@@ -9,7 +9,13 @@ variable "hcloud_token" {
 }
 
 variable "domain" {
-  description = "Base domain for the platform"
+  description = "Full domain where platform is deployed (e.g., staging.mindroom.chat)"
+  type        = string
+  default     = "mindroom.chat"
+}
+
+variable "root_domain" {
+  description = "Root domain registered with DNS provider (e.g., mindroom.chat)"
   type        = string
   default     = "mindroom.chat"
 }
