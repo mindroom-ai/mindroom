@@ -3,7 +3,9 @@
 # ===========================================
 
 locals {
-  dns_domain = var.environment == "production" ? var.domain : "${var.environment}.${var.domain}"
+  # var.domain is now the full superdomain (e.g., staging.mindroom.chat)
+  # No need to construct it based on environment
+  dns_domain = var.domain
 }
 
 # Configure Kubernetes provider to use the cluster we just created
