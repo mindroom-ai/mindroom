@@ -614,6 +614,93 @@ async def admin_update(
         raise HTTPException(status_code=400, detail="Invalid request") from None
 
 
+@router.delete("/admin/accounts/{account_id}/complete", response_model=AdminDeleteResponse)
+@limiter.limit("2/minute")
+async def admin_delete_account_complete(
+    request: Request,
+    account_id: str,
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
+    """Completely delete an account with all associated resources."""
+    sb = ensure_supabase()
+
+    # Get account details
+    account_result = sb.table("accounts").select("*").eq("id", account_id).execute()
+    if not account_result.data:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    account = account_result.data[0]
+    logger.info(
+        f"Admin {admin['user_id']} initiating complete deletion of account {account_id} ({account.get('email')})"
+    )
+
+    # 1. First, get all instances for this account
+    instances_result = sb.table("instances").select("*").eq("account_id", account_id).execute()
+    instances = instances_result.data or []
+
+    # 2. Deprovision all instances
+    for instance in instances:
+        instance_id = instance.get("instance_id")
+        if instance.get("status") not in ["deprovisioned", "terminated"]:
+            logger.info(f"Deprovisioning instance {instance_id} for account {account_id}")
+            try:
+                # Call the uninstall endpoint via provisioner
+                await uninstall_instance(
+                    instance_id=instance_id,
+                    api_key=PROVISIONER_API_KEY,
+                )
+            except Exception as e:
+                logger.error(f"Failed to deprovision instance {instance_id}: {e}")
+                # Continue with other instances even if one fails
+
+    # 3. Cancel any active Stripe subscriptions
+    if account.get("stripe_customer_id"):
+        try:
+            import stripe
+            from backend.config import STRIPE_API_KEY
+
+            stripe.api_key = STRIPE_API_KEY
+
+            # List and cancel all subscriptions for this customer
+            subscriptions = stripe.Subscription.list(customer=account["stripe_customer_id"], status="active")
+            for subscription in subscriptions.data:
+                logger.info(f"Canceling Stripe subscription {subscription.id}")
+                stripe.Subscription.cancel(subscription.id)
+
+            # Delete the Stripe customer (optional - you may want to keep for records)
+            # stripe.Customer.delete(account["stripe_customer_id"])
+
+        except Exception as e:
+            logger.error(f"Failed to cancel Stripe subscriptions: {e}")
+            # Continue with deletion even if Stripe fails
+
+    # 4. Delete the account (cascade deletion will handle related records)
+    try:
+        sb.table("accounts").delete().eq("id", account_id).execute()
+
+        # Log the complete deletion
+        audit_log_entry(
+            account_id=admin["user_id"],
+            action="delete_complete",
+            resource_type="accounts",
+            resource_id=account_id,
+            details={
+                "deleted_email": account.get("email"),
+                "instances_deprovisioned": len(instances),
+                "had_stripe_customer": bool(account.get("stripe_customer_id")),
+            },
+        )
+
+        logger.info(f"Successfully deleted account {account_id} and all associated resources")
+
+    except Exception as e:
+        logger.exception(f"Error deleting account {account_id}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete account: {str(e)}") from None
+
+    return {"data": {"id": account_id}}
+
+
 @router.delete("/admin/{resource}/{resource_id}", response_model=AdminDeleteResponse)
 @limiter.limit("10/minute")
 async def admin_delete(
@@ -622,9 +709,19 @@ async def admin_delete(
     resource_id: str,
     admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
 ) -> dict[str, Any]:
-    """Delete record for React Admin."""
+    """Delete record for React Admin (generic endpoint - use with caution for accounts)."""
     if resource not in ALLOWED_RESOURCES:
         raise HTTPException(status_code=400, detail="Invalid resource")
+
+    # For accounts, redirect to the complete deletion endpoint
+    if resource == "accounts":
+        logger.warning(
+            f"Generic delete called for account {resource_id}, use /admin/accounts/{resource_id}/complete instead"
+        )
+        raise HTTPException(
+            status_code=400, detail="Use DELETE /admin/accounts/{account_id}/complete for proper account deletion"
+        )
+
     sb = ensure_supabase()
 
     try:

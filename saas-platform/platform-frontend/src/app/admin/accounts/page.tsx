@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
+import { Card, CardContent, CardHeader } from '@/components/ui/Card'
 import { Button } from '@/components/ui/button'
 import { apiCall } from '@/lib/api'
 
@@ -21,6 +21,7 @@ export default function AccountsPage() {
   const [loading, setLoading] = useState(true)
   const [updatingId, setUpdatingId] = useState<string | null>(null)
   const [editStatuses, setEditStatuses] = useState<Record<string, string>>({})
+  const [deletingId, setDeletingId] = useState<string | null>(null)
 
   useEffect(() => {
     const fetchAccounts = async () => {
@@ -43,6 +44,38 @@ export default function AccountsPage() {
     fetchAccounts()
   }, [])
 
+  const handleDelete = async (accountId: string, accountEmail: string) => {
+    const confirmMessage = `Are you sure you want to permanently delete the account for ${accountEmail}?\n\n` +
+      `This will:\n` +
+      `• Deprovision all MindRoom instances (Matrix server, backend, frontend)\n` +
+      `• Cancel any active Stripe subscriptions\n` +
+      `• Delete the account and all associated data\n\n` +
+      `This action cannot be undone.`
+
+    if (!confirm(confirmMessage)) {
+      return
+    }
+
+    setDeletingId(accountId)
+    try {
+      const response = await apiCall(`/admin/accounts/${accountId}/complete`, { method: 'DELETE' })
+      if (response.ok) {
+        // Remove the account from the list
+        setAccounts(prev => prev.filter(a => a.id !== accountId))
+        alert(`Successfully deleted account ${accountEmail} and all associated resources.`)
+      } else {
+        const error = await response.text()
+        console.error('Failed to delete account:', error)
+        alert(`Failed to delete account: ${error}`)
+      }
+    } catch (error) {
+      console.error('Error deleting account:', error)
+      alert('An error occurred while deleting the account')
+    } finally {
+      setDeletingId(null)
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-screen">
@@ -62,9 +95,7 @@ export default function AccountsPage() {
       </div>
 
       <Card className="bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
-        <CardHeader>
-          <CardTitle className="text-gray-900 dark:text-gray-100">All Accounts</CardTitle>
-        </CardHeader>
+        <CardHeader className="text-gray-900 dark:text-gray-100">All Accounts</CardHeader>
         <CardContent>
           <div className="overflow-x-auto">
             <table className="w-full">
@@ -131,14 +162,24 @@ export default function AccountsPage() {
                       {new Date(account.created_at).toLocaleDateString()}
                     </td>
                     <td className="py-3 px-4">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300"
-                        onClick={() => window.location.href = `/admin/accounts/${account.id}`}
-                      >
-                        View
-                      </Button>
+                      <div className="flex gap-2">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300"
+                          onClick={() => window.location.href = `/admin/accounts/${account.id}`}
+                        >
+                          View
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          onClick={() => handleDelete(account.id, account.email)}
+                          disabled={deletingId === account.id}
+                        >
+                          {deletingId === account.id ? 'Deleting...' : 'Delete'}
+                        </Button>
+                      </div>
                     </td>
                   </tr>
                 ))}

@@ -1,5 +1,6 @@
 """Real integration tests for provisioner that actually test functionality."""
 
+import os
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -7,6 +8,10 @@ import pytest
 import yaml
 from hypothesis import given, strategies as st, settings
 from hypothesis.stateful import RuleBasedStateMachine, rule, invariant, initialize
+
+# Set test environment before importing any modules that use config
+os.environ["PLATFORM_DOMAIN"] = "test.mindroom.chat"
+os.environ["ENVIRONMENT"] = "test"
 
 
 class TestProvisionerCommandValidation:
@@ -47,8 +52,19 @@ class TestProvisionerCommandValidation:
     @pytest.mark.asyncio
     async def test_helm_install_command_validates_required_values(self):
         """Verify Helm command includes all required values."""
+        # Set environment before importing to ensure correct values
+        os.environ["PLATFORM_DOMAIN"] = "test.mindroom.chat"
+        os.environ["ENVIRONMENT"] = "test"
+
+        # Force reimport to pick up environment variables
+        import sys
+
+        if "backend.config" in sys.modules:
+            del sys.modules["backend.config"]
+        if "backend.routes.provisioner" in sys.modules:
+            del sys.modules["backend.routes.provisioner"]
+
         from backend.routes.provisioner import provision_instance
-        from backend.config import PLATFORM_DOMAIN
 
         captured_helm_args = []
 
@@ -89,7 +105,8 @@ class TestProvisionerCommandValidation:
         assert "customer" in set_args
         assert set_args["customer"] == "123"
         assert "baseDomain" in set_args
-        assert set_args["baseDomain"] == PLATFORM_DOMAIN
+        # The domain should be test.mindroom.chat in test environment
+        assert set_args["baseDomain"] == "test.mindroom.chat"
         assert "supabaseUrl" in set_args
 
         # Critical: Check we're not mixing up API keys

@@ -278,6 +278,8 @@ describe('Instance Lifecycle Operations', () => {
     })
 
     it('should handle network failures during operations', async () => {
+      const consoleSpy = jest.spyOn(console, 'error').mockImplementation()
+
       // Network failure
       mockFetch.mockRejectedValueOnce(new TypeError('Network request failed'))
       await expect(startInstance(1)).rejects.toThrow('Network request failed')
@@ -288,6 +290,8 @@ describe('Instance Lifecycle Operations', () => {
       )
       const result = await startInstance(1)
       expect(result.status).toBe('running')
+
+      consoleSpy.mockRestore()
     })
   })
 
