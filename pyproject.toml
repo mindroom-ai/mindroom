@@ -94,7 +94,6 @@ dependencies = [
   "rich",                                        # for CLI output
   "scrapegraph-py",                              # for ScrapeGraph tool
   "slack-sdk",                                   # for Slack tool
-  "slowapi>=0.1.9",
   "spider-client",                               # for Spider tool
   "spotipy>=2.25.1",                             # for Spotify tool, widget API Spotify integration
   "sqlalchemy",                                  # for SQL tool
@@ -127,7 +126,6 @@ scripts.mindroom = "mindroom.cli:main"
 [dependency-groups]
 dev = [
   "aioresponses>=0.7.8",
-  "hypothesis>=6.138.17",
   "markdown-code-runner>=2.4",
   "matty>=0.3",
   "mypy>=1.17",
