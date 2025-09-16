@@ -72,6 +72,8 @@ locals {
       openai     = var.openai_api_key
       anthropic  = var.anthropic_api_key
       openrouter = var.openrouter_api_key
+      google     = var.google_api_key
+      deepseek   = var.deepseek_api_key
     }
   }
 }

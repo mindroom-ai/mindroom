@@ -40,6 +40,8 @@ stringData:
   openai_key: {{ .Values.apiKeys.openai | default "" }}
   anthropic_key: {{ .Values.apiKeys.anthropic | default "" }}
   openrouter_key: {{ .Values.apiKeys.openrouter | default "" }}
+  google_key: {{ .Values.apiKeys.google | default "" }}
+  deepseek_key: {{ .Values.apiKeys.deepseek | default "" }}
 ---
 # Docker registry secret
 apiVersion: v1
@@ -180,6 +182,10 @@ spec:
           value: "/etc/secrets/anthropic_key"
         - name: OPENROUTER_API_KEY_FILE
           value: "/etc/secrets/openrouter_key"
+        - name: GOOGLE_API_KEY_FILE
+          value: "/etc/secrets/google_key"
+        - name: DEEPSEEK_API_KEY_FILE
+          value: "/etc/secrets/deepseek_key"
         volumeMounts:
         - name: platform-sensitive
           mountPath: /etc/secrets

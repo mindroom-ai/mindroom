@@ -151,6 +151,20 @@ variable "openrouter_api_key" {
   default     = ""
 }
 
+variable "google_api_key" {
+  description = "Google API key for MindRoom instances"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "deepseek_api_key" {
+  description = "DeepSeek API key for MindRoom instances"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
 # ===========================================
 # K3s Configuration
 # ===========================================
