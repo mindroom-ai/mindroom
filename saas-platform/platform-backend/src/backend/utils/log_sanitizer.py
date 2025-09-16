@@ -7,9 +7,6 @@ import re
 import os
 from typing import Any
 
-# Only sanitize in production
-IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() in ["production", "prod"]
-
 # Simple patterns for sensitive data
 PATTERNS = {
     # UUIDs (account IDs, user IDs, etc.)
@@ -30,7 +27,9 @@ def sanitize_string(text: str) -> str:
     Sanitize sensitive data from a string in production.
     In development, return as-is for debugging.
     """
-    if not IS_PRODUCTION or not text:
+    # Check environment at runtime, not import time
+    is_production = os.getenv("ENVIRONMENT", "development").lower() in ["production", "prod"]
+    if not is_production or not text:
         return text
 
     # Apply each pattern
@@ -47,7 +46,8 @@ def sanitize_args(*args: Any) -> tuple:
     """
     Sanitize all arguments that are strings.
     """
-    if not IS_PRODUCTION:
+    is_production = os.getenv("ENVIRONMENT", "development").lower() in ["production", "prod"]
+    if not is_production:
         return args
 
     return tuple(sanitize_string(arg) if isinstance(arg, str) else arg for arg in args)
@@ -57,7 +57,8 @@ def sanitize_kwargs(**kwargs: dict) -> dict:
     """
     Sanitize all keyword arguments that are strings.
     """
-    if not IS_PRODUCTION:
+    is_production = os.getenv("ENVIRONMENT", "development").lower() in ["production", "prod"]
+    if not is_production:
         return kwargs
 
     return {key: sanitize_string(value) if isinstance(value, str) else value for key, value in kwargs.items()}
