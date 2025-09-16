@@ -62,7 +62,10 @@ def sync_env_to_credentials() -> None:
         env_value = _get_secret(env_var)
 
         if not env_value:
+            logger.debug(f"No value found for {env_var} or {env_var}_FILE")
             continue
+
+        logger.debug(f"Found value for {env_var}: length={len(env_value)}")
 
         # Special handling for Ollama (it's a host, not an API key)
         if service == "ollama":
@@ -79,6 +82,11 @@ def sync_env_to_credentials() -> None:
                 creds_manager.set_api_key(service, env_value)
                 logger.info(f"Updated {service} API key from environment")
                 updated_count += 1
+
+            # Also set the environment variable directly for libraries that need it
+            # This ensures mem0 and other libraries can access the keys
+            if env_value:
+                os.environ[env_var] = env_value
 
     if updated_count > 0:
         logger.info(f"Synchronized {updated_count} credentials from environment")

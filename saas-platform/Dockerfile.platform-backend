@@ -46,9 +46,9 @@ COPY --from=tools /usr/local/bin/helm /usr/local/bin/helm
 COPY --from=builder /app /app
 
 # Copy additional files needed by platform-backend
-COPY cluster/k8s/instance /app/k8s/instance/
-COPY saas-platform/default-config.yaml /app/default-config.yaml
 COPY saas-platform/pricing-config.yaml /app/pricing-config.yaml
+# Copy the Helm chart (includes default-config.yaml)
+COPY cluster/k8s/instance /app/k8s/instance/
 
 EXPOSE 8000
 

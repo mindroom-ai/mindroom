@@ -18,9 +18,6 @@ data:
   SUPABASE_URL: {{ .Values.supabase.url | default "" | quote }}
   SUPABASE_ANON_KEY: {{ .Values.supabase.anonKey | default "" | quote }}
   STRIPE_PUBLISHABLE_KEY: {{ .Values.stripe.publishableKey | default "" | quote }}
-  STRIPE_SECRET_KEY: {{ .Values.stripe.secretKey | default "" | quote }}
-  STRIPE_WEBHOOK_SECRET: {{ .Values.stripe.webhookSecret | default "" | quote }}
-  PROVISIONER_API_KEY: {{ (index $prov "apiKey" | default "") | quote }}
   PLATFORM_BACKEND_URL: "http://platform-backend:8000"
   GITEA_USER: {{ .Values.gitea.user }}
 ---

@@ -1,7 +1,5 @@
 """Stripe payment and subscription routes."""
 
-from __future__ import annotations
-
 from typing import Annotated, Any
 
 from backend.config import PLATFORM_DOMAIN, logger, stripe

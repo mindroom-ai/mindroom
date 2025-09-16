@@ -1,7 +1,5 @@
 """Usage metrics and monitoring routes."""
 
-from __future__ import annotations
-
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 

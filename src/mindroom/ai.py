@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.models.base import Model
 
-    from .config import Config
+    from .config import Config, ModelConfig
 
 logger = get_logger(__name__)
 
@@ -130,6 +130,48 @@ def _set_api_key_env_var(provider: str) -> None:
         logger.debug(f"Set {env_vars[provider]} from CredentialsManager")
 
 
+def _create_model_for_provider(provider: str, model_id: str, model_config: ModelConfig, extra_kwargs: dict) -> Model:
+    """Create a model instance for a specific provider.
+
+    Args:
+        provider: The AI provider name
+        model_id: The model identifier
+        model_config: The model configuration object
+        extra_kwargs: Additional keyword arguments for the model
+
+    Returns:
+        Instantiated model for the provider
+
+    Raises:
+        ValueError: If provider not supported
+
+    """
+    if provider == "ollama":
+        # Priority: model config > env/CredentialsManager > default
+        # This allows per-model host configuration in config.yaml
+        host = model_config.host or get_ollama_host() or "http://localhost:11434"
+        logger.debug(f"Using Ollama host: {host}")
+        return Ollama(id=model_id, host=host, **extra_kwargs)
+    if provider == "openai":
+        return OpenAIChat(id=model_id, **extra_kwargs)
+    if provider == "anthropic":
+        return Claude(id=model_id, **extra_kwargs)
+    if provider == "openrouter":
+        # OpenRouter needs the API key passed explicitly because it captures
+        # the environment variable at import time, not at instantiation time
+        api_key = get_api_key_for_provider(provider)
+        if not api_key:
+            logger.warning("No OpenRouter API key found in environment or CredentialsManager")
+        return OpenRouter(id=model_id, api_key=api_key, **extra_kwargs)
+    if provider in ("gemini", "google"):
+        return Gemini(id=model_id, **extra_kwargs)
+    if provider == "cerebras":
+        return Cerebras(id=model_id, **extra_kwargs)
+
+    msg = f"Unsupported AI provider: {provider}"
+    raise ValueError(msg)
+
+
 def get_model_instance(config: Config, model_name: str = "default") -> Model:
     """Get a model instance from config.yaml.
 
@@ -161,25 +203,7 @@ def get_model_instance(config: Config, model_name: str = "default") -> Model:
     # Get extra kwargs if specified
     extra_kwargs = model_config.extra_kwargs or {}
 
-    if provider == "ollama":
-        # Priority: model config > env/CredentialsManager > default
-        # This allows per-model host configuration in config.yaml
-        host = model_config.host or get_ollama_host() or "http://localhost:11434"
-        logger.debug(f"Using Ollama host: {host}")
-        return Ollama(id=model_id, host=host, **extra_kwargs)
-    if provider == "openai":
-        return OpenAIChat(id=model_id, **extra_kwargs)
-    if provider == "anthropic":
-        return Claude(id=model_id, **extra_kwargs)
-    if provider == "openrouter":
-        return OpenRouter(id=model_id, **extra_kwargs)
-    if provider in ("gemini", "google"):
-        return Gemini(id=model_id, **extra_kwargs)
-    if provider == "cerebras":
-        return Cerebras(id=model_id, **extra_kwargs)
-
-    msg = f"Unsupported AI provider: {provider}"
-    raise ValueError(msg)
+    return _create_model_for_provider(provider, model_id, model_config, extra_kwargs)
 
 
 def _build_full_prompt(prompt: str, thread_history: list[dict[str, Any]] | None = None) -> str:

@@ -5,13 +5,17 @@
 
 set -e
 
-# Load environment variables from .env file
-set -a
-eval "$(uvx --from python-dotenv[cli] dotenv list --format shell)"
-set +a
-
-# Get kubeconfig path relative to this script's location
+# Get script directory and find .env file
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
+ENV_FILE="$REPO_ROOT/saas-platform/.env"
+
+# Load environment variables from .env file
+if [ -f "$ENV_FILE" ]; then
+    eval "$(uvx --from "python-dotenv[cli]" dotenv --file "$ENV_FILE" list --format shell)"
+else
+    echo "Warning: $ENV_FILE not found, some commands may not work"
+fi
 KUBECONFIG="$SCRIPT_DIR/../terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml"
 
 case "$1" in
@@ -48,23 +52,23 @@ case "$1" in
 
     provision)
         if [ -z "$2" ]; then
-            echo "Usage: $0 provision <customer-id>"
+            echo "Usage: $0 provision <instance-id>"
+            echo "Note: instance-id will be used as the subdomain (e.g., 1, 2, test1)"
             exit 1
         fi
-        echo "Provisioning instance for: $2"
+        echo "Provisioning instance: $2"
+        # Use a test UUID for account_id
+        TEST_ACCOUNT_ID="00000000-0000-0000-0000-000000000001"
         API_BASE="${API_URL:-https://api.${PLATFORM_DOMAIN:-staging.mindroom.chat}}"
         curl -k -X POST "$API_BASE/system/provision" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer ${PROVISIONER_API_KEY}" \
             -d "{
-                \"account_id\": \"$2\",
+                \"account_id\": \"$TEST_ACCOUNT_ID\",
                 \"subscription_id\": \"sub-$2\",
                 \"tier\": \"starter\",
-                \"api_keys\": {
-                    \"openai\": \"\",
-                    \"anthropic\": \"\"
-                }
-            }" | jq
+                \"instance_id\": \"$2\"
+            }"
         ;;
 
     deprovision)
