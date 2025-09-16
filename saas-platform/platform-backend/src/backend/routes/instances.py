@@ -1,13 +1,9 @@
 """Instance management routes."""
 
-from __future__ import annotations
-
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Annotated, Any
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
+from typing import Annotated, Any
 
 from backend.config import PROVISIONER_API_KEY, logger
 from backend.deps import ensure_supabase, verify_user

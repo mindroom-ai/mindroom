@@ -65,7 +65,9 @@ def main() -> int:
     """Copy entire config but override models for SaaS."""
     root_dir = Path(__file__).parent.parent
     source_path = root_dir / "config.yaml"
-    target_path = root_dir / "saas-platform" / "default-config.yaml"
+
+    # Write directly to the k8s instance directory
+    target_path = root_dir / "cluster" / "k8s" / "instance" / "default-config.yaml"
 
     # Load source config
     with source_path.open() as f:
@@ -104,11 +106,14 @@ def main() -> int:
     if "router" in config:
         config["router"]["model"] = "gpt5nano"
 
-    # Save to target
+    # Save to target location
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
     with target_path.open("w") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False, allow_unicode=True, width=120)
 
     print(f"✅ Synced config with OpenRouter models to {target_path.relative_to(root_dir)}")
+
     return 0
 
 

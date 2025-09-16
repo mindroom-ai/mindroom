@@ -1,7 +1,5 @@
 """Instance provisioning and management routes."""
 
-from __future__ import annotations
-
 import hmac
 from datetime import UTC, datetime
 from typing import Annotated, Any
@@ -17,6 +15,7 @@ from backend.config import (
     PLATFORM_DOMAIN,
     PROVISIONER_API_KEY,
     SUPABASE_ANON_KEY,
+    SUPABASE_SERVICE_KEY,
     SUPABASE_URL,
     logger,
 )
@@ -60,7 +59,10 @@ def _require_provisioner_auth(authorization: str | None) -> None:
         token = _extract_bearer_token(authorization)
     except HTTPException:
         raise HTTPException(status_code=401, detail="Unauthorized") from None
-    if not PROVISIONER_API_KEY or not hmac.compare_digest(token, PROVISIONER_API_KEY):
+    if not PROVISIONER_API_KEY:
+        logger.error("PROVISIONER_API_KEY is not configured")
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not hmac.compare_digest(token, PROVISIONER_API_KEY):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
@@ -207,6 +209,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
                 "--set",
                 f"supabaseAnonKey={SUPABASE_ANON_KEY or ''}",
                 "--set",
+                f"supabaseServiceKey={SUPABASE_SERVICE_KEY or ''}",
+                "--set",
                 f"openai_key={OPENAI_API_KEY}",
                 "--set",
                 f"anthropic_key={ANTHROPIC_API_KEY}",
@@ -216,6 +220,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
                 f"openrouter_key={OPENROUTER_API_KEY}",
                 "--set",
                 f"deepseek_key={DEEPSEEK_API_KEY}",
+                "--set",
                 "mindroom_image=git.nijho.lt/basnijholt/mindroom-frontend:latest",
             ],
         )
