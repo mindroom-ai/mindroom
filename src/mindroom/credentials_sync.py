@@ -80,6 +80,11 @@ def sync_env_to_credentials() -> None:
                 logger.info(f"Updated {service} API key from environment")
                 updated_count += 1
 
+            # Also set the environment variable directly for libraries that need it
+            # This ensures mem0 and other libraries can access the keys
+            if env_value and service != "ollama":
+                os.environ[env_var] = env_value
+
     if updated_count > 0:
         logger.info(f"Synchronized {updated_count} credentials from environment")
     else:
