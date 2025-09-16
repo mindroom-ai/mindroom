@@ -35,7 +35,8 @@ generate_patch_json() {
   {"op": "replace", "path": "/data/anthropic_key", "value": "$(echo -n "$ANTHROPIC_API_KEY" | base64 -w0)"},
   {"op": "replace", "path": "/data/google_key", "value": "$(echo -n "$GOOGLE_API_KEY" | base64 -w0)"},
   {"op": "replace", "path": "/data/openrouter_key", "value": "$(echo -n "$OPENROUTER_API_KEY" | base64 -w0)"},
-  {"op": "replace", "path": "/data/deepseek_key", "value": "$(echo -n "$DEEPSEEK_API_KEY" | base64 -w0)"}
+  {"op": "replace", "path": "/data/deepseek_key", "value": "$(echo -n "$DEEPSEEK_API_KEY" | base64 -w0)"},
+  {"op": "replace", "path": "/data/supabase_service_key", "value": "$(echo -n "$SUPABASE_SERVICE_KEY" | base64 -w0)"}
 ]
 EOF
 }

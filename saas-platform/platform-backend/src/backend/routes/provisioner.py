@@ -15,6 +15,7 @@ from backend.config import (
     PLATFORM_DOMAIN,
     PROVISIONER_API_KEY,
     SUPABASE_ANON_KEY,
+    SUPABASE_SERVICE_KEY,
     SUPABASE_URL,
     logger,
 )
@@ -207,6 +208,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
                 f"supabaseUrl={SUPABASE_URL or ''}",
                 "--set",
                 f"supabaseAnonKey={SUPABASE_ANON_KEY or ''}",
+                "--set",
+                f"supabaseServiceKey={SUPABASE_SERVICE_KEY or ''}",
                 "--set",
                 f"openai_key={OPENAI_API_KEY}",
                 "--set",
