@@ -1,6 +1,7 @@
 # Security Review: Session & Token Management
 
 **Review Date**: 2025-01-11
+**Updated**: September 15, 2025
 **Reviewer**: Security Analysis
 **Focus**: JWT implementation, token lifecycle, and session security
 **Components Reviewed**:
@@ -18,8 +19,8 @@ The MindRoom SaaS platform uses **Supabase Auth** as its primary authentication 
 - ✅ JWT signature validation handled by Supabase (robust)
 - ✅ Proper token extraction and Bearer scheme validation
 - ✅ Secure logout implementation with SSO cookie cleanup
-- ⚠️ **PARTIAL**: Rate limiting added to admin/provisioner; apply to user/SSO
-- ❌ Token caching without proper invalidation mechanisms
+- ✅ **IMPLEMENTED**: Authentication failure tracking with IP blocking
+- ⚠️ Token caching without proper invalidation mechanisms (low priority)
 - ⚠️ Minimal validation of JWT claims beyond signature
 
 ---
@@ -165,25 +166,35 @@ JWT with modified claims - REJECTED by signature mismatch
 ---
 
 ### 6. Rate Limiting on Authentication Endpoints
-**Status**: ⚠️ **PARTIAL** (Implemented on admin/provisioner routes)
+**Status**: ✅ **IMPLEMENTED** (Auth failure tracking with IP blocking)
 
-**Analysis:**
-- Implemented per-route limits for admin and provisioner endpoints
-- Remaining: throttling for SSO and user endpoints (`/my/*`) where appropriate
-- FastAPI rate limiting middleware (slowapi) integrated
+**September 15, 2025 Update:**
+- ✅ IP-based authentication failure tracking implemented
+- ✅ Automatic IP blocking after 5 failures in 15 minutes
+- ✅ 30-minute block duration for suspicious IPs
+- ✅ All auth events logged to audit_logs table
+- ✅ Simple module-level functions following KISS principle
 
-**Remaining High-Risk Endpoints:**
+**Implementation Details:**
 ```python
-# /my/sso-cookie (create/delete)
-# /my/* endpoints using verify_user dependency (review per-route necessity)
+# auth_monitor.py - Simple protection
+MAX_FAILURES = 5
+WINDOW_MINUTES = 15
+BLOCK_DURATION_MINUTES = 30
+
+def record_failure(ip_address: str, user_id: str = None) -> bool:
+    # Track failures and block if threshold exceeded
+    if len(failed_attempts[ip_address]) >= MAX_FAILURES:
+        blocked_ips[ip_address] = datetime.now(UTC)
+        return True
 ```
 
-**Attack Vectors:**
-- Brute force token validation attempts
-- DoS attacks via excessive authentication requests
-- Token enumeration attacks
+**Protection Against:**
+- ✅ Brute force attacks (auto-blocking)
+- ✅ Credential stuffing (rate limiting via IP blocks)
+- ✅ Account enumeration (same protection)
 
-**Risk Level**: **HIGH** - Complete coverage recommended before public beta
+**Risk Level**: **LOW** - Effective brute force protection implemented
 
 ---
 

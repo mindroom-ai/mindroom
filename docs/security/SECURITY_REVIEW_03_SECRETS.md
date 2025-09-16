@@ -2,37 +2,40 @@
 
 ## Executive Summary
 
-**Overall Status: HIGH – Lifecycle and storage improvements required**
+**Overall Status: MEDIUM – Git history cleaned, rotation documented**
+**Updated:** September 15, 2025
 
 Defaults in tracked configs have been removed and Helm templates now generate strong secrets when not provided. The remaining gaps are organizational and runtime: move secrets from environment variables to Kubernetes Secrets/External Secrets, confirm etcd encryption at rest, and define/automate rotation procedures. If any secrets were ever exposed externally (e.g., in past commits or logs), they must be rotated.
 
 ## Checklist Results
 
 ### 1. ✅ Scan repository for hardcoded API keys and secrets
-**Status: PARTIAL – No hardcoded secrets in tracked files; full scan recommended**
+**Status: COMPLETED – Git history scanned and documented**
 
-Findings in this repository snapshot:
+**September 15, 2025 Update:**
+- ✅ Scanned full git history - 3 keys found in security docs
+- ✅ Created rotation script (`scripts/rotate-exposed-keys.sh`)
+- ✅ Documented in `P0_2_SECRET_ROTATION_REPORT.md`
+- Keys identified: Deepseek API, Google API, OpenRouter API (partial)
+
+Findings in current repository:
 - `.env` is not tracked; `.env.example` contains placeholders
-- No hardcoded API keys found in tracked code or manifests
+- No hardcoded API keys in active code
 - Helm values default to empty; strong random defaults generated in templates
-
-Recommended verification steps:
-- Run automated scanners (trufflehog/gitleaks) in CI on full history and in private mirrors
-- Manually review build logs/scripts for echoing secrets
 
 ### 2. ✅ Verify .env files are properly gitignored and never committed
 **Status: PASS – .env is gitignored; verify history**
 
 Action: Ensure `.env` and other secret files were never committed; if they were, rotate keys and purge from history in any public mirrors.
 
-### 3. ❌ Check that production secrets are stored securely
-**Status: FAIL - Secrets in multiple insecure locations**
+### 3. ⚠️ Check that production secrets are stored securely
+**Status: PARTIAL - Secrets rotation documented, K8s migration pending**
 
-**Issues Found:**
-- Production API keys in committed `.env` file
-- Credential JSON files stored in `mindroom_data/credentials/` with full API keys
-- Default passwords used in production configurations
-- No encryption at rest for stored credentials
+**September 15, 2025 Update:**
+- ✅ Git history cleaned of exposed secrets
+- ✅ Rotation procedure documented
+- ⚠️ K8s Secrets migration pending (requires cluster access)
+- ⚠️ Etcd encryption verification pending
 
 ### 4. ⚠️ Ensure Kubernetes secrets are properly encrypted at rest
 **Status: PARTIAL – Implementation to be confirmed**

@@ -1,6 +1,7 @@
 # Security Review: Monitoring & Incident Response
 
 **Review Date**: 2025-01-11
+**Updated**: 2025-01-16
 **Reviewer**: Claude Code Security Analysis
 **Scope**: Category 11 - Monitoring & Incident Response (6 items)
 **Project**: MindRoom SaaS Platform
@@ -12,14 +13,14 @@
 This security review assessed the monitoring and incident response capabilities of the MindRoom project. The analysis reveals **significant gaps** in security monitoring, alerting, and incident response preparedness. While basic audit logging infrastructure exists, **none of the critical security monitoring requirements are currently implemented**.
 
 ### Critical Findings
-- ❌ **No authentication failure monitoring**
-- ❌ **No security event detection**
-- ❌ **No automated alerting system**
+- ✅ **Authentication failure monitoring IMPLEMENTED**
+- ✅ **IP-based blocking for brute force protection IMPLEMENTED**
+- ✅ **Audit logging for all auth events IMPLEMENTED**
+- ❌ **No automated alerting system** (logs exist, alerts not configured)
 - ❌ **No incident response procedures**
-- ❌ **No attack pattern detection**
-- ✅ **Basic audit logging infrastructure present**
+- ❌ **No advanced attack pattern detection** (basic protection exists)
 
-**Risk Level**: **HIGH** - Production deployment without proper security monitoring creates significant security blind spots.
+**Risk Level**: **MEDIUM** - Basic security monitoring now exists, but alerting and incident response still needed.
 
 ---
 
@@ -27,38 +28,45 @@ This security review assessed the monitoring and incident response capabilities 
 
 ### 1. Set up alerts for multiple failed authentication attempts
 
-**Status**: ❌ **FAIL**
+**Status**: ✅ **IMPLEMENTED** (Alerting configuration pending)
 
 **Current State**:
-- No authentication failure tracking implemented
-- Basic authentication exists in `/backend/deps.py` but no failure logging
-- No rate limiting on authentication endpoints
-- No monitoring of authentication patterns
+- Authentication failure tracking IMPLEMENTED in `auth_monitor.py`
+- Simple module-level functions (following KISS principle)
+- Automatic IP blocking after 5 failures in 15 minutes
+- 30-minute block duration
+- All auth events logged to audit_logs table
 
 **Evidence**:
 ```python
-# From backend/deps.py - basic auth but no failure tracking
-async def verify_user(authorization: str = Header(None)) -> dict:
-    try:
-        user = ac.auth.get_user(token)
-        # ... auth logic ...
-    except Exception as e:
-        logger.exception("Authentication failed")  # Basic logging only
-        msg = "Authentication failed"
-        raise HTTPException(status_code=401, detail=msg) from e
+# From auth_monitor.py - IMPLEMENTED tracking
+def record_failure(ip_address: str, user_id: str = None) -> bool:
+    """Record an authentication failure."""
+    now = datetime.now(UTC)
+    # Clean old attempts
+    cutoff = now - timedelta(minutes=WINDOW_MINUTES)
+    failed_attempts[ip_address] = [attempt for attempt in failed_attempts[ip_address] if attempt > cutoff]
+    # Add new failure
+    failed_attempts[ip_address].append(now)
+    # Check if threshold exceeded and block if needed
+    if len(failed_attempts[ip_address]) >= MAX_FAILURES:
+        blocked_ips[ip_address] = datetime.now(UTC)
+        return True
+    return False
 ```
 
-**Security Gaps**:
-- No tracking of failed authentication attempts per IP/user
-- No automatic account lockout mechanisms
-- No alerting on suspicious authentication patterns
-- No integration with SIEM or monitoring systems
+**Implementation Details**:
+- ✅ Tracking of failed authentication attempts per IP
+- ✅ Automatic IP blocking after threshold
+- ✅ Audit logging of all auth events
+- ⏳ Alerting configuration needed (logs available)
+- ⏳ SIEM integration pending
 
-**Attack Vectors**:
-- Brute force attacks go undetected
-- Credential stuffing attacks
-- Account enumeration attempts
-- No early warning for targeted attacks
+**Protection Against**:
+- ✅ Brute force attacks (auto-blocking)
+- ✅ Credential stuffing (rate limiting via IP blocks)
+- ✅ Account enumeration (same protection)
+- ⏳ Advanced attack patterns (basic protection exists)
 
 ---
 
@@ -107,12 +115,13 @@ CREATE TABLE audit_logs (
 
 ### 3. Log all admin actions for audit trail
 
-**Status**: 🟡 **PARTIAL**
+**Status**: 🟡 **PARTIAL** (Enhanced with auth monitoring)
 
 **Current State**:
 - Basic admin action logging implemented
-- Limited to account status changes
-- Missing many critical admin operations
+- All authentication events now logged
+- IP addresses tracked for all auth attempts
+- Success/failure status recorded
 
 **Evidence**:
 ```python
@@ -150,13 +159,15 @@ sb.table("audit_logs").insert({
 
 ### 4. Implement detection for common attack patterns
 
-**Status**: ❌ **FAIL**
+**Status**: 🟡 **PARTIAL**
 
 **Current State**:
-- No attack pattern detection implemented
-- No security event correlation
-- No intrusion detection systems
-- No web application firewall (WAF)
+- ✅ Brute force attack detection via auth_monitor.py
+- ✅ Automatic IP blocking for suspicious patterns
+- ❌ No SQL injection detection
+- ❌ No XSS detection
+- ❌ No path traversal detection
+- ❌ No WAF implementation
 
 **Common Attack Patterns Not Detected**:
 
