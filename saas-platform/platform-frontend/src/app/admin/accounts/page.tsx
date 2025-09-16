@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
+import { Card, CardContent, CardHeader } from '@/components/ui/Card'
 import { Button } from '@/components/ui/button'
 import { apiCall } from '@/lib/api'
 
@@ -95,9 +95,7 @@ export default function AccountsPage() {
       </div>
 
       <Card className="bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
-        <CardHeader>
-          <CardTitle className="text-gray-900 dark:text-gray-100">All Accounts</CardTitle>
-        </CardHeader>
+        <CardHeader className="text-gray-900 dark:text-gray-100">All Accounts</CardHeader>
         <CardContent>
           <div className="overflow-x-auto">
             <table className="w-full">

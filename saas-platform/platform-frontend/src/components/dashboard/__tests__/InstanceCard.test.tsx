@@ -55,6 +55,7 @@ describe('InstanceCard', () => {
     })
 
     it('should handle successful provisioning', async () => {
+      const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation()
       const mockProvisionResult = { instance_id: 1, status: 'provisioning' }
       ;(provisionInstance as jest.Mock).mockResolvedValueOnce(mockProvisionResult)
 
@@ -67,9 +68,12 @@ describe('InstanceCard', () => {
       await waitFor(() => {
         expect(provisionInstance).toHaveBeenCalled()
       })
+
+      consoleLogSpy.mockRestore()
     })
 
     it('should handle provisioning errors', async () => {
+      const consoleSpy = jest.spyOn(console, 'error').mockImplementation()
       const error = new Error('No subscription found')
       ;(provisionInstance as jest.Mock).mockRejectedValueOnce(error)
 
@@ -83,9 +87,12 @@ describe('InstanceCard', () => {
           'Please wait for your account setup to complete, then try again.'
         )
       })
+
+      consoleSpy.mockRestore()
     })
 
     it('should handle generic provisioning errors', async () => {
+      const consoleSpy = jest.spyOn(console, 'error').mockImplementation()
       const error = new Error('Server error')
       ;(provisionInstance as jest.Mock).mockRejectedValueOnce(error)
 
@@ -97,6 +104,8 @@ describe('InstanceCard', () => {
       await waitFor(() => {
         expect(mockAlert).toHaveBeenCalledWith('Failed to provision instance: Server error')
       })
+
+      consoleSpy.mockRestore()
     })
 
     it('should ignore aborted requests', async () => {
