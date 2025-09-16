@@ -129,6 +129,28 @@ variable "image_tag" {
   default     = "latest"
 }
 
+# API Keys for AI Models
+variable "openai_api_key" {
+  description = "OpenAI API key for MindRoom instances"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "anthropic_api_key" {
+  description = "Anthropic API key for MindRoom instances"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "openrouter_api_key" {
+  description = "OpenRouter API key for MindRoom instances"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
 # ===========================================
 # K3s Configuration
 # ===========================================
