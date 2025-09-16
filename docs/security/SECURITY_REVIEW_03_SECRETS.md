@@ -91,9 +91,11 @@ Notes:
 1. Secrets lifecycle and storage – Severity: HIGH
    - Move runtime secrets from env to K8s Secrets/External Secrets; confirm etcd encryption
    - Define and automate rotation
+   - **UPDATE**: Helper scripts created for API key rotation (`scripts/rotate-api-keys.sh`, `scripts/apply-rotated-keys.sh`)
 
 2. Historical exposure risk – Severity: HIGH (if applicable)
    - If secrets were ever checked into history or logs, rotate and purge
+   - **UPDATE**: Git history cleanup script created (`scripts/clean-git-history.sh`)
 
 3. Default passwords – Severity: RESOLVED
    - Defaults removed in tracked configs; continue to enforce strong secrets at deploy time

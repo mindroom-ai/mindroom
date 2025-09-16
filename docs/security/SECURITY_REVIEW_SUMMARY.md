@@ -11,10 +11,10 @@ The security review has been refreshed across 12 categories. Most P0/P1 blockers
 
 - Critical blockers: 0
 - High risks: secrets lifecycle; monitoring/alerting; internal TLS/mTLS
-- Medium risks: dependency scanning/pinning; CSP; broader rate‑limit coverage; backup path (IPv6)
+- Medium risks: dependency scanning/pinning; ~~CSP~~ (fixed); ~~broader rate‑limit coverage~~ (improved); ~~backup path~~ (fixed)
 - Low risks: minor RBAC tightening; policy automation; docs/process
 
-## What’s Fixed Since Last Review
+## What's Fixed Since Last Review
 
 - Admin endpoints: verify_admin enforced, resource allowlist, rate limits, audit logging added
 - Provisioner: constant‑time API key check, rate limits on start/stop/provision/uninstall
@@ -22,21 +22,27 @@ The security review has been refreshed across 12 categories. Most P0/P1 blockers
 - Multi‑tenancy: migrations add account_id + RLS to webhook_events and payments; handlers validate ownership; tests added
 - K8s: per‑instance NetworkPolicy; namespaced Role + RoleBinding for backend; ingress TLS protocols/ciphers; HSTS
 - Defaults removed: no "changeme" in tracked configs; Helm templates generate strong secrets by default; Compose requires explicit passwords
+- **NEW - Frontend CSP**: Comprehensive Content Security Policy headers with proper whitelisting for API, Supabase, and Stripe
+- **NEW - User endpoint rate limiting**: Rate limits added to accounts, instances, and subscriptions endpoints (11 endpoints total)
+- **NEW - Backup reliability**: Fixed IPv4 resolution for Supabase backups to ensure reliable connections
 
 ## Top Remaining Risks (priority order)
 
 1. Secrets lifecycle and rotation
    - Migrate runtime secrets from env to K8s Secrets/External Secrets; define rotation policy; confirm etcd encryption
+   - Note: Helper scripts for rotation created but architectural change still needed
 2. Monitoring and incident response
    - Alerts for failed auth/admin actions; audit log review; security@ inbox and security.txt
 3. Internal service encryption
    - Evaluate service mesh or mTLS between internal components; document cipher policy at ingress
-4. Frontend protections
-   - Add CSP, audit 3rd‑party scripts, verify SSO cookie usage end‑to‑end
-5. Broader rate‑limit coverage
-   - Evaluate user and webhook endpoints; maintain per‑route budgets
-6. Backup reliability
-   - Resolve IPv6 egress to Supabase for pg_dump, or run backups from dual‑stack host/cluster job
+4. ~~Frontend protections~~ **PARTIALLY ADDRESSED**
+   - ✅ CSP headers implemented with proper whitelisting
+   - Remaining: audit 3rd‑party scripts, verify SSO cookie usage end‑to‑end
+5. ~~Broader rate‑limit coverage~~ **PARTIALLY ADDRESSED**
+   - ✅ User endpoints now rate‑limited (accounts, instances, subscriptions)
+   - Remaining: webhook endpoints, maintain per‑route budgets
+6. ~~Backup reliability~~ **RESOLVED**
+   - ✅ IPv4 resolution fixed in backup script
 
 ## Deployment Guidance
 
@@ -54,9 +60,10 @@ The security review has been refreshed across 12 categories. Most P0/P1 blockers
 
 ## Risk Assessment
 
-- Current risk: ~6.8/10 (HIGH)
+- Previous risk: ~6.8/10 (HIGH)
+- **Current risk: ~5.5/10 (MEDIUM-HIGH)** - Reduced by CSP, rate limiting, and backup fixes
 - Target risk: ≤3/10 (LOW)
-- Estimated effort: 2–4 weeks (2–3 engineers) to close remaining High items
+- Estimated effort: 2–3 weeks (2 engineers) to close remaining High items
 
 ---
 
