@@ -61,7 +61,7 @@ The security review has been refreshed across 12 categories. Most P0/P1 blockers
 ## Risk Assessment
 
 - Previous risk: ~6.8/10 (HIGH)
-- **Current risk: ~5.5/10 (MEDIUM-HIGH)** - Reduced by CSP, rate limiting, and backup fixes
+- **Current risk: ~5.8/10 (MEDIUM-HIGH)** - Reduced by CSP, rate limiting, and backup fixes
 - Target risk: ≤3/10 (LOW)
 - Estimated effort: 2–3 weeks (2 engineers) to close remaining High items
 

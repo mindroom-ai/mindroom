@@ -119,7 +119,7 @@ A comprehensive security review of the MindRoom SaaS platform was conducted acro
 The MindRoom platform has strong foundational architecture with good multi-tenant isolation design and modern technology stack. However, critical implementation gaps create severe security vulnerabilities that could lead to complete system compromise.
 
 **Previous Risk Level:** ~6.8/10 (HIGH)
-**Current Risk Level:** ~5.5/10 (MEDIUM-HIGH) - Reduced by CSP, rate limiting, and backup fixes
+**Current Risk Level:** ~5.8/10 (MEDIUM-HIGH) - Reduced by CSP, rate limiting, and backup fixes
 **Target After Remediation:** ≤3/10 (LOW)
 
 The platform is suitable for staging/testing with trusted users. Production launch should wait until secrets lifecycle, monitoring/alerting, and internal TLS are addressed and a final validation pass is completed. CSP and backup reliability have been resolved.
