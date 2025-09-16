@@ -27,15 +27,33 @@ if [ -z "$OPENAI_API_KEY" ] && [ -z "$ANTHROPIC_API_KEY" ] && [ -z "$GOOGLE_API_
     echo "Warning: No API keys found in .env file"
 fi
 
-echo "Updating platform secrets..."
-# Update platform secrets in staging namespace
-kubectl patch secret platform-secrets -n mindroom-staging --kubeconfig="$KUBECONFIG" --type='json' -p='[
-  {"op": "replace", "path": "/data/openai_key", "value": "'$(echo -n "$OPENAI_API_KEY" | base64 -w0)'"},
-  {"op": "replace", "path": "/data/anthropic_key", "value": "'$(echo -n "$ANTHROPIC_API_KEY" | base64 -w0)'"},
-  {"op": "replace", "path": "/data/google_key", "value": "'$(echo -n "$GOOGLE_API_KEY" | base64 -w0)'"},
-  {"op": "replace", "path": "/data/openrouter_key", "value": "'$(echo -n "$OPENROUTER_API_KEY" | base64 -w0)'"},
-  {"op": "replace", "path": "/data/deepseek_key", "value": "'$(echo -n "$DEEPSEEK_API_KEY" | base64 -w0)'"}
-]' 2>/dev/null || echo "Platform secrets updated (some keys may not exist)"
+# Function to generate the API keys patch JSON
+generate_patch_json() {
+    cat <<EOF
+[
+  {"op": "replace", "path": "/data/openai_key", "value": "$(echo -n "$OPENAI_API_KEY" | base64 -w0)"},
+  {"op": "replace", "path": "/data/anthropic_key", "value": "$(echo -n "$ANTHROPIC_API_KEY" | base64 -w0)"},
+  {"op": "replace", "path": "/data/google_key", "value": "$(echo -n "$GOOGLE_API_KEY" | base64 -w0)"},
+  {"op": "replace", "path": "/data/openrouter_key", "value": "$(echo -n "$OPENROUTER_API_KEY" | base64 -w0)"},
+  {"op": "replace", "path": "/data/deepseek_key", "value": "$(echo -n "$DEEPSEEK_API_KEY" | base64 -w0)"}
+]
+EOF
+}
+
+# Function to update a secret's API keys
+update_secret() {
+    local secret_name=$1
+    local namespace=$2
+    local description=$3
+
+    echo "Updating $description..."
+    kubectl patch secret "$secret_name" -n "$namespace" --kubeconfig="$KUBECONFIG" \
+        --type='json' -p="$(generate_patch_json)" 2>/dev/null || \
+        echo "  Warning: Failed to update some keys for $description"
+}
+
+# Update platform secrets
+update_secret "platform-secrets" "mindroom-staging" "platform secrets"
 
 echo "Restarting platform backend to pick up new keys..."
 kubectl rollout restart deployment/platform-backend -n mindroom-staging --kubeconfig="$KUBECONFIG"
@@ -44,22 +62,14 @@ kubectl rollout status deployment/platform-backend -n mindroom-staging --kubecon
 # Update instance secrets
 echo ""
 echo "Updating instance secrets..."
-INSTANCES=$(kubectl get secrets -n mindroom-instances --kubeconfig="$KUBECONFIG" -o name | grep "secret/mindroom-api-keys-" | sed 's|secret/||')
+INSTANCES=$(kubectl get secrets -n mindroom-instances --kubeconfig="$KUBECONFIG" -o name 2>/dev/null | grep "secret/mindroom-api-keys-" | sed 's|secret/||')
 
 if [ -z "$INSTANCES" ]; then
     echo "No instance secrets found"
 else
     for SECRET_NAME in $INSTANCES; do
         INSTANCE_ID=$(echo "$SECRET_NAME" | sed 's/mindroom-api-keys-//')
-        echo "Updating API keys for instance $INSTANCE_ID..."
-
-        kubectl patch secret "$SECRET_NAME" -n mindroom-instances --kubeconfig="$KUBECONFIG" --type='json' -p='[
-          {"op": "replace", "path": "/data/openai_key", "value": "'$(echo -n "$OPENAI_API_KEY" | base64 -w0)'"},
-          {"op": "replace", "path": "/data/anthropic_key", "value": "'$(echo -n "$ANTHROPIC_API_KEY" | base64 -w0)'"},
-          {"op": "replace", "path": "/data/google_key", "value": "'$(echo -n "$GOOGLE_API_KEY" | base64 -w0)'"},
-          {"op": "replace", "path": "/data/openrouter_key", "value": "'$(echo -n "$OPENROUTER_API_KEY" | base64 -w0)'"},
-          {"op": "replace", "path": "/data/deepseek_key", "value": "'$(echo -n "$DEEPSEEK_API_KEY" | base64 -w0)'"}
-        ]' 2>/dev/null || echo "  Warning: Failed to update some keys for instance $INSTANCE_ID"
+        update_secret "$SECRET_NAME" "mindroom-instances" "instance $INSTANCE_ID"
 
         echo "  Restarting instance $INSTANCE_ID to pick up new keys..."
         kubectl rollout restart deployment/mindroom-backend-$INSTANCE_ID -n mindroom-instances --kubeconfig="$KUBECONFIG" 2>/dev/null || echo "  Backend not found or restart failed"
