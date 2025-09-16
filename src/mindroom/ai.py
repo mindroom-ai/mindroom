@@ -200,12 +200,6 @@ def get_model_instance(config: Config, model_name: str = "default") -> Model:
     # Set environment variable from CredentialsManager for Agno to use
     _set_api_key_env_var(provider)
 
-    # Debug logging for OpenRouter
-    if provider == "openrouter":
-        logger.info(f"OpenRouter API key in environment: {'OPENROUTER_API_KEY' in os.environ}")
-        if "OPENROUTER_API_KEY" not in os.environ:
-            logger.warning("OPENROUTER_API_KEY not set in environment after _set_api_key_env_var call")
-
     # Get extra kwargs if specified
     extra_kwargs = model_config.extra_kwargs or {}
 
