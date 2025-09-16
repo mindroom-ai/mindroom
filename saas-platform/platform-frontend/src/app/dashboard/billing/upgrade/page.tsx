@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { Check, ArrowLeft, Sparkles } from 'lucide-react'
 import { useSubscription } from '@/hooks/useSubscription'
 import { createCheckoutSession, getPricingConfig } from '@/lib/api'
+import { logger } from '@/lib/logger'
 
 interface PricingPlan {
   id: string
@@ -43,7 +44,7 @@ export default function UpgradePage() {
     // Fetch pricing configuration from backend
     getPricingConfig()
       .then(setPricingConfig)
-      .catch(console.error)
+      .catch(logger.error)
       .finally(() => setPricingLoading(false))
   }, [])
 
@@ -77,7 +78,7 @@ export default function UpgradePage() {
       const { url } = await createCheckoutSession(selectedPlan, billingCycle, quantity)
       window.location.href = url
     } catch (error) {
-      console.error('Error creating checkout session:', error)
+      logger.error('Error creating checkout session:', error)
       alert('An error occurred. Please try again.')
       setIsProcessing(false)
     }

@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Users, CreditCard, Server, Activity } from 'lucide-react'
 import { apiCall } from '@/lib/api'
+import { logger } from '@/lib/logger'
 
 interface AdminStats {
   // Keep legacy shape for compatibility; we compute values defensively
@@ -61,7 +62,7 @@ export default function AdminDashboard() {
           })
         }
       } catch (error) {
-        console.error('Error fetching admin data:', error)
+        logger.error('Error fetching admin data:', error)
       } finally {
         setLoading(false)
       }

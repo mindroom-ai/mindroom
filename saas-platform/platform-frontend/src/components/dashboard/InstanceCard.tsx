@@ -4,6 +4,7 @@ import { useState } from 'react'
 import type { Instance } from '@/hooks/useInstance'
 import { provisionInstance } from '@/lib/api'
 import { Card, CardHeader } from '@/components/ui/Card'
+import { logger } from '@/lib/logger'
 
 export function InstanceCard({ instance }: { instance: Instance | null }) {
   const [isProvisioning, setIsProvisioning] = useState(false)
@@ -43,7 +44,7 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
     setIsProvisioning(true)
     try {
       const result = await provisionInstance()
-      console.log('Provision result:', result)
+      logger.log('Provision result:', result)
       // Refresh the page to show the new instance
       window.location.reload()
     } catch (error: any) {
@@ -60,7 +61,7 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
         return
       }
 
-      console.error('Provision error:', error)
+      logger.error('Provision error:', error)
       const errorMessage = error.message || 'Unknown error'
       // Check for specific error conditions
       if (errorMessage.includes('No subscription found')) {

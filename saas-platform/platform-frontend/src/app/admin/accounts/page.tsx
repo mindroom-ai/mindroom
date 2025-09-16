@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { Card, CardContent, CardHeader } from '@/components/ui/Card'
 import { Button } from '@/components/ui/button'
 import { apiCall } from '@/lib/api'
+import { logger } from '@/lib/logger'
 
 interface Account {
   id: string
@@ -32,10 +33,10 @@ export default function AccountsPage() {
           // Generic admin list endpoint returns { data, total }
           setAccounts(data.data || [])
         } else {
-          console.error('Failed to fetch accounts:', response.statusText)
+          logger.error('Failed to fetch accounts:', response.statusText)
         }
       } catch (error) {
-        console.error('Error fetching accounts:', error)
+        logger.error('Error fetching accounts:', error)
       } finally {
         setLoading(false)
       }
@@ -65,11 +66,11 @@ export default function AccountsPage() {
         alert(`Successfully deleted account ${accountEmail} and all associated resources.`)
       } else {
         const error = await response.text()
-        console.error('Failed to delete account:', error)
+        logger.error('Failed to delete account:', error)
         alert(`Failed to delete account: ${error}`)
       }
     } catch (error) {
-      console.error('Error deleting account:', error)
+      logger.error('Error deleting account:', error)
       alert('An error occurred while deleting the account')
     } finally {
       setDeletingId(null)
@@ -141,7 +142,7 @@ export default function AccountsPage() {
                               if (!res.ok) throw new Error('Failed to update status')
                               setAccounts((prev) => prev.map(a => a.id === account.id ? { ...a, status: next } : a))
                             } catch (err) {
-                              console.error('Update status failed', err)
+                              logger.error('Update status failed', err)
                             } finally {
                               setUpdatingId(null)
                             }

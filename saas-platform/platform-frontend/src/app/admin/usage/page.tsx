@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { apiCall } from '@/lib/api'
+import { logger } from '@/lib/logger'
 
 interface UsageMetric {
   id: string
@@ -43,10 +44,10 @@ export default function UsagePage() {
           const data = await response.json()
           setMetrics(data.data || [])
         } else {
-          console.error('Failed to fetch usage metrics:', response.statusText)
+          logger.error('Failed to fetch usage metrics:', response.statusText)
         }
       } catch (error) {
-        console.error('Error fetching usage metrics:', error)
+        logger.error('Error fetching usage metrics:', error)
       } finally {
         setLoading(false)
       }

@@ -1,5 +1,6 @@
 import { redirect } from 'next/navigation'
 import { createServerClientSupabase } from '@/lib/supabase/server'
+import { logger } from '../logger'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || (
   process.env.PLATFORM_DOMAIN ? `https://api.${process.env.PLATFORM_DOMAIN}` : 'http://localhost:8000'
@@ -11,7 +12,7 @@ export async function requireAdmin() {
   const { data: { user }, error } = await supabase.auth.getUser()
 
   if (error || !user) {
-    console.error('[Admin Auth] Auth error:', error)
+    logger.error('[Admin Auth] Auth error:', error)
     redirect('/auth/login')
   }
 
@@ -32,7 +33,7 @@ export async function requireAdmin() {
     })
 
     if (!response.ok) {
-      console.error('[Admin Auth] API error:', response.status)
+      logger.error('[Admin Auth] API error:', response.status)
       redirect('/dashboard')
     }
 
@@ -57,7 +58,7 @@ export async function requireAdmin() {
 
     return { user, account: { id: user.id, email: user.email, is_admin: true } }
   } catch (err) {
-    console.error('[Admin Auth] Request error:', err)
+    logger.error('[Admin Auth] Request error:', err)
     redirect('/dashboard')
   }
 }

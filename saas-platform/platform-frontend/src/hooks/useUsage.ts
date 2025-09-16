@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { useAuth } from './useAuth'
 import { apiCall } from '@/lib/api'
 import { cache } from '@/lib/cache'
+import { logger } from '@/lib/logger'
 
 export interface UsageMetrics {
   id: string
@@ -56,10 +57,10 @@ export function useUsage(days: number = 30) {
           setUsage(usageData)
           cache.set(cacheKey, usageData)
         } else {
-          console.error('Error fetching usage:', response.statusText)
+          logger.error('Error fetching usage:', response.statusText)
         }
       } catch (error) {
-        console.error('Error fetching usage:', error)
+        logger.error('Error fetching usage:', error)
       } finally {
         if (isInitial) {
           setLoading(false)

@@ -11,6 +11,7 @@ import { Card, CardHeader } from '@/components/ui/Card'
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { setSsoCookie, setupAccount } from '@/lib/api'
+import { logger } from '@/lib/logger'
 
 export default function DashboardPage() {
   const { user, loading: authLoading } = useAuth()
@@ -22,9 +23,9 @@ export default function DashboardPage() {
 
   useEffect(() => {
     // Ensure SSO cookie for instance access (no-op if not logged in)
-    setSsoCookie().catch((e) => console.warn('Failed to set SSO cookie', e))
+    setSsoCookie().catch((e) => logger.warn('Failed to set SSO cookie', e))
     // Refresh cookie periodically for longer sessions
-    const id = setInterval(() => { setSsoCookie().catch((e) => console.warn('Failed to refresh SSO cookie', e)) }, 15 * 60 * 1000)
+    const id = setInterval(() => { setSsoCookie().catch((e) => logger.warn('Failed to refresh SSO cookie', e)) }, 15 * 60 * 1000)
 
     return () => clearInterval(id)
   }, [])
@@ -48,18 +49,18 @@ export default function DashboardPage() {
         return
       }
 
-      console.log('Setting up free tier account...')
+      logger.log('Setting up free tier account...')
       setSetupAttempted(true)
       setIsSettingUp(true)
       try {
         const result = await setupAccount()
-        console.log('Free tier setup result:', result)
+        logger.log('Free tier setup result:', result)
         // Trigger a refresh; hooks poll and will pick up the new subscription
         router.refresh()
         // Force reload after a short delay to ensure data is updated
         setTimeout(() => window.location.reload(), 2000)
       } catch (error) {
-        console.error('Error setting up free tier:', error)
+        logger.error('Error setting up free tier:', error)
       } finally {
         setIsSettingUp(false)
       }

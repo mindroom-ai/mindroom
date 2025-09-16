@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-import asyncio
 import hmac
 import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from backend import auth_monitor
 from backend.config import auth_client, logger, supabase
 from cachetools import TTLCache
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -19,9 +19,6 @@ if TYPE_CHECKING:
 
 # TTL cache for auth verification (5 minutes, max 100 entries)
 _auth_cache = TTLCache(maxsize=100, ttl=300)
-
-# Minimum time for auth operations to prevent timing attacks
-MIN_AUTH_TIME = 0.1  # 100ms minimum
 
 # Global rate limiter for the FastAPI app and routes
 limiter = Limiter(key_func=get_remote_address)
@@ -62,22 +59,24 @@ def _extract_bearer_token(authorization: str | None) -> str:
     return parts[1]
 
 
-async def verify_user(authorization: str = Header(None)) -> dict:  # noqa: C901, PLR0912, PLR0915
+async def verify_user(authorization: str = Header(None), request: Request = None) -> dict:  # noqa: C901, PLR0912
     """Verify regular user via Supabase JWT.
 
     With the current schema, `account.id == auth.user.id`.
     Ensures the `accounts` row exists, creating it if necessary.
     """
-    # Track timing to ensure constant-time operations
-    start_time = time.perf_counter()
+    # Get client IP for monitoring
+    client_ip = request.client.host if request else "unknown"
+
+    # Check if IP is blocked
+    if auth_monitor.is_blocked(client_ip):
+        raise HTTPException(status_code=429, detail="Too many failed attempts. Please try again later.")
 
     try:
         token = _extract_bearer_token(authorization)
     except HTTPException:
-        # Ensure minimum time even for early failures
-        elapsed = time.perf_counter() - start_time
-        if elapsed < MIN_AUTH_TIME:
-            await asyncio.sleep(MIN_AUTH_TIME - elapsed)
+        # Record auth failure
+        auth_monitor.record_failure(client_ip)
         raise
 
     # Check cache first
@@ -93,10 +92,15 @@ async def verify_user(authorization: str = Header(None)) -> dict:  # noqa: C901,
     try:
         user = ac.auth.get_user(token)
         if not user or not user.user:
+            # Record auth failure
+            auth_monitor.record_failure(client_ip)
             msg = "Invalid token"
             raise HTTPException(status_code=401, detail=msg)  # noqa: TRY301
 
         account_id = user.user.id
+
+        # Record successful auth
+        auth_monitor.record_success(client_ip, str(account_id))
 
         # Ensure account exists
         try:
@@ -147,25 +151,15 @@ async def verify_user(authorization: str = Header(None)) -> dict:  # noqa: C901,
         db_time = time.perf_counter() - start
         logger.info("Auth database lookup: %.2fms", db_time * 1000)
 
-    except HTTPException:
-        # Ensure minimum time for all error paths
-        elapsed = time.perf_counter() - start_time
-        if elapsed < MIN_AUTH_TIME:
-            await asyncio.sleep(MIN_AUTH_TIME - elapsed)
+    except HTTPException as e:
+        # Record failure if it's an auth error (not a 404)
+        if e.status_code == 401:
+            auth_monitor.record_failure(client_ip, str(account_id) if "account_id" in locals() else None)
         raise
     except Exception:
         logger.exception("User verification error")
-        # Ensure minimum time for all error paths
-        elapsed = time.perf_counter() - start_time
-        if elapsed < MIN_AUTH_TIME:
-            await asyncio.sleep(MIN_AUTH_TIME - elapsed)
         msg = "Authentication failed"
         raise HTTPException(status_code=401, detail=msg) from None
-
-    # Ensure minimum time for successful auth too
-    elapsed = time.perf_counter() - start_time
-    if elapsed < MIN_AUTH_TIME:
-        await asyncio.sleep(MIN_AUTH_TIME - elapsed)
 
     return user_data
 

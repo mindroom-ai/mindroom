@@ -1,4 +1,5 @@
 import { createClient } from '@/lib/supabase/client'
+import { logger } from './logger'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
@@ -24,9 +25,9 @@ export async function apiCall(
   } catch (error: any) {
     // Log the error but check if it's a cancellation
     if (error?.name === 'AbortError' || !error?.message) {
-      console.log(`Request cancelled: ${url}`)
+      logger.log(`Request cancelled: ${url}`)
     } else {
-      console.error(`API call failed: ${url}`, error)
+      logger.error(`API call failed: ${url}`, error)
     }
     throw error
   }

@@ -1,6 +1,7 @@
 import { createServerClientSupabase } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 import { NextRequest } from 'next/server'
+import { logger } from '@/lib/logger'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || (
   process.env.PLATFORM_DOMAIN ? `https://api.${process.env.PLATFORM_DOMAIN}` : 'http://localhost:8000'
@@ -42,7 +43,7 @@ export async function GET(request: NextRequest) {
             }
           }
         } catch (err) {
-          console.error('Error checking admin status:', err)
+          logger.error('Error checking admin status:', err)
         }
       }
     }

@@ -1,6 +1,6 @@
 """Test dependency injection utilities."""
 
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -33,13 +33,6 @@ class TestDeps:
             mock.perf_counter.side_effect = [0.0, 0.001, 0.002, 0.003, 0.004]
             yield mock
 
-    @pytest.fixture
-    def mock_sleep(self):
-        """Mock asyncio.sleep."""
-        with patch("backend.deps.asyncio.sleep") as mock:
-            mock.return_value = None
-            yield mock
-
     @pytest.mark.asyncio
     async def test_verify_user_success(self, mock_supabase: MagicMock, mock_auth_client: MagicMock, mock_time: Mock):
         """Test successful user verification."""
@@ -66,7 +59,7 @@ class TestDeps:
         assert result["email"] == "test@example.com"
 
     @pytest.mark.asyncio
-    async def test_verify_user_invalid_token(self, mock_auth_client: MagicMock, mock_time: Mock, mock_sleep: AsyncMock):
+    async def test_verify_user_invalid_token(self, mock_auth_client: MagicMock, mock_time: Mock):
         """Test user verification with invalid token."""
         from backend.deps import verify_user
 
@@ -140,7 +133,7 @@ class TestDeps:
         _auth_cache.clear()
 
     @pytest.mark.asyncio
-    async def test_verify_user_missing_bearer(self, mock_sleep: AsyncMock):
+    async def test_verify_user_missing_bearer(self):
         """Test user verification with missing Bearer prefix."""
         from backend.deps import verify_user
 
@@ -151,27 +144,19 @@ class TestDeps:
         assert "Invalid authorization format" in exc_info.value.detail
 
     @pytest.mark.asyncio
-    async def test_verify_user_constant_time(self, mock_auth_client: MagicMock, mock_sleep: AsyncMock):
-        """Test constant-time operation for security."""
+    async def test_verify_user_auth_failures(self, mock_auth_client: MagicMock):
+        """Test that auth failures are properly handled."""
         from backend.deps import verify_user
 
-        # Mock time to simulate fast failure
-        with patch("backend.deps.time.perf_counter") as mock_time:
-            # Need: start_time, token extract, after get_user failure
-            mock_time.side_effect = [0.0, 0.0, 0.0001, 0.0001]  # Very fast failure
+        # Setup invalid token
+        mock_auth_client.auth.get_user.return_value = None
 
-            # Setup invalid token
-            mock_auth_client.auth.get_user.return_value = None
+        # Test
+        with pytest.raises(HTTPException) as exc_info:
+            await verify_user("Bearer invalid")
 
-            # Test
-            with pytest.raises(HTTPException):
-                await verify_user("Bearer invalid")
-
-            # Should have slept to maintain constant time
-            mock_sleep.assert_called()
-            if mock_sleep.call_args:
-                sleep_time = mock_sleep.call_args[0][0]
-                assert sleep_time > 0  # Should sleep for remaining time
+        assert exc_info.value.status_code == 401
+        assert exc_info.value.detail == "Invalid token"
 
     @pytest.mark.asyncio
     async def test_verify_admin_success(self, mock_supabase: MagicMock, mock_auth_client: MagicMock):

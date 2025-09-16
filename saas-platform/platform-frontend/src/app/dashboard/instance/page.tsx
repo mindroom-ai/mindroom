@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { Loader2, RefreshCw, CheckCircle, AlertCircle, Clock, Play, Pause, ExternalLink, Server, Database, Globe } from 'lucide-react'
 import { listInstances, startInstance, stopInstance, restartInstance as apiRestartInstance } from '@/lib/api'
+import { logger } from '@/lib/logger'
 import { Card, CardHeader, CardSection } from '@/components/ui/Card'
 import { cache } from '@/lib/cache'
 
@@ -67,7 +68,7 @@ export default function InstancePage() {
         setInstance(null)
       }
     } catch (error) {
-      console.error('Error fetching instance:', error)
+      logger.error('Error fetching instance:', error)
     } finally {
       setLoading(false)
     }
@@ -121,7 +122,7 @@ export default function InstancePage() {
         error?.message === ''
 
       if (!isAborted) {
-        console.error(`Error performing ${action}:`, error)
+        logger.error(`Error performing ${action}:`, error)
         alert(`Failed to ${action} instance. Please try again.`)
       }
     } finally {

@@ -5,6 +5,7 @@ import { createClient } from '@/lib/supabase/client'
 import { useAuth } from './useAuth'
 import { listInstances, restartInstance as apiRestartInstance } from '@/lib/api'
 import { instanceCache } from '@/lib/cache'
+import { logger } from '@/lib/logger'
 
 export interface Instance {
   id: string // UUID
@@ -84,10 +85,10 @@ export function useInstance() {
           instanceCache.delete('user-instance')
         }
       } catch (error) {
-        console.error('Error fetching instance:', error)
+        logger.error('Error fetching instance:', error)
         // Show more details about the error
         if (error instanceof Error) {
-          console.error('Error details:', error.message)
+          logger.error('Error details:', error.message)
         }
       } finally {
         if (isInitial) {
@@ -122,7 +123,7 @@ export function useInstance() {
       // Update local state to show restarting
       setInstance(prev => prev ? { ...prev, status: 'restarting' } : null)
     } catch (error) {
-      console.error('Error restarting instance:', error)
+      logger.error('Error restarting instance:', error)
     }
   }
 

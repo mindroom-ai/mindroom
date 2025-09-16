@@ -23,7 +23,12 @@ load_dotenv(saas_platform_env)
 
 # Configure logging once
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("mindroom.backend")
+
+# Use sanitized logger if available, otherwise standard logger
+try:
+    from backend.utils.logger import logger
+except ImportError:
+    logger = logging.getLogger("mindroom.backend")
 
 
 def _get_secret(name: str, default: str = "") -> str:
