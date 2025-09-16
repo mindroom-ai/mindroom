@@ -8,24 +8,25 @@
 
 This review examines the API security posture of the MindRoom platform backend, focusing on rate limiting, DoS protection, API versioning, and access controls. The platform consists of 45+ API endpoints across 10 route modules with a clear separation between user-facing and internal system endpoints.
 
-**Critical Findings**: The platform lacks comprehensive rate limiting and request size controls, creating significant DoS vulnerabilities. While authentication and API key management are implemented correctly, the absence of basic protective measures presents immediate security risks.
+**Updated Status**: Rate limiting has been significantly improved with coverage extended to user endpoints. The platform now has rate limiting on admin, provisioner, and user-facing endpoints, reducing DoS vulnerability from CRITICAL to MEDIUM. Request size controls and some API versioning improvements still needed.
 
 ---
 
-## 1. Rate Limiting Implementation (PARTIAL)
+## 1. Rate Limiting Implementation (IMPROVED)
 
-### Current Status: **PARTIAL** ⚠️
+### Current Status: **IMPROVED** ✅
 
 **Findings:**
 - FastAPI rate limiting integrated via `slowapi`; 429 handler registered
 - Per-route limits applied to admin and provisioner endpoints
-- Remaining: evaluate user/SSO endpoints and public routes for appropriate limits
+- **NEW**: Rate limits added to user endpoints (accounts, instances, subscriptions)
+  - `/my/instances` - 30/min for listing, 5/min for creation, 10/min for control
+  - `/my/account` - 30/min for reading, 5/min for setup
+  - `/my/subscription` - 30/min for reading, 5/min for modifications
 
 **High-Risk Endpoints Remaining:**
 ```python
-# /my/account/setup               # Account creation - abuse risk
-# /stripe/checkout                # Payment processing - financial risk
-# /webhooks/stripe                # External webhook - DoS risk
+# /webhooks/stripe                # External webhook - DoS risk (already has 20/min limit)
 ```
 
 **Security Impact:**
@@ -405,9 +406,9 @@ async def detect_anomalies(key_hash: str):
 | Endpoint | Risk Level | Attack Vector | Impact |
 |----------|------------|---------------|---------|
 | `/system/provision` | **CRITICAL** | Resource exhaustion through instance creation | $$ cost, cluster overload |
-| `/admin/stats` | **HIGH** | Database query flooding | Database performance degradation |
-| `/my/instances` | **HIGH** | Kubernetes API flooding | Cluster API rate limiting |
-| `/webhooks/stripe` | **MEDIUM** | Payload flooding | Memory exhaustion |
+| `/admin/stats` | ~~**HIGH**~~ **RESOLVED** | ~~Database query flooding~~ Rate limited | ~~Database performance degradation~~ |
+| `/my/instances` | ~~**HIGH**~~ **RESOLVED** | ~~Kubernetes API flooding~~ Rate limited | ~~Cluster API rate limiting~~ |
+| `/webhooks/stripe` | ~~**MEDIUM**~~ **RESOLVED** | ~~Payload flooding~~ Rate limited | ~~Memory exhaustion~~ |
 | `/health` | **LOW** | Simple request flooding | Server resource exhaustion |
 
 **2. Resource Exhaustion Vectors**

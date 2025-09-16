@@ -55,18 +55,10 @@ if [[ -z "${DB_URL}" ]]; then
   DB_USER=${SUPABASE_DB_USER:-postgres}
   DB_NAME=${SUPABASE_DB_NAME:-postgres}
   DB_HOST="db.${SUPA_URL_HOST}"
-  # Resolve IPv4 address to avoid IPv6 connectivity issues
-  DB_HOSTADDR=$(python - <<PY
-import socket
-host = "${DB_HOST}"
-try:
-    infos = socket.getaddrinfo(host, 5432, family=socket.AF_INET, type=socket.SOCK_STREAM)
-    if infos:
-        print(infos[0][4][0])
-except Exception:
-    pass
-PY
-)
+
+  # Force IPv4 resolution for Supabase connectivity
+  DB_HOSTADDR=$(python -c "import socket; print(socket.gethostbyname('${DB_HOST}'))")
+
   # URL-encode the password to handle special characters like @, *, !, etc.
   ENC_PASS=$(python - <<'PY'
 from urllib.parse import quote
@@ -74,11 +66,9 @@ import os
 print(quote(os.environ.get('SUPABASE_DB_PASSWORD',''), safe=''))
 PY
 )
-  QUERY_PARAMS="?sslmode=require"
-  if [ -n "${DB_HOSTADDR}" ]; then
-    QUERY_PARAMS="${QUERY_PARAMS}&hostaddr=${DB_HOSTADDR}"
-  fi
-  DB_URL="postgresql://${DB_USER}:${ENC_PASS}@${DB_HOST}:5432/${DB_NAME}${QUERY_PARAMS}"
+
+  # Build connection URL with IPv4 address
+  DB_URL="postgresql://${DB_USER}:${ENC_PASS}@${DB_HOST}:5432/${DB_NAME}?sslmode=require&hostaddr=${DB_HOSTADDR}"
 fi
 
 # 3) Choose output path
@@ -87,18 +77,17 @@ OUT_DIR=${DB_BACKUP_DIR:-backups}
 mkdir -p "$OUT_DIR"
 OUT_FILE="$OUT_DIR/supabase_full_${STAMP}.dump"
 
-echo "Backing up database to: $OUT_FILE"
-
-# 4) Run pg_dump (prefer local binary; fallback to Docker postgres if not available)
+# 4) Run pg_dump (single attempt, fail fast)
 if command -v pg_dump >/dev/null 2>&1; then
-  pg_dump --no-owner --no-privileges --format=custom --file="$OUT_FILE" "$DB_URL"
+  pg_dump \
+    --no-owner \
+    --no-privileges \
+    --format=custom \
+    --file="$OUT_FILE" \
+    "$DB_URL"
 else
-  echo "pg_dump not found locally; attempting Docker-based pg_dump (postgres:16-alpine)" >&2
   docker run --rm \
     -v "$(pwd)":/work -w /work \
-    -e PGCLIENTENCODING=UTF8 \
     postgres:16-alpine \
-    sh -c "pg_dump --no-owner --no-privileges --format=custom --file='$OUT_FILE' '$DB_URL'"
+    pg_dump --no-owner --no-privileges --format=custom --file="$OUT_FILE" "$DB_URL"
 fi
-
-echo "✅ Backup complete: $OUT_FILE"

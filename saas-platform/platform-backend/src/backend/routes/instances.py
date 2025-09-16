@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from backend.config import PROVISIONER_API_KEY, logger
-from backend.deps import ensure_supabase, verify_user
+from backend.deps import ensure_supabase, limiter, verify_user
 from backend.k8s import check_deployment_exists, run_kubectl
 from backend.models import ActionResult, InstancesResponse, ProvisionResponse
 from backend.routes.provisioner import (
@@ -15,7 +15,7 @@ from backend.routes.provisioner import (
     start_instance_provisioner,
     stop_instance_provisioner,
 )
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 
 router = APIRouter()
 
@@ -87,7 +87,9 @@ async def _background_sync_instance_status(instance_id: str) -> None:
 
 
 @router.get("/my/instances", response_model=InstancesResponse)
+@limiter.limit("30/minute")  # Reading is less sensitive
 async def list_user_instances(
+    request: Request,
     user: Annotated[dict, Depends(verify_user)],
     background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
@@ -144,7 +146,9 @@ async def list_user_instances(
 
 
 @router.post("/my/instances/provision", response_model=ProvisionResponse)
+@limiter.limit("5/minute")  # Creating instances is expensive
 async def provision_user_instance(
+    request: Request,
     user: Annotated[dict, Depends(verify_user)],
     background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
@@ -237,18 +241,27 @@ async def _verify_instance_ownership_and_proxy(
 
 
 @router.post("/my/instances/{instance_id}/start", response_model=ActionResult)
-async def start_user_instance(instance_id: int, user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
+@limiter.limit("10/minute")  # Control actions moderate rate
+async def start_user_instance(
+    request: Request, instance_id: int, user: Annotated[dict, Depends(verify_user)]
+) -> dict[str, Any]:
     """Start user's instance."""
     return await _verify_instance_ownership_and_proxy(instance_id, user, start_instance_provisioner)
 
 
 @router.post("/my/instances/{instance_id}/stop", response_model=ActionResult)
-async def stop_user_instance(instance_id: int, user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
+@limiter.limit("10/minute")  # Control actions moderate rate
+async def stop_user_instance(
+    request: Request, instance_id: int, user: Annotated[dict, Depends(verify_user)]
+) -> dict[str, Any]:
     """Stop user's instance."""
     return await _verify_instance_ownership_and_proxy(instance_id, user, stop_instance_provisioner)
 
 
 @router.post("/my/instances/{instance_id}/restart", response_model=ActionResult)
-async def restart_user_instance(instance_id: int, user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
+@limiter.limit("10/minute")  # Control actions moderate rate
+async def restart_user_instance(
+    request: Request, instance_id: int, user: Annotated[dict, Depends(verify_user)]
+) -> dict[str, Any]:
     """Restart user's instance."""
     return await _verify_instance_ownership_and_proxy(instance_id, user, restart_instance_provisioner)

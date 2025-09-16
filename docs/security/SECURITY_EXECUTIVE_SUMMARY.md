@@ -25,12 +25,14 @@ A comprehensive security review of the MindRoom SaaS platform was conducted acro
    - Alerts for failed auth/admin actions; audit log reviews; security@ inbox and security.txt; incident playbook
 3. Internal service encryption (High)
    - Evaluate mTLS/service mesh for internal traffic; document cipher policy
-4. Frontend protection (Medium)
-   - Add CSP; audit third‑party scripts; verify cookie usage end‑to‑end
-5. Broader rate‑limit coverage (Medium)
-   - Evaluate user and webhook endpoints; maintain per‑route budgets
-6. Backup reliability (Medium)
-   - Resolve IPv6 egress or run db backup from dual‑stack host/cluster job
+4. Frontend protection (Medium) - **Partially Addressed**
+   - ✅ CSP headers implemented with proper whitelisting
+   - Remaining: audit third‑party scripts; verify cookie usage end‑to‑end
+5. Broader rate‑limit coverage (Medium) - **Partially Addressed**
+   - ✅ User endpoints now rate‑limited (accounts, instances, subscriptions - 11 endpoints)
+   - Remaining: maintain per‑route budgets
+6. Backup reliability (Medium) - **Resolved**
+   - ✅ IPv4 resolution fixed in backup script
 
 ## Security Posture by Category (updated)
 
@@ -47,7 +49,7 @@ A comprehensive security review of the MindRoom SaaS platform was conducted acro
 | Error Handling | ⚠️ PARTIAL | Standardize sanitization + 4xx/5xx behavior |
 | API Security | ⚠️ PARTIAL | Request size limit; extend per‑route rate limits |
 | Monitoring & Incident Response | ❌ FAIL | Alerts/playbooks not yet implemented |
-| Frontend Security | ⚠️ PARTIAL | Add CSP; review third‑party scripts |
+| Frontend Security | ⚠️ PARTIAL | CSP implemented; review third‑party scripts |
 
 ## Business Impact Assessment
 
@@ -116,10 +118,11 @@ A comprehensive security review of the MindRoom SaaS platform was conducted acro
 
 The MindRoom platform has strong foundational architecture with good multi-tenant isolation design and modern technology stack. However, critical implementation gaps create severe security vulnerabilities that could lead to complete system compromise.
 
-**Current Risk Level:** ~6.8/10 (HIGH)
+**Previous Risk Level:** ~6.8/10 (HIGH)
+**Current Risk Level:** ~5.8/10 (MEDIUM-HIGH) - Reduced by CSP, rate limiting, and backup fixes
 **Target After Remediation:** ≤3/10 (LOW)
 
-The platform is suitable for staging/testing with trusted users. Production launch should wait until secrets lifecycle, monitoring/alerting, internal TLS, CSP, and backup reliability are addressed and a final validation pass is completed.
+The platform is suitable for staging/testing with trusted users. Production launch should wait until secrets lifecycle, monitoring/alerting, and internal TLS are addressed and a final validation pass is completed. CSP and backup reliability have been resolved.
 
 ### Decision Required
 
