@@ -43,31 +43,18 @@ app = FastAPI(title="MindRoom Backend")
 
 # IMPORTANT: Middleware order is reversed in FastAPI!
 # The last middleware added runs first.
-# We want: Request -> AuditLogging -> CORS -> Routes
+# We want the execution order to be:
+# Request -> CORS -> TrustedHost -> SlowAPI -> Security -> AuditLogging -> Routes
 # So we add them in reverse order:
 
-# Audit logging middleware (added first, runs second)
+# 1. Audit logging middleware (runs after security checks)
 app.add_middleware(AuditLoggingMiddleware)
 
-# Compute CORS origins: exclude localhost in production
-cors_origins = [o for o in ALLOWED_ORIGINS if not (ENVIRONMENT == "production" and o.startswith("http://localhost"))]
-
-# CORS middleware (added last, runs first - ensures CORS headers on ALL responses)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=cors_origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
-    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
-    expose_headers=["X-Total-Count"],
-    max_age=86400,
-)
-
-# Restrict allowed hosts
-allowed_hosts = [f"*.{PLATFORM_DOMAIN}", PLATFORM_DOMAIN, "testserver"]
-if ENVIRONMENT != "production":
-    allowed_hosts += ["localhost", "127.0.0.1", "testserver"]
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
+# NOTE: The following middleware will be added later:
+# 2. Custom @app.middleware("http") decorators for security headers and request size
+# 3. SlowAPIMiddleware for rate limiting
+# 4. TrustedHostMiddleware for host validation
+# 5. CORSMiddleware (must be last to run first)
 
 
 # Request size limit middleware (1 MiB default)
@@ -117,7 +104,32 @@ async def _logged_rate_limit_exceeded(request: Request, exc: RateLimitExceeded) 
 
 
 app.add_exception_handler(RateLimitExceeded, _logged_rate_limit_exceeded)
+
+# Add remaining middleware BEFORE routers (but after custom middleware functions)
+# Remember: Last added = First to run
+
+# 3. SlowAPI rate limiting middleware
 app.add_middleware(SlowAPIMiddleware)
+
+# 4. Trusted host middleware - restrict allowed hosts
+allowed_hosts = [f"*.{PLATFORM_DOMAIN}", PLATFORM_DOMAIN, "testserver"]
+if ENVIRONMENT != "production":
+    allowed_hosts += ["localhost", "127.0.0.1", "testserver"]
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
+
+# 5. Compute CORS origins: exclude localhost in production
+cors_origins = [o for o in ALLOWED_ORIGINS if not (ENVIRONMENT == "production" and o.startswith("http://localhost"))]
+
+# 6. CORS middleware (added LAST so it runs FIRST - ensures CORS headers on ALL responses)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
+    expose_headers=["X-Total-Count"],
+    max_age=86400,
+)
 
 # Include routers
 app.include_router(health.router)

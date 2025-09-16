@@ -3,17 +3,25 @@
 from __future__ import annotations
 
 import os
+import sys
 from fastapi.testclient import TestClient
-
-# Configure test superdomain before importing app
-os.environ.setdefault("PLATFORM_DOMAIN", "test.mindroom.chat")
-os.environ.setdefault("ENVIRONMENT", "test")
-
-from main import app
 
 
 def test_cors_headers_present_for_allowed_origin() -> None:
     """Allowed origin should be echoed and credentials allowed."""
+    # Configure test environment
+    os.environ["PLATFORM_DOMAIN"] = "test.mindroom.chat"
+    os.environ["ENVIRONMENT"] = "test"
+
+    # Force reimport of modules to pick up new environment
+    if "backend.config" in sys.modules:
+        del sys.modules["backend.config"]
+    if "main" in sys.modules:
+        del sys.modules["main"]
+
+    # Now import with correct environment
+    from main import app
+
     client = TestClient(app)
     origin = "https://app.test.mindroom.chat"
 
