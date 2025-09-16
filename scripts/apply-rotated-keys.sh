@@ -4,42 +4,19 @@
 set -euo pipefail
 
 if [ $# -ne 1 ]; then
-    echo "Usage: $0 <path-to-new-secrets.env>"
+    echo "Usage: $0 <path-to-new-secrets.env>" >&2
     exit 1
 fi
 
 SECRETS_FILE="$1"
-
-if [ ! -f "$SECRETS_FILE" ]; then
-    echo "❌ Error: Secrets file not found: $SECRETS_FILE"
-    exit 1
-fi
-
-echo "🔐 Applying Rotated API Keys"
-echo "============================"
 
 # Load the new secrets
 set -a
 source "$SECRETS_FILE"
 set +a
 
-# Check for Kubernetes access
-if ! kubectl cluster-info > /dev/null 2>&1; then
-    echo "⚠️  Warning: kubectl not configured. Skipping Kubernetes updates."
-    echo "Set KUBECONFIG or configure kubectl to update cluster secrets."
-    SKIP_K8S=true
-else
-    SKIP_K8S=false
-fi
-
-# Update Kubernetes secrets if accessible
-if [ "$SKIP_K8S" = false ]; then
-    echo "📦 Updating Kubernetes secrets..."
-
-    # Create namespace if it doesn't exist
-    kubectl create namespace mindroom-secrets --dry-run=client -o yaml | kubectl apply -f -
-    kubectl create namespace mindroom-staging --dry-run=client -o yaml | kubectl apply -f -
-    kubectl create namespace mindroom-instances --dry-run=client -o yaml | kubectl apply -f -
+# Update Kubernetes secrets
+if kubectl cluster-info > /dev/null 2>&1; then
 
     # Delete existing secrets (if any) and create new ones
     kubectl delete secret api-keys --namespace=mindroom-staging --ignore-not-found
@@ -67,66 +44,33 @@ if [ "$SKIP_K8S" = false ]; then
         --from-literal=google-client-secret="$GOOGLE_CLIENT_SECRET" \
         --namespace=mindroom-staging
 
-    echo "✅ Kubernetes secrets updated"
 fi
 
 # Update local .env file (backup existing)
 if [ -f ".env" ]; then
     cp .env .env.backup.$(date +%Y%m%d_%H%M%S)
-    echo "📝 Backed up existing .env file"
 fi
 
-# Create new .env file from template
+# Create new .env file
 cat > .env << EOF
-# MindRoom Environment Configuration
-# Generated: $(date)
-# ⚠️  DO NOT COMMIT THIS FILE
-
-# AI Provider Keys
 OPENAI_API_KEY=$OPENAI_API_KEY
 ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY
 GOOGLE_API_KEY=$GOOGLE_API_KEY
 OPENROUTER_API_KEY=$OPENROUTER_API_KEY
 DEEPSEEK_API_KEY=$DEEPSEEK_API_KEY
-
-# Supabase Configuration
 SUPABASE_URL=$SUPABASE_URL
 SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY
 SUPABASE_SERVICE_KEY=$SUPABASE_SERVICE_KEY
-
-# Stripe Configuration
 STRIPE_PUBLISHABLE_KEY=$STRIPE_PUBLISHABLE_KEY
 STRIPE_SECRET_KEY=$STRIPE_SECRET_KEY
 STRIPE_WEBHOOK_SECRET=$STRIPE_WEBHOOK_SECRET
-
-# Internal Configuration
 PROVISIONER_API_KEY=$PROVISIONER_API_KEY
-
-# OAuth Configuration
 GOOGLE_CLIENT_ID=$GOOGLE_CLIENT_ID
 GOOGLE_CLIENT_SECRET=$GOOGLE_CLIENT_SECRET
-
-# Other existing configuration (preserved from backup if exists)
 EOF
 
-echo "✅ Local .env file updated"
-
 # Update saas-platform .env if it exists
-if [ -d "saas-platform" ]; then
-    if [ -f "saas-platform/.env" ]; then
-        cp saas-platform/.env saas-platform/.env.backup.$(date +%Y%m%d_%H%M%S)
-    fi
+if [ -d "saas-platform" ] && [ -f "saas-platform/.env" ]; then
+    cp saas-platform/.env saas-platform/.env.backup.$(date +%Y%m%d_%H%M%S)
     cp .env saas-platform/.env
-    echo "✅ Updated saas-platform/.env"
 fi
-
-echo ""
-echo "🎯 Next Steps:"
-echo "1. ⚠️  IMMEDIATELY revoke old API keys in each provider's dashboard"
-echo "2. Delete the secrets file: rm -f $SECRETS_FILE"
-echo "3. Restart services to pick up new configuration:"
-echo "   - Kubernetes: kubectl rollout restart deployment -n mindroom-staging"
-echo "   - Docker: docker-compose restart"
-echo "4. Test that services are working with new keys"
-echo ""
-echo "✅ API key rotation applied successfully!"
