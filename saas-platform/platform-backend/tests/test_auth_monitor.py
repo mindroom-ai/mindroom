@@ -142,34 +142,33 @@ class TestAuthMonitor:
             assert is_blocked(ip)
             assert ip in blocked_ips
 
-    @patch("backend.auth_monitor.supabase")
-    def test_audit_logging_on_block(self, mock_supabase):
+    @patch("backend.auth_monitor.create_audit_log")
+    def test_audit_logging_on_block(self, mock_create_audit_log):
         """Test that blocking triggers audit log."""
         ip = "192.168.1.10"
-        mock_table = MagicMock()
-        mock_supabase.table.return_value = mock_table
 
         # Trigger block
         for _ in range(MAX_FAILURES):
             record_failure(ip)
 
-        # Verify audit log was attempted
-        mock_supabase.table.assert_called_with("audit_logs")
-        mock_table.insert.assert_called()
+        # Verify audit logs were called
+        # Should have MAX_FAILURES auth_failed logs + 1 ip_blocked log
+        assert mock_create_audit_log.call_count == MAX_FAILURES + 1
 
-        # Check the logged data
-        call_args = mock_table.insert.call_args[0][0]
-        assert call_args["action"] == "ip_blocked"  # Corrected action name
-        assert call_args["ip_address"] == ip
-        assert call_args["details"]["reason"] == "excessive_auth_failures"
-        assert call_args["success"] is True  # Block action succeeded
+        # Check the final ip_blocked call
+        final_call = mock_create_audit_log.call_args_list[-1]
+        assert final_call.kwargs["action"] == "ip_blocked"
+        assert final_call.kwargs["resource_type"] == "security"
+        assert final_call.kwargs["ip_address"] == ip
+        assert final_call.kwargs["details"]["reason"] == "excessive_auth_failures"
+        assert final_call.kwargs["success"] is True
 
-    @patch("backend.auth_monitor.supabase", None)
+    @patch("backend.auth_monitor.create_audit_log", MagicMock())
     def test_works_without_supabase(self):
         """Test that auth monitor works even without database."""
         ip = "192.168.1.11"
 
-        # Should work without errors even if supabase is None
+        # Should work without errors even if audit logging fails
         for _ in range(MAX_FAILURES):
             blocked = record_failure(ip)
 

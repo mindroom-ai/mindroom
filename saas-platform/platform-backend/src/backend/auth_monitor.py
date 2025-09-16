@@ -7,7 +7,7 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 import logging
 
-from backend.config import supabase
+from backend.utils.audit import create_audit_log
 
 logger = logging.getLogger(__name__)
 
@@ -49,43 +49,30 @@ def record_failure(ip_address: str, user_id: str = None) -> bool:
     # Add new failure
     failed_attempts[ip_address].append(now)
 
-    # Log to database for audit (non-critical, don't fail auth on log failure)
-    try:
-        supabase.table("audit_logs").insert(
-            {
-                "account_id": user_id,
-                "action": "auth_failed",
-                "resource_type": "authentication",
-                "ip_address": ip_address,
-                "success": False,
-                "created_at": now.isoformat(),
-            }
-        ).execute()
-    except Exception as e:
-        logger.error(f"Failed to log auth failure: {e}")
+    # Log to database for audit
+    create_audit_log(
+        action="auth_failed",
+        resource_type="authentication",
+        account_id=user_id,
+        ip_address=ip_address,
+        success=False,
+    )
 
     # Check if threshold exceeded and block if needed
     if len(failed_attempts[ip_address]) >= MAX_FAILURES:
         blocked_ips[ip_address] = datetime.now(UTC)
         logger.warning(f"Blocked IP {ip_address} due to too many failed auth attempts")
 
-        try:
-            supabase.table("audit_logs").insert(
-                {
-                    "action": "ip_blocked",
-                    "resource_type": "security",
-                    "details": {
-                        "ip_address": ip_address,
-                        "reason": "excessive_auth_failures",
-                        "attempts": len(failed_attempts[ip_address]),
-                    },
-                    "ip_address": ip_address,
-                    "success": True,
-                    "created_at": datetime.now(UTC).isoformat(),
-                }
-            ).execute()
-        except Exception as e:
-            logger.error(f"Failed to log IP block: {e}")
+        create_audit_log(
+            action="ip_blocked",
+            resource_type="security",
+            details={
+                "reason": "excessive_auth_failures",
+                "attempts": len(failed_attempts[ip_address]),
+            },
+            ip_address=ip_address,
+            success=True,
+        )
         return True
 
     return False
@@ -97,17 +84,11 @@ def record_success(ip_address: str, user_id: str = None):
     if ip_address in failed_attempts:
         del failed_attempts[ip_address]
 
-    # Log successful auth (non-critical, don't fail auth on log failure)
-    try:
-        supabase.table("audit_logs").insert(
-            {
-                "account_id": user_id,
-                "action": "auth_success",
-                "resource_type": "authentication",
-                "ip_address": ip_address,
-                "success": True,
-                "created_at": datetime.now(UTC).isoformat(),
-            }
-        ).execute()
-    except Exception as e:
-        logger.error(f"Failed to log auth success: {e}")
+    # Log successful auth
+    create_audit_log(
+        action="auth_success",
+        resource_type="authentication",
+        account_id=user_id,
+        ip_address=ip_address,
+        success=True,
+    )

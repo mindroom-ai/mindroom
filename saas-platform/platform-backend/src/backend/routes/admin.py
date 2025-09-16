@@ -8,6 +8,7 @@ from typing import Annotated, Any
 from backend.config import PROVISIONER_API_KEY, logger
 from pydantic import BaseModel
 from backend.deps import ensure_supabase, limiter, verify_admin
+from backend.utils.audit import create_audit_log
 from backend.models import (
     ActionResult,
     AdminAccountDetailsResponse,
@@ -51,22 +52,15 @@ def audit_log_entry(
     details: dict | None = None,
 ) -> None:
     """Log an admin action to the audit_logs table (best effort)."""
-    try:
-        sb = ensure_supabase()
-        sb.table("audit_logs").insert(
-            {
-                "account_id": account_id,
-                "action": action,
-                "resource_type": resource_type,
-                "resource_id": resource_id,
-                "details": details,
-                "created_at": datetime.now(UTC).isoformat(),
-            },
-        ).execute()
-    except Exception:
-        logger.warning(
-            f"Failed to log audit: {action} on {resource_type}{f'/{resource_id}' if resource_id else ''}",
-        )
+    # Use the shared helper for consistency
+    create_audit_log(
+        action=action,
+        resource_type=resource_type,
+        account_id=account_id,
+        resource_id=resource_id,
+        details=details,
+        success=True,  # Admin actions that reach this point are successful
+    )
 
 
 @router.get("/admin/stats", response_model=AdminStatsOut)
