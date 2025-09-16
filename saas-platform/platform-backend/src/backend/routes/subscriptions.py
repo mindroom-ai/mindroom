@@ -6,14 +6,14 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from backend.config import logger, stripe
-from backend.deps import ensure_supabase, verify_user
+from backend.deps import ensure_supabase, limiter, verify_user
 from backend.models import (
     SubscriptionCancelResponse,
     SubscriptionOut,
     SubscriptionReactivateResponse,
 )
 from backend.pricing import get_plan_limits_from_metadata
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -26,7 +26,9 @@ class CancelSubscriptionRequest(BaseModel):
 
 
 @router.get("/my/subscription", response_model=SubscriptionOut)
+@limiter.limit("30/minute")  # Reading subscription info
 async def get_user_subscription(
+    request: Request,
     user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, Any]:
     """Get current user's subscription."""
@@ -60,7 +62,9 @@ async def get_user_subscription(
 
 
 @router.post("/my/subscription/cancel", response_model=SubscriptionCancelResponse)
+@limiter.limit("5/minute")  # Sensitive operation
 async def cancel_subscription(
+    req: Request,
     request: CancelSubscriptionRequest,
     user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, Any]:
@@ -111,7 +115,9 @@ async def cancel_subscription(
 
 
 @router.post("/my/subscription/reactivate", response_model=SubscriptionReactivateResponse)
+@limiter.limit("5/minute")  # Sensitive operation
 async def reactivate_subscription(
+    request: Request,
     user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, Any]:
     """Reactivate a cancelled subscription (if still in billing period)."""
