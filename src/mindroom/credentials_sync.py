@@ -85,7 +85,7 @@ def sync_env_to_credentials() -> None:
 
             # Also set the environment variable directly for libraries that need it
             # This ensures mem0 and other libraries can access the keys
-            if env_value and service != "ollama":
+            if env_value:
                 os.environ[env_var] = env_value
 
     if updated_count > 0:
