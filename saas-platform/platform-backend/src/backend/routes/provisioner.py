@@ -7,8 +7,11 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from backend.config import (
+    ANTHROPIC_API_KEY,
     GITEA_TOKEN,
     GITEA_USER,
+    GOOGLE_API_KEY,
+    DEEPSEEK_API_KEY,
     OPENAI_API_KEY,
     OPENROUTER_API_KEY,
     PLATFORM_DOMAIN,
@@ -204,10 +207,15 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
                 "--set",
                 f"supabaseAnonKey={SUPABASE_ANON_KEY or ''}",
                 "--set",
-                f"openrouter_key={OPENROUTER_API_KEY}",
-                "--set",
                 f"openai_key={OPENAI_API_KEY}",
                 "--set",
+                f"anthropic_key={ANTHROPIC_API_KEY}",
+                "--set",
+                f"google_key={GOOGLE_API_KEY}",
+                "--set",
+                f"openrouter_key={OPENROUTER_API_KEY}",
+                "--set",
+                f"deepseek_key={DEEPSEEK_API_KEY}",
                 "mindroom_image=git.nijho.lt/basnijholt/mindroom-frontend:latest",
             ],
         )
