@@ -12,7 +12,9 @@ synapse_image: matrixdotorg/synapse:latest
 # Provide values here or inject via a separate Secret overwrite.
 openai_key: ""
 anthropic_key: ""
+google_key: ""
 openrouter_key: ""
+deepseek_key: ""
 
 # Supabase (shared auth)
 supabaseUrl: ""

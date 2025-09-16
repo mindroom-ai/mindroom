@@ -57,6 +57,10 @@ spec:
           value: {{ .Values.supabaseAnonKey | quote }}
         - name: OPENROUTER_API_KEY_FILE
           value: "/etc/secrets/openrouter_key"
+        - name: GOOGLE_API_KEY_FILE
+          value: "/etc/secrets/google_key"
+        - name: DEEPSEEK_API_KEY_FILE
+          value: "/etc/secrets/deepseek_key"
         - name: HOME
           value: {{ .Values.storagePath }}
         volumeMounts:
