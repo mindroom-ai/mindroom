@@ -15,9 +15,11 @@ import stripe
 from dotenv import load_dotenv
 from supabase import create_client
 
-# Load environment variables from repo root and backend dir if present
-load_dotenv(".env")
-load_dotenv("../.env")
+# Load environment variables from saas-platform/.env
+# Use absolute path relative to this file's location
+config_dir = Path(__file__).parent
+saas_platform_env = config_dir / "../../../.env"
+load_dotenv(saas_platform_env)
 
 # Configure logging once
 logging.basicConfig(level=logging.INFO)
