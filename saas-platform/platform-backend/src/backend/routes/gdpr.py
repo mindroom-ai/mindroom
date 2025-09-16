@@ -6,7 +6,7 @@ KISS principle - simple, straightforward implementation.
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 
 from backend.deps import ensure_supabase, verify_user
 
@@ -135,14 +135,10 @@ async def request_account_deletion(
 
     # Use soft delete function for GDPR compliance
     # This provides a 30-day grace period before hard deletion
-    try:
-        # Call the soft delete function
-        sb.rpc(
-            "soft_delete_account",
-            {"target_account_id": account_id, "reason": "gdpr_request", "requested_by": account_id},
-        ).execute()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to process deletion request: {str(e)}")
+    sb.rpc(
+        "soft_delete_account",
+        {"target_account_id": account_id, "reason": "gdpr_request", "requested_by": account_id},
+    ).execute()
 
     return {
         "status": "deletion_scheduled",
@@ -220,26 +216,23 @@ async def cancel_account_deletion(user: Annotated[dict, Depends(verify_user)]) -
             "message": "No deletion request found for this account",
         }
 
-    try:
-        # Restore the account
-        sb.rpc("restore_account", {"target_account_id": account_id}).execute()
+    # Restore the account
+    sb.rpc("restore_account", {"target_account_id": account_id}).execute()
 
-        # Log the cancellation
-        sb.table("audit_logs").insert(
-            {
-                "account_id": account_id,
-                "action": "gdpr_deletion_cancelled",
-                "resource_type": "account",
-                "resource_id": account_id,
-                "success": True,
-                "created_at": datetime.now(UTC).isoformat(),
-            }
-        ).execute()
-
-        return {
-            "status": "success",
-            "message": "Account deletion request has been cancelled",
-            "account_status": "active",
+    # Log the cancellation
+    sb.table("audit_logs").insert(
+        {
+            "account_id": account_id,
+            "action": "gdpr_deletion_cancelled",
+            "resource_type": "account",
+            "resource_id": account_id,
+            "success": True,
+            "created_at": datetime.now(UTC).isoformat(),
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to cancel deletion: {str(e)}")
+    ).execute()
+
+    return {
+        "status": "success",
+        "message": "Account deletion request has been cancelled",
+        "account_status": "active",
+    }

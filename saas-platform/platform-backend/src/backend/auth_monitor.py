@@ -49,39 +49,27 @@ def record_failure(ip_address: str, user_id: str = None) -> bool:
     # Add new failure
     failed_attempts[ip_address].append(now)
 
-    # Log to database for audit
+    # Log to database for audit (non-critical, don't fail auth on log failure)
     try:
-        if supabase:
-            supabase.table("audit_logs").insert(
-                {
-                    "account_id": user_id,
-                    "action": "auth_failed",
-                    "resource_type": "authentication",
-                    "ip_address": ip_address,
-                    "success": False,
-                    "created_at": now.isoformat(),
-                }
-            ).execute()
+        supabase.table("audit_logs").insert(
+            {
+                "account_id": user_id,
+                "action": "auth_failed",
+                "resource_type": "authentication",
+                "ip_address": ip_address,
+                "success": False,
+                "created_at": now.isoformat(),
+            }
+        ).execute()
     except Exception as e:
         logger.error(f"Failed to log auth failure: {e}")
 
-    # Check if threshold exceeded
+    # Check if threshold exceeded and block if needed
     if len(failed_attempts[ip_address]) >= MAX_FAILURES:
-        _block_ip(ip_address)
-        return True
+        blocked_ips[ip_address] = datetime.now(UTC)
+        logger.warning(f"Blocked IP {ip_address} due to too many failed auth attempts")
 
-    return False
-
-
-def _block_ip(ip_address: str):
-    """Block an IP address."""
-    blocked_ips[ip_address] = datetime.now(UTC)
-
-    # Log the block
-    logger.warning(f"Blocked IP {ip_address} due to too many failed auth attempts")
-
-    try:
-        if supabase:
+        try:
             supabase.table("audit_logs").insert(
                 {
                     "action": "ip_blocked",
@@ -96,8 +84,11 @@ def _block_ip(ip_address: str):
                     "created_at": datetime.now(UTC).isoformat(),
                 }
             ).execute()
-    except Exception as e:
-        logger.error(f"Failed to log IP block: {e}")
+        except Exception as e:
+            logger.error(f"Failed to log IP block: {e}")
+        return True
+
+    return False
 
 
 def record_success(ip_address: str, user_id: str = None):
@@ -106,18 +97,17 @@ def record_success(ip_address: str, user_id: str = None):
     if ip_address in failed_attempts:
         del failed_attempts[ip_address]
 
-    # Log successful auth
+    # Log successful auth (non-critical, don't fail auth on log failure)
     try:
-        if supabase:
-            supabase.table("audit_logs").insert(
-                {
-                    "account_id": user_id,
-                    "action": "auth_success",
-                    "resource_type": "authentication",
-                    "ip_address": ip_address,
-                    "success": True,
-                    "created_at": datetime.now(UTC).isoformat(),
-                }
-            ).execute()
+        supabase.table("audit_logs").insert(
+            {
+                "account_id": user_id,
+                "action": "auth_success",
+                "resource_type": "authentication",
+                "ip_address": ip_address,
+                "success": True,
+                "created_at": datetime.now(UTC).isoformat(),
+            }
+        ).execute()
     except Exception as e:
         logger.error(f"Failed to log auth success: {e}")

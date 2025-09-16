@@ -154,7 +154,7 @@ async def verify_user(authorization: str = Header(None), request: Request = None
     except HTTPException as e:
         # Record failure if it's an auth error (not a 404)
         if e.status_code == 401:
-            auth_monitor.record_failure(client_ip, str(account_id) if "account_id" in locals() else None)
+            auth_monitor.record_failure(client_ip)
         raise
     except Exception:
         logger.exception("User verification error")

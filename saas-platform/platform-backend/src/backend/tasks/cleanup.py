@@ -29,19 +29,14 @@ def cleanup_soft_deleted_accounts(grace_period_days: int = 30) -> dict:
     )
 
     accounts_deleted = 0
-    errors = []
 
     for account in result.data or []:
-        try:
-            # Call hard delete function
-            sb.rpc("hard_delete_account", {"target_account_id": account["id"]}).execute()
-            accounts_deleted += 1
-            logger.info(f"Hard deleted account {account['id']} after {grace_period_days} day grace period")
-        except Exception as e:
-            errors.append(f"Failed to delete account {account['id']}: {str(e)}")
-            logger.error(f"Failed to hard delete account {account['id']}: {e}")
+        # Call hard delete function
+        sb.rpc("hard_delete_account", {"target_account_id": account["id"]}).execute()
+        accounts_deleted += 1
+        logger.info(f"Hard deleted account {account['id']} after {grace_period_days} day grace period")
 
-    return {"accounts_deleted": accounts_deleted, "errors": errors, "timestamp": datetime.now(UTC).isoformat()}
+    return {"accounts_deleted": accounts_deleted, "timestamp": datetime.now(UTC).isoformat()}
 
 
 def cleanup_old_audit_logs(retention_days: int = 90) -> dict:
@@ -103,27 +98,11 @@ def run_all_cleanup_tasks() -> dict:
     Run all cleanup tasks.
     This should be scheduled to run daily via cron/scheduler.
     """
-    results = {}
-
-    try:
-        results["accounts"] = cleanup_soft_deleted_accounts()
-    except Exception as e:
-        results["accounts"] = {"error": str(e)}
-        logger.error(f"Account cleanup failed: {e}")
-
-    try:
-        results["audit_logs"] = cleanup_old_audit_logs()
-    except Exception as e:
-        results["audit_logs"] = {"error": str(e)}
-        logger.error(f"Audit log cleanup failed: {e}")
-
-    try:
-        results["usage_metrics"] = cleanup_old_usage_metrics()
-    except Exception as e:
-        results["usage_metrics"] = {"error": str(e)}
-        logger.error(f"Usage metrics cleanup failed: {e}")
-
-    return results
+    return {
+        "accounts": cleanup_soft_deleted_accounts(),
+        "audit_logs": cleanup_old_audit_logs(),
+        "usage_metrics": cleanup_old_usage_metrics(),
+    }
 
 
 if __name__ == "__main__":
