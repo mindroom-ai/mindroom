@@ -62,7 +62,10 @@ def sync_env_to_credentials() -> None:
         env_value = _get_secret(env_var)
 
         if not env_value:
+            logger.debug(f"No value found for {env_var} or {env_var}_FILE")
             continue
+
+        logger.debug(f"Found value for {env_var}: length={len(env_value)}")
 
         # Special handling for Ollama (it's a host, not an API key)
         if service == "ollama":
