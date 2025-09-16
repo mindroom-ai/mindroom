@@ -166,9 +166,7 @@ def _create_model_for_provider(provider: str, model_id: str, model_config: Model
     if provider in ("gemini", "google"):
         return Gemini(id=model_id, **extra_kwargs)
     if provider == "cerebras":
-        # Pass API key explicitly for consistency
-        api_key = get_api_key_for_provider(provider)
-        return Cerebras(id=model_id, api_key=api_key, **extra_kwargs)
+        return Cerebras(id=model_id, **extra_kwargs)
 
     msg = f"Unsupported AI provider: {provider}"
     raise ValueError(msg)
