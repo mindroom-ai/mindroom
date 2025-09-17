@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import '@testing-library/jest-dom'
 import { useRouter } from 'next/navigation'
 import SettingsPage from '../page'
@@ -81,8 +81,10 @@ describe('SettingsPage - Edge Cases and Potential Bugs', () => {
       fireEvent.click(marketingCheckbox)
       fireEvent.click(marketingCheckbox)
 
-      // Fast forward past debounce delay
-      jest.advanceTimersByTime(600)
+      // Fast forward past debounce delay - wrap in act to handle state updates
+      act(() => {
+        jest.advanceTimersByTime(600)
+      })
 
       await waitFor(() => {
         // With debouncing, should only make ONE API call despite 3 clicks
@@ -114,8 +116,10 @@ describe('SettingsPage - Edge Cases and Potential Bugs', () => {
       // Unmount component before the 3-second timeout
       unmount()
 
-      // Fast-forward time to see if the timeout still executes
-      jest.advanceTimersByTime(3500)
+      // Fast-forward time to see if the timeout still executes - wrap in act
+      act(() => {
+        jest.advanceTimersByTime(3500)
+      })
 
       // After unmount and timeout, signOut should NOT have been called
       // because the cleanup should have cleared the timeout
@@ -143,7 +147,9 @@ describe('SettingsPage - Edge Cases and Potential Bugs', () => {
       fireEvent.click(confirmButton)
       fireEvent.click(confirmButton)
 
-      jest.advanceTimersByTime(150)
+      act(() => {
+        jest.advanceTimersByTime(150)
+      })
 
       await waitFor(() => {
         // Should only call the API once, but it might call multiple times
@@ -203,7 +209,9 @@ describe('SettingsPage - Edge Cases and Potential Bugs', () => {
         expect(api.requestAccountDeletion).toHaveBeenCalled()
       })
 
-      jest.advanceTimersByTime(3500)
+      act(() => {
+        jest.advanceTimersByTime(3500)
+      })
 
       // Should still only have created one client (reused the existing one)
       expect(createClient).toHaveBeenCalledTimes(1)
