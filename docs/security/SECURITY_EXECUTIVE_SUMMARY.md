@@ -12,7 +12,7 @@ A comprehensive security review of the MindRoom SaaS platform was conducted acro
 
 ### P0 Legal/Regulatory Compliance (✅ COMPLETE):
 - **Logging Sanitization:** Zero sensitive data in production logs (frontend/backend)
-- **GDPR Compliance:** Full data export, deletion with 30-day grace, consent management
+- **GDPR Compliance:** Full data export, deletion with 7-day grace, consent management
 - **Soft Delete:** Audit trail and recovery capability implemented
 - **Git History:** Scanned and documented 3 exposed keys in docs (rotation script created)
 
@@ -86,7 +86,7 @@ A comprehensive security review of the MindRoom SaaS platform was conducted acro
 ### ✅ Phase 2: GDPR & Data Protection (COMPLETED - September 15, 2025)
 - ✅ Complete GDPR compliance implementation
 - ✅ Logging sanitization (frontend & backend)
-- ✅ Soft delete with 30-day grace period
+- ✅ Soft delete with 7-day grace period
 - ✅ Data export and consent management
 
 ### ✅ Phase 3: Security Headers & Frontend (COMPLETED)

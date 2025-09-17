@@ -62,14 +62,14 @@ Comprehensive security remediation has been completed for the MindRoom SaaS plat
 
 **GDPR Compliance:**
 - **Data Export:** Complete personal data export in JSON format (`/my/gdpr/export-data`)
-- **Data Deletion:** Soft delete with 30-day grace period (`/my/gdpr/request-deletion`)
+- **Data Deletion:** Soft delete with 7-day grace period (`/my/gdpr/request-deletion`)
 - **Consent Management:** User consent preferences (`/my/gdpr/consent`)
 - **Result:** Full GDPR Article compliance
 
 **Soft Delete Implementation:**
 - **Database:** Migration 004 adds soft delete capabilities
 - **Functions:** `soft_delete_account()`, `restore_account()`, `hard_delete_account()`
-- **Grace Period:** 30-day recovery window
+- **Grace Period:** 7-day recovery window
 - **Result:** Data lifecycle management with audit trail
 
 ### P1.1: Authentication Security (COMPLETED)
@@ -259,7 +259,7 @@ Comprehensive security remediation has been completed for the MindRoom SaaS plat
 
 **P0 Legal/Regulatory Compliance:**
 1. ✅ GDPR data export endpoint implemented and tested
-2. ✅ GDPR data deletion with 30-day grace period implemented
+2. ✅ GDPR data deletion with 7-day grace period implemented
 3. ✅ GDPR consent management implemented
 4. ✅ Frontend logging sanitization (zero production output)
 5. ✅ Backend logging sanitization (automatic PII redaction)

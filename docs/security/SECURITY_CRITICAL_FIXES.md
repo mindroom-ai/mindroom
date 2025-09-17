@@ -19,7 +19,7 @@
 **Issues RESOLVED:**
 - ✅ Sensitive data in logs: Sanitized via log_sanitizer.py
 - ✅ GDPR compliance: Full export/delete/consent endpoints
-- ✅ Soft delete: 30-day grace period implemented
+- ✅ Soft delete: 7-day grace period implemented
 - ⚠️ PII encryption: Deferred (not critical for MVP)
 
 **Implementation:**

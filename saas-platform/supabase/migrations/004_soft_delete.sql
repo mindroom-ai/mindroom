@@ -51,6 +51,7 @@ BEGIN
         deleted_at = NOW(),
         deletion_reason = reason,
         deletion_requested_by = COALESCE(requested_by, target_account_id),
+        deletion_requested_at = NOW(),
         status = 'deleted',
         updated_at = NOW()
     WHERE id = target_account_id
@@ -82,6 +83,7 @@ BEGIN
         deleted_at = NULL,
         deletion_reason = NULL,
         deletion_requested_by = NULL,
+        deletion_requested_at = NULL,
         status = 'active',
         updated_at = NOW()
     WHERE id = target_account_id

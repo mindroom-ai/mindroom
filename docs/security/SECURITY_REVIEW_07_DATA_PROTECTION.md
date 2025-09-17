@@ -19,7 +19,7 @@ This report evaluates the Data Protection & Privacy controls for the MindRoom Sa
 - ✅ **RESOLVED**: GDPR compliance implemented (export, delete, consent endpoints)
 - ✅ **RESOLVED**: Data retention policies and cleanup procedures implemented
 - ✅ **RESOLVED**: Backend logging sanitized with redaction
-- ✅ **RESOLVED**: Soft delete with 30-day grace period and audit trail
+- ✅ **RESOLVED**: Soft delete with 7-day grace period and audit trail
 
 ## Detailed Findings
 
@@ -276,11 +276,11 @@ CREATE TABLE audit_logs (
 #### Implementation Summary
 
 **Complete data lifecycle management implemented**:
-1. ✅ **Soft delete mechanism** - 30-day grace period before hard deletion
+1. ✅ **Soft delete mechanism** - 7-day grace period before hard deletion
 2. ✅ **Deletion audit trail** - comprehensive logging for GDPR compliance
 3. ✅ **Controlled deletion** - graceful handling with restoration capability
 4. ✅ **Data export** - complete data export before deletion available
-5. ✅ **Grace period** - 30-day recovery window implemented
+5. ✅ **Grace period** - 7-day recovery window implemented
 
 **Key Implementation Details**:
 - Database migration 004 adds soft delete functionality
@@ -345,7 +345,7 @@ CREATE TABLE audit_logs (
        # Log deletion request
        audit_deletion_request(user["account_id"], reason)
 
-       # Soft delete with 30-day retention
+      # Soft delete with 7-day retention
        soft_delete_account(user["account_id"], reason, user["account_id"])
 
        return {"status": "deletion_scheduled", "data_export": user_data}
@@ -376,7 +376,7 @@ CREATE TABLE audit_logs (
    - Change tracking with timestamps and responsible user
 
 4. **Right to Erasure** ✅
-   - Soft delete with 30-day grace period via `/my/gdpr/request-deletion`
+   - Soft delete with 7-day grace period via `/my/gdpr/request-deletion`
    - Confirmation required to prevent accidental deletion
    - Account restoration possible via `/my/gdpr/cancel-deletion`
    - Complete "right to be forgotten" implementation
@@ -427,7 +427,7 @@ CREATE TABLE audit_logs (
        if not confirmation:
            return {"message": "Please confirm deletion by setting confirmation=true"}
 
-       # Schedule deletion with 30-day grace period
+      # Schedule deletion with 7-day grace period
        schedule_account_deletion(user["account_id"])
 
        # Send confirmation email
@@ -483,7 +483,7 @@ CREATE TABLE audit_logs (
 #### Implementation Summary
 **Comprehensive data retention policies implemented**:
 
-1. ✅ **Automated cleanup** - Soft delete with 30-day hard deletion
+1. ✅ **Automated cleanup** - Soft delete with 7-day hard deletion
 2. ✅ **Retention periods defined** - 7 years account/audit, 3 years usage metrics
 3. ✅ **Controlled storage** - Grace periods and cleanup procedures
 4. ✅ **Archival processes** - Audit trail preservation before deletion
@@ -545,7 +545,7 @@ _auth_cache = TTLCache(maxsize=100, ttl=300)  # 5 minutes
            .execute()
        results["usage_metrics_deleted"] = len(usage_result.data or [])
 
-       # Hard delete accounts after 30-day grace period
+       # Hard delete accounts after 7-day grace period
        cutoff_date = datetime.now(UTC) - timedelta(days=30)
        deleted_accounts = supabase.table("accounts")\
            .select("id")\
@@ -843,7 +843,7 @@ The MindRoom platform has **successfully implemented comprehensive data protecti
 **Implementation Achievements (September 15, 2025)**:
 - ✅ **GDPR Full Compliance**: Complete implementation of all 6 core rights
 - ✅ **Logging Sanitization**: Zero sensitive data exposure in production logs
-- ✅ **Data Lifecycle Management**: Soft delete with 30-day grace period and audit trail
+- ✅ **Data Lifecycle Management**: Soft delete with 7-day grace period and audit trail
 - ✅ **Data Retention Policies**: Comprehensive retention periods and cleanup procedures
 - ✅ **Audit Capabilities**: Complete audit trail for all data operations
 

@@ -11,7 +11,7 @@ from backend.deps import ensure_supabase
 logger = logging.getLogger(__name__)
 
 
-def cleanup_soft_deleted_accounts(grace_period_days: int = 30) -> dict:
+def cleanup_soft_deleted_accounts(grace_period_days: int = 7) -> dict:
     """
     Hard delete accounts that have been soft-deleted for longer than grace period.
     This ensures GDPR compliance while giving users time to recover accounts.
