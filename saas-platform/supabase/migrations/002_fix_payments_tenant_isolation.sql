@@ -2,6 +2,10 @@
 -- Date: 2025-09-11
 -- Purpose: Add tenant association to payments table and create RLS policy
 -- Security Issue: Related to SECURITY_REVIEW_02_MULTITENANCY.md - Ensure all financial data is tenant-isolated
+--
+-- NOTE: This migration intentionally drops and recreates the "Users can view own payments" policy
+-- to replace the customer_id-based policy with a more reliable account_id-based one.
+-- The DROP POLICY warning is expected and safe.
 
 -- Step 1: Add account_id column to payments table
 ALTER TABLE payments
@@ -13,8 +17,13 @@ CREATE INDEX IF NOT EXISTS idx_payments_account_id ON payments(account_id);
 -- Step 3: Enable RLS on payments table (if not already enabled)
 ALTER TABLE payments ENABLE ROW LEVEL SECURITY;
 
--- Step 4: Drop old policy if it exists (using customer_id) and create new one with account_id
+-- Step 4: Replace old policy that uses customer_id with improved one using account_id
+-- IMPORTANT: This DROP is intentional and safe. We're replacing the less reliable
+-- customer_id-based policy from the base schema with a better account_id-based policy.
+-- The new policy is created immediately after dropping the old one.
 DROP POLICY IF EXISTS "Users can view own payments" ON payments;
+
+-- Create improved policy using account_id for better tenant isolation
 CREATE POLICY "Users can view own payments" ON payments
     FOR SELECT USING (
         account_id = auth.uid() OR
