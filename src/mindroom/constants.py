@@ -15,8 +15,19 @@ load_dotenv()
 # Agent names
 ROUTER_AGENT_NAME = "router"
 
-# Default path to agents configuration file
-DEFAULT_AGENTS_CONFIG = Path(__file__).parent.parent.parent / "config.yaml"
+# Default path to agents configuration file. Allow overriding via environment
+# variable so deployments can place the writable configuration file on a
+# persistent volume instead of the package directory (which may be read-only).
+_CONFIG_PATH_ENV = os.getenv("MINDROOM_CONFIG_PATH") or os.getenv("CONFIG_PATH")
+DEFAULT_AGENTS_CONFIG = (
+    Path(_CONFIG_PATH_ENV).expanduser() if _CONFIG_PATH_ENV else Path(__file__).parent.parent.parent / "config.yaml"
+)
+
+# Optional template path used to seed the writable config file if it does not
+# exist yet. Defaults to the same location as DEFAULT_AGENTS_CONFIG so the
+# behaviour is unchanged when no overrides are provided.
+_CONFIG_TEMPLATE_ENV = os.getenv("MINDROOM_CONFIG_TEMPLATE") or os.getenv("CONFIG_TEMPLATE_PATH")
+DEFAULT_CONFIG_TEMPLATE = Path(_CONFIG_TEMPLATE_ENV).expanduser() if _CONFIG_TEMPLATE_ENV else DEFAULT_AGENTS_CONFIG
 
 STORAGE_PATH = os.getenv("STORAGE_PATH", "mindroom_data")
 STORAGE_PATH_OBJ = Path(STORAGE_PATH)

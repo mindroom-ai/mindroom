@@ -327,7 +327,10 @@ class Config(BaseModel):
         """
         path = config_path or DEFAULT_AGENTS_CONFIG
         config_dict = self.model_dump(exclude_none=True)
-        with Path(path).open("w", encoding="utf-8") as f:
+        path_obj = Path(path)
+        path_obj.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path_obj.with_suffix(path_obj.suffix + ".tmp")
+        with tmp_path.open("w", encoding="utf-8") as f:
             yaml.dump(
                 config_dict,
                 f,
@@ -335,6 +338,6 @@ class Config(BaseModel):
                 sort_keys=True,
                 allow_unicode=True,  # Preserve Unicode characters like ë
                 width=120,  # Wider lines to reduce wrapping
-                encoding="utf-8",
             )
+        tmp_path.replace(path_obj)
         logger.info(f"Saved configuration to {path}")
