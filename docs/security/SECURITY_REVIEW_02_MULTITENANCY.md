@@ -20,7 +20,7 @@ This security review focuses on the multi-tenancy and data isolation aspects of 
 
 **Evidence:**
 ```sql
--- RLS Policy in 000_complete_schema.sql:290
+-- RLS Policy in 000_consolidated_complete_schema.sql (formerly 000_complete_schema.sql):290
 CREATE POLICY "Users can view own account" ON accounts
     FOR SELECT USING (auth.uid() = id OR is_admin());
 ```
@@ -48,7 +48,7 @@ async def get_current_account(user: Annotated[dict, Depends(verify_user)]) -> di
 
 **Evidence:**
 ```sql
--- RLS Policy in 000_complete_schema.sql:298
+-- RLS Policy in 000_consolidated_complete_schema.sql (formerly 000_complete_schema.sql):298
 CREATE POLICY "Users can view own subscriptions" ON subscriptions
     FOR SELECT USING (account_id = auth.uid() OR is_admin());
 ```
@@ -68,7 +68,7 @@ CREATE POLICY "Users can view own subscriptions" ON subscriptions
 
 **Evidence:**
 ```sql
--- RLS Policy in 000_complete_schema.sql:302-307
+-- RLS Policy in 000_consolidated_complete_schema.sql (formerly 000_complete_schema.sql):302-307
 CREATE POLICY "Users can view own instances" ON instances
     FOR SELECT USING (
         account_id = auth.uid() OR
@@ -107,7 +107,7 @@ async def _verify_instance_ownership_and_proxy(instance_id: int, user: dict, pro
 
 **Evidence:**
 ```sql
--- RLS Policy in 000_complete_schema.sql:310-314
+-- RLS Policy in 000_consolidated_complete_schema.sql (formerly 000_complete_schema.sql):310-314
 CREATE POLICY "Users can view own usage" ON usage_metrics
     FOR SELECT USING (
         subscription_id IN (SELECT id FROM subscriptions WHERE account_id = auth.uid()) OR
@@ -180,7 +180,7 @@ def handle_subscription_deleted(subscription: dict) -> tuple[bool, str | None]:
 
 **Evidence:**
 ```sql
--- RLS Policy in 000_complete_schema.sql:324-325
+-- RLS Policy in 000_consolidated_complete_schema.sql (formerly 000_complete_schema.sql):324-325
 CREATE POLICY "Only admins can view audit logs" ON audit_logs
     FOR SELECT USING (is_admin());
 ```
@@ -260,7 +260,7 @@ CREATE POLICY "Users can view own webhook events" ON webhook_events
     FOR SELECT USING (account_id = auth.uid() OR is_admin());
 ```
 
-**Status:** ✅ Fixed in migrations 001 and updated webhook handlers
+**Status:** ✅ Fixed in migrations 001 and updated webhook handlers (now part of `000_consolidated_complete_schema.sql`)
 
 ### 2. ~~Payments Table Lacks Tenant Isolation~~ ✅ FIXED
 
@@ -274,7 +274,7 @@ CREATE POLICY "Users can view own payments" ON payments
     FOR SELECT USING (account_id = auth.uid() OR is_admin());
 ```
 
-**Status:** ✅ Fixed in migration 002 and updated payment handlers
+**Status:** ✅ Fixed in migration 002 and updated payment handlers (now part of `000_consolidated_complete_schema.sql`)
 
 ### 3. Admin Panel Generic Resource Access (MEDIUM PRIORITY)
 

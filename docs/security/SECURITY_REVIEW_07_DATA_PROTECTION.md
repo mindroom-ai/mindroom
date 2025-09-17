@@ -39,7 +39,7 @@ This report evaluates the Data Protection & Privacy controls for the MindRoom Sa
 
 #### Evidence
 ```sql
--- From supabase/migrations/000_complete_schema.sql
+-- From supabase/migrations/000_consolidated_complete_schema.sql (formerly 000_complete_schema.sql)
 CREATE TABLE accounts (
     id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
     email TEXT UNIQUE NOT NULL,           -- ❌ Unencrypted PII
@@ -250,7 +250,7 @@ def handle_payment_succeeded(invoice: dict) -> None:
 **Hard deletes with CASCADE - no audit trail**:
 
 ```sql
--- From supabase/migrations/000_complete_schema.sql
+-- From supabase/migrations/000_consolidated_complete_schema.sql (formerly 000_complete_schema.sql)
 CREATE TABLE accounts (
     id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,  -- ❌ Hard delete
     -- ...

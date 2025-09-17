@@ -16,9 +16,7 @@ Addressed critical security issues identified in security review:
 #### Multi-Tenancy Isolation
 - **Issue**: Webhook events and payments lacked tenant isolation
 - **Fix**: Added `account_id` columns and RLS policies to ensure data segregation
-- **Files Modified**:
-  - `supabase/migrations/002_fix_payments_tenant_isolation.sql`
-  - `supabase/migrations/003_fix_webhook_tenant_isolation.sql` (renamed from duplicate 001)
+- **Status**: Changes now consolidated into `supabase/migrations/000_consolidated_complete_schema.sql`
 
 #### Row-Level Security (RLS)
 - **Issue**: Missing or inadequate RLS policies
@@ -68,18 +66,13 @@ Addressed critical security issues identified in security review:
 #### Solution Implemented
 Created a single consolidated migration file that includes everything:
 - **File**: `supabase/migrations/000_consolidated_complete_schema.sql`
-- **Size**: 567 lines containing all tables, functions, policies, and security fixes
+- **Size**: 583 lines containing all tables, functions, policies, and security fixes
 - **Validation**: Created Python script to verify completeness
 - **Missing Elements Found**: Added `handle_new_user` trigger function
 
 #### Migration Files Structure
 ```
-000_consolidated_complete_schema.sql  # Use this for fresh installs
-000_complete_schema.sql              # Original base schema
-001_add_kubernetes_sync_timestamp.sql
-002_fix_payments_tenant_isolation.sql
-003_fix_webhook_tenant_isolation.sql  # Renamed from duplicate 001
-004_soft_delete.sql
+000_consolidated_complete_schema.sql  # Single source of truth for fresh installs
 ```
 
 ### 4. Critical Production Bug Fixes (Most Recent)
@@ -176,11 +169,8 @@ Apply migrations in order if not already applied:
 
 ## Files Changed Summary
 
-### Database Migrations (5 files)
-- `000_consolidated_complete_schema.sql` (NEW - 567 lines)
-- `002_fix_payments_tenant_isolation.sql` (MODIFIED)
-- `003_fix_webhook_tenant_isolation.sql` (RENAMED from 001)
-- `004_soft_delete.sql` (from previous session)
+### Database Migrations (single file)
+- `000_consolidated_complete_schema.sql` (updated to 583 lines; contains all fixes, including soft delete)
 
 ### Backend (2 files)
 - `src/backend/routes/gdpr.py` (NEW)

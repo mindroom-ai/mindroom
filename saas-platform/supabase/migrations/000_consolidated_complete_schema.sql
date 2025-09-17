@@ -354,14 +354,16 @@ BEGIN
     INSERT INTO deletion_audit (table_name, record_id, deletion_reason, requested_by)
     VALUES ('accounts', target_account_id, reason, COALESCE(requested_by, target_account_id));
 
-    -- Also mark related data
+    -- Mark related data while avoiding unnecessary churn
     UPDATE subscriptions
     SET status = 'cancelled', updated_at = NOW()
-    WHERE account_id = target_account_id;
+    WHERE account_id = target_account_id
+    AND status != 'cancelled';
 
     UPDATE instances
     SET status = 'deprovisioned', updated_at = NOW()
-    WHERE account_id = target_account_id;
+    WHERE account_id = target_account_id
+    AND status NOT IN ('deprovisioned', 'stopped');
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
@@ -381,6 +383,21 @@ BEGIN
         updated_at = NOW()
     WHERE id = target_account_id
     AND deleted_at IS NOT NULL;
+
+    -- Restore related data that was cancelled/deprovisioned during soft delete
+    UPDATE subscriptions
+    SET
+        status = 'active',
+        updated_at = NOW()
+    WHERE account_id = target_account_id
+    AND status = 'cancelled';
+
+    UPDATE instances
+    SET
+        status = 'running',
+        updated_at = NOW()
+    WHERE account_id = target_account_id
+    AND status = 'deprovisioned';
 
     -- Update audit log
     UPDATE deletion_audit
