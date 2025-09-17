@@ -18,6 +18,27 @@ else
 fi
 KUBECONFIG="$SCRIPT_DIR/../terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml"
 
+function require_arg() {
+    local value="$1"
+    local message="$2"
+    if [ -z "$value" ]; then
+        echo "$message" >&2
+        exit 1
+    fi
+}
+
+function ensure_kubeconfig() {
+    if [ ! -f "$KUBECONFIG" ]; then
+        echo "Error: kubeconfig not found at $KUBECONFIG" >&2
+        exit 1
+    fi
+}
+
+function detect_release_name() {
+    local customer="$1"
+    echo "instance-$customer"
+}
+
 case "$1" in
     list|ls)
         echo "Customer Instances:"
@@ -82,6 +103,41 @@ case "$1" in
             -H "Authorization: Bearer ${PROVISIONER_API_KEY}" | jq
         ;;
 
+    upgrade)
+        require_arg "$2" "Usage: $0 upgrade <customer-id> [values-file]"
+        ensure_kubeconfig
+        CUSTOMER_ID="$2"
+        RELEASE=$(detect_release_name "$CUSTOMER_ID")
+        VALUES_FILE="$3"
+        VALUES_TMP=""
+        if [ -z "$VALUES_FILE" ]; then
+            echo "🔄 Fetching current Helm values from cluster for $CUSTOMER_ID"
+            VALUES_TMP=$(mktemp)
+            if ! helm get values "$RELEASE" -n mindroom-instances --kubeconfig="$KUBECONFIG" -o yaml >"$VALUES_TMP"; then
+                rm -f "$VALUES_TMP"
+                echo "Failed to fetch existing values. Provide a values file: $0 upgrade <customer-id> <values-file>" >&2
+                exit 1
+            fi
+            VALUES_FILE="$VALUES_TMP"
+        fi
+        echo "📦 Running helm upgrade for $RELEASE"
+        helm upgrade --install "$RELEASE" "$REPO_ROOT/cluster/k8s/instance" \
+            -n mindroom-instances \
+            -f "$VALUES_FILE" \
+            --kubeconfig="$KUBECONFIG"
+        echo "⏳ Waiting for rollout to complete..."
+        kubectl rollout status deployment/mindroom-backend-$CUSTOMER_ID \
+            -n mindroom-instances \
+            --kubeconfig="$KUBECONFIG"
+        kubectl rollout status deployment/mindroom-frontend-$CUSTOMER_ID \
+            -n mindroom-instances \
+            --kubeconfig="$KUBECONFIG" || true
+        if [ -n "$VALUES_TMP" ]; then
+            rm -f "$VALUES_TMP"
+        fi
+        echo "✅ Upgrade completed for $CUSTOMER_ID"
+        ;;
+
     *)
         echo "MindRoom SaaS Platform CLI"
         echo ""
@@ -95,11 +151,13 @@ case "$1" in
         echo "  logs <id>       Show logs for a customer instance"
         echo "  provision <id>  Provision a new test instance"
         echo "  deprovision <id> Remove a customer instance"
+        echo "  upgrade <id>    Re-run Helm upgrade (optional second arg for values file)"
         echo ""
         echo "Examples:"
         echo "  $0 list"
         echo "  $0 provision test-customer"
         echo "  $0 logs test-customer"
+        echo "  $0 upgrade test-customer"
         echo "  $0 deprovision test-customer"
         ;;
 esac
