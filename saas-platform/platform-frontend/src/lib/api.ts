@@ -26,6 +26,9 @@ export async function apiCall(
     // Log the error but check if it's a cancellation
     if (error?.name === 'AbortError' || !error?.message) {
       logger.log(`Request cancelled: ${url}`)
+    } else if (error?.message?.includes('CORS') || error?.message?.includes('NetworkError')) {
+      logger.error(`CORS/Network error - Backend may need restart or CORS configuration: ${url}`, error)
+      throw new Error(`Cannot connect to backend. Please ensure the backend is running and CORS is configured for ${window.location.origin}`)
     } else {
       logger.error(`API call failed: ${url}`, error)
     }
@@ -63,8 +66,10 @@ export async function exportUserData() {
 }
 
 export async function requestAccountDeletion(confirmation: boolean = false) {
-  const url = confirmation ? '/my/gdpr/request-deletion?confirmation=true' : '/my/gdpr/request-deletion'
-  const response = await apiCall(url, { method: 'POST' })
+  const response = await apiCall('/my/gdpr/request-deletion', {
+    method: 'POST',
+    body: JSON.stringify({ confirmation })
+  })
   if (!response.ok) {
     const error = await response.text()
     throw new Error(error || 'Failed to request deletion')
@@ -82,10 +87,10 @@ export async function cancelAccountDeletion() {
 }
 
 export async function updateConsent(marketing: boolean, analytics: boolean) {
-  const response = await apiCall(
-    `/my/gdpr/consent?marketing=${marketing}&analytics=${analytics}`,
-    { method: 'POST' }
-  )
+  const response = await apiCall('/my/gdpr/consent', {
+    method: 'POST',
+    body: JSON.stringify({ marketing, analytics })
+  })
   if (!response.ok) {
     const error = await response.text()
     throw new Error(error || 'Failed to update consent')

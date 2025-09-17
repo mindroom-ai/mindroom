@@ -7,10 +7,24 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 
 from backend.deps import ensure_supabase, verify_user
 
 router = APIRouter()
+
+
+class ConsentUpdate(BaseModel):
+    """Model for consent update requests."""
+
+    marketing: bool = False
+    analytics: bool = False
+
+
+class DeletionRequest(BaseModel):
+    """Model for account deletion requests."""
+
+    confirmation: bool = False
 
 
 @router.get("/my/gdpr/export-data")
@@ -97,13 +111,13 @@ async def export_user_data(user: Annotated[dict, Depends(verify_user)]) -> dict[
 @router.post("/my/gdpr/request-deletion")
 async def request_account_deletion(
     user: Annotated[dict, Depends(verify_user)],
-    confirmation: bool = False,
+    request: DeletionRequest,
 ) -> dict[str, Any]:
     """
     Request account and data deletion under GDPR Article 17.
     Requires explicit confirmation to prevent accidental deletion.
     """
-    if not confirmation:
+    if not request.confirmation:
         return {
             "status": "confirmation_required",
             "message": "Please confirm deletion by setting confirmation=true",
@@ -147,8 +161,7 @@ async def request_account_deletion(
 @router.post("/my/gdpr/consent")
 async def update_consent(
     user: Annotated[dict, Depends(verify_user)],
-    marketing: bool = False,
-    analytics: bool = False,
+    consent: ConsentUpdate,
 ) -> dict[str, Any]:
     """
     Update user consent preferences for GDPR compliance.
@@ -160,8 +173,8 @@ async def update_consent(
     # In production, this would be a separate consent table
     sb.table("accounts").update(
         {
-            "consent_marketing": marketing,
-            "consent_analytics": analytics,
+            "consent_marketing": consent.marketing,
+            "consent_analytics": consent.analytics,
             "consent_updated_at": datetime.now(UTC).isoformat(),
             "updated_at": datetime.now(UTC).isoformat(),
         }
@@ -175,8 +188,8 @@ async def update_consent(
             "resource_type": "account",
             "resource_id": account_id,
             "details": {
-                "marketing": marketing,
-                "analytics": analytics,
+                "marketing": consent.marketing,
+                "analytics": consent.analytics,
             },
             "success": True,
             "created_at": datetime.now(UTC).isoformat(),
@@ -186,8 +199,8 @@ async def update_consent(
     return {
         "status": "success",
         "consent": {
-            "marketing": marketing,
-            "analytics": analytics,
+            "marketing": consent.marketing,
+            "analytics": consent.analytics,
             "essential": True,  # Always required for service
         },
         "updated_at": datetime.now(UTC).isoformat(),
