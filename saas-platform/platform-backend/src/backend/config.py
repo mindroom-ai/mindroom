@@ -15,6 +15,8 @@ import stripe
 from dotenv import load_dotenv
 from supabase import create_client
 
+from backend.utils.logger import logger
+
 # Load environment variables from saas-platform/.env
 # Use absolute path relative to this file's location
 config_dir = Path(__file__).parent
@@ -23,12 +25,6 @@ load_dotenv(saas_platform_env)
 
 # Configure logging once
 logging.basicConfig(level=logging.INFO)
-
-# Use sanitized logger if available, otherwise standard logger
-try:
-    from backend.utils.logger import logger
-except ImportError:
-    logger = logging.getLogger("mindroom.backend")
 
 
 def _get_secret(name: str, default: str = "") -> str:

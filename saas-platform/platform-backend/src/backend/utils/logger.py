@@ -4,8 +4,9 @@ KISS principle - wraps standard Python logger with automatic sanitization.
 """
 
 import logging
+import os
 from typing import Any
-from .log_sanitizer import sanitize_args, IS_PRODUCTION
+from .log_sanitizer import sanitize_args
 
 # Get the standard logger
 _logger = logging.getLogger("backend")
@@ -21,8 +22,11 @@ class SanitizedLogger:
 
     def _log(self, level: int, msg: str, *args: Any, **kwargs: Any) -> None:
         """Internal log method with sanitization."""
-        # Sanitize the message and arguments
-        if IS_PRODUCTION:
+        # Check environment at runtime
+        is_production = os.getenv("ENVIRONMENT", "development").lower() in ["production", "prod"]
+
+        # Sanitize the message and arguments in production
+        if is_production:
             # Sanitize both the message and any args
             sanitized = sanitize_args(msg, *args) if args else (sanitize_args(msg)[0],)
             if len(sanitized) > 1:
