@@ -534,7 +534,10 @@ describe('API Client', () => {
 
         expect(mockFetch).toHaveBeenCalledWith(
           'http://localhost:8000/my/gdpr/request-deletion',
-          expect.objectContaining({ method: 'POST' })
+          expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ confirmation: false })
+          })
         )
         expect(result).toEqual(response)
       })
@@ -553,8 +556,11 @@ describe('API Client', () => {
         const result = await requestAccountDeletion(true)
 
         expect(mockFetch).toHaveBeenCalledWith(
-          'http://localhost:8000/my/gdpr/request-deletion?confirmation=true',
-          expect.objectContaining({ method: 'POST' })
+          'http://localhost:8000/my/gdpr/request-deletion',
+          expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ confirmation: true })
+          })
         )
         expect(result).toEqual(response)
       })
@@ -628,8 +634,11 @@ describe('API Client', () => {
         const result = await updateConsent(true, false)
 
         expect(mockFetch).toHaveBeenCalledWith(
-          'http://localhost:8000/my/gdpr/consent?marketing=true&analytics=false',
-          expect.objectContaining({ method: 'POST' })
+          'http://localhost:8000/my/gdpr/consent',
+          expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ marketing: true, analytics: false })
+          })
         )
         expect(result).toEqual(response)
       })
@@ -650,8 +659,11 @@ describe('API Client', () => {
           await updateConsent(marketing, analytics)
 
           expect(mockFetch).toHaveBeenLastCalledWith(
-            `http://localhost:8000/my/gdpr/consent?marketing=${marketing}&analytics=${analytics}`,
-            expect.any(Object)
+            'http://localhost:8000/my/gdpr/consent',
+            expect.objectContaining({
+              method: 'POST',
+              body: JSON.stringify({ marketing, analytics })
+            })
           )
         }
       })

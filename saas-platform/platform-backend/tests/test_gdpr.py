@@ -120,7 +120,9 @@ class TestGDPREndpoints:
     def test_request_deletion_without_confirmation(self, client, mock_verify_user):
         """Test deletion request requires confirmation."""
 
-        response = client.post("/my/gdpr/request-deletion", headers={"Authorization": "Bearer test-token"})
+        response = client.post(
+            "/my/gdpr/request-deletion", headers={"Authorization": "Bearer test-token"}, json={"confirmation": False}
+        )
 
         assert response.status_code == 200
         data = response.json()
@@ -135,14 +137,14 @@ class TestGDPREndpoints:
         mock_supabase.rpc.return_value = mock_rpc
 
         response = client.post(
-            "/my/gdpr/request-deletion?confirmation=true", headers={"Authorization": "Bearer test-token"}
+            "/my/gdpr/request-deletion", headers={"Authorization": "Bearer test-token"}, json={"confirmation": True}
         )
 
         assert response.status_code == 200
         data = response.json()
 
         assert data["status"] == "deletion_scheduled"
-        assert data["grace_period_days"] == 30
+        assert data["grace_period_days"] == 7  # Reduced from 30 for GDPR compliance
         assert "deletion_date" in data
 
         # Verify soft delete was called with correct reason
@@ -195,8 +197,9 @@ class TestGDPREndpoints:
         mock_eq.execute.return_value = MagicMock()
 
         response = client.post(
-            "/my/gdpr/consent?marketing=false&analytics=true",
+            "/my/gdpr/consent",
             headers={"Authorization": "Bearer test-token"},
+            json={"marketing": False, "analytics": True},
         )
 
         assert response.status_code == 200
@@ -247,7 +250,7 @@ class TestGDPREndpoints:
         # Request deletion twice
         for _ in range(2):
             response = client.post(
-                "/my/gdpr/request-deletion?confirmation=true", headers={"Authorization": "Bearer test-token"}
+                "/my/gdpr/request-deletion", headers={"Authorization": "Bearer test-token"}, json={"confirmation": True}
             )
             assert response.status_code == 200
             assert response.json()["status"] == "deletion_scheduled"
