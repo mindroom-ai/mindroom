@@ -9,9 +9,12 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from backend.config import ALLOWED_ORIGINS, ENVIRONMENT, PLATFORM_DOMAIN
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+from backend.config import ALLOWED_ORIGINS, ENABLE_CLEANUP_SCHEDULER, ENVIRONMENT, PLATFORM_DOMAIN
 from backend.deps import limiter
 from backend.middleware.audit_logging import AuditLoggingMiddleware
+from backend.tasks.cleanup import run_all_cleanup_tasks
 from backend.routes import (
     accounts,
     admin,
@@ -148,6 +151,50 @@ app.include_router(gdpr.router)
 
 # Keep a reference list of primary endpoints for tooling/tests that grep this file
 EXPOSED_ENDPOINTS = ["/my/subscription", "/my/usage", "/my/account/admin-status", "/admin/stats"]
+
+
+def _run_cleanup_job() -> None:
+    """Execute periodic cleanup tasks with logging."""
+
+    try:
+        result = run_all_cleanup_tasks()
+        logger = logging.getLogger("mindroom.cleanup")
+        logger.info("Cleanup job completed", extra={"result": result})
+    except Exception:  # noqa: BLE001
+        logging.getLogger("mindroom.cleanup").exception("Scheduled cleanup job failed")
+
+
+@app.on_event("startup")
+async def start_cleanup_scheduler() -> None:
+    """Start APScheduler for periodic cleanup when enabled."""
+
+    if not ENABLE_CLEANUP_SCHEDULER:
+        return
+
+    scheduler = AsyncIOScheduler(timezone="UTC")
+    scheduler.add_job(
+        _run_cleanup_job,
+        trigger="cron",
+        hour=3,
+        minute=0,
+        id="daily_cleanup",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.start()
+    app.state.cleanup_scheduler = scheduler
+    logging.getLogger("mindroom.cleanup").info("Cleanup scheduler started (daily at 03:00 UTC)")
+
+
+@app.on_event("shutdown")
+async def stop_cleanup_scheduler() -> None:
+    """Shut down the APScheduler instance on application exit."""
+
+    scheduler: AsyncIOScheduler | None = getattr(app.state, "cleanup_scheduler", None)
+    if scheduler:
+        scheduler.shutdown(wait=False)
+        logging.getLogger("mindroom.cleanup").info("Cleanup scheduler stopped")
+        app.state.cleanup_scheduler = None
 
 
 if __name__ == "__main__":

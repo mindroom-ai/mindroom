@@ -63,6 +63,11 @@ else:
 # Platform configuration
 PLATFORM_DOMAIN = os.getenv("PLATFORM_DOMAIN", "mindroom.chat")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
+ENABLE_CLEANUP_SCHEDULER = os.getenv("ENABLE_CLEANUP_SCHEDULER", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 # Stripe configuration
 stripe.api_key = _get_secret("STRIPE_SECRET_KEY", "")
@@ -112,6 +117,7 @@ ALLOWED_ORIGINS = _build_allowed_origins(PLATFORM_DOMAIN, ENVIRONMENT)
 
 __all__ = [
     "ALLOWED_ORIGINS",
+    "ENABLE_CLEANUP_SCHEDULER",
     "ENVIRONMENT",
     "GITEA_TOKEN",
     "GITEA_USER",
