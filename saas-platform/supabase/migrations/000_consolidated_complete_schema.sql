@@ -551,6 +551,26 @@ GRANT EXECUTE ON FUNCTION soft_delete_account TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION restore_account TO service_role;
 GRANT EXECUTE ON FUNCTION hard_delete_account TO service_role;
 
+GRANT ALL ON TABLE accounts TO service_role;
+GRANT ALL ON TABLE subscriptions TO service_role;
+GRANT ALL ON TABLE instances TO service_role;
+GRANT ALL ON TABLE usage_metrics TO service_role;
+GRANT ALL ON TABLE payments TO service_role;
+GRANT ALL ON TABLE webhook_events TO service_role;
+GRANT ALL ON TABLE audit_logs TO service_role;
+GRANT ALL ON TABLE usage TO service_role;
+
+GRANT SELECT, INSERT, UPDATE ON TABLE accounts TO authenticated;
+GRANT SELECT, INSERT, UPDATE ON TABLE subscriptions TO authenticated;
+GRANT SELECT, INSERT, UPDATE ON TABLE instances TO authenticated;
+
+GRANT SELECT ON TABLE accounts TO anon;
+GRANT SELECT ON TABLE subscriptions TO anon;
+GRANT SELECT ON TABLE instances TO anon;
+GRANT SELECT ON TABLE usage_metrics TO anon;
+GRANT SELECT ON TABLE payments TO anon;
+GRANT SELECT ON TABLE webhook_events TO anon;
+
 -- ============================================================================
 -- COMMENTS
 -- ============================================================================
