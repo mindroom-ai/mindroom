@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { Card, CardHeader, CardSection } from '@/components/ui/Card'
 import {
   Download,
@@ -23,6 +23,31 @@ import { logger } from '@/lib/logger'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 
+// Debounce hook for preventing rapid API calls
+function useDebounce<T extends (...args: any[]) => any>(
+  callback: T,
+  delay: number
+): (...args: Parameters<T>) => void {
+  const timeoutRef = useRef<NodeJS.Timeout | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current)
+      }
+    }
+  }, [])
+
+  return useCallback((...args: Parameters<T>) => {
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current)
+    }
+    timeoutRef.current = setTimeout(() => {
+      callback(...args)
+    }, delay)
+  }, [callback, delay])
+}
+
 export default function SettingsPage() {
   const router = useRouter()
   const [loading, setLoading] = useState<string | null>(null)
@@ -34,9 +59,20 @@ export default function SettingsPage() {
   })
   const [accountInfo, setAccountInfo] = useState<any>(null)
   const [isDeletionPending, setIsDeletionPending] = useState(false)
+  const deletionTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const supabaseClientRef = useRef<ReturnType<typeof createClient> | null>(null)
 
   useEffect(() => {
+    // Create Supabase client once
+    supabaseClientRef.current = createClient()
     loadAccountInfo()
+
+    // Cleanup on unmount
+    return () => {
+      if (deletionTimeoutRef.current) {
+        clearTimeout(deletionTimeoutRef.current)
+      }
+    }
   }, [])
 
   const loadAccountInfo = async () => {
@@ -78,7 +114,12 @@ export default function SettingsPage() {
       setMessage({ type: 'success', text: 'Your data has been exported successfully!' })
     } catch (error) {
       logger.error('Export failed:', error)
-      setMessage({ type: 'error', text: 'Failed to export data. Please try again.' })
+      // Show more specific error message
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred'
+      setMessage({
+        type: 'error',
+        text: `Failed to export data: ${errorMessage}`
+      })
     } finally {
       setLoading(null)
     }
@@ -103,16 +144,26 @@ export default function SettingsPage() {
         })
         setIsDeletionPending(true)
 
+        // Clear any existing timeout
+        if (deletionTimeoutRef.current) {
+          clearTimeout(deletionTimeoutRef.current)
+        }
+
         // Sign out after scheduling deletion
-        setTimeout(async () => {
-          const supabase = createClient()
-          await supabase.auth.signOut()
-          router.push('/login')
+        deletionTimeoutRef.current = setTimeout(async () => {
+          if (supabaseClientRef.current) {
+            await supabaseClientRef.current.auth.signOut()
+            router.push('/login')
+          }
         }, 3000)
       }
     } catch (error) {
       logger.error('Deletion request failed:', error)
-      setMessage({ type: 'error', text: 'Failed to request account deletion. Please try again.' })
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred'
+      setMessage({
+        type: 'error',
+        text: `Failed to request account deletion: ${errorMessage}`
+      })
     } finally {
       setLoading(null)
       setShowDeleteConfirm(false)
@@ -133,32 +184,50 @@ export default function SettingsPage() {
       }
     } catch (error) {
       logger.error('Cancel deletion failed:', error)
-      setMessage({ type: 'error', text: 'Failed to cancel deletion. Please try again.' })
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred'
+      setMessage({
+        type: 'error',
+        text: `Failed to cancel deletion: ${errorMessage}`
+      })
     } finally {
       setLoading(null)
     }
   }
 
-  const handleConsentUpdate = async (type: 'marketing' | 'analytics') => {
+  // Debounced consent update to prevent rapid API calls
+  const debouncedConsentUpdate = useDebounce(async (marketing: boolean, analytics: boolean) => {
+    setLoading('consent')
+    try {
+      await updateConsent(marketing, analytics)
+      setMessage({ type: 'success', text: 'Privacy preferences updated.' })
+    } catch (error) {
+      logger.error('Consent update failed:', error)
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred'
+      setMessage({
+        type: 'error',
+        text: `Failed to update preferences: ${errorMessage}`
+      })
+      // Revert on error - reload account info to get correct state
+      await loadAccountInfo()
+    } finally {
+      setLoading(null)
+    }
+  }, 500) // 500ms debounce delay
+
+  const handleConsentUpdate = (type: 'marketing' | 'analytics') => {
+    // Disable if already loading
+    if (loading === 'consent') return
+
     const newSettings = {
       ...consentSettings,
       [type]: !consentSettings[type]
     }
 
+    // Update UI immediately (optimistic update)
     setConsentSettings(newSettings)
-    setLoading('consent')
 
-    try {
-      await updateConsent(newSettings.marketing, newSettings.analytics)
-      setMessage({ type: 'success', text: 'Privacy preferences updated.' })
-    } catch (error) {
-      logger.error('Consent update failed:', error)
-      // Revert the change on error
-      setConsentSettings(consentSettings)
-      setMessage({ type: 'error', text: 'Failed to update preferences. Please try again.' })
-    } finally {
-      setLoading(null)
-    }
+    // Debounced API call
+    debouncedConsentUpdate(newSettings.marketing, newSettings.analytics)
   }
 
   return (
