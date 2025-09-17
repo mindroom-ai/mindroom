@@ -1,7 +1,7 @@
 # Security Review: Session & Token Management
 
 **Review Date**: 2025-01-11
-**Updated**: September 15, 2025
+**Updated**: September 17, 2025
 **Reviewer**: Security Analysis
 **Focus**: JWT implementation, token lifecycle, and session security
 **Components Reviewed**:
@@ -13,15 +13,13 @@
 
 ## Executive Summary
 
-The MindRoom SaaS platform uses **Supabase Auth** as its primary authentication provider, which handles JWT generation, validation, and rotation. The implementation demonstrates several **strong security practices** but has **critical gaps** in rate limiting and lacks some defense-in-depth measures.
+The MindRoom SaaS platform uses **Supabase Auth** for JWT issuance/validation. Core protections (token extraction, Supabase validation, auth rate limiting) are in place. Remaining items before production: shrink the 5-minute auth cache window, add token revocation hooks, and plan admin MFA/step-up authentication.
 
-**Key Findings:**
+**Key Findings (Sept 17, 2025):**
 - ✅ JWT signature validation handled by Supabase (robust)
-- ✅ Proper token extraction and Bearer scheme validation
-- ✅ Secure logout implementation with SSO cookie cleanup
-- ✅ **IMPLEMENTED**: Authentication failure tracking with IP blocking
-- ⚠️ Token caching without proper invalidation mechanisms (low priority)
-- ⚠️ Minimal validation of JWT claims beyond signature
+- ✅ Hardened bearer parsing and auth failure tracking with IP blocking
+- ⚠️ Token cache retains entries for 5 minutes (revoked tokens may linger)
+- ⚠️ No server-driven revocation/MFA for admin accounts
 
 ---
 

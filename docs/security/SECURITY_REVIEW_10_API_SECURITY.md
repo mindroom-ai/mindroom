@@ -8,7 +8,7 @@
 
 This review examines the API security posture of the MindRoom platform backend, focusing on rate limiting, DoS protection, API versioning, and access controls. The platform consists of 45+ API endpoints across 10 route modules with a clear separation between user-facing and internal system endpoints.
 
-**Updated Status**: Rate limiting has been significantly improved with coverage extended to user endpoints. The platform now has rate limiting on admin, provisioner, and user-facing endpoints, reducing DoS vulnerability from CRITICAL to MEDIUM. Request size controls and some API versioning improvements still needed.
+**Updated Status (Sept 17, 2025)**: Rate limiting now covers admin, provisioner, and user endpoints. Remaining gaps: add CAPTCHA/abuse controls for high-risk flows, formalise API versioning strategy, and document API key rotation cadence.
 
 ---
 
@@ -827,22 +827,10 @@ The MindRoom platform has **moderate to high API security risks** due to the abs
 3. **Medium**: Lack of comprehensive request size controls creates memory exhaustion risks
 4. **Medium**: No API versioning strategy complicates security updates
 
-### Immediate Actions Required
+### Current Follow-ups
 
-1. **Week 1**: Implement basic rate limiting using `slowapi`
-2. **Week 2**: Add application-level request size limits
-3. **Week 3**: Deploy CAPTCHA for account creation and payment endpoints
-4. **Week 4**: Set up basic security monitoring and alerting
+1. Add CAPTCHA/abuse protection for account creation and other high-risk flows.
+2. Formalise API versioning/deprecation documentation.
+3. Document API key rotation cadence and wire alerts for abnormal API usage (ties into Monitoring review).
 
-### Long-term Security Roadmap
-
-1. **Month 1**: Complete rate limiting implementation across all endpoints
-2. **Month 2**: Implement API versioning and deprecation strategy
-3. **Month 3**: Deploy advanced DoS protection and anomaly detection
-4. **Month 6**: Complete API key rotation automation
-
-**Overall Assessment**: While the platform has solid authentication and access control foundations, the lack of rate limiting and DoS protection creates significant security gaps that should be addressed immediately before production deployment.
-
-<function_calls>
-<invoke name="TodoWrite">
-<parameter name="todos">[{"id": "1", "content": "Read security review checklist and understand API security requirements", "status": "completed"}, {"id": "2", "content": "Analyze all API endpoints in platform-backend routes directory", "status": "completed"}, {"id": "3", "content": "Review rate limiting implementation and configurations", "status": "completed"}, {"id": "4", "content": "Examine request size limits and payload handling", "status": "completed"}, {"id": "5", "content": "Analyze file upload security and restrictions", "status": "completed"}, {"id": "6", "content": "Check for GraphQL endpoints and query complexity limits", "status": "completed"}, {"id": "7", "content": "Review API versioning strategy and endpoint security", "status": "completed"}, {"id": "8", "content": "Assess internal vs external API separation", "status": "completed"}, {"id": "9", "content": "Examine API key management and rotation mechanisms", "status": "completed"}, {"id": "10", "content": "Test for rate limit bypass and DoS vulnerabilities", "status": "completed"}, {"id": "11", "content": "Create comprehensive security report with remediation", "status": "completed"}]
+**Overall Assessment (Sept 17, 2025):** Medium risk – rate limiting and request-size checks are in place, but abuse-prevention and long-term key rotation strategy must land before a public launch.
