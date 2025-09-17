@@ -7,6 +7,8 @@ metadata:
     app: mindroom-backend
     customer: {{ .Values.customer | quote }}
 spec:
+  strategy:
+    type: Recreate
   replicas: 1
   selector:
     matchLabels:
