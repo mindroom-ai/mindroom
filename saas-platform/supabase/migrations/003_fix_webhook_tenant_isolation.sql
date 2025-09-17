@@ -59,7 +59,7 @@ WHERE we.payload->>'customer' = a.customer_id
 -- Step 8: Add audit log entry for this security fix
 INSERT INTO audit_logs (
     action,
-    resource,
+    resource_type,
     resource_id,
     details,
     account_id,

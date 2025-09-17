@@ -55,7 +55,7 @@ CREATE POLICY "Admins can manage all payments" ON payments
 -- Step 9: Add audit log entry for this security fix
 INSERT INTO audit_logs (
     action,
-    resource,
+    resource_type,
     resource_id,
     details,
     account_id,
