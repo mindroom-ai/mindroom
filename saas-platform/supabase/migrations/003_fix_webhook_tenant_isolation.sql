@@ -69,7 +69,7 @@ INSERT INTO audit_logs (
     'webhook_events',
     NULL,
     jsonb_build_object(
-        'migration', '001_fix_webhook_tenant_isolation',
+        'migration', '003_fix_webhook_tenant_isolation',
         'issue', 'Added tenant isolation to webhook_events table',
         'severity', 'HIGH'
     ),

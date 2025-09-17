@@ -10,10 +10,11 @@ ADD COLUMN IF NOT EXISTS account_id UUID REFERENCES accounts(id);
 -- Step 2: Create index for performance
 CREATE INDEX IF NOT EXISTS idx_payments_account_id ON payments(account_id);
 
--- Step 3: Enable RLS on payments table
+-- Step 3: Enable RLS on payments table (if not already enabled)
 ALTER TABLE payments ENABLE ROW LEVEL SECURITY;
 
--- Step 4: Create RLS policy for payments - users can only view their own payments
+-- Step 4: Drop old policy if it exists (using customer_id) and create new one with account_id
+DROP POLICY IF EXISTS "Users can view own payments" ON payments;
 CREATE POLICY "Users can view own payments" ON payments
     FOR SELECT USING (
         account_id = auth.uid() OR
