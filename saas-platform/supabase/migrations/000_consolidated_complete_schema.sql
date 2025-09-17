@@ -215,20 +215,6 @@ CREATE INDEX idx_audit_logs_created_at ON audit_logs(created_at DESC);
 CREATE INDEX idx_audit_logs_action ON audit_logs(action);
 
 -- ============================================================================
--- DELETION AUDIT TABLE (for GDPR compliance)
--- ============================================================================
-CREATE TABLE deletion_audit (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    table_name TEXT NOT NULL,
-    record_id UUID NOT NULL,
-    deletion_reason TEXT,
-    requested_by UUID,
-    deleted_at TIMESTAMPTZ DEFAULT NOW(),
-    restored_at TIMESTAMPTZ NULL,
-    hard_deleted_at TIMESTAMPTZ NULL
-);
-
--- ============================================================================
 -- USAGE TABLE (for tracking)
 -- ============================================================================
 CREATE TABLE usage (
@@ -351,8 +337,18 @@ BEGIN
     AND deleted_at IS NULL;
 
     -- Log the deletion
-    INSERT INTO deletion_audit (table_name, record_id, deletion_reason, requested_by)
-    VALUES ('accounts', target_account_id, reason, COALESCE(requested_by, target_account_id));
+    INSERT INTO audit_logs (account_id, action, resource_type, resource_id, details, success)
+    VALUES (
+        target_account_id,
+        'gdpr_deletion_scheduled',
+        'account',
+        target_account_id::text,
+        jsonb_build_object(
+            'reason', reason,
+            'requested_by', COALESCE(requested_by, target_account_id)
+        ),
+        TRUE
+    );
 
     -- Mark related data while avoiding unnecessary churn
     UPDATE subscriptions
@@ -399,12 +395,16 @@ BEGIN
     WHERE account_id = target_account_id
     AND status = 'deprovisioned';
 
-    -- Update audit log
-    UPDATE deletion_audit
-    SET restored_at = NOW()
-    WHERE table_name = 'accounts'
-    AND record_id = target_account_id
-    AND restored_at IS NULL;
+    -- Audit log entry
+    INSERT INTO audit_logs (account_id, action, resource_type, resource_id, details, success)
+    VALUES (
+        target_account_id,
+        'gdpr_deletion_cancelled',
+        'account',
+        target_account_id::text,
+        jsonb_build_object('status', 'restored'),
+        TRUE
+    );
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
@@ -413,13 +413,6 @@ CREATE OR REPLACE FUNCTION hard_delete_account(
     target_account_id UUID
 ) RETURNS VOID AS $$
 BEGIN
-    -- Update audit log first
-    UPDATE deletion_audit
-    SET hard_deleted_at = NOW()
-    WHERE table_name = 'accounts'
-    AND record_id = target_account_id
-    AND hard_deleted_at IS NULL;
-
     -- Delete related data (cascade will handle most)
     DELETE FROM instances WHERE account_id = target_account_id;
     DELETE FROM subscriptions WHERE account_id = target_account_id;
@@ -427,6 +420,16 @@ BEGIN
 
     -- Finally delete the account
     DELETE FROM accounts WHERE id = target_account_id;
+
+    -- Audit entry for hard delete (system action)
+    INSERT INTO audit_logs (action, resource_type, resource_id, details, success)
+    VALUES (
+        'gdpr_account_hard_deleted',
+        'account',
+        target_account_id::text,
+        jsonb_build_object('source', 'hard_delete_account'),
+        TRUE
+    );
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
@@ -544,20 +547,6 @@ CREATE POLICY "Admins can manage all webhook events" ON webhook_events
     FOR ALL USING (is_admin())
     WITH CHECK (is_admin());
 
--- ============================================================================
--- VIEWS
--- ============================================================================
-
--- Create a view for active accounts (convenience)
-CREATE OR REPLACE VIEW active_accounts AS
-SELECT * FROM accounts WHERE deleted_at IS NULL;
-
--- ============================================================================
--- PERMISSIONS
--- ============================================================================
-
--- Grant permissions
-GRANT SELECT ON active_accounts TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION soft_delete_account TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION restore_account TO service_role;
 GRANT EXECUTE ON FUNCTION hard_delete_account TO service_role;

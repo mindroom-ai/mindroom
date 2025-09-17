@@ -297,19 +297,6 @@ CREATE TABLE audit_logs (
    ALTER TABLE accounts ADD COLUMN deletion_reason TEXT NULL;
    ALTER TABLE accounts ADD COLUMN deletion_requested_by UUID NULL;
 
-   -- Create audit table for deletions
-   CREATE TABLE deletion_audit (
-       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-       table_name TEXT NOT NULL,
-       record_id UUID NOT NULL,
-       deleted_data JSONB NOT NULL,  -- Encrypted copy of deleted data
-       deletion_reason TEXT,
-       requested_by UUID,
-       gdpr_request_id UUID,
-       deleted_at TIMESTAMPTZ DEFAULT NOW(),
-       hard_delete_scheduled_for TIMESTAMPTZ  -- For automatic cleanup
-   );
-
    -- Create soft delete function
    CREATE OR REPLACE FUNCTION soft_delete_account(
        account_id UUID,
@@ -317,17 +304,23 @@ CREATE TABLE audit_logs (
        requested_by UUID DEFAULT NULL
    ) RETURNS VOID AS $$
    BEGIN
-       -- Archive account data
-       INSERT INTO deletion_audit (table_name, record_id, deleted_data, deletion_reason, requested_by)
-       SELECT 'accounts', id, to_jsonb(accounts.*), reason, requested_by
-       FROM accounts WHERE id = account_id;
-
        -- Soft delete
        UPDATE accounts
        SET deleted_at = NOW(),
            deletion_reason = reason,
            deletion_requested_by = requested_by
        WHERE id = account_id;
+
+       -- Record audit trail in audit_logs
+       INSERT INTO audit_logs (account_id, action, resource_type, resource_id, details, success)
+       VALUES (
+           account_id,
+           'gdpr_deletion_scheduled',
+           'account',
+           account_id::text,
+           jsonb_build_object('reason', reason, 'requested_by', requested_by),
+           TRUE
+       );
    END;
    $$ LANGUAGE plpgsql;
    ```
