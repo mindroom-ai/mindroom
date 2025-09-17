@@ -8,13 +8,11 @@
 
 This report presents a comprehensive security review of dependency and supply chain security for the MindRoom project. The assessment covers 5 critical checklist items focusing on dependency vulnerabilities, Docker base image security, source verification, version pinning, and automated scanning implementation.
 
-### Overall Security Posture: **GOOD**
-- ✅ **0 Critical vulnerabilities** found in Python dependencies
-- ✅ **0 High-severity vulnerabilities** found in Python dependencies
-- ⚠️ **5 vulnerabilities** found in frontend Node.js dependencies (2 low, 3 moderate)
-- ✅ **Good dependency source verification** - all from official registries
-- ✅ **Excellent version pinning** with lock files
-- ❌ **No automated vulnerability scanning** in CI/CD pipeline
+### Overall Security Posture (Sept 17, 2025): **MEDIUM**
+- ✅ Python (`pip-audit`) clean as of Sept 17
+- ⚠️ Frontend `pnpm audit` shows 5 open vulns (esbuild/mermaid/vite) – dev tooling but should be patched
+- ✅ Dependencies sourced via official registries with lock files
+- ❌ No automated vulnerability scanning in CI/CD yet (manual runs only)
 
 ## Detailed Assessment
 
@@ -493,4 +491,4 @@ jobs:
 EOF
 ```
 
-This comprehensive assessment provides a clear roadmap for maintaining and improving the security posture of the MindRoom project's dependency and supply chain security.
+**Current todo (Sept 17, 2025):** ship dependency upgrades for the five `pnpm audit` findings and add automated `pip-audit`/`pnpm audit` + image scanning to CI so manual runs aren’t required.

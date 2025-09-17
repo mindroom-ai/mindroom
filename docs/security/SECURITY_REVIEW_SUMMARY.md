@@ -31,7 +31,8 @@ The security review has been refreshed across 12 categories. Most P0/P1 blockers
 1. Secrets lifecycle and rotation
    - ✅ K8s Secrets already implemented with secure file mounts at `/etc/secrets`
    - ✅ Application reads secrets via `_get_secret()` with file fallback
-   - ✅ Rotation scripts created and documented
+   - ✅ Helper scripts exist (`scripts/rotate-api-keys.sh`, `scripts/apply-rotated-keys.sh`)
+   - ⚠️ Need recorded rotation run + confirmation from providers
    - ⚠️ Only need to verify etcd encryption (usually enabled by default)
 2. Monitoring and incident response
    - Alerts for failed auth/admin actions; audit log review; security@ inbox and security.txt

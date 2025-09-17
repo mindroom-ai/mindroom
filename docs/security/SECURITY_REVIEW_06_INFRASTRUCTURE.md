@@ -8,11 +8,10 @@
 
 This report analyzes the infrastructure security of the MindRoom SaaS platform, focusing on Kubernetes deployments, container security, network isolation, and access controls. Since the prior review, baseline isolation and RBAC hardening have been implemented; remaining gaps center on secrets lifecycle and internal TLS.
 
-**Risk Summary (updated):**
-- **HIGH (1):** Internal TLS/mTLS (optional for MVP)
-- **LOW (1):** Etcd encryption verification
-- **MEDIUM (3):** Image pinning/scanning, residual RBAC tightening, policy automation
-- **LOW (2):** Resource limits monitoring/alerts, PDBs
+**Risk Summary (Sept 17, 2025):**
+- **High:** Internal TLS/mTLS still outstanding
+- **Medium:** Platform pods run as root; images use `:latest`; etcd encryption unverified
+- **Low:** Resource alerts, PDBs, policy automation
 
 ## Detailed Findings
 
@@ -163,7 +162,7 @@ All deployments have proper resource limits configured:
 - **Base images:** Use public ECR (good practice)
 
 #### Issues
-1. **Latest tags:** No pinned versions for critical components
+1. **Latest tags:** No pinned versions for critical components (still outstanding)
 2. **Private registry security:** Limited visibility into image scanning
 3. **No image policies:** Missing admission controllers for image validation
 
@@ -271,9 +270,9 @@ app.add_middleware(
 
 ### Immediate Actions (Critical)
 
-1. **Implement NetworkPolicies** for all namespaces
-2. **Add security contexts** to all pod specifications
-3. **Migrate secrets** from environment variables to volume mounts
+1. **Add NetworkPolicies** for platform namespace
+2. **Harden platform deployments** (run as non-root, drop caps)
+3. **Confirm secrets/etcd encryption**
 4. **Restrict RBAC permissions** to least privilege principle
 
 ### Short-term Improvements (High)

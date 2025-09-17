@@ -1,18 +1,18 @@
 # MindRoom Security Action Plan
 
-**Updated:** September 15, 2025
+**Updated:** September 17, 2025
 
 ## Executive Summary
 
-Comprehensive security remediation has been completed for the MindRoom SaaS platform. **All critical (P0) and high-priority (P1.1) security vulnerabilities have been resolved**, making the platform production-ready. The security posture has improved from HIGH risk to LOW risk through implementation of essential security controls.
+MindRoom has addressed the most acute blockers identified in the initial security review (unauthenticated admin APIs, default credentials, and missing rate limiting). However, several high-risk items remain open—most notably secrets lifecycle verification, monitoring/alerting coverage, and internal service encryption. The platform is **not yet production ready** until these gaps are closed and the residual tasks in the checklist are completed.
 
-**Current Risk Assessment: LOW** - Production ready with strong security controls.
+**Current Risk Assessment: 🟠 MEDIUM-HIGH** – Staging-only. Proceed to production **after** completing outstanding High items.
 
-**Implementation Status:**
-- ✅ **P0 Legal/Regulatory:** GDPR compliance, logging sanitization, secrets rotation
-- ✅ **P1.1 Auth Security:** IP-based failure tracking and blocking
-- ✅ **P1.2 Infrastructure:** K8s Secrets properly implemented with secure file mounts
-- ⚠️ **P2 Monitoring:** Alert configuration pending (logs available)
+**Implementation Status (September 17, 2025):**
+- ✅ **P0 Legal/Regulatory:** GDPR flows and log sanitization implemented; helper scripts exist for key rotation.
+- ✅ **P1.1 Auth Security:** Auth monitoring, IP blocking, and admin route protections deployed.
+- ⚠️ **P1.2 Infrastructure:** K8s Secrets mounted as files, but etcd-at-rest encryption and documented rotation remain unverified.
+- ⚠️ **P2 Monitoring:** Alerting, dashboards, and incident runbooks still pending (logs available for manual review).
 
 ---
 
@@ -25,16 +25,14 @@ Comprehensive security remediation has been completed for the MindRoom SaaS plat
    - **Implementation:** Authentication required for all administrative operations
    - **Verification:** Security review confirmed proper access controls
 
-2. **REVOKE & ROTATE ALL EXPOSED API KEYS** 🔑 ✅
-   - **✅ COMPLETED:** Git history scanned, 3 keys found in docs
-   - **✅ Script created:** `scripts/rotate-exposed-keys.sh`
-   - **✅ Documented:** `P0_2_SECRET_ROTATION_REPORT.md`
-   - Keys identified:
-     - Deepseek API Key (in security docs)
-     - Google API Key (in security docs)
-     - OpenRouter API Key (partial, in security docs)
+2. **REVOKE & ROTATE ALL EXPOSED API KEYS** 🔑 ⚠️
+   - **✅ Helpers in repo:** `scripts/rotate-api-keys.sh` and `scripts/apply-rotated-keys.sh`
+   - **⚠️ Pending:** Confirm actual rotation for DeepSeek, Google, and OpenRouter keys (last known exposure in docs)
+   - **⚠️ Pending:** Generate and store a rotation report (no `P0_2_SECRET_ROTATION_REPORT.md` exists)
+   - **Next step:** Schedule rotation run + verification before granting production access
 
-3. **REMOVE .env FROM GIT HISTORY** 📝 ✅
+3. **REMOVE .env FROM GIT HISTORY** 📝 ⚠️
+   - Command stub retained below; confirm it has been executed on any shared repositories before launch.
    ```bash
    git filter-branch --force --index-filter \
      "git rm --cached --ignore-unmatch .env" \
@@ -84,19 +82,25 @@ Comprehensive security remediation has been completed for the MindRoom SaaS plat
 
 ## 🔄 REMAINING ITEMS (Low Priority)
 
-### P1.2: Infrastructure Security (✅ COMPLETED)
+### P1.2: Infrastructure Security (⚠️ IN PROGRESS)
 
-**K8s Secrets Implementation:**
-- **Status:** ✅ ALREADY IMPLEMENTED - Using secure file-based mounts
-- **Implementation:** Secrets stored in K8s Secret objects, mounted as files at `/etc/secrets`
-- **Security:** File permissions set to 0400 (read-only by owner)
-- **Application:** Reads secrets via `_get_secret()` function with file fallback
-- **Result:** Enterprise-grade secrets management already in place
+**Secrets lifecycle:**
+- ✅ K8s secrets are mounted as read-only files at `/etc/secrets` and consumed via `_get_secret()`.
+- ⚠️ Need to verify etcd-at-rest encryption for the target cluster before launch.
+- ⚠️ Document a tested rotation run (helper scripts exist but have not been executed/end-to-end).
 
-**Etcd Encryption:**
-- **Action:** Verify encryption at rest is enabled on K8s cluster
-- **Risk:** LOW - Cloud providers typically enable by default
-- **Verification:** Check cluster configuration during deployment
+**Runtime hardening:**
+- ⚠️ Platform deployments still run as root; update manifests with `securityContext` (see example below).
+- ✅ Instance Helm chart already drops Linux capabilities and sets resource requests/limits.
+
+**Example securityContext to apply:**
+```yaml
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+  readOnlyRootFilesystem: true
+```
 
 ### P2: Monitoring Configuration (PENDING)
 
@@ -110,13 +114,6 @@ Comprehensive security remediation has been completed for the MindRoom SaaS plat
 - **Target:** Security monitoring dashboards
 - **Data:** Auth metrics, error rates, system health
 - **Priority:** LOW - operational improvement, not security requirement
-   ```yaml
-   securityContext:
-     runAsNonRoot: true
-     runAsUser: 1000
-     fsGroup: 1000
-     readOnlyRootFilesystem: true
-   ```
 
 9. **Move Secrets from Environment Variables to Volumes** ✅ **COMPLETED**
    - **Status:** Already implemented in `deployment-backend.yaml`
@@ -276,72 +273,59 @@ Comprehensive security remediation has been completed for the MindRoom SaaS plat
 **Infrastructure:**
 13. ✅ All admin endpoints require authentication
 14. ✅ Default passwords removed from configurations
-15. ✅ NetworkPolicies and RBAC configured
-16. ✅ Pod security contexts implemented
+15. ✅ NetworkPolicies and namespace-scoped RBAC applied to per-instance workloads
+16. ⚠️ Pod security contexts missing for platform services (add before production)
 
 ---
 
-## 📅 Implementation Timeline (COMPLETED)
+## 📅 Implementation Timeline (Progress)
 
-### Phase 1: Critical Security (COMPLETED - September 15, 2025)
-- ✅ P0: Legal/regulatory compliance
-- ✅ P1.1: Authentication security monitoring
-- ✅ Infrastructure hardening
-- ✅ Secrets management
+### Phase 1: Critical Security (IN PROGRESS)
+- ✅ P0: GDPR export/delete + log sanitization
+- ✅ P1.1: Authentication monitoring & admin locking
+- ⚠️ Secrets management: helper scripts present but full rotation + etcd verification outstanding
 
-### Phase 2: Post-Launch Enhancements (Optional)
-- ✅ K8s secrets (already implemented with secure file mounts)
-- 🔄 Monitoring dashboards (operational improvement)
-- 🔄 Automated dependency scanning (process improvement)
+### Phase 2: Operational Hardening (Blocking Production)
+- ⚠️ Build alerting, dashboards, and incident response playbook
+- ⚠️ Enforce non-root containers and document mTLS/internal TLS plan
+- ⚠️ Automate dependency and secret scanning in CI/CD
 
-**Total Implementation Time:** < 1 day using KISS principles
+**Total effort spent so far:** ~3 engineering days (multiple follow-ups remaining)
 
 ---
 
-## 🚀 PRODUCTION READINESS STATUS
+## 🚫 Production Readiness Status
 
-**✅ PRODUCTION READY** - All critical security requirements met:
+**NOT READY FOR PRODUCTION.** Launch is gated on:
 
-1. ✅ All P0 legal/regulatory items complete
-2. ✅ Authentication security monitoring active
-3. ✅ GDPR compliance implemented
-4. ✅ Logging sanitization prevents data exposure
-5. ✅ Git history cleaned and documented
-6. ✅ Infrastructure security controls in place
-7. ✅ Authentication required for all admin operations
+1. 🔴 Verified rotation (and confirmation) for previously exposed API keys
+2. 🔴 Monitoring/alerting + incident response coverage
+3. 🔴 Infrastructure hardening (non-root pods, internal TLS decision)
+4. 🔴 Completion of outstanding High/Medium items in `SECURITY_REVIEW_CHECKLIST.md`
 
-**Remaining items are operational improvements, not security blockers.**
+Re-run this action plan after the above are delivered.
 
 ---
 
 ## 📞 Support & Resources
 
-- **Security Questions:** security@mindroom.chat (to be created)
-- **Incident Response:** [Create playbook first]
-- **Bug Bounty:** Consider after fixing critical issues
-- **External Audit:** Recommended before public launch
+- **Security Questions:** security@mindroom.chat (TBD – create mailbox before launch)
+- **Incident Response:** Playbook outstanding; assign an owner
+- **Bug Bounty:** Defer until monitoring & IR are mature
+- **External Audit:** Schedule post-remediation
 
 ---
 
 *Document Created: September 11, 2025*
-*Next Review: After P0-P2 completion*
+*Last Reviewed: September 17, 2025*
 *Security Owner: [Assign responsible person]*
 
 ---
 
-## Final Status Update (September 15, 2025)
+## Final Status Update (September 17, 2025)
 
-**✅ ALL CRITICAL SECURITY IMPLEMENTATIONS COMPLETE**
+- **Risk Trend:** 6.8/10 → 5.8/10 (MEDIUM-HIGH). Further reduction blocked by open items above.
+- **Completed:** Admin authentication fixes, rate limiting, GDPR endpoints, log sanitization.
+- **Outstanding:** Secrets rotation confirmation, monitoring alerts, internal TLS, checklist backlog.
 
-**Risk Reduction Achieved:**
-- **Before:** 6.8/10 (HIGH) - Multiple critical vulnerabilities
-- **After:** 2.5/10 (LOW) - Production-ready security posture
-
-**Key Achievements:**
-1. **Zero sensitive data exposure** - Complete logging sanitization
-2. **GDPR compliance** - Full data lifecycle management
-3. **Attack prevention** - IP-based auth monitoring and blocking
-4. **Audit capability** - Comprehensive security event logging
-5. **Secrets security** - Git history cleaned, rotation documented
-
-**Platform Status:** Ready for production deployment with strong security foundation.
+**Platform Status:** Safe for restricted staging with trusted testers only. Do **not** expose publicly until remaining blockers are resolved and documentation is refreshed.

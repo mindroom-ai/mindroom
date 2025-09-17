@@ -20,7 +20,7 @@ This security review assessed the monitoring and incident response capabilities 
 - ❌ **No incident response procedures**
 - ❌ **No advanced attack pattern detection** (basic protection exists)
 
-**Risk Level**: **LOW** - Comprehensive security monitoring implemented with strong audit capabilities. Alerting configuration pending but not critical for security.
+**Risk Level**: **MEDIUM** – Core logging exists, but automated alerting, dashboards, and incident process are absent.
 
 ---
 
@@ -28,14 +28,13 @@ This security review assessed the monitoring and incident response capabilities 
 
 ### 1. Set up alerts for multiple failed authentication attempts
 
-**Status**: ✅ **IMPLEMENTED** (Alerting configuration pending)
+**Status**: ⚠️ **PARTIAL** (logging + blocking in place, no automated alerts yet)
 
 **Current State**:
-- Authentication failure tracking IMPLEMENTED in `auth_monitor.py`
-- Simple module-level functions (following KISS principle)
-- Automatic IP blocking after 5 failures in 15 minutes
-- 30-minute block duration
-- All auth events logged to audit_logs table
+- Authentication failure tracking implemented in `auth_monitor.py`
+- Automatic IP blocking after 5 failures in 15 minutes (30-minute lockout)
+- Auth events logged to `audit_logs`
+- No alert routing (e.g., email/Slack/PagerDuty) configured
 
 **Evidence**:
 ```python
@@ -115,45 +114,18 @@ CREATE TABLE audit_logs (
 
 ### 3. Log all admin actions for audit trail
 
-**Status**: 🟡 **PARTIAL** (Enhanced with auth monitoring)
+**Status**: ✅ **PASS (best-effort)**
 
-**Current State**:
-- Basic admin action logging implemented
-- All authentication events now logged
-- IP addresses tracked for all auth attempts
-- Success/failure status recorded
+**Current State:**
+- `admin.py` now routes all operations through `audit_log_entry`, capturing account ID, resource, action, and optional details.
+- Instance start/stop/restart/provision flows log to `audit_logs`.
+- Account updates (status/CRUD) emit structured entries.
+- Auth monitor records success/failure events for login attempts.
+- Best-effort only: failures in Supabase logging are swallowed (acceptable for MVP, but monitor errors).
 
-**Evidence**:
-```python
-# From admin.py - only account status changes logged
-sb.table("audit_logs").insert({
-    "account_id": admin["user_id"],
-    "action": "update",
-    "resource_type": "account",
-    "resource_id": account_id,
-    "details": {"status": status},
-    "created_at": datetime.now(UTC).isoformat(),
-}).execute()
-```
-
-**Logged Admin Actions**:
-- ✅ Account status changes
-- ❌ Instance management operations
-- ❌ Configuration changes
-- ❌ User privilege escalations
-- ❌ Database modifications
-- ❌ System configuration changes
-
-**Missing Critical Logging**:
-```python
-# Admin actions NOT being logged:
-# - Instance start/stop/restart operations
-# - Provisioning and deprovisioning
-# - Admin privilege grants/revokes
-# - Database access and modifications
-# - Configuration file changes
-# - SSH access and system commands
-```
+**Remaining Enhancements:**
+- Add alerting or dashboards around key admin actions.
+- Consider logging configuration changes outside FastAPI (e.g., Helm, Terraform) separately.
 
 ---
 
@@ -910,26 +882,25 @@ class SecurityOrchestration:
 
 ## Summary and Recommendations
 
-### Critical Actions Required
-1. **Implement authentication monitoring immediately** - High risk of undetected attacks
-2. **Deploy basic attack detection** - Essential for production security
-3. **Set up comprehensive admin logging** - Required for compliance and forensics
-4. **Create incident response procedures** - Critical for effective security response
+### Critical Actions Required (Pre-Launch)
+1. Wire authentication failure and admin-action alerts to on-call destinations.
+2. Publish an incident response playbook and create a monitored `security@` channel/security.txt.
+3. Build baseline dashboards for auth failures, admin activity, and anomalous access patterns.
+4. Decide on advanced detections (webhook anomalies, data exfil alerts) and backlog them post-launch.
 
 ### Security Posture Assessment
-- **Current**: ✅ **STRONG** - Comprehensive auth monitoring and audit logging implemented
-- **Achievement**: Core security monitoring operational with IP-based attack prevention
-- **Enhancement**: Alerting configuration available as operational improvement
+- **Current**: ⚠️ **PARTIAL** – Foundational logging exists; alerting/IR processes missing.
+- **Achievement**: Auth failure tracking with IP blocking reduces brute-force risk.
+- **Enhancement Needed**: Automate escalation paths and operationalize log review.
 
 ### Business Impact
-With implemented monitoring and audit capabilities:
-- ✅ **Security breach detection** - Authentication failures tracked and blocked automatically
-- ✅ **Compliance support** - Comprehensive audit trails for all security events
-- ✅ **Data protection** - Authentication monitoring prevents unauthorized access
-- ✅ **Risk mitigation** - IP-based blocking provides immediate attack response
-- ✅ **Operational security** - Audit logging supports forensic analysis
+With current logging-only setup:
+- 🔶 **Breach detection** relies on manual log review (no alerts).
+- ✅ **Compliance support** improved via audit trails but requires process documentation.
+- 🔶 **Risk mitigation** limited without proactive notifications.
+- ✅ **Operational security** benefits from recorded admin actions, yet alerting would accelerate response.
 
-The current state provides **strong security monitoring foundation** suitable for production deployment.
+Treat monitoring as staging-ready only. Production launch requires alerting and incident response readiness.
 
 ---
 

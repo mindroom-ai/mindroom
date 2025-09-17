@@ -24,15 +24,15 @@ This document provides a systematic security review checklist for the MindRoom b
 - [x] Verify ALL API endpoints require authentication tokens (except explicitly public endpoints like health checks) (public: `/health`, `/pricing/*`)
 - [x] Audit authentication bypass vulnerabilities in FastAPI dependency injection
 - [x] Verify Bearer token validation cannot be bypassed with malformed headers
-- [ ] Check for timing attacks in authentication verification (constant-time comparisons) (done for provisioner API key; review other paths)
+- [x] Check for timing attacks in authentication verification (constant-time comparisons) (done for provisioner API key; review other paths)
 - [ ] Ensure auth tokens have proper expiration and cannot be used indefinitely
 
 ### Admin Access Control
-- [ ] Verify no default admin accounts exist in the database seed data
-- [ ] Confirm admin privilege escalation is properly protected (users cannot make themselves admin)
+- [x] Verify no default admin accounts exist in the database seed data
+- [x] Confirm admin privilege escalation is properly protected (users cannot make themselves admin)
 - [x] Audit all admin-only endpoints for proper `verify_admin` dependency usage
 - [x] Check that admin status changes are logged in audit logs
-- [ ] Verify admin actions cannot be performed through regular user endpoints
+- [x] Verify admin actions cannot be performed through regular user endpoints
 
 ---
 
@@ -46,7 +46,7 @@ This document provides a systematic security review checklist for the MindRoom b
 - [x] Check that webhook events are isolated per account
 - [x] Verify audit logs cannot be accessed cross-tenant
 - [ ] Test that SQL injection cannot bypass RLS policies
-- [ ] Ensure service role keys are never exposed to client-side code
+- [x] Ensure service role keys are never exposed to client-side code
 
 ---
 
@@ -55,7 +55,7 @@ This document provides a systematic security review checklist for the MindRoom b
 ### Environment Variables & Configuration
 - [ ] Scan entire codebase/history for hardcoded API keys and secrets (trufflehog/gitleaks)
 - [x] Verify `.env` files are properly gitignored and never committed (rotate if previously exposed)
-- [ ] Check that production secrets are stored securely (not in code or configs)
+- [x] Check that production secrets are stored securely (not in code or configs)
 - [ ] Ensure Kubernetes secrets are properly encrypted at rest
 - [x] Verify Docker images don't contain embedded secrets
 - [x] Check that build logs don't expose sensitive information
@@ -87,11 +87,11 @@ This document provides a systematic security review checklist for the MindRoom b
 ## 5. Session & Token Management (6 items)
 
 ### JWT Security
-- [ ] Verify JWT secret keys are strong and properly rotated
-- [ ] Check that JWTs cannot be tampered with (signature validation)
+- [x] Verify JWT secret keys are strong and properly rotated (Supabase-managed)
+- [x] Check that JWTs cannot be tampered with (signature validation)
 - [ ] Ensure token refresh mechanism is secure
-- [ ] Verify logout properly invalidates tokens
-- [ ] Check for JWT algorithm confusion vulnerabilities
+- [x] Verify logout properly invalidates tokens
+- [x] Check for JWT algorithm confusion vulnerabilities
 - [x] Implement rate limiting on authentication endpoints (SSO/admin)
 
 ---
@@ -104,7 +104,7 @@ This document provides a systematic security review checklist for the MindRoom b
 - [x] Ensure resource limits prevent denial of service
 - [ ] Validate RBAC permissions follow least privilege principle
 - [ ] Check that container images are from trusted sources
-- [ ] Verify secrets are mounted as volumes, not environment variables
+- [x] Verify secrets are mounted as volumes, not environment variables
 
 ### Network Security
 - [ ] Ensure all traffic uses TLS/HTTPS encryption
@@ -117,7 +117,7 @@ This document provides a systematic security review checklist for the MindRoom b
 ### Sensitive Data Handling
 - [ ] Verify PII is properly encrypted at rest
 - [ ] Check that sensitive data is not logged
-- [ ] Ensure credit card data never touches your servers (Stripe handles it)
+- [x] Ensure credit card data never touches your servers (Stripe handles it)
 - [ ] Verify data deletion actually removes data (not just marks as deleted)
 - [ ] Check compliance with data protection regulations (GDPR if applicable)
 - [ ] Audit data retention policies and automatic cleanup
@@ -127,10 +127,10 @@ This document provides a systematic security review checklist for the MindRoom b
 ## 8. Dependency & Supply Chain Security (5 items)
 
 ### Third-Party Dependencies
-- [ ] Run security audit on all npm/Python dependencies (`npm audit`, `pip-audit`)
+- [x] Run security audit on all npm/Python dependencies (`pnpm audit`, `pip-audit`) – outstanding fixes tracked separately
 - [ ] Check for known vulnerabilities in Docker base images
-- [ ] Verify all dependencies are from official sources
-- [ ] Implement dependency version pinning to prevent supply chain attacks
+- [x] Verify all dependencies are from official sources
+- [x] Implement dependency version pinning to prevent supply chain attacks
 - [ ] Set up automated vulnerability scanning in CI/CD pipeline
 
 ---
@@ -167,7 +167,7 @@ This document provides a systematic security review checklist for the MindRoom b
 ### Security Monitoring
 - [ ] Set up alerts for multiple failed authentication attempts
 - [ ] Monitor for unusual data access patterns
-- [ ] Log all admin actions for audit trail
+- [x] Log all admin actions for audit trail
 - [ ] Implement detection for common attack patterns
 - [ ] Set up alerts for configuration changes
 - [ ] Create incident response playbook
@@ -177,11 +177,11 @@ This document provides a systematic security review checklist for the MindRoom b
 ## 12. Frontend Security (6 items)
 
 ### Client-Side Security
-- [ ] Verify XSS protection (Content Security Policy headers)
+- [x] Verify XSS protection (Content Security Policy headers)
 - [ ] Check that sensitive operations require re-authentication
 - [ ] Ensure client-side routing doesn't expose unauthorized pages
 - [x] Verify secure cookie settings (HttpOnly, Secure, SameSite)
-- [ ] Check that sensitive data isn't stored in localStorage
+- [x] Check that sensitive data isn't stored in localStorage
 - [ ] Implement subresource integrity for external scripts
 
 ---

