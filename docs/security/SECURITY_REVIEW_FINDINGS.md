@@ -15,7 +15,7 @@ Completed:
 - Per‑instance Kubernetes NetworkPolicy; backend RBAC scoped to namespace with RoleBinding
 - Multi‑tenancy: added account_id + RLS for webhook_events and payments; handlers validate ownership; tests added
 
-Remaining (low priority):
+Remaining (high priority):
 - Verify etcd encryption at rest (K8s Secrets already implemented with file mounts)
 - Monitoring and incident response: alerts for failed auth/admin actions; incident playbook; security@ and security.txt
 - Internal TLS: evaluate mTLS/service mesh for in‑cluster traffic

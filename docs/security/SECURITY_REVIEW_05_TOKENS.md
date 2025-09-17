@@ -233,6 +233,8 @@ if token in _auth_cache:
 
 ## Remediation Roadmap
 
+> **Status Note (September 17, 2025):** Items 1, 3, and 4 below have been executed (rate limiting, security headers, algorithm checks). They remain documented here for traceability. Focus upcoming work on token cache hardening, monitoring, and rotation metrics.
+
 ### Critical Priority (Immediate)
 
 #### 1. Implement Rate Limiting

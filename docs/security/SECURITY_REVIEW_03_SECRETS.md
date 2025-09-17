@@ -2,26 +2,23 @@
 
 ## Executive Summary
 
-**Overall Status: PASS – K8s Secrets implemented, git history cleaned**
-**Updated:** September 16, 2025
+**Overall Status: PARTIAL – K8s Secrets implemented; rotation & encryption verification pending**
+**Updated:** September 17, 2025
 
 Defaults in tracked configs have been removed and Helm templates now generate strong secrets when not provided. K8s Secrets are already properly implemented using secure file-based mounts at `/etc/secrets`. The only remaining item is to confirm etcd encryption at rest (usually enabled by default on cloud providers). If any secrets were ever exposed externally (e.g., in past commits or logs), they must be rotated.
 
 ## Checklist Results
 
-### 1. ✅ Scan repository for hardcoded API keys and secrets
-**Status: COMPLETED – Git history scanned and documented**
+### 1. ⚠️ Scan repository for hardcoded API keys and secrets
+**Status: INCOMPLETE – Helper scripts exist, but a fresh scan/report is still required**
 
-**September 15, 2025 Update:**
-- ✅ Scanned full git history - 3 keys found in security docs
-- ✅ Created rotation script (`scripts/rotate-exposed-keys.sh`)
-- ✅ Documented in `P0_2_SECRET_ROTATION_REPORT.md`
-- Keys identified: Deepseek API, Google API, OpenRouter API (partial)
+**September 17, 2025 Status:**
+- ✅ Manual review caught three keys in docs (DeepSeek, Google, OpenRouter).
+- ⚠️ No evidence of a full trufflehog/gitleaks run in repo history.
+- ⚠️ No `P0_2_SECRET_ROTATION_REPORT.md` or equivalent artefact present.
+- ✅ `.env` ignored; templates populate strong defaults.
 
-Findings in current repository:
-- `.env` is not tracked; `.env.example` contains placeholders
-- No hardcoded API keys in active code
-- Helm values default to empty; strong random defaults generated in templates
+**Next actions:** Run a full secret scan (`trufflehog` or `gitleaks`) and archive results; track rotation of any findings.
 
 ### 2. ✅ Verify .env files are properly gitignored and never committed
 **Status: PASS – .env is gitignored; verify history**
@@ -31,13 +28,10 @@ Action: Ensure `.env` and other secret files were never committed; if they were,
 ### 3. ✅ Check that production secrets are stored securely
 **Status: PASS - K8s Secrets properly implemented with file mounts**
 
-**September 16, 2025 Update:**
-- ✅ Git history cleaned of exposed secrets
-- ✅ Rotation procedure documented
-- ✅ K8s Secrets ALREADY IMPLEMENTED - mounted as files at `/etc/secrets`
-- ✅ File permissions set to 0400 (read-only by owner)
-- ✅ Application reads via `_get_secret()` with file fallback
-- ⚠️ Etcd encryption verification pending (low priority)
+**September 17, 2025 Update:**
+- ✅ Secrets provided via Kubernetes Secret volumes and `_get_secret()` fallback
+- ✅ Secret files mounted read-only (0400)
+- ⚠️ Need documented rotation run + etcd encryption verification
 
 ### 4. ⚠️ Ensure Kubernetes secrets are properly encrypted at rest
 **Status: PARTIAL – Implementation to be confirmed**
@@ -91,33 +85,18 @@ Notes:
 
 ## Risk Assessment
 
-### Critical/High Risks
+### Critical/High Risks (September 17, 2025)
 
-1. Secrets lifecycle and storage – Severity: LOW (mostly complete)
-   - ✅ K8s Secrets already implemented with secure file mounts
-   - ✅ Secrets mounted at `/etc/secrets` with proper permissions
-   - ✅ Application reads secrets securely via file system
-   - ⚠️ Only need to confirm etcd encryption (usually enabled by default)
-   - **UPDATE**: Helper scripts created for API key rotation (`scripts/rotate-api-keys.sh`, `scripts/apply-rotated-keys.sh`)
+1. **Secrets lifecycle verification** – Severity: HIGH
+   - Helper scripts exist, but no recorded rotation run or provider confirmation.
+   - Etcd-at-rest encryption for managed clusters still unverified.
 
-2. Historical exposure risk – Severity: HIGH (if applicable)
-   - If secrets were ever checked into history or logs, rotate and purge
-   - **UPDATE**: Git history cleanup script created (`scripts/clean-git-history.sh`)
+2. **Historical exposure follow-up** – Severity: HIGH
+   - Keys previously present in docs; must ensure upstream rotation + purge.
+   - Maintain `scripts/clean-git-history.sh`, but verify it has been executed on any public mirrors.
 
-3. Default passwords – Severity: RESOLVED
-   - Defaults removed in tracked configs; continue to enforce strong secrets at deploy time
-
-### High Risks
-
-4. **Matrix Signing Key Exposure** - Severity: HIGH
-   - Cryptographic key committed to repository
-   - Compromises Matrix federation security
-   - Could allow message spoofing
-
-5. **Credential Files in Data Directory** - Severity: HIGH
-   - JSON files containing full API keys
-   - No encryption at rest
-   - Accessible to anyone with file system access
+3. **Default credentials** – Severity: RESOLVED
+   - Helm/Compose configs now require explicit secrets; keep validation in CI.
 
 ## Remediation Plan
 
@@ -298,12 +277,11 @@ def log_credential_access(service: str, action: str, user: str):
 
 ## Conclusion
 
-The MindRoom project has critical secret management vulnerabilities that require immediate remediation. The presence of production API keys in version control and default passwords in production configurations poses significant security risks.
+Secret handling has improved substantially (K8s secrets, `_get_secret`, default credential removal). The remaining work centres on **verifying** the lifecycle controls: execute/document key rotation, confirm etcd encryption, and automate secret scanning in CI. Treat these items as pre-launch requirements.
 
-**Priority Actions:**
-1. Immediately revoke all exposed API keys
-2. Remove .env file from git history
-3. Replace all default passwords
-4. Implement proper encrypted secret storage
+**Immediate Focus:**
+1. Run and document the API key rotation scripts; confirm provider revocation.
+2. Perform a fresh repo-wide secret scan (trufflehog/gitleaks) and archive results.
+3. Verify etcd-at-rest encryption (or enable it) for the target production cluster.
 
-This review should be followed by implementation of comprehensive secret management practices and regular security audits to prevent similar issues in the future.
+Continue periodic audits to ensure future changes do not reintroduce default credentials or secret leakage.

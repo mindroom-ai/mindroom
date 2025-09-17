@@ -1,8 +1,8 @@
 # Critical Security Fixes for Production Release
 
 **Created:** 2025-01-16
-**Updated:** 2025-09-16 (K8s Secrets Already Implemented)
-**Status:** ✅ P0 COMPLETE | ✅ P1.1 COMPLETE | ✅ P1.2 COMPLETE
+**Updated:** 2025-09-17 (Post-doc audit)
+**Status:** P0 🟢 (follow-up pending) | P1.1 🟢 | P1.2 ⚠️ (secrets lifecycle verification outstanding)
 
 ## Priority System
 - **P0**: Legal/Regulatory blockers - Fix IMMEDIATELY
@@ -14,13 +14,13 @@
 ## 🚨 P0: Legal & Regulatory Blockers
 
 ### 1. PII Encryption & Data Protection
-**Status:** ✅ COMPLETED
+**Status:** ⚠️ PARTIAL
 **Files:** Database schema, logging throughout codebase
 **Issues RESOLVED:**
 - ✅ Sensitive data in logs: Sanitized via log_sanitizer.py
-- ✅ GDPR compliance: Full export/delete/consent endpoints
+- ✅ GDPR flows: Export/delete/consent endpoints live with tests
 - ✅ Soft delete: 7-day grace period implemented
-- ⚠️ PII encryption: Deferred (not critical for MVP)
+- ⚠️ PII encryption: Application-level encryption & storage-at-rest verification still pending
 
 **Implementation:**
 1. ✅ Removed all sensitive logging (frontend & backend)
@@ -29,12 +29,13 @@
 4. ✅ Simple, direct implementation following KISS
 
 ### 2. Exposed Secrets & API Keys
-**Status:** ✅ IDENTIFIED & DOCUMENTED
+**Status:** ⚠️ IN PROGRESS
 **Files:** `.env`, git history
 **Issues RESOLVED:**
-- ✅ Git history scanned: 3 keys found in docs
-- ✅ Rotation script created: rotate-exposed-keys.sh
-- ✅ Report generated: P0_2_SECRET_ROTATION_REPORT.md
+- ✅ Git history scan identified 3 keys in docs (DeepSeek, Google, OpenRouter)
+- ✅ Helper scripts available: `scripts/rotate-api-keys.sh` + `scripts/apply-rotated-keys.sh`
+- ⚠️ Pending: Execute rotation and capture evidence (no rotation report on disk)
+- ⚠️ Pending: Confirm leaked keys revoked upstream
 
 **Implementation:**
 1. ✅ Checked git history for secrets
@@ -45,12 +46,14 @@
 
 ## 🔴 P1: Security Blind Spots
 
-### 3. Zero Security Monitoring
-**Status:** ✅ P1.1 COMPLETED
+### 3. Security Monitoring & Alerting
+**Status:** ⚠️ PARTIAL
 **Issues RESOLVED:**
-- ✅ Attack detection: IP-based failure tracking
+- ✅ Attack detection: IP-based failure tracking with auto-blocking
 - ✅ Auth failure tracking: In-memory with auto-blocking
-- ✅ Audit logging: All auth events logged
+- ✅ Audit logging: Auth events recorded via `create_audit_log`
+- ⚠️ Alerting & dashboards: Not yet configured (logs only)
+- ⚠️ Incident response: Playbook + disclosure channels outstanding
 
 **Implementation:**
 1. ✅ Simple module-level functions (no classes)
@@ -59,10 +62,11 @@
 4. ⏳ Incident response docs (not critical)
 
 ### 4. Critical Secrets Management
-**Status:** ✅ P1.2 COMPLETED
+**Status:** ⚠️ PARTIAL
 **Issues RESOLVED:**
-- ✅ K8s Secrets already implemented with file mounts
-- ✅ Rotation procedure documented
+- ✅ K8s Secrets implemented with read-only file mounts
+- ⚠️ Rotation run + documentation outstanding
+- ⚠️ Etcd-at-rest encryption not yet verified
 
 **Implementation:**
 1. ✅ Secrets stored in K8s Secret objects (`secret-api-keys.yaml`)
@@ -120,22 +124,20 @@
 
 ---
 
-## Success Criteria - ACHIEVED ✅
+## Success Criteria - STATUS
 - ✅ No PII in logs (sanitization implemented)
-- ✅ GDPR export/delete works (full compliance)
-- ✅ Auth failures are tracked (IP-based blocking)
-- ✅ Secrets are documented and rotation scripted
-- ✅ Comprehensive security monitoring exists
+- ✅ GDPR export/delete/consent endpoints functional (tests cover happy paths)
+- ✅ Auth failures are tracked with IP-based blocking and audit logging
+- ⚠️ Secrets rotation still requires an executed run + evidence
+- ⚠️ Comprehensive monitoring/alerting not yet in place
 
-## Risk Reduction Achieved
-- **Initial Assessment:** 6.8/10 (HIGH) - Multiple critical vulnerabilities
-- **After P0/P1.1 Implementation:** 2.5/10 (LOW) - Production ready
-- **Security Posture:** STRONG - All critical controls in place
-- **Production Ready:** ✅ YES - Ready for immediate deployment
+## Risk Reduction Summary
+- **Initial Assessment:** 6.8/10 (HIGH)
+- **Current Estimate:** 5.8/10 (MEDIUM-HIGH) after P0/P1.1 hardening
+- **Outstanding:** Secrets lifecycle verification, alerting/IR, pod hardening, dependency automation
+- **Production Ready:** ❌ No – maintain staging-only access until outstanding items close
 
 ## Implementation Philosophy
-- **KISS Principle:** Simple module functions, no classes
-- **No Over-Engineering:** Removed timing attacks, defensive code
-- **Direct Implementation:** Minimal abstractions
-- **Error Handling:** Only where failures are acceptable
-- **~300 lines of cruft removed** during simplification
+- **KISS Principle:** Prefer straightforward modules (e.g., `auth_monitor.py`)
+- **Pragmatism:** Focus remediation on demonstrated gaps first (admin auth, rate limiting)
+- **Iterative Hardening:** Track remaining items openly instead of glossing over gaps
