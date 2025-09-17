@@ -52,6 +52,47 @@ export async function setupAccount() {
   return response.json()
 }
 
+// GDPR Endpoints
+export async function exportUserData() {
+  const response = await apiCall('/my/gdpr/export-data')
+  if (!response.ok) {
+    const error = await response.text()
+    throw new Error(error || 'Failed to export data')
+  }
+  return response.json()
+}
+
+export async function requestAccountDeletion(confirmation: boolean = false) {
+  const url = confirmation ? '/my/gdpr/request-deletion?confirmation=true' : '/my/gdpr/request-deletion'
+  const response = await apiCall(url, { method: 'POST' })
+  if (!response.ok) {
+    const error = await response.text()
+    throw new Error(error || 'Failed to request deletion')
+  }
+  return response.json()
+}
+
+export async function cancelAccountDeletion() {
+  const response = await apiCall('/my/gdpr/cancel-deletion', { method: 'POST' })
+  if (!response.ok) {
+    const error = await response.text()
+    throw new Error(error || 'Failed to cancel deletion')
+  }
+  return response.json()
+}
+
+export async function updateConsent(marketing: boolean, analytics: boolean) {
+  const response = await apiCall(
+    `/my/gdpr/consent?marketing=${marketing}&analytics=${analytics}`,
+    { method: 'POST' }
+  )
+  if (!response.ok) {
+    const error = await response.text()
+    throw new Error(error || 'Failed to update consent')
+  }
+  return response.json()
+}
+
 // Instance Management
 export async function listInstances() {
   const response = await apiCall('/my/instances')

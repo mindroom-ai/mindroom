@@ -71,32 +71,24 @@ async def export_user_data(user: Annotated[dict, Depends(verify_user)]) -> dict[
         "payments": payments,
         "data_processing_purposes": [
             "Service provision and operation",
-            "Billing and payment processing",
-            "Customer support",
-            "Legal compliance",
+            "Billing and payment processing (only during active subscription)",
             "Security and fraud prevention",
         ],
         "data_retention_periods": {
-            "account_data": "7 years from account closure",
-            "usage_metrics": "3 years from generation",
-            "audit_logs": "7 years from creation",
-            "payment_data": "7 years for tax compliance",
+            "personal_data": "Deleted immediately when you close your account",
+            "payment_info": "We don't store payment details - Stripe handles this",
+            "invoices": "Invoice numbers only (anonymized) for tax compliance",
         },
         "third_party_processors": [
             {
                 "name": "Stripe",
                 "purpose": "Payment processing",
-                "data_shared": "Email, payment details",
+                "data_shared": "Email only (payment details go directly to Stripe)",
             },
             {
                 "name": "Supabase",
-                "purpose": "Database and authentication",
-                "data_shared": "All user data",
-            },
-            {
-                "name": "Kubernetes/Cloud Provider",
-                "purpose": "Infrastructure hosting",
-                "data_shared": "Instance configurations",
+                "purpose": "Database hosting",
+                "data_shared": "Account and instance data",
             },
         ],
     }
@@ -133,8 +125,9 @@ async def request_account_deletion(
         }
     ).execute()
 
-    # Use soft delete function for GDPR compliance
-    # This provides a 30-day grace period before hard deletion
+    # Use soft delete with SHORT grace period for accidental deletion recovery only
+    # After grace period, ALL personal data is permanently deleted
+    # Only anonymized invoice records kept for tax compliance
     sb.rpc(
         "soft_delete_account",
         {"target_account_id": account_id, "reason": "gdpr_request", "requested_by": account_id},
@@ -143,9 +136,11 @@ async def request_account_deletion(
     return {
         "status": "deletion_scheduled",
         "message": "Your account has been scheduled for deletion",
-        "grace_period_days": 30,
-        "deletion_date": "Account will be deleted after 30 days",
-        "cancellation": "You can cancel this request by logging in within 30 days",
+        "grace_period_days": 7,  # Reduced from 30 - just enough for accident recovery
+        "deletion_date": "Account will be permanently deleted after 7 days",
+        "cancellation": "You can cancel this request by logging in within 7 days",
+        "data_deleted": "All personal data, instances, and usage history will be permanently deleted",
+        "data_retained": "Only anonymized invoice numbers retained for tax compliance (no personal info)",
     }
 
 
