@@ -1,4 +1,5 @@
 import { createClient } from '@/lib/supabase/client'
+import { logger } from './logger'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
@@ -24,9 +25,12 @@ export async function apiCall(
   } catch (error: any) {
     // Log the error but check if it's a cancellation
     if (error?.name === 'AbortError' || !error?.message) {
-      console.log(`Request cancelled: ${url}`)
+      logger.log(`Request cancelled: ${url}`)
+    } else if (error?.message?.includes('CORS') || error?.message?.includes('NetworkError')) {
+      logger.error(`CORS/Network error - Backend may need restart or CORS configuration: ${url}`, error)
+      throw new Error(`Cannot connect to backend. Please ensure the backend is running and CORS is configured for ${window.location.origin}`)
     } else {
-      console.error(`API call failed: ${url}`, error)
+      logger.error(`API call failed: ${url}`, error)
     }
     throw error
   }
@@ -47,6 +51,49 @@ export async function setupAccount() {
   if (!response.ok) {
     const error = await response.text()
     throw new Error(error || 'Failed to setup account')
+  }
+  return response.json()
+}
+
+// GDPR Endpoints
+export async function exportUserData() {
+  const response = await apiCall('/my/gdpr/export-data')
+  if (!response.ok) {
+    const error = await response.text()
+    throw new Error(error || 'Failed to export data')
+  }
+  return response.json()
+}
+
+export async function requestAccountDeletion(confirmation: boolean = false) {
+  const response = await apiCall('/my/gdpr/request-deletion', {
+    method: 'POST',
+    body: JSON.stringify({ confirmation })
+  })
+  if (!response.ok) {
+    const error = await response.text()
+    throw new Error(error || 'Failed to request deletion')
+  }
+  return response.json()
+}
+
+export async function cancelAccountDeletion() {
+  const response = await apiCall('/my/gdpr/cancel-deletion', { method: 'POST' })
+  if (!response.ok) {
+    const error = await response.text()
+    throw new Error(error || 'Failed to cancel deletion')
+  }
+  return response.json()
+}
+
+export async function updateConsent(marketing: boolean, analytics: boolean) {
+  const response = await apiCall('/my/gdpr/consent', {
+    method: 'POST',
+    body: JSON.stringify({ marketing, analytics })
+  })
+  if (!response.ok) {
+    const error = await response.text()
+    throw new Error(error || 'Failed to update consent')
   }
   return response.json()
 }

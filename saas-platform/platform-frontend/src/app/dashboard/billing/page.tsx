@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react'
 import { useSubscription } from '@/hooks/useSubscription'
 import { createPortalSession, getPricingConfig } from '@/lib/api'
+import { logger } from '@/lib/logger'
 import { PLAN_GRADIENTS, type PlanId } from '@/lib/pricing-config'
 import { DashboardLoader } from '@/components/dashboard/DashboardLoader'
 import { Loader2, CreditCard, TrendingUp, Check, RefreshCw } from 'lucide-react'
@@ -50,7 +51,7 @@ export default function BillingPage() {
   useEffect(() => {
     getPricingConfig()
       .then(setPricingConfig)
-      .catch(console.error)
+      .catch(logger.error)
       .finally(() => setPricingLoading(false))
   }, [])
 
@@ -75,7 +76,7 @@ export default function BillingPage() {
       const { url } = await createPortalSession()
       window.location.href = url
     } catch (error) {
-      console.error('Error opening Stripe portal:', error)
+      logger.error('Error opening Stripe portal:', error)
       setRedirecting(false)
     }
   }

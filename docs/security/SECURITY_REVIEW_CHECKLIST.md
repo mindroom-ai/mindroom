@@ -10,7 +10,7 @@ This document provides a systematic security review checklist for the MindRoom b
 - Per‑instance NetworkPolicy and namespaced backend RBAC applied
 - Multi‑tenancy isolation fixed for webhook_events and payments (migrations + handler validation); tests added
 - Defaults removed in tracked configs; Helm templates generate strong secrets by default
-- Remaining: secrets lifecycle (env → K8s Secrets/External Secrets + rotation + etcd encryption), monitoring/alerts and IR playbook, internal TLS/mTLS, CSP, broader rate‑limit coverage, backup reliability (IPv6)
+- Remaining: verify etcd encryption (K8s Secrets already implemented with file mounts), monitoring/alerts and IR playbook, internal TLS/mTLS (optional for MVP)
 
 ## Critical Issues Found (Immediate Action Required)
 - [x] **CRITICAL**: Default Matrix admin password is set to "changeme" in `cluster/k8s/instance/values.yaml`

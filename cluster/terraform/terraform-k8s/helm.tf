@@ -75,6 +75,10 @@ locals {
       google     = var.google_api_key
       deepseek   = var.deepseek_api_key
     }
+
+    cleanupScheduler = {
+      enabled = var.cleanup_scheduler_enabled
+    }
   }
 }
 

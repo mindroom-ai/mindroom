@@ -15,6 +15,7 @@ metadata:
 data:
   PLATFORM_DOMAIN: {{ .Values.domain }}
   ENVIRONMENT: {{ .Values.environment }}
+  ENABLE_CLEANUP_SCHEDULER: {{ .Values.cleanupScheduler.enabled | default "false" | quote }}
   SUPABASE_URL: {{ .Values.supabase.url | default "" | quote }}
   SUPABASE_ANON_KEY: {{ .Values.supabase.anonKey | default "" | quote }}
   STRIPE_PUBLISHABLE_KEY: {{ .Values.stripe.publishableKey | default "" | quote }}

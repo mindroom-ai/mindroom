@@ -58,3 +58,4 @@ Requires:
 - `SUPABASE_SERVICE_KEY` - Service role key for admin operations
 - `STRIPE_SECRET_KEY` - Stripe API key
 - `STRIPE_WEBHOOK_SECRET` - Webhook endpoint secret
+- Optional: `ENABLE_CLEANUP_SCHEDULER=true` to enable the daily GDPR cleanup job (runs at 03:00 UTC)

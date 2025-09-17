@@ -11,7 +11,11 @@ import {
   createCheckoutSession,
   createPortalSession,
   setSsoCookie,
-  clearSsoCookie
+  clearSsoCookie,
+  exportUserData,
+  requestAccountDeletion,
+  cancelAccountDeletion,
+  updateConsent
 } from '../api'
 import { createClient } from '../supabase/client'
 
@@ -469,6 +473,207 @@ describe('API Client', () => {
 
         // Should not throw
         await expect(clearSsoCookie()).resolves.toBeUndefined()
+      })
+    })
+  })
+
+  describe('GDPR Endpoints', () => {
+    describe('exportUserData', () => {
+      it('should export user data successfully', async () => {
+        const exportData = {
+          export_date: '2025-01-15T00:00:00Z',
+          account_id: 'acc-123',
+          personal_data: {
+            email: 'test@example.com',
+            full_name: 'Test User'
+          },
+          subscriptions: [],
+          instances: [],
+          data_retention_periods: {
+            personal_data: 'Deleted immediately when you close your account'
+          }
+        }
+        mockFetch.mockResolvedValueOnce(
+          new Response(JSON.stringify(exportData), { status: 200 })
+        )
+
+        const result = await exportUserData()
+
+        expect(mockFetch).toHaveBeenCalledWith(
+          'http://localhost:8000/my/gdpr/export-data',
+          expect.objectContaining({
+            headers: expect.objectContaining({
+              'Authorization': 'Bearer test-token-123'
+            })
+          })
+        )
+        expect(result).toEqual(exportData)
+      })
+
+      it('should handle export failure', async () => {
+        mockFetch.mockResolvedValueOnce(
+          new Response('Unauthorized', { status: 401 })
+        )
+
+        await expect(exportUserData()).rejects.toThrow('Unauthorized')
+      })
+    })
+
+    describe('requestAccountDeletion', () => {
+      it('should request deletion without confirmation', async () => {
+        const response = {
+          status: 'confirmation_required',
+          message: 'Please confirm deletion by setting confirmation=true',
+          warning: 'This action cannot be undone.'
+        }
+        mockFetch.mockResolvedValueOnce(
+          new Response(JSON.stringify(response), { status: 200 })
+        )
+
+        const result = await requestAccountDeletion(false)
+
+        expect(mockFetch).toHaveBeenCalledWith(
+          'http://localhost:8000/my/gdpr/request-deletion',
+          expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ confirmation: false })
+          })
+        )
+        expect(result).toEqual(response)
+      })
+
+      it('should request deletion with confirmation', async () => {
+        const response = {
+          status: 'deletion_scheduled',
+          message: 'Your account has been scheduled for deletion',
+          grace_period_days: 7,
+          deletion_date: 'Account will be permanently deleted after 7 days'
+        }
+        mockFetch.mockResolvedValueOnce(
+          new Response(JSON.stringify(response), { status: 200 })
+        )
+
+        const result = await requestAccountDeletion(true)
+
+        expect(mockFetch).toHaveBeenCalledWith(
+          'http://localhost:8000/my/gdpr/request-deletion',
+          expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ confirmation: true })
+          })
+        )
+        expect(result).toEqual(response)
+      })
+
+      it('should handle deletion request failure', async () => {
+        mockFetch.mockResolvedValueOnce(
+          new Response('Server error', { status: 500 })
+        )
+
+        await expect(requestAccountDeletion(true)).rejects.toThrow('Server error')
+      })
+    })
+
+    describe('cancelAccountDeletion', () => {
+      it('should cancel deletion successfully', async () => {
+        const response = {
+          status: 'success',
+          message: 'Account deletion has been cancelled',
+          account_status: 'active'
+        }
+        mockFetch.mockResolvedValueOnce(
+          new Response(JSON.stringify(response), { status: 200 })
+        )
+
+        const result = await cancelAccountDeletion()
+
+        expect(mockFetch).toHaveBeenCalledWith(
+          'http://localhost:8000/my/gdpr/cancel-deletion',
+          expect.objectContaining({ method: 'POST' })
+        )
+        expect(result).toEqual(response)
+      })
+
+      it('should handle cancellation when no deletion pending', async () => {
+        const response = {
+          status: 'not_pending',
+          message: 'No deletion request found for this account'
+        }
+        mockFetch.mockResolvedValueOnce(
+          new Response(JSON.stringify(response), { status: 200 })
+        )
+
+        const result = await cancelAccountDeletion()
+        expect(result).toEqual(response)
+      })
+
+      it('should handle cancellation failure', async () => {
+        mockFetch.mockResolvedValueOnce(
+          new Response('Not authorized', { status: 403 })
+        )
+
+        await expect(cancelAccountDeletion()).rejects.toThrow('Not authorized')
+      })
+    })
+
+    describe('updateConsent', () => {
+      it('should update consent preferences successfully', async () => {
+        const response = {
+          status: 'success',
+          consent: {
+            marketing: true,
+            analytics: false,
+            essential: true
+          },
+          updated_at: '2025-01-15T00:00:00Z'
+        }
+        mockFetch.mockResolvedValueOnce(
+          new Response(JSON.stringify(response), { status: 200 })
+        )
+
+        const result = await updateConsent(true, false)
+
+        expect(mockFetch).toHaveBeenCalledWith(
+          'http://localhost:8000/my/gdpr/consent',
+          expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ marketing: true, analytics: false })
+          })
+        )
+        expect(result).toEqual(response)
+      })
+
+      it('should handle all consent combinations', async () => {
+        const testCases = [
+          { marketing: true, analytics: true },
+          { marketing: false, analytics: false },
+          { marketing: true, analytics: false },
+          { marketing: false, analytics: true }
+        ]
+
+        for (const { marketing, analytics } of testCases) {
+          mockFetch.mockResolvedValueOnce(
+            new Response('{}', { status: 200 })
+          )
+
+          await updateConsent(marketing, analytics)
+
+          expect(mockFetch).toHaveBeenLastCalledWith(
+            'http://localhost:8000/my/gdpr/consent',
+            expect.objectContaining({
+              method: 'POST',
+              body: JSON.stringify({ marketing, analytics })
+            })
+          )
+        }
+      })
+
+      it('should handle consent update failure', async () => {
+        mockFetch.mockResolvedValueOnce(
+          new Response('Database error', { status: 500 })
+        )
+
+        await expect(updateConsent(false, true)).rejects.toThrow('Database error')
       })
     })
   })

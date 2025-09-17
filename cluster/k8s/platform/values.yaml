@@ -9,6 +9,9 @@ imageTag: latest
 # Replicas
 replicas: 1
 
+cleanupScheduler:
+  enabled: "false"
+
 # These should be overridden in values-staging.yaml and values-prod.yaml
 supabase:
   url: ""

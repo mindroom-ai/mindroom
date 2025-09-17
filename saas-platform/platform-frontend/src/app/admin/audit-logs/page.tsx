@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { apiCall } from '@/lib/api'
+import { logger } from '@/lib/logger'
 
 interface AuditLog {
   id: string
@@ -34,10 +35,10 @@ export default function AuditLogsPage() {
           const data = await response.json()
           setLogs(data.data || [])
         } else {
-          console.error('Failed to fetch audit logs:', response.statusText)
+          logger.error('Failed to fetch audit logs:', response.statusText)
         }
       } catch (error) {
-        console.error('Error fetching audit logs:', error)
+        logger.error('Error fetching audit logs:', error)
       } finally {
         setLoading(false)
       }

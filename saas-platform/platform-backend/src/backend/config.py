@@ -15,6 +15,8 @@ import stripe
 from dotenv import load_dotenv
 from supabase import create_client
 
+from backend.utils.logger import logger
+
 # Load environment variables from saas-platform/.env
 # Use absolute path relative to this file's location
 config_dir = Path(__file__).parent
@@ -23,7 +25,6 @@ load_dotenv(saas_platform_env)
 
 # Configure logging once
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("mindroom.backend")
 
 
 def _get_secret(name: str, default: str = "") -> str:
@@ -62,6 +63,11 @@ else:
 # Platform configuration
 PLATFORM_DOMAIN = os.getenv("PLATFORM_DOMAIN", "mindroom.chat")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
+ENABLE_CLEANUP_SCHEDULER = os.getenv("ENABLE_CLEANUP_SCHEDULER", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 # Stripe configuration
 stripe.api_key = _get_secret("STRIPE_SECRET_KEY", "")
@@ -111,6 +117,7 @@ ALLOWED_ORIGINS = _build_allowed_origins(PLATFORM_DOMAIN, ENVIRONMENT)
 
 __all__ = [
     "ALLOWED_ORIGINS",
+    "ENABLE_CLEANUP_SCHEDULER",
     "ENVIRONMENT",
     "GITEA_TOKEN",
     "GITEA_USER",

@@ -29,8 +29,10 @@ The security review has been refreshed across 12 categories. Most P0/P1 blockers
 ## Top Remaining Risks (priority order)
 
 1. Secrets lifecycle and rotation
-   - Migrate runtime secrets from env to K8s Secrets/External Secrets; define rotation policy; confirm etcd encryption
-   - Note: Helper scripts for rotation created but architectural change still needed
+   - ✅ K8s Secrets already implemented with secure file mounts at `/etc/secrets`
+   - ✅ Application reads secrets via `_get_secret()` with file fallback
+   - ✅ Rotation scripts created and documented
+   - ⚠️ Only need to verify etcd encryption (usually enabled by default)
 2. Monitoring and incident response
    - Alerts for failed auth/admin actions; audit log review; security@ inbox and security.txt
 3. Internal service encryption

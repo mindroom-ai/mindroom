@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Button } from '@/components/ui/button'
 import { InstanceActions } from '@/components/admin/InstanceActions'
 import { apiCall } from '@/lib/api'
+import { logger } from '@/lib/logger'
 
 interface Instance {
   id: string
@@ -35,10 +36,10 @@ export default function InstancesPage() {
         // Generic admin list endpoint returns { data, total }
         setInstances(data.data || [])
       } else {
-        console.error('Failed to fetch instances:', response.statusText)
+        logger.error('Failed to fetch instances:', response.statusText)
       }
     } catch (error) {
-      console.error('Error fetching instances:', error)
+      logger.error('Error fetching instances:', error)
     } finally {
       setLoading(false)
     }
@@ -53,10 +54,10 @@ export default function InstancesPage() {
         // Refresh the instances list after sync
         await fetchInstances()
       } else {
-        console.error('Failed to sync instances')
+        logger.error('Failed to sync instances')
       }
     } catch (error) {
-      console.error('Failed to sync instances:', error)
+      logger.error('Failed to sync instances:', error)
     } finally {
       setSyncing(false)
     }

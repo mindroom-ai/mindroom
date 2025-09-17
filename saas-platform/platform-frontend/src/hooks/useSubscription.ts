@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { useAuth } from './useAuth'
 import { apiCall } from '@/lib/api'
 import { subscriptionCache } from '@/lib/cache'
+import { logger } from '@/lib/logger'
 
 export interface Subscription {
   id: string
@@ -56,10 +57,10 @@ export function useSubscription() {
         setSubscription(null)
         subscriptionCache.delete('user-subscription')
       } else {
-        console.error('Error fetching subscription:', response.statusText)
+        logger.error('Error fetching subscription:', response.statusText)
       }
     } catch (error) {
-      console.error('Error fetching subscription:', error)
+      logger.error('Error fetching subscription:', error)
     } finally {
       if (isInitial) {
         setLoading(false)

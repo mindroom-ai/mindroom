@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Button } from '@/components/ui/button'
 import { ArrowLeft, User, Mail, Building, Calendar, Shield } from 'lucide-react'
 import { apiCall } from '@/lib/api'
+import { logger } from '@/lib/logger'
 
 interface AccountDetails {
   id: string
@@ -45,10 +46,10 @@ export default function AccountDetailsPage() {
           const data = await response.json()
           setAccount(data)
         } else {
-          console.error('Failed to fetch account:', response.statusText)
+          logger.error('Failed to fetch account:', response.statusText)
         }
       } catch (error) {
-        console.error('Error fetching account:', error)
+        logger.error('Error fetching account:', error)
       } finally {
         setLoading(false)
       }

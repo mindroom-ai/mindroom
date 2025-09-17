@@ -117,24 +117,22 @@ def check_migrations() -> list[tuple[bool, str]]:
 
     migrations_dir = Path(__file__).parent.parent / "saas-platform" / "supabase" / "migrations"
 
-    expected_migrations = [
-        "001_fix_webhook_tenant_isolation.sql",
-        "002_fix_payments_tenant_isolation.sql",
-    ]
+    consolidated = migrations_dir / "000_consolidated_complete_schema.sql"
 
-    for migration in expected_migrations:
-        migration_file = migrations_dir / migration
-        if migration_file.exists():
-            results.append((True, f"✅ Migration {migration} exists"))
+    if consolidated.exists():
+        results.append((True, "✅ Consolidated schema migration exists"))
 
-            # Check migration content
-            content = migration_file.read_text()
-            if "account_id" in content and "RLS" in content:
-                results.append((True, "  ✓ Contains account_id and RLS policies"))
-            else:
-                results.append((False, "  ✗ Missing account_id or RLS policies"))
-        else:
-            results.append((False, f"❌ Migration {migration} not found"))
+        content = consolidated.read_text()
+        checks = {
+            "account_id column": "account_id" in content,
+            "RLS policies": "CREATE POLICY" in content,
+            "soft delete functions": "soft_delete_account" in content,
+        }
+
+        for name, passed in checks.items():
+            results.append((passed, f"  {'✓' if passed else '✗'} Contains {name}"))
+    else:
+        results.append((False, "❌ Consolidated schema migration not found"))
 
     return results
 

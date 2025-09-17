@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Button } from '@/components/ui/button'
 import { apiCall } from '@/lib/api'
+import { logger } from '@/lib/logger'
 
 interface Subscription {
   id: string
@@ -34,10 +35,10 @@ export default function SubscriptionsPage() {
           // Generic admin list endpoint returns { data, total }
           setSubscriptions(data.data || [])
         } else {
-          console.error('Failed to fetch subscriptions:', response.statusText)
+          logger.error('Failed to fetch subscriptions:', response.statusText)
         }
       } catch (error) {
-        console.error('Error fetching subscriptions:', error)
+        logger.error('Error fetching subscriptions:', error)
       } finally {
         setLoading(false)
       }

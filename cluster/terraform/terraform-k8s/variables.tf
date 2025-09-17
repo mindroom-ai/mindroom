@@ -129,6 +129,12 @@ variable "image_tag" {
   default     = "latest"
 }
 
+variable "cleanup_scheduler_enabled" {
+  description = "Whether the cleanup scheduler should run (true/false)"
+  type        = string
+  default     = "false"
+}
+
 # API Keys for AI Models
 variable "openai_api_key" {
   description = "OpenAI API key for MindRoom instances"

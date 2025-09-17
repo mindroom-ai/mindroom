@@ -1,8 +1,10 @@
--- MindRoom SaaS Platform - Fixed Consolidated Schema
--- This migration creates a properly linked schema where accounts.id = auth.users.id
--- ensuring perfect synchronization between authentication and application data
+-- MindRoom SaaS Platform - Complete Consolidated Schema
+-- This single migration file contains all schema definitions and security fixes
+-- Use this for fresh installations or complete resets
 --
 -- IMPORTANT: Service role keys automatically bypass RLS - no policies needed for them!
+-- Date: 2025-09-16
+-- Consolidates: 000_complete_schema + all security fixes + soft delete
 
 -- ============================================================================
 -- EXTENSIONS
@@ -32,6 +34,18 @@ CREATE TABLE accounts (
     tier TEXT DEFAULT 'free' CHECK (tier IN ('free', 'starter', 'professional', 'enterprise')),
     is_admin BOOLEAN DEFAULT FALSE,
     status TEXT DEFAULT 'active', -- active, suspended, deleted, pending_verification
+
+    -- Soft delete support (GDPR compliance)
+    deleted_at TIMESTAMPTZ NULL,
+    deletion_reason TEXT NULL,
+    deletion_requested_by UUID NULL,
+    deletion_requested_at TIMESTAMPTZ NULL,
+
+    -- Consent tracking (GDPR)
+    consent_marketing BOOLEAN DEFAULT FALSE,
+    consent_analytics BOOLEAN DEFAULT FALSE,
+    consent_updated_at TIMESTAMPTZ NULL,
+
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -41,6 +55,7 @@ CREATE INDEX idx_accounts_stripe_customer_id ON accounts(stripe_customer_id);
 CREATE INDEX idx_accounts_is_admin ON accounts(is_admin) WHERE is_admin = TRUE;
 CREATE INDEX idx_accounts_status ON accounts(status);
 CREATE INDEX idx_accounts_tier ON accounts(tier);
+CREATE INDEX idx_accounts_deleted_at ON accounts(deleted_at);
 
 -- ============================================================================
 -- SUBSCRIPTIONS TABLE
@@ -106,6 +121,9 @@ CREATE TABLE instances (
     -- Configuration
     config JSONB DEFAULT '{}'::jsonb,
 
+    -- Kubernetes sync tracking
+    kubernetes_synced_at TIMESTAMPTZ,
+
     -- Lifecycle timestamps
     deprovisioned_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -117,6 +135,7 @@ CREATE INDEX idx_instances_subscription_id ON instances(subscription_id);
 CREATE INDEX idx_instances_status ON instances(status);
 CREATE INDEX idx_instances_subdomain ON instances(subdomain);
 CREATE INDEX idx_instances_instance_id ON instances(instance_id);
+CREATE INDEX idx_instances_kubernetes_synced_at ON instances(kubernetes_synced_at);
 
 -- ============================================================================
 -- USAGE METRICS TABLE
@@ -139,10 +158,11 @@ CREATE TABLE usage_metrics (
 CREATE INDEX idx_usage_metrics_subscription_date ON usage_metrics(subscription_id, metric_date DESC);
 
 -- ============================================================================
--- PAYMENTS TABLE
+-- PAYMENTS TABLE (with tenant isolation)
 -- ============================================================================
 CREATE TABLE payments (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    account_id UUID REFERENCES accounts(id), -- For tenant isolation
     invoice_id TEXT UNIQUE,
     subscription_id TEXT,
     customer_id TEXT,
@@ -154,12 +174,14 @@ CREATE TABLE payments (
 
 CREATE INDEX idx_payments_subscription_id ON payments(subscription_id);
 CREATE INDEX idx_payments_customer_id ON payments(customer_id);
+CREATE INDEX idx_payments_account_id ON payments(account_id);
 
 -- ============================================================================
--- WEBHOOK EVENTS TABLE
+-- WEBHOOK EVENTS TABLE (with tenant isolation)
 -- ============================================================================
 CREATE TABLE webhook_events (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    account_id UUID REFERENCES accounts(id), -- For tenant isolation
     stripe_event_id TEXT UNIQUE NOT NULL,
     event_type TEXT NOT NULL,
     payload JSONB NOT NULL,
@@ -170,6 +192,7 @@ CREATE TABLE webhook_events (
 
 CREATE INDEX idx_webhook_events_stripe_event_id ON webhook_events(stripe_event_id);
 CREATE INDEX idx_webhook_events_processed_at ON webhook_events(processed_at);
+CREATE INDEX idx_webhook_events_account_id ON webhook_events(account_id);
 
 -- ============================================================================
 -- AUDIT LOGS TABLE
@@ -192,6 +215,25 @@ CREATE INDEX idx_audit_logs_created_at ON audit_logs(created_at DESC);
 CREATE INDEX idx_audit_logs_action ON audit_logs(action);
 
 -- ============================================================================
+-- USAGE TABLE (for tracking)
+-- ============================================================================
+CREATE TABLE usage (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    subscription_id UUID REFERENCES subscriptions(id) ON DELETE CASCADE,
+    instance_id INTEGER,
+    metric_type TEXT NOT NULL,
+    value DECIMAL(20,2) NOT NULL,
+    unit TEXT,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    recorded_at TIMESTAMPTZ DEFAULT NOW(),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_usage_subscription_id ON usage(subscription_id);
+CREATE INDEX idx_usage_instance_id ON usage(instance_id);
+CREATE INDEX idx_usage_recorded_at ON usage(recorded_at DESC);
+
+-- ============================================================================
 -- UPDATE TRIGGERS
 -- ============================================================================
 CREATE OR REPLACE FUNCTION update_updated_at_column()
@@ -200,7 +242,7 @@ BEGIN
     NEW.updated_at = NOW();
     RETURN NEW;
 END;
-$$ language 'plpgsql';
+$$ LANGUAGE plpgsql;
 
 CREATE TRIGGER update_accounts_updated_at BEFORE UPDATE ON accounts
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
@@ -222,15 +264,15 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-DROP TRIGGER IF EXISTS trg_set_subdomain_from_instance_id ON instances;
 CREATE TRIGGER trg_set_subdomain_from_instance_id
 BEFORE INSERT ON instances
-FOR EACH ROW EXECUTE PROCEDURE set_subdomain_from_instance_id();
+FOR EACH ROW EXECUTE FUNCTION set_subdomain_from_instance_id();
 
 -- ============================================================================
--- AUTOMATIC ACCOUNT CREATION ON SIGNUP
+-- HELPER FUNCTIONS
 -- ============================================================================
--- This function automatically creates an account record when a new user signs up
+
+-- Function to automatically create an account record when a new user signs up
 CREATE OR REPLACE FUNCTION handle_new_user()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -243,35 +285,157 @@ BEGIN
     );
     RETURN NEW;
 END;
-$$ language 'plpgsql' SECURITY DEFINER;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
 
--- Ensure existing trigger is removed to avoid conflicts on re-apply
-DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
 -- Trigger that fires when a new user is created in auth.users
 CREATE TRIGGER on_auth_user_created
     AFTER INSERT ON auth.users
     FOR EACH ROW EXECUTE FUNCTION handle_new_user();
 
--- ============================================================================
--- ADMIN CHECK FUNCTION (to avoid recursion in RLS policies)
--- ============================================================================
+-- Function to check if current user is admin
 CREATE OR REPLACE FUNCTION is_admin()
-RETURNS boolean AS $$
+RETURNS BOOLEAN AS $$
 BEGIN
-    -- Use SECURITY DEFINER to bypass RLS when checking admin status
     RETURN EXISTS (
         SELECT 1 FROM accounts
         WHERE id = auth.uid()
         AND is_admin = TRUE
+        AND deleted_at IS NULL
+    );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Function to get current account_id
+CREATE OR REPLACE FUNCTION get_current_account_id()
+RETURNS UUID AS $$
+BEGIN
+    RETURN auth.uid();
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- ============================================================================
+-- SOFT DELETE FUNCTIONS (GDPR Compliance)
+-- ============================================================================
+
+-- Soft delete function for accounts
+CREATE OR REPLACE FUNCTION soft_delete_account(
+    target_account_id UUID,
+    reason TEXT DEFAULT 'user_request',
+    requested_by UUID DEFAULT NULL
+) RETURNS VOID AS $$
+BEGIN
+    -- Mark account as deleted
+    UPDATE accounts
+    SET
+        deleted_at = NOW(),
+        deletion_reason = reason,
+        deletion_requested_by = COALESCE(requested_by, target_account_id),
+        deletion_requested_at = NOW(),
+        status = 'deleted',
+        updated_at = NOW()
+    WHERE id = target_account_id
+    AND deleted_at IS NULL;
+
+    -- Log the deletion
+    INSERT INTO audit_logs (account_id, action, resource_type, resource_id, details, success)
+    VALUES (
+        target_account_id,
+        'gdpr_deletion_scheduled',
+        'account',
+        target_account_id::text,
+        jsonb_build_object(
+            'reason', reason,
+            'requested_by', COALESCE(requested_by, target_account_id)
+        ),
+        TRUE
+    );
+
+    -- Mark related data while avoiding unnecessary churn
+    UPDATE subscriptions
+    SET status = 'cancelled', updated_at = NOW()
+    WHERE account_id = target_account_id
+    AND status != 'cancelled';
+
+    UPDATE instances
+    SET status = 'deprovisioned', updated_at = NOW()
+    WHERE account_id = target_account_id
+    AND status NOT IN ('deprovisioned', 'stopped');
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Restore function (for accidental deletions within grace period)
+CREATE OR REPLACE FUNCTION restore_account(
+    target_account_id UUID
+) RETURNS VOID AS $$
+BEGIN
+    -- Restore account
+    UPDATE accounts
+    SET
+        deleted_at = NULL,
+        deletion_reason = NULL,
+        deletion_requested_by = NULL,
+        deletion_requested_at = NULL,
+        status = 'active',
+        updated_at = NOW()
+    WHERE id = target_account_id
+    AND deleted_at IS NOT NULL;
+
+    -- Restore related data that was cancelled/deprovisioned during soft delete
+    UPDATE subscriptions
+    SET
+        status = 'active',
+        updated_at = NOW()
+    WHERE account_id = target_account_id
+    AND status = 'cancelled';
+
+    UPDATE instances
+    SET
+        status = 'running',
+        updated_at = NOW()
+    WHERE account_id = target_account_id
+    AND status = 'deprovisioned';
+
+    -- Audit log entry
+    INSERT INTO audit_logs (account_id, action, resource_type, resource_id, details, success)
+    VALUES (
+        target_account_id,
+        'gdpr_deletion_cancelled',
+        'account',
+        target_account_id::text,
+        jsonb_build_object('status', 'restored'),
+        TRUE
+    );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Hard delete function (for permanent deletion after grace period)
+CREATE OR REPLACE FUNCTION hard_delete_account(
+    target_account_id UUID
+) RETURNS VOID AS $$
+BEGIN
+    -- Delete related data (cascade will handle most)
+    DELETE FROM instances WHERE account_id = target_account_id;
+    DELETE FROM subscriptions WHERE account_id = target_account_id;
+    DELETE FROM audit_logs WHERE account_id = target_account_id;
+
+    -- Finally delete the account
+    DELETE FROM accounts WHERE id = target_account_id;
+
+    -- Audit entry for hard delete (system action)
+    INSERT INTO audit_logs (action, resource_type, resource_id, details, success)
+    VALUES (
+        'gdpr_account_hard_deleted',
+        'account',
+        target_account_id::text,
+        jsonb_build_object('source', 'hard_delete_account'),
+        TRUE
     );
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
 -- ============================================================================
--- ROW LEVEL SECURITY POLICIES
+-- ROW LEVEL SECURITY (RLS)
 -- ============================================================================
--- IMPORTANT: Service role keys automatically bypass RLS - DO NOT create policies for them!
--- The service_role key uses BYPASSRLS attribute and will skip all policies.
 
 -- Enable RLS on all tables
 ALTER TABLE accounts ENABLE ROW LEVEL SECURITY;
@@ -281,18 +445,22 @@ ALTER TABLE usage_metrics ENABLE ROW LEVEL SECURITY;
 ALTER TABLE payments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE webhook_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE usage ENABLE ROW LEVEL SECURITY;
 
 -- ============================================================================
--- USER POLICIES
+-- RLS POLICIES
 -- ============================================================================
 
 -- Accounts table policies
-CREATE POLICY "Users can view own account" ON accounts
-    FOR SELECT USING (auth.uid() = id OR is_admin());
+CREATE POLICY "Users can view own active account" ON accounts
+    FOR SELECT USING (auth.uid() = id AND deleted_at IS NULL);
 
 CREATE POLICY "Users can update own account" ON accounts
-    FOR UPDATE USING (auth.uid() = id)
-    WITH CHECK (auth.uid() = id AND NOT is_admin); -- Prevent users from making themselves admin
+    FOR UPDATE USING (auth.uid() = id AND deleted_at IS NULL)
+    WITH CHECK (auth.uid() = id AND deleted_at IS NULL);
+
+CREATE POLICY "Service role bypass" ON accounts
+    FOR ALL USING (auth.jwt()->>'role' = 'service_role');
 
 -- Subscriptions table policies
 CREATE POLICY "Users can view own subscriptions" ON subscriptions
@@ -306,17 +474,24 @@ CREATE POLICY "Users can view own instances" ON instances
         is_admin()
     );
 
--- Usage metrics table policies
+-- Usage metrics - users can view their own
 CREATE POLICY "Users can view own usage" ON usage_metrics
     FOR SELECT USING (
         subscription_id IN (SELECT id FROM subscriptions WHERE account_id = auth.uid()) OR
         is_admin()
     );
 
--- Payments table policies
+-- Payments table policies (with account_id for better isolation)
 CREATE POLICY "Users can view own payments" ON payments
     FOR SELECT USING (
-        customer_id IN (SELECT stripe_customer_id FROM accounts WHERE id = auth.uid()) OR
+        account_id = auth.uid() OR
+        is_admin()
+    );
+
+-- Webhook events - users can view their own
+CREATE POLICY "Users can view own webhook events" ON webhook_events
+    FOR SELECT USING (
+        account_id = auth.uid() OR
         is_admin()
     );
 
@@ -324,7 +499,12 @@ CREATE POLICY "Users can view own payments" ON payments
 CREATE POLICY "Only admins can view audit logs" ON audit_logs
     FOR SELECT USING (is_admin());
 
--- Webhook events - only service role can access (no policy needed, service role bypasses RLS)
+-- Usage table - users can view their own
+CREATE POLICY "Users can view own usage data" ON usage
+    FOR SELECT USING (
+        subscription_id IN (SELECT id FROM subscriptions WHERE account_id = auth.uid()) OR
+        is_admin()
+    );
 
 -- ============================================================================
 -- ADMIN POLICIES
@@ -341,7 +521,7 @@ CREATE POLICY "Admins can update subscriptions" ON subscriptions
     WITH CHECK (is_admin());
 
 CREATE POLICY "Admins can insert subscriptions" ON subscriptions
-    FOR INSERT WITH CHECK (is_admin());
+    FOR INSERT WITH CHECK (is_admin() OR auth.jwt()->>'role' = 'service_role');
 
 CREATE POLICY "Admins can delete subscriptions" ON subscriptions
     FOR DELETE USING (is_admin());
@@ -352,54 +532,82 @@ CREATE POLICY "Admins can update instances" ON instances
     WITH CHECK (is_admin());
 
 CREATE POLICY "Admins can insert instances" ON instances
-    FOR INSERT WITH CHECK (is_admin());
+    FOR INSERT WITH CHECK (is_admin() OR auth.jwt()->>'role' = 'service_role');
 
 CREATE POLICY "Admins can delete instances" ON instances
     FOR DELETE USING (is_admin());
 
+-- Admins can manage all payments
+CREATE POLICY "Admins can manage all payments" ON payments
+    FOR ALL USING (is_admin())
+    WITH CHECK (is_admin());
+
+-- Admins can manage all webhook events
+CREATE POLICY "Admins can manage all webhook events" ON webhook_events
+    FOR ALL USING (is_admin())
+    WITH CHECK (is_admin());
+
+GRANT EXECUTE ON FUNCTION soft_delete_account TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION restore_account TO service_role;
+GRANT EXECUTE ON FUNCTION hard_delete_account TO service_role;
+
+GRANT ALL ON TABLE accounts TO service_role;
+GRANT ALL ON TABLE subscriptions TO service_role;
+GRANT ALL ON TABLE instances TO service_role;
+GRANT ALL ON TABLE usage_metrics TO service_role;
+GRANT ALL ON TABLE payments TO service_role;
+GRANT ALL ON TABLE webhook_events TO service_role;
+GRANT ALL ON TABLE audit_logs TO service_role;
+GRANT ALL ON TABLE usage TO service_role;
+
+-- Grant sequence permissions (required for instance_id generation)
+-- Only USAGE is required for nextval(), SELECT allows currval()
+GRANT USAGE, SELECT ON SEQUENCE instance_id_seq TO authenticated;
+GRANT USAGE ON SEQUENCE instance_id_seq TO anon;  -- anon doesn't need UPDATE
+GRANT USAGE, SELECT, UPDATE ON SEQUENCE instance_id_seq TO service_role;  -- service role needs full access
+
+-- Helper to run privileged SQL via service role (used by tooling scripts)
+CREATE OR REPLACE FUNCTION exec_sql(query TEXT)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+    EXECUTE query;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION exec_sql(TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION exec_sql(TEXT) TO service_role;
+
+GRANT SELECT, INSERT, UPDATE ON TABLE accounts TO authenticated;
+GRANT SELECT, INSERT, UPDATE ON TABLE subscriptions TO authenticated;
+GRANT SELECT, INSERT, UPDATE ON TABLE instances TO authenticated;
+
+GRANT SELECT ON TABLE accounts TO anon;
+GRANT SELECT ON TABLE subscriptions TO anon;
+GRANT SELECT ON TABLE instances TO anon;
+GRANT SELECT ON TABLE usage_metrics TO anon;
+GRANT SELECT ON TABLE payments TO anon;
+GRANT SELECT ON TABLE webhook_events TO anon;
+
 -- ============================================================================
--- COMMENTS FOR DOCUMENTATION
+-- COMMENTS
 -- ============================================================================
-COMMENT ON TABLE accounts IS 'Customer accounts linked directly to auth.users by ID';
-COMMENT ON TABLE subscriptions IS 'Subscription records linked to accounts and Stripe billing';
-COMMENT ON TABLE instances IS 'MindRoom K8s instance deployments';
-COMMENT ON TABLE usage_metrics IS 'Daily usage metrics for billing and monitoring';
-COMMENT ON TABLE payments IS 'Payment records from Stripe';
-COMMENT ON TABLE webhook_events IS 'Stripe webhook event processing';
-COMMENT ON TABLE audit_logs IS 'Audit trail for significant events';
 
-COMMENT ON COLUMN accounts.id IS 'Same as auth.users.id for perfect linking';
-COMMENT ON COLUMN accounts.tier IS 'Account tier - determines features and limits';
-COMMENT ON COLUMN instances.instance_id IS 'Unique numeric identifier for the Kubernetes instance (e.g., 1, 2)';
-COMMENT ON COLUMN instances.config IS 'JSON configuration for the instance';
-COMMENT ON COLUMN accounts.is_admin IS 'Whether this account has admin privileges for the platform';
+COMMENT ON TABLE payments IS
+'Stores payment records from Stripe. Tenant-isolated via account_id and RLS policies.';
 
--- ============================================================================
--- GRANT PERMISSIONS TO SUPABASE ROLES
--- ============================================================================
--- CRITICAL: This must be done for tables created via SQL editor!
+COMMENT ON COLUMN payments.account_id IS
+'Account ID for tenant isolation. Required for all new payment records to ensure financial data segregation.';
 
--- Grant all permissions to service_role
-GRANT ALL ON ALL TABLES IN SCHEMA public TO service_role;
-GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO service_role;
-GRANT ALL ON ALL FUNCTIONS IN SCHEMA public TO service_role;
+COMMENT ON TABLE webhook_events IS
+'Stores Stripe webhook events. Service role can insert/update. Users can only view their own events via RLS.';
 
--- Grant appropriate permissions to anon role (for RLS to work)
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO anon;
-GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO anon;
-
--- Grant permissions to authenticated role
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO authenticated;
-GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO authenticated;
-
--- Make sure future tables also get permissions
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO service_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO service_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO anon;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO authenticated;
+COMMENT ON COLUMN webhook_events.account_id IS
+'Account ID for tenant isolation. Required for all new webhook events to ensure proper data segregation.';
 
 -- ============================================================================
--- INITIAL DATA SETUP
+-- END OF SCHEMA
 -- ============================================================================
--- After running this migration, manually update your user to be admin:
--- UPDATE accounts SET is_admin = TRUE WHERE email = 'basnijholt@gmail.com';

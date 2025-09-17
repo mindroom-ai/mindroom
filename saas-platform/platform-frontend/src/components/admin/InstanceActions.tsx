@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { apiCall } from '@/lib/api'
+import { logger } from '@/lib/logger'
 import { Button } from '@/components/ui/button'
 import { Play, Square, RotateCw, Trash2, Rocket } from 'lucide-react'
 
@@ -33,7 +34,7 @@ export function InstanceActions({ instanceId, currentStatus }: InstanceActionsPr
       // Simple reload to refresh the status
       window.location.reload()
     } catch (error) {
-      console.error(`Failed to ${action} instance:`, error)
+      logger.error(`Failed to ${action} instance:`, error)
     } finally {
       setLoading(null)
     }
