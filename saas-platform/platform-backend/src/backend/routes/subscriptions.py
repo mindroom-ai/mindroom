@@ -35,19 +35,26 @@ async def get_user_subscription(
     account_id = user["account_id"]
     result = sb.table("subscriptions").select("*").eq("account_id", account_id).limit(1).execute()
     if not result.data:
-        # Return a default free subscription if none exists
+        # Auto-create a real free subscription for new users
+        logger.info(f"No subscription found for account {account_id}, creating free tier")
         limits = get_plan_limits_from_metadata("free")
-        return {
-            "id": "00000000-0000-0000-0000-000000000000",
+        subscription_data = {
             "account_id": account_id,
             "tier": "free",
             "status": "active",
             "max_agents": limits["max_agents"],
             "max_messages_per_day": limits["max_messages_per_day"],
-            "max_storage_gb": limits["max_storage_gb"],
             "created_at": datetime.now(UTC).isoformat(),
             "updated_at": datetime.now(UTC).isoformat(),
         }
+        create_result = sb.table("subscriptions").insert(subscription_data).execute()
+        if create_result.data:
+            subscription = create_result.data[0]
+            subscription["max_storage_gb"] = limits["max_storage_gb"]
+            return subscription
+
+        logger.error(f"Failed to create subscription for account {account_id}")
+        raise HTTPException(status_code=500, detail="Failed to create subscription")
 
     # Add max_storage_gb from pricing config if not in database
     subscription = result.data[0]

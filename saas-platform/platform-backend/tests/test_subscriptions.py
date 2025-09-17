@@ -78,26 +78,58 @@ class TestSubscriptionsEndpoints:
         assert data["tier"] == "professional"
         assert data["status"] == "active"
 
-    def test_get_user_subscription_not_found(
+    def test_get_user_subscription_auto_creates_free_plan(
         self,
         client: TestClient,
         mock_supabase: MagicMock,
         mock_verify_user: Mock,
     ):
-        """Test getting subscription when user has none - returns free tier."""
-        # Setup - no subscription found
-        mock_supabase.table().select().eq().limit().execute.return_value = Mock(data=[])
+        """When no subscription exists we create a real free tier row in Supabase."""
+        table = mock_supabase.table.return_value
+        table.select.return_value.eq.return_value.limit.return_value.execute.return_value = Mock(data=[])
 
-        # Make request
-        response = client.get("/my/subscription")
+        inserted_at = datetime.now(UTC).isoformat()
+        inserted_row = {
+            "id": "sub_auto_123",
+            "account_id": "acc_test_123",
+            "tier": "free",
+            "status": "active",
+            "max_agents": 3,
+            "max_messages_per_day": 500,
+            # Intentionally omit max_storage_gb so route adds it from pricing metadata
+            "stripe_subscription_id": None,
+            "stripe_customer_id": None,
+            "current_period_start": None,
+            "current_period_end": None,
+            "trial_ends_at": None,
+            "cancelled_at": None,
+            "created_at": inserted_at,
+            "updated_at": inserted_at,
+        }
+        table.insert.return_value.execute.return_value = Mock(data=[inserted_row.copy()])
 
-        # Verify - should return free tier
+        plan_limits = {"max_agents": 3, "max_messages_per_day": 500, "max_storage_gb": 42}
+
+        with patch("backend.routes.subscriptions.get_plan_limits_from_metadata", return_value=plan_limits):
+            response = client.get("/my/subscription")
+
         assert response.status_code == 200
         data = response.json()
+
+        # Insert payload should use pricing limits
+        insert_payload = table.insert.call_args[0][0]
+        assert insert_payload["max_agents"] == plan_limits["max_agents"]
+        assert insert_payload["max_messages_per_day"] == plan_limits["max_messages_per_day"]
+
+        # Response reflects created row and fills in storage limit from pricing
+        assert data["id"] == inserted_row["id"]
         assert data["tier"] == "free"
         assert data["status"] == "active"
-        assert data["max_agents"] == 1
-        assert data["max_messages_per_day"] == 100
+        assert data["max_agents"] == plan_limits["max_agents"]
+        assert data["max_messages_per_day"] == plan_limits["max_messages_per_day"]
+        assert data["max_storage_gb"] == plan_limits["max_storage_gb"]
+        assert data["created_at"] == inserted_at
+        assert data["updated_at"] == inserted_at
 
     def test_cancel_subscription_success(
         self,

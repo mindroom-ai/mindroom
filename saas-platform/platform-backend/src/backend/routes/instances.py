@@ -179,6 +179,7 @@ async def provision_user_instance(
                 account_id,
             )
             return await provision_instance(
+                request=request,
                 data={
                     "subscription_id": subscription["id"],
                     "account_id": account_id,
@@ -207,6 +208,7 @@ async def provision_user_instance(
         }
 
     return await provision_instance(
+        request=request,
         data={
             "subscription_id": subscription["id"],
             "account_id": account_id,

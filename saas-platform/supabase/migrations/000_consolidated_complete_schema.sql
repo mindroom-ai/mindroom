@@ -560,6 +560,12 @@ GRANT ALL ON TABLE webhook_events TO service_role;
 GRANT ALL ON TABLE audit_logs TO service_role;
 GRANT ALL ON TABLE usage TO service_role;
 
+-- Grant sequence permissions (required for instance_id generation)
+-- Only USAGE is required for nextval(), SELECT allows currval()
+GRANT USAGE, SELECT ON SEQUENCE instance_id_seq TO authenticated;
+GRANT USAGE ON SEQUENCE instance_id_seq TO anon;  -- anon doesn't need UPDATE
+GRANT USAGE, SELECT, UPDATE ON SEQUENCE instance_id_seq TO service_role;  -- service role needs full access
+
 GRANT SELECT, INSERT, UPDATE ON TABLE accounts TO authenticated;
 GRANT SELECT, INSERT, UPDATE ON TABLE subscriptions TO authenticated;
 GRANT SELECT, INSERT, UPDATE ON TABLE instances TO authenticated;
