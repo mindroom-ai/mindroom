@@ -566,6 +566,21 @@ GRANT USAGE, SELECT ON SEQUENCE instance_id_seq TO authenticated;
 GRANT USAGE ON SEQUENCE instance_id_seq TO anon;  -- anon doesn't need UPDATE
 GRANT USAGE, SELECT, UPDATE ON SEQUENCE instance_id_seq TO service_role;  -- service role needs full access
 
+-- Helper to run privileged SQL via service role (used by tooling scripts)
+CREATE OR REPLACE FUNCTION exec_sql(query TEXT)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+    EXECUTE query;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION exec_sql(TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION exec_sql(TEXT) TO service_role;
+
 GRANT SELECT, INSERT, UPDATE ON TABLE accounts TO authenticated;
 GRANT SELECT, INSERT, UPDATE ON TABLE subscriptions TO authenticated;
 GRANT SELECT, INSERT, UPDATE ON TABLE instances TO authenticated;
