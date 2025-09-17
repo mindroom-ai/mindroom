@@ -43,6 +43,10 @@ spec:
           value: {{ .Values.customer | quote }}
         - name: STORAGE_PATH
           value: {{ .Values.storagePath }}
+        - name: MINDROOM_CONFIG_PATH
+          value: "{{ .Values.storagePath }}/config/config.yaml"
+        - name: MINDROOM_CONFIG_TEMPLATE
+          value: "/app/config.yaml"
         - name: LOG_LEVEL
           value: "INFO"
         - name: MATRIX_HOMESERVER
