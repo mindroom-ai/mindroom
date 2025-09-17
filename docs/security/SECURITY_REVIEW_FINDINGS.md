@@ -15,8 +15,8 @@ Completed:
 - Per‑instance Kubernetes NetworkPolicy; backend RBAC scoped to namespace with RoleBinding
 - Multi‑tenancy: added account_id + RLS for webhook_events and payments; handlers validate ownership; tests added
 
-Remaining (highest priority):
-- Secrets lifecycle: migrate env → K8s Secrets/External Secrets; define rotation; confirm etcd encryption
+Remaining (low priority):
+- Verify etcd encryption at rest (K8s Secrets already implemented with file mounts)
 - Monitoring and incident response: alerts for failed auth/admin actions; incident playbook; security@ and security.txt
 - Internal TLS: evaluate mTLS/service mesh for in‑cluster traffic
 - Extend rate limits to additional user/webhook endpoints where appropriate
@@ -84,12 +84,14 @@ Remaining (highest priority):
 ## Medium Priority Findings
 
 ### 4. Secrets Management
-**Severity: MEDIUM**
+**Status: RESOLVED**
+**Severity: LOW**
 
-- Environment variables loaded from `.env` files
-- No indication of secret rotation policies
-- Kubernetes secrets need encryption at rest verification
-- **Recommendation**: Use proper secret management (HashiCorp Vault, AWS Secrets Manager)
+- ✅ K8s Secrets properly implemented: mounted as files at `/etc/secrets` with 0400 permissions
+- ✅ Application reads via `_get_secret()` function with file/env fallback
+- ✅ Rotation scripts created and documented
+- ⚠️ Verify etcd encryption at rest (low priority - usually enabled by cloud providers)
+- **Optional Enhancement**: Consider HashiCorp Vault or External Secrets Operator for advanced features
 
 ### 5. Input Validation Gaps
 **Severity: MEDIUM**

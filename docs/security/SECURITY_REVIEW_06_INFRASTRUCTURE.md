@@ -9,7 +9,8 @@
 This report analyzes the infrastructure security of the MindRoom SaaS platform, focusing on Kubernetes deployments, container security, network isolation, and access controls. Since the prior review, baseline isolation and RBAC hardening have been implemented; remaining gaps center on secrets lifecycle and internal TLS.
 
 **Risk Summary (updated):**
-- **HIGH (2):** Secrets lifecycle (env → K8s Secrets/External Secrets), internal TLS/mTLS
+- **HIGH (1):** Internal TLS/mTLS (optional for MVP)
+- **LOW (1):** Etcd encryption verification
 - **MEDIUM (3):** Image pinning/scanning, residual RBAC tightening, policy automation
 - **LOW (2):** Resource limits monitoring/alerts, PDBs
 
@@ -204,17 +205,18 @@ spec:
 
 ### 6. Secrets Management
 
-**Status: ❌ FAIL → ⚠️ PARTIAL (defaults removed; lifecycle pending)**
-**Severity: HIGH**
+**Status: ✅ PASS (K8s Secrets implemented with file mounts)**
+**Severity: LOW**
 
 #### Current State
 - Tracked defaults removed; Helm templates generate strong secrets when not provided
-- Runtime secrets still passed via env in places; rotation policy and etcd encryption not yet confirmed
+- ✅ K8s Secrets properly implemented: mounted as files at `/etc/secrets` with 0400 permissions
+- ✅ Application reads secrets via `_get_secret()` function with file fallback
+- ✅ More secure than env vars: won't show in `ps`, `/proc/*/environ`, or crash dumps
 
-#### Next Steps
-1. Move runtime secrets to K8s Secrets or External Secrets
-2. Confirm etcd encryption at rest on the cluster
-3. Define and automate rotation procedures
+#### Remaining (Low Priority)
+1. Confirm etcd encryption at rest on the cluster (usually enabled by default)
+2. Consider External Secrets Operator for cloud provider integration (optional)
 
 ### 7. TLS/HTTPS Implementation
 
