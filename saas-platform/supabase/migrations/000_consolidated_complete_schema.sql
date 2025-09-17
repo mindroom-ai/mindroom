@@ -267,9 +267,44 @@ CREATE TRIGGER update_subscriptions_updated_at BEFORE UPDATE ON subscriptions
 CREATE TRIGGER update_instances_updated_at BEFORE UPDATE ON instances
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
+-- Subdomain default trigger to mirror numeric instance_id
+CREATE OR REPLACE FUNCTION set_subdomain_from_instance_id()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.subdomain IS NULL OR NEW.subdomain = '' THEN
+        NEW.subdomain := NEW.instance_id::text;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_set_subdomain_from_instance_id
+BEFORE INSERT ON instances
+FOR EACH ROW EXECUTE FUNCTION set_subdomain_from_instance_id();
+
 -- ============================================================================
 -- HELPER FUNCTIONS
 -- ============================================================================
+
+-- Function to automatically create an account record when a new user signs up
+CREATE OR REPLACE FUNCTION handle_new_user()
+RETURNS TRIGGER AS $$
+BEGIN
+    INSERT INTO public.accounts (id, email, full_name, tier)
+    VALUES (
+        NEW.id,
+        NEW.email,
+        COALESCE(NEW.raw_user_meta_data->>'full_name', ''),
+        'free'
+    );
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Trigger that fires when a new user is created in auth.users
+CREATE TRIGGER on_auth_user_created
+    AFTER INSERT ON auth.users
+    FOR EACH ROW EXECUTE FUNCTION handle_new_user();
 
 -- Function to check if current user is admin
 CREATE OR REPLACE FUNCTION is_admin()
@@ -468,6 +503,9 @@ CREATE POLICY "Admins can update subscriptions" ON subscriptions
 CREATE POLICY "Admins can insert subscriptions" ON subscriptions
     FOR INSERT WITH CHECK (is_admin() OR auth.jwt()->>'role' = 'service_role');
 
+CREATE POLICY "Admins can delete subscriptions" ON subscriptions
+    FOR DELETE USING (is_admin());
+
 -- Admins can manage instances
 CREATE POLICY "Admins can update instances" ON instances
     FOR UPDATE USING (is_admin())
@@ -475,6 +513,9 @@ CREATE POLICY "Admins can update instances" ON instances
 
 CREATE POLICY "Admins can insert instances" ON instances
     FOR INSERT WITH CHECK (is_admin() OR auth.jwt()->>'role' = 'service_role');
+
+CREATE POLICY "Admins can delete instances" ON instances
+    FOR DELETE USING (is_admin());
 
 -- Admins can manage all payments
 CREATE POLICY "Admins can manage all payments" ON payments
