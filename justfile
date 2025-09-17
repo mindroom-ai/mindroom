@@ -185,9 +185,9 @@ env-saas:
 ############
 
 # SaaS platform backend tests
-# Run SaaS platform backend tests
-test-saas-backend:
-    cd saas-platform/platform-backend && uv run pytest
+# Run SaaS platform backend tests with optional arguments
+test-saas-backend *args:
+    cd saas-platform/platform-backend && uv run pytest {{args}}
 
 # Run SaaS platform frontend tests (Jest)
 test-saas-frontend:
@@ -199,9 +199,9 @@ test-front:
     cd frontend && pnpm install && pnpm test
 
 # Core backend tests (pytest in repo)
-# Run core backend tests (pytest)
-test-backend:
-    uv run pytest -q
+# Run core backend tests (pytest) with optional arguments
+test-backend *args:
+    uv run pytest {{args}}
 
 #############################
 # Developer-friendly aliases
