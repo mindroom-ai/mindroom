@@ -16,7 +16,7 @@ This security review assessed the monitoring and incident response capabilities 
 - ✅ **Authentication failure monitoring IMPLEMENTED**
 - ✅ **IP-based blocking for brute force protection IMPLEMENTED**
 - ✅ **Audit logging for all auth events IMPLEMENTED**
-- ❌ **No automated alerting system** (logs exist, alerts not configured)
+- 🟡 **Prometheus alerting rules deployed (routing TBD)**
 - ❌ **No incident response procedures**
 - ❌ **No advanced attack pattern detection** (basic protection exists)
 
@@ -28,13 +28,17 @@ This security review assessed the monitoring and incident response capabilities 
 
 ### 1. Set up alerts for multiple failed authentication attempts
 
-**Status**: ⚠️ **PARTIAL** (logging + blocking in place, no automated alerts yet)
+**Status**: ⚠️ **PARTIAL** (Prometheus alerting rules live; notification routing pending)
 
 **Current State**:
 - Authentication failure tracking implemented in `auth_monitor.py`
 - Automatic IP blocking after 5 failures in 15 minutes (30-minute lockout)
 - Auth events logged to `audit_logs`
-- No alert routing (e.g., email/Slack/PagerDuty) configured
+- Prometheus scrape + alert rules (`platform-security-alerts`) deployed for:
+  - `MindroomAuthBlockedIP` (blocked IP persists >5m)
+  - `MindroomAdminUnauthorizedSpike` (auth failures spike >5 in 5m)
+  - `MindroomBlockedRequestFlood` (blocked_request surge)
+- Alertmanager receivers (email/Slack/PagerDuty) still to be configured
 
 **Evidence**:
 ```python
@@ -58,8 +62,15 @@ def record_failure(ip_address: str, user_id: str = None) -> bool:
 - ✅ Tracking of failed authentication attempts per IP
 - ✅ Automatic IP blocking after threshold
 - ✅ Audit logging of all auth events
-- ⏳ Alerting configuration needed (logs available)
-- ⏳ SIEM integration pending
+- ✅ Prometheus metrics exposed (`mindroom_auth_events_total`, `mindroom_admin_verifications_total`, `mindroom_blocked_ips`)
+- ✅ Prometheus ServiceMonitor scrapes platform backend every 30s
+- ✅ Alert expressions deployed via `PrometheusRule platform-security-alerts`
+- ⏳ Alertmanager routing/SIEM integration pending
+
+**Operational Notes**
+- Metrics and alert rules live inside the in-cluster Prometheus (`monitoring` namespace).
+- Use `kubectl port-forward -n monitoring svc/monitoring-kube-prometheus-prometheus 9090:9090` then visit http://localhost:9090 to inspect targets, graph the new metrics, or verify alert status.
+- Alertmanager is deployed with the stack; configure receivers (email/Slack/PagerDuty) before notifications are sent externally.
 
 **Protection Against**:
 - ✅ Brute force attacks (auto-blocking)
@@ -122,9 +133,10 @@ CREATE TABLE audit_logs (
 - Account updates (status/CRUD) emit structured entries.
 - Auth monitor records success/failure events for login attempts.
 - Best-effort only: failures in Supabase logging are swallowed (acceptable for MVP, but monitor errors).
+- Prometheus metrics expose aggregated admin verification outcomes for dashboarding/alerting.
 
 **Remaining Enhancements:**
-- Add alerting or dashboards around key admin actions.
+- Add alert routing or dashboards around key admin actions.
 - Consider logging configuration changes outside FastAPI (e.g., Helm, Terraform) separately.
 
 ---
