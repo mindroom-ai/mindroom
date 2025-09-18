@@ -799,6 +799,7 @@ groups:
 - [x] Environment-based secret management
 - [x] HTTPS enforcement via ingress configuration
 - [x] CORS configuration with specific allowed origins
+- [x] Prometheus metrics + alert rules for auth/admin activity
 
 ### ❌ Missing Implementation
 - [ ] Rate limiting on all endpoints
@@ -806,8 +807,8 @@ groups:
 - [ ] CAPTCHA protection for high-risk operations
 - [ ] API versioning strategy
 - [ ] API key rotation mechanism
-- [ ] Security monitoring and alerting
 - [ ] API documentation access controls
+- [ ] Alert routing & dashboards (configure Alertmanager receivers + visualization)
 
 ### ⚠️ Partial Implementation
 - [ ] Request size controls (nginx-level only)

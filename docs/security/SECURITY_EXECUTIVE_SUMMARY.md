@@ -44,13 +44,13 @@ A comprehensive security review of the MindRoom SaaS platform was conducted acro
 | Dependency & Supply Chain | ⚠️ PARTIAL | pnpm audit shows 5 vulns; automate scanning + upgrade path |
 | Error Handling | ⚠️ PARTIAL | Base headers in place; need consistent sanitized error body strategy |
 | API Security | ⚠️ PARTIAL | Webhook/user CAPTCHA absent; key rotation not yet executed |
-| Monitoring & Incident Response | ⚠️ PARTIAL | Alerts, dashboards, IR playbook, security.txt outstanding |
+| Monitoring & Incident Response | ⚠️ PARTIAL | Prometheus metrics + alert rules live; configure Alertmanager routing, dashboards, IR playbook, security.txt |
 | Frontend Security | ⚠️ PARTIAL | CSP shipped; remove dev auth bypass & require re-auth for sensitive flows |
 
 ## Business Impact Assessment
 
 ### Risk Posture (September 17, 2025)
-1. **Data Breach:** 🔶 Reduced; admin endpoints now locked down, but missing monitoring/alerts could delay detection.
+1. **Data Breach:** 🔶 Reduced; admin endpoints now locked down, but missing alert routing/IR playbook could delay detection.
 2. **Financial Loss:** 🔶 Rotation tooling present, yet exposed keys still require confirmed rotation.
 3. **Regulatory Exposure:** 🔶 GDPR workflows implemented; need retention & encryption verification before claiming compliance.
 4. **Reputation Damage:** 🔶 Improved controls, but lack of disclosure process (no security@/security.txt) remains.
@@ -66,7 +66,7 @@ A comprehensive security review of the MindRoom SaaS platform was conducted acro
 
 - Phase 1 hardening (admin auth, rate limiting, logging) complete.
 - GDPR endpoints, log sanitization, and CSP deployed with automated tests.
-- Follow-up work (secrets rotation verification, monitoring, pod hardening) is in flight; see timeline below for remaining tasks.
+- Follow-up work (secrets rotation verification, alert routing/IR, pod hardening) is in flight; see timeline below for remaining tasks.
 
 **Total Implementation Time:** ~3 engineering days to date (additional work pending)
 
@@ -80,7 +80,7 @@ A comprehensive security review of the MindRoom SaaS platform was conducted acro
 ## Recommendations (Pre-Launch)
 
 1. Execute and document key rotation; confirm etcd encryption or enable it explicitly.
-2. Stand up alerting/monitoring dashboards and publish an incident response playbook + disclosure channels.
+2. Wire Alertmanager receivers/dashboards and publish an incident response playbook + disclosure channels.
 3. Harden platform deployments (non-root, read-only FS) and decide on internal TLS/mTLS.
 4. Expand input validation and automate dependency/security scanning in CI.
 5. Remove dev auth bypass, require re-auth for sensitive frontend actions, and audit third-party scripts.

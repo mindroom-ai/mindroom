@@ -119,8 +119,8 @@
 ### ✅ Complete: Infrastructure
 - [x] K8s Secrets already implemented with secure file mounts
 - [x] Document rotation process
-- [ ] Configure monitoring alerts (logs available - low priority)
-- [ ] Setup security dashboards (optional)
+- [x] Deploy Prometheus metrics + alert rules for auth/admin events
+- [ ] Configure Alertmanager receivers & security dashboards (low priority)
 
 ---
 

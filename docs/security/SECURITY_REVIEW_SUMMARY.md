@@ -5,7 +5,7 @@
 
 ## Overview
 
-The security review has been refreshed across 12 categories. Most P0/P1 blockers are remediated: admin endpoints are authenticated and rate‑limited, provisioner auth is hardened, core security headers and trusted‑host checks are in place, multi‑tenancy isolation gaps are fixed, and baseline Kubernetes isolation is deployed. Remaining work focuses on secrets lifecycle, monitoring/alerting, internal TLS, and frontend CSP.
+The security review has been refreshed across 12 categories. Most P0/P1 blockers are remediated: admin endpoints are authenticated and rate‑limited, provisioner auth is hardened, core security headers and trusted‑host checks are in place, multi‑tenancy isolation gaps are fixed, and baseline Kubernetes isolation is deployed. Remaining work focuses on secrets lifecycle, alert routing/IR (Prometheus metrics + rules now live), internal TLS, and frontend CSP.
 
 ## Current Posture (high level)
 
@@ -35,7 +35,8 @@ The security review has been refreshed across 12 categories. Most P0/P1 blockers
    - ⚠️ Need recorded rotation run + confirmation from providers
    - ⚠️ Only need to verify etcd encryption (usually enabled by default)
 2. Monitoring and incident response
-   - Alerts for failed auth/admin actions; audit log review; security@ inbox and security.txt
+   - ✅ Prometheus metrics + alert rules for auth/admin events deployed
+   - ⚠️ Configure Alertmanager receivers, dashboards, security@ inbox, security.txt, and document IR procedures
 3. Internal service encryption
    - Evaluate service mesh or mTLS between internal components; document cipher policy at ingress
 4. ~~Frontend protections~~ **PARTIALLY ADDRESSED**
