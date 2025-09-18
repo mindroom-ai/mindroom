@@ -33,6 +33,30 @@ variable "deploy_platform" {
   default     = false
 }
 
+variable "deploy_monitoring" {
+  description = "Whether to deploy the monitoring stack (Prometheus)"
+  type        = bool
+  default     = true
+}
+
+variable "monitoring_release_name" {
+  description = "Helm release name for the monitoring stack"
+  type        = string
+  default     = "monitoring"
+}
+
+variable "monitoring_namespace" {
+  description = "Namespace where the monitoring stack should live"
+  type        = string
+  default     = "monitoring"
+}
+
+variable "monitoring_chart_version" {
+  description = "kube-prometheus-stack chart version to deploy"
+  type        = string
+  default     = "75.15.1"
+}
+
 # ===========================================
 # DNS Configuration (Porkbun)
 # ===========================================

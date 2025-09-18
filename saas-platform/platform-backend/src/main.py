@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from backend.config import ALLOWED_ORIGINS, ENABLE_CLEANUP_SCHEDULER, ENVIRONMENT, PLATFORM_DOMAIN
+from backend.metrics import instrument_app
 from backend.deps import limiter
 from backend.middleware.audit_logging import AuditLoggingMiddleware
 from backend.tasks.cleanup import run_all_cleanup_tasks
@@ -44,6 +45,8 @@ if TYPE_CHECKING:
 
 # FastAPI app
 app = FastAPI(title="MindRoom Backend")
+
+instrument_app(app)
 
 # IMPORTANT: Middleware order is reversed in FastAPI!
 # The last middleware added runs first.
@@ -119,6 +122,17 @@ app.add_middleware(SlowAPIMiddleware)
 allowed_hosts = [f"*.{PLATFORM_DOMAIN}", PLATFORM_DOMAIN, "testserver"]
 if ENVIRONMENT != "production":
     allowed_hosts += ["localhost", "127.0.0.1", "testserver"]
+
+# Permit internal service DNS names so Prometheus and other cluster components can hit /metrics
+service_hostnames = {
+    "platform-backend",
+    f"platform-backend.mindroom-{ENVIRONMENT}",
+    f"platform-backend.mindroom-{ENVIRONMENT}.svc",
+    f"platform-backend.mindroom-{ENVIRONMENT}.svc.cluster.local",
+}
+# Include versions with explicit port because Host headers may contain :8000
+service_hosts_with_ports = {f"{host}:8000" for host in service_hostnames}
+allowed_hosts += list(service_hostnames | service_hosts_with_ports)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
 # 5. Compute CORS origins: exclude localhost in production

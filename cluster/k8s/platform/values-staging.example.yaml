@@ -21,3 +21,18 @@ gitea:
 
 cleanupScheduler:
   enabled: "true"
+
+monitoring:
+  enabled: true
+  releaseLabel: monitoring
+  scrapeInterval: 30s
+  scrapeTimeout: 10s
+  alerts:
+    blockedIpThreshold: 0
+    blockedIpFor: 5m
+    adminUnauthorizedWindow: 5m
+    adminUnauthorizedThreshold: 5
+    adminUnauthorizedFor: 1m
+    blockedRequestWindow: 5m
+    blockedRequestThreshold: 10
+    blockedRequestFor: 2m

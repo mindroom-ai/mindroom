@@ -43,3 +43,18 @@ ingress:
   # NGINX blocks configuration-snippet by default in many setups (incl. kind example)
   # Keep disabled for local kind; enable in hardened clusters if allowed.
   enableConfigurationSnippet: false
+
+monitoring:
+  enabled: true
+  releaseLabel: monitoring
+  scrapeInterval: 30s
+  scrapeTimeout: 10s
+  alerts:
+    blockedIpThreshold: 0
+    blockedIpFor: 5m
+    adminUnauthorizedWindow: 5m
+    adminUnauthorizedThreshold: 5
+    adminUnauthorizedFor: 1m
+    blockedRequestWindow: 5m
+    blockedRequestThreshold: 10
+    blockedRequestFor: 2m

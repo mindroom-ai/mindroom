@@ -7,6 +7,7 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 import logging
 
+from backend.metrics import record_auth_event, set_blocked_ip_count
 from backend.utils.audit import create_audit_log
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,7 @@ def is_blocked(ip_address: str) -> bool:
     block_time = blocked_ips[ip_address]
     if datetime.now(UTC) - block_time > timedelta(minutes=BLOCK_DURATION_MINUTES):
         del blocked_ips[ip_address]
+        set_blocked_ip_count(len(blocked_ips))
         return False
 
     return True
@@ -49,7 +51,7 @@ def record_failure(ip_address: str, user_id: str = None) -> bool:
     # Add new failure
     failed_attempts[ip_address].append(now)
 
-    # Log to database for audit
+    # Log to database for audit and bump metrics
     create_audit_log(
         action="auth_failed",
         resource_type="authentication",
@@ -57,6 +59,7 @@ def record_failure(ip_address: str, user_id: str = None) -> bool:
         ip_address=ip_address,
         success=False,
     )
+    record_auth_event(actor="user", outcome="failure")
 
     # Check if threshold exceeded and block if needed
     if len(failed_attempts[ip_address]) >= MAX_FAILURES:
@@ -73,6 +76,8 @@ def record_failure(ip_address: str, user_id: str = None) -> bool:
             ip_address=ip_address,
             success=True,
         )
+        record_auth_event(actor="user", outcome="blocked")
+        set_blocked_ip_count(len(blocked_ips))
         return True
 
     return False
@@ -92,3 +97,5 @@ def record_success(ip_address: str, user_id: str = None):
         ip_address=ip_address,
         success=True,
     )
+    record_auth_event(actor="user", outcome="success")
+    set_blocked_ip_count(len(blocked_ips))

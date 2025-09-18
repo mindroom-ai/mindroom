@@ -50,6 +50,9 @@ Complete Terraform configuration for deploying MindRoom on Kubernetes with a sin
    - Customer portal (with admin interface)
    - Stripe webhook handler
    - Instance provisioner
+4. **Monitoring Stack** (Prometheus + Alertmanager)
+   - Deployed via `kube-prometheus-stack`
+   - Scrapes platform backend metrics and ships built-in security alerts
 
 ## Quick Start
 

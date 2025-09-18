@@ -15,6 +15,7 @@ from backend.auth_monitor import (
     record_failure,
     record_success,
 )
+from backend.metrics import get_auth_metric, get_blocked_ip_count, reset_security_metrics
 
 
 class TestAuthMonitor:
@@ -24,6 +25,7 @@ class TestAuthMonitor:
         """Clear state before each test."""
         failed_attempts.clear()
         blocked_ips.clear()
+        reset_security_metrics()
 
     def test_record_single_failure(self):
         """Test recording a single failure doesn't trigger block."""
@@ -33,6 +35,7 @@ class TestAuthMonitor:
         assert not blocked
         assert ip not in blocked_ips
         assert len(failed_attempts[ip]) == 1
+        assert get_auth_metric(actor="user", outcome="failure") == 1
 
     def test_multiple_failures_trigger_block(self):
         """Test that MAX_FAILURES triggers IP blocking."""
@@ -48,6 +51,9 @@ class TestAuthMonitor:
         assert blocked
         assert ip in blocked_ips
         assert is_blocked(ip)
+        assert get_auth_metric(actor="user", outcome="failure") == MAX_FAILURES
+        assert get_auth_metric(actor="user", outcome="blocked") == 1
+        assert get_blocked_ip_count() == 1
 
     def test_is_blocked_check(self):
         """Test is_blocked function."""
@@ -55,6 +61,7 @@ class TestAuthMonitor:
 
         # Not blocked initially
         assert not is_blocked(ip)
+        assert get_blocked_ip_count() == 0
 
         # Trigger block
         for _ in range(MAX_FAILURES):
@@ -110,6 +117,7 @@ class TestAuthMonitor:
 
         # Failures should be cleared
         assert ip not in failed_attempts or len(failed_attempts[ip]) == 0
+        assert get_auth_metric(actor="user", outcome="success") == 1
 
     def test_different_ips_tracked_separately(self):
         """Test that different IPs are tracked independently."""

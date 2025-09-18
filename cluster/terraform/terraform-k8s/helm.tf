@@ -79,7 +79,69 @@ locals {
     cleanupScheduler = {
       enabled = var.cleanup_scheduler_enabled
     }
+
+    monitoring = {
+      enabled     = var.deploy_monitoring
+      releaseLabel = var.monitoring_release_name
+    }
   }
+}
+
+# ===========================================
+# Deploy Monitoring Stack
+# ===========================================
+
+resource "helm_release" "monitoring_stack" {
+  count = var.deploy_monitoring ? 1 : 0
+
+  depends_on = [
+    time_sleep.wait_for_cluster
+  ]
+
+  name       = var.monitoring_release_name
+  namespace  = var.monitoring_namespace
+  repository = "https://prometheus-community.github.io/helm-charts"
+  chart      = "kube-prometheus-stack"
+  version    = var.monitoring_chart_version
+
+  create_namespace = true
+  wait             = true
+  timeout          = 600
+
+  values = [
+    yamlencode({
+      grafana = {
+        enabled = false
+      }
+      prometheus = {
+        prometheusSpec = {
+          serviceMonitorSelectorNilUsesHelmValues = false
+          serviceMonitorSelector = {
+            matchLabels = {
+              release = var.monitoring_release_name
+            }
+          }
+          serviceMonitorNamespaceSelector = {
+            any = true
+          }
+          ruleSelectorNilUsesHelmValues = false
+          ruleSelector = {
+            matchLabels = {
+              release = var.monitoring_release_name
+            }
+          }
+          ruleNamespaceSelector = {
+            any = true
+          }
+        }
+      }
+      alertmanager = {
+        alertmanagerSpec = {
+          replicas = 1
+        }
+      }
+    })
+  ]
 }
 
 # Deploy the platform Helm chart

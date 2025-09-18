@@ -47,3 +47,9 @@ location    = "fsn1"   # Falkenstein, Germany
 
 # Cluster Configuration
 cluster_name = "mindroom-k8s"
+
+# Monitoring
+deploy_monitoring       = true
+monitoring_release_name = "monitoring"
+monitoring_namespace    = "monitoring"
+monitoring_chart_version = "75.15.1"

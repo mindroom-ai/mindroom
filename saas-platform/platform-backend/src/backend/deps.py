@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from backend import auth_monitor
+from backend.metrics import record_admin_verification, record_auth_event
 from backend.config import auth_client, logger, supabase
 from cachetools import TTLCache
 from fastapi import Header, HTTPException, Request
@@ -70,6 +71,7 @@ async def verify_user(authorization: str = Header(None), request: Request = None
 
     # Check if IP is blocked
     if auth_monitor.is_blocked(client_ip):
+        record_auth_event(actor="user", outcome="blocked_request")
         raise HTTPException(status_code=429, detail="Too many failed attempts. Please try again later.")
 
     try:
@@ -176,7 +178,12 @@ async def verify_user_optional(authorization: str = Header(None)) -> dict | None
 
 async def verify_admin(authorization: str = Header(None)) -> dict:
     """Verify admin access via Supabase auth."""
-    token = _extract_bearer_token(authorization)
+    try:
+        token = _extract_bearer_token(authorization)
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            record_admin_verification("unauthorized")
+        raise
 
     sb = ensure_supabase()
     ac = _ensure_auth_client()
@@ -185,16 +192,20 @@ async def verify_admin(authorization: str = Header(None)) -> dict:
         user = ac.auth.get_user(token)
         if not user or not user.user:
             msg = "Invalid token"
+            record_admin_verification("unauthorized")
             raise HTTPException(status_code=401, detail=msg)  # noqa: TRY301
 
         result = sb.table("accounts").select("is_admin").eq("id", user.user.id).single().execute()
         if not result.data or not result.data.get("is_admin"):
             msg = "Admin access required"
+            record_admin_verification("forbidden")
             raise HTTPException(status_code=403, detail=msg)  # noqa: TRY301
+        record_admin_verification("success")
         return {"user_id": user.user.id, "email": user.user.email}  # noqa: TRY300
     except HTTPException:
         raise
     except Exception:
         logger.exception("Admin verification error")
         msg = "Authentication failed"
+        record_admin_verification("error")
         raise HTTPException(status_code=401, detail=msg) from None
