@@ -236,7 +236,7 @@ nmap -p 1-65535 <target>
 2. **HIGH**: Implement comprehensive API authentication checks
 3. **HIGH**: Audit and strengthen RLS policies
 4. **MEDIUM**: Set up dependency vulnerability scanning
-5. **MEDIUM**: Implement rate limiting and monitoring
+5. **MEDIUM**: Implement rate limiting and monitoring (rate limits + Prometheus metrics/alerts deployed; finish Alertmanager routing/IR playbook)
 
 ---
 

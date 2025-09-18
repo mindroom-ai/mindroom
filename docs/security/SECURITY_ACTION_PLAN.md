@@ -102,18 +102,26 @@ securityContext:
   readOnlyRootFilesystem: true
 ```
 
-### P2: Monitoring Configuration (PENDING)
+### P2: Monitoring & IR (IN PROGRESS)
 
-**Alerting Setup:**
-- **Current:** Logs available for all security events
-- **Target:** Configure automated alerts for suspicious activity
-- **Components:** Auth failures, admin actions, error patterns
-- **Risk:** LOW - Logs provide visibility, alerts enhance response time
+**Prometheus Deployment (✅ COMPLETE)**
+- ✅ ServiceMonitor + PrometheusRule deployed for auth/admin events
+- ✅ Metrics exposed (`mindroom_auth_events_total`, `mindroom_admin_verifications_total`, `mindroom_blocked_ips`)
+- ✅ Scrape verified (Prometheus target UP)
+- ➡️ Documented in SECURITY_REVIEW_11
 
-**Dashboards:**
-- **Target:** Security monitoring dashboards
-- **Data:** Auth metrics, error rates, system health
-- **Priority:** LOW - operational improvement, not security requirement
+**Alert Routing (⚠️ TODO)**
+- Configure Alertmanager receivers (email/Slack/PagerDuty)
+- Produce on-call/IR runbook and notification matrix
+- Publish security@ mailbox & security.txt (ties into IR comms)
+
+**Dashboards & Reporting (⚠️ TODO / LOW)**
+- Stand up Grafana/Metabase dashboards for the new metrics
+- Automate weekly/monthly security reports once routing is in place
+
+**Incident Response (⚠️ TODO)**
+- Draft playbook covering triage, escalation, postmortems
+- Align with compliance requirements (SOC 2, GDPR breach notification)
 
 9. **Move Secrets from Environment Variables to Volumes** ✅ **COMPLETED**
    - **Status:** Already implemented in `deployment-backend.yaml`

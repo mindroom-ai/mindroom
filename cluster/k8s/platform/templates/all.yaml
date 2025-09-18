@@ -122,6 +122,9 @@ kind: Service
 metadata:
   name: platform-frontend
   namespace: mindroom-{{ .Values.environment }}
+  labels:
+    app: platform-frontend
+    environment: {{ .Values.environment }}
 spec:
   selector:
     app: platform-frontend
@@ -199,12 +202,80 @@ kind: Service
 metadata:
   name: platform-backend
   namespace: mindroom-{{ .Values.environment }}
+  labels:
+    app: platform-backend
+    environment: {{ .Values.environment }}
 spec:
   selector:
     app: platform-backend
     environment: {{ .Values.environment }}
   ports:
-  - port: 8000
+  - name: http
+    port: 8000
     targetPort: 8000
+{{- if .Values.monitoring.enabled }}
+{{- $monitoring := .Values.monitoring | default (dict) }}
+{{- $alerts := $monitoring.alerts | default (dict) }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: platform-backend
+  namespace: mindroom-{{ .Values.environment }}
+  labels:
+    app: platform-backend
+    release: {{ $monitoring.releaseLabel | default "monitoring" }}
+spec:
+  namespaceSelector:
+    matchNames:
+    - mindroom-{{ .Values.environment }}
+  selector:
+    matchLabels:
+      app: platform-backend
+      environment: {{ .Values.environment }}
+  endpoints:
+  - port: http
+    path: /metrics
+    scheme: http
+    interval: {{ $monitoring.scrapeInterval | default "30s" }}
+    scrapeTimeout: {{ $monitoring.scrapeTimeout | default "10s" }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: platform-security-alerts
+  namespace: mindroom-{{ .Values.environment }}
+  labels:
+    app: platform-backend
+    release: {{ $monitoring.releaseLabel | default "monitoring" }}
+spec:
+  groups:
+  - name: mindroom-security
+    rules:
+    - alert: MindroomAuthBlockedIP
+      expr: 'mindroom_blocked_ips > {{ $alerts.blockedIpThreshold | default 0 }}'
+      for: {{ $alerts.blockedIpFor | default "5m" }}
+      labels:
+        severity: critical
+      annotations:
+        summary: 'MindRoom auth guard blocked an IP address'
+        description: 'At least one IP has been blocked by the auth guard for over {{ $alerts.blockedIpFor | default "5m" }}.'
+    - alert: MindroomAdminUnauthorizedSpike
+      expr: 'increase(mindroom_admin_verifications_total{outcome="unauthorized"}[{{ $alerts.adminUnauthorizedWindow | default "5m" }}]) > {{ $alerts.adminUnauthorizedThreshold | default 5 }}'
+      for: {{ $alerts.adminUnauthorizedFor | default "1m" }}
+      labels:
+        severity: high
+      annotations:
+        summary: 'Spike in unauthorized admin verification attempts'
+        description: 'More than {{ $alerts.adminUnauthorizedThreshold | default 5 }} unauthorized admin attempts observed within {{ $alerts.adminUnauthorizedWindow | default "5m" }}.'
+    - alert: MindroomBlockedRequestFlood
+      expr: 'increase(mindroom_auth_events_total{actor="user", outcome="blocked_request"}[{{ $alerts.blockedRequestWindow | default "5m" }}]) > {{ $alerts.blockedRequestThreshold | default 10 }}'
+      for: {{ $alerts.blockedRequestFor | default "2m" }}
+      labels:
+        severity: high
+      annotations:
+        summary: 'Spike in blocked user requests'
+        description: 'More than {{ $alerts.blockedRequestThreshold | default 10 }} blocked user requests observed in {{ $alerts.blockedRequestWindow | default "5m" }}.'
+{{- end }}
 # Admin Dashboard (Static Frontend)
 # Admin dashboard removed - functionality merged into platform-frontend

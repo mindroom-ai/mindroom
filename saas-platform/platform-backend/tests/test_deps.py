@@ -5,6 +5,8 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 from fastapi import HTTPException
 
+from backend.metrics import get_admin_metric, reset_security_metrics
+
 
 class TestDeps:
     """Test dependency injection functions."""
@@ -163,6 +165,8 @@ class TestDeps:
         """Test successful admin verification."""
         from backend.deps import verify_admin
 
+        reset_security_metrics()
+
         # Setup mock admin user
         mock_user = Mock()
         mock_user.user.id = "admin_123"
@@ -181,11 +185,14 @@ class TestDeps:
         # Verify
         assert result["user_id"] == "admin_123"
         assert result["email"] == "admin@example.com"
+        assert get_admin_metric("success") == 1
 
     @pytest.mark.asyncio
     async def test_verify_admin_not_admin(self, mock_supabase: MagicMock, mock_auth_client: MagicMock):
         """Test admin verification fails for non-admin user."""
         from backend.deps import verify_admin
+
+        reset_security_metrics()
 
         # Setup mock regular user
         mock_user = Mock()
@@ -205,6 +212,20 @@ class TestDeps:
 
         assert exc_info.value.status_code == 403
         assert exc_info.value.detail == "Admin access required"
+        assert get_admin_metric("forbidden") == 1
+
+    @pytest.mark.asyncio
+    async def test_verify_admin_invalid_header(self):
+        """Test admin verification with malformed authorization header."""
+        from backend.deps import verify_admin
+
+        reset_security_metrics()
+
+        with pytest.raises(HTTPException) as exc_info:
+            await verify_admin("invalid")
+
+        assert exc_info.value.status_code == 401
+        assert get_admin_metric("unauthorized") == 1
 
     def test_ensure_supabase(self):
         """Test ensure_supabase returns client."""

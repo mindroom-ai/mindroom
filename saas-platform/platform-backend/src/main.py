@@ -7,11 +7,13 @@ This replaces the previous monolithic implementation.
 from __future__ import annotations
 
 import logging
+import socket
 from typing import TYPE_CHECKING
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from backend.config import ALLOWED_ORIGINS, ENABLE_CLEANUP_SCHEDULER, ENVIRONMENT, PLATFORM_DOMAIN
+from backend.metrics import instrument_app
 from backend.deps import limiter
 from backend.middleware.audit_logging import AuditLoggingMiddleware
 from backend.tasks.cleanup import run_all_cleanup_tasks
@@ -44,6 +46,8 @@ if TYPE_CHECKING:
 
 # FastAPI app
 app = FastAPI(title="MindRoom Backend")
+
+instrument_app(app)
 
 # IMPORTANT: Middleware order is reversed in FastAPI!
 # The last middleware added runs first.
@@ -109,6 +113,31 @@ async def _logged_rate_limit_exceeded(request: Request, exc: RateLimitExceeded) 
 
 app.add_exception_handler(RateLimitExceeded, _logged_rate_limit_exceeded)
 
+
+def _service_allowed_hosts(*, environment: str) -> list[str]:
+    """Return host aliases Prometheus (and other in-cluster services) use to scrape /metrics."""
+
+    base_hosts = {
+        "platform-backend",
+        f"platform-backend.mindroom-{environment}",
+        f"platform-backend.mindroom-{environment}.svc",
+        f"platform-backend.mindroom-{environment}.svc.cluster.local",
+    }
+
+    hosts_with_ports = {f"{host}:8000" for host in base_hosts}
+
+    try:
+        pod_ip = socket.gethostbyname(socket.gethostname())
+    except OSError:
+        pod_ip = ""
+
+    if pod_ip:
+        base_hosts.add(pod_ip)
+        hosts_with_ports.add(f"{pod_ip}:8000")
+
+    return list(base_hosts | hosts_with_ports)
+
+
 # Add remaining middleware BEFORE routers (but after custom middleware functions)
 # Remember: Last added = First to run
 
@@ -119,6 +148,8 @@ app.add_middleware(SlowAPIMiddleware)
 allowed_hosts = [f"*.{PLATFORM_DOMAIN}", PLATFORM_DOMAIN, "testserver"]
 if ENVIRONMENT != "production":
     allowed_hosts += ["localhost", "127.0.0.1", "testserver"]
+
+allowed_hosts += _service_allowed_hosts(environment=ENVIRONMENT)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
 # 5. Compute CORS origins: exclude localhost in production

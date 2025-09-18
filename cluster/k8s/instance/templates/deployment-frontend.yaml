@@ -74,11 +74,11 @@ spec:
         # Frontend UI is stateless; no persistent volumes needed
         resources:
           requests:
-            memory: "1Gi"
-            cpu: "500m"
+            memory: "512Mi"
+            cpu: "200m"
           limits:
-            memory: "4Gi"
-            cpu: "2000m"
+            memory: "2Gi"
+            cpu: "1000m"
         securityContext:
           runAsUser: 1000
           runAsGroup: 1000
