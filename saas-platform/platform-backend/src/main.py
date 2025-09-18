@@ -113,6 +113,31 @@ async def _logged_rate_limit_exceeded(request: Request, exc: RateLimitExceeded) 
 
 app.add_exception_handler(RateLimitExceeded, _logged_rate_limit_exceeded)
 
+
+def _service_allowed_hosts(*, environment: str) -> list[str]:
+    """Return service/pod hostnames (with optional port) trusted by TrustedHostMiddleware."""
+
+    base_hosts = {
+        "platform-backend",
+        f"platform-backend.mindroom-{environment}",
+        f"platform-backend.mindroom-{environment}.svc",
+        f"platform-backend.mindroom-{environment}.svc.cluster.local",
+    }
+
+    hosts_with_ports = {f"{host}:8000" for host in base_hosts}
+
+    try:
+        pod_ip = socket.gethostbyname(socket.gethostname())
+    except OSError:
+        pod_ip = ""
+
+    if pod_ip:
+        base_hosts.add(pod_ip)
+        hosts_with_ports.add(f"{pod_ip}:8000")
+
+    return list(base_hosts | hosts_with_ports)
+
+
 # Add remaining middleware BEFORE routers (but after custom middleware functions)
 # Remember: Last added = First to run
 
@@ -124,24 +149,7 @@ allowed_hosts = [f"*.{PLATFORM_DOMAIN}", PLATFORM_DOMAIN, "testserver"]
 if ENVIRONMENT != "production":
     allowed_hosts += ["localhost", "127.0.0.1", "testserver"]
 
-# Permit internal service DNS names so Prometheus and other cluster components can hit /metrics
-service_hostnames = {
-    "platform-backend",
-    f"platform-backend.mindroom-{ENVIRONMENT}",
-    f"platform-backend.mindroom-{ENVIRONMENT}.svc",
-    f"platform-backend.mindroom-{ENVIRONMENT}.svc.cluster.local",
-}
-# Include versions with explicit port because Host headers may contain :8000
-service_hosts_with_ports = {f"{host}:8000" for host in service_hostnames}
-try:
-    pod_ip = socket.gethostbyname(socket.gethostname())
-    if pod_ip:
-        service_hostnames.add(pod_ip)
-        service_hosts_with_ports.add(f"{pod_ip}:8000")
-except OSError:
-    pass
-
-allowed_hosts += list(service_hostnames | service_hosts_with_ports)
+allowed_hosts += _service_allowed_hosts(environment=ENVIRONMENT)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
 # 5. Compute CORS origins: exclude localhost in production
