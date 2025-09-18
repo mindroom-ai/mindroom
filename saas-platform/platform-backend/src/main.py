@@ -115,7 +115,7 @@ app.add_exception_handler(RateLimitExceeded, _logged_rate_limit_exceeded)
 
 
 def _service_allowed_hosts(*, environment: str) -> list[str]:
-    """Return service/pod hostnames (with optional port) trusted by TrustedHostMiddleware."""
+    """Return host aliases Prometheus (and other in-cluster services) use to scrape /metrics."""
 
     base_hosts = {
         "platform-backend",
