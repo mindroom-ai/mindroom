@@ -7,6 +7,7 @@ This replaces the previous monolithic implementation.
 from __future__ import annotations
 
 import logging
+import socket
 from typing import TYPE_CHECKING
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -132,6 +133,14 @@ service_hostnames = {
 }
 # Include versions with explicit port because Host headers may contain :8000
 service_hosts_with_ports = {f"{host}:8000" for host in service_hostnames}
+try:
+    pod_ip = socket.gethostbyname(socket.gethostname())
+    if pod_ip:
+        service_hostnames.add(pod_ip)
+        service_hosts_with_ports.add(f"{pod_ip}:8000")
+except OSError:
+    pass
+
 allowed_hosts += list(service_hostnames | service_hosts_with_ports)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
