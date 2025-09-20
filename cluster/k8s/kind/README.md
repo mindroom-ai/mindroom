@@ -102,8 +102,8 @@ docker exec -it mindroom-control-plane crictl images | grep platform
 ./build_load_images.sh
 
 # Update deployments to use correct tag and pull policy
-kubectl set image deployment/platform-backend app=git.nijho.lt/basnijholt/platform-backend:amd64 -n mindroom-staging
-kubectl set image deployment/platform-frontend app=git.nijho.lt/basnijholt/platform-frontend:amd64 -n mindroom-staging
+kubectl set image deployment/platform-backend app=git.nijho.lt/basnijholt/platform-backend:latest -n mindroom-staging
+kubectl set image deployment/platform-frontend app=git.nijho.lt/basnijholt/platform-frontend:latest -n mindroom-staging
 
 # Patch to use IfNotPresent
 kubectl patch deployment platform-backend -n mindroom-staging \
@@ -162,7 +162,7 @@ Create this file from `.env.example` if needed.
 
 ## Notes
 
-- Images are tagged as `:amd64` by the build script
+- Images are tagged as `:latest` by the build script
 - The Helm chart defaults expect this tag
 - Use `imagePullPolicy: IfNotPresent` to avoid registry pulls
 - Platform namespace: `mindroom-staging`

@@ -8,8 +8,8 @@ CLUSTER_NAME="mindroom"
 
 # Image coordinates used by the Helm chart defaults
 REGISTRY="git.nijho.lt/basnijholt"
-BACKEND_IMAGE="${REGISTRY}/platform-backend:amd64"
-FRONTEND_IMAGE="${REGISTRY}/platform-frontend:amd64"
+BACKEND_IMAGE="${REGISTRY}/platform-backend:latest"
+FRONTEND_IMAGE="${REGISTRY}/platform-frontend:latest"
 
 echo "[images] Building platform images tagged to chart defaults:" \
      "${BACKEND_IMAGE} and ${FRONTEND_IMAGE}"
