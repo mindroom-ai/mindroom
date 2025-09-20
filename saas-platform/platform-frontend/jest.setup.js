@@ -7,7 +7,6 @@ const { getServerRuntimeConfig } = require('./src/lib/runtime-config')
 // Mock environment variables for runtime config (server side)
 process.env.SUPABASE_URL = 'https://test.supabase.co'
 process.env.SUPABASE_ANON_KEY = 'test-anon-key'
-process.env.API_URL = 'http://localhost:8000'
 
 // Mock fetch globally
 global.fetch = jest.fn()

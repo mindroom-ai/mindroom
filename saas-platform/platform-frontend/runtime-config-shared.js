@@ -1,10 +1,6 @@
 const DEFAULT_API_URL = 'http://localhost:8000'
 
 function resolveApiUrl(env = process.env) {
-  if (env.API_URL) {
-    return env.API_URL
-  }
-
   if (env.PLATFORM_DOMAIN) {
     return `https://api.${env.PLATFORM_DOMAIN}`
   }
