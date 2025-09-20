@@ -1,3 +1,5 @@
+import { DEFAULT_API_URL, resolveApiUrl as resolveApiUrlFromEnv } from '../../runtime-config-shared.js'
+
 export type RuntimeConfig = {
   apiUrl: string
   supabaseUrl: string
@@ -5,13 +7,10 @@ export type RuntimeConfig = {
   platformDomain: string
 }
 
-export const DEFAULT_API_URL = 'http://localhost:8000'
+export { DEFAULT_API_URL }
 
 export function resolveApiUrl(): string {
-  return (
-    process.env.API_URL ||
-    (process.env.PLATFORM_DOMAIN ? `https://api.${process.env.PLATFORM_DOMAIN}` : DEFAULT_API_URL)
-  )
+  return resolveApiUrlFromEnv(process.env)
 }
 
 function safeJson(value: unknown): string {

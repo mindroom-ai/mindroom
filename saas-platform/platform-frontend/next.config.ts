@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import { resolveApiUrl } from "./runtime-config-shared.js";
 
 const nextConfig: NextConfig = {
   /* config options here */
@@ -22,7 +23,6 @@ const nextConfig: NextConfig = {
     root: __dirname,
   },
   async headers() {
-    const { resolveApiUrl } = await import('./src/lib/runtime-config')
     const apiUrl = resolveApiUrl()
     const supabaseUrl = process.env.SUPABASE_URL || ''
     const isDev = process.env.NODE_ENV !== 'production'
