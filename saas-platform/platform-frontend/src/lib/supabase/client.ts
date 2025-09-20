@@ -1,9 +1,9 @@
 import { createBrowserClient } from '@supabase/ssr'
+import { getRuntimeConfig } from '@/lib/runtime-config'
 import type { Database } from './types'
 
 export function createClient() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  const { supabaseUrl, supabaseAnonKey } = getRuntimeConfig()
 
-  return createBrowserClient<Database>(url, anonKey)
+  return createBrowserClient<Database>(supabaseUrl, supabaseAnonKey)
 }

@@ -228,14 +228,19 @@ sb.table("accounts").select("*").eq("id", account_id).execute()
 **Evidence:**
 ```typescript
 // platform-frontend/src/lib/supabase/client.ts:7
-const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'placeholder-key'
+const { supabaseAnonKey } = getRuntimeConfig()
 // Only anon key exposed to client
 ```
 
 ```dockerfile
-# Dockerfile.platform-frontend:5-6
-ARG NEXT_PUBLIC_SUPABASE_ANON_KEY
-ENV NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY
+# Dockerfile.platform-frontend:15-22
+ARG SUPABASE_URL
+ARG SUPABASE_ANON_KEY
+ARG PLATFORM_DOMAIN
+ENV NODE_ENV=production \\
+    SUPABASE_URL=${SUPABASE_URL} \\
+    SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY} \\
+    PLATFORM_DOMAIN=${PLATFORM_DOMAIN}
 # Only public keys in frontend builds
 ```
 

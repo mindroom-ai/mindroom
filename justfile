@@ -227,8 +227,9 @@ docker-build-saas-frontend:
     eval "$(uvx --from python-dotenv[cli] dotenv -f saas-platform/.env list --format shell)"
     cd saas-platform
     docker build \
-        --build-arg NEXT_PUBLIC_SUPABASE_URL="${NEXT_PUBLIC_SUPABASE_URL:-${SUPABASE_URL:-}}" \
-        --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY="${NEXT_PUBLIC_SUPABASE_ANON_KEY:-${SUPABASE_ANON_KEY:-}}" \
+        --build-arg SUPABASE_URL="${SUPABASE_URL:-}" \
+        --build-arg SUPABASE_ANON_KEY="${SUPABASE_ANON_KEY:-}" \
+        --build-arg PLATFORM_DOMAIN="${PLATFORM_DOMAIN:-}" \
         -t platform-frontend:dev \
         -f saas-platform/Dockerfile.platform-frontend .
 

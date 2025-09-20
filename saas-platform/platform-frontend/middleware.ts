@@ -1,6 +1,7 @@
 import { createServerClient } from '@supabase/ssr'
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
+import { getServerRuntimeConfig } from '@/lib/runtime-config'
 
 export async function middleware(request: NextRequest) {
   let response = NextResponse.next({
@@ -9,9 +10,11 @@ export async function middleware(request: NextRequest) {
     },
   })
 
+  const { supabaseUrl, supabaseAnonKey, apiUrl } = getServerRuntimeConfig()
+
   const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    supabaseUrl,
+    supabaseAnonKey,
     {
       cookies: {
         get(name: string) {
@@ -76,12 +79,8 @@ export async function middleware(request: NextRequest) {
     }
 
     // Check admin status via API
-    const API_URL = process.env.NEXT_PUBLIC_API_URL || (
-      process.env.PLATFORM_DOMAIN ? `https://api.${process.env.PLATFORM_DOMAIN}` : 'http://localhost:8000'
-    )
-
     try {
-      const apiResponse = await fetch(`${API_URL}/my/account/admin-status`, {
+      const apiResponse = await fetch(`${apiUrl}/my/account/admin-status`, {
         headers: {
           'Authorization': `Bearer ${session.access_token}`,
           'Content-Type': 'application/json',

@@ -15,17 +15,14 @@ RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
 FROM deps AS builder
 WORKDIR /app
 COPY saas-platform/platform-frontend/ ./platform-frontend/
-# REQUIRED: Accept build arguments for Next.js public env vars
-# These MUST be provided at build time or the app will fail
-ARG NEXT_PUBLIC_SUPABASE_URL
-ARG NEXT_PUBLIC_SUPABASE_ANON_KEY
-ARG NEXT_PUBLIC_API_URL
-# Set them as environment variables for the build
-# Next.js bakes these into the client bundle at build time
-ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL
-ENV NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY
-ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
-ENV NODE_ENV=production
+# Provide runtime env vars during build so Next.js can pre-render pages
+ARG SUPABASE_URL
+ARG SUPABASE_ANON_KEY
+ARG PLATFORM_DOMAIN
+ENV NODE_ENV=production \
+    SUPABASE_URL=${SUPABASE_URL} \
+    SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY} \
+    PLATFORM_DOMAIN=${PLATFORM_DOMAIN}
 # Build production bundle with optimizations
 # Next.js standalone output creates minimal production build
 RUN cd platform-frontend && pnpm run build

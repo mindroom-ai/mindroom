@@ -57,8 +57,8 @@ Runs on port 3000 by default with hot module replacement.
 ## Environment Variables
 
 Required for runtime:
-- `NEXT_PUBLIC_SUPABASE_URL` - Supabase project URL
-- `NEXT_PUBLIC_SUPABASE_ANON_KEY` - Public anon key
+- `SUPABASE_URL` - Supabase project URL
+- `SUPABASE_ANON_KEY` - Public anon key
 - `SUPABASE_SERVICE_KEY` - Service key for server-side operations
 - `STRIPE_SECRET_KEY` - Stripe API key
 - `PLATFORM_BACKEND_URL` - Backend service URL

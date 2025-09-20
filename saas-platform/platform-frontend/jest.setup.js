@@ -2,10 +2,11 @@
 import '@testing-library/jest-dom'
 import 'whatwg-fetch'
 
-// Mock environment variables
-process.env.NEXT_PUBLIC_API_URL = 'http://localhost:8000'
-process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://test.supabase.co'
-process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = 'test-anon-key'
+const { getServerRuntimeConfig } = require('./src/lib/runtime-config')
+
+// Mock environment variables for runtime config (server side)
+process.env.SUPABASE_URL = 'https://test.supabase.co'
+process.env.SUPABASE_ANON_KEY = 'test-anon-key'
 
 // Mock fetch globally
 global.fetch = jest.fn()
@@ -74,3 +75,6 @@ window.location = {
   replace: jest.fn(),
   assign: jest.fn(),
 }
+
+// Inject runtime config expected by browser helpers
+window.__MINDROOM_CONFIG__ = getServerRuntimeConfig()

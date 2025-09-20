@@ -1,15 +1,17 @@
 import { AuthWrapper } from '@/components/auth/auth-wrapper'
+import { MindRoomLogo } from '@/components/MindRoomLogo'
+import { getServerRuntimeConfig } from '@/lib/runtime-config'
 import { headers } from 'next/headers'
 import Link from 'next/link'
 import { X } from 'lucide-react'
-import { MindRoomLogo } from '@/components/MindRoomLogo'
 
 export default async function LoginPage({ searchParams }: { searchParams: { redirect_to?: string } }) {
   const nextTarget = searchParams?.redirect_to || '/dashboard'
   const hdrs = await headers()
   const host = hdrs.get('host') || ''
-  const base = process.env.PLATFORM_DOMAIN
-    ? `https://app.${process.env.PLATFORM_DOMAIN}`
+  const { platformDomain } = getServerRuntimeConfig()
+  const base = platformDomain
+    ? `https://app.${platformDomain}`
     : (host ? `https://${host}` : '')
   const callback = `${base}/auth/callback?next=${encodeURIComponent(nextTarget)}`
 
