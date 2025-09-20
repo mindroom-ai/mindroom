@@ -32,7 +32,7 @@ export default function InstancePage() {
   const [loading, setLoading] = useState(!cachedInstance)
   const [refreshing, setRefreshing] = useState(false)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
-  const platformDomain = useMemo(() => getRuntimeConfig().platformDomain, [])
+  const { platformDomain, apiUrl } = useMemo(() => getRuntimeConfig(), [])
 
 
   useEffect(() => {
@@ -333,7 +333,11 @@ export default function InstancePage() {
           <div className="grid md:grid-cols-2 gap-4">
             <div>
               <p className="text-sm text-gray-600 dark:text-gray-400">Subdomain</p>
-              <p className="font-mono text-sm">{`${instance.subdomain}.${platformDomain || 'mindroom.chat'}`}</p>
+              <p className="font-mono text-sm">
+                {platformDomain
+                  ? `${instance.subdomain}.${platformDomain}`
+                  : instance.frontend_url || instance.backend_url || instance.subdomain}
+              </p>
             </div>
             <div>
               <p className="text-sm text-gray-600 dark:text-gray-400">Created</p>
