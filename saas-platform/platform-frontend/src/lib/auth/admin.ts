@@ -1,10 +1,7 @@
 import { redirect } from 'next/navigation'
+import { getServerRuntimeConfig } from '@/lib/runtime-config'
 import { createServerClientSupabase } from '@/lib/supabase/server'
 import { logger } from '../logger'
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || (
-  process.env.PLATFORM_DOMAIN ? `https://api.${process.env.PLATFORM_DOMAIN}` : 'http://localhost:8000'
-)
 
 export async function requireAdmin() {
   const supabase = await createServerClientSupabase()
@@ -24,8 +21,10 @@ export async function requireAdmin() {
   }
 
   // Check admin status via API
+  const { apiUrl } = getServerRuntimeConfig()
+
   try {
-    const response = await fetch(`${API_URL}/my/account/admin-status`, {
+    const response = await fetch(`${apiUrl}/my/account/admin-status`, {
       headers: {
         'Authorization': `Bearer ${session.access_token}`,
         'Content-Type': 'application/json',
@@ -44,7 +43,7 @@ export async function requireAdmin() {
     }
 
     // Also get full account info
-    const accountResponse = await fetch(`${API_URL}/my/account`, {
+    const accountResponse = await fetch(`${apiUrl}/my/account`, {
       headers: {
         'Authorization': `Bearer ${session.access_token}`,
         'Content-Type': 'application/json',

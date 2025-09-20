@@ -1,16 +1,18 @@
+import { getRuntimeConfig } from '@/lib/runtime-config'
 import { createClient } from '@/lib/supabase/client'
 import { logger } from './logger'
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+const resolveApiUrl = () => getRuntimeConfig().apiUrl
 
 export async function apiCall(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<Response> {
+  const apiUrl = resolveApiUrl()
   const supabase = createClient()
   const { data: { session } } = await supabase.auth.getSession()
 
-  const url = `${API_URL}${endpoint}`
+  const url = `${apiUrl}${endpoint}`
   const headers = {
     'Content-Type': 'application/json',
     'Authorization': session?.access_token ? `Bearer ${session.access_token}` : '',
@@ -186,11 +188,12 @@ export async function createPortalSession() {
 
 // SSO cookie setup
 export async function setSsoCookie() {
+  const apiUrl = resolveApiUrl()
   const supabase = createClient()
   const { data: { session } } = await supabase.auth.getSession()
   if (!session?.access_token) return { ok: false }
 
-  const response = await fetch(`${API_URL}/my/sso-cookie`, {
+  const response = await fetch(`${apiUrl}/my/sso-cookie`, {
     method: 'POST',
     credentials: 'include',
     headers: {
@@ -202,7 +205,8 @@ export async function setSsoCookie() {
 }
 
 export async function clearSsoCookie() {
-  await fetch(`${API_URL}/my/sso-cookie`, {
+  const apiUrl = resolveApiUrl()
+  await fetch(`${apiUrl}/my/sso-cookie`, {
     method: 'DELETE',
     credentials: 'include',
   })

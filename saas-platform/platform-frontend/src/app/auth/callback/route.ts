@@ -1,16 +1,15 @@
+import { getServerRuntimeConfig } from '@/lib/runtime-config'
 import { createServerClientSupabase } from '@/lib/supabase/server'
+import { logger } from '@/lib/logger'
 import { NextResponse } from 'next/server'
 import { NextRequest } from 'next/server'
-import { logger } from '@/lib/logger'
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || (
-  process.env.PLATFORM_DOMAIN ? `https://api.${process.env.PLATFORM_DOMAIN}` : 'http://localhost:8000'
-)
 
 export async function GET(request: NextRequest) {
   const requestUrl = new URL(request.url)
   const code = requestUrl.searchParams.get('code')
   const next = requestUrl.searchParams.get('next') || '/dashboard'
+
+  const { apiUrl, platformDomain } = getServerRuntimeConfig()
 
   if (code) {
     const supabase = await createServerClientSupabase()
@@ -23,7 +22,7 @@ export async function GET(request: NextRequest) {
       if (session && next.startsWith('/admin')) {
         // Check if user is admin via API
         try {
-          const response = await fetch(`${API_URL}/my/account/admin-status`, {
+          const response = await fetch(`${apiUrl}/my/account/admin-status`, {
             headers: {
               'Authorization': `Bearer ${session.access_token}`,
               'Content-Type': 'application/json',
@@ -35,8 +34,8 @@ export async function GET(request: NextRequest) {
 
             // If user is admin and was trying to go to admin, redirect there
             if (data.is_admin) {
-              const publicUrl = process.env.PLATFORM_DOMAIN
-                ? `https://app.${process.env.PLATFORM_DOMAIN}`
+              const publicUrl = platformDomain
+                ? `https://app.${platformDomain}`
                 : `https://${request.headers.get('host')}` || request.url
               // Use normal admin redirect
               return NextResponse.redirect(new URL(next, publicUrl))
@@ -51,8 +50,8 @@ export async function GET(request: NextRequest) {
 
   // URL to redirect to after sign in process completes
   // Use the public app URL from environment or construct from headers
-  const publicUrl = process.env.PLATFORM_DOMAIN
-    ? `https://app.${process.env.PLATFORM_DOMAIN}`
+  const publicUrl = platformDomain
+    ? `https://app.${platformDomain}`
     : `https://${request.headers.get('host')}` || request.url
 
   // Redirect to a client page that sets the SSO cookie before navigating to `next`

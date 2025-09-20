@@ -22,8 +22,9 @@ const nextConfig: NextConfig = {
     root: __dirname,
   },
   async headers() {
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL || (process.env.PLATFORM_DOMAIN ? `https://api.${process.env.PLATFORM_DOMAIN}` : 'http://localhost:8000')
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ''
+    const { resolveApiUrl } = await import('./src/lib/runtime-config')
+    const apiUrl = resolveApiUrl()
+    const supabaseUrl = process.env.SUPABASE_URL || ''
     const isDev = process.env.NODE_ENV !== 'production'
 
     // Build connect-src whitelist

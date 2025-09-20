@@ -1,12 +1,13 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { Loader2, RefreshCw, CheckCircle, AlertCircle, Clock, Play, Pause, ExternalLink, Server, Database, Globe } from 'lucide-react'
 import { listInstances, startInstance, stopInstance, restartInstance as apiRestartInstance } from '@/lib/api'
+import { cache } from '@/lib/cache'
+import { getRuntimeConfig } from '@/lib/runtime-config'
 import { logger } from '@/lib/logger'
 import { Card, CardHeader, CardSection } from '@/components/ui/Card'
-import { cache } from '@/lib/cache'
 
 type InstanceStatus = 'provisioning' | 'running' | 'stopped' | 'failed' | 'error' | 'deprovisioned' | 'restarting'
 
@@ -31,6 +32,7 @@ export default function InstancePage() {
   const [loading, setLoading] = useState(!cachedInstance)
   const [refreshing, setRefreshing] = useState(false)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
+  const platformDomain = useMemo(() => getRuntimeConfig().platformDomain, [])
 
 
   useEffect(() => {
@@ -331,7 +333,7 @@ export default function InstancePage() {
           <div className="grid md:grid-cols-2 gap-4">
             <div>
               <p className="text-sm text-gray-600 dark:text-gray-400">Subdomain</p>
-              <p className="font-mono text-sm">{`${instance.subdomain}.${process.env.NEXT_PUBLIC_PLATFORM_DOMAIN || 'mindroom.chat'}`}</p>
+              <p className="font-mono text-sm">{`${instance.subdomain}.${platformDomain || 'mindroom.chat'}`}</p>
             </div>
             <div>
               <p className="text-sm text-gray-600 dark:text-gray-400">Created</p>
