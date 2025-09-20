@@ -15,8 +15,16 @@ RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
 FROM deps AS builder
 WORKDIR /app
 COPY saas-platform/platform-frontend/ ./platform-frontend/
-# Runtime configuration is injected at startup; no build-time env needed
-ENV NODE_ENV=production
+# Provide runtime env vars during build so Next.js can pre-render pages
+ARG SUPABASE_URL
+ARG SUPABASE_ANON_KEY
+ARG API_URL
+ARG PLATFORM_DOMAIN
+ENV NODE_ENV=production \
+    SUPABASE_URL=${SUPABASE_URL} \
+    SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY} \
+    API_URL=${API_URL} \
+    PLATFORM_DOMAIN=${PLATFORM_DOMAIN}
 # Build production bundle with optimizations
 # Next.js standalone output creates minimal production build
 RUN cd platform-frontend && pnpm run build
