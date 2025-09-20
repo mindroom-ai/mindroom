@@ -155,8 +155,9 @@ The kind cluster configuration is in `kind-config.yaml`:
 ## Environment Variables
 
 The build script reads from `saas-platform/.env` for:
-- `NEXT_PUBLIC_SUPABASE_URL`
-- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `SUPABASE_URL`
+- `SUPABASE_ANON_KEY`
+- `PLATFORM_DOMAIN`
 
 Create this file from `.env.example` if needed.
 

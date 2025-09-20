@@ -175,9 +175,10 @@ export async function middleware(request: NextRequest) {
 **Current Cookie Handling:**
 ```typescript
 // middleware.ts - Cookie handling via Supabase
+const { supabaseUrl, supabaseAnonKey } = getServerRuntimeConfig()
 const supabase = createServerClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+  supabaseUrl,
+  supabaseAnonKey,
   {
     cookies: {
       get(name: string) {

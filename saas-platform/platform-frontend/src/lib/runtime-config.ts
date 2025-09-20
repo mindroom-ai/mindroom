@@ -61,10 +61,7 @@ export function getBrowserRuntimeConfig(): RuntimeConfig {
 
 export function getRuntimeConfig(): RuntimeConfig {
   if (typeof window !== 'undefined') {
-    const browserConfig = window.__MINDROOM_CONFIG__
-    if (browserConfig) {
-      return browserConfig
-    }
+    return getBrowserRuntimeConfig()
   }
 
   return getServerRuntimeConfig()
