@@ -14,6 +14,8 @@ type Instance = {
   tier: string | null
   created_at: string
   updated_at: string
+  kubernetes_synced_at?: string | null
+  status_hint?: string | null
 }
 
 // Mock the API module
@@ -168,6 +170,24 @@ describe('InstanceCard', () => {
         expect(screen.getByText(expectedText)).toBeInTheDocument()
         rerender(<InstanceCard instance={null} />)
       })
+    })
+
+    it('should display provisioning hint and last sync info when available', () => {
+      const syncedAt = new Date().toISOString()
+      render(
+        <InstanceCard
+          instance={{
+            ...mockInstance,
+            status: 'provisioning',
+            status_hint: 'Waiting for pods',
+            kubernetes_synced_at: syncedAt,
+          }}
+        />
+      )
+
+      expect(screen.getByText('Provisioning...')).toBeInTheDocument()
+      expect(screen.getByText('Waiting for pods')).toBeInTheDocument()
+      expect(screen.getByText(/Last checked/)).toBeInTheDocument()
     })
 
     it('should format relative time correctly', () => {

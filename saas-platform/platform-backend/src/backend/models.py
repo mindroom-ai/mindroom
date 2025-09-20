@@ -30,6 +30,7 @@ class InstanceOut(BaseModel):
     created_at: str | None = None
     updated_at: str | None = None
     kubernetes_synced_at: str | None = None
+    status_hint: str | None = None
 
 
 class InstancesResponse(BaseModel):

@@ -1,5 +1,6 @@
 """Instance management routes."""
 
+import json
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -43,20 +44,50 @@ async def _background_sync_instance_status(instance_id: str) -> None:
         exists = await check_deployment_exists(instance_id)
 
         if exists:
-            # Get actual replicas count
-            code, out, _ = await run_kubectl(
+            # Inspect deployment status to understand readiness
+            code, out, err = await run_kubectl(
                 [
                     "get",
                     f"deployment/mindroom-backend-{instance_id}",
-                    "-o=jsonpath={.spec.replicas}",
+                    "-o=json",
                 ],
                 namespace="mindroom-instances",
             )
-            if code == 0:
-                replicas = int(out.strip() or "0")
-                actual_status = "running" if replicas > 0 else "stopped"
+            if code == 0 and out:
+                try:
+                    deployment = json.loads(out)
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "Failed to parse deployment JSON for instance %s: %s",
+                        instance_id,
+                        out[:120],
+                    )
+                    deployment = {}
+
+                if not deployment:
+                    actual_status = "provisioning"
+                else:
+                    spec = deployment.get("spec", {}) or {}
+                    status = deployment.get("status", {}) or {}
+                    desired_replicas = int(spec.get("replicas") or 0)
+                    ready_replicas = int(status.get("readyReplicas") or 0)
+                    available_replicas = int(status.get("availableReplicas") or 0)
+                    updated_replicas = int(status.get("updatedReplicas") or 0)
+
+                    if desired_replicas == 0:
+                        actual_status = "stopped"
+                    elif min(ready_replicas, available_replicas, updated_replicas) >= desired_replicas:
+                        actual_status = "running"
+                    else:
+                        actual_status = "provisioning"
             else:
-                actual_status = "error"
+                logger.warning(
+                    "kubectl get deployment failed for instance %s: %s",
+                    instance_id,
+                    err.strip() if err else out.strip(),
+                )
+                # Fall back to assuming deployment exists but is still provisioning
+                actual_status = "provisioning"
         elif current_status in ["deprovisioned", "provisioning"]:
             # Keep current status if it makes sense
             actual_status = current_status
@@ -104,9 +135,26 @@ async def list_user_instances(
 
     instances = result.data or []
 
+    enhanced_instances: list[dict[str, Any]] = []
+    for instance in instances:
+        status = instance.get("status")
+        hint: str | None = None
+
+        if status == "provisioning":
+            hint = (
+                "Provisioning in progress. First boot can take several minutes while "
+                "containers pull images and TLS certificates issue."
+            )
+        elif status == "restarting":
+            hint = "Restarting backend pods; the workspace will be available again shortly."
+        elif status == "running" and not instance.get("kubernetes_synced_at"):
+            hint = "Running (awaiting initial Kubernetes health check)."
+
+        enhanced_instances.append({**instance, "status_hint": hint})
+
     # Check if any instance needs a background sync (older than 30 seconds)
     stale_threshold = datetime.now(UTC) - timedelta(seconds=30)
-    for instance in instances:
+    for instance in enhanced_instances:
         instance_id = instance.get("instance_id")
         if not instance_id:
             continue
@@ -142,7 +190,7 @@ async def list_user_instances(
     )
 
     # Return cached data immediately
-    return {"instances": instances}
+    return {"instances": enhanced_instances}
 
 
 @router.post("/my/instances/provision", response_model=ProvisionResponse)

@@ -20,6 +20,7 @@ export interface Instance {
   tier?: string
   matrix_server_url?: string | null
   kubernetes_synced_at?: string | null
+  status_hint?: string | null
 }
 
 // Development-only mock instance

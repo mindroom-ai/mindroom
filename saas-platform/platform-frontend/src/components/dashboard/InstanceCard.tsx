@@ -156,6 +156,15 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
   const frontendHost = getHostname(instance.frontend_url)
   const backendHost = getHostname(instance.backend_url)
   const matrixHost = getHostname(instance.matrix_server_url)
+  const lastSynced = instance.kubernetes_synced_at
+    ? formatRelativeTime(instance.kubernetes_synced_at)
+    : null
+  const statusHint = instance.status_hint
+    || (instance.status === 'provisioning'
+      ? 'Instance provisioning in progress. First boot can take a few minutes while containers pull and TLS certificates issue.'
+      : instance.status === 'restarting'
+        ? 'Instance is restarting and will be reachable again soon.'
+        : null)
 
   return (
     <Card>
@@ -166,6 +175,21 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
           <span className="text-sm font-medium">{getStatusText()}</span>
         </div>
       </div>
+
+      {(statusHint || lastSynced) && (
+        <div className="mb-3 space-y-1">
+          {statusHint && (
+            <p className="text-sm text-gray-600 dark:text-gray-400 leading-relaxed">
+              {statusHint}
+            </p>
+          )}
+          {lastSynced && (
+            <p className="text-xs text-gray-500 dark:text-gray-500">
+              Last checked {lastSynced}.
+            </p>
+          )}
+        </div>
+      )}
 
       <div className="space-y-3">
         {/* Domain */}

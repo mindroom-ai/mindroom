@@ -17,6 +17,8 @@ type Instance = {
   tier: string | null
   created_at: string
   updated_at: string
+  kubernetes_synced_at?: string | null
+  status_hint?: string | null
 }
 
 // Mock the API
