@@ -122,6 +122,9 @@ cluster-helm-lint:
 cluster-tf-up:
     bash cluster/terraform/terraform-k8s/scripts/up.sh
 
+cluster-tf-build-snapshots:
+    bash cluster/terraform/terraform-k8s/scripts/build_snapshots.sh
+
 # Show Terraform outputs and cluster status
 cluster-tf-status:
     bash cluster/terraform/terraform-k8s/scripts/status.sh
