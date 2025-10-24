@@ -63,7 +63,7 @@ spec:
     - app.{{ .Values.domain }}
     - api.{{ .Values.domain }}
     - webhooks.{{ .Values.domain }}
-    secretName: platform-apps-tls
+    secretName: platform-tls-cert
 
 ---
 apiVersion: networking.k8s.io/v1
@@ -103,4 +103,4 @@ spec:
   - hosts:
     - {{ .Values.domain }}
     - www.{{ .Values.domain }}
-    secretName: platform-root-tls
+    secretName: platform-tls-cert

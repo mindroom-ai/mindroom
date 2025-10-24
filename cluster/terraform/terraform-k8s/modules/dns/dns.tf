@@ -33,7 +33,7 @@ locals {
   # "mindroom.chat" - "mindroom.chat" = ""
   subdomain_prefix = var.superdomain == var.root_domain ? "" : trimspace(trimsuffix(var.superdomain, ".${var.root_domain}"))
 
-  platform_subdomains = ["app", "api", "webhooks", "www"]
+  platform_subdomains = ["app", "api", "webhooks"]
 }
 
 resource "porkbun_dns_record" "platform_a" {
