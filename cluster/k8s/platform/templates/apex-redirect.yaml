@@ -1,0 +1,39 @@
+# Apex redirect: mindroom.chat and www.mindroom.chat -> https://app.<domain>
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: platform-root-redirect
+  namespace: mindroom-{{ .Values.environment }}
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/permanent-redirect: https://app.{{ .Values.domain }}
+    nginx.ingress.kubernetes.io/permanent-redirect-code: "308"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: {{ .Values.domain }}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: platform-frontend
+            port:
+              number: 3000
+  - host: www.{{ .Values.domain }}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: platform-frontend
+            port:
+              number: 3000
+  tls:
+  - hosts:
+    - {{ .Values.domain }}
+    - www.{{ .Values.domain }}
+    secretName: platform-tls-cert
