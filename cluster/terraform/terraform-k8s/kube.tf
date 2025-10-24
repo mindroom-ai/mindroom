@@ -41,6 +41,16 @@ resource "tls_private_key" "cluster" {
   algorithm = "ED25519"
 }
 
+# Prefer a repo-scoped SSH key if present; otherwise generate one.
+# This ensures Terraform never falls back to a user’s personal SSH key.
+locals {
+  repo_ssh_key_path     = "${path.module}/cluster_ssh_key"
+  repo_ssh_key_pub_path = "${path.module}/cluster_ssh_key.pub"
+  use_repo_ssh_key      = fileexists(local.repo_ssh_key_path) && fileexists(local.repo_ssh_key_pub_path)
+  ssh_public_key_value  = local.use_repo_ssh_key ? file(local.repo_ssh_key_pub_path) : tls_private_key.cluster.public_key_openssh
+  ssh_private_key_value = local.use_repo_ssh_key ? file(local.repo_ssh_key_path)     : tls_private_key.cluster.private_key_pem
+}
+
 module "kube-hetzner" {
   source  = "kube-hetzner/kube-hetzner/hcloud"
   version = "2.15.0"
