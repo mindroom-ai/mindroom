@@ -68,8 +68,8 @@ module "kube-hetzner" {
   cluster_name = var.cluster_name
 
   # SSH key configuration - use dedicated cluster key
-  ssh_public_key  = tls_private_key.cluster.public_key_openssh
-  ssh_private_key = tls_private_key.cluster.private_key_pem
+  ssh_public_key  = local.ssh_public_key_value
+  ssh_private_key = local.ssh_private_key_value
 
   # Single node configuration - everything runs on one node
   control_plane_nodepools = [
