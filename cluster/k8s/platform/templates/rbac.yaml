@@ -4,7 +4,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: platform-backend
-  namespace: {{ .Release.Namespace }}
+  namespace: mindroom-{{ .Values.environment }}
 ---
 ---
 # Namespaced Role for managing instance resources (least privilege)
@@ -55,7 +55,7 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: platform-backend
-    namespace: {{ .Release.Namespace }}
+    namespace: mindroom-{{ .Values.environment }}
 ---
 ---
 # ClusterRole for platform-backend to manage namespaces
@@ -82,4 +82,4 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: platform-backend
-    namespace: {{ .Release.Namespace }}
+    namespace: mindroom-{{ .Values.environment }}

@@ -1,9 +1,16 @@
+# Platform Services Deployment
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mindroom-{{ .Values.environment }}
+---
 # Non-sensitive config for platform services
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: platform-config
-  namespace: {{ .Release.Namespace }}
+  namespace: mindroom-{{ .Values.environment }}
 {{ $prov := .Values.provisioner | default (dict) }}
 data:
   PLATFORM_DOMAIN: {{ .Values.domain }}
@@ -20,7 +27,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: platform-secrets
-  namespace: {{ .Release.Namespace }}
+  namespace: mindroom-{{ .Values.environment }}
 type: Opaque
 stringData:
   supabase_service_key: {{ .Values.supabase.serviceKey }}
@@ -39,7 +46,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: gitea-registry
-  namespace: {{ .Release.Namespace }}
+  namespace: mindroom-{{ .Values.environment }}
 type: kubernetes.io/dockerconfigjson
 data:
   .dockerconfigjson: {{ printf "{\"auths\":{\"git.nijho.lt\":{\"username\":\"basnijholt\",\"password\":\"%s\",\"auth\":\"%s\"}}}" .Values.gitea.token (printf "basnijholt:%s" .Values.gitea.token | b64enc) | b64enc }}
@@ -49,7 +56,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: platform-frontend
-  namespace: {{ .Release.Namespace }}
+  namespace: mindroom-{{ .Values.environment }}
   labels:
     app: platform-frontend
     environment: {{ .Values.environment }}
@@ -98,7 +105,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: platform-frontend
-  namespace: {{ .Release.Namespace }}
+  namespace: mindroom-{{ .Values.environment }}
   labels:
     app: platform-frontend
     environment: {{ .Values.environment }}
@@ -115,7 +122,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: platform-backend
-  namespace: {{ .Release.Namespace }}
+  namespace: mindroom-{{ .Values.environment }}
   labels:
     app: platform-backend
     environment: {{ .Values.environment }}
@@ -178,7 +185,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: platform-backend
-  namespace: {{ .Release.Namespace }}
+  namespace: mindroom-{{ .Values.environment }}
   labels:
     app: platform-backend
     environment: {{ .Values.environment }}
@@ -198,14 +205,14 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: platform-backend
-  namespace: {{ .Release.Namespace }}
+  namespace: mindroom-{{ .Values.environment }}
   labels:
     app: platform-backend
     release: {{ $monitoring.releaseLabel | default "monitoring" }}
 spec:
   namespaceSelector:
     matchNames:
-    - {{ .Release.Namespace }}
+    - mindroom-{{ .Values.environment }}
   selector:
     matchLabels:
       app: platform-backend
@@ -221,7 +228,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
   name: platform-security-alerts
-  namespace: {{ .Release.Namespace }}
+  namespace: mindroom-{{ .Values.environment }}
   labels:
     app: platform-backend
     release: {{ $monitoring.releaseLabel | default "monitoring" }}
