@@ -15,11 +15,11 @@ terraform {
 }
 
 variable "superdomain" {
-  type = string
+  type        = string
   description = "The full domain where the platform is deployed (e.g., staging.mindroom.chat)"
 }
 variable "root_domain" {
-  type = string
+  type        = string
   description = "The root domain registered with DNS provider (e.g., mindroom.chat)"
 }
 variable "porkbun_api_key" { type = string }
@@ -33,7 +33,7 @@ locals {
   # "mindroom.chat" - "mindroom.chat" = ""
   subdomain_prefix = var.superdomain == var.root_domain ? "" : trimspace(trimsuffix(var.superdomain, ".${var.root_domain}"))
 
-  platform_subdomains = ["app", "api", "webhooks"]
+  platform_subdomains = ["app", "api", "webhooks", "www"]
 }
 
 resource "porkbun_dns_record" "platform_a" {
@@ -52,6 +52,22 @@ resource "porkbun_dns_record" "platform_aaaa" {
   type     = "AAAA"
   content  = var.ipv6_address
   ttl      = "600"
+}
+
+resource "porkbun_dns_record" "apex_a" {
+  domain  = var.root_domain
+  name    = local.subdomain_prefix != "" ? local.subdomain_prefix : ""
+  type    = "A"
+  content = var.ipv4_address
+  ttl     = "600"
+}
+
+resource "porkbun_dns_record" "apex_aaaa" {
+  domain  = var.root_domain
+  name    = local.subdomain_prefix != "" ? local.subdomain_prefix : ""
+  type    = "AAAA"
+  content = var.ipv6_address
+  ttl     = "600"
 }
 
 resource "porkbun_dns_record" "wildcard_a" {
