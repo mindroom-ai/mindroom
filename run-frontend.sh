@@ -11,7 +11,7 @@ if ! command -v bun &> /dev/null; then
 fi
 
 cd "$SCRIPT_DIR/frontend"
-[ ! -d "node_modules" ] && bun install
+bun install
 
 if [ "${1:-dev}" = "prod" ] || [ "$1" = "production" ]; then
   bun run build

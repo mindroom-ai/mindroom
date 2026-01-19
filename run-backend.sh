@@ -12,11 +12,8 @@ if ! command -v uv &> /dev/null; then
   exit 1
 fi
 
-# Install dependencies if .venv doesn't exist
-if [ ! -d "$SCRIPT_DIR/.venv" ]; then
-  echo "📦 Installing Python dependencies..."
-  (cd "$SCRIPT_DIR" && uv sync --all-extras)
-fi
+# Sync dependencies (fast no-op if already current)
+(cd "$SCRIPT_DIR" && uv sync --all-extras)
 
 # Set paths (container uses /app, local uses script dir)
 APP_DIR="${SCRIPT_DIR}"
