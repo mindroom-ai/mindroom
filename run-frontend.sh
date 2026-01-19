@@ -15,15 +15,15 @@ if [ ! -d "node_modules" ]; then
   pnpm install
 fi
 
+# Add node_modules/.bin to PATH for vite and other tools
+export PATH="$PWD/node_modules/.bin:$PATH"
+
 if [ "$MODE" = "prod" ] || [ "$MODE" = "production" ]; then
     echo "Starting frontend in PRODUCTION mode..."
     pnpm run build
     # Serve production build with preview server
-    # Use empty VITE_API_URL for relative URLs (proxied to backend)
-    exec pnpm run preview -- --host 0.0.0.0 --port 3003
+    exec ./node_modules/.bin/vite preview --host 0.0.0.0 --port 3003
 else
     echo "Starting frontend in DEVELOPMENT mode..."
-
-    # Use empty VITE_API_URL for relative URLs (proxied to backend)
-    exec pnpm run dev -- --host 0.0.0.0 --port 3003
+    exec ./node_modules/.bin/vite --host 0.0.0.0 --port 3003
 fi
