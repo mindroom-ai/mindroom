@@ -4,13 +4,25 @@
 
 trap 'kill $(jobs -p)' EXIT
 
-# Use STORAGE_PATH environment variable, defaulting to /mindroom_data if not set
-STORAGE_PATH="${STORAGE_PATH:-/app/mindroom_data}"
+# Detect script directory for resolving paths
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
-# Determine config location. Allow overrides so we can keep the writable config
-# on the persistent volume even when a read-only template is mounted at
-# /app/config.yaml (e.g. Kubernetes ConfigMap).
-CONFIG_PATH="${MINDROOM_CONFIG_PATH:-/app/config.yaml}"
+# Detect if running in container or local dev environment
+if [ -d "/app" ] && [ -f "/app/config.yaml" ]; then
+  # Container environment
+  STORAGE_PATH="${STORAGE_PATH:-/app/mindroom_data}"
+  CONFIG_PATH="${MINDROOM_CONFIG_PATH:-/app/config.yaml}"
+  PYTHON_CMD=".venv/bin/python"
+  UVICORN_CMD=".venv/bin/uvicorn"
+else
+  # Local development environment
+  STORAGE_PATH="${STORAGE_PATH:-$SCRIPT_DIR/mindroom_data}"
+  CONFIG_PATH="${MINDROOM_CONFIG_PATH:-$SCRIPT_DIR/config.yaml}"
+  # Use uv run for local dev (works with nix-shell)
+  PYTHON_CMD="uv run python"
+  UVICORN_CMD="uv run uvicorn"
+fi
+
 CONFIG_TEMPLATE="${MINDROOM_CONFIG_TEMPLATE:-$CONFIG_PATH}"
 
 # Ensure config directory exists and seed from template when necessary
@@ -32,8 +44,12 @@ chmod 600 "$CONFIG_PATH" 2>/dev/null || true
 # Create necessary directories
 mkdir -p "$STORAGE_PATH"
 
+echo "Starting MindRoom backend..."
+echo "  Storage: $STORAGE_PATH"
+echo "  Config: $CONFIG_PATH"
+
 # Start bot in background (logs to stdout)
-.venv/bin/python -m mindroom.cli run --log-level INFO --storage-path "$STORAGE_PATH" &
+$PYTHON_CMD -m mindroom.cli run --log-level INFO --storage-path "$STORAGE_PATH" &
 
 # Start API server in foreground (logs to stdout)
-.venv/bin/uvicorn mindroom.api.main:app --host 0.0.0.0 --port 8765
+$UVICORN_CMD mindroom.api.main:app --host 0.0.0.0 --port 8765

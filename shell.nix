@@ -32,27 +32,20 @@ pkgs.mkShell {
 
     # uv for Python package management
     uv
-
-    # Infra tooling
-    terraform
-    kind
-    kubectl
-    kubernetes-helm
-    kubeconform
   ];
 
   shellHook = ''
-    echo "MindRoom Widget Development Shell"
+    echo "MindRoom Development Shell"
     echo "Tools available: uv, pnpm, nodejs, python3, chromium"
-    echo "Chromium available for screenshots"
     export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
     export PUPPETEER_EXECUTABLE_PATH=${pkgs.chromium}/bin/chromium
 
-    echo "Tip: run backend tests with:"
-    echo "  (cd saas-platform/platform-backend && PYTHONPATH=src uv run pytest -q)"
-    echo "Render Helm templates with:"
-    echo "  helm template platform ./cluster/k8s/platform -f cluster/k8s/platform/values.yaml | kubeconform -ignore-missing-schemas"
-    echo "Kind cluster helpers:"
-    echo "  just cluster-kind-up && just cluster-kind-build-load && just cluster-kind-install-platform"
+    echo ""
+    echo "Run MindRoom locally:"
+    echo "  ./run-nix.sh           # Start backend + frontend"
+    echo ""
+    echo "Run tests:"
+    echo "  uv run pytest -q       # Backend tests"
+    echo "  cd frontend && pnpm test  # Frontend tests"
   '';
 }
