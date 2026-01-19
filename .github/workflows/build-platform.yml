@@ -1,17 +1,22 @@
 name: Build Platform
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'saas-platform/**'
-      - '.github/workflows/build-platform.yml'
+  # Build (no push) on PRs to validate Dockerfiles
   pull_request:
     branches: [main]
     paths:
       - 'saas-platform/**'
       - '.github/workflows/build-platform.yml'
+  # Push images only on releases
+  release:
+    types: [published]
+  # Manual trigger with push option
   workflow_dispatch:
+    inputs:
+      push_images:
+        description: 'Push images to registry'
+        type: boolean
+        default: false
 
 env:
   REGISTRY: ghcr.io
@@ -69,7 +74,7 @@ jobs:
           context: ${{ matrix.service.context }}
           file: ${{ matrix.service.context }}/${{ matrix.service.dockerfile }}
           platforms: linux/amd64
-          push: true
+          push: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.push_images) }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

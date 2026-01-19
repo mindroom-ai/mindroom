@@ -2,21 +2,24 @@ name: Build MindRoom
 # Builds MindRoom instance images in parallel for maximum speed with change detection
 
 on:
-  push:
-    branches: [ main, public ]
+  # Build (no push) on PRs to validate Dockerfiles
+  pull_request:
+    branches: [ main ]
     paths:
-      - 'src/**'  # Backend code is in src/, not backend/
+      - 'src/**'
       - 'frontend/**'
       - 'deploy/Dockerfile.*'
-      - 'Dockerfile.backend'
-      - 'Dockerfile.frontend'
       - 'pyproject.toml'
       - 'uv.lock'
       - '.github/workflows/build-mindroom.yml'
+  # Push images only on releases
+  release:
+    types: [ published ]
+  # Manual trigger with push option
   workflow_dispatch:
     inputs:
-      force_build:
-        description: 'Force build all images'
+      push_images:
+        description: 'Push images to registry'
         type: boolean
         default: false
 
@@ -91,7 +94,7 @@ jobs:
         context: .
         file: ${{ steps.vars.outputs.dockerfile }}
         platforms: ${{ matrix.platform }}
-        push: true
+        push: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.push_images) }}
         tags: |
           ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ steps.vars.outputs.platform_suffix }}
           ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ github.ref_name }}-${{ steps.vars.outputs.platform_suffix }}
@@ -102,9 +105,10 @@ jobs:
         provenance: false
         sbom: false
 
-  # Create multi-arch manifests after all builds complete
+  # Create multi-arch manifests after all builds complete (only on release/manual push)
   manifest:
     needs: build
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.push_images)
     runs-on: ubuntu-latest
     permissions:
       packages: write
