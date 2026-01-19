@@ -7,11 +7,17 @@
 MODE="${1:-dev}"
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
+# Ensure bun is available
+if ! command -v bun &> /dev/null; then
+  echo "❌ bun not found. Install: curl -fsSL https://bun.sh/install | bash"
+  exit 1
+fi
+
 cd "$SCRIPT_DIR/frontend"
 
 # Install dependencies if node_modules is missing
 if [ ! -d "node_modules" ]; then
-  echo "Installing frontend dependencies..."
+  echo "📦 Installing frontend dependencies..."
   bun install
 fi
 

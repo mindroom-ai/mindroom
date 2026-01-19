@@ -7,6 +7,19 @@ trap 'kill $(jobs -p)' EXIT
 # Detect script directory for resolving paths
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
+# Ensure uv is available (local dev only)
+if [ ! -d "/app" ]; then
+  if ! command -v uv &> /dev/null; then
+    echo "❌ uv not found. Install: curl -LsSf https://astral.sh/uv/install.sh | sh"
+    exit 1
+  fi
+  # Install dependencies if .venv doesn't exist
+  if [ ! -d "$SCRIPT_DIR/.venv" ]; then
+    echo "📦 Installing Python dependencies..."
+    (cd "$SCRIPT_DIR" && uv sync --all-extras)
+  fi
+fi
+
 # Detect if running in container or local dev environment
 if [ -d "/app" ] && [ -f "/app/config.yaml" ]; then
   # Container environment
