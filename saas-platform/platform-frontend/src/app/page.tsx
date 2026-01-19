@@ -114,7 +114,7 @@ export default function LandingPage() {
           </p>
           <div className="flex items-center justify-center gap-4">
             <a
-              href="https://github.com/basnijholt/mindroom"
+              href="https://github.com/mindroom-ai/mindroom"
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-2 px-4 py-2 bg-gray-900 dark:bg-white text-white dark:text-gray-900 rounded-lg hover:bg-gray-800 dark:hover:bg-gray-100 transition-colors"

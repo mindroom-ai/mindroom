@@ -252,4 +252,4 @@ The `bridge_instances.json` file is automatically added to `.gitignore`.
 - Telegram Bridge: https://docs.mau.fi/bridges/python/telegram/
 - Slack Bridge: https://docs.mau.fi/bridges/python/slack/
 - General Mautrix: https://docs.mau.fi/bridges/
-- Mindroom: https://github.com/yourusername/mindroom
+- Mindroom: https://github.com/mindroom-ai/mindroom

@@ -112,9 +112,9 @@ dependencies = [
   "zep-cloud>=3.3",                              # for Zep tool
 ]
 
-urls.documentation = "https://github.com/basnijholt/mindroom"
-urls.homepage = "https://github.com/basnijholt/mindroom"
-urls.repository = "https://github.com/basnijholt/mindroom"
+urls.documentation = "https://github.com/mindroom-ai/mindroom"
+urls.homepage = "https://github.com/mindroom-ai/mindroom"
+urls.repository = "https://github.com/mindroom-ai/mindroom"
 
 scripts.mindroom = "mindroom.cli:main"
 

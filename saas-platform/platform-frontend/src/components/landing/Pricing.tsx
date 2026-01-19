@@ -25,7 +25,7 @@ const defaultPlans = [
       { text: 'Managed hosting', included: false },
     ],
     cta: 'View Docs',
-    href: 'https://github.com/basnijholt/mindroom',
+    href: 'https://github.com/mindroom-ai/mindroom',
     featured: false,
     gradient: 'from-gray-500 to-gray-600',
   },

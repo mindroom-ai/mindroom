@@ -154,7 +154,7 @@ Gmail, GitHub, Spotify, Home Assistant, Google Drive, Reddit, weather services, 
 
 ```bash
 # Clone and install
-git clone https://github.com/yourusername/mindroom
+git clone https://github.com/mindroom-ai/mindroom
 ```
 
 ```bash
