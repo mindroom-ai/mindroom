@@ -45,7 +45,6 @@ dependencies = [
   "exa-py",                                      # for Exa tool
   "fal-client",                                  # for Fal tool
   "fastapi[standard]>=0.116.1",                  # for widget API and future API endpoints
-  "ffmpeg",                                      # for MoviePy tool
   "firecrawl-py<3",                              # for Firecrawl tool
   "google-api-python-client>=2.178",             # for Google Calendar, Google Sheets, Gmail tools, widget API
   "google-auth>=2.40.3",                         # for Google Calendar, Google Sheets, Gmail tools, widget API
@@ -66,14 +65,12 @@ dependencies = [
   "lumaai",                                      # for LumaLabs tool
   "lxml-html-clean",                             # for Newspaper4K tools
   "markdown>=3.7",                               # for HTML formatting in Matrix messages
-  "matplotlib",                                  # for Visualization tool
   "matrix-nio>=0.24",
   "mcp[cli]>=1.12.4",                            # for MCP tool
   "mem0ai>=0.1.115",                             # for Mem0 tool
   "moviepy",                                     # for MoviePy tool
   "newspaper4k",                                 # for Newspaper4K tool
   "openai",                                      # for OpenAI and DALL-E tools, Morph model
-  "opencv-python",                               # for OpenCV tool
   "oxylabs",                                     # for Oxylabs tool
   "pandas>=2.2",                                 # for Pandas tool
   "playwright",                                  # for AgentQL and Browserbase tools
@@ -107,9 +104,7 @@ dependencies = [
   "twilio",                                      # for Twilio tool
   "typer>=0.16",
   "uvicorn>=0.35",                               # for running FastAPI server (widget API)
-  "valyu",                                       # for Valyu tool
   "watchdog>=6",                                 # for file watching (widget API)
-  "web3",                                        # for EVM tool
   "webexpythonsdk",                              # for Webex tool
   "wikipedia",                                   # for Wikipedia tool
   "yfinance",                                    # for YFinance tool
