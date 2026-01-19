@@ -157,9 +157,6 @@ Gmail, GitHub, Spotify, Home Assistant, Google Drive, Reddit, weather services, 
 git clone https://github.com/mindroom-ai/mindroom
 cd mindroom
 uv sync --all-extras
-
-# Copy example config
-cp config.example.yaml config.yaml
 ```
 
 ```bash
