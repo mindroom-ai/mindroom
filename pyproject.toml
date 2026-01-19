@@ -1,10 +1,9 @@
 [build-system]
 build-backend = "hatchling.build"
-requires = [ "hatchling" ]
+requires = [ "hatch-vcs", "hatchling" ]
 
 [project]
 name = "mindroom"
-version = "0.1.0"
 description = "A universal interface for AI agents with persistent memory, where every conversation has a home"
 readme = "README.md"
 authors = [
@@ -16,6 +15,7 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
 ]
+dynamic = [ "version" ]
 dependencies = [
   "agentql",                                     # for AgentQL tool
   "agno[anthropic,google,ollama,openai]>=1.7.6",
@@ -143,7 +143,10 @@ dev = [
 ]
 
 [tool.hatch.version]
-source = "versioningit"
+source = "vcs"
+
+[tool.hatch.version.raw-options]
+version_scheme = "no-guess-dev"
 
 [tool.hatch.build.targets.wheel]
 packages = [ "src/mindroom" ]
@@ -269,11 +272,3 @@ disable_error_code = [
   "type-var",           # Tests may use complex type variables
   "comparison-overlap", # Tests may check impossible conditions for coverage
 ]
-
-[tool.versioningit]
-default-version = "0.0.0"
-
-[tool.versioningit.vcs]
-method = "git"
-match = [ "v*" ]
-default-tag = "0.0.0"
