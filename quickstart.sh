@@ -1,80 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Quickstart script for MindRoom
-# This script sets up everything needed to run MindRoom
-
 echo "🚀 MindRoom Quickstart"
-echo "======================"
 echo ""
 
-# Check for required tools
-echo "📋 Checking prerequisites..."
-
+# Check for uv (installs Python automatically)
 if ! command -v uv &> /dev/null; then
-    echo "❌ uv is not installed. Please install it first:"
-    echo "   curl -LsSf https://astral.sh/uv/install.sh | sh"
+    echo "❌ uv not found. Install: curl -LsSf https://astral.sh/uv/install.sh | sh"
     exit 1
 fi
 
-if ! command -v python3 &> /dev/null; then
-    echo "❌ Python is not installed. Please install Python 3.11 or later."
-    exit 1
+# Check for bun (optional, for frontend)
+if ! command -v bun &> /dev/null; then
+    echo "⚠️  bun not found - skipping frontend. Install: curl -fsSL https://bun.sh/install | bash"
 fi
 
-# Check if we want to set up the widget UI
-SETUP_WIDGET=false
-if command -v bun &> /dev/null; then
-    SETUP_WIDGET=true
-    echo "✅ Found bun - will set up widget UI"
-else
-    echo "⚠️  bun not found - skipping widget UI setup"
-    echo "   (Install bun to get the web interface at http://localhost:3003)"
-    echo "   curl -fsSL https://bun.sh/install | bash"
-fi
-
-echo ""
-echo "📦 Installing Python dependencies..."
+echo "📦 Installing dependencies..."
 uv sync --all-extras
+command -v bun &> /dev/null && (cd frontend && bun install)
 
 echo ""
-echo "🔧 Setting up configuration..."
-if [ ! -f config.yaml ]; then
-    if [ -f config.example.yaml ]; then
-        cp config.example.yaml config.yaml
-        echo "✅ Created config.yaml from example"
-    else
-        echo "⚠️  No config.yaml found - you'll need to create one"
-    fi
-else
-    echo "✅ config.yaml already exists"
-fi
-
-# Set up frontend if available
-if [ "$SETUP_WIDGET" = true ]; then
-    echo ""
-    echo "🎨 Setting up frontend UI..."
-
-    if [ -d "frontend" ]; then
-        echo "  📦 Installing frontend dependencies..."
-        (cd frontend && bun install)
-    fi
-fi
-
-echo ""
-echo "✅ Setup complete!"
-echo ""
-echo "🚀 To start MindRoom:"
-echo ""
-
-echo "   # Terminal 1: Start backend (agents + API)"
-echo "   ./run-backend.sh"
-if [ "$SETUP_WIDGET" = true ]; then
-    echo ""
-    echo "   # Terminal 2: Start frontend (optional, for web UI)"
-    echo "   ./run-frontend.sh"
-fi
-
-echo ""
-echo "📖 First time? Check the README for configuration details."
-echo "💬 Join your Matrix client and start chatting with your agents!"
+echo "✅ Ready! Run: ./run-backend.sh"
+command -v bun &> /dev/null && echo "   Frontend: ./run-frontend.sh"
