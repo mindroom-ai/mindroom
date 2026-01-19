@@ -12,7 +12,7 @@ on:
       - 'Dockerfile.frontend'
       - 'pyproject.toml'
       - 'uv.lock'
-      - '.gitea/workflows/build-mindroom.yml'
+      - '.github/workflows/build-mindroom.yml'
   workflow_dispatch:
     inputs:
       force_build:
@@ -21,8 +21,8 @@ on:
         default: false
 
 env:
-  REGISTRY: git.nijho.lt
-  OWNER: basnijholt
+  REGISTRY: ghcr.io
+  OWNER: ${{ github.repository_owner }}
 
 jobs:
   # Build each image/platform combination in parallel
@@ -59,12 +59,12 @@ jobs:
         driver-opts: |
           network=host
 
-    - name: Login to Gitea Registry
+    - name: Login to GitHub Container Registry
       uses: docker/login-action@v3
       with:
         registry: ${{ env.REGISTRY }}
-        username: ${{ gitea.actor }}
-        password: ${{ secrets.DOCKER_TOKEN }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Set build vars
       id: vars
@@ -116,12 +116,12 @@ jobs:
           - frontend
 
     steps:
-    - name: Login to Gitea Registry
+    - name: Login to GitHub Container Registry
       uses: docker/login-action@v3
       with:
         registry: ${{ env.REGISTRY }}
-        username: ${{ gitea.actor }}
-        password: ${{ secrets.DOCKER_TOKEN }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Create and push manifest
       run: |
