@@ -194,12 +194,12 @@ test-saas-backend *args:
 
 # Run SaaS platform frontend tests (Jest)
 test-saas-frontend:
-    cd saas-platform/platform-frontend && pnpm install && pnpm test
+    cd saas-platform/platform-frontend && bun install && bun test
 
 # Core frontend tests (vitest)
 # Run core frontend tests (vitest)
 test-front:
-    cd frontend && pnpm install && pnpm test
+    cd frontend && bun install && bun test
 
 # Core backend tests (pytest in repo)
 # Run core backend tests (pytest) with optional arguments
@@ -240,7 +240,7 @@ docker-build-saas-backend:
 # Core MindRoom dev
 # Start core MindRoom frontend (dev)
 start-frontend-dev:
-    cd frontend && pnpm install && pnpm run dev -- --host 0.0.0.0 --port 3003
+    cd frontend && bun install && bun run dev -- --host 0.0.0.0 --port 3003
 
 # Start core MindRoom backend (dev)
 start-backend-dev:
@@ -249,7 +249,7 @@ start-backend-dev:
 # SaaS Platform app dev
 # Start SaaS platform frontend (dev)
 start-saas-frontend-dev:
-    cd saas-platform/platform-frontend && pnpm install && pnpm dev
+    cd saas-platform/platform-frontend && bun install && bun dev
 
 # Start SaaS platform backend (dev)
 start-saas-backend-dev:

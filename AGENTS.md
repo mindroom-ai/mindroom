@@ -194,7 +194,7 @@ MindRoom standardizes developer and ops flows through `just` recipes (see root `
 
 - **Matrix + core stacks**: `just local-matrix-up` boots a Synapse + Postgres dev stack, while `just local-instances-*` manages per-customer Compose environments via `local/instances/deploy`.
 - **SaaS platform**: `just local-platform-compose-up` launches the platform portal/backends; `start-saas-*-dev` kicks off hot-reload dev servers in the respective directories.
-- **Testing**: `just test-backend`, `test-front`, `test-saas-backend`, and `test-saas-frontend` wrap uv/pytest and pnpm test runners to ensure parity with CI.
+- **Testing**: `just test-backend`, `test-front`, `test-saas-backend`, and `test-saas-frontend` wrap uv/pytest and bun test runners to ensure parity with CI.
 - **Infrastructure**: `cluster-*` recipes lint/render Helm charts, drive Terraform lifecycle, or stand up Kind-based preview clusters (with Nix shells for repeatability).
 - **Docker builds**: handy shortcuts for building dev images for core agents or the SaaS portal (`docker-build-*`).
 - **Environment sync**: `just env-saas` prints evaluated SaaS `.env` variables so you can export them into shells or CI jobs.

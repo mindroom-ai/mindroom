@@ -77,14 +77,14 @@ repos:
     hooks:
       - id: typescript-check
         name: TypeScript type checking
-        entry: bash -c 'cd frontend && pnpm run type-check'
+        entry: bash -c 'cd frontend && bun run type-check'
         language: system
         files: ^frontend/.*\.(ts|tsx)$
         pass_filenames: false
 
-      - id: check-package-lock
-        name: Check pnpm-lock.yaml is up to date
-        entry: bash -c 'cd frontend && pnpm ls >/dev/null 2>&1'
+      - id: check-bun-lock
+        name: Check bun.lock is up to date
+        entry: bash -c 'cd frontend && bun install --frozen-lockfile'
         language: system
         files: ^frontend/package\.json$
         pass_filenames: false

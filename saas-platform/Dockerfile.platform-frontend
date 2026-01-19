@@ -1,15 +1,14 @@
 # Multi-stage build for production frontend
-# Using public ECR to avoid Docker Hub rate limits
-FROM public.ecr.aws/docker/library/node:20-slim AS base
-RUN npm install -g pnpm
+# Using official bun image for faster builds
+FROM oven/bun:1 AS base
 
 # Dependencies stage
 FROM base AS deps
 WORKDIR /app
-COPY saas-platform/platform-frontend/package.json saas-platform/platform-frontend/pnpm-lock.yaml ./platform-frontend/
-# Use cache mount for pnpm store to speed up builds
-RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
-    cd platform-frontend && pnpm install --frozen-lockfile
+COPY saas-platform/platform-frontend/package.json saas-platform/platform-frontend/bun.lock ./platform-frontend/
+# Use cache mount for bun cache to speed up builds
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+    cd platform-frontend && bun install --frozen-lockfile
 
 # Build stage
 FROM deps AS builder
@@ -25,7 +24,7 @@ ENV NODE_ENV=production \
     PLATFORM_DOMAIN=${PLATFORM_DOMAIN}
 # Build production bundle with optimizations
 # Next.js standalone output creates minimal production build
-RUN cd platform-frontend && pnpm run build
+RUN cd platform-frontend && bun run build
 
 # Production stage - optimized for Next.js standalone
 FROM public.ecr.aws/docker/library/node:20-alpine AS final

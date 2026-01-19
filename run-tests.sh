@@ -8,7 +8,7 @@ echo ""
 echo "Running Frontend Tests (TypeScript/React)..."
 echo "-------------------------------------------"
 cd frontend
-pnpm exec vitest run
+bun run vitest run
 
 # Backend tests
 echo ""

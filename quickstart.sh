@@ -24,11 +24,11 @@ fi
 
 # Check if we want to set up the widget UI
 SETUP_WIDGET=false
-if command -v node &> /dev/null && command -v pnpm &> /dev/null; then
+if command -v node &> /dev/null && command -v bun &> /dev/null; then
     SETUP_WIDGET=true
-    echo "✅ Found Node.js and pnpm - will set up widget UI"
+    echo "✅ Found Node.js and bun - will set up widget UI"
 else
-    echo "⚠️  Node.js or pnpm not found - skipping widget UI setup"
+    echo "⚠️  Node.js or bun not found - skipping widget UI setup"
     echo "   (Install them to get the web interface at http://localhost:3003)"
 fi
 
@@ -56,7 +56,7 @@ if [ "$SETUP_WIDGET" = true ]; then
 
     if [ -d "frontend" ]; then
         echo "  📦 Installing frontend dependencies..."
-        (cd frontend && pnpm install)
+        (cd frontend && bun install)
     fi
 fi
 

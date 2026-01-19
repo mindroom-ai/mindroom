@@ -101,7 +101,7 @@ async function main() {
 
   if (!serverRunning) {
     console.log(`${RED}Error: Customer portal is not running on localhost:3000${RESET}`);
-    console.log('Please run: pnpm run dev');
+    console.log('Please run: bun run dev');
     process.exit(1);
   }
 

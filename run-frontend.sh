@@ -12,7 +12,7 @@ cd "$SCRIPT_DIR/frontend"
 # Install dependencies if node_modules is missing
 if [ ! -d "node_modules" ]; then
   echo "Installing frontend dependencies..."
-  pnpm install
+  bun install
 fi
 
 # Add node_modules/.bin to PATH for vite and other tools
@@ -20,7 +20,7 @@ export PATH="$PWD/node_modules/.bin:$PATH"
 
 if [ "$MODE" = "prod" ] || [ "$MODE" = "production" ]; then
     echo "Starting frontend in PRODUCTION mode..."
-    pnpm run build
+    bun run build
     # Serve production build with preview server
     exec ./node_modules/.bin/vite preview --host 0.0.0.0 --port 3003
 else

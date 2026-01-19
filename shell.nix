@@ -26,9 +26,9 @@ pkgs.mkShell {
     at-spi2-atk
     at-spi2-core
 
-    # Node.js and pnpm for running the widget
+    # Node.js and bun for running the widget
     nodejs_20
-    pnpm
+    bun
 
     # uv for Python package management
     uv
@@ -36,7 +36,7 @@ pkgs.mkShell {
 
   shellHook = ''
     echo "MindRoom Development Shell"
-    echo "Tools available: uv, pnpm, nodejs, python3, chromium"
+    echo "Tools available: uv, bun, nodejs, python3, chromium"
     export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
     export PUPPETEER_EXECUTABLE_PATH=${pkgs.chromium}/bin/chromium
 
@@ -46,6 +46,6 @@ pkgs.mkShell {
     echo ""
     echo "Run tests:"
     echo "  uv run pytest -q       # Backend tests"
-    echo "  cd frontend && pnpm test  # Frontend tests"
+    echo "  cd frontend && bun test   # Frontend tests"
   '';
 }

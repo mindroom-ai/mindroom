@@ -24,16 +24,16 @@ The frontend uses Vitest as the test runner with React Testing Library for compo
 cd frontend
 
 # Run all tests once
-pnpm test
+bun test
 
 # Run tests in watch mode
-pnpm run test
+bun run test
 
 # Run tests with UI
-pnpm run test:ui
+bun run test:ui
 
 # Run tests with coverage
-pnpm run test:coverage
+bun run test:coverage
 ```
 
 ### Writing Frontend Tests
@@ -148,8 +148,8 @@ jobs:
       - uses: actions/setup-node@v3
         with:
           node-version: '20'
-      - run: cd frontend && pnpm install --frozen-lockfile
-      - run: cd frontend && pnpm test
+      - run: cd frontend && bun install --frozen-lockfile
+      - run: cd frontend && bun test
 
   backend-tests:
     runs-on: ubuntu-latest
@@ -166,9 +166,9 @@ jobs:
 ## Troubleshooting
 
 ### Frontend Test Issues
-- Ensure all dependencies are installed: `pnpm install`
+- Ensure all dependencies are installed: `bun install`
 - Clear cache: `rm -rf node_modules/.vite`
-- Check for TypeScript errors: `pnpm run type-check`
+- Check for TypeScript errors: `bun run type-check`
 
 ### Backend Test Issues
 - Ensure virtual environment is activated

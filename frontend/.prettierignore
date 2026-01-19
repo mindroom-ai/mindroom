@@ -11,7 +11,7 @@ build/
 *.min.js
 *.min.css
 package-lock.json
-pnpm-lock.yaml
+bun.lock
 yarn.lock
 
 # Coverage

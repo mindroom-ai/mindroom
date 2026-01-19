@@ -37,7 +37,7 @@ async function isServerRunning(url) {
 function startDevServer() {
   return new Promise((resolve, reject) => {
     console.log('Starting Next.js dev server...');
-    const devServer = spawn('pnpm', ['run', 'dev'], {
+    const devServer = spawn('bun', ['run', 'dev'], {
       cwd: __dirname,
       detached: false,
       stdio: 'pipe'

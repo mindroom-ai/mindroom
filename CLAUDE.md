@@ -61,7 +61,7 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8765
 
 # Platform Frontend
 cd saas-platform/platform-frontend
-pnpm install && pnpm run dev
+bun install && bun run dev
 ```
 
 #### Deployment
@@ -125,7 +125,7 @@ cd saas-platform
 ### Step 6: Viewing the Widget
 
 - **Taking Screenshots**: To view the widget without Jupyter, use `python frontend/take_screenshot.py` from the project root.
-- **Manual Screenshot**: From the frontend directory, run `pnpm run dev` to start the development server, then run `pnpm run screenshot` in another terminal.
+- **Manual Screenshot**: From the frontend directory, run `bun run dev` to start the development server, then run `bun run screenshot` in another terminal.
 - **Screenshot Location**: Screenshots are saved to `frontend/screenshots/` with timestamps.
 - **Use Cases**: This is helpful for visual verification, documentation, and sharing the widget appearance.
 

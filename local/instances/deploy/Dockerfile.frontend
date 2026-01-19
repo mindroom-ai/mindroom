@@ -1,15 +1,14 @@
 # Multi-stage build for production frontend
-# Using public ECR to avoid Docker Hub rate limits
-FROM public.ecr.aws/docker/library/node:20-slim AS base
-RUN npm install -g pnpm
+# Using official bun image for faster builds
+FROM oven/bun:1 AS base
 
 # Dependencies stage
 FROM base AS deps
 WORKDIR /app
-COPY frontend/package.json frontend/pnpm-lock.yaml ./frontend/
-# Use cache mount for pnpm store to speed up builds
-RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
-    cd frontend && pnpm install --frozen-lockfile
+COPY frontend/package.json frontend/bun.lock ./frontend/
+# Use cache mount for bun cache to speed up builds
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+    cd frontend && bun install --frozen-lockfile
 
 # Build stage
 FROM deps AS builder
@@ -21,7 +20,7 @@ COPY src/mindroom/tools_metadata.json ./src/mindroom/
 ENV VITE_API_URL=""
 ENV NODE_ENV=production
 # Build production bundle with optimizations
-RUN cd frontend && pnpm run build
+RUN cd frontend && bun run build
 
 # Production stage - optimized for static serving
 FROM public.ecr.aws/nginx/nginx:alpine AS final
