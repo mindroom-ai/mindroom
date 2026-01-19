@@ -155,17 +155,19 @@ Gmail, GitHub, Spotify, Home Assistant, Google Drive, Reddit, weather services, 
 ```bash
 # Clone and install
 git clone https://github.com/mindroom-ai/mindroom
+cd mindroom
+uv sync --all-extras
+
+# Copy example config
+cp config.example.yaml config.yaml
 ```
 
 ```bash
-# Option 1: Start everything with Zellij (recommended)
-./scripts/start
+# Terminal 1: Start backend (agents + API)
+./run-backend.sh
 
-# Option 2.1: Start just the agents
-uv run mindroom run
-
-# Option 2.1: Start the web UI separately
-./run-ui.sh
+# Terminal 2: Start frontend (optional, for web UI)
+./run-frontend.sh
 ```
 
 The web interface will be available at http://localhost:3003

@@ -66,17 +66,12 @@ echo ""
 echo "🚀 To start MindRoom:"
 echo ""
 
+echo "   # Terminal 1: Start backend (agents + API)"
+echo "   ./run-backend.sh"
 if [ "$SETUP_WIDGET" = true ]; then
-    echo "   Option 1: Start everything (recommended):"
-    echo "   ./scripts/start"
     echo ""
-    echo "   Option 2: Start just the agents:"
-    echo "   uv run mindroom run"
-    echo ""
-    echo "   Option 3: Start UI separately:"
-    echo "   ./run-ui.sh"
-else
-    echo "   uv run mindroom run"
+    echo "   # Terminal 2: Start frontend (optional, for web UI)"
+    echo "   ./run-frontend.sh"
 fi
 
 echo ""
