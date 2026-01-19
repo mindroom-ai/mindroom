@@ -12,27 +12,20 @@ if ! command -v uv &> /dev/null; then
   exit 1
 fi
 
-# Detect container vs local dev environment
-if [ -d "/app" ] && [ -f "/app/config.yaml" ]; then
-  STORAGE_PATH="${STORAGE_PATH:-/app/mindroom_data}"
-  CONFIG_PATH="${MINDROOM_CONFIG_PATH:-/app/config.yaml}"
-else
-  # Install dependencies if .venv doesn't exist
-  if [ ! -d "$SCRIPT_DIR/.venv" ]; then
-    echo "📦 Installing Python dependencies..."
-    (cd "$SCRIPT_DIR" && uv sync --all-extras)
-  fi
-  STORAGE_PATH="${STORAGE_PATH:-$SCRIPT_DIR/mindroom_data}"
-  CONFIG_PATH="${MINDROOM_CONFIG_PATH:-$SCRIPT_DIR/config.yaml}"
+# Install dependencies if .venv doesn't exist
+if [ ! -d "$SCRIPT_DIR/.venv" ]; then
+  echo "📦 Installing Python dependencies..."
+  (cd "$SCRIPT_DIR" && uv sync --all-extras)
 fi
 
-CONFIG_TEMPLATE="${MINDROOM_CONFIG_TEMPLATE:-$CONFIG_PATH}"
-CONFIG_DIR="$(dirname "$CONFIG_PATH")"
-mkdir -p "$CONFIG_DIR" "$STORAGE_PATH"
+# Set paths (container uses /app, local uses script dir)
+APP_DIR="${SCRIPT_DIR}"
+[ -d "/app" ] && [ -f "/app/config.yaml" ] && APP_DIR="/app"
 
-if [ ! -f "$CONFIG_PATH" ] && [ -f "$CONFIG_TEMPLATE" ]; then
-  cp "$CONFIG_TEMPLATE" "$CONFIG_PATH"
-fi
+STORAGE_PATH="${STORAGE_PATH:-$APP_DIR/mindroom_data}"
+CONFIG_PATH="${MINDROOM_CONFIG_PATH:-$APP_DIR/config.yaml}"
+
+mkdir -p "$(dirname "$CONFIG_PATH")" "$STORAGE_PATH"
 [ ! -f "$CONFIG_PATH" ] && touch "$CONFIG_PATH"
 chmod 600 "$CONFIG_PATH" 2>/dev/null || true
 
