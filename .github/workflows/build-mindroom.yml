@@ -79,6 +79,12 @@ jobs:
       run: |
         echo "dockerfile=local/instances/deploy/Dockerfile.${{ matrix.image }}" >> $GITHUB_OUTPUT
         echo "timestamp=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
+        # Extract version from tag (strip 'v' prefix) or use 0.0.0 for non-release builds
+        if [[ "${{ github.ref_name }}" == v* ]]; then
+          echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+        else
+          echo "version=0.0.0" >> $GITHUB_OUTPUT
+        fi
 
     - name: Build and push image
       uses: docker/build-push-action@v5
@@ -91,6 +97,8 @@ jobs:
           ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ matrix.platform_suffix }}
           ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ github.ref_name }}-${{ matrix.platform_suffix }}
           ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ steps.vars.outputs.timestamp }}-${{ matrix.platform_suffix }}
+        build-args: |
+          VERSION=${{ steps.vars.outputs.version }}
         cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:buildcache-${{ matrix.platform_suffix }}
         cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:buildcache-${{ matrix.platform_suffix }},mode=max
         provenance: false

@@ -19,6 +19,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY src /app/src
 
 # Install the project itself
+# Set pretend version for setuptools-scm (no .git in container)
+ARG VERSION=0.0.0
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=${VERSION}
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev
 
