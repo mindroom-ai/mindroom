@@ -1,5 +1,6 @@
 """Test configuration and fixtures for MindRoom tests."""
 
+import os
 from collections.abc import AsyncGenerator, Generator
 from unittest.mock import patch
 
@@ -8,6 +9,18 @@ import pytest_asyncio
 from aioresponses import aioresponses
 
 __all__ = ["TEST_ACCESS_TOKEN", "TEST_PASSWORD", "aioresponse", "bypass_authorization"]
+
+
+def pytest_collection_modifyitems(_config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Skip tests marked with requires_matrix unless MATRIX_SERVER_URL is set."""
+    if os.environ.get("MATRIX_SERVER_URL"):
+        # Matrix server available, don't skip
+        return
+
+    skip_marker = pytest.mark.skip(reason="requires_matrix: no MATRIX_SERVER_URL set")
+    for item in items:
+        if "requires_matrix" in item.keywords:
+            item.add_marker(skip_marker)
 
 
 # Test credentials constants - not real credentials, safe for testing
