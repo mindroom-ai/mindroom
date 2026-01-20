@@ -30,6 +30,10 @@ FROM public.ecr.aws/docker/library/python:3.12-slim AS final
 # Copy uv for runtime
 COPY --from=uv /uv /uvx /bin/
 
+# Set version for setuptools-scm at runtime (no .git in container)
+ARG VERSION=0.0.0
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=${VERSION}
+
 WORKDIR /app
 
 # Install runtime dependencies (curl for health checks)
@@ -52,8 +56,14 @@ RUN chmod +x /app/run-backend.sh
 # Create necessary directories
 RUN mkdir -p /app/logs /app/mindroom_data
 
+# Create non-root user and set ownership
+RUN useradd -u 1000 -U -m mindroom && chown -R 1000:1000 /app
+
 # Set environment variable to indicate Docker mode
 ENV DOCKER_CONTAINER=1
+
+# Run as non-root user
+USER 1000:1000
 
 EXPOSE 8765
 # Run the app
