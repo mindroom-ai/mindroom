@@ -11,7 +11,7 @@ from aioresponses import aioresponses
 __all__ = ["TEST_ACCESS_TOKEN", "TEST_PASSWORD", "aioresponse", "bypass_authorization"]
 
 
-def pytest_collection_modifyitems(_config: pytest.Config, items: list[pytest.Item]) -> None:
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """Skip tests marked with requires_matrix unless MATRIX_SERVER_URL is set."""
     if os.environ.get("MATRIX_SERVER_URL"):
         # Matrix server available, don't skip
