@@ -13,6 +13,33 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 
 ## Architecture
 
+### Core MindRoom (`src/mindroom/`)
+
+**MultiAgentOrchestrator** (`bot.py`) is the heart of the system - it boots every configured entity (router, agents, teams), provisions Matrix users, and keeps sync loops alive with hot-reload support when `config.yaml` changes.
+
+**Entity types**:
+- `router`: Built-in traffic director that greets rooms and decides which agent should answer
+- **Agents**: Single-specialty actors defined under `agents:` in `config.yaml`
+- **Teams**: Collaborative bundles of agents that coordinate or parallelize work
+
+**Key modules**:
+| Module | Purpose |
+|--------|---------|
+| `bot.py` | MultiAgentOrchestrator - boots agents, manages sync loops, hot-reload |
+| `agents.py` | Agent creation and configuration |
+| `config.py` | Pydantic models for YAML config parsing |
+| `routing.py` | Intelligent agent selection when no agent is mentioned |
+| `teams.py` | Multi-agent collaboration (coordinate vs collaborate modes) |
+| `memory/` | Mem0-inspired dual memory: agent, room, and team-scoped |
+| `tools/` | 80+ tool integrations |
+| `matrix/` | Matrix protocol integration (client, users, rooms, presence) |
+
+**Persistent state** lives under `mindroom_data/` (overridable via `STORAGE_PATH`):
+- `sessions/` – Per-agent SQLite event history for Agno conversations
+- `memory/` – Mem0 vector store for agent/room/team memories
+- `tracking/` – Response tracking to avoid duplicate replies
+- `credentials/` – JSON secrets synchronized from `.env`
+
 ### SaaS Platform (`saas-platform/`)
 - **Platform Backend**: Modular FastAPI app with routes in `backend/routes/`
 - **Platform Frontend**: Next.js 15 with centralized API client in `lib/api.ts`
@@ -20,10 +47,68 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 - **Deployment**: Kubernetes with Helm charts, dual-mode support (platform/standalone)
 - **Database**: Supabase with comprehensive RLS policies
 
-### Core MindRoom (`src/mindroom/`)
-- **Agent System**: AI agents with persistent memory in Matrix
-- **Matrix Integration**: Synapse server for federation
-- **Multi-Platform**: Works via bridges to Slack, Discord, Telegram, etc.
+### Repo Layout
+
+| Path | Purpose |
+|------|---------|
+| `src/mindroom/` | Core agent runtime (Matrix orchestrator, routing, memory, tools) |
+| `frontend/` | Core MindRoom dashboard (Vite + React) |
+| `saas-platform/platform-backend/` | SaaS control-plane API (FastAPI) |
+| `saas-platform/platform-frontend/` | SaaS portal UI (Next.js 15) |
+| `saas-platform/supabase/` | Supabase migrations, policies, seeds |
+| `cluster/` | Terraform + Helm for hosted deployments |
+| `local/` | Docker Compose helpers for local dev stacks |
+
+### Configuration Model
+
+The authoritative config is `config.yaml`, loaded via Pydantic models in `src/mindroom/config.py`:
+
+```yaml
+agents:
+  code:
+    display_name: CodeAgent
+    role: Generate code, manage files, execute shell commands
+    model: sonnet
+    tools: [file, shell]
+    instructions:
+      - Always read files before modifying them.
+    rooms: [lobby, dev]
+
+defaults:
+  num_history_runs: 5
+  markdown: true
+
+models:
+  sonnet:
+    provider: anthropic
+    id: claude-sonnet-4-latest
+
+router:
+  model: ollama
+
+teams:
+  super_team:
+    display_name: Super Team
+    agents: [code, research, finance]
+    mode: collaborate
+
+timezone: America/Los_Angeles
+```
+
+**Hot reloading**: `config.yaml` changes are watched at runtime. The orchestrator diffs configs, gracefully restarts affected agents, and rejoins rooms without bringing down the stack.
+
+### Memory System
+
+Mem0-inspired dual memory (`src/mindroom/memory/functions.py`):
+- **Agent memory** (`agent_<name>`) – Personal preferences, coding style, tasks
+- **Team memory** – Shared context for team collaboration
+- **Room memory** (`room_<id>`) – Project-specific knowledge
+
+### Teams & Collaboration
+
+Teams (`src/mindroom/teams.py`) let multiple agents work together:
+- **coordinate**: Lead agent orchestrates others
+- **collaborate**: All members respond in parallel with consensus summary
 
 ## 1. Core Philosophy
 
@@ -129,6 +214,23 @@ cd saas-platform
 - **Screenshot Location**: Screenshots are saved to `frontend/screenshots/` with timestamps.
 - **Use Cases**: This is helpful for visual verification, documentation, and sharing the widget appearance.
 
+### Developer Automation (`justfile`)
+
+Common `just` recipes for development:
+```bash
+# Local stacks
+just local-matrix-up              # Boot Synapse + Postgres dev stack
+just local-platform-compose-up    # Full SaaS sandbox
+
+# Testing
+just test-backend                 # Run pytest for core
+just test-saas-backend            # Run pytest for SaaS backend
+
+# Deployment
+just redeploy-mindroom-backend    # Build, push, restart all instances
+just deploy target=platform-backend  # One-off rollout
+```
+
 ## 3. Critical "Don'ts"
 
 - **DO NOT** manually edit the CLI help messages in `README.md`. They are auto-generated.
@@ -210,6 +312,24 @@ matty thread-reply "test_room" t1 "@mindroom_research find information about X"
 - **Thread IDs**: Use t1, t2, t3 to reference threads (persistent across sessions)
 - **Output formats**: Add `--format json` for machine-readable output
 - **Streaming responses**: If you see "⋯" in agent messages, they're still typing. Agents stream responses by editing messages, which may take 10+ seconds to complete. Re-check the thread after waiting.
+
+## 5. Quick Reference
+
+```bash
+# Run the stack
+uv run mindroom run --storage-path mindroom_data  # or use ./run-backend.sh
+
+# Update credentials
+# Edit .env and restart; sync step mirrors keys to credentials vault
+
+# Discover commands
+# Send !help from any bridged room
+
+# Debug logging
+mindroom run --log-level DEBUG  # Surface routing decisions, tool calls, config reloads
+```
+
+Inspect agent traces: `mindroom_data/sessions/<agent>.db`
 
 # Important Instruction Reminders
 Do what has been asked; nothing more, nothing less.
