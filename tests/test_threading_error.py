@@ -195,6 +195,7 @@ class TestThreadingBehavior:
         with (
             patch("mindroom.bot.interactive.handle_text_response", AsyncMock(return_value=None)),
             patch("mindroom.bot.ai_response", AsyncMock(return_value="OK")),
+            patch("mindroom.bot.get_latest_thread_event_id_if_needed", AsyncMock(return_value="latest_thread_event")),
         ):
             # Process the message
             await bot._on_message(room, event)

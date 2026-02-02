@@ -30,10 +30,12 @@ from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
 from .logging_config import emoji, get_logger, setup_logging
 from .matrix.client import (
+    _latest_thread_event_id,
     check_and_set_avatar,
     edit_message,
     fetch_thread_history,
     get_joined_rooms,
+    get_latest_thread_event_id_if_needed,
     get_room_members,
     invite_to_room,
     join_room,
@@ -1442,12 +1444,21 @@ class AgentBot:
         event_info = EventInfo.from_event(reply_to_event.source if reply_to_event else None)
         effective_thread_id = thread_id or event_info.safe_thread_root or reply_to_event_id
 
+        # Get the latest message in thread for MSC3440 fallback compatibility
+        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
+            self.client,
+            room_id,
+            effective_thread_id,
+            reply_to_event_id,
+        )
+
         content = format_message_with_mentions(
             self.config,
             response_text,
             sender_domain=sender_domain,
             thread_event_id=effective_thread_id,
             reply_to_event_id=reply_to_event_id,
+            latest_thread_event_id=latest_thread_event_id,
         )
 
         # Add metadata to indicate mentions should be ignored for responses
@@ -1472,11 +1483,25 @@ class AgentBot:
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
 
+        # For edits in threads, we need to get the latest thread event ID for MSC3440 compliance
+        # When editing, we still need the latest thread event for the fallback behavior
+        # So we fetch it directly rather than using get_latest_thread_event_id_if_needed
+        latest_thread_event_id = None
+        if thread_id:
+            assert self.client is not None
+            # For edits, we always need the latest thread event ID
+            # We can use the event being edited as the fallback if we can't get the latest
+            latest_thread_event_id = await _latest_thread_event_id(self.client, room_id, thread_id)
+            # If we couldn't get the latest, use the event being edited as fallback
+            if latest_thread_event_id is None:
+                latest_thread_event_id = event_id
+
         content = format_message_with_mentions(
             self.config,
             new_text,
             sender_domain=sender_domain,
             thread_event_id=thread_id,
+            latest_thread_event_id=latest_thread_event_id,
         )
 
         assert self.client is not None
@@ -1529,12 +1554,22 @@ class AgentBot:
             # Check if the current event can be a thread root
             thread_event_id = event_info.safe_thread_root or event.event_id
 
+        # Get latest thread event for MSC3440 compliance when no specific reply
+        # Note: We use event.event_id as reply_to for routing suggestions
+        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
+            self.client,
+            room.room_id,
+            thread_event_id,
+            event.event_id,
+        )
+
         content = format_message_with_mentions(
             self.config,
             response_text,
             sender_domain=sender_domain,
             thread_event_id=thread_event_id,
             reply_to_event_id=event.event_id,
+            latest_thread_event_id=latest_thread_event_id,
         )
 
         assert self.client is not None

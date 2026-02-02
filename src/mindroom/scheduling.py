@@ -18,7 +18,11 @@ from pydantic import BaseModel, Field
 
 from .ai import get_model_instance
 from .logging_config import get_logger
-from .matrix.client import fetch_thread_history, send_message
+from .matrix.client import (
+    fetch_thread_history,
+    get_latest_thread_event_id_if_needed,
+    send_message,
+)
 from .matrix.identity import MatrixID
 from .matrix.mentions import format_message_with_mentions, parse_mentions_in_text
 from .matrix.message_builder import build_message_content
@@ -189,11 +193,17 @@ async def execute_scheduled_workflow(
         automated_message = (
             f"⏰ [Automated Task]\n{workflow.message}\n\n_Note: Automated task - no follow-up expected._"
         )
+        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
+            client,
+            workflow.room_id,
+            workflow.thread_id,
+        )
         content = format_message_with_mentions(
             config,
             automated_message,
             sender_domain=config.domain,
             thread_event_id=workflow.thread_id,
+            latest_thread_event_id=latest_thread_event_id,
         )
         await send_message(client, workflow.room_id, content)
         logger.info("Executed scheduled workflow", description=workflow.description, thread_id=workflow.thread_id)
@@ -204,6 +214,7 @@ async def execute_scheduled_workflow(
             error_content = build_message_content(
                 body=error_message,
                 thread_event_id=workflow.thread_id,
+                latest_thread_event_id=workflow.thread_id,
             )
             await send_message(client, workflow.room_id, error_content)
 
@@ -248,6 +259,7 @@ async def run_cron_task(
             error_content = build_message_content(
                 body=error_message,
                 thread_event_id=workflow.thread_id,
+                latest_thread_event_id=workflow.thread_id,
             )
             await send_message(client, workflow.room_id, error_content)
 
@@ -283,6 +295,7 @@ async def run_once_task(
             error_content = build_message_content(
                 body=error_message,
                 thread_event_id=workflow.thread_id,
+                latest_thread_event_id=workflow.thread_id,
             )
             await send_message(client, workflow.room_id, error_content)
 

@@ -8,24 +8,36 @@ from .client import markdown_to_html
 def build_thread_relation(
     thread_event_id: str,
     reply_to_event_id: str | None = None,
+    latest_thread_event_id: str | None = None,
 ) -> dict[str, Any]:
-    """Build the m.relates_to structure for thread messages.
+    """Build the m.relates_to structure for thread messages per MSC3440.
 
     Args:
         thread_event_id: The thread root event ID
         reply_to_event_id: Optional event ID for genuine replies within thread
+        latest_thread_event_id: Latest event in thread (required for fallback if no reply_to)
+
     Returns:
         The m.relates_to structure for the message content
 
     """
-    relation: dict[str, Any] = {
+    if reply_to_event_id:
+        # Genuine reply to a specific message in the thread
+        return {
+            "rel_type": "m.thread",
+            "event_id": thread_event_id,
+            "is_falling_back": False,
+            "m.in_reply_to": {"event_id": reply_to_event_id},
+        }
+    # Fallback: continuing thread without specific reply
+    # Per MSC3440, should point to latest message in thread for backwards compatibility
+    assert latest_thread_event_id is not None, "latest_thread_event_id is required for thread fallback"
+    return {
         "rel_type": "m.thread",
         "event_id": thread_event_id,
-        "is_falling_back": False,
+        "is_falling_back": True,
+        "m.in_reply_to": {"event_id": latest_thread_event_id},
     }
-    if reply_to_event_id:
-        relation["m.in_reply_to"] = {"event_id": reply_to_event_id}
-    return relation
 
 
 def build_message_content(
@@ -34,6 +46,7 @@ def build_message_content(
     mentioned_user_ids: list[str] | None = None,
     thread_event_id: str | None = None,
     reply_to_event_id: str | None = None,
+    latest_thread_event_id: str | None = None,
 ) -> dict[str, Any]:
     """Build a complete Matrix message content dictionary.
 
@@ -41,7 +54,7 @@ def build_message_content(
     - Basic message structure
     - HTML formatting
     - User mentions
-    - Thread relations
+    - Thread relations (MSC3440 compliant)
     - Reply relations
 
     Args:
@@ -50,6 +63,8 @@ def build_message_content(
         mentioned_user_ids: Optional list of Matrix user IDs to mention
         thread_event_id: Optional thread root event ID
         reply_to_event_id: Optional event ID to reply to
+        latest_thread_event_id: Optional latest event in thread (for MSC3440 fallback)
+
     Returns:
         Complete content dictionary ready for room_send
 
@@ -70,6 +85,7 @@ def build_message_content(
         content["m.relates_to"] = build_thread_relation(
             thread_event_id=thread_event_id,
             reply_to_event_id=reply_to_event_id,
+            latest_thread_event_id=latest_thread_event_id,
         )
     elif reply_to_event_id:
         # Plain reply without thread (shouldn't happen in this bot)

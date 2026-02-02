@@ -78,6 +78,7 @@ def create_agent(agent_name: str, config: Config) -> Agent:
     """
     from .ai import get_model_instance  # noqa: PLC0415
 
+    # Use passed config (config_path is deprecated)
     agent_config = config.get_agent(agent_name)
     defaults = config.defaults
 
