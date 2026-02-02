@@ -252,6 +252,10 @@ Status: complete (2026-02-02)
 - Plugin load:
   - Plugin tools registered in registry.
   - Plugin skill dir contributes to skills list.
+- Live smoke test (local):
+  - Start local Matrix + backend with OpenAI-compatible server on port 9292.
+  - Use Matty to send two skill-triggering messages in Lobby.
+  - Verify `SKILL_USED: hello` and `SKILL_USED: repo-quick-audit` responses.
 
 ## 10) Security + Safety
 
@@ -272,3 +276,4 @@ Status: complete (2026-02-02)
 - 2026-02-02: Phase 1 implemented (skills loader, gating, prompt injection, tests).
 - 2026-02-02: Phase 2 implemented (plugin loader, tool registration, plugin skills).
 - 2026-02-02: Phase 3 complete (API tool metadata is runtime; JSON remains for frontend build).
+- 2026-02-02: Live skills smoke test performed via Matty (hello + repo-quick-audit) against local OpenAI-compatible server on port 9292.
