@@ -193,21 +193,36 @@ class TestProvisionerStateTransitions:
         instance_id = 999
         results = []
 
+        class _DummyTable:
+            def update(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                return self
+
+            def eq(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                return self
+
+            def execute(self):  # noqa: ANN001
+                return Mock(data=[{"status": "running"}])
+
+        class _DummySB:
+            def table(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                return _DummyTable()
+
         def update_state(new_state):
             success = update_instance_status(instance_id, new_state)
             results.append((new_state, success))
 
-        # Simulate concurrent updates
-        threads = [
-            threading.Thread(target=update_state, args=("running",)),
-            threading.Thread(target=update_state, args=("stopped",)),
-            threading.Thread(target=update_state, args=("error",)),
-        ]
+        with patch("backend.db_utils.ensure_supabase", return_value=_DummySB()):
+            # Simulate concurrent updates
+            threads = [
+                threading.Thread(target=update_state, args=("running",)),
+                threading.Thread(target=update_state, args=("stopped",)),
+                threading.Thread(target=update_state, args=("error",)),
+            ]
 
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
 
         # At least one should succeed, and state should be valid
         assert any(success for _, success in results)
