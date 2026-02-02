@@ -46,7 +46,7 @@ class EmbedderConfig(BaseModel):
 
     model: str = Field(default="text-embedding-3-small", description="Model name for embeddings")
     api_key: str | None = Field(default=None, description="API key (usually from environment variable)")
-    host: str | None = Field(default=None, description="Host URL for self-hosted models like Ollama")
+    host: str | None = Field(default=None, description="Host URL for self-hosted models (Ollama, llama.cpp, etc.)")
 
 
 class MemoryEmbedderConfig(BaseModel):
