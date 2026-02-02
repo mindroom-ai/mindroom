@@ -55,6 +55,7 @@ from .matrix.state import MatrixState
 from .matrix.typing import typing_indicator
 from .matrix.users import AgentMatrixUser, create_agent_user, login_agent_user
 from .memory import store_conversation_memory
+from .plugins import load_plugins
 from .response_tracker import ResponseTracker
 from .room_cleanup import cleanup_all_orphaned_bots
 from .routing import suggest_agent_for_message
@@ -1888,6 +1889,7 @@ class MultiAgentOrchestrator:
         await self._ensure_user_account()
 
         config = Config.from_yaml()
+        load_plugins(config)
         self.config = config
 
         # Create bots for all configured entities
@@ -1969,7 +1971,7 @@ class MultiAgentOrchestrator:
         # Run all sync tasks
         await asyncio.gather(*tuple(self._sync_tasks.values()))
 
-    async def update_config(self) -> bool:  # noqa: C901, PLR0912
+    async def update_config(self) -> bool:  # noqa: C901, PLR0912, PLR0915
         """Update configuration with simplified self-managing agents.
 
         Each agent handles its own user account creation and room management.
@@ -1979,6 +1981,7 @@ class MultiAgentOrchestrator:
 
         """
         new_config = Config.from_yaml()
+        load_plugins(new_config)
 
         if not self.config:
             self.config = new_config

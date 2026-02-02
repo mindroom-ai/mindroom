@@ -13,6 +13,7 @@ from . import agent_prompts
 from . import tools as _tools_module  # noqa: F401
 from .constants import ROUTER_AGENT_NAME, SESSIONS_DIR
 from .logging_config import get_logger
+from .plugins import load_plugins
 from .skills import build_skills_prompt, get_agent_skills
 from .tools_metadata import get_tool_by_name
 
@@ -82,6 +83,8 @@ def create_agent(agent_name: str, config: Config) -> Agent:
     # Use passed config (config_path is deprecated)
     agent_config = config.get_agent(agent_name)
     defaults = config.defaults
+
+    load_plugins(config)
 
     tool_names = list(agent_config.tools)
     if agent_config.skills and "file" not in tool_names:

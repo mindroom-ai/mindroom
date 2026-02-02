@@ -37,8 +37,9 @@ an OpenClaw-style model:
 
 - Skills locations:
   - Bundled: `skills/` in repo
+  - Plugin-provided: plugin skill directories
   - User-managed: `~/.mindroom/skills`
-  - Precedence: user > bundled
+  - Precedence: user > plugins > bundled
 - Plugins are declared in `config.yaml`.
 - Agents default to **no skills** when `skills` is not set.
 - OpenClaw `metadata` in `SKILL.md` must be parsed as JSON5.
@@ -223,11 +224,13 @@ Status: complete (2026-02-02)
 - [x] Add unit tests for parsing + gating.
 
 ### Phase 2: Plugin loader (local dirs)
-- Add plugin discovery from `config.yaml`.
-- Load `mindroom.plugin.json`.
-- Import `tools_module` dynamically.
-- Add plugin skill dirs to the skills loader.
-- Add tests for plugin load + tool registration.
+Status: complete (2026-02-02)
+
+- [x] Add plugin discovery from `config.yaml`.
+- [x] Load `mindroom.plugin.json`.
+- [x] Import `tools_module` dynamically.
+- [x] Add plugin skill dirs to the skills loader.
+- [x] Add tests for plugin load + tool registration.
 
 ### Phase 3: Decide tool metadata delivery
 - Decide between runtime API generation vs static JSON update.
@@ -269,3 +272,4 @@ Status: complete (2026-02-02)
 
 - 2026-02-02: Initial plan created. Locked decisions recorded. Phased implementation defined.
 - 2026-02-02: Phase 1 implemented (skills loader, gating, prompt injection, tests).
+- 2026-02-02: Phase 2 implemented (plugin loader, tool registration, plugin skills).

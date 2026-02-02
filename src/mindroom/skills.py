@@ -47,6 +47,18 @@ class _SkillCacheEntry:
 
 
 _SKILL_CACHE: dict[Path, _SkillCacheEntry] = {}
+_PLUGIN_SKILL_ROOTS: list[Path] = []
+
+
+def set_plugin_skill_roots(roots: Sequence[Path]) -> None:
+    """Replace the plugin-provided skill roots."""
+    global _PLUGIN_SKILL_ROOTS
+    _PLUGIN_SKILL_ROOTS = _unique_paths(roots)
+
+
+def get_plugin_skill_roots() -> list[Path]:
+    """Return the current plugin-provided skill roots."""
+    return list(_PLUGIN_SKILL_ROOTS)
 
 
 def get_user_skills_dir() -> Path:
@@ -61,7 +73,7 @@ def get_bundled_skills_dir() -> Path:
 
 def get_default_skill_roots() -> list[Path]:
     """Return the default skill search roots in precedence order."""
-    return [get_user_skills_dir(), get_bundled_skills_dir()]
+    return _unique_paths([get_user_skills_dir(), *_PLUGIN_SKILL_ROOTS, get_bundled_skills_dir()])
 
 
 def discover_skill_files(root: Path) -> list[Path]:
@@ -339,3 +351,15 @@ def _collect_credential_keys() -> set[str]:
             if value:
                 keys.add(key)
     return keys
+
+
+def _unique_paths(paths: Sequence[Path]) -> list[Path]:
+    seen: set[Path] = set()
+    unique_paths: list[Path] = []
+    for path in paths:
+        resolved = path.expanduser().resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique_paths.append(resolved)
+    return unique_paths
