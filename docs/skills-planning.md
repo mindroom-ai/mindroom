@@ -157,7 +157,7 @@ Supported frontmatter fields:
 - `homepage` (string, optional)
 - `metadata` (string, optional, JSON5; single-line in OpenClaw)
 
-Ignored for now (but preserved if present):
+Ignored for MVP (but preserved if present):
 - `user-invocable`, `disable-model-invocation`, `command-dispatch`, `command-tool`, `command-arg-mode`
 
 Resolution rules:
@@ -234,7 +234,18 @@ Status: complete (2026-02-02)
 - [x] Generate API tool metadata from the runtime registry (core + plugins).
 - [x] Keep `tools_metadata.json` generation for frontend icon scripts.
 
-### Phase 4: Optional enhancements
+### Phase 4: Skill command / dispatch (OpenClaw-style)
+
+- Parse command dispatch fields from `SKILL.md` (e.g., `command-dispatch`, `command-tool`,
+  `command-arg-mode`, `user-invocable`).
+- Add a chat command handler (e.g., `!skill <name> [args]`) that:
+  - Resolves the skill by name (same precedence as normal skill discovery).
+  - Optionally maps to a tool call (`command-tool`) or inlines skill usage guidance.
+  - Supports basic argument pass-through (`command-arg-mode`) with safe defaults.
+- Ensure this path is opt-in per agent (new config flag or require `user-invocable: true`).
+- Add tests for command parsing + dispatch behavior.
+
+### Phase 5: Optional enhancements
 - Skills watcher (hot reload).
 - Dependency installer helper.
 - Plugin packaging beyond local dirs.
@@ -277,3 +288,4 @@ Status: complete (2026-02-02)
 - 2026-02-02: Phase 2 implemented (plugin loader, tool registration, plugin skills).
 - 2026-02-02: Phase 3 complete (API tool metadata is runtime; JSON remains for frontend build).
 - 2026-02-02: Live skills smoke test performed via Matty (hello + repo-quick-audit) against local OpenAI-compatible server on port 9292.
+- 2026-02-02: Added Phase 4 plan for skill command/dispatch; moved optional enhancements to Phase 5.
