@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import functools
 import os
-from contextlib import suppress
 from typing import TYPE_CHECKING, Any, cast
 
 import diskcache
@@ -247,24 +246,15 @@ async def _cached_agent_run(
     model = agent.model
     assert model is not None
     cache_key = _build_cache_key(agent, full_prompt, session_id)
-    try:
-        cached_result = cache.get(cache_key)
-    except Exception as exc:
-        logger.warning("Cache read failed, clearing entry", agent=agent_name, error=str(exc))
-        with suppress(Exception):
-            cache.delete(cache_key)
-        cached_result = None
+    cached_result = cache.get(cache_key)
     if cached_result is not None:
         logger.info("Cache hit", agent=agent_name)
         return cast("RunOutput", cached_result)
 
     response = await agent.arun(full_prompt, session_id=session_id)
 
-    try:
-        cache.set(cache_key, response)
-        logger.info("Response cached", agent=agent_name)
-    except Exception as exc:
-        logger.warning("Cache write failed", agent=agent_name, error=str(exc))
+    cache.set(cache_key, response)
+    logger.info("Response cached", agent=agent_name)
 
     return response
 
