@@ -60,6 +60,7 @@ dependencies = [
   "httpx>=0.27",                                       # for Jina, Telegram, Searxng tools, widget API
   "humanize>=4.12.3",
   "jira>=3.10.5",                                      # for Jira tool
+  "json5>=0.13",
   "linkup-sdk>=0.2.8",                                 # for Linkup tool
   "loguru>=0.7.3",
   "lumaai",                                            # for LumaLabs tool

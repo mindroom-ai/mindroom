@@ -13,6 +13,7 @@ from . import agent_prompts
 from . import tools as _tools_module  # noqa: F401
 from .constants import ROUTER_AGENT_NAME, SESSIONS_DIR
 from .logging_config import get_logger
+from .skills import build_skills_prompt, get_agent_skills
 from .tools_metadata import get_tool_by_name
 
 if TYPE_CHECKING:
@@ -82,9 +83,13 @@ def create_agent(agent_name: str, config: Config) -> Agent:
     agent_config = config.get_agent(agent_name)
     defaults = config.defaults
 
+    tool_names = list(agent_config.tools)
+    if agent_config.skills and "file" not in tool_names:
+        tool_names.append("file")
+
     # Create tools
     tools: list = []  # Use list type to satisfy Agent's parameter type
-    for tool_name in agent_config.tools:
+    for tool_name in tool_names:
         try:
             tool = get_tool_by_name(tool_name)
             tools.append(tool)
@@ -134,6 +139,11 @@ def create_agent(agent_name: str, config: Config) -> Agent:
     # Create agent with defaults applied
     model = get_model_instance(config, agent_config.model)
     logger.info(f"Creating agent '{agent_name}' with model: {model.__class__.__name__}(id={model.id})")
+
+    if agent_config.skills:
+        eligible_skills = get_agent_skills(agent_name, config)
+        if eligible_skills:
+            instructions.append(build_skills_prompt(eligible_skills))
 
     instructions.append(agent_prompts.INTERACTIVE_QUESTION_PROMPT)
 
