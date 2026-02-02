@@ -39,10 +39,6 @@ class GoogleSearchTools(WebSearchTools):
             **kwargs,
         )
 
-        # Backward compatibility aliases for old method names
-        self.google_search = self.web_search
-        self.google_news = self.search_news
-
 
 @register_tool_with_metadata(
     name="googlesearch",
