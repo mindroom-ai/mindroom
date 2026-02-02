@@ -13,6 +13,7 @@ from aioresponses import aioresponses
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.config import AgentConfig, Config, ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.teams import TeamMode
 
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
@@ -215,16 +216,13 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
     with (
         patch("mindroom.bot.login_agent_user") as mock_login,
         patch("mindroom.config.Config.from_yaml", return_value=mock_config),
-        patch("mindroom.teams.get_model_instance") as mock_get_model_instance,
+        patch("mindroom.teams.select_team_mode", new=AsyncMock()) as mock_select_mode,
     ):
         mock_client = AsyncMock()
         mock_client.add_event_callback = MagicMock()
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
-
-        # Mock get_model_instance to return a mock model
-        mock_model = MagicMock()
-        mock_get_model_instance.return_value = mock_model
+        mock_select_mode.return_value = TeamMode.COLLABORATE
 
         config = Config.from_yaml()
 
@@ -459,17 +457,21 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
             mock_config.teams = {}
             mock_from_yaml.return_value = mock_config
 
-            orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
-            await orchestrator.initialize()
+            with patch("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
+                orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+                await orchestrator.initialize()
 
-            # Verify agents were created (2 agents + 1 router)
-            assert len(orchestrator.agent_bots) == 3
-            assert "calculator" in orchestrator.agent_bots
-            assert "general" in orchestrator.agent_bots
-            assert "router" in orchestrator.agent_bots
+                # Verify agents were created (2 agents + 1 router)
+                assert len(orchestrator.agent_bots) == 3
+                assert "calculator" in orchestrator.agent_bots
+                assert "general" in orchestrator.agent_bots
+                assert "router" in orchestrator.agent_bots
 
         # Test that agents can be started
-        with patch("mindroom.bot.login_agent_user") as mock_login:
+        with (
+            patch("mindroom.bot.login_agent_user") as mock_login,
+            patch("mindroom.bot.AgentBot.ensure_user_account", new=AsyncMock()),
+        ):
             mock_client = AsyncMock()
             mock_client.add_event_callback = MagicMock()
             mock_client.user_id = "@mindroom_calculator:localhost"

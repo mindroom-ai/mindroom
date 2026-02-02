@@ -147,6 +147,7 @@ async def test_orchestrator_update_config_cancels_old_tasks() -> None:
         patch("mindroom.bot.create_bot_for_entity") as mock_create_bot,
         patch("mindroom.bot._sync_forever_with_restart"),
         patch("mindroom.bot._create_temp_user") as mock_create_temp_user,
+        patch("mindroom.bot.MultiAgentOrchestrator._setup_rooms_and_memberships", new=AsyncMock()),
     ):
         # Create orchestrator with existing agent
         orchestrator = MultiAgentOrchestrator(storage_path=MagicMock())

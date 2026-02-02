@@ -9,8 +9,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
-from agno.run.response import RunResponseContentEvent
-from agno.run.team import TeamRunResponse
+from agno.models.ollama import Ollama
+from agno.run.agent import RunContentEvent
+from agno.run.team import TeamRunOutput
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.config import Config, ModelConfig
@@ -399,7 +400,7 @@ class TestAgentBot:
         mock_load_config.return_value = config
 
         # Mock get_model_instance to return a mock model
-        mock_model = MagicMock()
+        mock_model = Ollama(id="test-model")
         mock_get_model_instance.return_value = mock_model
 
         # Mock get_latest_thread_event_id_if_needed to return a valid event ID
@@ -456,20 +457,20 @@ class TestAgentBot:
 
         async def mock_team_stream() -> AsyncGenerator[Any, None]:
             # Yield member content events (using display names as Agno would)
-            event1 = MagicMock(spec=RunResponseContentEvent)
-            event1.event = "RunResponseContent"  # Set the event type
+            event1 = MagicMock(spec=RunContentEvent)
+            event1.event = "RunContent"  # Set the event type
             event1.agent_name = "CalculatorAgent"  # Display name, not short name
             event1.content = "Team response chunk 1"
             yield event1
 
-            event2 = MagicMock(spec=RunResponseContentEvent)
-            event2.event = "RunResponseContent"  # Set the event type
+            event2 = MagicMock(spec=RunContentEvent)
+            event2.event = "RunContent"  # Set the event type
             event2.agent_name = "GeneralAgent"  # Display name, not short name
             event2.content = "Team response chunk 2"
             yield event2
 
             # Yield final team response
-            team_response = MagicMock(spec=TeamRunResponse)
+            team_response = MagicMock(spec=TeamRunOutput)
             team_response.content = "Team consensus"
             team_response.member_responses = []
             team_response.messages = []
@@ -664,14 +665,15 @@ class TestMultiAgentOrchestrator:
         mock_config.teams = {}
         mock_load_config.return_value = mock_config
 
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
-        await orchestrator.initialize()
+        with patch("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
+            orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+            await orchestrator.initialize()
 
-        # Should have 3 bots: calculator, general, and router
-        assert len(orchestrator.agent_bots) == 3
-        assert "calculator" in orchestrator.agent_bots
-        assert "general" in orchestrator.agent_bots
-        assert "router" in orchestrator.agent_bots
+            # Should have 3 bots: calculator, general, and router
+            assert len(orchestrator.agent_bots) == 3
+            assert "calculator" in orchestrator.agent_bots
+            assert "general" in orchestrator.agent_bots
+            assert "router" in orchestrator.agent_bots
 
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator start
@@ -693,29 +695,30 @@ class TestMultiAgentOrchestrator:
         mock_config.get_all_configured_rooms.return_value = ["lobby"]
         mock_load_config.return_value = mock_config
 
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
-        await orchestrator.initialize()  # Need to initialize first
+        with patch("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
+            orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+            await orchestrator.initialize()  # Need to initialize first
 
-        # Mock start for all bots to avoid actual login/setup
-        start_mocks = []
-        for bot in orchestrator.agent_bots.values():
-            # Create a mock that tracks the call
-            mock_start = AsyncMock()
-            # Replace start with our mock
-            bot.start = mock_start  # type: ignore[method-assign]
-            start_mocks.append(mock_start)
-            bot.running = False
+            # Mock start for all bots to avoid actual login/setup
+            start_mocks = []
+            for bot in orchestrator.agent_bots.values():
+                # Create a mock that tracks the call
+                mock_start = AsyncMock()
+                # Replace start with our mock
+                bot.start = mock_start  # type: ignore[method-assign]
+                start_mocks.append(mock_start)
+                bot.running = False
 
-        # Start the orchestrator but don't wait for sync_forever
-        start_tasks = [bot.start() for bot in orchestrator.agent_bots.values()]
+            # Start the orchestrator but don't wait for sync_forever
+            start_tasks = [bot.start() for bot in orchestrator.agent_bots.values()]
 
-        await asyncio.gather(*start_tasks)
-        orchestrator.running = True  # Manually set since we're not calling orchestrator.start()
+            await asyncio.gather(*start_tasks)
+            orchestrator.running = True  # Manually set since we're not calling orchestrator.start()
 
-        assert orchestrator.running
-        # Verify start was called for each bot
-        for mock_start in start_mocks:
-            mock_start.assert_called_once()
+            assert orchestrator.running
+            # Verify start was called for each bot
+            for mock_start in start_mocks:
+                mock_start.assert_called_once()
 
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator stop
@@ -737,22 +740,23 @@ class TestMultiAgentOrchestrator:
         mock_config.get_all_configured_rooms.return_value = ["lobby"]
         mock_load_config.return_value = mock_config
 
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
-        await orchestrator.initialize()
+        with patch("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
+            orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+            await orchestrator.initialize()
 
-        # Mock the agent clients and ensure_user_account
-        for bot in orchestrator.agent_bots.values():
-            bot.client = AsyncMock()
-            bot.running = True
-            bot.ensure_user_account = AsyncMock()  # type: ignore[method-assign]
+            # Mock the agent clients and ensure_user_account
+            for bot in orchestrator.agent_bots.values():
+                bot.client = AsyncMock()
+                bot.running = True
+                bot.ensure_user_account = AsyncMock()  # type: ignore[method-assign]
 
-        await orchestrator.stop()
+            await orchestrator.stop()
 
-        assert not orchestrator.running
-        for bot in orchestrator.agent_bots.values():
-            assert not bot.running
-            if bot.client is not None:
-                bot.client.close.assert_called_once()
+            assert not orchestrator.running
+            for bot in orchestrator.agent_bots.values():
+                assert not bot.running
+                if bot.client is not None:
+                    bot.client.close.assert_called_once()
 
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator streaming
@@ -775,10 +779,11 @@ class TestMultiAgentOrchestrator:
         mock_config.get_all_configured_rooms.return_value = ["lobby"]
         mock_load_config.return_value = mock_config
 
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
-        await orchestrator.initialize()
+        with patch("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
+            orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+            await orchestrator.initialize()
 
-        # All bots should have streaming disabled except teams (which never stream)
-        for bot in orchestrator.agent_bots.values():
-            if hasattr(bot, "enable_streaming"):
-                assert bot.enable_streaming is False
+            # All bots should have streaming disabled except teams (which never stream)
+            for bot in orchestrator.agent_bots.values():
+                if hasattr(bot, "enable_streaming"):
+                    assert bot.enable_streaming is False

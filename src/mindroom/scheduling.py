@@ -148,7 +148,7 @@ Examples of event/condition phrasing to include in the message (do not include t
         name="WorkflowParser",
         role="Parse scheduling requests into structured workflows",
         model=model,
-        response_model=ScheduledWorkflow,
+        output_schema=ScheduledWorkflow,
     )
 
     try:

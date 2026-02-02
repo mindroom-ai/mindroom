@@ -85,7 +85,7 @@ Generate the topic:"""
         name="TopicGenerator",
         role="Generate contextual room topics",
         model=model,
-        response_model=RoomTopic,
+        output_schema=RoomTopic,
     )
 
     session_id = f"topic_{room_key}"

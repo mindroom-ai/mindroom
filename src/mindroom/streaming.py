@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from agno.run.response import RunResponseContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
+from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
 from . import interactive
 from .ai import _format_tool_completed_message, _format_tool_started_message
@@ -181,7 +181,7 @@ async def send_streaming_response(
         # Handle different types of chunks from the stream
         if isinstance(chunk, str):
             text_chunk = chunk
-        elif isinstance(chunk, RunResponseContentEvent) and chunk.content:
+        elif isinstance(chunk, RunContentEvent) and chunk.content:
             text_chunk = str(chunk.content)
         elif isinstance(chunk, ToolCallStartedEvent):
             text_chunk = _format_tool_started_message(chunk)

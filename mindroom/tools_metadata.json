@@ -17,9 +17,9 @@
         },
         {
           "default": true,
-          "description": "Enable sending messages to Discord channels",
-          "label": "Enable Messaging",
-          "name": "enable_messaging",
+          "description": null,
+          "label": "Enable Send Message",
+          "name": "enable_send_message",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -28,9 +28,9 @@
         },
         {
           "default": true,
-          "description": "Enable retrieving message history from channels",
-          "label": "Enable History",
-          "name": "enable_history",
+          "description": null,
+          "label": "Enable Get Channel Messages",
+          "name": "enable_get_channel_messages",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -39,9 +39,9 @@
         },
         {
           "default": true,
-          "description": "Enable getting channel info and listing channels",
-          "label": "Enable Channel Management",
-          "name": "enable_channel_management",
+          "description": null,
+          "label": "Enable Get Channel Info",
+          "name": "enable_get_channel_info",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -50,9 +50,31 @@
         },
         {
           "default": true,
-          "description": "Enable deleting messages from channels",
-          "label": "Enable Message Management",
-          "name": "enable_message_management",
+          "description": null,
+          "label": "Enable List Channels",
+          "name": "enable_list_channels",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Delete Message",
+          "name": "enable_delete_message",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -90,9 +112,9 @@
         },
         {
           "default": true,
-          "description": "Enable sending messages to channels",
-          "label": "Send Message",
-          "name": "send_message",
+          "description": null,
+          "label": "Markdown",
+          "name": "markdown",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -101,9 +123,9 @@
         },
         {
           "default": true,
-          "description": "Enable sending threaded messages",
-          "label": "Send Message Thread",
-          "name": "send_message_thread",
+          "description": null,
+          "label": "Enable Send Message",
+          "name": "enable_send_message",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -112,9 +134,9 @@
         },
         {
           "default": true,
-          "description": "Enable listing workspace channels",
-          "label": "List Channels",
-          "name": "list_channels",
+          "description": null,
+          "label": "Enable Send Message Thread",
+          "name": "enable_send_message_thread",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -123,9 +145,31 @@
         },
         {
           "default": true,
-          "description": "Enable retrieving channel message history",
-          "label": "Get Channel History",
-          "name": "get_channel_history",
+          "description": null,
+          "label": "Enable List Channels",
+          "name": "enable_list_channels",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Get Channel History",
+          "name": "enable_get_channel_history",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -170,6 +214,28 @@
           "placeholder": "1234567890:ABCdefGHijKlmnOPqrSTuvwXYZ",
           "required": false,
           "type": "password",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Send Message",
+          "name": "enable_send_message",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
           "validation": null
         }
       ],
@@ -266,6 +332,50 @@
           "required": false,
           "type": "boolean",
           "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Send Sms",
+          "name": "enable_send_sms",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Get Call Details",
+          "name": "enable_get_call_details",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable List Messages",
+          "name": "enable_list_messages",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
         }
       ],
       "dependencies": [
@@ -286,6 +396,39 @@
       "category": "communication",
       "config_fields": [
         {
+          "default": true,
+          "description": null,
+          "label": "Enable Send Message",
+          "name": "enable_send_message",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable List Rooms",
+          "name": "enable_list_rooms",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
           "default": null,
           "description": "Webex access token for authentication (can also be set via WEBEX_ACCESS_TOKEN env var)",
           "label": "Access Token",
@@ -294,28 +437,6 @@
           "placeholder": "Bearer token from Webex Developer Portal",
           "required": false,
           "type": "password",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable sending messages to Webex spaces/rooms",
-          "label": "Send Message",
-          "name": "send_message",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable listing Webex spaces/rooms",
-          "label": "List Rooms",
-          "name": "list_rooms",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
           "validation": null
         }
       ],
@@ -422,9 +543,9 @@
         },
         {
           "default": true,
-          "description": "Enable saving DAG files",
-          "label": "Save DAG",
-          "name": "save_dag",
+          "description": null,
+          "label": "Enable Save Dag File",
+          "name": "enable_save_dag_file",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -433,9 +554,20 @@
         },
         {
           "default": true,
-          "description": "Enable reading DAG files",
-          "label": "Read DAG",
-          "name": "read_dag",
+          "description": null,
+          "label": "Enable Read Dag File",
+          "name": "enable_read_dag_file",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -460,17 +592,6 @@
       "config_fields": [
         {
           "default": null,
-          "description": "Apify API token for authentication (can also be set via APIFY_API_TOKEN env var)",
-          "label": "API Token",
-          "name": "apify_api_token",
-          "options": null,
-          "placeholder": "apify_api_...",
-          "required": false,
-          "type": "password",
-          "validation": null
-        },
-        {
-          "default": null,
           "description": "Single Actor ID as string or comma-separated list of Actor IDs to register as individual tools (e.g., 'apify/rag-web-browser' for web content extraction)",
           "label": "Actors",
           "name": "actors",
@@ -478,6 +599,17 @@
           "placeholder": "apify/rag-web-browser,compass/crawler-google-places",
           "required": false,
           "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Apify API token for authentication (can also be set via APIFY_API_TOKEN env var)",
+          "label": "API Token",
+          "name": "apify_api_token",
+          "options": null,
+          "placeholder": "apify_api_...",
+          "required": false,
+          "type": "password",
           "validation": null
         }
       ],
@@ -507,6 +639,39 @@
           "placeholder": "us-east-1",
           "required": false,
           "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable List Functions",
+          "name": "enable_list_functions",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Invoke Function",
+          "name": "enable_invoke_function",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
           "validation": null
         }
       ],
@@ -562,9 +727,9 @@
         },
         {
           "default": true,
-          "description": "Enable getting available time slots for booking",
-          "label": "Get Available Slots",
-          "name": "get_available_slots",
+          "description": null,
+          "label": "Enable Get Available Slots",
+          "name": "enable_get_available_slots",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -573,9 +738,9 @@
         },
         {
           "default": true,
-          "description": "Enable creating new bookings",
-          "label": "Create Booking",
-          "name": "create_booking",
+          "description": null,
+          "label": "Enable Create Booking",
+          "name": "enable_create_booking",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -584,9 +749,9 @@
         },
         {
           "default": true,
-          "description": "Enable getting upcoming bookings",
-          "label": "Get Upcoming Bookings",
-          "name": "get_upcoming_bookings",
+          "description": null,
+          "label": "Enable Get Upcoming Bookings",
+          "name": "enable_get_upcoming_bookings",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -595,9 +760,9 @@
         },
         {
           "default": true,
-          "description": "Enable rescheduling existing bookings",
-          "label": "Reschedule Booking",
-          "name": "reschedule_booking",
+          "description": null,
+          "label": "Enable Reschedule Booking",
+          "name": "enable_reschedule_booking",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -606,9 +771,20 @@
         },
         {
           "default": true,
-          "description": "Enable canceling existing bookings",
-          "label": "Cancel Booking",
-          "name": "cancel_booking",
+          "description": null,
+          "label": "Enable Cancel Booking",
+          "name": "enable_cancel_booking",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -633,107 +809,7 @@
     {
       "auth_provider": null,
       "category": "development",
-      "config_fields": [
-        {
-          "default": true,
-          "description": "Enable addition operation",
-          "label": "Addition",
-          "name": "add",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable subtraction operation",
-          "label": "Subtraction",
-          "name": "subtract",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable multiplication operation",
-          "label": "Multiplication",
-          "name": "multiply",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable division operation",
-          "label": "Division",
-          "name": "divide",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable exponentiation operation (power calculation)",
-          "label": "Exponentiation",
-          "name": "exponentiate",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable factorial calculation for integers",
-          "label": "Factorial",
-          "name": "factorial",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable prime number checking",
-          "label": "Prime Check",
-          "name": "is_prime",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable square root calculation",
-          "label": "Square Root",
-          "name": "square_root",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable all available mathematical operations regardless of individual settings",
-          "label": "Enable All Operations",
-          "name": "enable_all",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        }
-      ],
+      "config_fields": [],
       "dependencies": [
         "agno"
       ],
@@ -786,9 +862,9 @@
         },
         {
           "default": true,
-          "description": "Enable text-to-speech functionality",
-          "label": "Text to Speech Enabled",
-          "name": "text_to_speech_enabled",
+          "description": null,
+          "label": "Enable Text To Speech",
+          "name": "enable_text_to_speech",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -797,9 +873,9 @@
         },
         {
           "default": true,
-          "description": "Enable listing available voices functionality",
-          "label": "List Voices Enabled",
-          "name": "list_voices_enabled",
+          "description": null,
+          "label": "Enable List Voices",
+          "name": "enable_list_voices",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -808,9 +884,20 @@
         },
         {
           "default": false,
-          "description": "Enable voice localization functionality",
-          "label": "Voice Localize Enabled",
-          "name": "voice_localize_enabled",
+          "description": null,
+          "label": "Enable Localize Voice",
+          "name": "enable_localize_voice",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -868,17 +955,6 @@
       "config_fields": [
         {
           "default": null,
-          "description": "Confluence instance URL (can also be set via CONFLUENCE_URL env var)",
-          "label": "Confluence URL",
-          "name": "url",
-          "options": null,
-          "placeholder": "https://your-confluence-instance.atlassian.net",
-          "required": false,
-          "type": "url",
-          "validation": null
-        },
-        {
-          "default": null,
           "description": "Confluence username (can also be set via CONFLUENCE_USERNAME env var)",
           "label": "Username",
           "name": "username",
@@ -897,6 +973,17 @@
           "placeholder": "your-password",
           "required": false,
           "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Confluence instance URL (can also be set via CONFLUENCE_URL env var)",
+          "label": "Confluence URL",
+          "name": "url",
+          "options": null,
+          "placeholder": "https://your-confluence-instance.atlassian.net",
+          "required": false,
+          "type": "url",
           "validation": null
         },
         {
@@ -1018,9 +1105,20 @@
         },
         {
           "default": true,
-          "description": "Whether to register the make_request function",
+          "description": null,
           "label": "Enable Make Request",
-          "name": "make_request",
+          "name": "enable_make_request",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -1046,17 +1144,6 @@
       "category": "development",
       "config_fields": [
         {
-          "default": null,
-          "description": "OpenAI API key for authentication (can also be set via OPENAI_API_KEY env var)",
-          "label": "API Key",
-          "name": "api_key",
-          "options": null,
-          "placeholder": "sk-...",
-          "required": false,
-          "type": "password",
-          "validation": null
-        },
-        {
           "default": "dall-e-3",
           "description": "The DALL-E model to use (dall-e-3 or dall-e-2)",
           "label": "Model",
@@ -1065,6 +1152,17 @@
           "placeholder": "dall-e-3",
           "required": false,
           "type": "text",
+          "validation": null
+        },
+        {
+          "default": 1,
+          "description": "Number of images to generate (DALL-E 3 only supports 1)",
+          "label": "Number of Images",
+          "name": "n",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
           "validation": null
         },
         {
@@ -1101,14 +1199,36 @@
           "validation": null
         },
         {
-          "default": 1,
-          "description": "Number of images to generate (DALL-E 3 only supports 1)",
-          "label": "Number of Images",
-          "name": "n",
+          "default": null,
+          "description": "OpenAI API key for authentication (can also be set via OPENAI_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "sk-...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Create Image",
+          "name": "enable_create_image",
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "number",
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
           "validation": null
         }
       ],
@@ -1241,6 +1361,17 @@
         },
         {
           "default": null,
+          "description": "Whether the sandbox should be public",
+          "label": "Sandbox Public",
+          "name": "sandbox_public",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": null,
           "description": "Organization ID for the sandbox",
           "label": "Organization ID",
           "name": "organization_id",
@@ -1296,17 +1427,6 @@
         },
         {
           "default": null,
-          "description": "Whether the sandbox should be public",
-          "label": "Sandbox Public",
-          "name": "sandbox_public",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": null,
           "description": "Custom instructions for the toolkit",
           "label": "Instructions",
           "name": "instructions",
@@ -1344,52 +1464,7 @@
     {
       "auth_provider": null,
       "category": "development",
-      "config_fields": [
-        {
-          "default": true,
-          "description": "Enable container operations (list, start, stop, remove, logs, inspect, run, exec)",
-          "label": "Enable Container Management",
-          "name": "enable_container_management",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable image operations (list, pull, remove, build, tag, inspect)",
-          "label": "Enable Image Management",
-          "name": "enable_image_management",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable volume operations (list, create, remove, inspect)",
-          "label": "Enable Volume Management",
-          "name": "enable_volume_management",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable network operations (list, create, remove, inspect, connect, disconnect)",
-          "label": "Enable Network Management",
-          "name": "enable_network_management",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        }
-      ],
+      "config_fields": [],
       "dependencies": [
         "docker"
       ],
@@ -1445,72 +1520,6 @@
           "validation": null
         },
         {
-          "default": true,
-          "description": "Enable running Python code in the sandbox",
-          "label": "Run Code",
-          "name": "run_code",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable uploading files to the sandbox",
-          "label": "Upload File",
-          "name": "upload_file",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable downloading execution results (PNG images, charts, files)",
-          "label": "Download Result",
-          "name": "download_result",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable filesystem operations (list, read, write files and directories)",
-          "label": "Filesystem Operations",
-          "name": "filesystem",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable internet access functions (public URLs, web servers)",
-          "label": "Internet Access",
-          "name": "internet_access",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable sandbox management functions (timeout, status, shutdown)",
-          "label": "Sandbox Management",
-          "name": "sandbox_management",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
           "default": null,
           "description": "Additional options to pass to the Sandbox constructor (JSON format)",
           "label": "Sandbox Options",
@@ -1519,17 +1528,6 @@
           "placeholder": "{\"template\": \"python\"}",
           "required": false,
           "type": "text",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable shell command execution in the sandbox",
-          "label": "Command Execution",
-          "name": "command_execution",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
           "validation": null
         }
       ],
@@ -1551,6 +1549,17 @@
       "category": "development",
       "config_fields": [
         {
+          "default": "JBFqnCBsd6RMkjVDRZzb",
+          "description": "The voice ID to use for audio generation",
+          "label": "Voice ID",
+          "name": "voice_id",
+          "options": null,
+          "placeholder": "JBFqnCBsd6RMkjVDRZzb",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
           "default": null,
           "description": "Eleven Labs API key for authentication (can also be set via ELEVEN_LABS_API_KEY env var)",
           "label": "API Key",
@@ -1562,12 +1571,12 @@
           "validation": null
         },
         {
-          "default": "JBFqnCBsd6RMkjVDRZzb",
-          "description": "The voice ID to use for audio generation",
-          "label": "Voice ID",
-          "name": "voice_id",
+          "default": null,
+          "description": "Directory to save generated audio files (optional)",
+          "label": "Target Directory",
+          "name": "target_directory",
           "options": null,
-          "placeholder": "JBFqnCBsd6RMkjVDRZzb",
+          "placeholder": "audio_generations",
           "required": false,
           "type": "text",
           "validation": null
@@ -1595,14 +1604,47 @@
           "validation": null
         },
         {
-          "default": null,
-          "description": "Directory to save generated audio files (optional)",
-          "label": "Target Directory",
-          "name": "target_directory",
+          "default": true,
+          "description": null,
+          "label": "Enable Get Voices",
+          "name": "enable_get_voices",
           "options": null,
-          "placeholder": "audio_generations",
+          "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Generate Sound Effect",
+          "name": "enable_generate_sound_effect",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Text To Speech",
+          "name": "enable_text_to_speech",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
           "validation": null
         }
       ],
@@ -1644,6 +1686,39 @@
           "required": false,
           "type": "text",
           "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Generate Media",
+          "name": "enable_generate_media",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Enable Image To Image",
+          "name": "enable_image_to_image",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
         }
       ],
       "dependencies": [
@@ -1676,9 +1751,9 @@
         },
         {
           "default": true,
-          "description": "Enable file saving operations",
-          "label": "Save Files",
-          "name": "save_files",
+          "description": null,
+          "label": "Enable Save File",
+          "name": "enable_save_file",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -1687,9 +1762,20 @@
         },
         {
           "default": true,
-          "description": "Enable file reading operations",
-          "label": "Read Files",
-          "name": "read_files",
+          "description": null,
+          "label": "Enable Read File",
+          "name": "enable_read_file",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Enable Delete File",
+          "name": "enable_delete_file",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -1698,9 +1784,9 @@
         },
         {
           "default": true,
-          "description": "Enable file listing operations",
-          "label": "List Files",
-          "name": "list_files",
+          "description": null,
+          "label": "Enable List Files",
+          "name": "enable_list_files",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -1709,9 +1795,86 @@
         },
         {
           "default": true,
-          "description": "Enable file search operations with pattern matching",
-          "label": "Search Files",
-          "name": "search_files",
+          "description": null,
+          "label": "Enable Search Files",
+          "name": "enable_search_files",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Read File Chunk",
+          "name": "enable_read_file_chunk",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Replace File Chunk",
+          "name": "enable_replace_file_chunk",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Expose Base Directory",
+          "name": "expose_base_directory",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": 10000000,
+          "description": null,
+          "label": "Max File Length",
+          "name": "max_file_length",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": 100000,
+          "description": null,
+          "label": "Max File Lines",
+          "name": "max_file_lines",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": "\n",
+          "description": null,
+          "label": "Line Separator",
+          "name": "line_separator",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -1745,94 +1908,6 @@
           "placeholder": "your_api_key_here",
           "required": false,
           "type": "password",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable financial statement related functions (income statements, balance sheets, cash flow)",
-          "label": "Enable Financial Statements",
-          "name": "enable_financial_statements",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable company information related functions",
-          "label": "Enable Company Info",
-          "name": "enable_company_info",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable market data related functions (stock prices, earnings, metrics)",
-          "label": "Enable Market Data",
-          "name": "enable_market_data",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable ownership data related functions (insider trades, institutional ownership)",
-          "label": "Enable Ownership Data",
-          "name": "enable_ownership_data",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable news related functions",
-          "label": "Enable News",
-          "name": "enable_news",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable SEC filings related functions",
-          "label": "Enable SEC Filings",
-          "name": "enable_sec_filings",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable cryptocurrency related functions",
-          "label": "Enable Crypto",
-          "name": "enable_crypto",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable search related functions",
-          "label": "Enable Search",
-          "name": "enable_search",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
           "validation": null
         }
       ],
@@ -1918,6 +1993,39 @@
           "required": false,
           "type": "text",
           "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Generate Image",
+          "name": "enable_generate_image",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Generate Video",
+          "name": "enable_generate_video",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
         }
       ],
       "dependencies": [
@@ -1958,6 +2066,28 @@
           "required": false,
           "type": "number",
           "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Search Gifs",
+          "name": "enable_search_gifs",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
         }
       ],
       "dependencies": [
@@ -1997,435 +2127,6 @@
           "placeholder": "https://api.github.com",
           "required": false,
           "type": "url",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable searching for repositories",
-          "label": "Search Repositories",
-          "name": "search_repositories",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable listing user/org repositories",
-          "label": "List Repositories",
-          "name": "list_repositories",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable getting repository details",
-          "label": "Get Repository",
-          "name": "get_repository",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable creating new repositories",
-          "label": "Create Repository",
-          "name": "create_repository",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable deleting repositories",
-          "label": "Delete Repository",
-          "name": "delete_repository",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable getting repository language statistics",
-          "label": "Get Repository Languages",
-          "name": "get_repository_languages",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable getting repository star count",
-          "label": "Get Repository Stars",
-          "name": "get_repository_stars",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable getting repository with detailed statistics",
-          "label": "Get Repository with Stats",
-          "name": "get_repository_with_stats",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable listing repository branches",
-          "label": "List Branches",
-          "name": "list_branches",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable creating new branches",
-          "label": "Create Branch",
-          "name": "create_branch",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable setting the default branch",
-          "label": "Set Default Branch",
-          "name": "set_default_branch",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable getting branch content",
-          "label": "Get Branch Content",
-          "name": "get_branch_content",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable getting pull request details",
-          "label": "Get Pull Request",
-          "name": "get_pull_request",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable getting pull request file changes",
-          "label": "Get Pull Request Changes",
-          "name": "get_pull_request_changes",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable getting pull request count",
-          "label": "Get Pull Request Count",
-          "name": "get_pull_request_count",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable listing pull requests",
-          "label": "Get Pull Requests",
-          "name": "get_pull_requests",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable getting pull request comments",
-          "label": "Get Pull Request Comments",
-          "name": "get_pull_request_comments",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable creating pull request comments",
-          "label": "Create Pull Request Comment",
-          "name": "create_pull_request_comment",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable editing pull request comments",
-          "label": "Edit Pull Request Comment",
-          "name": "edit_pull_request_comment",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable getting pull request with full details",
-          "label": "Get Pull Request with Details",
-          "name": "get_pull_request_with_details",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable creating new pull requests",
-          "label": "Create Pull Request",
-          "name": "create_pull_request",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable requesting reviews on pull requests",
-          "label": "Create Review Request",
-          "name": "create_review_request",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable creating new issues",
-          "label": "Create Issue",
-          "name": "create_issue",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable listing repository issues",
-          "label": "List Issues",
-          "name": "list_issues",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable getting issue details",
-          "label": "Get Issue",
-          "name": "get_issue",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable commenting on issues",
-          "label": "Comment on Issue",
-          "name": "comment_on_issue",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable closing issues",
-          "label": "Close Issue",
-          "name": "close_issue",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable reopening closed issues",
-          "label": "Reopen Issue",
-          "name": "reopen_issue",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable assigning issues to users",
-          "label": "Assign Issue",
-          "name": "assign_issue",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable adding labels to issues",
-          "label": "Label Issue",
-          "name": "label_issue",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable listing issue comments",
-          "label": "List Issue Comments",
-          "name": "list_issue_comments",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable editing issue details",
-          "label": "Edit Issue",
-          "name": "edit_issue",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable creating new files in repositories",
-          "label": "Create File",
-          "name": "create_file",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable reading file content from repositories",
-          "label": "Get File Content",
-          "name": "get_file_content",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable updating files in repositories",
-          "label": "Update File",
-          "name": "update_file",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable deleting files from repositories",
-          "label": "Delete File",
-          "name": "delete_file",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable listing directory contents",
-          "label": "Get Directory Content",
-          "name": "get_directory_content",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable searching code across repositories",
-          "label": "Search Code",
-          "name": "search_code",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable searching issues and pull requests",
-          "label": "Search Issues and PRs",
-          "name": "search_issues_and_prs",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
           "validation": null
         }
       ],
@@ -2470,94 +2171,6 @@
           "placeholder": "AIza...",
           "required": false,
           "type": "password",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable places search functionality",
-          "label": "Search Places",
-          "name": "search_places",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable directions functionality",
-          "label": "Get Directions",
-          "name": "get_directions",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable address validation functionality",
-          "label": "Validate Address",
-          "name": "validate_address",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable geocoding functionality",
-          "label": "Geocode Address",
-          "name": "geocode_address",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable reverse geocoding functionality",
-          "label": "Reverse Geocode",
-          "name": "reverse_geocode",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable distance matrix functionality",
-          "label": "Get Distance Matrix",
-          "name": "get_distance_matrix",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable elevation functionality",
-          "label": "Get Elevation",
-          "name": "get_elevation",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable timezone functionality",
-          "label": "Get Timezone",
-          "name": "get_timezone",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
           "validation": null
         }
       ],
@@ -2719,6 +2332,50 @@
           "required": false,
           "type": "text",
           "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Transcribe Audio",
+          "name": "enable_transcribe_audio",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Translate Audio",
+          "name": "enable_translate_audio",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Generate Speech",
+          "name": "enable_generate_speech",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
         }
       ],
       "dependencies": [
@@ -2781,6 +2438,72 @@
           "required": false,
           "type": "password",
           "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Get Issue",
+          "name": "enable_get_issue",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Create Issue",
+          "name": "enable_create_issue",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Search Issues",
+          "name": "enable_search_issues",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Add Comment",
+          "name": "enable_add_comment",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Add Worklog",
+          "name": "enable_add_worklog",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
         }
       ],
       "dependencies": [
@@ -2801,91 +2524,14 @@
       "category": "development",
       "config_fields": [
         {
-          "default": true,
-          "description": "Enable fetching authenticated user details",
-          "label": "Get User Details",
-          "name": "get_user_details",
+          "default": null,
+          "description": null,
+          "label": "Api Key",
+          "name": "api_key",
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable fetching team details for the authenticated user",
-          "label": "Get Teams Details",
-          "name": "get_teams_details",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable retrieving details of specific issues by ID",
-          "label": "Get Issue Details",
-          "name": "get_issue_details",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable creating new issues within teams and projects",
-          "label": "Create Issue",
-          "name": "create_issue",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable updating issue titles and states",
-          "label": "Update Issue",
-          "name": "update_issue",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable retrieving issues assigned to specific users",
-          "label": "Get User Assigned Issues",
-          "name": "get_user_assigned_issues",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable retrieving issues within specific workflow states",
-          "label": "Get Workflow Issues",
-          "name": "get_workflow_issues",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable retrieving issues with high priority (priority <= 2)",
-          "label": "Get High Priority Issues",
-          "name": "get_high_priority_issues",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
+          "type": "password",
           "validation": null
         }
       ],
@@ -2949,6 +2595,39 @@
           "required": false,
           "type": "number",
           "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Generate Video",
+          "name": "enable_generate_video",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Image To Video",
+          "name": "enable_image_to_video",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
         }
       ],
       "dependencies": [
@@ -2977,17 +2656,6 @@
           "placeholder": "your-modelslabs-api-key",
           "required": false,
           "type": "password",
-          "validation": null
-        },
-        {
-          "default": "mp4",
-          "description": "The type of file to generate (mp4, gif, or mp3)",
-          "label": "File Type",
-          "name": "file_type",
-          "options": null,
-          "placeholder": "mp4",
-          "required": false,
-          "type": "text",
           "validation": null
         },
         {
@@ -3022,6 +2690,17 @@
           "required": false,
           "type": "number",
           "validation": null
+        },
+        {
+          "default": "mp4",
+          "description": "The type of file to generate (mp4, gif, or mp3)",
+          "label": "File Type",
+          "name": "file_type",
+          "options": null,
+          "placeholder": "mp4",
+          "required": false,
+          "type": "text",
+          "validation": null
         }
       ],
       "dependencies": [
@@ -3043,9 +2722,9 @@
       "config_fields": [
         {
           "default": true,
-          "description": "Enable the extract_audio tool for extracting audio tracks from video files",
-          "label": "Process Video",
-          "name": "process_video",
+          "description": null,
+          "label": "Enable Process Video",
+          "name": "enable_process_video",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -3054,9 +2733,9 @@
         },
         {
           "default": true,
-          "description": "Enable the create_srt tool for saving transcriptions to SRT formatted files",
-          "label": "Generate Captions",
-          "name": "generate_captions",
+          "description": null,
+          "label": "Enable Generate Captions",
+          "name": "enable_generate_captions",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -3065,9 +2744,20 @@
         },
         {
           "default": true,
-          "description": "Enable the embed_captions tool for creating videos with word-level highlighted captions",
-          "label": "Embed Captions",
-          "name": "embed_captions",
+          "description": null,
+          "label": "Enable Embed Captions",
+          "name": "enable_embed_captions",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -3130,6 +2820,17 @@
           "description": "Enable text-to-speech synthesis",
           "label": "Enable Speech Generation",
           "name": "enable_speech_generation",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -3266,9 +2967,9 @@
         },
         {
           "default": true,
-          "description": "Enable current weather function",
-          "label": "Current Weather",
-          "name": "current_weather",
+          "description": null,
+          "label": "Enable Current Weather",
+          "name": "enable_current_weather",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -3277,9 +2978,9 @@
         },
         {
           "default": true,
-          "description": "Enable forecast function",
-          "label": "Forecast",
-          "name": "forecast",
+          "description": null,
+          "label": "Enable Forecast",
+          "name": "enable_forecast",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -3288,9 +2989,9 @@
         },
         {
           "default": true,
-          "description": "Enable air pollution function",
-          "label": "Air Pollution",
-          "name": "air_pollution",
+          "description": null,
+          "label": "Enable Air Pollution",
+          "name": "enable_air_pollution",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -3299,9 +3000,20 @@
         },
         {
           "default": true,
-          "description": "Enable geocoding function",
-          "label": "Geocoding",
-          "name": "geocoding",
+          "description": null,
+          "label": "Enable Geocoding",
+          "name": "enable_geocoding",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -3361,75 +3073,9 @@
         },
         {
           "default": true,
-          "description": "Enable saving Python code to files and executing them",
-          "label": "Save and Run Files",
-          "name": "save_and_run",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable direct execution of Python code in memory",
-          "label": "Run Code",
-          "name": "run_code",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable reading file contents",
-          "label": "Read Files",
-          "name": "read_files",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable listing files in the base directory",
-          "label": "List Files",
-          "name": "list_files",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable running existing Python files",
-          "label": "Run Files",
-          "name": "run_files",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable installing packages using pip",
-          "label": "Pip Install",
-          "name": "pip_install",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable installing packages using uv pip",
-          "label": "UV Pip Install",
-          "name": "uv_pip_install",
+          "description": null,
+          "label": "Restrict To Base Dir",
+          "name": "restrict_to_base_dir",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -3475,6 +3121,28 @@
           "required": false,
           "type": "text",
           "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Generate Media",
+          "name": "enable_generate_media",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
         }
       ],
       "dependencies": [
@@ -3504,6 +3172,28 @@
           "required": false,
           "type": "text",
           "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Run Shell Command",
+          "name": "enable_run_shell_command",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
         }
       ],
       "dependencies": [],
@@ -3520,7 +3210,30 @@
     {
       "auth_provider": null,
       "category": "development",
-      "config_fields": [],
+      "config_fields": [
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Sleep",
+          "name": "enable_sleep",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
       "dependencies": [
         "agno"
       ],
@@ -3570,83 +3283,6 @@
           "required": false,
           "type": "password",
           "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable creating new cards in boards and lists",
-          "label": "Create Card",
-          "name": "create_card",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable moving cards between lists",
-          "label": "Move Card",
-          "name": "move_card",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable retrieving all cards from a list",
-          "label": "Get Cards",
-          "name": "get_cards",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable creating new Trello boards",
-          "label": "Create Board",
-          "name": "create_board",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable listing all accessible Trello boards",
-          "label": "List Boards",
-          "name": "list_boards",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable retrieving all lists on a board",
-          "label": "Get Board Lists",
-          "name": "get_board_lists",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable creating new lists on boards",
-          "label": "Create List",
-          "name": "create_list",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
         }
       ],
       "dependencies": [
@@ -3665,7 +3301,30 @@
     {
       "auth_provider": null,
       "category": "development",
-      "config_fields": [],
+      "config_fields": [
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Open Page",
+          "name": "enable_open_page",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
       "dependencies": [],
       "description": "Open URLs in web browser tabs or windows",
       "display_name": "Web Browser Tools",
@@ -3712,6 +3371,28 @@
           "placeholder": "mycompany",
           "required": false,
           "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Search Zendesk",
+          "name": "enable_search_zendesk",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
           "validation": null
         }
       ],
@@ -3763,6 +3444,28 @@
           "placeholder": "us-east-1",
           "required": false,
           "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Send Email",
+          "name": "enable_send_email",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
           "validation": null
         }
       ],
@@ -3825,6 +3528,28 @@
           "placeholder": "Gmail password or app-specific password",
           "required": false,
           "type": "password",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Email User",
+          "name": "enable_email_user",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
           "validation": null
         }
       ],
@@ -3988,6 +3713,28 @@
           "required": false,
           "type": "text",
           "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Send Email",
+          "name": "enable_send_email",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
         }
       ],
       "dependencies": [
@@ -4111,9 +3858,9 @@
       "config_fields": [
         {
           "default": true,
-          "description": "Enable extracting captions/transcripts from YouTube videos",
-          "label": "Get Video Captions",
-          "name": "get_video_captions",
+          "description": null,
+          "label": "Enable Get Video Captions",
+          "name": "enable_get_video_captions",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -4122,9 +3869,9 @@
         },
         {
           "default": true,
-          "description": "Enable extracting video metadata (title, author, thumbnail, etc.)",
-          "label": "Get Video Data",
-          "name": "get_video_data",
+          "description": null,
+          "label": "Enable Get Video Data",
+          "name": "enable_get_video_data",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -4133,9 +3880,20 @@
         },
         {
           "default": true,
-          "description": "Enable generating timestamped transcripts from video captions",
-          "label": "Get Video Timestamps",
-          "name": "get_video_timestamps",
+          "description": null,
+          "label": "Enable Get Video Timestamps",
+          "name": "enable_get_video_timestamps",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -4414,50 +4172,6 @@
           "validation": null
         },
         {
-          "default": true,
-          "description": "Enable reading CSV file contents",
-          "label": "Read CSVs",
-          "name": "read_csvs",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable listing available CSV files",
-          "label": "List CSVs",
-          "name": "list_csvs",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable SQL querying of CSV files (requires DuckDB)",
-          "label": "Query CSVs",
-          "name": "query_csvs",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable reading column names from CSV files",
-          "label": "Read Column Names",
-          "name": "read_column_names",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
           "default": null,
           "description": "Existing DuckDB connection object (advanced usage)",
           "label": "DuckDB Connection",
@@ -4477,6 +4191,61 @@
           "placeholder": "{\"memory_limit\": \"1GB\"}",
           "required": false,
           "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Read Csv File",
+          "name": "enable_read_csv_file",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable List Csv Files",
+          "name": "enable_list_csv_files",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Get Columns",
+          "name": "enable_get_columns",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Query Csv File",
+          "name": "enable_query_csv_file",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
           "validation": null
         }
       ],
@@ -4551,61 +4320,6 @@
           "required": false,
           "type": "text",
           "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable executing SQL queries",
-          "label": "Run Queries",
-          "name": "run_queries",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable query plan inspection and analysis",
-          "label": "Inspect Queries",
-          "name": "inspect_queries",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable creating tables from files and data sources",
-          "label": "Create Tables",
-          "name": "create_tables",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable table summarization with statistical analysis",
-          "label": "Summarize Tables",
-          "name": "summarize_tables",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable exporting tables to various file formats",
-          "label": "Export Tables",
-          "name": "export_tables",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
         }
       ],
       "dependencies": [
@@ -4670,6 +4384,17 @@
       "config_fields": [
         {
           "default": null,
+          "description": "JSON configuration for self-hosted Mem0 instance (overrides cloud API)",
+          "label": "Local Configuration",
+          "name": "config",
+          "options": null,
+          "placeholder": "{\"vector_store\": {\"provider\": \"chroma\"}}",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
           "description": "Mem0 API key for cloud usage (can also be set via MEM0_API_KEY env var)",
           "label": "API Key",
           "name": "api_key",
@@ -4677,6 +4402,17 @@
           "placeholder": "mem0_...",
           "required": false,
           "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Default user ID for memory operations (can be overridden per operation)",
+          "label": "Default User ID",
+          "name": "user_id",
+          "options": null,
+          "placeholder": "user_123",
+          "required": false,
+          "type": "text",
           "validation": null
         },
         {
@@ -4702,32 +4438,65 @@
           "validation": null
         },
         {
-          "default": null,
-          "description": "JSON configuration for self-hosted Mem0 instance (overrides cloud API)",
-          "label": "Local Configuration",
-          "name": "config",
-          "options": null,
-          "placeholder": "{\"vector_store\": {\"provider\": \"chroma\"}}",
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "default": null,
-          "description": "Default user ID for memory operations (can be overridden per operation)",
-          "label": "Default User ID",
-          "name": "user_id",
-          "options": null,
-          "placeholder": "user_123",
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
           "default": true,
           "description": "Enable automatic memory inference and extraction from conversations",
           "label": "Enable Memory Inference",
           "name": "infer",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Add Memory",
+          "name": "enable_add_memory",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Search Memory",
+          "name": "enable_search_memory",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Get All Memories",
+          "name": "enable_get_all_memories",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Delete All Memories",
+          "name": "enable_delete_all_memories",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -4751,7 +4520,41 @@
     {
       "auth_provider": null,
       "category": "productivity",
-      "config_fields": [],
+      "config_fields": [
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Create Pandas Dataframe",
+          "name": "enable_create_pandas_dataframe",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Run Dataframe Operation",
+          "name": "enable_run_dataframe_operation",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
       "dependencies": [
         "pandas"
       ],
@@ -4870,9 +4673,9 @@
         },
         {
           "default": true,
-          "description": "Enable listing database tables",
-          "label": "List Tables",
-          "name": "list_tables",
+          "description": null,
+          "label": "Enable List Tables",
+          "name": "enable_list_tables",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -4881,9 +4684,9 @@
         },
         {
           "default": true,
-          "description": "Enable describing table schemas",
-          "label": "Describe Table",
-          "name": "describe_table",
+          "description": null,
+          "label": "Enable Describe Table",
+          "name": "enable_describe_table",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -4892,9 +4695,20 @@
         },
         {
           "default": true,
-          "description": "Enable executing SQL queries",
-          "label": "Run SQL Query",
-          "name": "run_sql_query",
+          "description": null,
+          "label": "Enable Run Sql Query",
+          "name": "enable_run_sql_query",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -4929,83 +4743,6 @@
           "required": false,
           "type": "password",
           "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable creating new tasks in Todoist",
-          "label": "Create Task",
-          "name": "create_task",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable fetching specific tasks by ID",
-          "label": "Get Task",
-          "name": "get_task",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable updating existing tasks with new properties",
-          "label": "Update Task",
-          "name": "update_task",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable marking tasks as completed",
-          "label": "Close Task",
-          "name": "close_task",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable deleting tasks from Todoist",
-          "label": "Delete Task",
-          "name": "delete_task",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable retrieving all active (non-completed) tasks",
-          "label": "Get Active Tasks",
-          "name": "get_active_tasks",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable retrieving all projects in Todoist",
-          "label": "Get Projects",
-          "name": "get_projects",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
         }
       ],
       "dependencies": [
@@ -5026,113 +4763,14 @@
       "category": "productivity",
       "config_fields": [
         {
-          "default": true,
-          "description": "Enable getting current stock prices",
-          "label": "Stock Price",
-          "name": "stock_price",
+          "default": null,
+          "description": null,
+          "label": "Session",
+          "name": "session",
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable getting company information and overview",
-          "label": "Company Info",
-          "name": "company_info",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable getting fundamental data for stocks",
-          "label": "Stock Fundamentals",
-          "name": "stock_fundamentals",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable getting historical stock prices",
-          "label": "Historical Prices",
-          "name": "historical_prices",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable getting income statements",
-          "label": "Income Statements",
-          "name": "income_statements",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable getting key financial ratios",
-          "label": "Key Financial Ratios",
-          "name": "key_financial_ratios",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable getting analyst recommendations",
-          "label": "Analyst Recommendations",
-          "name": "analyst_recommendations",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable getting company news and press releases",
-          "label": "Company News",
-          "name": "company_news",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable getting technical indicators",
-          "label": "Technical Indicators",
-          "name": "technical_indicators",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable all available Yahoo Finance tools",
-          "label": "Enable All",
-          "name": "enable_all",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
+          "type": "text",
           "validation": null
         }
       ],
@@ -5153,17 +4791,6 @@
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [
-        {
-          "default": null,
-          "description": "Zep API key for authentication (can also be set via ZEP_API_KEY env var)",
-          "label": "API Key",
-          "name": "api_key",
-          "options": null,
-          "placeholder": "your_zep_api_key",
-          "required": false,
-          "type": "password",
-          "validation": null
-        },
         {
           "default": null,
           "description": "Optional session ID. Auto-generated if not provided",
@@ -5188,13 +4815,13 @@
         },
         {
           "default": null,
-          "description": "Custom instructions for using the Zep tools",
-          "label": "Custom Instructions",
-          "name": "instructions",
+          "description": "Zep API key for authentication (can also be set via ZEP_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
           "options": null,
-          "placeholder": "Custom instructions for using the Zep tools",
+          "placeholder": "your_zep_api_key",
           "required": false,
-          "type": "text",
+          "type": "password",
           "validation": null
         },
         {
@@ -5209,6 +4836,50 @@
           "validation": null
         },
         {
+          "default": true,
+          "description": null,
+          "label": "Enable Add Zep Message",
+          "name": "enable_add_zep_message",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Get Zep Memory",
+          "name": "enable_get_zep_memory",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Search Zep Memory",
+          "name": "enable_search_zep_memory",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Custom instructions for using the Zep tools",
+          "label": "Custom Instructions",
+          "name": "instructions",
+          "options": null,
+          "placeholder": "Custom instructions for using the Zep tools",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
           "default": false,
           "description": "Whether to add default instructions",
           "label": "Add Instructions",
@@ -5220,32 +4891,10 @@
           "validation": null
         },
         {
-          "default": true,
-          "description": "Enable adding messages to the current Zep session memory",
-          "label": "Add Zep Message",
-          "name": "add_zep_message",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable retrieving memory for the current Zep session",
-          "label": "Get Zep Memory",
-          "name": "get_zep_memory",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable searching the Zep memory store for relevant information",
-          "label": "Search Zep Memory",
-          "name": "search_zep_memory",
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -5283,9 +4932,31 @@
         },
         {
           "default": true,
-          "description": "Enable the basic text scraping functionality",
-          "label": "Enable Text Scraping",
-          "name": "scrape",
+          "description": null,
+          "label": "Enable Scrape Website",
+          "name": "enable_scrape_website",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Enable Custom Scrape Website",
+          "name": "enable_custom_scrape_website",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -5324,9 +4995,9 @@
       "config_fields": [
         {
           "default": true,
-          "description": "Enable searching ArXiv for academic papers",
-          "label": "Search ArXiv",
-          "name": "search_arxiv",
+          "description": null,
+          "label": "Enable Search Arxiv",
+          "name": "enable_search_arxiv",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -5335,9 +5006,20 @@
         },
         {
           "default": true,
-          "description": "Enable downloading and reading ArXiv papers",
-          "label": "Read ArXiv Papers",
-          "name": "read_arxiv_papers",
+          "description": null,
+          "label": "Enable Read Arxiv Papers",
+          "name": "enable_read_arxiv_papers",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -5439,6 +5121,28 @@
           "required": false,
           "type": "boolean",
           "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Baidu Search",
+          "name": "enable_baidu_search",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
         }
       ],
       "dependencies": [
@@ -5471,6 +5175,61 @@
           "validation": null
         },
         {
+          "default": true,
+          "description": null,
+          "label": "Enable Scrape Markdown",
+          "name": "enable_scrape_markdown",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Screenshot",
+          "name": "enable_screenshot",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Search Engine",
+          "name": "enable_search_engine",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Web Data Feed",
+          "name": "enable_web_data_feed",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
           "default": "serp_api",
           "description": "Zone for search engine requests (can be overridden with BRIGHT_DATA_SERP_ZONE env var)",
           "label": "SERP Zone",
@@ -5490,50 +5249,6 @@
           "placeholder": "web_unlocker1",
           "required": false,
           "type": "text",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable the scrape_as_markdown tool",
-          "label": "Scrape as Markdown",
-          "name": "scrape_as_markdown",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable the get_screenshot tool",
-          "label": "Get Screenshot",
-          "name": "get_screenshot",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable the search_engine tool",
-          "label": "Search Engine",
-          "name": "search_engine",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable the web_data_feed tool",
-          "label": "Web Data Feed",
-          "name": "web_data_feed",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
           "validation": null
         },
         {
@@ -5607,6 +5322,83 @@
           "placeholder": "https://api.browserbase.com",
           "required": false,
           "type": "url",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Navigate To",
+          "name": "enable_navigate_to",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Screenshot",
+          "name": "enable_screenshot",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Get Page Content",
+          "name": "enable_get_page_content",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Close Session",
+          "name": "enable_close_session",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Parse Html",
+          "name": "parse_html",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": 100000,
+          "description": null,
+          "label": "Max Content Length",
+          "name": "max_content_length",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
           "validation": null
         }
       ],
@@ -5704,6 +5496,39 @@
           "required": false,
           "type": "text",
           "validation": null
+        },
+        {
+          "default": null,
+          "description": null,
+          "label": "Proxy Config",
+          "name": "proxy_config",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Crawl",
+          "name": "enable_crawl",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
         }
       ],
       "dependencies": [
@@ -5725,9 +5550,9 @@
       "config_fields": [
         {
           "default": true,
-          "description": "Enable DuckDuckGo search function",
-          "label": "Search",
-          "name": "search",
+          "description": null,
+          "label": "Enable Search",
+          "name": "enable_search",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -5736,9 +5561,9 @@
         },
         {
           "default": true,
-          "description": "Enable DuckDuckGo news function",
-          "label": "News",
-          "name": "news",
+          "description": null,
+          "label": "Enable News",
+          "name": "enable_news",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -5819,21 +5644,10 @@
       "category": "research",
       "config_fields": [
         {
-          "default": null,
-          "description": "Exa API key for authentication (can also be set via EXA_API_KEY env var)",
-          "label": "API Key",
-          "name": "api_key",
-          "options": null,
-          "placeholder": "exa_...",
-          "required": false,
-          "type": "password",
-          "validation": null
-        },
-        {
           "default": true,
-          "description": "Enable web search functionality",
-          "label": "Search",
-          "name": "search",
+          "description": null,
+          "label": "Enable Search",
+          "name": "enable_search",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -5842,9 +5656,9 @@
         },
         {
           "default": true,
-          "description": "Enable retrieving detailed content from URLs",
-          "label": "Get Contents",
-          "name": "get_contents",
+          "description": null,
+          "label": "Enable Get Contents",
+          "name": "enable_get_contents",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -5853,9 +5667,9 @@
         },
         {
           "default": true,
-          "description": "Enable finding similar pages to a given URL",
-          "label": "Find Similar",
-          "name": "find_similar",
+          "description": null,
+          "label": "Enable Find Similar",
+          "name": "enable_find_similar",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -5864,9 +5678,9 @@
         },
         {
           "default": true,
-          "description": "Enable LLM-powered question answering with search results",
-          "label": "Answer",
-          "name": "answer",
+          "description": null,
+          "label": "Enable Answer",
+          "name": "enable_answer",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -5875,9 +5689,20 @@
         },
         {
           "default": false,
-          "description": "Enable deep research functionality with structured output",
-          "label": "Research",
-          "name": "research",
+          "description": null,
+          "label": "Enable Research",
+          "name": "enable_research",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -5907,17 +5732,6 @@
           "validation": null
         },
         {
-          "default": true,
-          "description": "Include highlighted snippets in results",
-          "label": "Highlights",
-          "name": "highlights",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
           "default": false,
           "description": "Include AI-generated summaries in results",
           "label": "Summary",
@@ -5926,6 +5740,17 @@
           "placeholder": null,
           "required": false,
           "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Exa API key for authentication (can also be set via EXA_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "exa_...",
+          "required": false,
+          "type": "password",
           "validation": null
         },
         {
@@ -5996,17 +5821,6 @@
         },
         {
           "default": null,
-          "description": "Enable autoprompt features to improve query understanding",
-          "label": "Use Autoprompt",
-          "name": "use_autoprompt",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": null,
           "description": "Specify content type filter (e.g., article, blog, video)",
           "label": "Content Type",
           "name": "type",
@@ -6050,23 +5864,23 @@
           "validation": null
         },
         {
+          "default": false,
+          "description": "Log search results for debugging purposes",
+          "label": "Show Results",
+          "name": "show_results",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
           "default": null,
           "description": "The search model to use. Options: \"exa\" or \"exa-pro\"",
           "label": "Search Model",
           "name": "model",
           "options": null,
           "placeholder": "exa",
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "default": "exa-research",
-          "description": "Model for research functionality. Options: \"exa-research\" or \"exa-research-pro\"",
-          "label": "Research Model",
-          "name": "research_model",
-          "options": null,
-          "placeholder": "exa-research",
           "required": false,
           "type": "text",
           "validation": null
@@ -6083,14 +5897,14 @@
           "validation": null
         },
         {
-          "default": false,
-          "description": "Log search results for debugging purposes",
-          "label": "Show Results",
-          "name": "show_results",
+          "default": "exa-research",
+          "description": "Model for research functionality. Options: \"exa-research\" or \"exa-research-pro\"",
+          "label": "Research Model",
+          "name": "research_model",
           "options": null,
-          "placeholder": null,
+          "placeholder": "exa-research",
           "required": false,
-          "type": "boolean",
+          "type": "text",
           "validation": null
         }
       ],
@@ -6123,14 +5937,58 @@
           "validation": null
         },
         {
-          "default": "https://api.firecrawl.dev",
-          "description": "Firecrawl API endpoint URL",
-          "label": "API URL",
-          "name": "api_url",
+          "default": true,
+          "description": null,
+          "label": "Enable Scrape",
+          "name": "enable_scrape",
           "options": null,
-          "placeholder": "https://api.firecrawl.dev",
+          "placeholder": null,
           "required": false,
-          "type": "url",
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Enable Crawl",
+          "name": "enable_crawl",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Enable Mapping",
+          "name": "enable_mapping",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Enable Search",
+          "name": "enable_search",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
           "validation": null
         },
         {
@@ -6178,47 +6036,14 @@
           "validation": null
         },
         {
-          "default": true,
-          "description": "Enable website scraping functionality",
-          "label": "Enable Scraping",
-          "name": "scrape",
+          "default": "https://api.firecrawl.dev",
+          "description": "Firecrawl API endpoint URL",
+          "label": "API URL",
+          "name": "api_url",
           "options": null,
-          "placeholder": null,
+          "placeholder": "https://api.firecrawl.dev",
           "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable website crawling functionality",
-          "label": "Enable Crawling",
-          "name": "crawl",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable website structure mapping functionality",
-          "label": "Enable Mapping",
-          "name": "mapping",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable web search functionality",
-          "label": "Enable Search",
-          "name": "search",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
+          "type": "url",
           "validation": null
         }
       ],
@@ -6240,25 +6065,47 @@
       "category": "research",
       "config_fields": [
         {
+          "default": true,
+          "description": "Enable Google search results",
+          "label": "Enable Search",
+          "name": "enable_search",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable Google news results",
+          "label": "Enable News",
+          "name": "enable_news",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
           "default": null,
-          "description": "Fixed number of maximum search results to return (overrides per-query max_results)",
+          "description": "Modifier prepended to the search query",
+          "label": "Search Modifier",
+          "name": "modifier",
+          "options": null,
+          "placeholder": "site:example.com",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Fixed number of maximum search results to return",
           "label": "Fixed Max Results",
           "name": "fixed_max_results",
           "options": null,
           "placeholder": "10",
           "required": false,
           "type": "number",
-          "validation": null
-        },
-        {
-          "default": null,
-          "description": "Fixed language for search results (overrides per-query language setting)",
-          "label": "Fixed Language",
-          "name": "fixed_language",
-          "options": null,
-          "placeholder": "en",
-          "required": false,
-          "type": "text",
           "validation": null
         },
         {
@@ -6284,24 +6131,23 @@
           "validation": null
         },
         {
-          "default": null,
-          "description": "Custom headers for search requests (JSON format)",
-          "label": "Custom Headers",
-          "name": "headers",
+          "default": true,
+          "description": "Verify SSL certificates for secure connections",
+          "label": "Verify SSL",
+          "name": "verify_ssl",
           "options": null,
-          "placeholder": "{\"User-Agent\": \"Custom Agent\"}",
+          "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "boolean",
           "validation": null
         }
       ],
       "dependencies": [
-        "googlesearch-python",
-        "pycountry"
+        "ddgs"
       ],
-      "description": "Search Google for web results using Python library",
+      "description": "Search Google for web results using the WebSearch backend",
       "display_name": "Google Search",
-      "docs_url": "https://docs.agno.com/tools/toolkits/search/googlesearch",
+      "docs_url": "https://docs.agno.com/tools/toolkits/search/websearch",
       "helper_text": null,
       "icon": "FaGoogle",
       "icon_color": "text-blue-500",
@@ -6315,9 +6161,9 @@
       "config_fields": [
         {
           "default": true,
-          "description": "Enable getting top stories from Hacker News",
-          "label": "Get Top Stories",
-          "name": "get_top_stories",
+          "description": null,
+          "label": "Enable Get Top Stories",
+          "name": "enable_get_top_stories",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -6326,9 +6172,20 @@
         },
         {
           "default": true,
-          "description": "Enable getting user details from Hacker News",
-          "label": "Get User Details",
-          "name": "get_user_details",
+          "description": null,
+          "label": "Enable Get User Details",
+          "name": "enable_get_user_details",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -6410,20 +6267,9 @@
         },
         {
           "default": true,
-          "description": "Enable URL reading functionality",
-          "label": "Read URL",
-          "name": "read_url",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable web search functionality",
-          "label": "Search Query",
-          "name": "search_query",
+          "description": "Include full URL content in search results",
+          "label": "Search Query Content",
+          "name": "search_query_content",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -6432,9 +6278,31 @@
         },
         {
           "default": true,
-          "description": "Include full URL content in search results",
-          "label": "Search Query Content",
-          "name": "search_query_content",
+          "description": null,
+          "label": "Enable Read Url",
+          "name": "enable_read_url",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Enable Search Query",
+          "name": "enable_search_query",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -6492,6 +6360,28 @@
           "required": false,
           "type": "text",
           "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Web Search With Linkup",
+          "name": "enable_web_search_with_linkup",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
         }
       ],
       "dependencies": [
@@ -6512,17 +6402,6 @@
       "category": "research",
       "config_fields": [
         {
-          "default": true,
-          "description": "Enable the functionality to read the full content of an article",
-          "label": "Read Article",
-          "name": "read_article",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
           "default": false,
           "description": "Include a summary of the article along with the full content",
           "label": "Include Summary",
@@ -6542,6 +6421,28 @@
           "placeholder": "5000",
           "required": false,
           "type": "number",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Read Article",
+          "name": "enable_read_article",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
           "validation": null
         }
       ],
@@ -6635,6 +6536,28 @@
           "required": false,
           "type": "boolean",
           "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Search Pubmed",
+          "name": "enable_search_pubmed",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
         }
       ],
       "dependencies": [
@@ -6667,9 +6590,9 @@
         },
         {
           "default": true,
-          "description": "Enable AI-powered data extraction using natural language prompts",
-          "label": "Smart Scraper",
-          "name": "smartscraper",
+          "description": null,
+          "label": "Enable Smartscraper",
+          "name": "enable_smartscraper",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -6678,9 +6601,9 @@
         },
         {
           "default": false,
-          "description": "Enable webpage to markdown conversion",
-          "label": "Markdownify",
-          "name": "markdownify",
+          "description": null,
+          "label": "Enable Markdownify",
+          "name": "enable_markdownify",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -6689,9 +6612,9 @@
         },
         {
           "default": false,
-          "description": "Enable website crawling and structured data extraction",
-          "label": "Crawl",
-          "name": "crawl",
+          "description": null,
+          "label": "Enable Crawl",
+          "name": "enable_crawl",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -6700,9 +6623,9 @@
         },
         {
           "default": false,
-          "description": "Enable web search and information extraction",
-          "label": "Search Scraper",
-          "name": "searchscraper",
+          "description": null,
+          "label": "Enable Searchscraper",
+          "name": "enable_searchscraper",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -6711,9 +6634,42 @@
         },
         {
           "default": false,
-          "description": "Enable automated browser actions and optional AI extraction",
-          "label": "Agentic Crawler",
-          "name": "agentic_crawler",
+          "description": null,
+          "label": "Enable Agentic Crawler",
+          "name": "enable_agentic_crawler",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Enable Scrape",
+          "name": "enable_scrape",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Render Heavy Js",
+          "name": "render_heavy_js",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -6770,83 +6726,6 @@
           "required": false,
           "type": "number",
           "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable searching for images",
-          "label": "Enable Image Search",
-          "name": "images",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable searching for IT-related content",
-          "label": "Enable IT Search",
-          "name": "it",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable searching for maps",
-          "label": "Enable Map Search",
-          "name": "map",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable searching for music",
-          "label": "Enable Music Search",
-          "name": "music",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable searching for news",
-          "label": "Enable News Search",
-          "name": "news",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable searching for science-related content",
-          "label": "Enable Science Search",
-          "name": "science",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable searching for videos",
-          "label": "Enable Video Search",
-          "name": "videos",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
         }
       ],
       "dependencies": [],
@@ -6876,10 +6755,32 @@
           "validation": null
         },
         {
+          "default": true,
+          "description": null,
+          "label": "Enable Search Google",
+          "name": "enable_search_google",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
           "default": false,
-          "description": "Enable YouTube search functionality",
-          "label": "Search YouTube",
-          "name": "search_youtube",
+          "description": null,
+          "label": "Enable Search Youtube",
+          "name": "enable_search_youtube",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -6958,6 +6859,61 @@
           "required": false,
           "type": "text",
           "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Search",
+          "name": "enable_search",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Search News",
+          "name": "enable_search_news",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Search Scholar",
+          "name": "enable_search_scholar",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Scrape Webpage",
+          "name": "enable_scrape_webpage",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
         }
       ],
       "dependencies": [
@@ -7009,6 +6965,50 @@
           "required": false,
           "type": "text",
           "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Search",
+          "name": "enable_search",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Scrape",
+          "name": "enable_scrape",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Crawl",
+          "name": "enable_crawl",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
         }
       ],
       "dependencies": [
@@ -7040,10 +7040,21 @@
           "validation": null
         },
         {
+          "default": null,
+          "description": null,
+          "label": "Api Base Url",
+          "name": "api_base_url",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "url",
+          "validation": null
+        },
+        {
           "default": true,
-          "description": "Enable web search functionality",
+          "description": null,
           "label": "Enable Search",
-          "name": "search",
+          "name": "enable_search",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -7052,9 +7063,31 @@
         },
         {
           "default": false,
-          "description": "Use search context method instead of regular search",
-          "label": "Use Search Context",
-          "name": "use_search_context",
+          "description": null,
+          "label": "Enable Search Context",
+          "name": "enable_search_context",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Enable Extract",
+          "name": "enable_extract",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -7104,6 +7137,61 @@
           "validation": null
         },
         {
+          "default": "basic",
+          "description": null,
+          "label": "Extract Depth",
+          "name": "extract_depth",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Include Images",
+          "name": "include_images",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Include Favicon",
+          "name": "include_favicon",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": null,
+          "label": "Extract Timeout",
+          "name": "extract_timeout",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": "markdown",
+          "description": null,
+          "label": "Extract Format",
+          "name": "extract_format",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
           "default": "markdown",
           "description": "Format for search result output",
           "label": "Output Format",
@@ -7143,9 +7231,9 @@
       "config_fields": [
         {
           "default": null,
-          "description": "Advanced: Optional knowledge base instance for storing website content (WebsiteKnowledgeBase or CombinedKnowledgeBase)",
-          "label": "Knowledge Base",
-          "name": "knowledge_base",
+          "description": null,
+          "label": "Knowledge",
+          "name": "knowledge",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -7173,13 +7261,24 @@
       "config_fields": [
         {
           "default": null,
-          "description": "Optional WikipediaKnowledgeBase instance for advanced usage (typically left empty)",
-          "label": "Knowledge Base",
-          "name": "knowledge_base",
+          "description": null,
+          "label": "Knowledge",
+          "name": "knowledge",
           "options": null,
           "placeholder": null,
           "required": false,
           "type": "text",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
           "validation": null
         }
       ],
@@ -7409,94 +7508,6 @@
           "placeholder": "your_reddit_password",
           "required": false,
           "type": "password",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable getting information about Reddit users",
-          "label": "Get User Info",
-          "name": "get_user_info",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable getting top posts from subreddits",
-          "label": "Get Top Posts",
-          "name": "get_top_posts",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable getting information about subreddits",
-          "label": "Get Subreddit Info",
-          "name": "get_subreddit_info",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable getting currently trending subreddits",
-          "label": "Get Trending Subreddits",
-          "name": "get_trending_subreddits",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable getting statistics about subreddits",
-          "label": "Get Subreddit Stats",
-          "name": "get_subreddit_stats",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable creating new posts in subreddits",
-          "label": "Create Post",
-          "name": "create_post",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable replying to existing posts",
-          "label": "Reply to Post",
-          "name": "reply_to_post",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable replying to existing comments",
-          "label": "Reply to Comment",
-          "name": "reply_to_comment",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
           "validation": null
         }
       ],
