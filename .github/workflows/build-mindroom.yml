@@ -79,6 +79,15 @@ jobs:
       run: |
         echo "dockerfile=local/instances/deploy/Dockerfile.${{ matrix.image }}" >> $GITHUB_OUTPUT
         echo "timestamp=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
+        ref_raw="${GITHUB_REF_NAME}"
+        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          ref_raw="pr-${{ github.event.pull_request.number }}"
+        fi
+        ref_tag=$(echo "$ref_raw" | tr '/@' '-' | tr -cd '[:alnum:]_.-')
+        if [[ -z "$ref_tag" ]]; then
+          ref_tag="build-${GITHUB_RUN_ID}"
+        fi
+        echo "ref_tag=$ref_tag" >> $GITHUB_OUTPUT
         # Extract version from tag (strip 'v' prefix) or use 0.0.0 for non-release builds
         if [[ "${{ github.ref_name }}" == v* ]]; then
           echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
@@ -95,7 +104,7 @@ jobs:
         push: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.push_images) }}
         tags: |
           ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ matrix.platform_suffix }}
-          ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ github.ref_name }}-${{ matrix.platform_suffix }}
+          ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ steps.vars.outputs.ref_tag }}-${{ matrix.platform_suffix }}
           ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ steps.vars.outputs.timestamp }}-${{ matrix.platform_suffix }}
         build-args: |
           VERSION=${{ steps.vars.outputs.version }}
@@ -128,6 +137,14 @@ jobs:
 
     - name: Create and push manifest
       run: |
+        ref_raw="${GITHUB_REF_NAME}"
+        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          ref_raw="pr-${{ github.event.pull_request.number }}"
+        fi
+        ref_tag=$(echo "$ref_raw" | tr '/@' '-' | tr -cd '[:alnum:]_.-')
+        if [[ -z "$ref_tag" ]]; then
+          ref_tag="build-${GITHUB_RUN_ID}"
+        fi
         # Create multi-arch manifest with both amd64 and arm64
         docker manifest create \
           ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:latest \
@@ -138,11 +155,11 @@ jobs:
 
         # Also create branch-tagged manifest
         docker manifest create \
-          ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ github.ref_name }} \
-          ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ github.ref_name }}-amd64 \
-          ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ github.ref_name }}-arm64
+          ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${ref_tag} \
+          ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${ref_tag}-amd64 \
+          ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${ref_tag}-arm64
 
-        docker manifest push ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ github.ref_name }}
+        docker manifest push ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${ref_tag}
 
         echo "✅ Multi-arch manifest created for mindroom-${{ matrix.image }}"
         echo "Pull with: docker pull ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:latest"
