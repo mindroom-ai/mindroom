@@ -133,7 +133,6 @@ def save_credentials(creds: Credentials) -> None:
     if hasattr(creds, "_id_token") and creds._id_token:
         token_data["_id_token"] = creds._id_token
 
-    # Save using credentials manager (handles backward compatibility)
     creds_manager.save_credentials("google", token_data)
 
 

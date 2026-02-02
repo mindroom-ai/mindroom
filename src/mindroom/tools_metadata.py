@@ -12,11 +12,8 @@ from loguru import logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from agno.tools import Toolkit
-
-    from mindroom.config import Config
 
 from mindroom.credentials import get_credentials_manager
 
@@ -309,7 +306,7 @@ def get_all_tool_metadata() -> dict[str, ToolMetadata]:
     return TOOL_METADATA.copy()
 
 
-def ensure_tool_registry_loaded(config: Config | None = None, *, config_path: Path | None = None) -> None:  # noqa: ARG001
+def ensure_tool_registry_loaded() -> None:
     """Ensure core tools are registered in the metadata registry."""
     import mindroom.tools  # noqa: F401, PLC0415  # import here to avoid tools_metadata cycle
 

@@ -21,8 +21,6 @@ if TYPE_CHECKING:
 
     from .config import Config
 
-from .matrix.client import get_latest_thread_event_id_if_needed
-
 logger = get_logger(__name__)
 
 # Global constant for the in-progress marker
@@ -42,7 +40,6 @@ class StreamingResponse:
     event_id: str | None = None  # None until first message sent
     last_update: float = 0.0
     update_interval: float = 1.0
-    latest_thread_event_id: str | None = None  # For MSC3440 compliance
 
     def _update(self, new_chunk: str) -> None:
         """Append new chunk to accumulated text."""
@@ -78,16 +75,12 @@ class StreamingResponse:
         response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=False)
         display_text = response.formatted_text
 
-        # Only use latest_thread_event_id for the initial message (not edits)
-        latest_for_message = self.latest_thread_event_id if self.event_id is None else None
-
         content = format_message_with_mentions(
             config=self.config,
             text=display_text,
             sender_domain=self.sender_domain,
             thread_event_id=effective_thread_id,
             reply_to_event_id=self.reply_to_event_id,
-            latest_thread_event_id=latest_for_message,
         )
 
         if self.event_id is None:
@@ -150,21 +143,12 @@ async def send_streaming_response(
         Tuple of (final event_id or None, full accumulated text)
 
     """
-    latest_thread_event_id = await get_latest_thread_event_id_if_needed(
-        client,
-        room_id,
-        thread_id,
-        reply_to_event_id,
-        existing_event_id,
-    )
-
     streaming = streaming_cls(
         room_id=room_id,
         reply_to_event_id=reply_to_event_id,
         thread_id=thread_id,
         sender_domain=sender_domain,
         config=config,
-        latest_thread_event_id=latest_thread_event_id,
     )
 
     # Ensure the first chunk triggers an initial send immediately

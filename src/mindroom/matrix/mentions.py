@@ -107,7 +107,6 @@ def format_message_with_mentions(
     sender_domain: str = "localhost",
     thread_event_id: str | None = None,
     reply_to_event_id: str | None = None,
-    latest_thread_event_id: str | None = None,
 ) -> dict[str, Any]:
     """Parse text for mentions and create properly formatted Matrix message.
 
@@ -119,7 +118,6 @@ def format_message_with_mentions(
         sender_domain: Domain part of the sender's user ID
         thread_event_id: Optional thread root event ID
         reply_to_event_id: Optional event ID to reply to (for genuine replies)
-        latest_thread_event_id: Optional latest event ID in thread (for fallback compatibility)
 
     Returns:
         Properly formatted content dict for room_send
@@ -137,5 +135,4 @@ def format_message_with_mentions(
         mentioned_user_ids=mentioned_user_ids,
         thread_event_id=thread_event_id,
         reply_to_event_id=reply_to_event_id,
-        latest_thread_event_id=latest_thread_event_id,
     )
