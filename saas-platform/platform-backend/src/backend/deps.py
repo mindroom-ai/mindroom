@@ -88,7 +88,6 @@ async def verify_user(authorization: str = Header(None), request: Request = None
 
     # Start timing for database lookup
     start = time.perf_counter()
-    sb = ensure_supabase()
     ac = _ensure_auth_client()
 
     try:
@@ -100,6 +99,7 @@ async def verify_user(authorization: str = Header(None), request: Request = None
             raise HTTPException(status_code=401, detail=msg)  # noqa: TRY301
 
         account_id = user.user.id
+        sb = ensure_supabase()
 
         # Record successful auth
         auth_monitor.record_success(client_ip, str(account_id))

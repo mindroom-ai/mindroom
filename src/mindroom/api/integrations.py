@@ -1,6 +1,5 @@
 """Third-party service integrations API."""
 
-import json
 import os
 from pathlib import Path
 from typing import Any
@@ -10,8 +9,9 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from spotipy import Spotify, SpotifyOAuth  # type: ignore[import-untyped]
 
-import mindroom
+from mindroom.config import Config
 from mindroom.credentials import CredentialsManager
+from mindroom.tools_metadata import ensure_tool_registry_loaded, export_tools_metadata
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
@@ -19,22 +19,20 @@ router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 creds_manager = CredentialsManager()
 
 
+def _load_tools_config() -> tuple[Config, Path]:
+    from mindroom.api import main  # noqa: PLC0415
+
+    config_path = main.CONFIG_PATH
+    return Config.from_yaml(config_path), config_path
+
+
 # Load tool metadata from the single source of truth
 def get_tools_metadata() -> dict[str, Any]:
-    """Load tool metadata from JSON file."""
-    # Always use the package location to find tools_metadata.json
-    # This works regardless of how the package is installed or where it's run from
-    package_dir = Path(mindroom.__file__).parent
-    json_path = package_dir / "tools_metadata.json"
-
-    if not json_path.exists():
-        print(f"Warning: tools_metadata.json not found at {json_path}")
-        return {}
-
-    with json_path.open() as f:
-        data = json.load(f)
-        # Convert to dict keyed by tool name for easy lookup
-        return {tool["name"]: tool for tool in data.get("tools", [])}
+    """Load tool metadata from the in-memory registry."""
+    config, config_path = _load_tools_config()
+    ensure_tool_registry_loaded(config, config_path=config_path)
+    tools = export_tools_metadata()
+    return {tool["name"]: tool for tool in tools}
 
 
 class ServiceStatus(BaseModel):

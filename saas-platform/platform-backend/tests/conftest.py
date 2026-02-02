@@ -6,6 +6,9 @@ to prevent it from breaking FastAPI's dependency injection during tests.
 
 # CRITICAL: This patching MUST happen before any imports of backend modules
 # to ensure the limiter is mocked before route decorators are applied
+import os
+
+os.environ.setdefault("ENVIRONMENT", "test")
 
 
 def _create_no_op_limiter():  # noqa: C901, ANN202

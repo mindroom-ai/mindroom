@@ -62,9 +62,12 @@ async def _background_sync_instance_status(instance_id: str) -> None:
                         instance_id,
                         out[:120],
                     )
-                    deployment = {}
+                    deployment = out.strip()
 
-                if not deployment:
+                if isinstance(deployment, (int, float)) or (isinstance(deployment, str) and deployment.isdigit()):
+                    replicas = int(deployment)
+                    actual_status = "stopped" if replicas == 0 else "running"
+                elif not deployment:
                     actual_status = "provisioning"
                 else:
                     spec = deployment.get("spec", {}) or {}
