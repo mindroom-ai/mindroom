@@ -8,13 +8,14 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from loguru import logger
 
+from mindroom.config import Config
+from mindroom.plugins import load_plugins
+
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
     from agno.tools import Toolkit
-
-    from mindroom.config import Config
 
 from mindroom.credentials import get_credentials_manager
 
@@ -225,17 +226,13 @@ def get_all_tool_metadata() -> dict[str, ToolMetadata]:
 
 def ensure_tool_registry_loaded(config: Config | None = None, *, config_path: Path | None = None) -> None:
     """Ensure core and plugin tools are registered in the metadata registry."""
-    import mindroom.tools  # noqa: F401, PLC0415
+    import mindroom.tools  # noqa: F401, PLC0415  # import here to avoid tools_metadata cycle
 
     if config is None and config_path is not None:
-        from mindroom.config import Config  # noqa: PLC0415
-
         config = Config.from_yaml(config_path)
 
     if config is None:
         return
-
-    from mindroom.plugins import load_plugins  # noqa: PLC0415
 
     load_plugins(config, config_path=config_path)
 
