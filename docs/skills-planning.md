@@ -213,12 +213,14 @@ Behavior:
 ## 8) Implementation Plan (Phased)
 
 ### Phase 1: Skills loader + prompt injection
-- Add skill discovery for `skills/` and `~/.mindroom/skills`.
-- Parse `SKILL.md` frontmatter + JSON5 metadata.
-- Apply OpenClaw gating rules.
-- Build `<available_skills>` prompt section.
-- Ensure `file` tool available for agents with skills.
-- Add unit tests for parsing + gating.
+Status: complete (2026-02-02)
+
+- [x] Add skill discovery for `skills/` and `~/.mindroom/skills`.
+- [x] Parse `SKILL.md` frontmatter + JSON5 metadata.
+- [x] Apply OpenClaw gating rules.
+- [x] Build `<available_skills>` prompt section.
+- [x] Ensure `file` tool available for agents with skills.
+- [x] Add unit tests for parsing + gating.
 
 ### Phase 2: Plugin loader (local dirs)
 - Add plugin discovery from `config.yaml`.
@@ -266,3 +268,4 @@ Behavior:
 ## 12) Change Log
 
 - 2026-02-02: Initial plan created. Locked decisions recorded. Phased implementation defined.
+- 2026-02-02: Phase 1 implemented (skills loader, gating, prompt injection, tests).
