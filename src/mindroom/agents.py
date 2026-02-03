@@ -142,6 +142,8 @@ def create_agent(agent_name: str, config: Config) -> Agent:
     logger.info(f"Creating agent '{agent_name}' with model: {model.__class__.__name__}(id={model.id})")
 
     skills = build_agent_skills(agent_name, config)
+    if skills and skills.get_skill_names():
+        instructions.append(agent_prompts.SKILLS_TOOL_USAGE_PROMPT)
 
     instructions.append(agent_prompts.INTERACTIVE_QUESTION_PROMPT)
 

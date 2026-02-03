@@ -45,6 +45,13 @@ The user can respond by:
 Keep it simple: max 5 options with clear, concise labels.
 """
 
+SKILLS_TOOL_USAGE_PROMPT = """When using skills, access them via the skill tools:
+- get_skill_instructions(...)
+- get_skill_reference(...)
+- get_skill_script(...)
+Do not open SKILL.md directly with file tools.
+"""
+
 CODE_AGENT_PROMPT = """## Core Expertise
 You are an expert software developer specialized in code generation, file management, and development workflows.
 
