@@ -7,11 +7,13 @@ import sys
 from pathlib import Path
 
 import typer
+from pydantic import ValidationError
 from rich.console import Console
 
 from mindroom import __version__
 from mindroom.bot import main as bot_main
-from mindroom.constants import STORAGE_PATH
+from mindroom.config import Config
+from mindroom.constants import DEFAULT_AGENTS_CONFIG, STORAGE_PATH
 
 app = typer.Typer(
     help="Mindroom: Multi-agent Matrix bot system",
@@ -27,6 +29,44 @@ def version() -> None:
     """Show the current version of Mindroom."""
     console.print(f"Mindroom version: [bold]{__version__}[/bold]")
     console.print("Multi-agent Matrix bot system")
+
+
+@app.command()
+def validate(
+    config_path: Path = typer.Option(  # noqa: B008
+        Path(DEFAULT_AGENTS_CONFIG),
+        "--config",
+        "-c",
+        help="Path to the configuration file to validate",
+    ),
+) -> None:
+    """Validate the configuration file.
+
+    Parses the YAML configuration using Pydantic and reports any errors.
+    """
+    console.print(f"Validating configuration: [bold]{config_path}[/bold]")
+
+    if not config_path.exists():
+        console.print(f"[red]Error:[/red] Configuration file not found: {config_path}")
+        raise typer.Exit(1)
+
+    try:
+        config = Config.from_yaml(config_path)
+        console.print("[green]✓[/green] Configuration is valid!")
+        console.print(f"  • {len(config.agents)} agent(s): {', '.join(config.agents.keys()) or 'none'}")
+        console.print(f"  • {len(config.teams)} team(s): {', '.join(config.teams.keys()) or 'none'}")
+        console.print(f"  • {len(config.models)} model(s): {', '.join(config.models.keys()) or 'none'}")
+        rooms = config.get_all_configured_rooms()
+        console.print(f"  • {len(rooms)} room(s): {', '.join(sorted(rooms)) or 'none'}")
+    except ValidationError as e:
+        console.print("[red]✗[/red] Configuration validation failed:")
+        for error in e.errors():
+            loc = " → ".join(str(x) for x in error["loc"])
+            console.print(f"  [red]•[/red] {loc}: {error['msg']}")
+        raise typer.Exit(1) from None
+    except Exception as e:
+        console.print(f"[red]✗[/red] Error loading configuration: {e}")
+        raise typer.Exit(1) from None
 
 
 @app.command()
