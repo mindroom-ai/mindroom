@@ -15,6 +15,7 @@ Models define the AI providers and model IDs used by agents.
 - `groq` - Groq-hosted models (fast inference)
 - `openrouter` - OpenRouter-hosted models (access to many providers)
 - `cerebras` - Cerebras-hosted models
+- `deepseek` - DeepSeek models
 
 ## Model Config Fields
 
@@ -72,6 +73,11 @@ models:
     provider: cerebras
     id: llama3.1-8b
 
+  # DeepSeek
+  deepseek:
+    provider: deepseek
+    id: deepseek-chat
+
   # Custom OpenAI-compatible endpoint (e.g., vLLM, llama.cpp server)
   custom:
     provider: openai
@@ -91,6 +97,7 @@ GOOGLE_API_KEY=...
 GROQ_API_KEY=...
 OPENROUTER_API_KEY=...
 CEREBRAS_API_KEY=...
+DEEPSEEK_API_KEY=...
 ```
 
 For Ollama, you can also set:

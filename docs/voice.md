@@ -145,10 +145,10 @@ The router agent handles all voice message processing to avoid duplicate transcr
 
 MindRoom also supports text-to-speech (TTS) through agent tools. These are separate from voice message transcription and allow agents to generate audio responses:
 
-- **OpenAI** - TTS via `openai` tool
-- **ElevenLabs** - High-quality AI voices via `eleven_labs` tool
-- **Cartesia** - Voice AI with localization via `cartesia` tool
-- **Groq** - Fast TTS via `groq` tool
+- **OpenAI** - Speech synthesis via `openai` tool
+- **ElevenLabs** - High-quality AI voices and sound effects via `eleven_labs` tool
+- **Cartesia** - Voice AI with optional voice localization via `cartesia` tool
+- **Groq** - Fast speech generation via `groq` tool
 
 See the [Tools documentation](/tools) for configuration details.
 

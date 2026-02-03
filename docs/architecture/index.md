@@ -48,5 +48,5 @@ MindRoom's architecture consists of several key components working together.
 2. **Router decides** which agent should handle it (if no explicit mention)
 3. **Agent processes** the message using the Agno runtime
 4. **Tools execute** as needed (file operations, API calls, etc.)
-5. **Memory updates** with relevant information
-6. **Response sent** back to Matrix room
+5. **Response sent** back to Matrix room
+6. **Memory updates** asynchronously in background

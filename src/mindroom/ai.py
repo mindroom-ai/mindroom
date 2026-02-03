@@ -9,7 +9,9 @@ from typing import TYPE_CHECKING, Any, cast
 import diskcache
 from agno.models.anthropic import Claude
 from agno.models.cerebras import Cerebras
+from agno.models.deepseek import DeepSeek
 from agno.models.google import Gemini
+from agno.models.groq import Groq
 from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat
 from agno.models.openrouter import OpenRouter
@@ -153,16 +155,15 @@ def _create_model_for_provider(provider: str, model_id: str, model_config: Model
         ValueError: If provider not supported
 
     """
+    # Handle Ollama separately due to special host configuration
     if provider == "ollama":
         # Priority: model config > env/CredentialsManager > default
         # This allows per-model host configuration in config.yaml
         host = model_config.host or get_ollama_host() or "http://localhost:11434"
         logger.debug(f"Using Ollama host: {host}")
         return Ollama(id=model_id, host=host, **extra_kwargs)
-    if provider == "openai":
-        return OpenAIChat(id=model_id, **extra_kwargs)
-    if provider == "anthropic":
-        return Claude(id=model_id, **extra_kwargs)
+
+    # Handle OpenRouter separately due to API key capture timing issue
     if provider == "openrouter":
         # OpenRouter needs the API key passed explicitly because it captures
         # the environment variable at import time, not at instantiation time
@@ -170,10 +171,21 @@ def _create_model_for_provider(provider: str, model_id: str, model_config: Model
         if not api_key:
             logger.warning("No OpenRouter API key found in environment or CredentialsManager")
         return OpenRouter(id=model_id, api_key=api_key, **extra_kwargs)
-    if provider in ("gemini", "google"):
-        return Gemini(id=model_id, **extra_kwargs)
-    if provider == "cerebras":
-        return Cerebras(id=model_id, **extra_kwargs)
+
+    # Map providers to their model classes for simple instantiation
+    provider_map: dict[str, type[Model]] = {
+        "openai": OpenAIChat,
+        "anthropic": Claude,
+        "gemini": Gemini,
+        "google": Gemini,
+        "cerebras": Cerebras,
+        "groq": Groq,
+        "deepseek": DeepSeek,
+    }
+
+    model_class = provider_map.get(provider)
+    if model_class is not None:
+        return model_class(id=model_id, **extra_kwargs)
 
     msg = f"Unsupported AI provider: {provider}"
     raise ValueError(msg)

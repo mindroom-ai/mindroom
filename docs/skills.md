@@ -19,7 +19,7 @@ my-skill/
     └── examples.md
 ```
 
-Agents can access these via `get_skill_script()` and `get_skill_reference()`.
+Agents access skills via `get_skill_instructions()`, scripts via `get_skill_script()`, and references via `get_skill_reference()`.
 
 ## SKILL.md format (OpenClaw compatible)
 
@@ -55,9 +55,9 @@ Notes:
 | `metadata` | mapping or JSON5 string | OpenClaw metadata and custom fields |
 | `user-invocable` | bool | Allow `!skill` (default: true) |
 | `disable-model-invocation` | bool | Prevent model invocation (default: false) |
-| `command-dispatch` | string | Set to `tool` to run a tool directly |
-| `command-tool` | string | Function to call: `fn`, `toolkit.fn`, or `toolkit` (if single function) |
-| `command-arg-mode` | string | Only `raw` is supported |
+| `command-dispatch` | `"tool"` | Set to `tool` to run a tool directly |
+| `command-tool` | string | Function to call: `function_name`, `toolkit.function_name`, or `toolkit` (if the toolkit exposes exactly one function) |
+| `command-arg-mode` | `"raw"` | Argument passing mode; only `raw` is currently supported |
 
 ## Eligibility gating (OpenClaw metadata)
 
@@ -76,11 +76,11 @@ Skills without `metadata.openclaw` are always eligible.
 
 MindRoom loads skills from these locations, in this order:
 
-1. Bundled skills: `skills/` in the repo
-2. Plugin-provided skill directories
+1. Bundled skills: `skills/` at the repository root (if present)
+2. Plugin-provided skill directories (see [Plugins](plugins.md))
 3. User skills: `~/.mindroom/skills/`
 
-If multiple skills share the same name, the last one wins. This means user skills override plugin skills, and plugin skills override bundled skills.
+If multiple skills share the same name, the last one wins (user > plugin > bundled).
 
 ## Configuring skills
 
@@ -101,7 +101,7 @@ If `skills` is empty or unset, the agent gets no skills.
 
 ## Using skills at runtime
 
-Agents see available skills in the system prompt and can load details using Agno tools:
+Agents see available skills in the system prompt and can load details using these tools:
 
 - `get_skill_instructions(skill_name)`
 - `get_skill_reference(skill_name, reference_path)`
@@ -139,7 +139,7 @@ Rules:
 
 ## Hot reloading
 
-MindRoom watches skill directories for changes. When a `SKILL.md` file is modified, the skill cache is automatically cleared so agents pick up the new instructions.
+MindRoom polls skill directories every second. When a `SKILL.md` file is added, removed, or modified, the skill cache is automatically cleared so agents pick up the new instructions on their next request.
 
 ## Best practices
 

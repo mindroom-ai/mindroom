@@ -33,7 +33,7 @@ my-plugin/
 | --- | --- | --- |
 | `name` | string | Plugin identifier (required) |
 | `tools_module` | string | Path to the tools module (optional) |
-| `skills` | list | Relative directories containing skills (optional) |
+| `skills` | list of strings | Relative directories containing skills (optional) |
 
 Unknown fields are ignored.
 

@@ -21,9 +21,9 @@ agents:
 
 ```yaml
 agents:
-  code:
+  developer:
     # Display name shown in Matrix
-    display_name: CodeAgent
+    display_name: Developer
 
     # Role description - guides the agent's behavior
     role: Generate code, manage files, execute shell commands
@@ -79,7 +79,7 @@ agents:
 
 ## Rich Prompt Agents
 
-Some agent names have built-in rich prompts that provide detailed behavior:
+Some agent names (the YAML key, not `display_name`) have built-in rich prompts that provide detailed behavior:
 
 - `code` - Code generation, file management, shell commands
 - `research` - Web research and information gathering
@@ -91,7 +91,7 @@ Some agent names have built-in rich prompts that provide detailed behavior:
 - `news` - News aggregation
 - `data_analyst` - Data analysis
 
-When using these names, the built-in prompt is used instead of the `role` field, though `instructions` are still applied.
+When using these names, the built-in prompt is used instead of the `role` field. Note that custom `instructions` from YAML are NOT applied to rich prompt agents - the built-in prompt is used as-is.
 
 ## Defaults
 
@@ -105,7 +105,7 @@ defaults:
   show_stop_button: false
 ```
 
-These defaults apply to all agents unless overridden in the agent's configuration.
+The `num_history_runs`, `markdown`, and `add_history_to_messages` defaults apply to all agents unless overridden in the agent's configuration. The `show_stop_button` setting is global-only and cannot be overridden per-agent.
 
 ## Tools
 

@@ -57,16 +57,16 @@ MindRoom includes 85+ built-in tool integrations organized by category.
 
 | Tool | Description | Config Required |
 |------|-------------|-----------------|
-| `openai` | OpenAI API access | `api_key` |
-| `gemini` | Google Gemini | `api_key` |
-| `groq` | Groq inference | `api_key` |
-| `replicate` | Run ML models | `api_token` |
-| `fal` | Fal.ai models | `api_key` |
+| `openai` | Transcription, image generation, and speech synthesis | `api_key` |
+| `gemini` | Google AI for image and video generation | `api_key` |
+| `groq` | Audio transcription, translation, and text-to-speech | `api_key` |
+| `replicate` | Generate images and videos using AI models | `api_key` |
+| `fal` | AI media generation (images and videos) | `api_key` |
 | `dalle` | DALL-E image generation | `api_key` |
-| `cartesia` | Voice synthesis | `api_key` |
-| `eleven_labs` | Text-to-speech | `api_key` |
-| `lumalabs` | Luma video generation | `api_key` |
-| `modelslabs` | Custom models | `api_key` |
+| `cartesia` | Text-to-speech and voice localization | `api_key` |
+| `eleven_labs` | Text-to-speech and sound effects | `api_key` |
+| `lumalabs` | 3D content creation and video generation | `api_key` |
+| `modelslabs` | Generate videos, audio, and GIFs from text | `api_key` |
 
 ## Knowledge & Research
 
@@ -75,8 +75,8 @@ MindRoom includes 85+ built-in tool integrations organized by category.
 | `arxiv` | Academic papers search | - |
 | `wikipedia` | Wikipedia lookups | - |
 | `pubmed` | Medical literature | - |
-| `hackernews` | Hacker News | - |
-| `youtube` | YouTube transcripts | - |
+| `hackernews` | Get top stories and user details from Hacker News | - |
+| `youtube` | Extract video data, captions, and timestamps | - |
 | `reddit` | Reddit browsing and interaction | `client_id`, `client_secret` |
 
 ## Communication
@@ -103,8 +103,8 @@ MindRoom includes 85+ built-in tool integrations organized by category.
 | `linear` | Issue tracking and project management | `api_key` |
 | `confluence` | Atlassian wiki pages | `url`, `username`, `password` or `api_key` |
 | `trello` | Trello boards | `api_key`, `token` |
-| `todoist` | Todoist tasks | `api_key` |
-| `zendesk` | Zendesk support | `subdomain`, `email`, `api_token` |
+| `todoist` | Todoist task management | `api_token` |
+| `zendesk` | Search help center articles | `username`, `password`, `company_name` |
 
 ## Calendar & Scheduling
 
@@ -135,7 +135,7 @@ MindRoom includes 85+ built-in tool integrations organized by category.
 |------|-------------|-----------------|
 | `aws_lambda` | AWS Lambda functions | AWS credentials |
 | `aws_ses` | AWS email service | AWS credentials |
-| `airflow` | Apache Airflow | `base_url`, `username`, `password` |
+| `airflow` | Apache Airflow DAG file management | - |
 | `e2b` | Code execution sandbox | `api_key` |
 | `daytona` | Development environments | `api_key` |
 | `composio` | API composition | `api_key` |

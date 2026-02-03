@@ -99,7 +99,20 @@ teams:
 
 ## Dynamic Team Formation
 
-When multiple agents are mentioned in a message (e.g., `@code @research analyze this`), MindRoom can automatically form an ad-hoc team. The collaboration mode is selected by AI based on the task:
+When multiple agents are mentioned in a message (e.g., `@code @research analyze this`), MindRoom automatically forms an ad-hoc team. Dynamic teams form in these scenarios:
+
+1. **Multiple agents explicitly tagged** - e.g., `@code @research analyze this`
+2. **Thread with previously mentioned agents** - Follow-up messages in a thread where multiple agents were mentioned earlier
+3. **Thread with multiple agent participants** - Continuing a conversation where multiple agents have responded
+4. **DM room with multiple agents** - Messages in a DM room containing multiple agents (main timeline only)
+
+### Mode Selection
+
+For dynamic teams, the collaboration mode is selected by AI based on the task:
 
 - Tasks with different subtasks for each agent use **coordinate** mode
 - Tasks asking for opinions or brainstorming use **collaborate** mode
+
+When AI mode selection is unavailable, MindRoom falls back to:
+- **coordinate** for explicitly tagged agents (they likely have different roles)
+- **collaborate** for agents from thread history (likely discussing same topic)

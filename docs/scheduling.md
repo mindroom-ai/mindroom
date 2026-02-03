@@ -54,7 +54,9 @@ The system can convert event-based requests into smart polling schedules:
 !list_schedules
 ```
 
-Shows all pending scheduled tasks in the current thread.
+Shows all pending scheduled tasks. When used in a thread, shows tasks for that thread. When used in the main room, shows all tasks in the room.
+
+Alternative syntax: `!listschedules`, `!list-schedules`, `!list_schedule`
 
 ### Cancel a Schedule
 
@@ -63,7 +65,9 @@ Shows all pending scheduled tasks in the current thread.
 !cancel_schedule all
 ```
 
-Cancel a specific scheduled task by its ID, or use `all` to cancel all scheduled tasks in the room.
+Cancel a specific scheduled task by its ID, or use `all` to cancel all scheduled tasks in the room (no confirmation required).
+
+Alternative syntax: `!cancelschedule`, `!cancel-schedule`
 
 Use `!list_schedules` to see task IDs.
 
@@ -86,7 +90,7 @@ MindRoom uses AI to parse your natural language request into a structured schedu
 
 ### Agent Mentions
 
-Include `@agent_name` in your schedule to have specific agents respond. The scheduler validates that mentioned agents are available in the thread before creating the task.
+Include `@agent_name` in your schedule to have specific agents respond. The scheduler validates that mentioned agents are available in the room before creating the task.
 
 ## Cron Reference
 

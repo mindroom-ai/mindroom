@@ -28,20 +28,28 @@ MindRoom uses two Helm charts:
 Use the CLI helper for managed deployments:
 
 ```bash
-# Set kubeconfig
-export KUBECONFIG=./cluster/terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml
+# Navigate to cluster directory and set kubeconfig
+cd cluster
+export KUBECONFIG=./terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml
 
-# Provision a new instance
-./cluster/scripts/mindroom-cli.sh provision 1
+# Provision a new instance (instance ID used as subdomain)
+./scripts/mindroom-cli.sh provision 1
 
 # Check status
-./cluster/scripts/mindroom-cli.sh status
+./scripts/mindroom-cli.sh status
 
 # View logs
-./cluster/scripts/mindroom-cli.sh logs 1
+./scripts/mindroom-cli.sh logs 1
 
 # Upgrade an instance
-./cluster/scripts/mindroom-cli.sh upgrade 1
+./scripts/mindroom-cli.sh upgrade 1
+```
+
+Alternatively, from the repository root:
+
+```bash
+export KUBECONFIG=./cluster/terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml
+./cluster/scripts/mindroom-cli.sh provision 1
 ```
 
 ### Direct Helm Installation
@@ -52,10 +60,16 @@ For manual deployments or debugging:
 helm upgrade --install instance-1 ./cluster/k8s/instance \
   --namespace mindroom-instances \
   --set customer=1 \
+  --set accountId="your-account-uuid" \
   --set baseDomain=mindroom.chat \
   --set anthropic_key="your-key" \
-  --set openrouter_key="your-key"
+  --set openrouter_key="your-key" \
+  --set supabaseUrl="https://your-project.supabase.co" \
+  --set supabaseAnonKey="your-anon-key" \
+  --set supabaseServiceKey="your-service-key"
 ```
+
+Note: The `mindroom-instances` namespace must exist before deployment.
 
 ### Instance values.yaml
 
@@ -64,6 +78,9 @@ customer: demo
 baseDomain: mindroom.chat
 storage: 10Gi
 storagePath: "/mindroom_data"
+
+# Account ID (UUID from Supabase)
+accountId: ""
 
 # Docker images
 mindroom_image: git.nijho.lt/basnijholt/mindroom-frontend:latest
@@ -110,6 +127,9 @@ stringData:
   openai_key: "..."
   anthropic_key: "..."
   openrouter_key: "..."
+  google_key: "..."
+  deepseek_key: "..."
+  supabase_service_key: "..."
 ```
 
 ## ConfigMap
@@ -143,14 +163,25 @@ Each instance gets three ingress hosts:
 Deploy the SaaS platform control plane:
 
 ```bash
-# Create values file from example
+# Create values file from example (choose staging or prod)
+cp cluster/k8s/platform/values-staging.example.yaml cluster/k8s/platform/values-staging.yaml
+# or for production:
 cp cluster/k8s/platform/values-prod.example.yaml cluster/k8s/platform/values-prod.yaml
-# Edit with your configuration
 
+# Edit with your configuration, then deploy
+
+# For staging
+helm upgrade --install platform ./cluster/k8s/platform \
+  -f ./cluster/k8s/platform/values-staging.yaml \
+  --namespace mindroom-staging
+
+# For production
 helm upgrade --install platform ./cluster/k8s/platform \
   -f ./cluster/k8s/platform/values-prod.yaml \
-  --namespace mindroom-staging
+  --namespace mindroom-production
 ```
+
+The namespace should match the `environment` value in your values file (`mindroom-{environment}`).
 
 ### Platform values.yaml
 
@@ -160,6 +191,7 @@ domain: mindroom.chat
 
 registry: git.nijho.lt/basnijholt
 imageTag: latest
+replicas: 1
 
 supabase:
   url: "https://your-project.supabase.co"
@@ -177,13 +209,27 @@ gitea:
 
 provisioner:
   apiKey: "your-provisioner-key"
+
+# Optional AI API keys for platform services
+apiKeys:
+  openai: ""
+  anthropic: ""
+  openrouter: ""
+
+# Cleanup scheduler (enable in production)
+cleanupScheduler:
+  enabled: "false"
+
+# Ingress options
+ingress:
+  enableConfigurationSnippet: false
 ```
 
 Platform services use these ingress hosts:
 
 - `app.{domain}` - Platform frontend
 - `api.{domain}` - Platform backend API
-- `webhooks.{domain}` - Stripe webhooks
+- `webhooks.{domain}/stripe` - Stripe webhooks endpoint
 
 ## Local Development with Kind
 
@@ -205,18 +251,58 @@ See `cluster/k8s/kind/README.md` for detailed instructions.
 
 ## CLI Helper
 
-The `mindroom-cli.sh` script provides common operations:
+The `mindroom-cli.sh` script provides common operations (run from `cluster/` directory):
 
 ```bash
-./cluster/scripts/mindroom-cli.sh list          # List instances
-./cluster/scripts/mindroom-cli.sh pods          # Show pods
-./cluster/scripts/mindroom-cli.sh urls          # Show instance URLs
-./cluster/scripts/mindroom-cli.sh status        # Overall status
-./cluster/scripts/mindroom-cli.sh logs <id>     # View logs
-./cluster/scripts/mindroom-cli.sh provision <id>    # Create instance
-./cluster/scripts/mindroom-cli.sh deprovision <id>  # Remove instance
-./cluster/scripts/mindroom-cli.sh upgrade <id>      # Upgrade instance
+./scripts/mindroom-cli.sh list          # List instances (alias: ls)
+./scripts/mindroom-cli.sh pods          # Show pods
+./scripts/mindroom-cli.sh urls          # Show instance URLs
+./scripts/mindroom-cli.sh status        # Overall status
+./scripts/mindroom-cli.sh logs <id>     # View logs
+./scripts/mindroom-cli.sh provision <id>    # Create instance via provisioner API
+./scripts/mindroom-cli.sh deprovision <id>  # Remove instance
+./scripts/mindroom-cli.sh upgrade <id>      # Upgrade instance (optional: values file)
 ```
+
+The CLI reads configuration from `saas-platform/.env` for the provisioner API key and platform domain.
+
+## Provisioner API
+
+The platform backend exposes a provisioner API for managing instances programmatically. All endpoints require a bearer token (`PROVISIONER_API_KEY`).
+
+### Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/system/provision` | POST | Create or re-provision an instance |
+| `/system/instances/{id}/start` | POST | Start a stopped instance |
+| `/system/instances/{id}/stop` | POST | Stop a running instance |
+| `/system/instances/{id}/restart` | POST | Restart an instance |
+| `/system/instances/{id}/uninstall` | DELETE | Completely remove an instance |
+| `/system/sync-instances` | POST | Sync instance states between DB and K8s |
+
+### Provision Request
+
+```bash
+curl -X POST "https://api.mindroom.chat/system/provision" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $PROVISIONER_API_KEY" \
+  -d '{
+    "account_id": "uuid-from-supabase",
+    "subscription_id": "sub-123",
+    "tier": "starter",
+    "instance_id": "1"
+  }'
+```
+
+Note: `instance_id` is optional and used for re-provisioning an existing instance.
+
+The provisioner automatically:
+
+- Creates the `mindroom-instances` namespace if needed
+- Generates instance URLs (`{id}.{domain}`, `{id}.api.{domain}`, `{id}.matrix.{domain}`)
+- Deploys via Helm with all required secrets
+- Updates instance status in Supabase
 
 ## Deployment Scripts
 
@@ -245,6 +331,6 @@ Each customer instance gets:
 - Independent configuration via ConfigMap
 - Dedicated ingress routes
 
-Instances are deployed to the `mindroom-instances` namespace while platform services run in `mindroom-{environment}` (e.g., `mindroom-staging`).
+Instances are deployed to the `mindroom-instances` namespace while platform services run in `mindroom-{environment}` (e.g., `mindroom-staging` for staging, `mindroom-production` for production).
 
 MindRoom automatically creates Matrix user accounts for agents. The bundled Synapse server is configured to allow registration.

@@ -31,11 +31,11 @@ MindRoom consists of two containers: backend (bot + API) and frontend (dashboard
 ```bash
 docker run -d \
   --name mindroom-backend \
-  -v ./config.yaml:/app/config.yaml \
-  -v ./mindroom_data:/app/mindroom_data \
-  -v ./.env:/app/.env \
   -p 8765:8765 \
-  ghcr.io/mindroom-ai/mindroom-backend:latest
+  -v ./config.yaml:/app/config.yaml:ro \
+  -v ./mindroom_data:/app/mindroom_data \
+  --env-file .env \
+  ghcr.io/basnijholt/mindroom-backend:latest
 ```
 
 See the [Docker deployment guide](docker.md) for full setup including the frontend.
@@ -84,11 +84,13 @@ MindRoom stores data in the following structure:
 
 ```
 mindroom_data/
-├── sessions/         # Agent conversation history (SQLite)
-├── memory/           # Vector store for memories (ChromaDB)
-├── tracking/         # Response tracking to avoid duplicates
-├── credentials/      # Synced credentials from .env
-└── encryption_keys/  # Matrix E2EE keys (if enabled)
+├── sessions/          # Agent conversation history (SQLite)
+├── memory/            # Vector store for memories (ChromaDB)
+├── tracking/          # Response tracking to avoid duplicates
+├── credentials/       # Synced credentials from .env
+├── logs/              # Application logs
+├── matrix_state.yaml  # Matrix connection state
+└── encryption_keys/   # Matrix E2EE keys (if enabled)
 ```
 
 Ensure this directory is persisted across restarts. The `STORAGE_PATH` environment variable controls the location (defaults to `mindroom_data`).
