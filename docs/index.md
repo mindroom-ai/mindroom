@@ -13,8 +13,11 @@ MindRoom is an AI agent orchestration system with Matrix integration. It provide
 - **Multi-agent collaboration** - Configure multiple specialized agents that can work together
 - **Matrix-native** - Agents live in Matrix rooms and respond to messages
 - **Persistent memory** - Agent, room, and team-scoped memory that persists across conversations
-- **80+ tool integrations** - Connect to external services like GitHub, Slack, Gmail, and more
+- **85+ tool integrations** - Connect to external services like GitHub, Slack, Gmail, and more
 - **Hot-reload configuration** - Update `config.yaml` and agents restart automatically
+- **Scheduled tasks** - Schedule agents to run at specific times with cron expressions or natural language
+- **Voice messages** - Speech-to-text transcription with intelligent command recognition
+- **Authorization** - Fine-grained access control for users and rooms
 
 > [!TIP]
 > **Matrix is the backbone** - MindRoom agents communicate through the Matrix protocol, which means they can be bridged to Discord, Slack, Telegram, and other platforms.
@@ -53,12 +56,13 @@ defaults:
   markdown: true
 ```
 
-2. Set up your Matrix credentials in `.env`:
+2. Set up your environment in `.env`:
 
 ```bash
+# Matrix homeserver (must allow open registration)
 MATRIX_HOMESERVER=https://matrix.example.com
-MATRIX_USER_ID=@bot:example.com
-MATRIX_ACCESS_TOKEN=your_token
+
+# AI provider API keys
 ANTHROPIC_API_KEY=your_api_key
 ```
 
@@ -73,10 +77,14 @@ mindroom run
 | Feature | Description |
 |---------|-------------|
 | **Agents** | Single-specialty actors with specific tools and instructions |
-| **Teams** | Collaborative bundles of agents that coordinate or parallelize work |
+| **Teams** | Collaborative bundles of agents (coordinate or collaborate modes) |
 | **Router** | Built-in traffic director that routes messages to the right agent |
-| **Memory** | Mem0-inspired dual memory: agent, room, and team-scoped |
-| **Tools** | 80+ integrations for external services |
+| **Memory** | Mem0-inspired memory system with agent, room, and team scopes |
+| **Tools** | 85+ integrations for external services |
+| **Skills** | OpenClaw-compatible skills system for extended agent capabilities |
+| **Scheduling** | Schedule tasks with cron expressions or natural language |
+| **Voice** | Speech-to-text transcription for voice messages |
+| **Authorization** | Fine-grained user and room access control |
 | **Hot Reload** | Config changes are detected and agents restart automatically |
 
 ## Architecture
@@ -103,7 +111,11 @@ mindroom run
 - [Skills](skills.md) - OpenClaw-compatible skills system
 - [Plugins](plugins.md) - Extend with custom tools and skills
 - [Memory System](memory.md) - How agent memory works
+- [Scheduling](scheduling.md) - Schedule tasks with cron or natural language
+- [Voice Messages](voice.md) - Voice message transcription
+- [Authorization](authorization.md) - User and room access control
 - [Architecture](architecture/index.md) - How it works under the hood
+- [Deployment](deployment/index.md) - Docker and Kubernetes deployment
 - [CLI Reference](cli.md) - Command-line interface
 
 ## License

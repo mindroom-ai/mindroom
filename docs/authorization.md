@@ -25,12 +25,12 @@ authorization:
     - "@admin:example.com"
     - "@developer:example.com"
 
-  # Room-specific permissions
+  # Room-specific permissions (must use Matrix room IDs)
   room_permissions:
-    "!roomid:example.com":
+    "!abc123:example.com":
       - "@user1:example.com"
       - "@user2:example.com"
-    "support":
+    "!xyz789:example.com":
       - "@support-team:example.com"
 
   # Default for rooms not explicitly configured
@@ -55,19 +55,18 @@ Use this for:
 
 ## Room Permissions
 
-Grant access to specific rooms:
+Grant access to specific rooms using their Matrix room ID:
 
 ```yaml
 authorization:
   room_permissions:
-    # By room ID
     "!abc123:example.com":
       - "@contractor:example.com"
-
-    # By room name (as configured in rooms section)
-    "support":
+    "!xyz789:example.com":
       - "@support-agent:example.com"
 ```
+
+Note: Room permissions must use the full Matrix room ID (starting with `!`), not room aliases or names.
 
 ## Default Access
 
@@ -105,6 +104,18 @@ Examples:
       │
       ▼
 ┌─────────────┐     ┌─────────────┐
+│ Is internal │────▶│ Authorized  │────▶ Process
+│ system user │ Yes └─────────────┘
+└─────┬───────┘
+      │ No
+      ▼
+┌─────────────┐     ┌─────────────┐
+│ Is MindRoom │────▶│ Authorized  │────▶ Process
+│ agent/team  │ Yes └─────────────┘
+└─────┬───────┘
+      │ No
+      ▼
+┌─────────────┐     ┌─────────────┐
 │ Check       │────▶│ Authorized  │────▶ Process
 │ Global      │ Yes └─────────────┘
 └─────┬───────┘
@@ -128,6 +139,14 @@ Examples:
 └─────────────┘
 ```
 
+The authorization checks are performed in order:
+
+1. **Internal system user** - The `@mindroom_user` account is always authorized
+2. **MindRoom agents/teams** - Configured agents and teams are authorized to communicate
+3. **Global users** - Users in `global_users` have access to all rooms
+4. **Room permissions** - Users listed for a specific room ID
+5. **Default access** - Falls back to `default_room_access` setting
+
 ## SaaS Platform Authorization
 
 When running with the SaaS platform:
@@ -135,10 +154,6 @@ When running with the SaaS platform:
 1. **Instance-level** - Users must have instance access via Supabase
 2. **Room-level** - Additional filtering via `authorization` config
 3. **JWT validation** - Tokens verified on each request
-
-## Dashboard Configuration
-
-Use the Rooms tab in the dashboard to configure per-room authorization visually.
 
 ## Best Practices
 

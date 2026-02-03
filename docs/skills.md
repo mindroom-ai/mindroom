@@ -6,6 +6,21 @@ icon: lucide/zap
 
 MindRoom uses Agno's skills system with OpenClaw-compatible metadata. Skills are instruction packs (a `SKILL.md` file) with optional scripts and references that guide agents without adding new code capabilities.
 
+## Skill directory structure
+
+A skill is a directory containing:
+
+```
+my-skill/
+├── SKILL.md         # Required: frontmatter + instructions
+├── scripts/         # Optional: executable scripts
+│   └── audit.sh
+└── references/      # Optional: reference documents
+    └── examples.md
+```
+
+Agents can access these via `get_skill_script()` and `get_skill_reference()`.
+
 ## SKILL.md format (OpenClaw compatible)
 
 ```markdown
@@ -41,7 +56,7 @@ Notes:
 | `user-invocable` | bool | Allow `!skill` (default: true) |
 | `disable-model-invocation` | bool | Prevent model invocation (default: false) |
 | `command-dispatch` | string | Set to `tool` to run a tool directly |
-| `command-tool` | string | Tool name (`toolkit` or `toolkit.fn`) |
+| `command-tool` | string | Function to call: `fn`, `toolkit.fn`, or `toolkit` (if single function) |
 | `command-arg-mode` | string | Only `raw` is supported |
 
 ## Eligibility gating (OpenClaw metadata)
@@ -100,6 +115,12 @@ Users can run a skill by name:
 !skill repo-quick-audit --recent
 ```
 
+Agent resolution:
+
+- If you mention an agent (e.g., `@mindroom_code !skill build`), that agent handles the skill.
+- If only one agent in the room has the skill enabled, it handles the request.
+- If multiple agents have the skill, you must mention one to disambiguate.
+
 Rules:
 
 - The skill must be in the agent allowlist and `user-invocable` must be `true`.
@@ -115,6 +136,10 @@ Rules:
 | Filtering | Automatic by requirements | Always available |
 | Instructions | Rich markdown | Docstrings |
 | Invocation | User or model | Model only |
+
+## Hot reloading
+
+MindRoom watches skill directories for changes. When a `SKILL.md` file is modified, the skill cache is automatically cleared so agents pick up the new instructions.
 
 ## Best practices
 

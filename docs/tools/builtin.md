@@ -4,17 +4,17 @@ icon: lucide/box
 
 # Built-in Tools
 
-MindRoom includes 80+ built-in tool integrations organized by category.
+MindRoom includes 85+ built-in tool integrations organized by category.
 
 ## File & System
 
-| Tool | Description | Required Env Vars |
-|------|-------------|-------------------|
-| `file` | Read, write, list, and manage files | - |
+| Tool | Description | Config Required |
+|------|-------------|-----------------|
+| `file` | Read, write, list, search, and manage local files | - |
 | `shell` | Execute shell commands | - |
 | `docker` | Manage Docker containers and images | - |
 | `python` | Execute Python code | - |
-| `sql` | Execute SQL queries | Database connection |
+| `sql` | Database query and management for SQL databases | `db_url` or connection params |
 | `duckdb` | Query data with DuckDB | - |
 | `pandas` | Data manipulation with Pandas | - |
 | `csv` | Read and write CSV files | - |
@@ -23,149 +23,149 @@ MindRoom includes 80+ built-in tool integrations organized by category.
 
 ## Web Search & Research
 
-| Tool | Description | Required Env Vars |
-|------|-------------|-------------------|
+| Tool | Description | Config Required |
+|------|-------------|-----------------|
 | `duckduckgo` | DuckDuckGo web search | - |
-| `googlesearch` | Google search | `GOOGLE_API_KEY`, `GOOGLE_CSE_ID` |
+| `googlesearch` | Google search via WebSearch backend | - |
 | `baidusearch` | Baidu search | - |
-| `tavily` | AI-powered web research | `TAVILY_API_KEY` |
-| `exa` | Neural search engine | `EXA_API_KEY` |
-| `serpapi` | Search API aggregator | `SERPAPI_API_KEY` |
-| `serper` | Google search API | `SERPER_API_KEY` |
-| `searxng` | Self-hosted metasearch | `SEARXNG_URL` |
-| `linkup` | Link discovery | `LINKUP_API_KEY` |
+| `tavily` | Real-time web search API | `api_key` |
+| `exa` | AI-powered web search and research | `api_key` |
+| `serpapi` | Search API aggregator | `api_key` |
+| `serper` | Google search API | `api_key` |
+| `searxng` | Self-hosted metasearch | `host` |
+| `linkup` | Link discovery | `api_key` |
 
 ## Web Scraping & Crawling
 
-| Tool | Description | Required Env Vars |
-|------|-------------|-------------------|
-| `firecrawl` | Web scraping and crawling | `FIRECRAWL_API_KEY` |
+| Tool | Description | Config Required |
+|------|-------------|-----------------|
+| `firecrawl` | Web scraping and crawling | `api_key` |
 | `crawl4ai` | AI-powered web crawling | - |
-| `browserbase` | Cloud browser automation | `BROWSERBASE_API_KEY` |
-| `agentql` | Structured web scraping | `AGENTQL_API_KEY` |
-| `spider` | Web spider/crawler | `SPIDER_API_KEY` |
-| `scrapegraph` | Graph-based scraping | `SCRAPEGRAPH_API_KEY` |
-| `apify` | Web scraping platform | `APIFY_API_KEY` |
-| `brightdata` | Proxy and scraping | `BRIGHTDATA_API_KEY` |
-| `oxylabs` | Web scraping proxy | `OXYLABS_API_KEY` |
-| `jina` | Document processing | `JINA_API_KEY` |
+| `browserbase` | Cloud browser automation | `api_key` |
+| `agentql` | Structured web scraping | `api_key` |
+| `spider` | Web spider/crawler | `api_key` |
+| `scrapegraph` | Graph-based scraping | `api_key` |
+| `apify` | Web scraping platform | `api_key` |
+| `brightdata` | Proxy and scraping | `api_key` |
+| `oxylabs` | Web scraping proxy | `api_key` |
+| `jina` | Web content reading and search | `api_key` (optional) |
 | `website` | Simple web fetching | - |
 | `newspaper4k` | Article extraction | - |
 | `web_browser_tools` | Browser automation | - |
 
 ## AI & ML APIs
 
-| Tool | Description | Required Env Vars |
-|------|-------------|-------------------|
-| `openai` | OpenAI API access | `OPENAI_API_KEY` |
-| `gemini` | Google Gemini | `GOOGLE_API_KEY` |
-| `groq` | Groq inference | `GROQ_API_KEY` |
-| `replicate` | Run ML models | `REPLICATE_API_TOKEN` |
-| `fal` | Fal.ai models | `FAL_API_KEY` |
-| `dalle` | DALL-E image generation | `OPENAI_API_KEY` |
-| `cartesia` | Voice synthesis | `CARTESIA_API_KEY` |
-| `eleven_labs` | Text-to-speech | `ELEVEN_LABS_API_KEY` |
-| `lumalabs` | Luma video generation | `LUMALABS_API_KEY` |
-| `modelslabs` | Custom models | `MODELSLABS_API_KEY` |
+| Tool | Description | Config Required |
+|------|-------------|-----------------|
+| `openai` | OpenAI API access | `api_key` |
+| `gemini` | Google Gemini | `api_key` |
+| `groq` | Groq inference | `api_key` |
+| `replicate` | Run ML models | `api_token` |
+| `fal` | Fal.ai models | `api_key` |
+| `dalle` | DALL-E image generation | `api_key` |
+| `cartesia` | Voice synthesis | `api_key` |
+| `eleven_labs` | Text-to-speech | `api_key` |
+| `lumalabs` | Luma video generation | `api_key` |
+| `modelslabs` | Custom models | `api_key` |
 
 ## Knowledge & Research
 
-| Tool | Description | Required Env Vars |
-|------|-------------|-------------------|
-| `arxiv` | Academic papers | - |
+| Tool | Description | Config Required |
+|------|-------------|-----------------|
+| `arxiv` | Academic papers search | - |
 | `wikipedia` | Wikipedia lookups | - |
 | `pubmed` | Medical literature | - |
 | `hackernews` | Hacker News | - |
 | `youtube` | YouTube transcripts | - |
-| `reddit` | Reddit API | `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET` |
+| `reddit` | Reddit browsing and interaction | `client_id`, `client_secret` |
 
 ## Communication
 
-| Tool | Description | Required Env Vars |
-|------|-------------|-------------------|
-| `gmail` | Gmail integration | Google OAuth |
-| `slack` | Slack messaging | `SLACK_BOT_TOKEN` |
-| `discord` | Discord bot | `DISCORD_BOT_TOKEN` |
-| `telegram` | Telegram bot | `TELEGRAM_BOT_TOKEN` |
-| `whatsapp` | WhatsApp Business | `WHATSAPP_API_KEY` |
-| `twilio` | SMS and voice | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` |
-| `webex` | Webex Teams | `WEBEX_ACCESS_TOKEN` |
-| `resend` | Transactional email | `RESEND_API_KEY` |
-| `email` | Generic email | SMTP config |
-| `x` | X/Twitter | `X_API_KEY`, `X_API_SECRET` |
+| Tool | Description | Config Required |
+|------|-------------|-----------------|
+| `gmail` | Read, search, and manage Gmail emails | Google OAuth |
+| `slack` | Send messages and manage channels | `token` |
+| `discord` | Interact with Discord channels and servers | `bot_token` |
+| `telegram` | Send messages via Telegram bot | `token`, `chat_id` |
+| `whatsapp` | WhatsApp Business API messaging | `access_token`, `phone_number_id` |
+| `twilio` | SMS and voice | `account_sid`, `auth_token` |
+| `webex` | Webex Teams messaging | `access_token` |
+| `resend` | Transactional email | `api_key` |
+| `email` | Generic SMTP email | SMTP config |
+| `x` | X/Twitter posting and DMs | `bearer_token` or OAuth credentials |
 
 ## Project Management
 
-| Tool | Description | Required Env Vars |
-|------|-------------|-------------------|
-| `github` | GitHub repos, issues, PRs | `GITHUB_TOKEN` |
-| `jira` | Jira issue tracking | `JIRA_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` |
-| `linear` | Linear issues | `LINEAR_API_KEY` |
-| `confluence` | Confluence wikis | `CONFLUENCE_URL`, `CONFLUENCE_API_TOKEN` |
-| `trello` | Trello boards | `TRELLO_API_KEY`, `TRELLO_TOKEN` |
-| `todoist` | Todoist tasks | `TODOIST_API_KEY` |
-| `zendesk` | Zendesk support | `ZENDESK_SUBDOMAIN`, `ZENDESK_EMAIL`, `ZENDESK_API_TOKEN` |
+| Tool | Description | Config Required |
+|------|-------------|-----------------|
+| `github` | Repository and issue management | `access_token` |
+| `jira` | Issue tracking and project management | `server_url`, `username`, `password` or `token` |
+| `linear` | Issue tracking and project management | `api_key` |
+| `confluence` | Atlassian wiki pages | `url`, `username`, `password` or `api_key` |
+| `trello` | Trello boards | `api_key`, `token` |
+| `todoist` | Todoist tasks | `api_key` |
+| `zendesk` | Zendesk support | `subdomain`, `email`, `api_token` |
 
 ## Calendar & Scheduling
 
-| Tool | Description | Required Env Vars |
-|------|-------------|-------------------|
-| `google_calendar` | Google Calendar | Google OAuth |
-| `cal_com` | Cal.com scheduling | `CAL_COM_API_KEY` |
-| `zoom` | Zoom meetings | `ZOOM_API_KEY`, `ZOOM_API_SECRET` |
+| Tool | Description | Config Required |
+|------|-------------|-----------------|
+| `google_calendar` | View and schedule meetings | Google OAuth |
+| `cal_com` | Cal.com scheduling | `api_key` |
+| `zoom` | Video conferencing and meetings | `account_id`, `client_id`, `client_secret` |
 
 ## Data & Business
 
-| Tool | Description | Required Env Vars |
-|------|-------------|-------------------|
-| `google_sheets` | Google Sheets | Google OAuth |
+| Tool | Description | Config Required |
+|------|-------------|-----------------|
+| `google_sheets` | Read, create, update spreadsheets | Google OAuth |
 | `yfinance` | Financial data | - |
-| `financial_datasets_api` | Financial datasets | `FINANCIAL_DATASETS_API_KEY` |
+| `financial_datasets_api` | Financial datasets | `api_key` |
 
 ## Location & Maps
 
-| Tool | Description | Required Env Vars |
-|------|-------------|-------------------|
-| `google_maps` | Maps and places | `GOOGLE_MAPS_API_KEY` |
-| `openweather` | Weather data | `OPENWEATHER_API_KEY` |
+| Tool | Description | Config Required |
+|------|-------------|-----------------|
+| `google_maps` | Maps and places | `api_key` |
+| `openweather` | Weather data | `api_key` |
 
 ## DevOps & Infrastructure
 
-| Tool | Description | Required Env Vars |
-|------|-------------|-------------------|
+| Tool | Description | Config Required |
+|------|-------------|-----------------|
 | `aws_lambda` | AWS Lambda functions | AWS credentials |
 | `aws_ses` | AWS email service | AWS credentials |
-| `airflow` | Apache Airflow | `AIRFLOW_URL`, `AIRFLOW_USERNAME`, `AIRFLOW_PASSWORD` |
-| `e2b` | Code execution sandbox | `E2B_API_KEY` |
-| `daytona` | Development environments | `DAYTONA_API_KEY` |
-| `composio` | API composition | `COMPOSIO_API_KEY` |
+| `airflow` | Apache Airflow | `base_url`, `username`, `password` |
+| `e2b` | Code execution sandbox | `api_key` |
+| `daytona` | Development environments | `api_key` |
+| `composio` | API composition | `api_key` |
 
 ## Smart Home
 
-| Tool | Description | Required Env Vars |
-|------|-------------|-------------------|
-| `homeassistant` | Home Assistant control | `HOMEASSISTANT_URL`, `HOMEASSISTANT_TOKEN` |
+| Tool | Description | Config Required |
+|------|-------------|-----------------|
+| `homeassistant` | Control and monitor smart home devices | `HOMEASSISTANT_URL`, `HOMEASSISTANT_TOKEN` |
 
 ## Media
 
-| Tool | Description | Required Env Vars |
-|------|-------------|-------------------|
-| `giphy` | GIF search | `GIPHY_API_KEY` |
+| Tool | Description | Config Required |
+|------|-------------|-----------------|
+| `giphy` | GIF search | `api_key` |
 | `moviepy_video_tools` | Video processing | - |
 
 ## Memory & Storage
 
-| Tool | Description | Required Env Vars |
-|------|-------------|-------------------|
-| `mem0` | Memory management | `MEM0_API_KEY` |
-| `zep` | Conversation memory | `ZEP_API_KEY` |
+| Tool | Description | Config Required |
+|------|-------------|-----------------|
+| `mem0` | Persistent memory system | `api_key` (optional for cloud) |
+| `zep` | Conversation memory | `api_key` |
 
-## Custom
+## Custom & Config
 
-| Tool | Description | Required Env Vars |
-|------|-------------|-------------------|
+| Tool | Description | Config Required |
+|------|-------------|-----------------|
 | `custom_api` | Custom API calls | Varies |
-| `config_manager` | MindRoom config | - |
+| `config_manager` | MindRoom configuration management | - |
 
 ## Enabling Tools
 

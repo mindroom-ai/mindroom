@@ -79,22 +79,29 @@ MindRoom resolves the package location and looks for `mindroom.plugin.json` in t
 from agno.tools import Toolkit
 from mindroom.tools_metadata import ToolCategory, register_tool_with_metadata
 
-class DemoTools(Toolkit):
-    def __init__(self) -> None:
-        super().__init__(name="demo", tools=[self.ping])
 
-    def ping(self, command: str, commandName: str, skillName: str) -> str:
-        return f"{commandName}:{skillName}:{command}"
+class GreeterTools(Toolkit):
+    """A simple greeting toolkit."""
+
+    def __init__(self) -> None:
+        super().__init__(name="greeter", tools=[self.greet])
+
+    def greet(self, name: str) -> str:
+        """Greet someone by name."""
+        return f"Hello, {name}!"
+
 
 @register_tool_with_metadata(
-    name="demo_plugin",
-    display_name="Demo Plugin",
-    description="Demo plugin tool",
+    name="greeter",
+    display_name="Greeter",
+    description="A simple greeting tool",
     category=ToolCategory.DEVELOPMENT,
 )
-def demo_plugin_tools():
-    return DemoTools
+def greeter_tools() -> type[GreeterTools]:
+    return GreeterTools
 ```
+
+The factory function (decorated with `@register_tool_with_metadata`) must return the **class**, not an instance. MindRoom instantiates the class when building agents.
 
 ## Plugin skills
 
