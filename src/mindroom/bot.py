@@ -251,6 +251,8 @@ def _resolve_skill_command_agent(  # noqa: C901
         name = mid.agent_name(config)
         if not name:
             continue
+        if name not in config.agents:
+            continue
         allowlist = {skill.lower() for skill in config.get_agent(name).skills}
         if requested in allowlist:
             candidate_names.append(name)
