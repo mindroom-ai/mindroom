@@ -39,8 +39,9 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │ --help                        Show this message and exit.                              │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ version   Show the current version of Mindroom.                                        │
-│ run       Run the mindroom multi-agent system.                                         │
+│ version    Show the current version of Mindroom.                                       │
+│ validate   Validate the configuration file.                                            │
+│ run        Run the mindroom multi-agent system.                                        │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
