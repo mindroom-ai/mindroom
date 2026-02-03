@@ -1,12 +1,10 @@
 """API endpoints for tools information."""
 
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from mindroom.config import Config
 from mindroom.credentials import CredentialsManager, get_credentials_manager
 from mindroom.tools_metadata import ensure_tool_registry_loaded, export_tools_metadata
 
@@ -19,13 +17,6 @@ class ToolsResponse(BaseModel):
     """Response containing all registered tools."""
 
     tools: list[dict]
-
-
-def _load_tools_config() -> tuple[Config, Path]:
-    from mindroom.api import main  # noqa: PLC0415
-
-    config_path = main.CONFIG_PATH
-    return Config.from_yaml(config_path), config_path
 
 
 def _check_homeassistant_configured(tool_name: str, manager: CredentialsManager) -> bool:
@@ -62,7 +53,9 @@ async def get_registered_tools() -> ToolsResponse:
     This builds tool metadata from the in-memory registry and updates availability
     based on credentials (including plugin-provided tools).
     """
-    config, config_path = _load_tools_config()
+    from mindroom.api.main import load_runtime_config  # noqa: PLC0415
+
+    config, config_path = load_runtime_config()
     ensure_tool_registry_loaded(config, config_path=config_path)
     tools = export_tools_metadata()
 

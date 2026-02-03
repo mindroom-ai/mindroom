@@ -1,7 +1,6 @@
 """Third-party service integrations API."""
 
 import os
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -9,7 +8,6 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from spotipy import Spotify, SpotifyOAuth  # type: ignore[import-untyped]
 
-from mindroom.config import Config
 from mindroom.credentials import CredentialsManager
 from mindroom.tools_metadata import ensure_tool_registry_loaded, export_tools_metadata
 
@@ -19,17 +17,12 @@ router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 creds_manager = CredentialsManager()
 
 
-def _load_tools_config() -> tuple[Config, Path]:
-    from mindroom.api import main  # noqa: PLC0415
-
-    config_path = main.CONFIG_PATH
-    return Config.from_yaml(config_path), config_path
-
-
 # Load tool metadata from the single source of truth
 def get_tools_metadata() -> dict[str, Any]:
     """Load tool metadata from the in-memory registry."""
-    config, config_path = _load_tools_config()
+    from mindroom.api.main import load_runtime_config  # noqa: PLC0415
+
+    config, config_path = load_runtime_config()
     ensure_tool_registry_loaded(config, config_path=config_path)
     tools = export_tools_metadata()
     return {tool["name"]: tool for tool in tools}
