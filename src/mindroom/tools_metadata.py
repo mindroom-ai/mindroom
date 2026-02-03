@@ -2,21 +2,16 @@
 
 from __future__ import annotations
 
-import inspect
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from enum import Enum
-from functools import wraps
-from typing import TYPE_CHECKING, Any, Literal, Union, cast, get_args, get_origin
+from typing import TYPE_CHECKING, Any, Literal
 
 from loguru import logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from agno.tools import Toolkit
-
-    from mindroom.config import Config
 
 from mindroom.credentials import get_credentials_manager
 
@@ -185,7 +180,7 @@ def register_tool_with_metadata(
 
     """
 
-    def decorator(func: Callable[[], type[Toolkit]]) -> Callable[[], type[Toolkit]]:
+    def decorator(func: Callable) -> Callable:
         # Create metadata object
         metadata = ToolMetadata(
             name=name,
@@ -204,99 +199,15 @@ def register_tool_with_metadata(
             factory=func,
         )
 
-        @wraps(func)
-        def wrapper() -> type[Toolkit]:
-            tool_class = func()
-            _sync_tool_config_fields(metadata, tool_class)
-            return tool_class
-
         # Store in metadata registry
         TOOL_METADATA[name] = metadata
 
         # Also register in TOOL_REGISTRY for actual tool loading
-        TOOL_REGISTRY[name] = wrapper
+        TOOL_REGISTRY[name] = func
 
-        metadata.factory = wrapper
-
-        return wrapper
+        return func
 
     return decorator
-
-
-def _sync_tool_config_fields(metadata: ToolMetadata, tool_class: type) -> None:
-    if not tool_class.__module__.startswith("agno.") and metadata.config_fields:
-        return
-
-    sig = inspect.signature(tool_class.__init__)  # type: ignore[misc]
-    existing_fields = {field.name: field for field in (metadata.config_fields or [])}
-    synced_fields: list[ConfigField] = []
-
-    for name, param in sig.parameters.items():
-        if name == "self":
-            continue
-        if param.kind == inspect.Parameter.VAR_KEYWORD:
-            continue
-
-        existing = existing_fields.get(name)
-        inferred_type = _infer_config_field_type(name, param.annotation)
-        field_type = inferred_type or (existing.type if existing else "text")
-        default = existing.default if existing and existing.default is not None else _param_default(param)
-        required = existing.required if existing else param.default is inspect.Parameter.empty
-
-        synced_fields.append(
-            ConfigField(
-                name=name,
-                label=existing.label if existing else _humanize_label(name),
-                type=field_type,
-                required=required,
-                default=default,
-                placeholder=existing.placeholder if existing else None,
-                description=existing.description if existing else None,
-                options=existing.options if existing else None,
-                validation=existing.validation if existing else None,
-            ),
-        )
-
-    metadata.config_fields = synced_fields
-
-
-def _param_default(param: inspect.Parameter) -> object | None:
-    if param.default is inspect.Parameter.empty:
-        return None
-    return cast("object", param.default)
-
-
-def _humanize_label(name: str) -> str:
-    return name.replace("_", " ").strip().title()
-
-
-def _infer_config_field_type(
-    name: str,
-    annotation: object,
-) -> Literal["boolean", "number", "password", "text", "url"] | None:
-    if annotation is inspect.Parameter.empty:
-        return None
-
-    actual_type = annotation
-    if get_origin(actual_type) is Union:
-        args = get_args(actual_type)
-        if type(None) in args:
-            actual_type = next(arg for arg in args if arg is not type(None))
-
-    field_type: Literal["boolean", "number", "password", "text", "url"] | None = None
-    if actual_type is bool:
-        field_type = "boolean"
-    elif actual_type in (int, float):
-        field_type = "number"
-    elif actual_type is str:
-        lower_name = name.lower()
-        if any(token in lower_name for token in ("token", "password", "secret", "key")):
-            field_type = "password"
-        elif any(token in lower_name for token in ("url", "uri", "proxy", "endpoint", "host")):
-            field_type = "url"
-        else:
-            field_type = "text"
-    return field_type
 
 
 def get_tool_metadata(name: str) -> ToolMetadata | None:
@@ -307,24 +218,3 @@ def get_tool_metadata(name: str) -> ToolMetadata | None:
 def get_all_tool_metadata() -> dict[str, ToolMetadata]:
     """Get all tool metadata."""
     return TOOL_METADATA.copy()
-
-
-def ensure_tool_registry_loaded(config: Config | None = None, *, config_path: Path | None = None) -> None:  # noqa: ARG001
-    """Ensure core tools are registered in the metadata registry."""
-    import mindroom.tools  # noqa: F401, PLC0415  # import here to avoid tools_metadata cycle
-
-
-def export_tools_metadata() -> list[dict[str, Any]]:
-    """Export tool metadata as JSON-serializable dictionaries."""
-    tools: list[dict[str, Any]] = []
-
-    for metadata in TOOL_METADATA.values():
-        tool_dict = asdict(metadata)
-        tool_dict["category"] = metadata.category.value
-        tool_dict["status"] = metadata.status.value
-        tool_dict["setup_type"] = metadata.setup_type.value
-        tool_dict.pop("factory", None)
-        tools.append(tool_dict)
-
-    tools.sort(key=lambda tool: (tool["category"], tool["name"]))
-    return tools

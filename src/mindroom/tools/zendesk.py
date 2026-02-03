@@ -26,30 +26,40 @@ if TYPE_CHECKING:
     icon="HelpCircle",  # React icon for help/support
     icon_color="text-green-600",  # Zendesk brand green
     config_fields=[
-        # Authentication parameters
         ConfigField(
             name="username",
             label="Username",
             type="text",
             required=False,
-            placeholder="john.doe@company.com",
-            description="The username used for authentication or identification purposes (can also be set via ZENDESK_USERNAME env var)",
+            default=None,
         ),
         ConfigField(
             name="password",
             label="Password",
             type="password",
             required=False,
-            placeholder="•••••••••",
-            description="The password associated with the username for authentication purposes (can also be set via ZENDESK_PW env var)",
+            default=None,
         ),
         ConfigField(
             name="company_name",
             label="Company Name",
             type="text",
             required=False,
-            placeholder="mycompany",
-            description="The name of the company related to the user or the data being accessed (can also be set via ZENDESK_COMPANY_NAME env var)",
+            default=None,
+        ),
+        ConfigField(
+            name="enable_search_zendesk",
+            label="Enable Search Zendesk",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="all",
+            label="All",
+            type="boolean",
+            required=False,
+            default=False,
         ),
     ],
     dependencies=["requests"],

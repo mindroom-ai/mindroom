@@ -28,12 +28,24 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="base_dir",
-            label="Base Directory",
+            label="Base Dir",
             type="text",
             required=False,
             default=None,
-            placeholder="/path/to/working/directory",
-            description="Base directory for command execution (defaults to current directory)",
+        ),
+        ConfigField(
+            name="enable_run_shell_command",
+            label="Enable Run Shell Command",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="all",
+            label="All",
+            type="boolean",
+            required=False,
+            default=False,
         ),
     ],
     dependencies=[],

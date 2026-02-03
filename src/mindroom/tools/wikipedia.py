@@ -27,12 +27,18 @@ if TYPE_CHECKING:
     icon_color="text-gray-700",
     config_fields=[
         ConfigField(
-            name="knowledge_base",
-            label="Knowledge Base",
+            name="knowledge",
+            label="Knowledge",
             type="text",
             required=False,
             default=None,
-            description="Optional WikipediaKnowledgeBase instance for advanced usage (typically left empty)",
+        ),
+        ConfigField(
+            name="all",
+            label="All",
+            type="boolean",
+            required=False,
+            default=False,
         ),
     ],
     dependencies=["wikipedia"],

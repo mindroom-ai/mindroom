@@ -26,15 +26,12 @@ if TYPE_CHECKING:
     icon="Mail",
     icon_color="text-blue-600",
     config_fields=[
-        # Authentication/Connection parameters
         ConfigField(
             name="receiver_email",
             label="Receiver Email",
             type="text",
             required=False,
             default=None,
-            placeholder="recipient@example.com",
-            description="Default recipient email address",
         ),
         ConfigField(
             name="sender_name",
@@ -42,8 +39,6 @@ if TYPE_CHECKING:
             type="text",
             required=False,
             default=None,
-            placeholder="Your Name",
-            description="Name to display as the sender",
         ),
         ConfigField(
             name="sender_email",
@@ -51,17 +46,27 @@ if TYPE_CHECKING:
             type="text",
             required=False,
             default=None,
-            placeholder="your.email@gmail.com",
-            description="Gmail address to send emails from",
         ),
         ConfigField(
             name="sender_passkey",
-            label="Sender Password/App Password",
+            label="Sender Passkey",
             type="password",
             required=False,
             default=None,
-            placeholder="Gmail password or app-specific password",
-            description="Gmail password or app-specific password for authentication",
+        ),
+        ConfigField(
+            name="enable_email_user",
+            label="Enable Email User",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="all",
+            label="All",
+            type="boolean",
+            required=False,
+            default=False,
         ),
     ],
     dependencies=[],  # Uses built-in smtplib
