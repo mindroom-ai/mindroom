@@ -58,7 +58,7 @@ memory:
     provider: openai  # or "ollama"
     config:
       model: text-embedding-3-small
-      host: null  # Optional: custom base URL for OpenAI-compatible servers
+      host: null  # Optional: host URL for self-hosted models
 
   # LLM for memory extraction (optional)
   llm:
@@ -66,7 +66,6 @@ memory:
     config:
       model: gpt-4o-mini
       temperature: 0.1
-      top_p: 1
 ```
 
 ### Configuration Options
@@ -75,9 +74,11 @@ memory:
 |-------|-------------|
 | `embedder.provider` | Embedding provider: `openai`, `ollama` |
 | `embedder.config.model` | Model name for embeddings |
-| `embedder.config.host` | Custom base URL for OpenAI-compatible servers |
+| `embedder.config.host` | Host URL for self-hosted models (Ollama, OpenAI-compatible servers, etc.) |
 | `llm.provider` | LLM provider for memory extraction: `openai`, `ollama`, `anthropic` |
-| `llm.config` | Provider-specific LLM configuration |
+| `llm.config.model` | Model name for the LLM |
+| `llm.config.temperature` | Temperature for LLM responses (e.g., `0.1`) |
+| `llm.config.ollama_base_url` | Host URL for Ollama LLM (when using `ollama` provider) |
 
 ### Example with Ollama
 
@@ -109,17 +110,17 @@ memory:
 ```
 User Message
     ↓
-┌─────────────────────────────────────┐
-│ Search agent memories (limit: 3)    │
-│ Search team memories (if in team)   │
-│ Search room memories (limit: 3)     │
-└─────────────────────────────────────┘
+┌──────────────────────────────────────────┐
+│ Search agent memories (default limit: 3) │
+│ + team memories (if agent is in a team)  │
+│ Search room memories (default limit: 3)  │
+└──────────────────────────────────────────┘
     ↓
-Enhanced prompt with memory context
+Enhanced prompt: [room context] + [agent context] + [original message]
     ↓
 Agent response
     ↓
-Store conversation in memory
+Store conversation in memory (agent/team + room scopes)
 ```
 
 ## Storage Location
@@ -133,10 +134,10 @@ Memories are stored in ChromaDB under `<storage_path>/chroma/`:
 
 For explicit memory control, agents can use the `mem0` tool which provides functions to:
 
-- Add memories manually
-- Search memories with custom queries
-- Get all memories
-- Delete memories
+- `add_memory`: Add memories manually
+- `search_memory`: Search memories with custom queries
+- `get_all_memories`: Retrieve all stored memories
+- `delete_all_memories`: Delete all memories for the agent
 
 Add the tool to an agent:
 
@@ -150,4 +151,4 @@ With this tool enabled, agents can respond to natural language requests like:
 
 - "Remember that I prefer TypeScript over JavaScript"
 - "What do you know about this project?"
-- "Forget the database credentials I mentioned earlier"
+- "Clear all my memories and start fresh"

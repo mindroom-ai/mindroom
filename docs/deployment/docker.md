@@ -11,7 +11,7 @@ Deploy MindRoom using Docker for simple, containerized deployments.
 MindRoom consists of two containers:
 
 - **Backend**: The bot orchestrator and API server (port 8765)
-- **Frontend**: The dashboard UI (port 3003)
+- **Frontend**: The dashboard UI (port 8080)
 
 For a minimal setup with just the backend:
 
@@ -22,7 +22,7 @@ docker run -d \
   -v ./config.yaml:/app/config.yaml:ro \
   -v ./mindroom_data:/app/mindroom_data \
   --env-file .env \
-  ghcr.io/mindroom-ai/mindroom-backend:latest
+  ghcr.io/basnijholt/mindroom-backend:latest
 ```
 
 ## Docker Compose
@@ -32,7 +32,7 @@ Create a `docker-compose.yml`:
 ```yaml
 services:
   mindroom:
-    image: ghcr.io/mindroom-ai/mindroom-backend:latest
+    image: ghcr.io/basnijholt/mindroom-backend:latest
     container_name: mindroom
     restart: unless-stopped
     ports:
@@ -93,7 +93,7 @@ cd local/matrix && docker compose up -d
 # Verify Matrix is running
 curl -s http://localhost:8008/_matrix/client/versions
 
-# Start MindRoom (from project root)
+# Start MindRoom using the docker-compose.yml you created above
 docker compose up -d
 ```
 
@@ -119,6 +119,8 @@ MindRoom stores data in the `mindroom_data` directory:
 - `memory/` - Vector store for agent/room memories
 - `tracking/` - Response tracking to avoid duplicates
 - `credentials/` - Synchronized secrets from `.env`
+- `logs/` - Application logs
+- `matrix_state.yaml` - Matrix connection state
 - `encryption_keys/` - Matrix E2EE keys (if enabled)
 
 ## Full Stack with Frontend
@@ -128,7 +130,7 @@ For a complete deployment including the dashboard:
 ```yaml
 services:
   backend:
-    image: ghcr.io/mindroom-ai/mindroom-backend:latest
+    image: ghcr.io/basnijholt/mindroom-backend:latest
     container_name: mindroom-backend
     restart: unless-stopped
     ports:
@@ -142,16 +144,21 @@ services:
       - STORAGE_PATH=/app/mindroom_data
 
   frontend:
-    image: ghcr.io/mindroom-ai/mindroom-frontend:latest
+    image: ghcr.io/basnijholt/mindroom-frontend:latest
     container_name: mindroom-frontend
     restart: unless-stopped
     ports:
-      - "3003:3003"
+      - "8080:8080"
     environment:
-      - VITE_API_URL=  # Empty for relative URLs when using reverse proxy
+      - VITE_API_URL=http://localhost:8765  # Direct backend URL for standalone setup
     depends_on:
       - backend
 ```
+
+!!! note "API URL Configuration"
+    Set `VITE_API_URL` to the backend URL (e.g., `http://localhost:8765`) for standalone
+    deployments. Use an empty string (`VITE_API_URL=`) only when using a reverse proxy
+    that routes `/api/*` requests to the backend.
 
 !!! tip "Production Deployment"
     For production, use a reverse proxy (Traefik, Nginx) to serve both services

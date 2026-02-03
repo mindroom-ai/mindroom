@@ -17,7 +17,7 @@ mindroom run --config /path/to/config.yaml
 ## Basic Structure
 
 ```yaml
-# Agent definitions (required)
+# Agent definitions (at least one recommended)
 agents:
   assistant:
     display_name: Assistant        # Required: Human-readable name
@@ -31,10 +31,10 @@ agents:
     markdown: true                 # Optional: Override default markdown
     add_history_to_messages: true  # Optional: Include history in context
 
-# Model configurations (required for non-default models)
+# Model configurations (at least a "default" model is recommended)
 models:
   sonnet:
-    provider: anthropic            # Required: openai, anthropic, ollama, google, groq, cerebras
+    provider: anthropic            # Required: openai, anthropic, ollama, google/gemini, groq, cerebras, openrouter, deepseek
     id: claude-sonnet-4-latest     # Required: Model ID for the provider
     host: null                     # Optional: Host URL (e.g., for Ollama)
     api_key: null                  # Optional: API key (usually from env vars)
@@ -47,7 +47,7 @@ teams:
     role: Collaborative research   # Required: Description of team purpose
     agents: [researcher, writer]   # Required: List of agent names
     mode: collaborate              # Optional: "coordinate" or "collaborate" (default: coordinate)
-    model: sonnet                  # Optional: Model for team coordination
+    model: sonnet                  # Optional: Model for team coordination (default: "default")
     rooms: []                      # Optional: Rooms to auto-join
 
 # Router configuration (optional)
@@ -117,7 +117,7 @@ The memory system stores agent memories using embeddings. Configuration is optio
 ```yaml
 memory:
   embedder:
-    provider: openai               # Provider: openai, huggingface, etc.
+    provider: openai               # Provider: openai, ollama, huggingface, etc.
     config:
       model: text-embedding-3-small  # Embedding model
       api_key: null                # From OPENAI_API_KEY env var
@@ -184,9 +184,10 @@ When `default_room_access` is `false`, only users in `global_users` or the speci
 
 ### Optional Sections
 
-All top-level sections except `agents` are optional:
+All top-level sections are technically optional (with sensible defaults), but you need at least one agent for MindRoom to function:
 
-- `models` - Only needed if agents reference non-default models
+- `agents` - Defaults to empty; at least one agent is needed for a functional setup
+- `models` - A model named "default" is needed unless all agents/teams specify explicit models
 - `teams` - Only needed for multi-agent collaboration
 - `router` - Only needed to customize routing behavior
 - `defaults` - All fields have sensible defaults

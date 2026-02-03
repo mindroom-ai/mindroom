@@ -43,7 +43,7 @@ from mindroom.matrix.client import create_matrix_client, login
 client = create_matrix_client(
     homeserver="https://matrix.example.com",
     user_id="@mindroom_agent:example.com",
-    store_path="/path/to/encryption/keys"  # Optional, auto-generated if omitted
+    store_path="/path/to/encryption/keys"  # Optional, defaults to mindroom_data/encryption_keys/<user_id>
 )
 
 # Login with password
@@ -59,9 +59,10 @@ async with matrix_client(homeserver, user_id, access_token) as client:
 
 ### Environment Variables
 
-- `MATRIX_HOMESERVER` - Matrix homeserver URL
+- `MATRIX_HOMESERVER` - Matrix homeserver URL (default: `http://localhost:8008`)
 - `MATRIX_SERVER_NAME` - Federation server name (if different from homeserver hostname)
-- `MATRIX_SSL_VERIFY` - Set to `"false"` to disable SSL verification (dev only)
+- `MATRIX_SSL_VERIFY` - Set to `"false"` to disable SSL verification (default: `"true"`, dev only)
+- `MINDROOM_ENABLE_STREAMING` - Set to `"false"` to disable message streaming/editing (default: `"true"`)
 
 ## Agent Users
 
@@ -275,7 +276,7 @@ async with typing_indicator(client, room_id):
 # Typing indicator automatically stopped
 ```
 
-The typing indicator is automatically refreshed at half the timeout interval (or every 15 seconds) to remain visible during long operations.
+The typing indicator is automatically refreshed at the smaller of half the timeout interval or 15 seconds to remain visible during long operations.
 
 ## Mentions
 

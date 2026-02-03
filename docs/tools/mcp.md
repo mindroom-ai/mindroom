@@ -38,12 +38,44 @@ See the [MCP servers directory](https://github.com/modelcontextprotocol/servers)
 
 ## Workaround: Using Agno MCPTools Directly
 
-Until native MindRoom configuration is available, you can use MCP tools through a [custom plugin](../plugins.md):
+Until native MindRoom configuration is available, you can use MCP tools through a [custom plugin](../plugins.md). The key is to create a subclass that pre-configures the MCP server parameters, since MindRoom's tool registry expects a class (not an instance).
+
+### Plugin Structure
+
+Create a plugin directory with the following structure:
+
+```
+plugins/
+└── mcp-filesystem/
+    ├── mindroom.plugin.json
+    └── tools.py
+```
+
+**mindroom.plugin.json:**
+
+```json
+{
+  "name": "mcp-filesystem",
+  "tools_module": "tools.py"
+}
+```
+
+**tools.py:**
 
 ```python
-# plugins/mcp_plugin.py
 from agno.tools.mcp import MCPTools
 from mindroom.tools_metadata import register_tool_with_metadata, ToolCategory, ToolStatus, SetupType
+
+
+class FilesystemMCPTools(MCPTools):
+    """Pre-configured MCPTools for filesystem access."""
+
+    def __init__(self, **kwargs):
+        super().__init__(
+            command="npx -y @modelcontextprotocol/server-filesystem /path/to/dir",
+            **kwargs,
+        )
+
 
 @register_tool_with_metadata(
     name="my_mcp_server",
@@ -54,15 +86,17 @@ from mindroom.tools_metadata import register_tool_with_metadata, ToolCategory, T
     setup_type=SetupType.NONE,
 )
 def my_mcp_tools():
-    """Return MCP tools from a custom server."""
-    return MCPTools(command="npx -y @modelcontextprotocol/server-filesystem /path/to/dir")
+    """Return the MCPTools subclass (not an instance)."""
+    return FilesystemMCPTools
 ```
 
-Then reference it in your agent configuration:
+### Configuration
+
+Reference the plugin directory in your `config.yaml`:
 
 ```yaml
 plugins:
-  - plugins/mcp_plugin.py
+  - ./plugins/mcp-filesystem
 
 agents:
   assistant:
@@ -71,5 +105,5 @@ agents:
       - my_mcp_server
 ```
 
-> [!WARNING]
-> MCP tools are async and require special handling. The above workaround may have limitations compared to native support.
+> [!NOTE]
+> MCP tools require async operations. Agno's Agent class automatically handles connecting and disconnecting MCP servers during async runs (`arun`, `aprint_response`). The MCP server process starts when the agent runs and stops when the run completes.

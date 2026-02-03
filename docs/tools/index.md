@@ -4,7 +4,7 @@ icon: lucide/wrench
 
 # Tools
 
-MindRoom includes 80+ tool integrations that agents can use to interact with external services.
+MindRoom includes 85+ tool integrations that agents can use to interact with external services.
 
 ## Enabling Tools
 
@@ -20,45 +20,70 @@ agents:
       - file
       - shell
       - github
-      - web_search
+      - duckduckgo
 ```
 
 ## Tool Categories
 
-### File & System
+Tools are organized by category:
 
-- `file` - Read, write, and manage files
-- `shell` - Execute shell commands
-- `docker` - Manage Docker containers
+- **Development** - File operations, shell, Docker, GitHub, Jira, code execution
+- **Research** - Web search (DuckDuckGo, Tavily, Exa), academic papers (arXiv, PubMed), web scraping
+- **Communication** - Slack, Discord, Telegram, Twilio, WhatsApp, Webex
+- **Email** - Gmail, AWS SES, Resend, generic SMTP
+- **Productivity** - Google Calendar, Todoist, SQL, Pandas, CSV, DuckDB
+- **Social** - Reddit, X/Twitter, Zoom
+- **Entertainment** - YouTube
+- **Smart Home** - Home Assistant
+- **Integrations** - Composio
 
-### AI & Search
+## Quick Examples
 
-- `web_search` - Search the web
-- `tavily` - AI-powered web search
-- `exa` - Neural search engine
-- `arxiv` - Search academic papers
+### Research Agent
 
-### Communication
+```yaml
+agents:
+  researcher:
+    display_name: Researcher
+    role: Find and summarize information from the web and academic sources
+    model: sonnet
+    tools:
+      - duckduckgo
+      - arxiv
+      - wikipedia
+      - pubmed
+```
 
-- `slack` - Send messages to Slack
-- `gmail` - Send and read emails
-- `telegram` - Telegram bot integration
-- `twilio` - SMS and voice calls
+### DevOps Agent
 
-### Development
+```yaml
+agents:
+  devops:
+    display_name: DevOps
+    role: Manage infrastructure, containers, and deployments
+    model: sonnet
+    tools:
+      - shell
+      - docker
+      - github
+      - aws_lambda
+```
 
-- `github` - Manage GitHub repos, issues, PRs
-- `jira` - Issue tracking
-- `confluence` - Wiki documentation
+### Communication Agent
 
-### Productivity
-
-- `google_calendar` - Calendar management
-- `google_sheets` - Spreadsheet access
-- `todoist` - Task management
-- `trello` - Board management
+```yaml
+agents:
+  notifier:
+    display_name: Notifier
+    role: Send notifications and messages across platforms
+    model: sonnet
+    tools:
+      - slack
+      - telegram
+      - gmail
+```
 
 See the full list in:
 
-- [Built-in Tools](builtin.md) - All available tool integrations
+- [Built-in Tools](builtin.md) - Complete list of 85+ available tools with configuration details
 - [MCP Tools](mcp.md) - Model Context Protocol tools (planned)

@@ -59,7 +59,7 @@ Create and configure AI agents with a visual editor:
   - **Configured tools** - Tools with credentials already set up
   - **Default tools** - Tools that work without configuration
 - **Instructions** - Custom behavior instructions (add/remove entries)
-- **Rooms** - Select which rooms the agent joins
+- **Agent rooms** - Select rooms where this agent can operate
 - **History runs** - Number of previous conversation turns as context
 
 ### Teams
@@ -73,7 +73,7 @@ Configure multi-agent collaboration:
   - **Collaborate** - Agents work simultaneously in parallel
 - **Team model** - Optional model override for all agents in the team
 - **Team members** - Select agents to include
-- **Team rooms** - Where the team responds
+- **Team rooms** - Select rooms where this team can operate
 
 ### Rooms
 
@@ -81,12 +81,12 @@ Manage Matrix room configuration:
 
 - **Display name** - Human-readable name for the room
 - **Description** - Describe the room's purpose
-- **Room model** - Optional model override for agents in this room
+- **Room model** - Optional model override for agents and teams in this room
 - **Agents in room** - Which agents are members (their room list updates automatically)
 
 ### External Rooms
 
-View and manage rooms that agents have joined but aren't in the configuration:
+View and manage rooms that agents have joined but are not in the configuration:
 
 - **Summary** - Shows total external rooms across all agents
 - **Per-agent view** - See which external rooms each agent has joined
@@ -131,10 +131,10 @@ Supported providers:
 Configure the embedder for agent memory storage and retrieval:
 
 - **Embedder provider** - Choose where embeddings are computed:
-  - Ollama (local)
-  - OpenAI (cloud)
-  - HuggingFace (cloud)
-  - Sentence Transformers (local)
+  - Ollama (Local)
+  - OpenAI
+  - HuggingFace
+  - Sentence Transformers
 - **Embedding model** - Select the specific model for the provider
 - **Host URL** - Configure Ollama server location (for Ollama provider)
 
@@ -144,9 +144,9 @@ Configure voice message handling:
 
 - **Enable/disable** - Toggle voice message support
 - **Speech-to-Text (STT)**:
-  - Provider: OpenAI Whisper (cloud) or self-hosted (OpenAI-compatible)
+  - Provider: OpenAI Whisper (Cloud) or Self-hosted (OpenAI-compatible)
   - Model: Whisper model name
-  - API key (optional for OpenAI, uses environment variable if not set)
+  - API key (optional for OpenAI, uses OPENAI_API_KEY environment variable if not set)
   - Host URL (for self-hosted providers)
 - **Command Intelligence** (advanced settings):
   - AI model for processing transcriptions
@@ -166,7 +166,7 @@ Manage tool integrations:
   - Research
   - Smart Home
   - Information
-- **Filter by status** - All, Available, Unconfigured, Configured, Coming Soon
+- **Filter by status** - Show All, Available, Unconfigured, Configured, Coming Soon
 - **Configure** - Set up API keys and options via dialogs
 - **OAuth flows** - Connect Google, Spotify, Home Assistant, etc.
 - **Edit/disconnect** - Manage connected integrations
@@ -178,8 +178,8 @@ Manage tool integrations:
 Changes in the dashboard are immediately reflected in `config.yaml`. The sync status indicator shows:
 
 - **Synced** - All changes saved
-- **Syncing** - Save in progress
-- **Error** - Sync failed
+- **Syncing...** - Save in progress
+- **Sync Error** - Sync failed
 - **Disconnected** - Lost connection to backend
 
 ### Dark/Light Theme
@@ -230,12 +230,15 @@ The dashboard communicates with the MindRoom backend API at `/api/`. Key endpoin
 - `POST /api/credentials/:service` - Set credentials
 - `POST /api/credentials/:service/api-key` - Set API key
 - `GET /api/credentials/:service/api-key` - Get masked API key
+- `POST /api/credentials/:service/test` - Test credentials validity
 - `DELETE /api/credentials/:service` - Delete credentials
 
 ### Tools & Matrix
 
 - `GET /api/tools` - List available tools with status
 - `GET /api/rooms` - List configured rooms
-- `GET /api/matrix/agents/rooms` - Get agent room memberships
+- `GET /api/matrix/agents/rooms` - Get all agents' room memberships
+- `GET /api/matrix/agents/:id/rooms` - Get specific agent's room memberships
+- `POST /api/matrix/rooms/leave` - Leave a single room
 - `POST /api/matrix/rooms/leave-bulk` - Leave multiple rooms
 - `POST /api/test/model` - Test model connection

@@ -274,9 +274,11 @@ Notes:
     if topic == "list_schedules":
         return """**List Schedules Command**
 
-Usage: `!list_schedules` or `!listschedules`
+Usage: `!list_schedules`
 
-Shows all pending scheduled tasks in this thread."""
+Alternative syntax: `!listschedules`, `!list-schedules`, `!list_schedule`
+
+Shows pending scheduled tasks. When used in a thread, shows tasks for that thread. When used in the main room, shows all tasks in the room."""
 
     if topic in {"cancel", "cancel_schedule"}:
         return """**Cancel Schedule Command**
@@ -284,9 +286,11 @@ Shows all pending scheduled tasks in this thread."""
 Usage: `!cancel_schedule <id>` - Cancel a scheduled task
        `!cancel_schedule all` - Cancel ALL scheduled tasks in this room
 
+Alternative syntax: `!cancelschedule`, `!cancel-schedule`
+
 Examples:
 - `!cancel_schedule abc123` - Cancel the task with ID abc123
-- `!cancel_schedule all` - Cancel all scheduled tasks (requires confirmation)
+- `!cancel_schedule all` - Cancel all scheduled tasks
 
 Use `!list_schedules` to see task IDs."""
 

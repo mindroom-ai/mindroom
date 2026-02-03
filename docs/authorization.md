@@ -111,7 +111,8 @@ Examples:
       ▼
 ┌─────────────┐     ┌─────────────┐
 │ Is MindRoom │────▶│ Authorized  │────▶ Process
-│ agent/team  │ Yes └─────────────┘
+│ agent/team/ │ Yes └─────────────┘
+│ router      │
 └─────┬───────┘
       │ No
       ▼
@@ -121,31 +122,36 @@ Examples:
 └─────┬───────┘
       │ No
       ▼
+┌───────────────────┐
+│ Room in           │
+│ room_permissions? │
+└─────────┬─────────┘
+          │
+     ┌────┴────┐
+    Yes       No
+     │         │
+     ▼         ▼
 ┌─────────────┐     ┌─────────────┐
-│ Check Room  │────▶│ Authorized  │────▶ Process
-│ Permissions │ Yes └─────────────┘
-└─────┬───────┘
-      │ No
-      ▼
-┌─────────────┐     ┌─────────────┐
-│ Check       │────▶│ Authorized  │────▶ Process
-│ Default     │ Yes └─────────────┘
-└─────┬───────┘
-      │ No
-      ▼
-┌─────────────┐
-│ Ignore      │
-│ Message     │
-└─────────────┘
+│ User in     │     │ default_    │
+│ room list?  │     │ room_access │
+└─────┬───────┘     └─────┬───────┘
+   ┌──┴──┐             ┌──┴──┐
+  Yes   No           true  false
+   │     │             │     │
+   ▼     ▼             ▼     ▼
+ ┌───────────┐     ┌───────────┐
+ │ Authorize │     │  Ignore   │
+ │ (Process) │     │  Message  │
+ └───────────┘     └───────────┘
 ```
 
 The authorization checks are performed in order:
 
-1. **Internal system user** - The `@mindroom_user` account is always authorized
-2. **MindRoom agents/teams** - Configured agents and teams are authorized to communicate
+1. **Internal system user** - The `@mindroom_user` account on the current domain is always authorized (note: `@mindroom_user` from a different domain is NOT automatically authorized)
+2. **MindRoom agents/teams/router** - Configured agents, teams, and the router are authorized to communicate
 3. **Global users** - Users in `global_users` have access to all rooms
-4. **Room permissions** - Users listed for a specific room ID
-5. **Default access** - Falls back to `default_room_access` setting
+4. **Room permissions** - Users listed for a specific room ID (if a room is in `room_permissions` but the user is not listed, access is denied - it does not fall through to default access)
+5. **Default access** - For rooms not in `room_permissions` at all, falls back to `default_room_access` setting
 
 ## SaaS Platform Authorization
 
