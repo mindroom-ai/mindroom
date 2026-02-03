@@ -25,6 +25,7 @@ class CommandType(Enum):
     WIDGET = "widget"
     CONFIG = "config"  # Configuration command
     HI = "hi"  # Welcome message command
+    SKILL = "skill"  # Skill command
     UNKNOWN = "unknown"  # Special type for unrecognized commands
 
 
@@ -37,6 +38,7 @@ COMMAND_DOCS = {
     CommandType.WIDGET: ("!widget [url]", "Add configuration widget"),
     CommandType.CONFIG: ("!config <operation>", "Manage configuration"),
     CommandType.HI: ("!hi", "Show welcome message"),
+    CommandType.SKILL: ("!skill <name> [args]", "Run a skill by name"),
 }
 
 
@@ -92,8 +94,9 @@ class CommandParser:
     WIDGET_PATTERN = re.compile(r"^!widget(?:\s+(.+))?$", re.IGNORECASE)
     CONFIG_PATTERN = re.compile(r"^!config(?:\s+(.+))?$", re.IGNORECASE)
     HI_PATTERN = re.compile(r"^!hi$", re.IGNORECASE)
+    SKILL_PATTERN = re.compile(r"^!skill(?:\s+(.+))?$", re.IGNORECASE)
 
-    def parse(self, message: str) -> Command | None:  # noqa: PLR0911
+    def parse(self, message: str) -> Command | None:  # noqa: C901, PLR0911
         """Parse a message for commands.
 
         Args:
@@ -181,6 +184,25 @@ class CommandParser:
                 raw_text=message,
             )
 
+        # !skill command
+        match = self.SKILL_PATTERN.match(message)
+        if match:
+            payload = match.group(1).strip() if match.group(1) else ""
+            if not payload:
+                return Command(
+                    type=CommandType.SKILL,
+                    args={"skill_name": None, "args_text": ""},
+                    raw_text=message,
+                )
+            parts = payload.split(maxsplit=1)
+            skill_name = parts[0].strip()
+            args_text = parts[1].strip() if len(parts) > 1 else ""
+            return Command(
+                type=CommandType.SKILL,
+                args={"skill_name": skill_name, "args_text": args_text},
+                raw_text=message,
+            )
+
         # Unknown command - return a special Command indicating it's unknown
         logger.debug(f"Unknown command: {message}")
         return Command(
@@ -190,7 +212,7 @@ class CommandParser:
         )
 
 
-def get_command_help(topic: str | None = None) -> str:
+def get_command_help(topic: str | None = None) -> str:  # noqa: PLR0911
     """Get help text for commands.
 
     Args:
@@ -235,6 +257,19 @@ How it works:
 - Agents receive clear instructions about conditions to check
 - Multiple agents collaborate when mentioned together
 - Automated tasks are clearly marked so agents don't wait for follow-up"""
+
+    if topic == "skill":
+        return """**Skill Command**
+
+Usage: `!skill <name> [args]` - Run a user-invocable skill by name
+
+Examples:
+- `!skill repo-quick-audit`
+- `!skill summarize Release notes for v2.3`
+
+Notes:
+- Skills must be enabled on the target agent and marked `user-invocable: true`.
+- When a skill uses `command-dispatch: tool`, the tool runs directly with raw args."""
 
     if topic == "list_schedules":
         return """**List Schedules Command**

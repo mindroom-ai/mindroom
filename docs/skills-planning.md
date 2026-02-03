@@ -169,7 +169,7 @@ Supported frontmatter fields:
 - `homepage` (string, optional)
 - `metadata` (string, optional, JSON5; single-line in OpenClaw)
 
-Ignored for MVP (not yet wired):
+Previously ignored for MVP (now wired for `!skill` command dispatch):
 - `user-invocable`, `disable-model-invocation`, `command-dispatch`, `command-tool`, `command-arg-mode`
 
 Resolution rules:
@@ -240,15 +240,16 @@ Status: complete (2026-02-02)
 - [x] Keep `tools_metadata.json` generation for frontend icon scripts.
 
 ### Phase 4: Skill command / dispatch (OpenClaw-style)
+Status: complete (2026-02-03)
 
-- Parse command dispatch fields from `SKILL.md` (e.g., `command-dispatch`, `command-tool`,
+- [x] Parse command dispatch fields from `SKILL.md` (e.g., `command-dispatch`, `command-tool`,
   `command-arg-mode`, `user-invocable`).
-- Add a chat command handler (e.g., `!skill <name> [args]`) that:
+- [x] Add a chat command handler (`!skill <name> [args]`) that:
   - Resolves the skill by name (same precedence as normal skill discovery).
-  - Optionally maps to a tool call (`command-tool`) or inlines skill usage guidance.
-  - Supports basic argument pass-through (`command-arg-mode`) with safe defaults.
-- Ensure this path is opt-in per agent (new config flag or require `user-invocable: true`).
-- Add tests for command parsing + dispatch behavior.
+  - Optionally maps to a tool call (`command-tool`) or uses model-driven skill execution.
+  - Supports raw argument pass-through (`command-arg-mode: raw`) with safe defaults.
+- [x] Ensure this path is opt-in per agent (requires `user-invocable: true` + per-agent allowlist).
+- [x] Add tests for command parsing + dispatch behavior.
 
 ### Phase 5: Optional enhancements
 - Skills watcher (hot reload).
@@ -297,3 +298,4 @@ Status: complete (2026-02-02)
 - 2026-02-02: Added Phase 4 plan for skill command/dispatch; moved optional enhancements to Phase 5.
 - 2026-02-03: Switched skills to Agno `Skills` + `LocalSkills(validate=False)` with OpenClaw JSON5 metadata normalization; prompt injection now uses Agno `<skills_system>` snippet.
 - 2026-02-03: Live skill test via Matty confirmed `hello` skill usage on `@mindroom_general` (response included `SKILL_USED: hello`).
+- 2026-02-03: Phase 4 complete: `!skill` command wired with OpenClaw-style dispatch (raw args to tool) and tests for parsing/dispatch.
