@@ -33,6 +33,7 @@ docker compose up -d
 ```
 
 Open:
+
 - MindRoom UI: http://localhost:3003
 - Element: http://localhost:8080
 - Matrix homeserver: http://matrix.localhost:8008
