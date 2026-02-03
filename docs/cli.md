@@ -32,16 +32,16 @@ mindroom [OPTIONS] COMMAND [ARGS]...
  Mindroom: Multi-agent Matrix bot system
 
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --install-completion          Install completion for the current shell.      │
-│ --show-completion             Show completion for the current shell, to copy │
-│                               it or customize the installation.              │
-│ --help                        Show this message and exit.                    │
-╰──────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ───────────────────────────────────────────────────────────────────╮
-│ version   Show the current version of Mindroom.                              │
-│ run       Run the mindroom multi-agent system.                               │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --install-completion          Install completion for the current shell.                │
+│ --show-completion             Show completion for the current shell, to copy it or     │
+│                               customize the installation.                              │
+│ --help                        Show this message and exit.                              │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
+│ version   Show the current version of Mindroom.                                        │
+│ run       Run the mindroom multi-agent system.                                         │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -70,9 +70,9 @@ Show the current MindRoom version.
  Show the current version of Mindroom.
 
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --help          Show this message and exit.                                  │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --help          Show this message and exit.                                            │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -100,19 +100,18 @@ Start MindRoom with your configuration.
 
  Run the mindroom multi-agent system.
 
- This command starts the multi-agent bot system which automatically: - Creates
- all necessary user and agent accounts - Creates all rooms defined in
- config.yaml - Manages agent room memberships
+ This command starts the multi-agent bot system which automatically: - Creates all
+ necessary user and agent accounts - Creates all rooms defined in config.yaml - Manages
+ agent room memberships
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --log-level     -l      TEXT  Set the logging level (DEBUG, INFO, WARNING,   │
-│                               ERROR)                                         │
-│                               [default: INFO]                                │
-│ --storage-path  -s      PATH  Base directory for persistent MindRoom data    │
-│                               (state, sessions, tracking)                    │
-│                               [default: mindroom_data]                       │
-│ --help                        Show this message and exit.                    │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --log-level     -l      TEXT  Set the logging level (DEBUG, INFO, WARNING, ERROR)      │
+│                               [default: INFO]                                          │
+│ --storage-path  -s      PATH  Base directory for persistent MindRoom data (state,      │
+│                               sessions, tracking)                                      │
+│                               [default: mindroom_data]                                 │
+│ --help                        Show this message and exit.                              │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
