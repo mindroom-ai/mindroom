@@ -6,13 +6,48 @@ icon: lucide/rocket
 
 This guide will help you set up MindRoom and create your first AI agent.
 
-## Prerequisites
+## Recommended: Full Stack Docker Compose (backend + frontend + Matrix + Element)
+
+MindRoom depends on a Matrix homeserver plus supporting services. The easiest onboarding is the full stack Docker Compose repo, which brings everything up together.
+
+**Prereqs:** Docker + Docker Compose.
+
+### 1. Clone the full stack repo
+
+```bash
+git clone https://github.com/mindroom-ai/mindroom-stack
+cd mindroom-stack
+```
+
+### 2. Add your API keys
+
+```bash
+cp .env.example .env
+$EDITOR .env  # add at least one AI provider key
+```
+
+### 3. Start everything
+
+```bash
+docker compose up -d
+```
+
+Open:
+- MindRoom UI: http://localhost:3003
+- Element: http://localhost:8080
+- Matrix homeserver: http://matrix.localhost:8008
+
+## Manual Install (advanced)
+
+Use this if you already have a Matrix homeserver and want to run MindRoom directly.
+
+### Prerequisites
 
 - Python 3.12 or higher
 - A Matrix homeserver (or use a public one like matrix.org)
 - API keys for your preferred AI provider (Anthropic, OpenAI, etc.)
 
-## Installation
+### Installation
 
 === "uv (recommended)"
 
@@ -35,9 +70,9 @@ This guide will help you set up MindRoom and create your first AI agent.
     source .venv/bin/activate
     ```
 
-## Configuration
+### Configuration
 
-### 1. Create your config file
+#### 1. Create your config file
 
 Create a `config.yaml` in your working directory:
 
@@ -61,7 +96,7 @@ defaults:
 timezone: America/Los_Angeles
 ```
 
-### 2. Set up environment variables
+#### 2. Set up environment variables
 
 Create a `.env` file with your credentials:
 
@@ -84,7 +119,7 @@ ANTHROPIC_API_KEY=your_anthropic_key
 > [!NOTE]
 > MindRoom automatically creates Matrix user accounts for each agent. Your Matrix homeserver must allow open registration, or you need to configure it to allow registration from localhost. If registration fails, check your homeserver's registration settings.
 
-### 3. Run MindRoom
+#### 3. Run MindRoom
 
 ```bash
 mindroom run
