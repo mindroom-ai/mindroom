@@ -123,6 +123,7 @@ scripts.mindroom = "mindroom.cli:main"
 dev = [
   "aioresponses>=0.7.8",
   "markdown-code-runner>=2.4",
+  "markdown-gfm-admonition",
   "matty>=0.3",
   "mypy>=1.17",
   "pre-commit>=4.2",
@@ -141,6 +142,7 @@ dev = [
   "types-pytz>=2025.2.0.20250809",
   "types-pyyaml>=6.0.12.20250516",
   "types-requests>=2.32.4.20250611",
+  "zensical",
 ]
 
 [tool.hatch.version]

@@ -254,3 +254,19 @@ start-saas-frontend-dev:
 # Start SaaS platform backend (dev)
 start-saas-backend-dev:
     cd saas-platform/platform-backend && uv run uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+#############################
+# Documentation
+#############################
+
+# Build documentation
+doc-build:
+    uv run zensical build
+
+# Serve documentation locally (with live reload)
+doc-serve:
+    uv run zensical serve
+
+# Update auto-generated documentation
+doc-update:
+    uv run python docs/run_markdown_code_runner.py
