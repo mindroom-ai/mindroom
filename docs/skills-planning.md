@@ -77,8 +77,8 @@ Implementation (current):
 Eligibility (OpenClaw style):
 - `metadata.openclaw.always` bypasses other checks.
 - `metadata.openclaw.os` matches current OS.
-- `metadata.openclaw.requires.bins` and `anyBins` (optional; in Mindroom this may map to
-  PATH executables if present).
+- `metadata.openclaw.requires.bins` requires all binaries to exist in PATH.
+- `metadata.openclaw.requires.anyBins` requires at least one binary in PATH.
 - `metadata.openclaw.requires.env` satisfied by real env vars or credentials.
 - `metadata.openclaw.requires.config` satisfied by `config.yaml` paths.
 - Skill is excluded if disabled in config or not eligible.
@@ -185,9 +185,8 @@ Use `metadata.openclaw` when present:
 - `os`: include only if it matches current OS.
 - `requires.env`: include only if env var is set or credentials supply it.
 - `requires.config`: include only if config path is truthy.
-
-Out of scope for MVP:
-- `requires.bins`, `requires.anyBins` (optional later if needed)
+- `requires.bins`: include only if all binaries are found in PATH.
+- `requires.anyBins`: include only if any binary is found in PATH.
 
 ### 8.3 Prompt injection
 
@@ -253,7 +252,7 @@ Status: complete (2026-02-03)
 
 ### Phase 5: Optional enhancements
 - [x] Skills watcher (hot reload + cache invalidation).
-- [ ] Dependency installer helper.
+- [x] Dependency installer helper (PATH bin gating + logging).
 - [ ] Plugin packaging beyond local dirs.
 
 ## 9) Testing Strategy
@@ -300,3 +299,4 @@ Status: complete (2026-02-03)
 - 2026-02-03: Live skill test via Matty confirmed `hello` skill usage on `@mindroom_general` (response included `SKILL_USED: hello`).
 - 2026-02-03: Phase 4 complete: `!skill` command wired with OpenClaw-style dispatch (raw args to tool) and tests for parsing/dispatch.
 - 2026-02-03: Added skill cache + watcher that clears cached skills when SKILL.md files change.
+- 2026-02-03: Added `requires.bins` / `requires.anyBins` gating with debug logs to surface missing binaries.

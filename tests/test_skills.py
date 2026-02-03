@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import pytest
 from agno.tools import Toolkit
 
+import mindroom.skills as skills_module
 from mindroom.bot import _run_skill_command_tool
 from mindroom.config import AgentConfig, Config
 from mindroom.skills import build_agent_skills, resolve_skill_command_spec
@@ -113,6 +114,68 @@ def test_skill_eligibility_env_and_config(tmp_path: Path) -> None:
         credential_keys={"TEST_ENV"},
     )
     assert _skill_names(eligible_with_credentials) == ["envconfig"]
+
+
+def test_skill_eligibility_requires_bins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gate skills on required binaries."""
+    metadata = '{openclaw:{requires:{bins:["git","make"]}}}'
+    _write_skill(tmp_path, "bins", "Requires bins", metadata)
+
+    config = _base_config(["bins"])
+
+    def only_git(name: str) -> str | None:
+        return "/bin/git" if name == "git" else None
+
+    monkeypatch.setattr(skills_module.shutil, "which", only_git)
+    missing = build_agent_skills(
+        "code",
+        config,
+        skill_roots=[tmp_path],
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert _skill_names(missing) == []
+
+    monkeypatch.setattr(skills_module.shutil, "which", lambda name: f"/bin/{name}")
+    available = build_agent_skills(
+        "code",
+        config,
+        skill_roots=[tmp_path],
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert _skill_names(available) == ["bins"]
+
+
+def test_skill_eligibility_any_bins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Allow skills when any binary requirement is satisfied."""
+    metadata = '{openclaw:{requires:{anyBins:["rg","fd"]}}}'
+    _write_skill(tmp_path, "anybins", "Any bins", metadata)
+
+    config = _base_config(["anybins"])
+
+    def only_fd(name: str) -> str | None:
+        return "/bin/fd" if name == "fd" else None
+
+    monkeypatch.setattr(skills_module.shutil, "which", only_fd)
+    eligible = build_agent_skills(
+        "code",
+        config,
+        skill_roots=[tmp_path],
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert _skill_names(eligible) == ["anybins"]
+
+    monkeypatch.setattr(skills_module.shutil, "which", lambda _name: None)
+    ineligible = build_agent_skills(
+        "code",
+        config,
+        skill_roots=[tmp_path],
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert _skill_names(ineligible) == []
 
 
 def test_skill_eligibility_os_mismatch(tmp_path: Path) -> None:

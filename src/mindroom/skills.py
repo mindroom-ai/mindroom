@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import platform
 import re
+import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -439,16 +440,7 @@ def _is_skill_eligible(
         return False
 
     requires = openclaw.get("requires")
-    if isinstance(requires, dict):
-        env_requirements = _normalize_str_list(requires.get("env"))
-        if env_requirements and not _env_requirements_met(env_requirements, env_vars, credential_keys):
-            return False
-
-        config_requirements = _normalize_str_list(requires.get("config"))
-        if config_requirements and not _config_requirements_met(config_requirements, config_data):
-            return False
-
-    return True
+    return _requirements_met(requires, config_data, env_vars, credential_keys, skill.name)
 
 
 def _normalize_str_list(value: object) -> list[str]:
@@ -481,8 +473,49 @@ def _env_requirements_met(
     return True
 
 
+def _missing_bins(requirements: Sequence[str]) -> list[str]:
+    return [requirement for requirement in requirements if shutil.which(requirement) is None]
+
+
+def _any_bins_requirements_met(requirements: Sequence[str]) -> bool:
+    return any(shutil.which(requirement) for requirement in requirements)
+
+
 def _config_requirements_met(requirements: Sequence[str], config_data: Mapping[str, Any]) -> bool:
     return all(_config_path_truthy(config_data, requirement) for requirement in requirements)
+
+
+def _requirements_met(
+    requires: object,
+    config_data: Mapping[str, Any],
+    env_vars: Mapping[str, str],
+    credential_keys: set[str],
+    skill_name: str,
+) -> bool:
+    if not isinstance(requires, dict):
+        return True
+
+    env_requirements = _normalize_str_list(requires.get("env"))
+    if env_requirements and not _env_requirements_met(env_requirements, env_vars, credential_keys):
+        return False
+
+    config_requirements = _normalize_str_list(requires.get("config"))
+    if config_requirements and not _config_requirements_met(config_requirements, config_data):
+        return False
+
+    bin_requirements = _normalize_str_list(requires.get("bins"))
+    if bin_requirements:
+        missing_bins = _missing_bins(bin_requirements)
+        if missing_bins:
+            logger.debug("Skill missing required binaries", skill=skill_name, bins=missing_bins)
+            return False
+
+    any_bins_requirements = _normalize_str_list(requires.get("anyBins"))
+    if any_bins_requirements and not _any_bins_requirements_met(any_bins_requirements):
+        logger.debug("Skill missing any required binaries", skill=skill_name, bins=any_bins_requirements)
+        return False
+
+    return True
 
 
 def _config_path_truthy(config_data: Mapping[str, Any], path: str) -> bool:
