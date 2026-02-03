@@ -336,18 +336,27 @@ def _resolve_tool_dispatch_target(  # noqa: C901, PLR0911, PLR0912
     return None, None, f"Tool '{command_tool}' not found for this agent."
 
 
+@dataclass(frozen=True)
+class ToolCallArguments:
+    """Prepared arguments for a tool call."""
+
+    args: tuple[object, ...]
+    kwargs: dict[str, object]
+    error: str | None = None
+
+
 def _prepare_tool_call_arguments(  # noqa: PLR0911
     entrypoint: Callable[..., object] | None,
     base_args: Mapping[str, object],
-) -> tuple[tuple[object, ...], dict[str, object], str | None]:
+) -> ToolCallArguments:
     if entrypoint is None:
-        return (), {}, "Tool entrypoint is missing."
+        return ToolCallArguments((), {}, "Tool entrypoint is missing.")
 
     signature = inspect.signature(entrypoint)
     params = list(signature.parameters.values())
     has_var_kw = any(param.kind == param.VAR_KEYWORD for param in params)
     if has_var_kw:
-        return (), dict(base_args), None
+        return ToolCallArguments((), dict(base_args), None)
 
     kwargs = {key: value for key, value in base_args.items() if key in signature.parameters}
     if kwargs:
@@ -364,17 +373,17 @@ def _prepare_tool_call_arguments(  # noqa: PLR0911
             and param.name not in kwargs
         ]
         if missing:
-            return (), {}, f"Tool requires parameters: {', '.join(missing)}."
-        return (), kwargs, None
+            return ToolCallArguments((), {}, f"Tool requires parameters: {', '.join(missing)}.")
+        return ToolCallArguments((), kwargs, None)
 
     if not params:
-        return (), {}, None
+        return ToolCallArguments((), {}, None)
 
     if len(params) == 1 and params[0].kind in (
         inspect.Parameter.POSITIONAL_ONLY,
         inspect.Parameter.POSITIONAL_OR_KEYWORD,
     ):
-        return (base_args.get("command", ""),), {}, None
+        return ToolCallArguments((base_args.get("command", ""),), {}, None)
 
     missing = [
         param.name
@@ -388,8 +397,8 @@ def _prepare_tool_call_arguments(  # noqa: PLR0911
         )
     ]
     if missing:
-        return (), {}, f"Tool requires parameters: {', '.join(missing)}."
-    return (), {}, None
+        return ToolCallArguments((), {}, f"Tool requires parameters: {', '.join(missing)}.")
+    return ToolCallArguments((), {}, None)
 
 
 async def _maybe_await(value: object) -> object:
@@ -419,9 +428,9 @@ async def _run_skill_command_tool(
         "skillName": skill_name,
     }
     entrypoint = function.entrypoint
-    call_args, call_kwargs, arg_error = _prepare_tool_call_arguments(entrypoint, base_args)
-    if arg_error:
-        return f"❌ {arg_error}"
+    call_args = _prepare_tool_call_arguments(entrypoint, base_args)
+    if call_args.error:
+        return f"❌ {call_args.error}"
     assert entrypoint is not None
 
     try:
@@ -431,12 +440,12 @@ async def _run_skill_command_tool(
             if connect:
                 await _maybe_await(connect())
             try:
-                result = await _maybe_await(entrypoint(*call_args, **call_kwargs))
+                result = await _maybe_await(entrypoint(*call_args.args, **call_args.kwargs))
             finally:
                 if close:
                     await _maybe_await(close())
         else:
-            result = await _maybe_await(entrypoint(*call_args, **call_kwargs))
+            result = await _maybe_await(entrypoint(*call_args.args, **call_args.kwargs))
     except Exception as exc:
         logger.warning(
             "Skill command tool dispatch failed",
