@@ -252,9 +252,9 @@ Status: complete (2026-02-03)
 - [x] Add tests for command parsing + dispatch behavior.
 
 ### Phase 5: Optional enhancements
-- Skills watcher (hot reload).
-- Dependency installer helper.
-- Plugin packaging beyond local dirs.
+- [x] Skills watcher (hot reload + cache invalidation).
+- [ ] Dependency installer helper.
+- [ ] Plugin packaging beyond local dirs.
 
 ## 9) Testing Strategy
 
@@ -285,7 +285,7 @@ Status: complete (2026-02-03)
 ## 11) Performance Notes
 
 - Skills list should be compact to avoid prompt bloat.
-- Cache parsed skills and only rebuild when sources change.
+- Cache parsed skills and only rebuild when sources change (implemented via SKILL.md snapshot).
 - Consider debounced file watching in later phases.
 
 ## 12) Change Log
@@ -299,3 +299,4 @@ Status: complete (2026-02-03)
 - 2026-02-03: Switched skills to Agno `Skills` + `LocalSkills(validate=False)` with OpenClaw JSON5 metadata normalization; prompt injection now uses Agno `<skills_system>` snippet.
 - 2026-02-03: Live skill test via Matty confirmed `hello` skill usage on `@mindroom_general` (response included `SKILL_USED: hello`).
 - 2026-02-03: Phase 4 complete: `!skill` command wired with OpenClaw-style dispatch (raw args to tool) and tests for parsing/dispatch.
+- 2026-02-03: Added skill cache + watcher that clears cached skills when SKILL.md files change.

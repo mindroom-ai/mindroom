@@ -67,7 +67,7 @@ from .scheduling import (
     restore_scheduled_tasks,
     schedule_task,
 )
-from .skills import resolve_skill_command_spec
+from .skills import clear_skill_cache, get_skill_snapshot, resolve_skill_command_spec
 from .stop import StopManager
 from .streaming import (
     IN_PROGRESS_MARKER,
@@ -2786,6 +2786,18 @@ async def _watch_config_task(config_path: Path, orchestrator: MultiAgentOrchestr
     await watch_file(config_path, on_config_change, stop_watching)
 
 
+async def _watch_skills_task(orchestrator: MultiAgentOrchestrator) -> None:
+    """Watch skill roots for changes and clear cached skills."""
+    last_snapshot = get_skill_snapshot()
+    while orchestrator.running:
+        await asyncio.sleep(1.0)
+        snapshot = get_skill_snapshot()
+        if snapshot != last_snapshot:
+            last_snapshot = snapshot
+            clear_skill_cache()
+            logger.info("Skills changed; cache cleared")
+
+
 async def main(log_level: str, storage_path: Path) -> None:
     """Main entry point for the multi-agent bot system.
 
@@ -2818,8 +2830,14 @@ async def main(log_level: str, storage_path: Path) -> None:
         # Create task to watch config file for changes
         watcher_task = asyncio.create_task(_watch_config_task(config_path, orchestrator))
 
+        # Create task to watch skills for changes
+        skills_watcher_task = asyncio.create_task(_watch_skills_task(orchestrator))
+
         # Wait for either orchestrator or watcher to complete
-        done, pending = await asyncio.wait({orchestrator_task, watcher_task}, return_when=asyncio.FIRST_COMPLETED)
+        done, pending = await asyncio.wait(
+            {orchestrator_task, watcher_task, skills_watcher_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
 
         # Check if any completed task had an exception
         for task in done:

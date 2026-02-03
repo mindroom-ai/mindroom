@@ -34,6 +34,8 @@ _OS_ALIASES = {
 }
 
 _PLUGIN_SKILL_ROOTS: list[Path] = []
+SkillSnapshot = tuple[tuple[str, int, int], ...]
+_SKILL_CACHE: dict[Path, tuple[SkillSnapshot, list[Skill]]] = {}
 
 
 @dataclass
@@ -207,6 +209,7 @@ def set_plugin_skill_roots(roots: Sequence[Path]) -> None:
     """Replace the plugin-provided skill roots."""
     global _PLUGIN_SKILL_ROOTS
     _PLUGIN_SKILL_ROOTS = _unique_paths(roots)
+    clear_skill_cache()
 
 
 def get_plugin_skill_roots() -> list[Path]:
@@ -227,6 +230,36 @@ def get_bundled_skills_dir() -> Path:
 def get_default_skill_roots() -> list[Path]:
     """Return the default skill search roots in precedence order."""
     return _unique_paths([get_bundled_skills_dir(), *_PLUGIN_SKILL_ROOTS, get_user_skills_dir()])
+
+
+def clear_skill_cache() -> None:
+    """Clear cached skill loads."""
+    _SKILL_CACHE.clear()
+
+
+def get_skill_snapshot(roots: Sequence[Path] | None = None) -> SkillSnapshot:
+    """Return a snapshot of SKILL.md files under the provided roots."""
+    roots = list(roots or get_default_skill_roots())
+    entries: list[tuple[str, int, int]] = []
+    for root in _unique_paths(roots):
+        entries.extend(_snapshot_skill_files(root))
+    entries.sort()
+    return tuple(entries)
+
+
+def _snapshot_skill_files(root: Path) -> list[tuple[str, int, int]]:
+    if not root.exists() or not root.is_dir():
+        return []
+
+    entries: list[tuple[str, int, int]] = []
+    for skill_file in root.rglob(SKILL_FILENAME):
+        try:
+            stat = skill_file.stat()
+        except OSError:
+            continue
+        entries.append((str(skill_file), stat.st_mtime_ns, stat.st_size))
+    entries.sort()
+    return entries
 
 
 def _iter_skill_dirs(root: Path) -> list[Path]:
@@ -329,12 +362,23 @@ def _load_root_skills(root: Path) -> list[Skill]:
     if not root.exists() or not root.is_dir():
         return []
 
-    loader = LocalSkills(str(root), validate=False)
+    resolved_root = root.expanduser().resolve()
+    snapshot = tuple(_snapshot_skill_files(resolved_root))
+    cached = _SKILL_CACHE.get(resolved_root)
+    if cached and cached[0] == snapshot:
+        return cached[1]
+
+    loader = LocalSkills(str(resolved_root), validate=False)
     try:
-        return loader.load()
+        skills = loader.load()
     except Exception as exc:
-        logger.warning("Failed to load skills", path=str(root), error=str(exc))
+        logger.warning("Failed to load skills", path=str(resolved_root), error=str(exc))
+        if cached:
+            return cached[1]
         return []
+
+    _SKILL_CACHE[resolved_root] = (snapshot, skills)
+    return skills
 
 
 def _normalize_skill(skill: Skill) -> Skill | None:

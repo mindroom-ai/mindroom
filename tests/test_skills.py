@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import platform
 from typing import TYPE_CHECKING
 
@@ -164,6 +165,36 @@ def test_get_agent_skills_ordering(tmp_path: Path) -> None:
     )
 
     assert _skill_names(skills) == ["beta", "alpha"]
+
+
+def test_skill_cache_refreshes_on_change(tmp_path: Path) -> None:
+    """Reload cached skills when SKILL.md changes."""
+    skill_path = _write_skill(tmp_path, "alpha", "Alpha v1")
+
+    config = _base_config(["alpha"])
+    skills = build_agent_skills(
+        "code",
+        config,
+        skill_roots=[tmp_path],
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert skills is not None
+    assert skills.get_skill("alpha").description == "Alpha v1"
+
+    old_mtime = skill_path.stat().st_mtime_ns
+    skill_path = _write_skill(tmp_path, "alpha", "Alpha v2")
+    os.utime(skill_path, ns=(old_mtime + 2_000_000_000, old_mtime + 2_000_000_000))
+
+    refreshed = build_agent_skills(
+        "code",
+        config,
+        skill_roots=[tmp_path],
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert refreshed is not None
+    assert refreshed.get_skill("alpha").description == "Alpha v2"
 
 
 def test_skill_command_spec_parses_frontmatter(tmp_path: Path) -> None:
