@@ -4,65 +4,27 @@ icon: lucide/message-square
 
 # Matrix Integration
 
-MindRoom uses the Matrix protocol for all agent communication. The Matrix integration is implemented in `src/mindroom/matrix/` and consists of several specialized modules.
+MindRoom uses the Matrix protocol for all agent communication. The integration is implemented in `src/mindroom/matrix/`.
 
 ## Why Matrix?
 
 - **Federated** - Connect to any Matrix homeserver
 - **Bridgeable** - Bridge to Discord, Slack, Telegram, and more
 - **Open** - Open standard and open-source implementations
-- **End-to-End Encryption** - Secure communication (optional, with encrypted room support)
-
-## Architecture Overview
-
-The Matrix integration is split into focused modules:
-
-| Module | Purpose |
-|--------|---------|
-| `client.py` | Core client operations (login, send, edit, rooms) |
-| `rooms.py` | Room management and state persistence |
-| `users.py` | Agent user account creation and management |
-| `presence.py` | Presence status and streaming decisions |
-| `state.py` | Persistent state (accounts, rooms) via YAML |
-| `identity.py` | Matrix ID parsing and agent identification |
-| `event_info.py` | Event relation analysis (threads, edits, replies) |
-| `message_builder.py` | MSC3440-compliant message construction |
-| `mentions.py` | @mention parsing and formatting |
-| `typing.py` | Typing indicator management |
-| `large_messages.py` | Handling messages exceeding 64KB limit |
-| `message_content.py` | Message extraction with MXC attachment support |
+- **End-to-End Encryption** - Secure communication with encrypted room support
 
 ## Matrix Client
 
-MindRoom uses `matrix-nio` for Matrix communication. The client is created with SSL context handling and encryption key storage:
-
-```python
-from mindroom.matrix.client import create_matrix_client, login
-
-# Create client with optional SSL verification (for dev environments)
-client = create_matrix_client(
-    homeserver="https://matrix.example.com",
-    user_id="@mindroom_agent:example.com",
-    store_path="/path/to/encryption/keys"  # Optional, defaults to mindroom_data/encryption_keys/<sanitized_user_id>
-)
-
-# Login with password
-client = await login(homeserver, user_id, password)
-
-# Or use context manager for automatic cleanup
-from mindroom.matrix.client import matrix_client
-
-async with matrix_client(homeserver, user_id, access_token) as client:
-    # Use client
-    pass
-```
+MindRoom uses `matrix-nio` for Matrix communication with SSL context handling and encryption key storage.
 
 ### Environment Variables
 
-- `MATRIX_HOMESERVER` - Matrix homeserver URL (default: `http://localhost:8008`)
-- `MATRIX_SERVER_NAME` - Federation server name (if different from homeserver hostname)
-- `MATRIX_SSL_VERIFY` - Set to `"false"` to disable SSL verification (default: `"true"`, dev only)
-- `MINDROOM_ENABLE_STREAMING` - Set to `"false"` to disable message streaming/editing (default: `"true"`)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MATRIX_HOMESERVER` | `http://localhost:8008` | Matrix homeserver URL |
+| `MATRIX_SERVER_NAME` | (from homeserver) | Federation server name |
+| `MATRIX_SSL_VERIFY` | `true` | Set to `false` for dev/self-signed certs |
+| `MINDROOM_ENABLE_STREAMING` | `true` | Enable message streaming via edits |
 
 ## Agent Users
 
@@ -70,89 +32,20 @@ Each agent gets its own Matrix user with the `mindroom_` prefix:
 
 ```
 @mindroom_assistant:example.com
-@mindroom_code:example.com
-@mindroom_research:example.com
 @mindroom_router:example.com  (built-in routing agent)
 ```
 
-Users are automatically created during orchestrator startup:
-
-```python
-from mindroom.matrix.users import create_agent_user
-
-agent_user = await create_agent_user(
-    homeserver="https://matrix.example.com",
-    agent_name="assistant",
-    agent_display_name="Assistant Agent"
-)
-# Returns AgentMatrixUser with user_id, display_name, password
-# Note: access_token is None until login_agent_user() is called
-```
-
-Credentials are persisted in `mindroom_data/matrix_state.yaml` for reuse across restarts.
-
-## State Management
-
-Matrix state (accounts and rooms) is persisted using Pydantic models:
-
-```python
-from mindroom.matrix.state import MatrixState
-
-# Load existing state
-state = MatrixState.load()
-
-# Access accounts
-account = state.get_account("agent_assistant")
-
-# Access rooms
-room = state.get_room("lobby")
-room_aliases = state.get_room_aliases()  # {key: room_id}
-
-# Add/update and save
-state.add_room("dev", "!abc:example.com", "#dev:example.com", "Development")
-state.save()
-```
-
-State file location: `mindroom_data/matrix_state.yaml`
+Users are automatically created during orchestrator startup and credentials are persisted in `{STORAGE_PATH}/matrix_state.yaml` (default: `mindroom_data/matrix_state.yaml`).
 
 ## Room Management
 
-Agents can:
+Agents can join existing rooms, create new rooms with AI-generated topics, respond to invites automatically, leave unconfigured rooms, and set room avatars.
 
-- Join existing rooms by alias or ID
-- Create new rooms with AI-generated topics
-- Respond to invites automatically
-- Leave rooms when no longer configured
-- Set room avatars
-
-```python
-from mindroom.matrix.rooms import ensure_room_exists, ensure_all_rooms_exist
-
-# Ensure a single room exists (creates if needed)
-room_id = await ensure_room_exists(
-    client=client,
-    room_key="lobby",
-    config=config,
-    power_users=["@mindroom_assistant:example.com"]
-)
-
-# Ensure all configured rooms exist
-room_ids = await ensure_all_rooms_exist(client, config)
-```
-
-### DM Room Detection
-
-```python
-from mindroom.matrix.rooms import is_dm_room
-
-if await is_dm_room(client, room_id):
-    # Handle DM-specific behavior
-    pass
-```
+Rooms are auto-created via `ensure_room_exists()` and `ensure_all_rooms_exist()`. DM rooms can be detected with `is_dm_room(client, room_id)`.
 
 ## Threading (MSC3440)
 
-Agents respond in threads following the [MSC3440](https://github.com/matrix-org/matrix-spec-proposals/blob/main/proposals/3440-threading-via-relations.md) specification. Thread messages use `m.relates_to` with `rel_type: m.thread`.
+Agents respond in threads following [MSC3440](https://github.com/matrix-org/matrix-spec-proposals/blob/main/proposals/3440-threading-via-relations.md). Thread messages use `m.relates_to` with `rel_type: m.thread`.
 
 ```
 ├── User: @assistant help with this code
@@ -161,197 +54,71 @@ Agents respond in threads following the [MSC3440](https://github.com/matrix-org/
 │   └── Assistant: Here's the updated version...
 ```
 
-### Building Thread Messages
-
-```python
-from mindroom.matrix.message_builder import build_message_content
-
-content = build_message_content(
-    body="Here's the solution...",
-    thread_event_id="$original_message_id",
-    latest_thread_event_id="$latest_in_thread",  # Required for MSC3440 fallback when no reply_to
-    mentioned_user_ids=["@user:example.com"],
-    # Optional: formatted_body for custom HTML, reply_to_event_id for genuine replies
-)
-```
-
-### Event Analysis
-
-The `EventInfo` dataclass analyzes all Matrix event relations:
-
-```python
-from mindroom.matrix.event_info import EventInfo
-
-# Parse event source dictionary (from nio event.source)
-info = EventInfo.from_event(event.source)
-
-if info.is_thread:
-    thread_root = info.thread_id  # Thread root event ID
-
-if info.is_edit:
-    original = info.original_event_id  # Event being edited
-
-if info.is_reply:
-    reply_target = info.reply_to_event_id  # Event being replied to
-
-if info.is_reaction:
-    emoji = info.reaction_key  # Reaction emoji/key
-    target = info.reaction_target_event_id
-
-if info.can_be_thread_root:
-    # Safe to start a new thread from this message (no existing relations)
-    pass
-else:
-    # Use info.safe_thread_root as alternative thread root
-    safe_root = info.safe_thread_root
-```
+Use `build_message_content()` from `message_builder.py` to construct thread-aware messages, and `EventInfo.from_event()` to analyze event relations (threads, edits, replies, reactions).
 
 ## Message Flow
 
 ### Sync Loop
 
-Each agent bot runs its own sync loop (from `AgentBot` class in `bot.py`):
+Each agent bot runs its own sync loop with 30-second long-polling timeout. Sync loops are wrapped with `_sync_forever_with_restart()` for automatic restart on connection failures.
 
-```python
-# From bot.py - AgentBot.sync_forever()
-SYNC_TIMEOUT_MS = 30000  # 30 second timeout for long-polling
-
-async def sync_forever(self) -> None:
-    """Run the sync loop for this agent."""
-    await self.client.sync_forever(timeout=SYNC_TIMEOUT_MS, full_state=True)
-```
-
-Sync loops are wrapped with automatic restart logic via `_sync_forever_with_restart()` to handle connection failures gracefully.
-
-Events are processed in background tasks to prevent blocking:
-
-1. **Sync receives event** - Matrix server sends event via long-polling
-2. **Event callback triggered** - Appropriate handler based on event type (`_on_message`, `_on_invite`, etc.)
-3. **Background task created** - Processing happens asynchronously
-4. **Response sent** - Agent responds in thread with streaming or full message
+Events are processed in background tasks:
+1. Sync receives event via long-polling
+2. Event callback triggered (`_on_message`, `_on_invite`, etc.)
+3. Background task created for async processing
+4. Agent responds in thread
 
 ### Streaming Responses
 
-Agents can stream responses by editing messages progressively:
-
-```python
-from mindroom.matrix.presence import should_use_streaming
-
-# Only stream if user is online (saves API calls for offline users)
-# requester_user_id is optional - if None, defaults to streaming
-if await should_use_streaming(client, room_id, requester_user_id=sender_id):
-    # Use streaming (message edits)
-else:
-    # Send complete message at once
-```
+Agents stream responses by progressively editing messages. Streaming is enabled only when the requesting user is online (checked via `should_use_streaming()`), saving API calls for offline users.
 
 ## Presence
 
-Agents set their Matrix presence with status messages containing model and role information:
+Agents set their Matrix presence with status messages containing model and role information (e.g., "🤖 Model: anthropic/claude-sonnet-4-latest | 💼 Code assistant | 🔧 5 tools available").
 
-```python
-from mindroom.matrix.presence import set_presence_status, build_agent_status_message
-
-# Build status message
-status = build_agent_status_message(agent_name, config)
-# Example: "🤖 Model: anthropic/claude-sonnet-4-latest | 💼 Code assistant | 🔧 5 tools available"
-
-await set_presence_status(client, status, presence="online")
-```
-
-### Presence States
-
-- **online** - Agent is running and ready (includes model info in status message)
-- **unavailable** - Agent is idle but still connected (treated as online for streaming)
-- **offline** - Agent is stopped or disconnected
-
-Presence is checked to decide whether to use streaming:
-
-```python
-from mindroom.matrix.presence import is_user_online
-
-# Returns True if user is "online" or "unavailable" (client is open)
-if await is_user_online(client, user_id):
-    # User is online, streaming will be visible
-    pass
-```
-
-While processing, agents use **typing indicators** instead of changing presence state, providing real-time feedback that they're working on a response.
+**Presence States:**
+- **online** - Agent running and ready
+- **unavailable** - Agent idle but connected (treated as online for streaming)
+- **offline** - Agent stopped or disconnected
 
 ## Typing Indicators
 
-Show typing indicator while processing:
-
-```python
-from mindroom.matrix.typing import typing_indicator
-
-async with typing_indicator(client, room_id):
-    # Typing indicator shown, auto-refreshed
-    response = await generate_response()
-# Typing indicator automatically stopped
-```
-
-The typing indicator is automatically refreshed at the smaller of half the timeout interval or 15 seconds to remain visible during long operations.
+Agents show typing indicators while processing via `typing_indicator()` context manager. The indicator auto-refreshes at `min(timeout/2, 15)` seconds to remain visible during long operations.
 
 ## Mentions
 
-Parse and format @mentions in messages:
-
-```python
-from mindroom.matrix.mentions import format_message_with_mentions
-
-# Parse @agent mentions and create proper Matrix content
-content = format_message_with_mentions(
-    config,  # Config object (required, first positional argument)
-    text="Hey @assistant can you help?",
-    sender_domain="example.com",
-    thread_event_id="$thread_root",
-)
-# Returns content dict with m.mentions, formatted_body with links
-```
-
-Mention formats supported:
+Mentions are parsed via `format_message_with_mentions()` which handles multiple formats:
 - `@calculator` - Short agent name
 - `@mindroom_calculator` - Full username
 - `@mindroom_calculator:localhost` - Full Matrix ID
 
+Returns content with `m.mentions` and `formatted_body` containing clickable links.
+
 ## Large Messages
 
-Messages exceeding the 64KB Matrix event limit are automatically handled:
+Messages exceeding the 64KB Matrix event limit are automatically handled by `prepare_large_message()`:
 
-```python
-from mindroom.matrix.large_messages import prepare_large_message
-
-# Automatically uploads large content as MXC attachment if needed
-# Returns original content if small enough, or modified content with preview + MXC
-content = await prepare_large_message(client, room_id, content)
-```
-
-- Messages > 55KB (`NORMAL_MESSAGE_LIMIT`): Uploaded as `message.txt` attachment
-- Edits > 27KB (`EDIT_MESSAGE_LIMIT`): Lower threshold due to edit structure doubling size
-- Preview text included in message body (maximum size that fits)
+- Messages > 55,000 bytes: Uploaded as `message.txt` attachment
+- Edits > 27,000 bytes: Lower threshold since edit structure roughly doubles size
+- Preview text included in message body (maximum that fits)
 - Custom metadata (`io.mindroom.long_text`) for reconstruction
-- Supports encrypted rooms (content encrypted before upload with `message.txt.enc` filename)
+- Encrypted rooms: Content encrypted before upload as `message.txt.enc`
 
 ## Identity Management
 
-The `MatrixID` class handles Matrix user ID parsing:
+The `MatrixID` class handles Matrix user ID parsing and agent identification:
 
 ```python
-from mindroom.matrix.identity import MatrixID, extract_agent_name
-
-# Parse Matrix ID
 mid = MatrixID.parse("@mindroom_assistant:example.com")
-print(mid.username)  # "mindroom_assistant"
-print(mid.domain)    # "example.com"
-print(mid.full_id)   # "@mindroom_assistant:example.com"
+mid.username  # "mindroom_assistant"
+mid.domain    # "example.com"
+mid.full_id   # "@mindroom_assistant:example.com"
 
 # Create from agent name
 mid = MatrixID.from_agent("assistant", "example.com")
 
-# Extract agent name from Matrix ID
+# Extract agent name (returns "code" if configured, None otherwise)
 agent_name = extract_agent_name("@mindroom_code:localhost", config)
-# Returns "code" if configured, None otherwise
 ```
 
 ## Configuration
@@ -359,25 +126,15 @@ agent_name = extract_agent_name("@mindroom_code:localhost", config)
 Matrix settings are derived from `config.yaml`:
 
 ```yaml
-# Rooms are auto-created if they don't exist
 agents:
   assistant:
-    rooms: [lobby, dev]  # Room aliases (not full IDs)
+    rooms: [lobby, dev]  # Room aliases (auto-created if needed)
 
-# Teams also get Matrix users
 teams:
   research_team:
     rooms: [research]
 ```
 
-Room aliases are resolved to room IDs automatically. Full room IDs (starting with `!`) can also be used.
+Room aliases are resolved to room IDs automatically. Full room IDs (starting with `!`) are also supported.
 
-### Room Creation
-
-When a room alias doesn't exist on the server:
-
-1. Room is created with the configured alias
-2. AI-generated topic is set based on room name and configured agents
-3. Power users (agents configured for the room) are invited
-4. Room avatar is set if available in `avatars/rooms/{room_key}.png`
-5. State is saved to `matrix_state.yaml`
+When a room doesn't exist, it's created with an AI-generated topic, power users are invited, and avatars are set from `avatars/rooms/{room_key}.png` if available.

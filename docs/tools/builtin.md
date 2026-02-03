@@ -4,7 +4,7 @@ icon: lucide/box
 
 # Built-in Tools
 
-MindRoom includes 85+ built-in tool integrations organized by category.
+MindRoom includes 86 built-in tool integrations organized by category.
 
 ## File & System
 
@@ -59,7 +59,7 @@ MindRoom includes 85+ built-in tool integrations organized by category.
 |------|-------------|-----------------|
 | `openai` | Transcription, image generation, and speech synthesis | `api_key` |
 | `gemini` | Google AI for image and video generation | `api_key` |
-| `groq` | Audio transcription, translation, and text-to-speech | `api_key` |
+| `groq` | Fast AI inference for audio transcription, translation, and text-to-speech | `api_key` |
 | `replicate` | Generate images and videos using AI models | `api_key` |
 | `fal` | AI media generation (images and videos) | `api_key` |
 | `dalle` | DALL-E image generation | `api_key` |
@@ -90,7 +90,7 @@ MindRoom includes 85+ built-in tool integrations organized by category.
 | `webex` | Webex Teams messaging | `access_token` |
 | `resend` | Transactional email | `api_key` |
 | `email` | Generic SMTP email | SMTP config |
-| `x` | X/Twitter posting and DMs | `bearer_token` or OAuth credentials |
+| `x` | Post tweets, send DMs, and search X/Twitter | `bearer_token` or OAuth credentials |
 | `reddit` | Reddit browsing and interaction | `client_id`, `client_secret` |
 | `zoom` | Video conferencing and meetings | `account_id`, `client_id`, `client_secret` |
 
@@ -101,7 +101,7 @@ MindRoom includes 85+ built-in tool integrations organized by category.
 | `github` | Repository and issue management | `access_token` |
 | `jira` | Issue tracking and project management | `server_url`, `username`, `password` or `token` |
 | `linear` | Issue tracking and project management | `api_key` |
-| `confluence` | Atlassian wiki pages | `url`, `username`, `password` or `api_key` |
+| `confluence` | Retrieve, create, and update wiki pages | `url`, `username`, `password` or `api_key` |
 | `trello` | Trello boards | `api_key`, `token` |
 | `todoist` | Todoist task management | `api_token` |
 | `zendesk` | Search help center articles | `username`, `password`, `company_name` |

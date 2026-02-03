@@ -6,9 +6,7 @@ icon: lucide/workflow
 
 The `MultiAgentOrchestrator` (in `src/mindroom/bot.py`) manages the lifecycle of all agents, teams, and the router.
 
-## Lifecycle
-
-The boot sequence runs through these phases:
+## Boot Sequence
 
 ```
 main() entry
@@ -54,93 +52,54 @@ main() entry
 └──────────────────────────────────────┘
 ```
 
-### Boot Sequence Details
+**Key details:**
 
-1. **User Account Creation**: A shared "user" Matrix account is created first via `_ensure_user_account()` - this is a human user account, separate from agent accounts
-2. **Entity Order**: Router is created first, then agents, then teams (order defined in `all_entities` list)
-3. **Agent Account Setup**: Each bot calls `ensure_user_account()` during `start()` to create its own Matrix account
-4. **Room Setup** (`_setup_rooms_and_memberships`):
-   - Ensure all configured rooms exist (router creates them)
-   - Invite agents and users to rooms
-   - Have bots join their configured rooms
-5. **Sync Loops**: Each bot runs `_sync_forever_with_restart()` with automatic retry on failure
+- **Entity order**: Router first, then agents, then teams
+- **Room setup** (`_setup_rooms_and_memberships`): Router creates rooms, invites agents/users, bots join
+- **Sync loops**: Each bot runs `_sync_forever_with_restart()` with automatic retry
 
 ## Hot Reload
 
-Config changes are detected via polling (not Watchdog):
+Config changes are detected via polling (`watch_file()` checks `st_mtime` every second):
 
-1. `watch_file()` polls `config.yaml` every second by checking `st_mtime`
-2. On change, `_watch_config_task()` calls `orchestrator.update_config()`
-3. Diff computed via `_identify_entities_to_restart()`:
-   - Compare agent configs using `model_dump(exclude_none=True)`
-   - Check for new/removed entities
-   - Check if router needs restart (configured room set changed)
-4. Affected entities are stopped, recreated, and restarted
-5. Removed entities run `cleanup()` (leave rooms, stop bot)
-6. New/restarted bots go through room setup
+1. On change, `update_config()` is called
+2. `_identify_entities_to_restart()` computes diff using `model_dump(exclude_none=True)`
+3. Affected entities are stopped, recreated, and restarted
+4. Removed entities run `cleanup()` (leave rooms, stop bot)
+5. New/restarted bots go through room setup
 
-**No process restart required!**
-
-Skills are also watched separately via `_watch_skills_task()` with cache invalidation.
+Skills are watched separately via `_watch_skills_task()` with cache invalidation.
 
 ## Message Handling
 
-Messages are processed via Matrix event callbacks. The actual flow:
+Event callbacks are wrapped in `_create_task_wrapper()` to run as background tasks, ensuring the sync loop is never blocked.
 
-1. **Event Callback Registration** (in `AgentBot.start()`):
-   - Callbacks are wrapped in `_create_task_wrapper()` to run as background tasks
-   - This ensures the sync loop is never blocked by event processing
+**`_on_message` flow:**
 
-2. **Message Processing** (in `_on_message`):
-   - Skip own messages (except voice transcriptions from router)
-   - Check sender authorization
-   - Handle message edits separately
-   - Check if already responded (`ResponseTracker`)
-   - Router handles commands exclusively
-   - Extract message context (mentions, thread history)
-   - Skip messages from other agents (unless mentioned)
-   - Router performs AI routing when no agent mentioned
-   - Check for team formation or individual response
-   - Generate response (streaming or batch)
-   - Store conversation memory as background task
+1. Skip own messages (except voice transcriptions from router)
+2. Check sender authorization and handle edits
+3. Check if already responded (`ResponseTracker`)
+4. Router handles commands exclusively
+5. Extract message context (mentions, thread history)
+6. Skip messages from other agents (unless mentioned)
+7. Router performs AI routing when no agent mentioned
+8. Check for team formation or individual response
+9. Generate response and store memory
 
-3. **Routing** (when no agent mentioned):
-   - Router uses `suggest_agent_for_message()` to pick the best agent
-   - Considers room configuration and message content
-   - Only routes when multiple agents are available in the room
+**Routing** (when no agent mentioned): Router uses `suggest_agent_for_message()` to pick the best agent based on room configuration and message content. Only routes when multiple agents are available.
 
 ## Concurrency
 
-MindRoom handles multiple conversations concurrently:
-
 - Each bot runs its own sync loop via `_sync_forever_with_restart()`
-- Sync loop failures trigger automatic restart with exponential backoff (5s, 10s, ... up to 60s)
+- Sync loop failures trigger automatic restart with exponential backoff (5s, 10s, ... up to 60s max)
 - Event callbacks run as background tasks (never block the sync loop)
-- `ResponseTracker` prevents duplicate replies to the same message
+- `ResponseTracker` prevents duplicate replies
 - `StopManager` handles cancellation of in-progress responses
-
-### Sync Loop Recovery
-
-```python
-# Simplified from _sync_forever_with_restart()
-retry_count = 0
-while bot.running:
-    try:
-        await bot.sync_forever()
-    except asyncio.CancelledError:
-        break  # Task was cancelled, exit gracefully
-    except Exception:
-        retry_count += 1
-        wait_time = min(60, 5 * retry_count)  # 5s, 10s, 15s, ... up to 60s
-        await asyncio.sleep(wait_time)
-```
 
 ### Graceful Shutdown
 
-On shutdown (`orchestrator.stop()`):
+On `orchestrator.stop()`:
 
 1. Cancel all sync tasks
 2. Signal all bots to stop (`bot.running = False`)
-3. Call `bot.stop()` for each bot, which:
-   - Waits for background tasks to complete (5s timeout)
-   - Closes the Matrix client
+3. Call `bot.stop()` for each bot (waits 5s for background tasks, closes Matrix client)

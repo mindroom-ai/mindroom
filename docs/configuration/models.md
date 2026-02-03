@@ -88,14 +88,11 @@ models:
 
 ## Extra Kwargs
 
-The `extra_kwargs` field passes additional parameters directly to the underlying model class. Common options include:
+The `extra_kwargs` field passes additional parameters directly to the underlying [Agno](https://docs.agno.com/) model class. Common options include:
 
 - `base_url` - Custom API endpoint (useful for OpenAI-compatible servers)
-- `api_key` - Override the API key from environment variables
 - `temperature` - Sampling temperature
 - `max_tokens` - Maximum tokens in response
-
-Each provider's model class may support additional parameters. Refer to the [Agno documentation](https://docs.agno.com/) for provider-specific options.
 
 ## Environment Variables
 
