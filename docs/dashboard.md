@@ -93,6 +93,7 @@ Configure AI model providers:
 - **Test connection** - Verify model accessibility
 
 Supported providers:
+
 - Anthropic (Claude)
 - OpenAI (GPT)
 - Google (Gemini)

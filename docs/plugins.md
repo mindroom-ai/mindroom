@@ -48,6 +48,7 @@ plugins:
 ```
 
 Paths may be:
+
 - Absolute paths
 - Paths relative to `config.yaml`
 - Python package specs (see below)
@@ -65,6 +66,7 @@ plugins:
 ```
 
 Rules:
+
 - A bare package name is allowed if it contains no slashes.
 - `python:`, `pkg:`, and `module:` are explicit prefixes.
 - `:sub/path` points to a subdirectory inside the package.

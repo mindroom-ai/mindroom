@@ -48,6 +48,7 @@ authorization:
 ```
 
 Use this for:
+
 - Administrators
 - Developers
 - Trusted team members
@@ -89,6 +90,7 @@ User IDs follow the Matrix format:
 ```
 
 Examples:
+
 - `@alice:matrix.org`
 - `@bob:example.com`
 - `@admin:company.internal`

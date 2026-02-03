@@ -26,28 +26,33 @@ agents:
 ## Tool Categories
 
 ### File & System
+
 - `file` - Read, write, and manage files
 - `shell` - Execute shell commands
 - `docker` - Manage Docker containers
 
 ### AI & Search
+
 - `web_search` - Search the web
 - `tavily` - AI-powered web search
 - `exa` - Neural search engine
 - `arxiv` - Search academic papers
 
 ### Communication
+
 - `slack` - Send messages to Slack
 - `gmail` - Send and read emails
 - `telegram` - Telegram bot integration
 - `twilio` - SMS and voice calls
 
 ### Development
+
 - `github` - Manage GitHub repos, issues, PRs
 - `jira` - Issue tracking
 - `confluence` - Wiki documentation
 
 ### Productivity
+
 - `google_calendar` - Calendar management
 - `google_sheets` - Spreadsheet access
 - `todoist` - Task management
