@@ -20,25 +20,19 @@ if TYPE_CHECKING:
     icon="Globe",
     icon_color="text-blue-500",
     config_fields=[
-        # Connection parameters
         ConfigField(
             name="base_url",
             label="Base URL",
             type="url",
             required=False,
             default=None,
-            placeholder="https://api.example.com",
-            description="Base URL for API calls. If not provided, full URLs must be specified in endpoints",
         ),
-        # Authentication parameters
         ConfigField(
             name="username",
             label="Username",
             type="text",
             required=False,
             default=None,
-            placeholder="username",
-            description="Username for basic authentication",
         ),
         ConfigField(
             name="password",
@@ -46,8 +40,6 @@ if TYPE_CHECKING:
             type="password",
             required=False,
             default=None,
-            placeholder="password",
-            description="Password for basic authentication",
         ),
         ConfigField(
             name="api_key",
@@ -55,27 +47,20 @@ if TYPE_CHECKING:
             type="password",
             required=False,
             default=None,
-            placeholder="sk-...",
-            description="API key for bearer token authentication",
         ),
-        # Headers configuration
         ConfigField(
             name="headers",
-            label="Default Headers",
+            label="Headers",
             type="text",
             required=False,
             default=None,
-            placeholder='{"Content-Type": "application/json"}',
-            description="Default headers to include in requests (JSON format)",
         ),
-        # Configuration parameters
         ConfigField(
             name="verify_ssl",
-            label="Verify SSL",
+            label="Verify Ssl",
             type="boolean",
             required=False,
             default=True,
-            description="Whether to verify SSL certificates for HTTPS requests",
         ),
         ConfigField(
             name="timeout",
@@ -83,17 +68,20 @@ if TYPE_CHECKING:
             type="number",
             required=False,
             default=30,
-            placeholder="30",
-            description="Request timeout in seconds",
         ),
-        # Feature flags
         ConfigField(
-            name="make_request",
+            name="enable_make_request",
             label="Enable Make Request",
             type="boolean",
             required=False,
             default=True,
-            description="Whether to register the make_request function",
+        ),
+        ConfigField(
+            name="all",
+            label="All",
+            type="boolean",
+            required=False,
+            default=False,
         ),
     ],
     dependencies=["requests"],

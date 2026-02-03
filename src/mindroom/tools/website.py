@@ -27,12 +27,11 @@ if TYPE_CHECKING:
     icon_color="text-blue-600",
     config_fields=[
         ConfigField(
-            name="knowledge_base",
-            label="Knowledge Base",
+            name="knowledge",
+            label="Knowledge",
             type="text",
             required=False,
             default=None,
-            description="Advanced: Optional knowledge base instance for storing website content (WebsiteKnowledgeBase or CombinedKnowledgeBase)",
         ),
     ],
     dependencies=["httpx", "beautifulsoup4"],

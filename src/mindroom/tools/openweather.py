@@ -26,57 +26,54 @@ if TYPE_CHECKING:
     icon="WiDaySunny",  # Weather icon
     icon_color="text-orange-500",  # Orange sun color
     config_fields=[
-        # Authentication
         ConfigField(
             name="api_key",
             label="API Key",
             type="password",
             required=False,
-            placeholder="your_openweather_api_key",
-            description="OpenWeatherMap API key. If not provided, uses OPENWEATHER_API_KEY env var.",
+            default=None,
         ),
-        # Configuration
         ConfigField(
             name="units",
             label="Units",
             type="text",
             required=False,
             default="metric",
-            placeholder="metric",
-            description="Units of measurement. Options: 'standard', 'metric', 'imperial'.",
         ),
-        # Feature flags
         ConfigField(
-            name="current_weather",
-            label="Current Weather",
+            name="enable_current_weather",
+            label="Enable Current Weather",
             type="boolean",
             required=False,
             default=True,
-            description="Enable current weather function",
         ),
         ConfigField(
-            name="forecast",
-            label="Forecast",
+            name="enable_forecast",
+            label="Enable Forecast",
             type="boolean",
             required=False,
             default=True,
-            description="Enable forecast function",
         ),
         ConfigField(
-            name="air_pollution",
-            label="Air Pollution",
+            name="enable_air_pollution",
+            label="Enable Air Pollution",
             type="boolean",
             required=False,
             default=True,
-            description="Enable air pollution function",
         ),
         ConfigField(
-            name="geocoding",
-            label="Geocoding",
+            name="enable_geocoding",
+            label="Enable Geocoding",
             type="boolean",
             required=False,
             default=True,
-            description="Enable geocoding function",
+        ),
+        ConfigField(
+            name="all",
+            label="All",
+            type="boolean",
+            required=False,
+            default=False,
         ),
     ],
     dependencies=["requests"],  # From agno requirements

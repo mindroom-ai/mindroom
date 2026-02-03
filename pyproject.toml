@@ -18,9 +18,10 @@ classifiers = [
 dynamic = [ "version" ]
 dependencies = [
   "agentql",                                           # for AgentQL tool
-  "agno[anthropic,google,ollama,openai]>=1.7.6",
+  "agno[anthropic,google,ollama,openai]>=2.4.7",
   "aiofiles",                                          # for voice message handling
   "aiohttp",                                           # for voice message STT API calls
+  "anthropic>=0.70",
   "apify-client>=1.12.2; platform_machine!='aarch64'", # for Apify tool (no manylinux aarch64 wheels for impit dep)
   "arxiv",                                             # for Arxiv tool
   "atlassian-python-api",                              # for Confluence tool
@@ -45,7 +46,7 @@ dependencies = [
   "exa-py",                                            # for Exa tool
   "fal-client",                                        # for Fal tool
   "fastapi[standard]>=0.116.1",                        # for widget API and future API endpoints
-  "firecrawl-py<3",                                    # for Firecrawl tool
+  "firecrawl-py>=3",                                   # for Firecrawl tool
   "google-api-python-client>=2.178",                   # for Google Calendar, Google Sheets, Gmail tools, widget API
   "google-auth>=2.40.3",                               # for Google Calendar, Google Sheets, Gmail tools, widget API
   "google-auth-httplib2>=0.2",                         # for Google Calendar, Google Sheets, Gmail tools, widget API
@@ -55,7 +56,6 @@ dependencies = [
   "google-maps-places",                                # for Google Maps tool
   "google-search-results>=2.4.2",                      # for SerpApi tool
   "googlemaps",                                        # for Google Maps tool
-  "googlesearch-python",                               # for GoogleSearch tool
   "groq>=0.31",                                        # for Groq model
   "httpx>=0.27",                                       # for Jina, Telegram, Searxng tools, widget API
   "humanize>=4.12.3",

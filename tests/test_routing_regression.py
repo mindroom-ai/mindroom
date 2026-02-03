@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from agno.models.ollama import Ollama
 
 from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
@@ -266,7 +267,7 @@ class TestRoutingRegression:
         mock_news_agent.user_id = f"@mindroom_news:{domain}"
 
         # Mock get_model_instance to return a mock model
-        mock_model = MagicMock()
+        mock_model = Ollama(id="test-model")
         mock_get_model_instance.return_value = mock_model
 
         test_room_id = "!research:localhost"

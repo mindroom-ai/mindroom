@@ -26,22 +26,32 @@ if TYPE_CHECKING:
     icon="FaTelegram",
     icon_color="text-blue-500",  # Telegram blue
     config_fields=[
-        # Authentication/Connection parameters
         ConfigField(
             name="chat_id",
             label="Chat ID",
             type="text",
             required=True,
-            placeholder="123456789 or @username",
-            description="The chat ID or username to send messages to",
         ),
         ConfigField(
             name="token",
-            label="Bot Token",
+            label="Token",
             type="password",
             required=False,
-            placeholder="1234567890:ABCdefGHijKlmnOPqrSTuvwXYZ",
-            description="Telegram bot token (can also be set via TELEGRAM_TOKEN env var)",
+            default=None,
+        ),
+        ConfigField(
+            name="enable_send_message",
+            label="Enable Send Message",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="all",
+            label="All",
+            type="boolean",
+            required=False,
+            default=False,
         ),
     ],
     dependencies=["httpx"],

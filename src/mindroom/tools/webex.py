@@ -26,31 +26,33 @@ if TYPE_CHECKING:
     icon="FaVideo",
     icon_color="text-blue-600",
     config_fields=[
-        # Authentication
+        ConfigField(
+            name="enable_send_message",
+            label="Enable Send Message",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="enable_list_rooms",
+            label="Enable List Rooms",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="all",
+            label="All",
+            type="boolean",
+            required=False,
+            default=False,
+        ),
         ConfigField(
             name="access_token",
             label="Access Token",
             type="password",
             required=False,
-            placeholder="Bearer token from Webex Developer Portal",
-            description="Webex access token for authentication (can also be set via WEBEX_ACCESS_TOKEN env var)",
-        ),
-        # Feature flags
-        ConfigField(
-            name="send_message",
-            label="Send Message",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Enable sending messages to Webex spaces/rooms",
-        ),
-        ConfigField(
-            name="list_rooms",
-            label="List Rooms",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Enable listing Webex spaces/rooms",
+            default=None,
         ),
     ],
     dependencies=["webexpythonsdk"],

@@ -20,24 +20,40 @@ if TYPE_CHECKING:
     icon="FaRobot",  # AI/robot icon for AI model serving
     icon_color="text-purple-600",  # Purple for AI/ML services
     config_fields=[
-        # Authentication
         ConfigField(
             name="api_key",
             label="API Key",
             type="password",
             required=False,
-            placeholder="fal-***",
-            description="Fal API key for authentication (can also be set via FAL_KEY env var)",
+            default=None,
         ),
-        # Model configuration
         ConfigField(
             name="model",
             label="Model",
             type="text",
             required=False,
             default="fal-ai/hunyuan-video",
-            placeholder="fal-ai/hunyuan-video",
-            description="The model to use for media generation (default: fal-ai/hunyuan-video)",
+        ),
+        ConfigField(
+            name="enable_generate_media",
+            label="Enable Generate Media",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="enable_image_to_image",
+            label="Enable Image To Image",
+            type="boolean",
+            required=False,
+            default=False,
+        ),
+        ConfigField(
+            name="all",
+            label="All",
+            type="boolean",
+            required=False,
+            default=False,
         ),
     ],
     dependencies=["fal-client"],  # From agno requirements

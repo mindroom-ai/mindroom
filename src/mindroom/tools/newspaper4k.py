@@ -26,31 +26,33 @@ if TYPE_CHECKING:
     icon="FaNewspaper",
     icon_color="text-blue-600",
     config_fields=[
-        # Article reading functionality
-        ConfigField(
-            name="read_article",
-            label="Read Article",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Enable the functionality to read the full content of an article",
-        ),
-        # Content options
         ConfigField(
             name="include_summary",
             label="Include Summary",
             type="boolean",
             required=False,
             default=False,
-            description="Include a summary of the article along with the full content",
         ),
         ConfigField(
             name="article_length",
             label="Article Length",
             type="number",
             required=False,
-            placeholder="5000",
-            description="Maximum length of the article or its summary to be processed or returned",
+            default=None,
+        ),
+        ConfigField(
+            name="enable_read_article",
+            label="Enable Read Article",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="all",
+            label="All",
+            type="boolean",
+            required=False,
+            default=False,
         ),
     ],
     dependencies=["newspaper4k", "lxml_html_clean"],

@@ -26,23 +26,19 @@ if TYPE_CHECKING:
     icon="FaVideo",  # Video-related icon
     icon_color="text-purple-600",  # Purple color for AI/ML tools
     config_fields=[
-        # Authentication
         ConfigField(
             name="api_key",
             label="API Key",
             type="password",
             required=False,
-            placeholder="luma_api_...",
-            description="Luma AI API key for authentication (can also be set via LUMAAI_API_KEY env var)",
+            default=None,
         ),
-        # Generation settings
         ConfigField(
             name="wait_for_completion",
-            label="Wait for Completion",
+            label="Wait For Completion",
             type="boolean",
             required=False,
             default=True,
-            description="Wait for video generation to complete before returning results",
         ),
         ConfigField(
             name="poll_interval",
@@ -50,7 +46,6 @@ if TYPE_CHECKING:
             type="number",
             required=False,
             default=3,
-            description="Interval in seconds between status checks during video generation",
         ),
         ConfigField(
             name="max_wait_time",
@@ -58,7 +53,27 @@ if TYPE_CHECKING:
             type="number",
             required=False,
             default=300,
-            description="Maximum time in seconds to wait for video generation completion",
+        ),
+        ConfigField(
+            name="enable_generate_video",
+            label="Enable Generate Video",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="enable_image_to_video",
+            label="Enable Image To Video",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="all",
+            label="All",
+            type="boolean",
+            required=False,
+            default=False,
         ),
     ],
     dependencies=["lumaai"],

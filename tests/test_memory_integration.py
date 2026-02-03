@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from agno.models.ollama import Ollama
 
 from mindroom.ai import ai_response
 from mindroom.config import Config
@@ -54,7 +55,7 @@ class TestMemoryIntegration:
 
         with (
             patch("mindroom.ai._cached_agent_run", mock_agent_run),
-            patch("mindroom.ai.get_model_instance", return_value=MagicMock()),
+            patch("mindroom.ai.get_model_instance", return_value=Ollama(id="test-model")),
         ):
             response = await ai_response(
                 agent_name="calculator",
@@ -91,7 +92,7 @@ class TestMemoryIntegration:
 
         with (
             patch("mindroom.ai._cached_agent_run", mock_agent_run),
-            patch("mindroom.ai.get_model_instance", return_value=MagicMock()),
+            patch("mindroom.ai.get_model_instance", return_value=Ollama(id="test-model")),
         ):
             await ai_response(
                 agent_name="general",
@@ -141,7 +142,7 @@ class TestMemoryIntegration:
         with (
             patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory),
             patch("mindroom.ai._cached_agent_run", AsyncMock(return_value=MagicMock(content="First response"))),
-            patch("mindroom.ai.get_model_instance", return_value=MagicMock()),
+            patch("mindroom.ai.get_model_instance", return_value=Ollama(id="test-model")),
             patch("mindroom.agents.create_agent", return_value=MagicMock()),
         ):
             # First interaction

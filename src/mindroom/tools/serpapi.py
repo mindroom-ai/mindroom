@@ -26,23 +26,33 @@ if TYPE_CHECKING:
     icon="FaGoogle",
     icon_color="text-blue-500",
     config_fields=[
-        # Authentication
         ConfigField(
             name="api_key",
             label="API Key",
             type="password",
             required=False,
-            placeholder="YOUR_SERPAPI_KEY",
-            description="SerpApi API key for authentication (can also be set via SERP_API_KEY env var)",
+            default=None,
         ),
-        # Search features
         ConfigField(
-            name="search_youtube",
-            label="Search YouTube",
+            name="enable_search_google",
+            label="Enable Search Google",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="enable_search_youtube",
+            label="Enable Search Youtube",
             type="boolean",
             required=False,
             default=False,
-            description="Enable YouTube search functionality",
+        ),
+        ConfigField(
+            name="all",
+            label="All",
+            type="boolean",
+            required=False,
+            default=False,
         ),
     ],
     dependencies=["google-search-results"],

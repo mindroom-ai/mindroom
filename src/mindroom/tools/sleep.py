@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.tools_metadata import (
+    ConfigField,
     SetupType,
     ToolCategory,
     ToolStatus,
@@ -25,8 +26,20 @@ if TYPE_CHECKING:
     icon="Clock",  # React icon name
     icon_color="text-purple-500",  # Tailwind color class
     config_fields=[
-        # SleepTools has no explicit parameters, only **kwargs
-        # The tool inherits all base Toolkit configuration through **kwargs
+        ConfigField(
+            name="enable_sleep",
+            label="Enable Sleep",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="all",
+            label="All",
+            type="boolean",
+            required=False,
+            default=False,
+        ),
     ],
     dependencies=["agno"],  # From agno requirements
     docs_url="https://docs.agno.com/tools/toolkits/local/sleep",

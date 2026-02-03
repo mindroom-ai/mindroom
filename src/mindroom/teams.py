@@ -7,12 +7,12 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from agno.agent import Agent
 from agno.models.message import Message
-from agno.run.response import RunResponse
-from agno.run.response import RunResponseContentEvent as AgentRunResponseContentEvent
-from agno.run.response import ToolCallCompletedEvent as AgentToolCallCompletedEvent
-from agno.run.response import ToolCallStartedEvent as AgentToolCallStartedEvent
-from agno.run.team import RunResponseContentEvent as TeamRunResponseContentEvent
-from agno.run.team import TeamRunResponse
+from agno.run.agent import RunContentEvent as AgentRunContentEvent
+from agno.run.agent import RunOutput
+from agno.run.agent import ToolCallCompletedEvent as AgentToolCallCompletedEvent
+from agno.run.agent import ToolCallStartedEvent as AgentToolCallStartedEvent
+from agno.run.team import RunContentEvent as TeamRunContentEvent
+from agno.run.team import TeamRunOutput
 from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
 from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
 from agno.team import Team
@@ -142,7 +142,7 @@ def format_no_consensus_note(indent: int = 0) -> str:
     return f"\n{indent_str}*No team consensus - showing individual responses only*"
 
 
-def format_team_response(response: TeamRunResponse | RunResponse) -> list[str]:
+def format_team_response(response: TeamRunOutput | RunOutput) -> list[str]:
     """Format a complete team response with member contributions.
 
     Handles nested teams recursively with proper indentation.
@@ -158,7 +158,7 @@ def format_team_response(response: TeamRunResponse | RunResponse) -> list[str]:
 
 
 def _format_contributions_recursive(  # noqa: C901
-    response: TeamRunResponse | RunResponse,
+    response: TeamRunOutput | RunOutput,
     indent: int,
     include_consensus: bool,
 ) -> list[str]:
@@ -176,10 +176,10 @@ def _format_contributions_recursive(  # noqa: C901
     parts = []
     indent_str = "  " * indent
 
-    if isinstance(response, TeamRunResponse):
+    if isinstance(response, TeamRunOutput):
         if response.member_responses:
             for member_resp in response.member_responses:
-                if isinstance(member_resp, TeamRunResponse):
+                if isinstance(member_resp, TeamRunOutput):
                     team_name = member_resp.team_name or "Nested Team"
                     parts.append(f"{indent_str}**{team_name}** (Team):")
                     nested_parts = _format_contributions_recursive(
@@ -188,7 +188,7 @@ def _format_contributions_recursive(  # noqa: C901
                         include_consensus=False,  # No consensus for nested teams
                     )
                     parts.extend(nested_parts)
-                elif isinstance(member_resp, RunResponse):
+                elif isinstance(member_resp, RunOutput):
                     agent_name = member_resp.agent_name or "Team Member"
                     content = _get_response_content(member_resp)
                     if content:
@@ -200,7 +200,7 @@ def _format_contributions_recursive(  # noqa: C901
             elif parts:
                 parts.append(format_no_consensus_note(indent))
 
-    elif isinstance(response, RunResponse):
+    elif isinstance(response, RunOutput):
         agent_name = response.agent_name or "Agent"
         content = _get_response_content(response)
         if content:
@@ -209,7 +209,7 @@ def _format_contributions_recursive(  # noqa: C901
     return parts
 
 
-def _get_response_content(response: TeamRunResponse | RunResponse) -> str:
+def _get_response_content(response: TeamRunOutput | RunOutput) -> str:
     """Get content from a response object.
 
     Args:
@@ -291,7 +291,7 @@ Return the mode and a one-sentence reason why."""
         name="TeamModeDecider",
         role="Determine team mode",
         model=model,
-        response_model=TeamModeDecision,
+        output_schema=TeamModeDecision,
     )
 
     try:
@@ -481,11 +481,10 @@ def _create_team_instance(
 
     return Team(
         members=agents,  # type: ignore[arg-type]
-        mode=mode.value,
         name=f"Team-{'-'.join(agent_names)}",
         model=model,
+        delegate_to_all_members=mode == TeamMode.COLLABORATE,
         show_members_responses=True,
-        enable_agentic_context=True,
         debug_mode=False,
         # Agno will automatically list members with their names, roles, and tools
     )
@@ -557,7 +556,7 @@ async def team_response(
         team_name = f"Team ({agent_list})"
         return get_user_friendly_error_message(e, team_name)
 
-    if isinstance(response, TeamRunResponse):
+    if isinstance(response, TeamRunOutput):
         if response.member_responses:
             logger.debug(f"Team had {len(response.member_responses)} member responses")
 
@@ -591,7 +590,7 @@ async def team_response_stream_raw(
     """Yield raw team events (for structured live rendering). Falls back to a final response.
 
     Returns an async iterator of Agno events when supported; otherwise yields a
-    single TeamRunResponse for non-streaming providers.
+    single TeamRunOutput for non-streaming providers.
     """
     assert orchestrator.config is not None
     agent_names = [mid.agent_name(orchestrator.config) or mid.username for mid in agent_ids]
@@ -599,8 +598,8 @@ async def team_response_stream_raw(
 
     if not agents:
 
-        async def _empty() -> AsyncIterator[RunResponse]:
-            yield RunResponse(content=NO_AGENTS_RESPONSE)
+        async def _empty() -> AsyncIterator[RunOutput]:
+            yield RunOutput(content=NO_AGENTS_RESPONSE)
 
         return _empty()
 
@@ -612,14 +611,14 @@ async def team_response_stream_raw(
         logger.debug(f"Team member: {agent.name}")
 
     try:
-        return await team.arun(prompt, stream=True)
+        return team.arun(prompt, stream=True)
     except Exception as e:
         logger.exception(f"Error in team streaming with agents {agent_names}")
         team_name = f"Team ({', '.join(agent_names)})"
         error_message = get_user_friendly_error_message(e, team_name)
 
-        async def _error() -> AsyncIterator[RunResponse]:
-            yield RunResponse(content=error_message)
+        async def _error() -> AsyncIterator[RunOutput]:
+            yield RunOutput(content=error_message)
 
         return _error()
 
@@ -669,16 +668,16 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
 
     async for event in raw_stream:
         # Handle error case
-        if isinstance(event, RunResponse):
+        if isinstance(event, RunOutput):
             content = _get_response_content(event)
             if NO_AGENTS_RESPONSE in content:
                 yield content
                 return
-            logger.warning(f"Unexpected RunResponse in team stream: {content[:100]}")
+            logger.warning(f"Unexpected RunOutput in team stream: {content[:100]}")
             continue
 
         # Individual agent response event
-        elif isinstance(event, AgentRunResponseContentEvent):
+        elif isinstance(event, AgentRunContentEvent):
             agent_name = event.agent_name
             if agent_name:
                 content = str(event.content or "")
@@ -705,7 +704,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                 per_member[agent_name] += tool_msg
 
         # Team consensus content event
-        elif isinstance(event, TeamRunResponseContentEvent):
+        elif isinstance(event, TeamRunContentEvent):
             if event.content:
                 consensus += str(event.content)
             else:

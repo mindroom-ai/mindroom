@@ -20,23 +20,33 @@ if TYPE_CHECKING:
     icon="GiGift",
     icon_color="text-purple-500",
     config_fields=[
-        # Authentication
         ConfigField(
             name="api_key",
             label="API Key",
             type="password",
             required=False,
-            placeholder="dc6zaTOxFJmzC",
-            description="Giphy API key (can also be set via GIPHY_API_KEY env var)",
+            default=None,
         ),
-        # Search configuration
         ConfigField(
             name="limit",
-            label="GIF Limit",
+            label="Limit",
             type="number",
             required=False,
             default=1,
-            description="Number of GIFs to return in search results",
+        ),
+        ConfigField(
+            name="enable_search_gifs",
+            label="Enable Search Gifs",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="all",
+            label="All",
+            type="boolean",
+            required=False,
+            default=False,
         ),
     ],
     dependencies=["httpx"],

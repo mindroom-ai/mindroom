@@ -26,49 +26,54 @@ if TYPE_CHECKING:
     icon="FaDiscord",
     icon_color="text-indigo-500",  # Discord brand color
     config_fields=[
-        # Authentication
         ConfigField(
             name="bot_token",
             label="Bot Token",
             type="password",
             required=False,
-            placeholder="MTAx...",
-            description="Discord bot token for authentication (can also be set via DISCORD_BOT_TOKEN env var)",
+            default=None,
         ),
-        # Feature flags - Messaging
         ConfigField(
-            name="enable_messaging",
-            label="Enable Messaging",
+            name="enable_send_message",
+            label="Enable Send Message",
             type="boolean",
             required=False,
             default=True,
-            description="Enable sending messages to Discord channels",
         ),
-        # Feature flags - History and Channel Management
         ConfigField(
-            name="enable_history",
-            label="Enable History",
+            name="enable_get_channel_messages",
+            label="Enable Get Channel Messages",
             type="boolean",
             required=False,
             default=True,
-            description="Enable retrieving message history from channels",
         ),
         ConfigField(
-            name="enable_channel_management",
-            label="Enable Channel Management",
+            name="enable_get_channel_info",
+            label="Enable Get Channel Info",
             type="boolean",
             required=False,
             default=True,
-            description="Enable getting channel info and listing channels",
         ),
-        # Feature flags - Message Management
         ConfigField(
-            name="enable_message_management",
-            label="Enable Message Management",
+            name="enable_list_channels",
+            label="Enable List Channels",
             type="boolean",
             required=False,
             default=True,
-            description="Enable deleting messages from channels",
+        ),
+        ConfigField(
+            name="enable_delete_message",
+            label="Enable Delete Message",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="all",
+            label="All",
+            type="boolean",
+            required=False,
+            default=False,
         ),
     ],
     dependencies=["requests"],

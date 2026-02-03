@@ -462,6 +462,7 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
         return f"Test topic for {room_name}"
 
     monkeypatch.setattr("mindroom.topic_generator.generate_room_topic_ai", mock_generate_room_topic_ai)
+    monkeypatch.setattr("mindroom.matrix.rooms.generate_room_topic_ai", mock_generate_room_topic_ai)
 
     # Create orchestrator
     # Mock start/sync at class level so newly created bots during update_config don't perform real login/sync
@@ -476,6 +477,8 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
     monkeypatch.setattr("mindroom.bot.AgentBot.sync_forever", AsyncMock())
     monkeypatch.setattr("mindroom.bot.TeamBot.start", mock_start)
     monkeypatch.setattr("mindroom.bot.TeamBot.sync_forever", AsyncMock())
+    monkeypatch.setattr("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", AsyncMock())
+    monkeypatch.setattr("mindroom.bot.MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
 
     orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
 

@@ -26,22 +26,26 @@ if TYPE_CHECKING:
     icon="FaHackerNews",
     icon_color="text-orange-600",  # Hacker News orange
     config_fields=[
-        # Feature flags
         ConfigField(
-            name="get_top_stories",
-            label="Get Top Stories",
+            name="enable_get_top_stories",
+            label="Enable Get Top Stories",
             type="boolean",
             required=False,
             default=True,
-            description="Enable getting top stories from Hacker News",
         ),
         ConfigField(
-            name="get_user_details",
-            label="Get User Details",
+            name="enable_get_user_details",
+            label="Enable Get User Details",
             type="boolean",
             required=False,
             default=True,
-            description="Enable getting user details from Hacker News",
+        ),
+        ConfigField(
+            name="all",
+            label="All",
+            type="boolean",
+            required=False,
+            default=False,
         ),
     ],
     dependencies=["httpx"],

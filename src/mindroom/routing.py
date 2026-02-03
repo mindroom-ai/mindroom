@@ -78,13 +78,13 @@ Choose the most appropriate agent based on their role, tools, and instructions."
             name="Router",
             role="Route messages to appropriate agents",
             model=model,
-            response_model=AgentSuggestion,
+            output_schema=AgentSuggestion,
         )
 
         response = await agent.arun(prompt, session_id="routing")
         suggestion = response.content
 
-        # With response_model, we should always get the correct type
+        # With output_schema, we should always get the correct type
         if not isinstance(suggestion, AgentSuggestion):
             logger.error(
                 "Unexpected response type from AI routing",

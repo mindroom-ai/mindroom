@@ -11,7 +11,7 @@ from mindroom.agents import create_agent
 from mindroom.config import Config
 
 
-@patch("mindroom.agents.SqliteStorage")
+@patch("mindroom.agents.SqliteDb")
 def test_get_agent_calculator(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the calculator agent is created correctly."""
     config = Config.from_yaml()
@@ -20,7 +20,7 @@ def test_get_agent_calculator(mock_storage: MagicMock) -> None:  # noqa: ARG001
     assert agent.name == "CalculatorAgent"
 
 
-@patch("mindroom.agents.SqliteStorage")
+@patch("mindroom.agents.SqliteDb")
 def test_get_agent_general(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the general agent is created correctly."""
     config = Config.from_yaml()
@@ -29,7 +29,7 @@ def test_get_agent_general(mock_storage: MagicMock) -> None:  # noqa: ARG001
     assert agent.name == "GeneralAgent"
 
 
-@patch("mindroom.agents.SqliteStorage")
+@patch("mindroom.agents.SqliteDb")
 def test_get_agent_code(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the code agent is created correctly."""
     config = Config.from_yaml()
@@ -38,7 +38,7 @@ def test_get_agent_code(mock_storage: MagicMock) -> None:  # noqa: ARG001
     assert agent.name == "CodeAgent"
 
 
-@patch("mindroom.agents.SqliteStorage")
+@patch("mindroom.agents.SqliteDb")
 def test_get_agent_shell(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the shell agent is created correctly."""
     config = Config.from_yaml()
@@ -47,7 +47,7 @@ def test_get_agent_shell(mock_storage: MagicMock) -> None:  # noqa: ARG001
     assert agent.name == "ShellAgent"
 
 
-@patch("mindroom.agents.SqliteStorage")
+@patch("mindroom.agents.SqliteDb")
 def test_get_agent_summary(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the summary agent is created correctly."""
     config = Config.from_yaml()

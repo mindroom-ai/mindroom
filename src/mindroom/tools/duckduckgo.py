@@ -26,32 +26,26 @@ if TYPE_CHECKING:
     icon="FaSearch",
     icon_color="text-orange-500",  # DuckDuckGo orange
     config_fields=[
-        # Search features
         ConfigField(
-            name="search",
-            label="Search",
+            name="enable_search",
+            label="Enable Search",
             type="boolean",
             required=False,
             default=True,
-            description="Enable DuckDuckGo search function",
         ),
         ConfigField(
-            name="news",
-            label="News",
+            name="enable_news",
+            label="Enable News",
             type="boolean",
             required=False,
             default=True,
-            description="Enable DuckDuckGo news function",
         ),
-        # Search configuration
         ConfigField(
             name="modifier",
-            label="Search Modifier",
+            label="Modifier",
             type="text",
             required=False,
             default=None,
-            placeholder="site:example.com",
-            description="A modifier to be used in the search request",
         ),
         ConfigField(
             name="fixed_max_results",
@@ -59,8 +53,6 @@ if TYPE_CHECKING:
             type="number",
             required=False,
             default=None,
-            placeholder="10",
-            description="A fixed number of maximum results",
         ),
         ConfigField(
             name="proxy",
@@ -68,8 +60,6 @@ if TYPE_CHECKING:
             type="url",
             required=False,
             default=None,
-            placeholder="http://proxy.example.com:8080",
-            description="Proxy to be used in the search request",
         ),
         ConfigField(
             name="timeout",
@@ -77,16 +67,13 @@ if TYPE_CHECKING:
             type="number",
             required=False,
             default=10,
-            placeholder="10",
-            description="The maximum number of seconds to wait for a response",
         ),
         ConfigField(
             name="verify_ssl",
-            label="Verify SSL",
+            label="Verify Ssl",
             type="boolean",
             required=False,
             default=True,
-            description="Verify SSL certificates for secure connections",
         ),
     ],
     dependencies=["ddgs"],

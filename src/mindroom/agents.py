@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from agno.agent import Agent
-from agno.storage.sqlite import SqliteStorage
+from agno.db.sqlite import SqliteDb
 
 from . import agent_prompts
 from . import tools as _tools_module  # noqa: F401
@@ -100,7 +100,7 @@ def create_agent(agent_name: str, config: Config) -> Agent:
             logger.warning(f"Could not load tool '{tool_name}' for agent '{agent_name}': {e}")
 
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-    storage = SqliteStorage(table_name=f"{agent_name}_sessions", db_file=str(SESSIONS_DIR / f"{agent_name}.db"))
+    storage = SqliteDb(session_table=f"{agent_name}_sessions", db_file=str(SESSIONS_DIR / f"{agent_name}.db"))
 
     # Get model config for identity context
     model_name = agent_config.model or "default"
@@ -156,8 +156,8 @@ def create_agent(agent_name: str, config: Config) -> Agent:
         model=model,
         tools=tools,
         instructions=instructions,
-        storage=storage,
-        add_history_to_messages=agent_config.add_history_to_messages
+        db=storage,
+        add_history_to_context=agent_config.add_history_to_messages
         if agent_config.add_history_to_messages is not None
         else defaults.add_history_to_messages,
         num_history_runs=agent_config.num_history_runs or defaults.num_history_runs,
