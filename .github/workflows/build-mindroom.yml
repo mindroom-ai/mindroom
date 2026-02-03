@@ -79,6 +79,8 @@ jobs:
       run: |
         echo "dockerfile=local/instances/deploy/Dockerfile.${{ matrix.image }}" >> $GITHUB_OUTPUT
         echo "timestamp=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
+        # Sanitize ref for Docker tag usage (e.g. pull/123/merge -> pull-123-merge)
+        echo "safe_ref=${GITHUB_REF_NAME//\//-}" >> $GITHUB_OUTPUT
         # Extract version from tag (strip 'v' prefix) or use 0.0.0 for non-release builds
         if [[ "${{ github.ref_name }}" == v* ]]; then
           echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
@@ -95,7 +97,7 @@ jobs:
         push: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.push_images) }}
         tags: |
           ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ matrix.platform_suffix }}
-          ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ github.ref_name }}-${{ matrix.platform_suffix }}
+          ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ steps.vars.outputs.safe_ref }}-${{ matrix.platform_suffix }}
           ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ steps.vars.outputs.timestamp }}-${{ matrix.platform_suffix }}
         build-args: |
           VERSION=${{ steps.vars.outputs.version }}
@@ -126,6 +128,11 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
+    - name: Set safe ref
+      id: vars
+      run: |
+        echo "safe_ref=${GITHUB_REF_NAME//\//-}" >> $GITHUB_OUTPUT
+
     - name: Create and push manifest
       run: |
         # Create multi-arch manifest with both amd64 and arm64
@@ -138,11 +145,11 @@ jobs:
 
         # Also create branch-tagged manifest
         docker manifest create \
-          ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ github.ref_name }} \
-          ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ github.ref_name }}-amd64 \
-          ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ github.ref_name }}-arm64
+          ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ steps.vars.outputs.safe_ref }} \
+          ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ steps.vars.outputs.safe_ref }}-amd64 \
+          ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ steps.vars.outputs.safe_ref }}-arm64
 
-        docker manifest push ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ github.ref_name }}
+        docker manifest push ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ steps.vars.outputs.safe_ref }}
 
         echo "✅ Multi-arch manifest created for mindroom-${{ matrix.image }}"
         echo "Pull with: docker pull ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:latest"

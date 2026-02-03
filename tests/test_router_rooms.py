@@ -178,6 +178,8 @@ async def test_orchestrator_creates_router_with_all_rooms(
         return config_with_rooms
 
     monkeypatch.setattr("mindroom.config.Config.from_yaml", mock_load_config)
+    monkeypatch.setattr("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", AsyncMock())
+    monkeypatch.setattr("mindroom.bot.MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
 
     # Create orchestrator
     orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
@@ -259,6 +261,8 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyP
         return result
 
     monkeypatch.setattr("mindroom.config.Config.from_yaml", mock_load_config)
+    monkeypatch.setattr("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", AsyncMock())
+    monkeypatch.setattr("mindroom.bot.MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
 
     # Create orchestrator with initial config
     # Mock start/sync_forever at class level so newly created bots in update_config don't perform real login/sync

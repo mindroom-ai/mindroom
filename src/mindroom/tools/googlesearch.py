@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from agno.tools.websearch import WebSearchTools
 
 from mindroom.tools_metadata import (
     ConfigField,
@@ -12,72 +12,97 @@ from mindroom.tools_metadata import (
     register_tool_with_metadata,
 )
 
-if TYPE_CHECKING:
-    from agno.tools.googlesearch import GoogleSearchTools
+
+class GoogleSearchTools(WebSearchTools):
+    """Convenience wrapper for WebSearchTools with Google as the backend."""
+
+    def __init__(
+        self,
+        enable_search: bool = True,
+        enable_news: bool = True,
+        modifier: str | None = None,
+        fixed_max_results: int | None = None,
+        proxy: str | None = None,
+        timeout: int | None = 10,
+        verify_ssl: bool = True,
+        **kwargs: object,
+    ) -> None:
+        super().__init__(
+            enable_search=enable_search,
+            enable_news=enable_news,
+            backend="google",
+            modifier=modifier,
+            fixed_max_results=fixed_max_results,
+            proxy=proxy,
+            timeout=timeout,
+            verify_ssl=verify_ssl,
+            **kwargs,
+        )
 
 
 @register_tool_with_metadata(
     name="googlesearch",
     display_name="Google Search",
-    description="Search Google for web results using Python library",
+    description="Search Google for web results using the WebSearch backend",
     category=ToolCategory.RESEARCH,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     icon="FaGoogle",
     icon_color="text-blue-500",
     config_fields=[
-        # Search configuration
         ConfigField(
-            name="fixed_max_results",
-            label="Fixed Max Results",
-            type="number",
+            name="enable_search",
+            label="Enable Search",
+            type="text",
             required=False,
-            default=None,
-            placeholder="10",
-            description="Fixed number of maximum search results to return (overrides per-query max_results)",
+            default=True,
         ),
         ConfigField(
-            name="fixed_language",
-            label="Fixed Language",
+            name="enable_news",
+            label="Enable News",
+            type="text",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="modifier",
+            label="Modifier",
             type="text",
             required=False,
             default=None,
-            placeholder="en",
-            description="Fixed language for search results (overrides per-query language setting)",
+        ),
+        ConfigField(
+            name="fixed_max_results",
+            label="Fixed Max Results",
+            type="text",
+            required=False,
+            default=None,
         ),
         ConfigField(
             name="proxy",
             label="Proxy",
-            type="url",
-            required=False,
-            default=None,
-            placeholder="http://proxy.example.com:8080",
-            description="Proxy server for search requests",
-        ),
-        ConfigField(
-            name="timeout",
-            label="Request Timeout",
-            type="number",
-            required=False,
-            default=10,
-            placeholder="10",
-            description="Timeout for search requests in seconds",
-        ),
-        ConfigField(
-            name="headers",
-            label="Custom Headers",
             type="text",
             required=False,
             default=None,
-            placeholder='{"User-Agent": "Custom Agent"}',
-            description="Custom headers for search requests (JSON format)",
+        ),
+        ConfigField(
+            name="timeout",
+            label="Timeout",
+            type="text",
+            required=False,
+            default=10,
+        ),
+        ConfigField(
+            name="verify_ssl",
+            label="Verify Ssl",
+            type="text",
+            required=False,
+            default=True,
         ),
     ],
-    dependencies=["googlesearch-python", "pycountry"],
-    docs_url="https://docs.agno.com/tools/toolkits/search/googlesearch",
+    dependencies=["ddgs"],
+    docs_url="https://docs.agno.com/tools/toolkits/search/websearch",
 )
 def googlesearch_tools() -> type[GoogleSearchTools]:
     """Return Google Search tools for web search."""
-    from agno.tools.googlesearch import GoogleSearchTools
-
     return GoogleSearchTools

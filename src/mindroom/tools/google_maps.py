@@ -20,86 +20,12 @@ if TYPE_CHECKING:
     icon="FaMapMarkedAlt",
     icon_color="text-red-500",
     config_fields=[
-        # Authentication
         ConfigField(
             name="key",
-            label="API Key",
+            label="Key",
             type="password",
             required=False,
-            placeholder="AIza...",
-            description="Google Maps API key (can also be set via GOOGLE_MAPS_API_KEY env var)",
-        ),
-        # Place search functionality
-        ConfigField(
-            name="search_places",
-            label="Search Places",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Enable places search functionality",
-        ),
-        # Directions functionality
-        ConfigField(
-            name="get_directions",
-            label="Get Directions",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Enable directions functionality",
-        ),
-        # Address validation functionality
-        ConfigField(
-            name="validate_address",
-            label="Validate Address",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Enable address validation functionality",
-        ),
-        # Geocoding functionality
-        ConfigField(
-            name="geocode_address",
-            label="Geocode Address",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Enable geocoding functionality",
-        ),
-        # Reverse geocoding functionality
-        ConfigField(
-            name="reverse_geocode",
-            label="Reverse Geocode",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Enable reverse geocoding functionality",
-        ),
-        # Distance matrix functionality
-        ConfigField(
-            name="get_distance_matrix",
-            label="Get Distance Matrix",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Enable distance matrix functionality",
-        ),
-        # Elevation functionality
-        ConfigField(
-            name="get_elevation",
-            label="Get Elevation",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Enable elevation functionality",
-        ),
-        # Timezone functionality
-        ConfigField(
-            name="get_timezone",
-            label="Get Timezone",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Enable timezone functionality",
+            default=None,
         ),
     ],
     dependencies=["googlemaps", "google-maps-places"],

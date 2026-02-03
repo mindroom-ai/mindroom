@@ -20,31 +20,33 @@ if TYPE_CHECKING:
     icon="FaCog",
     icon_color="text-blue-600",
     config_fields=[
-        # Configuration parameters
         ConfigField(
             name="dags_dir",
-            label="DAGs Directory",
+            label="Dags Dir",
             type="text",
             required=False,
-            placeholder="dags",
-            description="Directory for DAG files (relative to current working directory)",
+            default=None,
         ),
-        # Feature flags
         ConfigField(
-            name="save_dag",
-            label="Save DAG",
+            name="enable_save_dag_file",
+            label="Enable Save Dag File",
             type="boolean",
             required=False,
             default=True,
-            description="Enable saving DAG files",
         ),
         ConfigField(
-            name="read_dag",
-            label="Read DAG",
+            name="enable_read_dag_file",
+            label="Enable Read Dag File",
             type="boolean",
             required=False,
             default=True,
-            description="Enable reading DAG files",
+        ),
+        ConfigField(
+            name="all",
+            label="All",
+            type="boolean",
+            required=False,
+            default=False,
         ),
     ],
     dependencies=[],  # No additional dependencies required beyond agno

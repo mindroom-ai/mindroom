@@ -20,95 +20,26 @@ if TYPE_CHECKING:
     icon="Terminal",
     icon_color="text-blue-600",
     config_fields=[
-        # Authentication
         ConfigField(
             name="api_key",
             label="API Key",
             type="password",
             required=False,
-            placeholder="e2b_...",
-            description="E2B API key for authentication (can also be set via E2B_API_KEY env var)",
+            default=None,
         ),
-        # Configuration
         ConfigField(
             name="timeout",
             label="Timeout",
             type="number",
             required=False,
             default=300,
-            placeholder="300",
-            description="Timeout in seconds for the sandbox (default: 5 minutes)",
         ),
-        # Code execution features
-        ConfigField(
-            name="run_code",
-            label="Run Code",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Enable running Python code in the sandbox",
-        ),
-        # File operations
-        ConfigField(
-            name="upload_file",
-            label="Upload File",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Enable uploading files to the sandbox",
-        ),
-        ConfigField(
-            name="download_result",
-            label="Download Result",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Enable downloading execution results (PNG images, charts, files)",
-        ),
-        # Filesystem operations
-        ConfigField(
-            name="filesystem",
-            label="Filesystem Operations",
-            type="boolean",
-            required=False,
-            default=False,
-            description="Enable filesystem operations (list, read, write files and directories)",
-        ),
-        # Internet access
-        ConfigField(
-            name="internet_access",
-            label="Internet Access",
-            type="boolean",
-            required=False,
-            default=False,
-            description="Enable internet access functions (public URLs, web servers)",
-        ),
-        # Sandbox management
-        ConfigField(
-            name="sandbox_management",
-            label="Sandbox Management",
-            type="boolean",
-            required=False,
-            default=False,
-            description="Enable sandbox management functions (timeout, status, shutdown)",
-        ),
-        # Advanced configuration
         ConfigField(
             name="sandbox_options",
             label="Sandbox Options",
             type="text",
             required=False,
-            placeholder='{"template": "python"}',
-            description="Additional options to pass to the Sandbox constructor (JSON format)",
-        ),
-        # Command execution
-        ConfigField(
-            name="command_execution",
-            label="Command Execution",
-            type="boolean",
-            required=False,
-            default=False,
-            description="Enable shell command execution in the sandbox",
+            default=None,
         ),
     ],
     dependencies=["e2b_code_interpreter"],

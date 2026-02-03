@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import functools
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import diskcache
 from agno.models.anthropic import Claude
@@ -13,12 +13,7 @@ from agno.models.google import Gemini
 from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat
 from agno.models.openrouter import OpenRouter
-from agno.run.response import (
-    RunResponse,
-    RunResponseContentEvent,
-    ToolCallCompletedEvent,
-    ToolCallStartedEvent,
-)
+from agno.run.agent import RunContentEvent, RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
 
 from .agents import create_agent
 from .constants import ENABLE_AI_CACHE
@@ -39,7 +34,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def _extract_response_content(response: RunResponse) -> str:
+def _extract_response_content(response: RunOutput) -> str:
     response_parts = []
 
     # Add main content if present
@@ -47,12 +42,24 @@ def _extract_response_content(response: RunResponse) -> str:
         response_parts.append(response.content)
 
     # Add formatted tool calls if present (similar to agno's print_response)
-    # Only add if there are actual tool calls to display
-    if response.formatted_tool_calls and any(response.formatted_tool_calls):
-        tool_calls_section = "\n\n**Tool Calls:**"
-        for tool_call in response.formatted_tool_calls:
-            tool_calls_section += f"\n• {tool_call}"
-        response_parts.append(tool_calls_section)
+    if response.tools:
+        tool_lines: list[str] = []
+        for tool in response.tools:
+            tool_name = tool.tool_name or "tool"
+            tool_args = tool.tool_args or {}
+            if tool_args:
+                args_str = ", ".join(f"{k}={v}" for k, v in tool_args.items())
+                tool_line = f"{tool_name}({args_str})"
+            else:
+                tool_line = f"{tool_name}()"
+            if tool.result:
+                tool_line = f"{tool_line}: {tool.result}"
+            tool_lines.append(tool_line)
+        if tool_lines:
+            tool_calls_section = "\n\n**Tool Calls:**"
+            for tool_line in tool_lines:
+                tool_calls_section += f"\n• {tool_line}"
+            response_parts.append(tool_calls_section)
 
     return "\n".join(response_parts) if response_parts else ""
 
@@ -230,11 +237,11 @@ async def _cached_agent_run(
     session_id: str,
     agent_name: str,
     storage_path: Path,
-) -> RunResponse:
+) -> RunOutput:
     """Cached wrapper for agent.arun() calls."""
     cache = get_cache(storage_path)
     if cache is None:
-        return await agent.arun(full_prompt, session_id=session_id)  # type: ignore[no-any-return]
+        return await agent.arun(full_prompt, session_id=session_id)
 
     model = agent.model
     assert model is not None
@@ -242,14 +249,14 @@ async def _cached_agent_run(
     cached_result = cache.get(cache_key)
     if cached_result is not None:
         logger.info("Cache hit", agent=agent_name)
-        return cached_result  # type: ignore[no-any-return]
+        return cast("RunOutput", cached_result)
 
     response = await agent.arun(full_prompt, session_id=session_id)
 
     cache.set(cache_key, response)
     logger.info("Response cached", agent=agent_name)
 
-    return response  # type: ignore[no-any-return]
+    return response
 
 
 async def _prepare_agent_and_prompt(
@@ -385,7 +392,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912
 
     # Execute the streaming AI call - this can fail for network, rate limits, etc.
     try:
-        stream_generator = await agent.arun(full_prompt, session_id=session_id, stream=True)
+        stream_generator = agent.arun(full_prompt, session_id=session_id, stream=True)
     except Exception as e:
         logger.exception("Error starting streaming AI response")
         yield get_user_friendly_error_message(e, agent_name)
@@ -394,7 +401,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912
     # Process the stream events
     try:
         async for event in stream_generator:
-            if isinstance(event, RunResponseContentEvent) and event.content:
+            if isinstance(event, RunContentEvent) and event.content:
                 chunk_text = str(event.content)
                 full_response += chunk_text
                 yield chunk_text
@@ -416,6 +423,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912
         return
 
     if cache is not None and full_response:
-        cached_response = RunResponse(content=full_response)
+        cached_response = RunOutput(content=full_response)
         cache.set(cache_key, cached_response)
         logger.info("Response cached", agent=agent_name)

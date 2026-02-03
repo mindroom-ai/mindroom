@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.tools_metadata import (
+    ConfigField,
     SetupType,
     ToolCategory,
     ToolStatus,
@@ -25,7 +26,20 @@ if TYPE_CHECKING:
     icon="FaGlobe",
     icon_color="text-blue-600",  # Web browser blue
     config_fields=[
-        # No configuration parameters - WebBrowserTools.__init__() takes no arguments
+        ConfigField(
+            name="enable_open_page",
+            label="Enable Open Page",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="all",
+            label="All",
+            type="boolean",
+            required=False,
+            default=False,
+        ),
     ],
     dependencies=[],  # Uses standard library webbrowser module
     docs_url="https://docs.agno.com/tools/toolkits/others/web-browser",

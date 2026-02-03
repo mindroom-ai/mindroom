@@ -20,15 +20,33 @@ if TYPE_CHECKING:
     icon="FaAws",
     icon_color="text-orange-500",
     config_fields=[
-        # Configuration
         ConfigField(
             name="region_name",
             label="Region Name",
             type="text",
             required=False,
             default="us-east-1",
-            placeholder="us-east-1",
-            description="AWS region name where Lambda functions are located",
+        ),
+        ConfigField(
+            name="enable_list_functions",
+            label="Enable List Functions",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="enable_invoke_function",
+            label="Enable Invoke Function",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="all",
+            label="All",
+            type="boolean",
+            required=False,
+            default=False,
         ),
     ],
     dependencies=["boto3"],

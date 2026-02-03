@@ -26,15 +26,12 @@ if TYPE_CHECKING:
     icon="FaSpider",
     icon_color="text-blue-600",
     config_fields=[
-        # Content extraction settings
         ConfigField(
             name="max_length",
             label="Max Length",
             type="number",
             required=False,
             default=5000,
-            placeholder="5000",
-            description="Maximum length of the text from the webpage to be returned",
         ),
         ConfigField(
             name="timeout",
@@ -42,17 +39,13 @@ if TYPE_CHECKING:
             type="number",
             required=False,
             default=60,
-            placeholder="60",
-            description="Timeout in seconds for page loading",
         ),
-        # Content filtering settings
         ConfigField(
             name="use_pruning",
             label="Use Pruning",
             type="boolean",
             required=False,
             default=False,
-            description="Enable content pruning to remove low-quality content",
         ),
         ConfigField(
             name="pruning_threshold",
@@ -60,26 +53,20 @@ if TYPE_CHECKING:
             type="number",
             required=False,
             default=0.48,
-            placeholder="0.48",
-            description="Threshold for content pruning (0.0 to 1.0)",
         ),
         ConfigField(
             name="bm25_threshold",
-            label="BM25 Threshold",
+            label="Bm25 Threshold",
             type="number",
             required=False,
             default=1.0,
-            placeholder="1.0",
-            description="Threshold for BM25 content filtering when using search queries",
         ),
-        # Browser settings
         ConfigField(
             name="headless",
-            label="Headless Mode",
+            label="Headless",
             type="boolean",
             required=False,
             default=True,
-            description="Run browser in headless mode (no GUI)",
         ),
         ConfigField(
             name="wait_until",
@@ -87,8 +74,27 @@ if TYPE_CHECKING:
             type="text",
             required=False,
             default="domcontentloaded",
-            placeholder="domcontentloaded",
-            description="Browser event to wait for before extracting content (domcontentloaded, load, networkidle)",
+        ),
+        ConfigField(
+            name="proxy_config",
+            label="Proxy Config",
+            type="text",
+            required=False,
+            default=None,
+        ),
+        ConfigField(
+            name="enable_crawl",
+            label="Enable Crawl",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="all",
+            label="All",
+            type="boolean",
+            required=False,
+            default=False,
         ),
     ],
     dependencies=["crawl4ai"],

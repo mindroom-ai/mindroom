@@ -26,24 +26,33 @@ if TYPE_CHECKING:
     icon="FaVideo",
     icon_color="text-purple-600",
     config_fields=[
-        # Authentication
         ConfigField(
             name="api_key",
             label="API Key",
             type="password",
             required=False,
-            placeholder="r8_...",
-            description="Replicate API token (can also be set via REPLICATE_API_TOKEN env var)",
+            default=None,
         ),
-        # Model configuration
         ConfigField(
             name="model",
             label="Model",
             type="text",
             required=False,
             default="minimax/video-01",
-            placeholder="minimax/video-01",
-            description="The Replicate model to use for media generation",
+        ),
+        ConfigField(
+            name="enable_generate_media",
+            label="Enable Generate Media",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="all",
+            label="All",
+            type="boolean",
+            required=False,
+            default=False,
         ),
     ],
     dependencies=["replicate"],

@@ -26,23 +26,33 @@ if TYPE_CHECKING:
     icon="Mail",
     icon_color="text-blue-600",
     config_fields=[
-        # Authentication
         ConfigField(
             name="api_key",
             label="API Key",
             type="password",
             required=False,
-            placeholder="re_...",
-            description="Resend API key for authentication (can also be set via RESEND_API_KEY env var)",
+            default=None,
         ),
-        # Configuration
         ConfigField(
             name="from_email",
             label="From Email",
             type="text",
             required=False,
-            placeholder="noreply@example.com",
-            description="Default sender email address for outgoing emails",
+            default=None,
+        ),
+        ConfigField(
+            name="enable_send_email",
+            label="Enable Send Email",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="all",
+            label="All",
+            type="boolean",
+            required=False,
+            default=False,
         ),
     ],
     dependencies=["resend"],

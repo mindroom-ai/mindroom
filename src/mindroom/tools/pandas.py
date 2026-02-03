@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.tools_metadata import (
+    ConfigField,
     SetupType,
     ToolCategory,
     ToolStatus,
@@ -24,7 +25,29 @@ if TYPE_CHECKING:
     setup_type=SetupType.NONE,
     icon="Database",
     icon_color="text-blue-600",
-    config_fields=[],
+    config_fields=[
+        ConfigField(
+            name="enable_create_pandas_dataframe",
+            label="Enable Create Pandas Dataframe",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="enable_run_dataframe_operation",
+            label="Enable Run Dataframe Operation",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="all",
+            label="All",
+            type="boolean",
+            required=False,
+            default=False,
+        ),
+    ],
     dependencies=["pandas"],
     docs_url="https://docs.agno.com/tools/toolkits/database/pandas",
 )

@@ -26,30 +26,33 @@ if TYPE_CHECKING:
     icon="FaVideo",  # React icon name for video
     icon_color="text-purple-600",  # Purple color for video processing
     config_fields=[
-        # Video processing features
         ConfigField(
-            name="process_video",
-            label="Process Video",
+            name="enable_process_video",
+            label="Enable Process Video",
             type="boolean",
             required=False,
             default=True,
-            description="Enable the extract_audio tool for extracting audio tracks from video files",
         ),
         ConfigField(
-            name="generate_captions",
-            label="Generate Captions",
+            name="enable_generate_captions",
+            label="Enable Generate Captions",
             type="boolean",
             required=False,
             default=True,
-            description="Enable the create_srt tool for saving transcriptions to SRT formatted files",
         ),
         ConfigField(
-            name="embed_captions",
-            label="Embed Captions",
+            name="enable_embed_captions",
+            label="Enable Embed Captions",
             type="boolean",
             required=False,
             default=True,
-            description="Enable the embed_captions tool for creating videos with word-level highlighted captions",
+        ),
+        ConfigField(
+            name="all",
+            label="All",
+            type="boolean",
+            required=False,
+            default=False,
         ),
     ],
     dependencies=["moviepy"],  # From agno requirements

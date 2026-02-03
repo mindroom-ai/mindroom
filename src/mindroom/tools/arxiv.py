@@ -26,32 +26,33 @@ if TYPE_CHECKING:
     icon="FaFileAlt",
     icon_color="text-red-600",  # ArXiv red
     config_fields=[
-        # Feature flags
         ConfigField(
-            name="search_arxiv",
-            label="Search ArXiv",
+            name="enable_search_arxiv",
+            label="Enable Search Arxiv",
             type="boolean",
             required=False,
             default=True,
-            description="Enable searching ArXiv for academic papers",
         ),
         ConfigField(
-            name="read_arxiv_papers",
-            label="Read ArXiv Papers",
+            name="enable_read_arxiv_papers",
+            label="Enable Read Arxiv Papers",
             type="boolean",
             required=False,
             default=True,
-            description="Enable downloading and reading ArXiv papers",
         ),
-        # Configuration
+        ConfigField(
+            name="all",
+            label="All",
+            type="boolean",
+            required=False,
+            default=False,
+        ),
         ConfigField(
             name="download_dir",
-            label="Download Directory",
+            label="Download Dir",
             type="text",
             required=False,
             default=None,
-            placeholder="/path/to/downloads",
-            description="Directory to download PDF files (defaults to arxiv_pdfs in tool directory)",
         ),
     ],
     dependencies=["arxiv", "pypdf"],
