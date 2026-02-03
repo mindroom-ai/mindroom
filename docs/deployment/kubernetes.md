@@ -76,6 +76,7 @@ helm install instance-1 mindroom/mindroom-instance \
 ```
 
 Each instance gets:
+
 - Separate deployment
 - Isolated storage
 - Independent configuration

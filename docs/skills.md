@@ -27,6 +27,7 @@ command-arg-mode: raw
 ```
 
 Notes:
+
 - `metadata` can be a JSON5 string (shown above) or a YAML mapping.
 - `user-invocable`, `disable-model-invocation`, and `command-*` also accept snake_case names.
 
@@ -100,6 +101,7 @@ Users can run a skill by name:
 ```
 
 Rules:
+
 - The skill must be in the agent allowlist and `user-invocable` must be `true`.
 - If `command-dispatch: tool` is set, MindRoom runs the tool directly.
 - If `disable-model-invocation: true` and no tool dispatch is configured, the command fails.
