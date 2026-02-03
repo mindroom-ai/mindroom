@@ -45,6 +45,7 @@ an OpenClaw-style model:
 - Agents default to **no skills** when `skills` is not set.
 - OpenClaw `metadata` in `SKILL.md` must be parsed as JSON5.
 - Skill orchestration uses Agno's `Skills` (prompt snippet + get_skill_* tools).
+- Skills are loaded via Agno `LocalSkills(validate=False)` and normalized to preserve OpenClaw metadata.
 - Plugin manifest filename: `mindroom.plugin.json`.
 - Tool metadata delivery: API builds from the in-memory registry at runtime; `tools_metadata.json`
   remains for frontend/icon build scripts.
@@ -71,6 +72,7 @@ Format:
 Implementation (current):
 - Agno `Skills` orchestrator is used for prompt injection and skill tools.
 - A Mindroom loader wraps Agno `LocalSkills(validate=False)` to keep OpenClaw metadata.
+  - The loader applies OpenClaw eligibility gating and per-agent allowlists.
 
 Eligibility (OpenClaw style):
 - `metadata.openclaw.always` bypasses other checks.
@@ -84,10 +86,15 @@ Eligibility (OpenClaw style):
 Prompt injection:
 - Use Agno's `<skills_system>` snippet (names, descriptions, scripts, references).
 - Agents access skills via `get_skill_instructions`, `get_skill_reference`, `get_skill_script`.
+  - No custom `<available_skills>` prompt block; the Agno snippet is the source of truth.
 
 Per-agent filtering:
 - `agent.skills` is the allowlist; empty list means no skills.
 - If `agent.skills` is set, only those skill names are included.
+
+Native Agno usage guidelines:
+- Prefer `get_skill_instructions(...)` over opening `SKILL.md` directly.
+- Use `get_skill_reference(...)` for reference docs and `get_skill_script(...)` for scripts.
 
 ### 6.2 Plugins subsystem
 
@@ -168,7 +175,7 @@ Ignored for MVP (not yet wired):
 Resolution rules:
 - `name` and `description` come from frontmatter only.
 - `metadata` is parsed from JSON5 (string) to a dict when present.
-- `source_path` is the skill directory path.
+- `source_path` is the skill directory path (used by Agno for scripts/references).
 - If frontmatter is missing/invalid, the skill is skipped.
 
 ### 8.2 Eligibility rules (OpenClaw-style)
@@ -184,7 +191,7 @@ Out of scope for MVP:
 
 ### 8.3 Prompt injection
 
-Inject only when the agent has `skills` configured.
+Inject only when the agent has `skills` configured (Skills object exists).
 
 Format:
 Agno's `<skills_system>` snippet (see `agno.skills.Skills.get_system_prompt_snippet()`).
@@ -192,6 +199,7 @@ Agno's `<skills_system>` snippet (see `agno.skills.Skills.get_system_prompt_snip
 Prompt rule:
 - Choose one skill if clearly applicable, then use `get_skill_instructions(...)`.
 - Read at most one skill up front.
+- Use skill tools instead of reading SKILL.md directly.
 
 ### 8.4 Plugin manifest
 
@@ -257,6 +265,7 @@ Status: complete (2026-02-02)
 - Prompt injection:
   - Skills appear only when eligible.
   - Agent with no skills gets no skills section.
+  - Agno `get_skill_*` tools are present when skills are configured.
 - Plugin load:
   - Plugin tools registered in registry.
   - Plugin skill dir contributes to skills list.
