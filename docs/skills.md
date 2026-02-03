@@ -2,72 +2,73 @@
 icon: lucide/zap
 ---
 
-# Skills System
+# Skills
 
-MindRoom supports an OpenClaw-compatible skills system that extends agent capabilities with reusable, metadata-driven components.
+MindRoom uses Agno's skills system with OpenClaw-compatible metadata. Skills are instruction packs (a `SKILL.md` file) with optional scripts and references that guide agents without adding new code capabilities.
 
-## What are Skills?
-
-Skills are self-contained capability modules that can be attached to agents. Unlike tools (which are code functions), skills are defined in markdown files with YAML frontmatter that describe:
-
-- When the skill should be available
-- What it does
-- How to invoke it
-- Dependencies and requirements
-
-## SKILL.md Format
-
-Each skill is defined in a `SKILL.md` file:
+## SKILL.md format (OpenClaw compatible)
 
 ```markdown
 ---
-name: my-skill
-description: A helpful skill that does something useful
-user_invocable: true
-disable_model_invocation: false
-requires:
-  env:
-    - MY_API_KEY
-  binaries:
-    - some-cli
-  os:
-    - linux
-    - macos
-dispatch:
-  tool: my_tool
-  arg_mode: raw
+name: repo-quick-audit
+description: Quick repository audit checklist
+metadata: '{openclaw:{requires:{bins:["git"], env:["GITHUB_TOKEN"]}}}'
+user-invocable: true
+disable-model-invocation: false
+command-dispatch: tool
+command-tool: repo_audit.run
+command-arg-mode: raw
 ---
 
-# My Skill
+# Repo Quick Audit
 
-Detailed instructions for the skill...
+1. Check CI status
+2. Review open issues
 ```
 
-## Frontmatter Fields
+Notes:
+- `metadata` can be a JSON5 string (shown above) or a YAML mapping.
+- `user-invocable`, `disable-model-invocation`, and `command-*` also accept snake_case names.
+
+## Frontmatter fields
 
 | Field | Type | Description |
-|-------|------|-------------|
+| --- | --- | --- |
 | `name` | string | Unique skill identifier |
-| `description` | string | Brief description shown to users |
-| `user_invocable` | bool | Can users invoke directly? (default: true) |
-| `disable_model_invocation` | bool | Hide from AI model? (default: false) |
-| `requires.env` | list | Required environment variables |
-| `requires.binaries` | list | Required CLI tools |
-| `requires.os` | list | Supported operating systems |
-| `dispatch.tool` | string | Tool to call when invoked |
-| `dispatch.arg_mode` | string | How to pass arguments (raw, json) |
+| `description` | string | Brief summary shown to users/models |
+| `metadata` | mapping or JSON5 string | OpenClaw metadata and custom fields |
+| `user-invocable` | bool | Allow `!skill` (default: true) |
+| `disable-model-invocation` | bool | Prevent model invocation (default: false) |
+| `command-dispatch` | string | Set to `tool` to run a tool directly |
+| `command-tool` | string | Tool name (`toolkit` or `toolkit.fn`) |
+| `command-arg-mode` | string | Only `raw` is supported |
 
-## Skill Locations
+## Eligibility gating (OpenClaw metadata)
 
-Skills are loaded from three locations (in priority order):
+If `metadata.openclaw` is present, MindRoom filters skills using these rules:
 
-1. **User skills**: `~/.mindroom/skills/`
-2. **Plugin skills**: From installed plugins
-3. **Bundled skills**: Shipped with MindRoom
+- `always: true` bypasses all checks
+- `os: ["linux", "darwin", "windows"]`
+- `requires.env`: env var set or credential key exists
+- `requires.config`: config path is truthy (e.g., `agents.code.tools`)
+- `requires.bins`: all binaries must exist in PATH
+- `requires.anyBins`: at least one binary must exist in PATH
 
-## Configuring Skills
+Skills without `metadata.openclaw` are always eligible.
 
-Add skills to agents in `config.yaml`:
+## Skill locations and precedence
+
+MindRoom loads skills from these locations, in this order:
+
+1. Bundled skills: `skills/` in the repo
+2. Plugin-provided skill directories
+3. User skills: `~/.mindroom/skills/`
+
+If multiple skills share the same name, the last one wins. This means user skills override plugin skills, and plugin skills override bundled skills.
+
+## Configuring skills
+
+Add skills to an agent allowlist in `config.yaml`:
 
 ```yaml
 agents:
@@ -76,100 +77,45 @@ agents:
     role: A coding assistant
     model: sonnet
     skills:
-      - agent-cli-dev
+      - repo-quick-audit
       - code-review
-    tools:
-      - file
-      - shell
 ```
 
-Or use the dashboard's Agents tab to enable skills visually.
+If `skills` is empty or unset, the agent gets no skills.
 
-## Conditional Loading
+## Using skills at runtime
 
-Skills are automatically filtered based on:
+Agents see available skills in the system prompt and can load details using Agno tools:
 
-### Operating System
+- `get_skill_instructions(skill_name)`
+- `get_skill_reference(skill_name, reference_path)`
+- `get_skill_script(skill_name, script_path, execute=False)`
 
-```yaml
-requires:
-  os:
-    - macos
-    - linux
+## Skill command dispatch (`!skill`)
+
+Users can run a skill by name:
+
+```
+!skill repo-quick-audit --recent
 ```
 
-The skill only loads on matching platforms.
+Rules:
+- The skill must be in the agent allowlist and `user-invocable` must be `true`.
+- If `command-dispatch: tool` is set, MindRoom runs the tool directly.
+- If `disable-model-invocation: true` and no tool dispatch is configured, the command fails.
 
-### Environment Variables
-
-```yaml
-requires:
-  env:
-    - GITHUB_TOKEN
-    - OPENAI_API_KEY
-```
-
-The skill only loads when required env vars are set.
-
-### Binary Dependencies
-
-```yaml
-requires:
-  binaries:
-    - docker
-    - kubectl
-```
-
-The skill only loads when required CLI tools are available.
-
-## Creating a Skill
-
-1. Create a directory in `~/.mindroom/skills/my-skill/`
-
-2. Add `SKILL.md`:
-
-```markdown
----
-name: my-skill
-description: Does something awesome
-requires:
-  env:
-    - MY_API_KEY
----
-
-# My Skill
-
-Instructions for using this skill...
-
-## Usage
-
-Explain how to use it here.
-```
-
-3. Add the skill to an agent's config:
-
-```yaml
-agents:
-  assistant:
-    skills:
-      - my-skill
-```
-
-4. Restart MindRoom or trigger hot-reload
-
-## Skill vs Tool
+## Skill vs tool
 
 | Aspect | Skills | Tools |
-|--------|--------|-------|
+| --- | --- | --- |
 | Definition | Markdown + YAML | Python code |
 | Location | File system | Code/plugins |
 | Filtering | Automatic by requirements | Always available |
 | Instructions | Rich markdown | Docstrings |
 | Invocation | User or model | Model only |
 
-## Best Practices
+## Best practices
 
-1. **Keep skills focused** - One skill per capability
-2. **Document thoroughly** - The markdown body is shown to users
-3. **Declare dependencies** - Use `requires` to prevent loading on incompatible systems
-4. **Use descriptive names** - `code-review` not `cr`
+1. Keep skills focused - one skill per capability
+2. Declare dependencies with `metadata.openclaw.requires`
+3. Use descriptive names like `code-review`
