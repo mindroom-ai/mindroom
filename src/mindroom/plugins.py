@@ -84,7 +84,68 @@ def _resolve_plugin_root(plugin_path: str, config_path: Path | None) -> Path:
         return path
 
     base = (config_path or DEFAULT_AGENTS_CONFIG).expanduser().resolve()
-    return (base.parent / path).resolve()
+    relative = (base.parent / path).resolve()
+    if relative.exists():
+        return relative
+
+    module_root = _resolve_python_plugin_root(plugin_path)
+    if module_root is not None:
+        return module_root
+
+    return relative
+
+
+def _resolve_python_plugin_root(plugin_path: str) -> Path | None:
+    parsed = _parse_python_plugin_spec(plugin_path)
+    if parsed is None:
+        return None
+
+    module_name, subpath, explicit = parsed
+    spec = util.find_spec(module_name)
+    if spec is None:
+        if explicit:
+            logger.warning("Plugin module not found", module=module_name, spec=plugin_path)
+        return None
+
+    if spec.submodule_search_locations:
+        root = Path(next(iter(spec.submodule_search_locations)))
+    elif spec.origin:
+        root = Path(spec.origin).parent
+    else:
+        if explicit:
+            logger.warning("Plugin module has no filesystem location", module=module_name)
+        return None
+
+    resolved_root = (root / subpath).resolve() if subpath else root.resolve()
+    if not resolved_root.exists() or not resolved_root.is_dir():
+        if explicit:
+            logger.warning("Plugin module path is not a directory", module=module_name, path=str(resolved_root))
+        return None
+
+    return resolved_root
+
+
+def _parse_python_plugin_spec(plugin_path: str) -> tuple[str, str | None, bool] | None:
+    prefixes = ("python:", "pkg:", "module:")
+    for prefix in prefixes:
+        if plugin_path.startswith(prefix):
+            spec = plugin_path[len(prefix) :]
+            explicit = True
+            break
+    else:
+        spec = plugin_path
+        explicit = False
+        if "/" in spec or spec.startswith("."):
+            return None
+
+    parts = spec.split(":", 1)
+    module_name = parts[0].strip()
+    if not module_name:
+        return None
+    subpath = parts[1].strip() if len(parts) > 1 else None
+    if subpath == "":
+        subpath = None
+    return module_name, subpath, explicit
 
 
 def _load_plugin(root: Path) -> Plugin | None:

@@ -109,6 +109,8 @@ plugins/my-plugin/
     my-skill/SKILL.md
 ```
 
+Plugins can also be resolved from importable Python packages (e.g., `demo_pkg` or `python:demo_pkg`).
+
 `mindroom.plugin.json` (draft fields):
 ```json
 {
@@ -253,7 +255,7 @@ Status: complete (2026-02-03)
 ### Phase 5: Optional enhancements
 - [x] Skills watcher (hot reload + cache invalidation).
 - [x] Dependency installer helper (PATH bin gating + logging).
-- [ ] Plugin packaging beyond local dirs.
+- [x] Plugin packaging beyond local dirs (importable Python packages).
 
 ## 9) Testing Strategy
 
@@ -300,3 +302,4 @@ Status: complete (2026-02-03)
 - 2026-02-03: Phase 4 complete: `!skill` command wired with OpenClaw-style dispatch (raw args to tool) and tests for parsing/dispatch.
 - 2026-02-03: Added skill cache + watcher that clears cached skills when SKILL.md files change.
 - 2026-02-03: Added `requires.bins` / `requires.anyBins` gating with debug logs to surface missing binaries.
+- 2026-02-03: Plugins can now resolve from importable Python packages (non-local plugin packaging).
