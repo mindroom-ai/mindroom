@@ -4,26 +4,48 @@ icon: lucide/calendar
 
 # Scheduling
 
-MindRoom supports scheduled tasks using cron expressions or natural language.
+MindRoom supports scheduled tasks using natural language, powered by AI parsing.
 
 ## Overview
 
-Schedule agents to perform tasks at specific times or intervals. Scheduled tasks run in the context of the room where they were created.
+Schedule agents to perform tasks at specific times or intervals. The scheduling system uses AI to understand natural language requests and converts them to either one-time tasks or recurring cron-based schedules. Scheduled tasks run in the context of the thread where they were created.
 
 ## Commands
 
 ### Schedule a Task
 
 ```
-!schedule <cron-or-natural-language> <message>
+!schedule <natural-language-request>
 ```
 
-**Examples:**
+Write your scheduling request in natural language. The AI will parse it and determine the timing and task.
+
+**Simple Reminders:**
 
 ```
-!schedule "0 9 * * 1" @researcher Send me a weekly market summary
-!schedule "every day at 9am" @assistant Good morning! What's on my calendar?
-!schedule "in 30 minutes" @reminder Check on the deployment
+!schedule in 5 minutes Check the deployment
+!schedule tomorrow at 3pm Send the weekly report
+!schedule later Ping me about the meeting
+```
+
+**Recurring Tasks:**
+
+```
+!schedule Every hour, @shell check server status
+!schedule Daily at 9am, @finance market report
+!schedule Weekly on Friday, @analyst prepare weekly summary
+!schedule Every Monday, @research AI news and @email_assistant send me a summary
+```
+
+**Event-Driven Workflows:**
+
+The system can convert event-based requests into smart polling schedules:
+
+```
+!schedule If I get an email about "urgent", @phone_agent call me
+!schedule When Bitcoin drops below $40k, @crypto_agent notify me
+!schedule If server CPU > 80%, @ops_agent scale up
+!schedule Whenever I get email from boss, @notification_agent alert me immediately
 ```
 
 ### List Schedules
@@ -32,19 +54,43 @@ Schedule agents to perform tasks at specific times or intervals. Scheduled tasks
 !list_schedules
 ```
 
-Shows all scheduled tasks in the current room.
+Shows all pending scheduled tasks in the current thread.
 
 ### Cancel a Schedule
 
 ```
-!cancel_schedule <schedule-id>
+!cancel_schedule <task-id>
+!cancel_schedule all
 ```
 
-Remove a scheduled task by its ID.
+Cancel a specific scheduled task by its ID, or use `all` to cancel all scheduled tasks in the room.
 
-## Cron Expressions
+Use `!list_schedules` to see task IDs.
 
-Standard 5-field cron format:
+## How It Works
+
+### AI-Powered Parsing
+
+MindRoom uses AI to parse your natural language request into a structured schedule. The AI determines:
+
+1. **Schedule type**: One-time or recurring (cron-based)
+2. **Timing**: When to execute the task
+3. **Message**: What to post when the task executes, including agent mentions
+
+### Schedule Types
+
+| Type | Description | Example |
+|------|-------------|---------|
+| One-time | Executes once at a specific time | `in 30 minutes`, `tomorrow at 3pm` |
+| Recurring | Executes repeatedly on a cron schedule | `every day at 9am`, `weekly on Monday` |
+
+### Agent Mentions
+
+Include `@agent_name` in your schedule to have specific agents respond. The scheduler validates that mentioned agents are available in the thread before creating the task.
+
+## Cron Reference
+
+For recurring tasks, the system internally uses standard 5-field cron expressions:
 
 ```
 ┌───────────── minute (0-59)
@@ -56,27 +102,15 @@ Standard 5-field cron format:
 * * * * *
 ```
 
-**Examples:**
+**Common Patterns:**
 
-| Expression | Description |
-|------------|-------------|
-| `0 9 * * *` | Every day at 9:00 AM |
-| `0 9 * * 1` | Every Monday at 9:00 AM |
-| `*/15 * * * *` | Every 15 minutes |
-| `0 0 1 * *` | First day of each month at midnight |
-| `0 18 * * 1-5` | Weekdays at 6:00 PM |
-
-## Natural Language
-
-MindRoom parses natural language schedules:
-
-| Input | Interpreted As |
-|-------|----------------|
-| `every day at 9am` | `0 9 * * *` |
-| `every monday at noon` | `0 12 * * 1` |
-| `every hour` | `0 * * * *` |
-| `in 30 minutes` | One-time, 30 mins from now |
-| `tomorrow at 3pm` | One-time, next day 15:00 |
+| Natural Language | Cron Equivalent | Description |
+|------------------|-----------------|-------------|
+| `every day at 9am` | `0 9 * * *` | Daily at 9:00 AM |
+| `every monday at noon` | `0 12 * * 1` | Weekly on Monday at noon |
+| `every hour` | `0 * * * *` | Hourly at minute 0 |
+| `every 15 minutes` | `*/15 * * * *` | Every 15 minutes |
+| `weekdays at 6pm` | `0 18 * * 1-5` | Mon-Fri at 6:00 PM |
 
 ## Timezone
 
@@ -86,19 +120,21 @@ Schedules use the timezone from `config.yaml`:
 timezone: America/Los_Angeles
 ```
 
-If not set, UTC is used.
+If not set, UTC is used. Times are displayed in your configured timezone with relative time indicators (e.g., "in 2 hours").
 
-## Configuration
+## Storage and Persistence
 
-No additional configuration is needed. Scheduling is built into the core system.
+Schedules are stored in the room's Matrix state using the `com.mindroom.scheduled.task` event type. This means:
 
-## Storage
-
-Schedules are stored in the room's Matrix state and persist across restarts.
+- Tasks persist across bot restarts
+- The router agent automatically restores pending tasks on startup
+- Past one-time tasks are skipped during restoration
 
 ## Best Practices
 
-1. **Use descriptive messages** - Include the agent mention and clear task
-2. **Test with short intervals** - Try `in 5 minutes` before setting up daily tasks
-3. **Set appropriate timezone** - Ensure `config.yaml` has your timezone
-4. **Clean up old schedules** - Periodically review with `!list_schedules`
+1. **Use descriptive requests** - Be clear about timing and what you want to happen
+2. **Mention agents explicitly** - Include `@agent_name` for specific agent responses
+3. **Test with short intervals** - Try `in 5 minutes` before setting up daily tasks
+4. **Set appropriate timezone** - Ensure `config.yaml` has your timezone
+5. **Clean up old schedules** - Periodically review with `!list_schedules`
+6. **Use threads** - Scheduled tasks execute in the thread where they were created

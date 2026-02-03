@@ -61,4 +61,4 @@ agents:
 See the full list in:
 
 - [Built-in Tools](builtin.md) - All available tool integrations
-- [MCP Tools](mcp.md) - Model Context Protocol tools
+- [MCP Tools](mcp.md) - Model Context Protocol tools (planned)

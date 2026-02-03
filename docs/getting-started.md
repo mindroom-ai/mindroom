@@ -65,16 +65,19 @@ timezone: America/Los_Angeles
 Create a `.env` file with your credentials:
 
 ```bash
-# Matrix credentials
+# Matrix homeserver (must allow open registration for agent accounts)
 MATRIX_HOMESERVER=https://matrix.example.com
-MATRIX_USER_ID=@mindroom:example.com
-MATRIX_ACCESS_TOKEN=your_access_token
 
 # AI provider API keys
 ANTHROPIC_API_KEY=your_anthropic_key
 # OPENAI_API_KEY=your_openai_key
 # GOOGLE_API_KEY=your_google_key
 ```
+
+!!! note "Matrix Registration"
+    MindRoom automatically creates Matrix user accounts for each agent.
+    Your Matrix homeserver must allow open registration, or you need to
+    configure it to allow registration from localhost.
 
 ### 3. Run MindRoom
 
