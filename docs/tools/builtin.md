@@ -77,7 +77,7 @@ MindRoom includes 85+ built-in tool integrations organized by category.
 | `pubmed` | Medical literature | - |
 | `hackernews` | Get top stories and user details from Hacker News | - |
 | `youtube` | Extract video data, captions, and timestamps | - |
-| `reddit` | Reddit browsing and interaction | `client_id`, `client_secret` |
+| `reddit` | Reddit browsing and interaction | `client_id`, `client_secret`, optional `username`/`password` |
 
 ## Communication
 

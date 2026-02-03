@@ -58,7 +58,7 @@ agents:
     # Enable markdown formatting
     markdown: true
 
-    # Whether to add history to messages (for context)
+    # Whether to include conversation history in context
     add_history_to_messages: true
 ```
 
@@ -91,7 +91,7 @@ Some agent names (the YAML key, not `display_name`) have built-in rich prompts t
 - `news` - News aggregation
 - `data_analyst` - Data analysis
 
-When using these names, the built-in prompt is used instead of the `role` field. Note that custom `instructions` from YAML are NOT applied to rich prompt agents - the built-in prompt is used as-is.
+When using these names, the built-in prompt is used instead of the `role` field. Note that both the `role` and `instructions` fields from YAML are ignored for rich prompt agents - the built-in prompt is used as-is.
 
 ## Defaults
 

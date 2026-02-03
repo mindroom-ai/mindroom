@@ -224,21 +224,21 @@ The dashboard communicates with the MindRoom backend API at `/api/`. Key endpoin
 
 ### Credentials
 
-- `GET /api/credentials/list` - List services with credentials
-- `GET /api/credentials/:service/status` - Get credential status
-- `GET /api/credentials/:service` - Get credentials for editing
-- `POST /api/credentials/:service` - Set credentials
-- `POST /api/credentials/:service/api-key` - Set API key
-- `GET /api/credentials/:service/api-key` - Get masked API key
-- `POST /api/credentials/:service/test` - Test credentials validity
-- `DELETE /api/credentials/:service` - Delete credentials
+- `GET /api/credentials/list` - List services with stored credentials
+- `GET /api/credentials/:service/status` - Get credential status for a service
+- `GET /api/credentials/:service` - Get credentials for a service (for editing)
+- `POST /api/credentials/:service` - Set multiple credentials for a service
+- `POST /api/credentials/:service/api-key` - Set an API key for a service
+- `GET /api/credentials/:service/api-key?key_name=` - Get masked API key (defaults to `api_key`)
+- `POST /api/credentials/:service/test` - Test if credentials exist for a service
+- `DELETE /api/credentials/:service` - Delete all credentials for a service
 
 ### Tools & Matrix
 
-- `GET /api/tools` - List available tools with status
-- `GET /api/rooms` - List configured rooms
-- `GET /api/matrix/agents/rooms` - Get all agents' room memberships
-- `GET /api/matrix/agents/:id/rooms` - Get specific agent's room memberships
-- `POST /api/matrix/rooms/leave` - Leave a single room
-- `POST /api/matrix/rooms/leave-bulk` - Leave multiple rooms
+- `GET /api/tools` - List all registered tools with availability status
+- `GET /api/rooms` - List configured rooms (extracted from agent configurations)
+- `GET /api/matrix/agents/rooms` - Get all agents' room memberships (configured, joined, unconfigured)
+- `GET /api/matrix/agents/:agent_id/rooms` - Get a specific agent's room memberships
+- `POST /api/matrix/rooms/leave` - Make an agent leave a specific room
+- `POST /api/matrix/rooms/leave-bulk` - Make multiple agents leave multiple rooms
 - `POST /api/test/model` - Test model connection

@@ -100,7 +100,7 @@ CEREBRAS_API_KEY=...
 DEEPSEEK_API_KEY=...
 ```
 
-For Ollama, you can also set:
+For Ollama, you can optionally set the host (defaults to `http://localhost:11434`):
 
 ```bash
 OLLAMA_HOST=http://localhost:11434

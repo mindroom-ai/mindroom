@@ -21,7 +21,7 @@ teams:
     mode: coordinate
 ```
 
-In coordinate mode, the leader analyzes the task and assigns different subtasks to each agent based on their roles. The leader decides whether to run tasks sequentially or in parallel based on dependencies.
+In coordinate mode, the leader analyzes the task and assigns different subtasks to each agent based on their roles. The leader determines whether tasks should run sequentially or in parallel depending on their dependencies.
 
 ### Collaborate Mode
 
@@ -75,7 +75,7 @@ teams:
 | `agents` | Yes | - | List of agent names that compose this team |
 | `mode` | No | `coordinate` | Collaboration mode: `coordinate` or `collaborate` |
 | `rooms` | No | `[]` | List of room names the team responds in |
-| `model` | No | `default` | Model used for team coordination and synthesis |
+| `model` | No | `"default"` | Model used for team coordination and synthesis |
 
 ## How Teams Work
 
@@ -99,9 +99,9 @@ teams:
 
 ## Dynamic Team Formation
 
-When multiple agents are mentioned in a message (e.g., `@code @research analyze this`), MindRoom automatically forms an ad-hoc team. Dynamic teams form in these scenarios:
+When multiple agents are mentioned in a message, MindRoom automatically forms an ad-hoc team. Dynamic teams form in these scenarios:
 
-1. **Multiple agents explicitly tagged** - e.g., `@code @research analyze this`
+1. **Multiple agents explicitly tagged** - For example, `@code @research analyze this`
 2. **Thread with previously mentioned agents** - Follow-up messages in a thread where multiple agents were mentioned earlier
 3. **Thread with multiple agent participants** - Continuing a conversation where multiple agents have responded
 4. **DM room with multiple agents** - Messages in a DM room containing multiple agents (main timeline only)
@@ -114,5 +114,6 @@ For dynamic teams, the collaboration mode is selected by AI based on the task:
 - Tasks asking for opinions or brainstorming use **collaborate** mode
 
 When AI mode selection is unavailable, MindRoom falls back to:
-- **coordinate** for explicitly tagged agents (they likely have different roles)
-- **collaborate** for agents from thread history (likely discussing same topic)
+
+- **coordinate** for explicitly tagged agents (assumes they were tagged for their distinct roles)
+- **collaborate** for agents from thread history (assumes they are discussing the same topic)

@@ -56,7 +56,7 @@ main() entry
 
 ### Boot Sequence Details
 
-1. **User Account Creation**: A shared "user" Matrix account is created first via `_ensure_user_account()` - this is a human user account, separate from agent accounts
+1. **User Account Creation**: A "user" Matrix account (named "Mindroom User") is created first via `_ensure_user_account()` - this is a human observer account, separate from agent accounts
 2. **Entity Order**: Router is created first, then agents, then teams (order defined in `all_entities` list)
 3. **Agent Account Setup**: Each bot calls `ensure_user_account()` during `start()` to create its own Matrix account
 4. **Room Setup** (`_setup_rooms_and_memberships`):
@@ -70,7 +70,7 @@ main() entry
 Config changes are detected via polling (not Watchdog):
 
 1. `watch_file()` polls `config.yaml` every second by checking `st_mtime`
-2. On change, `_watch_config_task()` calls `orchestrator.update_config()`
+2. On change, the callback triggers `orchestrator.update_config()` (via `_handle_config_change()`)
 3. Diff computed via `_identify_entities_to_restart()`:
    - Compare agent configs using `model_dump(exclude_none=True)`
    - Check for new/removed entities
@@ -113,7 +113,7 @@ Messages are processed via Matrix event callbacks. The actual flow:
 MindRoom handles multiple conversations concurrently:
 
 - Each bot runs its own sync loop via `_sync_forever_with_restart()`
-- Sync loop failures trigger automatic restart with exponential backoff (5s, 10s, ... up to 60s)
+- Sync loop failures trigger automatic restart with linear backoff (5s, 10s, 15s, ... up to 60s)
 - Event callbacks run as background tasks (never block the sync loop)
 - `ResponseTracker` prevents duplicate replies to the same message
 - `StopManager` handles cancellation of in-progress responses

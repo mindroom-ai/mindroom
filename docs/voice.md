@@ -145,10 +145,10 @@ The router agent handles all voice message processing to avoid duplicate transcr
 
 MindRoom also supports text-to-speech (TTS) through agent tools. These are separate from voice message transcription and allow agents to generate audio responses:
 
-- **OpenAI** - Speech synthesis via `openai` tool
-- **ElevenLabs** - High-quality AI voices and sound effects via `eleven_labs` tool
-- **Cartesia** - Voice AI with optional voice localization via `cartesia` tool
-- **Groq** - Fast speech generation via `groq` tool
+- **OpenAI** - Speech synthesis via the `openai` tool
+- **ElevenLabs** - High-quality AI voices and sound effects via the `eleven_labs` tool
+- **Cartesia** - Voice AI with text-to-speech and voice localization via the `cartesia` tool
+- **Groq** - Fast audio transcription, translation, and text-to-speech via the `groq` tool
 
 See the [Tools documentation](/tools) for configuration details.
 
@@ -164,6 +164,6 @@ See the [Tools documentation](/tools) for configuration details.
 
 1. **Speak clearly** - Enunciate agent names
 2. **Reduce background noise** - Improves accuracy
-3. **Say the agent name first** - "Hey @assistant, what's the weather?"
+3. **Say the agent name first** - "Hey assistant, what's the weather?"
 4. **Keep messages focused** - One request per message
 5. **Use display names** - The AI will convert spoken names like "HomeAssistant" to the correct `@home` mention

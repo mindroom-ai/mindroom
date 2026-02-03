@@ -25,7 +25,7 @@ Write your scheduling request in natural language. The AI will parse it and dete
 ```
 !schedule in 5 minutes Check the deployment
 !schedule tomorrow at 3pm Send the weekly report
-!schedule later Ping me about the meeting
+!schedule in 30 minutes Ping me about the meeting
 ```
 
 **Recurring Tasks:**
@@ -56,7 +56,7 @@ The system can convert event-based requests into smart polling schedules:
 
 Shows all pending scheduled tasks. When used in a thread, shows tasks for that thread. When used in the main room, shows all tasks in the room.
 
-Alternative syntax: `!listschedules`, `!list-schedules`, `!list_schedule`
+Alternative syntax: `!listschedules`, `!list-schedules`, `!list_schedule`, `!listschedule`, `!list-schedule`
 
 ### Cancel a Schedule
 

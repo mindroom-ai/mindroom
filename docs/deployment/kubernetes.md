@@ -59,6 +59,7 @@ For manual deployments or debugging:
 ```bash
 helm upgrade --install instance-1 ./cluster/k8s/instance \
   --namespace mindroom-instances \
+  --create-namespace \
   --set customer=1 \
   --set accountId="your-account-uuid" \
   --set baseDomain=mindroom.chat \
@@ -69,8 +70,6 @@ helm upgrade --install instance-1 ./cluster/k8s/instance \
   --set supabaseServiceKey="your-service-key"
 ```
 
-Note: The `mindroom-instances` namespace must exist before deployment.
-
 ### Instance values.yaml
 
 ```yaml
@@ -78,9 +77,6 @@ customer: demo
 baseDomain: mindroom.chat
 storage: 10Gi
 storagePath: "/mindroom_data"
-
-# Account ID (UUID from Supabase)
-accountId: ""
 
 # Docker images
 mindroom_image: git.nijho.lt/basnijholt/mindroom-frontend:latest
@@ -102,6 +98,8 @@ supabaseServiceKey: ""
 # Matrix admin password
 matrix_admin_password: ""
 ```
+
+Note: `accountId` is required when deploying but should be passed via `--set accountId=<uuid>` rather than stored in the values file.
 
 ## Secrets Management
 
@@ -173,12 +171,14 @@ cp cluster/k8s/platform/values-prod.example.yaml cluster/k8s/platform/values-pro
 # For staging
 helm upgrade --install platform ./cluster/k8s/platform \
   -f ./cluster/k8s/platform/values-staging.yaml \
-  --namespace mindroom-staging
+  --namespace mindroom-staging \
+  --create-namespace
 
 # For production
 helm upgrade --install platform ./cluster/k8s/platform \
   -f ./cluster/k8s/platform/values-prod.yaml \
-  --namespace mindroom-production
+  --namespace mindroom-production \
+  --create-namespace
 ```
 
 The namespace should match the `environment` value in your values file (`mindroom-{environment}`).
@@ -223,6 +223,12 @@ cleanupScheduler:
 # Ingress options
 ingress:
   enableConfigurationSnippet: false
+
+# Monitoring (optional)
+monitoring:
+  enabled: true
+  releaseLabel: monitoring
+  scrapeInterval: 30s
 ```
 
 Platform services use these ingress hosts:

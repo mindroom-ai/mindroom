@@ -72,7 +72,7 @@ MATRIX_HOMESERVER=https://matrix.example.com
 # Optional: For self-signed certificates (development)
 # MATRIX_SSL_VERIFY=false
 
-# Optional: For federation setups where server_name differs from homeserver hostname
+# Optional: For setups where server_name differs from the homeserver URL
 # MATRIX_SERVER_NAME=example.com
 
 # AI provider API keys
@@ -85,7 +85,8 @@ ANTHROPIC_API_KEY=your_anthropic_key
     MindRoom automatically creates Matrix user accounts for each agent.
     Your Matrix homeserver must allow open registration, or you need to
     configure it to allow registration from localhost. If registration
-    fails, check your homeserver's registration settings.
+    fails, check your homeserver's `enable_registration` setting
+    (in `homeserver.yaml` for Synapse).
 
 ### 3. Run MindRoom
 

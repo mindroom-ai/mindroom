@@ -63,12 +63,12 @@ Notes:
 
 If `metadata.openclaw` is present, MindRoom filters skills using these rules:
 
-- `always: true` bypasses all checks
-- `os: ["linux", "darwin", "windows"]`
-- `requires.env`: env var set or credential key exists
-- `requires.config`: config path is truthy (e.g., `agents.code.tools`)
-- `requires.bins`: all binaries must exist in PATH
-- `requires.anyBins`: at least one binary must exist in PATH
+- `always: true` - Bypasses all checks.
+- `os: ["linux", "darwin", "windows"]` - Skill is only available on the listed operating systems.
+- `requires.env` - Each listed env var must be set or exist as a credential key.
+- `requires.config` - Each listed config path must be truthy (e.g., `agents.code.tools`).
+- `requires.bins` - All listed binaries must exist in PATH.
+- `requires.anyBins` - At least one listed binary must exist in PATH.
 
 Skills without `metadata.openclaw` are always eligible.
 
@@ -80,7 +80,7 @@ MindRoom loads skills from these locations, in this order:
 2. Plugin-provided skill directories (see [Plugins](plugins.md))
 3. User skills: `~/.mindroom/skills/`
 
-If multiple skills share the same name, the last one wins (user > plugin > bundled).
+If multiple skills share the same name, the last one wins (user > plugin > bundled). Skill names are matched case-insensitively.
 
 ## Configuring skills
 
@@ -103,9 +103,9 @@ If `skills` is empty or unset, the agent gets no skills.
 
 Agents see available skills in the system prompt and can load details using these tools:
 
-- `get_skill_instructions(skill_name)`
-- `get_skill_reference(skill_name, reference_path)`
-- `get_skill_script(skill_name, script_path, execute=False)`
+- `get_skill_instructions(skill_name)` - Load the full instructions and metadata for a skill.
+- `get_skill_reference(skill_name, reference_path)` - Access a specific reference document from a skill.
+- `get_skill_script(skill_name, script_path, execute=False)` - Read or execute a script from a skill. When `execute=True`, optional `args` and `timeout` parameters are available.
 
 ## Skill command dispatch (`!skill`)
 
@@ -143,6 +143,6 @@ MindRoom polls skill directories every second. When a `SKILL.md` file is added, 
 
 ## Best practices
 
-1. Keep skills focused - one skill per capability
-2. Declare dependencies with `metadata.openclaw.requires`
-3. Use descriptive names like `code-review`
+1. Keep skills focused: one skill per capability.
+2. Declare dependencies with `metadata.openclaw.requires` to ensure skills only appear when prerequisites are met.
+3. Use descriptive, hyphenated names like `code-review` or `repo-quick-audit`.

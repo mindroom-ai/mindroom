@@ -38,7 +38,7 @@ See the [MCP servers directory](https://github.com/modelcontextprotocol/servers)
 
 ## Workaround: Using Agno MCPTools Directly
 
-Until native MindRoom configuration is available, you can use MCP tools through a [custom plugin](../plugins.md). The key is to create a subclass that pre-configures the MCP server parameters, since MindRoom's tool registry expects a class (not an instance).
+Until native MindRoom configuration is available, you can use MCP tools through a [custom plugin](../plugins.md). Create a subclass that pre-configures the MCP server parameters, since MindRoom's tool registry expects a class (not an instance).
 
 ### Plugin Structure
 
@@ -64,7 +64,7 @@ plugins/
 
 ```python
 from agno.tools.mcp import MCPTools
-from mindroom.tools_metadata import register_tool_with_metadata, ToolCategory, ToolStatus, SetupType
+from mindroom.tools_metadata import ToolCategory, register_tool_with_metadata
 
 
 class FilesystemMCPTools(MCPTools):
@@ -82,8 +82,6 @@ class FilesystemMCPTools(MCPTools):
     display_name="My MCP Server",
     description="Tools from my custom MCP server",
     category=ToolCategory.DEVELOPMENT,
-    status=ToolStatus.AVAILABLE,
-    setup_type=SetupType.NONE,
 )
 def my_mcp_tools():
     """Return the MCPTools subclass (not an instance)."""
@@ -107,3 +105,5 @@ agents:
 
 > [!NOTE]
 > MCP tools require async operations. Agno's Agent class automatically handles connecting and disconnecting MCP servers during async runs (`arun`, `aprint_response`). The MCP server process starts when the agent runs and stops when the run completes.
+
+Replace `/path/to/dir` with the directory you want the filesystem server to access.

@@ -34,7 +34,7 @@ agents:
 # Model configurations (at least a "default" model is recommended)
 models:
   sonnet:
-    provider: anthropic            # Required: openai, anthropic, ollama, google/gemini, groq, cerebras, openrouter, deepseek
+    provider: anthropic            # Required: openai, anthropic, ollama, gemini, groq, cerebras, openrouter, deepseek
     id: claude-sonnet-4-latest     # Required: Model ID for the provider
     host: null                     # Optional: Host URL (e.g., for Ollama)
     api_key: null                  # Optional: API key (usually from env vars)
@@ -122,7 +122,7 @@ memory:
       model: text-embedding-3-small  # Embedding model
       api_key: null                # From OPENAI_API_KEY env var
       host: null                   # For self-hosted (Ollama, llama.cpp)
-  llm:                             # Optional: LLM for memory summarization
+  llm:                             # Optional: LLM for memory operations
     provider: ollama
     config:
       model: llama3.2

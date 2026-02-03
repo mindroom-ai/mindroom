@@ -74,16 +74,34 @@ When the router joins a room, it restores any previously scheduled tasks and pen
 
 ## Routing Behavior Details
 
+### When Routing Occurs
+
+The router only performs AI-based routing when all of the following conditions are met:
+
+1. No specific agent is mentioned in the message
+2. No agents have already participated in the thread
+3. More than one agent is available in the room
+
+If agents are already participating in a thread, the conversation continues with those agents without additional routing.
+
 ### Single-Agent Optimization
 
-When there's only one agent configured in a room, the router skips AI routing entirely. The single agent handles messages directly, which is faster and more efficient.
+When there is only one agent configured in a room, the router skips AI routing entirely. The single agent handles messages directly, which is faster and more efficient. Note that the router itself is excluded from the "available agents" count for this optimization.
 
 ### Routing Fallback
 
-If routing fails (model error, invalid suggestion, etc.), the router sends a helpful error message: "I couldn't determine which agent should help with this. Please try mentioning an agent directly with @ or rephrase your request."
+If routing fails (model error, invalid suggestion, etc.), the router sends a helpful error message: "⚠️ I couldn't determine which agent should help with this. Please try mentioning an agent directly with @ or rephrase your request."
 
 Users can always mention agents directly with `@agent_name` to bypass routing.
 
+### DM Room Behavior
+
+In direct message (DM) rooms:
+
+- Single-agent DMs work just like single-agent rooms (agent responds directly without routing)
+- Multi-agent DMs with no agent mention trigger team formation, where all available agents collaborate
+- The router is preserved in DM rooms even during cleanup operations
+
 ## Note on the Router Agent
 
-The router is always present in MindRoom - it cannot be disabled. It automatically joins any room that has configured agents. Even if you don't explicitly configure a `router` section, it uses the default model for routing decisions.
+The router is always present in MindRoom and cannot be disabled. It automatically joins any room that has configured agents. Even if you do not explicitly configure a `router` section, it uses the default model for routing decisions.

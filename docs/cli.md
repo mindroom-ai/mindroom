@@ -129,17 +129,42 @@ mindroom run
 ### Debug logging
 
 ```bash
+# Full flag
 mindroom run --log-level DEBUG
+
+# Short flag (case-insensitive)
+mindroom run -l debug
 ```
 
 ### Custom storage path
 
 ```bash
+# Full flag
 mindroom run --storage-path /data/mindroom
+
+# Short flag
+mindroom run -s /data/mindroom
+```
+
+### Combined options
+
+```bash
+mindroom run -l DEBUG -s /data/mindroom
 ```
 
 ### Show version
 
 ```bash
 mindroom version
+```
+
+### Getting help
+
+```bash
+# Show main help
+mindroom --help
+mindroom -h
+
+# Show command-specific help
+mindroom run --help
 ```

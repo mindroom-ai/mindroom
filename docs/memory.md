@@ -127,7 +127,7 @@ Store conversation in memory (agent/team + room scopes)
 
 Memories are stored in ChromaDB under `<storage_path>/chroma/`:
 
-- Collection name: `mindroom_memories`
+- ChromaDB collection: `mindroom_memories`
 - Default path: `mindroom_data/chroma/`
 
 ## Mem0 Tool (Optional)

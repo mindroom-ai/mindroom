@@ -85,10 +85,10 @@ MindRoom stores data in the following structure:
 ```
 mindroom_data/
 ├── sessions/          # Agent conversation history (SQLite)
-├── memory/            # Vector store for memories (ChromaDB)
+├── chroma/            # Vector store for memories (ChromaDB)
+├── .ai_cache/         # AI response cache (if caching enabled)
 ├── tracking/          # Response tracking to avoid duplicates
 ├── credentials/       # Synced credentials from .env
-├── logs/              # Application logs
 ├── matrix_state.yaml  # Matrix connection state
 └── encryption_keys/   # Matrix E2EE keys (if enabled)
 ```

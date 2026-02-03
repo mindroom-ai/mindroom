@@ -82,7 +82,7 @@ docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.backend .
 
 The Dockerfile uses a multi-stage build with `uv` for dependency management and runs as a non-root user (UID 1000).
 
-## With Local Matrix
+## Running with a Local Matrix Server
 
 For development, run MindRoom alongside a local Matrix server:
 
@@ -116,10 +116,10 @@ curl http://localhost:8765/api/health
 MindRoom stores data in the `mindroom_data` directory:
 
 - `sessions/` - Per-agent conversation history (SQLite)
-- `memory/` - Vector store for agent/room memories
+- `chroma/` - Vector store for agent/room memories (ChromaDB)
+- `.ai_cache/` - AI response cache (if caching enabled)
 - `tracking/` - Response tracking to avoid duplicates
 - `credentials/` - Synchronized secrets from `.env`
-- `logs/` - Application logs
 - `matrix_state.yaml` - Matrix connection state
 - `encryption_keys/` - Matrix E2EE keys (if enabled)
 
@@ -149,16 +149,16 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
-    environment:
-      - VITE_API_URL=http://localhost:8765  # Direct backend URL for standalone setup
     depends_on:
       - backend
 ```
 
 !!! note "API URL Configuration"
-    Set `VITE_API_URL` to the backend URL (e.g., `http://localhost:8765`) for standalone
-    deployments. Use an empty string (`VITE_API_URL=`) only when using a reverse proxy
-    that routes `/api/*` requests to the backend.
+    The pre-built frontend image expects a reverse proxy that routes `/api/*` requests
+    to the backend. For standalone deployments without a reverse proxy, access the
+    backend API directly at `http://localhost:8765` and the frontend at `http://localhost:8080`.
+    To customize `VITE_API_URL`, you must build the frontend image yourself since Vite
+    variables are baked in at build time.
 
 !!! tip "Production Deployment"
     For production, use a reverse proxy (Traefik, Nginx) to serve both services

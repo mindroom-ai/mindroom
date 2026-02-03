@@ -4,7 +4,7 @@ icon: lucide/plug-2
 
 # Plugins
 
-MindRoom plugins add tools and can optionally ship skills. Plugins are loaded from paths listed in `config.yaml`.
+MindRoom plugins add tools and optionally ship skills. Plugins are loaded from paths listed in `config.yaml`.
 
 ## Plugin structure
 
@@ -109,7 +109,7 @@ List skill directories in the manifest `skills` array. Those directories are add
 
 ## Reloading plugins
 
-Plugin manifests and tools modules are cached by mtime. Changes are picked up the next time MindRoom reloads the tool registry (for example, on startup or config reload).
+Plugin manifests and tool modules are cached by mtime. Changes are picked up the next time MindRoom reloads the tool registry (for example, on startup or config reload).
 
 ## Security notes
 

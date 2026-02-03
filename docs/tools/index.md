@@ -27,15 +27,21 @@ agents:
 
 Tools are organized by category:
 
-- **Development** - File operations, shell, Docker, GitHub, Jira, code execution
-- **Research** - Web search (DuckDuckGo, Tavily, Exa), academic papers (arXiv, PubMed), web scraping
-- **Communication** - Slack, Discord, Telegram, Twilio, WhatsApp, Webex
-- **Email** - Gmail, AWS SES, Resend, generic SMTP
-- **Productivity** - Google Calendar, Todoist, SQL, Pandas, CSV, DuckDB
-- **Social** - Reddit, X/Twitter, Zoom
-- **Entertainment** - YouTube
+- **File & System** - File operations, shell, Docker, Python, SQL, DuckDB, Pandas, CSV
+- **Web Search & Research** - DuckDuckGo, Tavily, Exa, SerpAPI, Serper, SearXNG
+- **Web Scraping** - Firecrawl, Crawl4AI, Browserbase, Apify, Spider, Jina
+- **AI & ML APIs** - OpenAI, Gemini, Replicate, DALL-E, Eleven Labs, Cartesia
+- **Knowledge & Research** - arXiv, Wikipedia, PubMed, Hacker News, YouTube, Reddit
+- **Communication** - Gmail, Slack, Discord, Telegram, Twilio, WhatsApp, Webex, X/Twitter
+- **Project Management** - GitHub, Jira, Linear, Confluence, Trello, Todoist, Zendesk
+- **Calendar & Scheduling** - Google Calendar, Cal.com, Zoom
+- **Data & Business** - Google Sheets, YFinance, Financial Datasets API
+- **Location & Maps** - Google Maps, OpenWeather
+- **DevOps & Infrastructure** - AWS Lambda, AWS SES, Airflow, E2B, Daytona
 - **Smart Home** - Home Assistant
-- **Integrations** - Composio
+- **Media** - Giphy, MoviePy video tools
+- **Memory & Storage** - Mem0, Zep
+- **Custom & Config** - Custom API calls, MindRoom configuration management
 
 ## Quick Examples
 

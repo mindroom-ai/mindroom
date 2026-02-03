@@ -66,7 +66,7 @@ authorization:
       - "@support-agent:example.com"
 ```
 
-Note: Room permissions must use the full Matrix room ID (starting with `!`), not room aliases or names.
+Note: Room permissions must use the full Matrix room ID (starting with `!`), not room aliases (starting with `#`) or display names.
 
 ## Default Access
 
@@ -147,11 +147,11 @@ Examples:
 
 The authorization checks are performed in order:
 
-1. **Internal system user** - The `@mindroom_user` account on the current domain is always authorized (note: `@mindroom_user` from a different domain is NOT automatically authorized)
-2. **MindRoom agents/teams/router** - Configured agents, teams, and the router are authorized to communicate
-3. **Global users** - Users in `global_users` have access to all rooms
-4. **Room permissions** - Users listed for a specific room ID (if a room is in `room_permissions` but the user is not listed, access is denied - it does not fall through to default access)
-5. **Default access** - For rooms not in `room_permissions` at all, falls back to `default_room_access` setting
+1. **Internal system user** - The `@mindroom_user` account on the current domain is always authorized. Note that `@mindroom_user` from a different domain is not automatically authorized.
+2. **MindRoom agents/teams/router** - Configured agents, teams, and the router are authorized to communicate with each other.
+3. **Global users** - Users in `global_users` have access to all rooms.
+4. **Room permissions** - Users listed for a specific room ID. If a room is in `room_permissions` but the user is not listed, access is denied (does not fall through to default access).
+5. **Default access** - For rooms not in `room_permissions`, falls back to `default_room_access` setting.
 
 ## SaaS Platform Authorization
 
