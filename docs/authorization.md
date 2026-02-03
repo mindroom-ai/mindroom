@@ -35,6 +35,12 @@ authorization:
 
 This means only MindRoom system users (agents, teams, router, and `@mindroom_user`) can interact with agents by default.
 
+## Matrix ID Format
+
+User IDs follow the Matrix format: `@localpart:homeserver.domain`
+
+Examples: `@alice:matrix.org`, `@bob:example.com`, `@admin:company.internal`
+
 ## Authorization Flow
 
 Authorization checks are performed in order:
@@ -44,3 +50,6 @@ Authorization checks are performed in order:
 3. **Global users** - Users in `global_users` have access to all rooms
 4. **Room permissions** - If room is in `room_permissions`, user must be in that room's list (does NOT fall through to `default_room_access`)
 5. **Default access** - Rooms not in `room_permissions` use `default_room_access`
+
+> [!TIP]
+> Set `default_room_access: false` and explicitly grant access via `global_users` or `room_permissions` for better security.

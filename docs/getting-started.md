@@ -81,11 +81,8 @@ ANTHROPIC_API_KEY=your_anthropic_key
 # GOOGLE_API_KEY=your_google_key
 ```
 
-!!! note "Matrix Registration"
-    MindRoom automatically creates Matrix user accounts for each agent.
-    Your Matrix homeserver must allow open registration, or you need to
-    configure it to allow registration from localhost. If registration
-    fails, check your homeserver's registration settings.
+> [!NOTE]
+> MindRoom automatically creates Matrix user accounts for each agent. Your Matrix homeserver must allow open registration, or you need to configure it to allow registration from localhost. If registration fails, check your homeserver's registration settings.
 
 ### 3. Run MindRoom
 
