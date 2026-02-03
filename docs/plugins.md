@@ -2,167 +2,106 @@
 icon: lucide/plug-2
 ---
 
-# Plugins System
+# Plugins
 
-MindRoom supports dynamic plugins for extending functionality with custom tools and skills.
+MindRoom plugins add tools and can optionally ship skills. Plugins are loaded from paths listed in `config.yaml`.
 
-## Plugin Structure
+## Plugin structure
 
-A plugin is a directory containing a `manifest.json`:
+A plugin is a directory containing `mindroom.plugin.json`:
 
 ```
 my-plugin/
-├── manifest.json
+├── mindroom.plugin.json
 ├── tools.py
 └── skills/
     └── my-skill/
         └── SKILL.md
 ```
 
-## Manifest Format
+## Manifest format
 
 ```json
 {
   "name": "my-plugin",
-  "version": "1.0.0",
-  "description": "A custom plugin for MindRoom",
-  "tools_module": "tools",
-  "skill_paths": ["skills"]
+  "tools_module": "tools.py",
+  "skills": ["skills"]
 }
 ```
 
 | Field | Type | Description |
-|-------|------|-------------|
-| `name` | string | Plugin identifier |
-| `version` | string | Semantic version |
-| `description` | string | Brief description |
-| `tools_module` | string | Python module containing tools |
-| `skill_paths` | list | Directories containing skills |
+| --- | --- | --- |
+| `name` | string | Plugin identifier (required) |
+| `tools_module` | string | Path to the tools module (optional) |
+| `skills` | list | Relative directories containing skills (optional) |
 
-## Installing Plugins
+Unknown fields are ignored.
 
-### Local Directory
+## Configure plugins
 
-Place plugins in `~/.mindroom/plugins/`:
+Add plugin paths to `config.yaml`:
 
-```bash
-mkdir -p ~/.mindroom/plugins/my-plugin
+```yaml
+plugins:
+  - ./plugins/my-plugin
+  - python:my_skill_pack
 ```
 
-### From Git
+Paths may be:
+- Absolute paths
+- Paths relative to `config.yaml`
+- Python package specs (see below)
 
-Clone directly into the plugins directory:
+## Python package plugins
 
-```bash
-cd ~/.mindroom/plugins
-git clone https://github.com/user/mindroom-plugin-name
+MindRoom can resolve plugins from installed Python packages:
+
+```yaml
+plugins:
+  - my_skill_pack
+  - python:my_skill_pack
+  - pkg:my_skill_pack:plugins/demo
+  - module:my_skill_pack:plugins/demo
 ```
 
-## Creating Tools
+Rules:
+- A bare package name is allowed if it contains no slashes.
+- `python:`, `pkg:`, and `module:` are explicit prefixes.
+- `:sub/path` points to a subdirectory inside the package.
 
-Define tools in your `tools.py`:
+MindRoom resolves the package location and looks for `mindroom.plugin.json` in that directory.
+
+## Tools module example
 
 ```python
 from agno.tools import Toolkit
+from mindroom.tools_metadata import ToolCategory, register_tool_with_metadata
 
-class MyToolkit(Toolkit):
-    """Custom tools for my plugin."""
+class DemoTools(Toolkit):
+    def __init__(self) -> None:
+        super().__init__(name="demo", tools=[self.ping])
 
-    def __init__(self):
-        super().__init__(name="my_tools")
-        self.register(self.my_function)
+    def ping(self, command: str, commandName: str, skillName: str) -> str:
+        return f"{commandName}:{skillName}:{command}"
 
-    def my_function(self, param: str) -> str:
-        """Do something useful.
-
-        Args:
-            param: The input parameter
-
-        Returns:
-            The result
-        """
-        return f"Processed: {param}"
+@register_tool_with_metadata(
+    name="demo_plugin",
+    display_name="Demo Plugin",
+    description="Demo plugin tool",
+    category=ToolCategory.DEVELOPMENT,
+)
+def demo_plugin_tools():
+    return DemoTools
 ```
 
-## Creating Skills
+## Plugin skills
 
-Add skills in the `skills/` directory following the [Skills documentation](skills.md).
+List skill directories in the manifest `skills` array. Those directories are added to the skill search roots.
 
-## Hot Reload
+## Reloading plugins
 
-Plugins support hot reload - changes to `manifest.json` trigger automatic reloading:
+Plugin manifests and tools modules are cached by mtime. Changes are picked up the next time MindRoom reloads the tool registry (for example, on startup or config reload).
 
-1. MindRoom watches the plugins directory
-2. On manifest change, the plugin is unloaded
-3. The updated plugin is loaded fresh
-4. Agent toolkits are rebuilt
+## Security notes
 
-## Using Plugin Tools
-
-Reference plugin tools in agent configuration:
-
-```yaml
-agents:
-  assistant:
-    tools:
-      - my_tools  # From plugin
-      - file      # Built-in
-```
-
-## Using Plugin Skills
-
-Reference plugin skills the same way:
-
-```yaml
-agents:
-  assistant:
-    skills:
-      - my-skill  # From plugin
-```
-
-## Plugin Discovery
-
-MindRoom searches for plugins in:
-
-1. `~/.mindroom/plugins/` - User plugins
-2. `MINDROOM_PLUGINS_PATH` - Custom path (if set)
-3. Installed Python packages with `mindroom.plugins` entry point
-
-## Example Plugin
-
-Here's a complete example plugin:
-
-**manifest.json**:
-```json
-{
-  "name": "weather-plugin",
-  "version": "1.0.0",
-  "description": "Weather information tools",
-  "tools_module": "tools"
-}
-```
-
-**tools.py**:
-```python
-import httpx
-from agno.tools import Toolkit
-
-class WeatherToolkit(Toolkit):
-    def __init__(self, api_key: str):
-        super().__init__(name="weather")
-        self.api_key = api_key
-        self.register(self.get_weather)
-
-    def get_weather(self, city: str) -> str:
-        """Get current weather for a city."""
-        # Implementation here
-        return f"Weather in {city}: Sunny, 72°F"
-```
-
-## Best Practices
-
-1. **Version your plugins** - Use semantic versioning
-2. **Document dependencies** - List required packages
-3. **Handle missing credentials** - Check for API keys gracefully
-4. **Test independently** - Plugins should work in isolation
-5. **Use type hints** - Helps with tool schema generation
+Plugins execute code in-process. Only install plugins you trust.

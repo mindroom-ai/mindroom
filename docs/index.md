@@ -99,7 +99,8 @@ mindroom run
 - [Getting Started](getting-started.md) - Installation and first steps
 - [Configuration](configuration/index.md) - All configuration options
 - [Tools](tools/index.md) - Available tool integrations
-- [Skills and Plugins](configuration/skills-and-plugins.md) - Skill loading and plugin extensions
+- [Skills](skills.md) - Skill format, gating, and allowlists
+- [Plugins](plugins.md) - Plugin manifest and tool/skill loading
 - [Memory System](memory.md) - How agent memory works
 - [Architecture](architecture/index.md) - How it works under the hood
 - [CLI Reference](cli.md) - Command-line interface
