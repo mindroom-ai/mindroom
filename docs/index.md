@@ -98,7 +98,10 @@ mindroom run
 
 - [Getting Started](getting-started.md) - Installation and first steps
 - [Configuration](configuration/index.md) - All configuration options
+- [Dashboard](dashboard.md) - Web UI for configuration
 - [Tools](tools/index.md) - Available tool integrations
+- [Skills](skills.md) - OpenClaw-compatible skills system
+- [Plugins](plugins.md) - Extend with custom tools and skills
 - [Memory System](memory.md) - How agent memory works
 - [Architecture](architecture/index.md) - How it works under the hood
 - [CLI Reference](cli.md) - Command-line interface
