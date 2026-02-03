@@ -69,6 +69,8 @@ Key environment variables (set in `.env` or pass directly):
 | `MATRIX_SERVER_NAME` | Server name for federation (optional) | - |
 | `STORAGE_PATH` | Data storage directory | `mindroom_data` |
 | `LOG_LEVEL` | Logging level | `INFO` |
+| `MINDROOM_CONFIG_PATH` | Path to config.yaml (alternative: `CONFIG_PATH`) | Package default |
+| `MINDROOM_ENABLE_STREAMING` | Enable streaming responses | `true` |
 | `ANTHROPIC_API_KEY` | Anthropic API key (if using Claude models) | - |
 | `OPENAI_API_KEY` | OpenAI API key (if using OpenAI models) | - |
 

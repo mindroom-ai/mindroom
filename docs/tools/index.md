@@ -27,13 +27,13 @@ agents:
 
 Tools are organized by category:
 
-- **Development** - File operations, shell, Docker, GitHub, Jira, code execution
-- **Research** - Web search (DuckDuckGo, Tavily, Exa), academic papers (arXiv, PubMed), web scraping
+- **Development** - File operations, shell, Docker, GitHub, Jira, Python, Airflow, code execution sandboxes (E2B, Daytona)
+- **Research** - Web search (DuckDuckGo, Tavily, Exa, SerpAPI), academic papers (arXiv, PubMed), Wikipedia, Hacker News, web scraping (Firecrawl, Crawl4AI, Jina)
 - **Communication** - Slack, Discord, Telegram, Twilio, WhatsApp, Webex
 - **Email** - Gmail, AWS SES, Resend, generic SMTP
-- **Productivity** - Google Calendar, Todoist, SQL, Pandas, CSV, DuckDB
+- **Productivity** - Google Calendar, Todoist, Google Sheets, SQL, Pandas, CSV, DuckDB
 - **Social** - Reddit, X/Twitter, Zoom
-- **Entertainment** - YouTube
+- **Entertainment** - YouTube, Giphy
 - **Smart Home** - Home Assistant
 - **Integrations** - Composio
 

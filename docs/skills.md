@@ -58,6 +58,9 @@ Notes:
 | `command-dispatch` | `"tool"` | Set to `tool` to run a tool directly |
 | `command-tool` | string | Function to call: `function_name`, `toolkit.function_name`, or `toolkit` (if the toolkit exposes exactly one function) |
 | `command-arg-mode` | `"raw"` | Argument passing mode; only `raw` is currently supported |
+| `license` | string | Optional license information |
+| `compatibility` | string | Optional compatibility requirements |
+| `allowed-tools` | list | Optional list of tools this skill is allowed to use |
 
 ## Eligibility gating (OpenClaw metadata)
 
@@ -103,9 +106,9 @@ If `skills` is empty or unset, the agent gets no skills.
 
 Agents see available skills in the system prompt and can load details using these tools:
 
-- `get_skill_instructions(skill_name)`
-- `get_skill_reference(skill_name, reference_path)`
-- `get_skill_script(skill_name, script_path, execute=False)`
+- `get_skill_instructions(skill_name)` - Load the full instructions for a skill
+- `get_skill_reference(skill_name, reference_path)` - Access reference documentation
+- `get_skill_script(skill_name, script_path, execute=False, args=None, timeout=30)` - Read or execute scripts
 
 ## Skill command dispatch (`!skill`)
 

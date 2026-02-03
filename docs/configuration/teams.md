@@ -10,7 +10,7 @@ Teams allow multiple agents to collaborate on tasks. MindRoom supports two colla
 
 ### Coordinate Mode
 
-A team leader (automatically created) delegates different subtasks to team members:
+The team coordinator analyzes the task and delegates different subtasks to specific team members:
 
 ```yaml
 teams:
@@ -21,7 +21,7 @@ teams:
     mode: coordinate
 ```
 
-In coordinate mode, the leader analyzes the task and assigns different subtasks to each agent based on their roles. The leader decides whether to run tasks sequentially or in parallel based on dependencies.
+In coordinate mode, the coordinator analyzes the task and selects which agents should handle which subtasks based on their roles. The coordinator decides whether to run tasks sequentially or in parallel based on dependencies, then synthesizes all outputs into a cohesive response.
 
 ### Collaborate Mode
 
@@ -36,7 +36,7 @@ teams:
     mode: collaborate
 ```
 
-In collaborate mode, every team member receives the exact same task and works on it independently. This is useful when you want diverse perspectives on the same problem.
+In collaborate mode, the task is delegated to all team members simultaneously. Each agent works on the same task independently, and the coordinator synthesizes all perspectives into a final response. This is useful when you want diverse perspectives on the same problem.
 
 ## Full Configuration
 
@@ -80,22 +80,22 @@ teams:
 ## How Teams Work
 
 1. A message mentions the team (e.g., `@super_team`)
-2. The team leader (automatically created) receives the message
+2. The team coordinator receives the message
 3. In **coordinate** mode:
-   - The leader delegates different subtasks to each agent based on their roles
+   - The coordinator delegates different subtasks to selected agents based on their roles
    - Agents may work sequentially or in parallel depending on task dependencies
-   - The leader synthesizes all outputs into a cohesive response
+   - The coordinator synthesizes all outputs into a cohesive response
 4. In **collaborate** mode:
    - All agents receive the same task and work on it simultaneously
    - Each agent provides their perspective independently
-   - The leader synthesizes all perspectives into a final response
+   - The coordinator synthesizes all perspectives into a final response
 
 ## When to Use Each Mode
 
 | Mode | Use Case | Example |
 |------|----------|---------|
-| `coordinate` | Agents need to do different subtasks | "Get weather and news" - weather agent gets weather, news agent gets news |
-| `collaborate` | Want diverse perspectives on same problem | "What do you think about X?" - all agents share their view |
+| `coordinate` | Agents need to do different subtasks | "Get weather and news" - coordinator assigns weather to one agent, news to another |
+| `collaborate` | Want diverse perspectives on the same problem | "What do you think about X?" - all agents analyze the same question and share their views |
 
 ## Dynamic Team Formation
 
@@ -113,6 +113,6 @@ For dynamic teams, the collaboration mode is selected by AI based on the task:
 - Tasks with different subtasks for each agent use **coordinate** mode
 - Tasks asking for opinions or brainstorming use **collaborate** mode
 
-When AI mode selection is unavailable, MindRoom falls back to:
-- **coordinate** for explicitly tagged agents (they likely have different roles)
-- **collaborate** for agents from thread history (likely discussing same topic)
+When AI mode selection is unavailable or fails, MindRoom falls back to:
+- **coordinate** when multiple agents are explicitly tagged in the message (they likely have different roles to fulfill)
+- **collaborate** for all other cases, such as agents from thread history or DM rooms (likely discussing the same topic)

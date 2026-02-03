@@ -27,14 +27,14 @@ agents:
     skills: []                     # Optional: List of skill names
     instructions: []               # Optional: Custom instructions
     rooms: [lobby]                 # Optional: Rooms to auto-join
-    num_history_runs: 5            # Optional: Override default history
-    markdown: true                 # Optional: Override default markdown
-    add_history_to_messages: true  # Optional: Include history in context
+    num_history_runs: 5            # Optional: Override default (inherits from defaults section)
+    markdown: true                 # Optional: Override default (inherits from defaults section)
+    add_history_to_messages: true  # Optional: Override default (inherits from defaults section)
 
 # Model configurations (at least a "default" model is recommended)
 models:
   sonnet:
-    provider: anthropic            # Required: openai, anthropic, ollama, google/gemini, groq, cerebras, openrouter, deepseek
+    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, groq, cerebras, openrouter, deepseek
     id: claude-sonnet-4-latest     # Required: Model ID for the provider
     host: null                     # Optional: Host URL (e.g., for Ollama)
     api_key: null                  # Optional: API key (usually from env vars)

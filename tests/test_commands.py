@@ -93,7 +93,9 @@ def test_list_schedules_command() -> None:
         "!list_schedules",
         "!listschedules",
         "!list-schedules",
-        "!list_schedule",  # singular
+        "!list_schedule",  # singular with underscore
+        "!listschedule",  # singular without separator
+        "!list-schedule",  # singular with dash
         "!LIST_SCHEDULES",  # case insensitive
     ]
 

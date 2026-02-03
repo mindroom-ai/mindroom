@@ -99,6 +99,7 @@ Messages are processed via Matrix event callbacks. The actual flow:
    - Router handles commands exclusively
    - Extract message context (mentions, thread history)
    - Skip messages from other agents (unless mentioned)
+   - Router performs AI routing when no agent mentioned
    - Check for team formation or individual response
    - Generate response (streaming or batch)
    - Store conversation memory as background task
@@ -126,6 +127,8 @@ retry_count = 0
 while bot.running:
     try:
         await bot.sync_forever()
+    except asyncio.CancelledError:
+        break  # Task was cancelled, exit gracefully
     except Exception:
         retry_count += 1
         wait_time = min(60, 5 * retry_count)  # 5s, 10s, 15s, ... up to 60s

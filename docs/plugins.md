@@ -76,19 +76,19 @@ MindRoom resolves the package location and looks for `mindroom.plugin.json` in t
 ## Tools module example
 
 ```python
-from agno.tools import Toolkit
-from mindroom.tools_metadata import ToolCategory, register_tool_with_metadata
+from __future__ import annotations
 
+from typing import TYPE_CHECKING
 
-class GreeterTools(Toolkit):
-    """A simple greeting toolkit."""
+from mindroom.tools_metadata import (
+    SetupType,
+    ToolCategory,
+    ToolStatus,
+    register_tool_with_metadata,
+)
 
-    def __init__(self) -> None:
-        super().__init__(name="greeter", tools=[self.greet])
-
-    def greet(self, name: str) -> str:
-        """Greet someone by name."""
-        return f"Hello, {name}!"
+if TYPE_CHECKING:
+    from agno.tools import Toolkit
 
 
 @register_tool_with_metadata(
@@ -96,12 +96,41 @@ class GreeterTools(Toolkit):
     display_name="Greeter",
     description="A simple greeting tool",
     category=ToolCategory.DEVELOPMENT,
+    status=ToolStatus.AVAILABLE,
+    setup_type=SetupType.NONE,
 )
-def greeter_tools() -> type[GreeterTools]:
+def greeter_tools() -> type[Toolkit]:
+    from agno.tools import Toolkit
+
+    class GreeterTools(Toolkit):
+        """A simple greeting toolkit."""
+
+        def __init__(self) -> None:
+            super().__init__(name="greeter", tools=[self.greet])
+
+        def greet(self, name: str) -> str:
+            """Greet someone by name."""
+            return f"Hello, {name}!"
+
     return GreeterTools
 ```
 
 The factory function (decorated with `@register_tool_with_metadata`) must return the **class**, not an instance. MindRoom instantiates the class when building agents.
+
+All decorator arguments are keyword-only. Required fields:
+
+- `name`: Tool identifier
+- `display_name`: Human-readable name
+- `description`: Brief description
+- `category`: A `ToolCategory` enum value
+
+Common optional fields:
+
+- `status`: `ToolStatus.AVAILABLE` (default), `COMING_SOON`, or `REQUIRES_CONFIG`
+- `setup_type`: `SetupType.NONE` (default), `API_KEY`, `OAUTH`, or `SPECIAL`
+- `config_fields`: List of `ConfigField` objects for configuration
+- `dependencies`: List of required pip packages
+- `docs_url`: Link to documentation
 
 ## Plugin skills
 

@@ -95,7 +95,7 @@ class RegistryDefaults(BaseModel):
     """Registry defaults configuration."""
 
     backend_port_start: int = 8765
-    frontend_port_start: int = 3005
+    frontend_port_start: int = 8085
     matrix_port_start: int = 8448
     data_dir_base: str = Field(default_factory=lambda: str(SCRIPT_DIR / "instance_data"))
 

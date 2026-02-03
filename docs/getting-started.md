@@ -97,7 +97,7 @@ MindRoom will:
 
 1. Connect to your Matrix homeserver
 2. Create Matrix users for each agent
-3. Join the specified rooms
+3. Create any rooms that don't exist and join them
 4. Start listening for messages
 
 ## Next Steps

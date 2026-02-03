@@ -42,11 +42,10 @@ services:
     container_name: ${INSTANCE_NAME:-mindroom}-frontend
     restart: always
     ports:
-      - "${FRONTEND_PORT:-3003}:3003"
+      - "${FRONTEND_PORT:-8080}:8080"
     volumes:
       - ${DATA_DIR}/logs:/app/logs
     environment:
-      - FRONTEND_PORT=${FRONTEND_PORT:-3003}
       - VITE_API_URL=  # Empty for relative URLs
       - HOME=/app
     networks:
@@ -54,14 +53,14 @@ services:
       - mynetwork
     labels:
       - traefik.enable=true
-      # Frontend routes - only serves the UI on port 3003
+      # Frontend routes - serves the UI on port 8080 (nginx-unprivileged default)
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.rule=Host(`${INSTANCE_DOMAIN}`)
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.entrypoints=websecure
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.tls=true
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.tls.certresolver=porkbun
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.service=${INSTANCE_NAME:-mindroom}
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.priority=50
-      - traefik.http.services.${INSTANCE_NAME:-mindroom}.loadbalancer.server.port=3003
+      - traefik.http.services.${INSTANCE_NAME:-mindroom}.loadbalancer.server.port=8080
 
 networks:
   mindroom-network:
