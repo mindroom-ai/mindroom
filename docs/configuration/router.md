@@ -97,4 +97,4 @@ Users can always mention agents directly with `@agent_name` to bypass routing.
 
 ## Note on the Router Agent
 
-The router is always present in MindRoom - it cannot be disabled. It automatically joins any room that has configured agents. Even if you don't explicitly configure a `router` section, it uses the default model for routing decisions.
+The router is always present and cannot be disabled. It automatically joins any room with configured agents. If no `router` section is configured, it uses the default model.

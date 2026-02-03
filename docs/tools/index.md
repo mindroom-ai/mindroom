@@ -86,4 +86,4 @@ agents:
 See the full list in:
 
 - [Built-in Tools](builtin.md) - Complete list of 85+ available tools with configuration details
-- [MCP Tools](mcp.md) - Model Context Protocol tools (planned)
+- [MCP Tools](mcp.md) - Model Context Protocol tools via plugin workaround

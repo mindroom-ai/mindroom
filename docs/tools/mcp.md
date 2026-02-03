@@ -23,19 +23,6 @@ When implemented, MCP support will allow:
 - Automatic tool discovery from MCP server capabilities
 - Support for stdio, SSE, and Streamable HTTP transports
 
-## Available MCP Servers
-
-The MCP ecosystem includes servers for:
-
-- **Filesystem** - File operations
-- **GitHub** - Repository management
-- **Postgres** - Database queries
-- **Brave Search** - Web search
-- **Google Drive** - Document access
-- **Slack** - Messaging
-
-See the [MCP servers directory](https://github.com/modelcontextprotocol/servers) for more options.
-
 ## Workaround: Using Agno MCPTools Directly
 
 Until native MindRoom configuration is available, you can use MCP tools through a [custom plugin](../plugins.md). The key is to create a subclass that pre-configures the MCP server parameters, since MindRoom's tool registry expects a class (not an instance).

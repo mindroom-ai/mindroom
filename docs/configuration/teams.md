@@ -77,19 +77,6 @@ teams:
 | `rooms` | No | `[]` | List of room names the team responds in |
 | `model` | No | `default` | Model used for team coordination and synthesis |
 
-## How Teams Work
-
-1. A message mentions the team (e.g., `@super_team`)
-2. The team coordinator receives the message
-3. In **coordinate** mode:
-   - The coordinator delegates different subtasks to selected agents based on their roles
-   - Agents may work sequentially or in parallel depending on task dependencies
-   - The coordinator synthesizes all outputs into a cohesive response
-4. In **collaborate** mode:
-   - All agents receive the same task and work on it simultaneously
-   - Each agent provides their perspective independently
-   - The coordinator synthesizes all perspectives into a final response
-
 ## When to Use Each Mode
 
 | Mode | Use Case | Example |

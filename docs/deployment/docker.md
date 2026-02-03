@@ -151,16 +151,15 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
-    environment:
-      - VITE_API_URL=http://localhost:8765  # Direct backend URL for standalone setup
     depends_on:
       - backend
 ```
 
-!!! note "API URL Configuration"
-    Set `VITE_API_URL` to the backend URL (e.g., `http://localhost:8765`) for standalone
-    deployments. Use an empty string (`VITE_API_URL=`) only when using a reverse proxy
-    that routes `/api/*` requests to the backend.
+!!! note "Frontend API URL"
+    The frontend image is built with `VITE_API_URL=""` (empty), meaning it uses relative
+    URLs and expects `/api/*` requests to be proxied to the backend. For standalone
+    deployments without a reverse proxy, rebuild the frontend image with
+    `VITE_API_URL=http://localhost:8765`.
 
 !!! tip "Production Deployment"
     For production, use a reverse proxy (Traefik, Nginx) to serve both services

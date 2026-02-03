@@ -69,48 +69,28 @@ agents:
 | `display_name` | string | *required* | Human-readable name shown in Matrix |
 | `role` | string | `""` | Description of the agent's purpose and behavior |
 | `model` | string | `"default"` | Model name (must be defined in `models` section) |
-| `tools` | list | `[]` | List of tool names the agent can use |
-| `skills` | list | `[]` | List of skill names the agent can use |
-| `instructions` | list | `[]` | Additional instructions for the agent |
-| `rooms` | list | `[]` | Room names/aliases the agent should join |
-| `num_history_runs` | int | `5` (from defaults) | Number of previous conversation runs to include |
-| `markdown` | bool | `true` (from defaults) | Whether to format responses as markdown |
-| `add_history_to_messages` | bool | `true` (from defaults) | Whether to include conversation history in context |
+| `tools` | list | `[]` | Tool names the agent can use |
+| `skills` | list | `[]` | Skill names the agent can use |
+| `instructions` | list | `[]` | Additional behavioral instructions |
+| `rooms` | list | `[]` | Room names/aliases to auto-join |
+| `num_history_runs` | int | from defaults | Previous conversation runs to include for context |
+| `markdown` | bool | from defaults | Format responses as markdown |
+| `add_history_to_messages` | bool | from defaults | Include conversation history in context |
 
 ## Rich Prompt Agents
 
-Some agent names (the YAML key, not `display_name`) have built-in rich prompts that provide detailed behavior:
+Certain agent names (the YAML key, not `display_name`) have built-in rich prompts:
 
-- `code` - Code generation, file management, shell commands
-- `research` - Web research and information gathering
-- `calculator` - Mathematical calculations
-- `general` - General-purpose assistant
-- `shell` - Shell command execution
-- `summary` - Text summarization
-- `finance` - Financial analysis
-- `news` - News aggregation
-- `data_analyst` - Data analysis
+`code`, `research`, `calculator`, `general`, `shell`, `summary`, `finance`, `news`, `data_analyst`
 
-When using these names, the built-in prompt is used instead of the `role` field. Note that custom `instructions` from YAML are NOT applied to rich prompt agents - the built-in prompt is used as-is.
+When using these names, the built-in prompt replaces the `role` field and any custom `instructions` are ignored.
 
 ## Defaults
-
-Default values can be configured globally:
 
 ```yaml
 defaults:
   num_history_runs: 5
   markdown: true
   add_history_to_messages: true
-  show_stop_button: false
+  show_stop_button: false  # global-only, cannot be overridden per-agent
 ```
-
-The `num_history_runs`, `markdown`, and `add_history_to_messages` defaults apply to all agents unless overridden in the agent's configuration. The `show_stop_button` setting is global-only and cannot be overridden per-agent.
-
-## Tools
-
-See [Tools](../tools/index.md) for the full list of available tools.
-
-## Skills
-
-Skills provide reusable capabilities that can be shared across agents. See [Skills](../skills.md) for more information.

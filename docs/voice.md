@@ -155,15 +155,9 @@ See the [Tools documentation](/tools) for configuration details.
 ## Limitations
 
 - Only OpenAI-compatible STT APIs are supported
-- Audio quality affects transcription accuracy
-- Very long messages may be truncated by the STT service
-- Background noise can reduce accuracy
-- Some accents may have lower accuracy
+- Audio quality and background noise affect transcription accuracy
 
-## Best Practices
+## Tips
 
-1. **Speak clearly** - Enunciate agent names
-2. **Reduce background noise** - Improves accuracy
-3. **Say the agent name first** - "Hey @assistant, what's the weather?"
-4. **Keep messages focused** - One request per message
-5. **Use display names** - The AI will convert spoken names like "HomeAssistant" to the correct `@home` mention
+- **Say the agent name first** - "Hey @assistant, what's the weather?"
+- **Use display names** - The AI converts spoken names like "HomeAssistant" to the correct `@home` mention
