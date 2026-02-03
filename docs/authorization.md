@@ -80,6 +80,13 @@ authorization:
 
 **Recommended:** Set to `false` and explicitly grant access.
 
+**Note:** If no `authorization` block is configured at all, the defaults are:
+- `global_users: []` (empty)
+- `room_permissions: {}` (empty)
+- `default_room_access: false`
+
+This means only MindRoom system users (agents, teams, router, and `@mindroom_user`) can interact with agents by default.
+
 ## Matrix ID Format
 
 User IDs follow the Matrix format:
@@ -147,10 +154,10 @@ Examples:
 
 The authorization checks are performed in order:
 
-1. **Internal system user** - The `@mindroom_user` account on the current domain is always authorized (note: `@mindroom_user` from a different domain is NOT automatically authorized)
+1. **Internal system user** - The `@mindroom_user:{domain}` account (e.g., `@mindroom_user:example.com`) is always authorized. Note: `@mindroom_user` from a different domain is NOT automatically authorized.
 2. **MindRoom agents/teams/router** - Configured agents, teams, and the router are authorized to communicate
 3. **Global users** - Users in `global_users` have access to all rooms
-4. **Room permissions** - Users listed for a specific room ID (if a room is in `room_permissions` but the user is not listed, access is denied - it does not fall through to default access)
+4. **Room permissions** - Users listed for a specific room ID. If a room is in `room_permissions` but the user is not listed, access is denied. It does NOT fall through to `default_room_access`.
 5. **Default access** - For rooms not in `room_permissions` at all, falls back to `default_room_access` setting
 
 ## SaaS Platform Authorization

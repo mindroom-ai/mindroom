@@ -38,7 +38,18 @@ The router is a special system agent that handles several important tasks beyond
 
 ### Command Handling
 
-The router exclusively handles all commands (`!help`, `!hi`, `!schedule`, `!list_schedules`, `!cancel_schedule`, `!widget`, `!config`, `!skill`). Even in single-agent rooms, commands are always processed by the router.
+The router exclusively handles all commands:
+
+- `!help [topic]` - Get help on commands or specific topics
+- `!hi` - Show the welcome message again
+- `!schedule <task>` - Schedule tasks and reminders
+- `!list_schedules` - List scheduled tasks
+- `!cancel_schedule <id>` - Cancel a scheduled task
+- `!widget [url]` - Add configuration widget to the room
+- `!config <operation>` - Manage configuration
+- `!skill <name> [args]` - Run a skill by name
+
+Even in single-agent rooms, commands are always processed by the router.
 
 ### Welcome Messages
 

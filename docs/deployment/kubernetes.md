@@ -59,6 +59,7 @@ For manual deployments or debugging:
 ```bash
 helm upgrade --install instance-1 ./cluster/k8s/instance \
   --namespace mindroom-instances \
+  --create-namespace \
   --set customer=1 \
   --set accountId="your-account-uuid" \
   --set baseDomain=mindroom.chat \
@@ -69,7 +70,7 @@ helm upgrade --install instance-1 ./cluster/k8s/instance \
   --set supabaseServiceKey="your-service-key"
 ```
 
-Note: The `mindroom-instances` namespace must exist before deployment.
+Note: Add `--create-namespace` if the `mindroom-instances` namespace doesn't exist yet.
 
 ### Instance values.yaml
 
@@ -78,9 +79,6 @@ customer: demo
 baseDomain: mindroom.chat
 storage: 10Gi
 storagePath: "/mindroom_data"
-
-# Account ID (UUID from Supabase)
-accountId: ""
 
 # Docker images
 mindroom_image: git.nijho.lt/basnijholt/mindroom-frontend:latest
@@ -102,6 +100,8 @@ supabaseServiceKey: ""
 # Matrix admin password
 matrix_admin_password: ""
 ```
+
+Note: `accountId` is passed via `--set` during provisioning and is not in the default values file.
 
 ## Secrets Management
 
@@ -134,21 +134,25 @@ stringData:
 
 ## ConfigMap
 
-Each instance has a ConfigMap with the MindRoom configuration. The default configuration is in `cluster/k8s/instance/default-config.yaml` and is automatically included:
+Each instance has a ConfigMap with the MindRoom configuration. The default configuration is loaded from `cluster/k8s/instance/default-config.yaml` via Helm's `.Files.Get`:
 
 ```yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: mindroom-config-{{ .Values.customer }}
+  namespace: mindroom-instances
 data:
   config.yaml: |
+    # Contents loaded from default-config.yaml
     agents:
       general:
         display_name: GeneralAgent
         model: sonnet
         # ... agent configuration
 ```
+
+The default config includes pre-configured agents (general, research, code, etc.), model definitions, and team configurations.
 
 ## Ingress
 
@@ -204,7 +208,7 @@ stripe:
   webhookSecret: "whsec_..."
 
 gitea:
-  user: "username"
+  user: "your-gitea-user"
   token: "your-token"
 
 provisioner:
@@ -260,8 +264,8 @@ The `mindroom-cli.sh` script provides common operations (run from `cluster/` dir
 ./scripts/mindroom-cli.sh status        # Overall status
 ./scripts/mindroom-cli.sh logs <id>     # View logs
 ./scripts/mindroom-cli.sh provision <id>    # Create instance via provisioner API
-./scripts/mindroom-cli.sh deprovision <id>  # Remove instance
-./scripts/mindroom-cli.sh upgrade <id>      # Upgrade instance (optional: values file)
+./scripts/mindroom-cli.sh deprovision <id>  # Remove instance via provisioner API
+./scripts/mindroom-cli.sh upgrade <id> [values-file]  # Upgrade instance (optional values file)
 ```
 
 The CLI reads configuration from `saas-platform/.env` for the provisioner API key and platform domain.
@@ -317,8 +321,11 @@ cd saas-platform
 # Deploy platform backend
 ./deploy.sh platform-backend
 
-# Redeploy all MindRoom backends
+# Redeploy all MindRoom instance backends
 ./redeploy-mindroom-backend.sh
+
+# Redeploy all MindRoom instance frontends
+./redeploy-mindroom-frontend.sh
 ```
 
 ## Multi-Tenant Architecture

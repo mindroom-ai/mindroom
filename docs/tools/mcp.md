@@ -56,7 +56,8 @@ plugins/
 ```json
 {
   "name": "mcp-filesystem",
-  "tools_module": "tools.py"
+  "tools_module": "tools.py",
+  "skills": []
 }
 ```
 

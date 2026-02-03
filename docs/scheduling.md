@@ -56,7 +56,7 @@ The system can convert event-based requests into smart polling schedules:
 
 Shows all pending scheduled tasks. When used in a thread, shows tasks for that thread. When used in the main room, shows all tasks in the room.
 
-Alternative syntax: `!listschedules`, `!list-schedules`, `!list_schedule`
+Alternative syntax: `!listschedules`, `!list-schedules`, `!list_schedule`, `!listschedule`, `!list-schedule`
 
 ### Cancel a Schedule
 

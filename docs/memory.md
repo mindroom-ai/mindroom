@@ -74,11 +74,11 @@ memory:
 |-------|-------------|
 | `embedder.provider` | Embedding provider: `openai`, `ollama` |
 | `embedder.config.model` | Model name for embeddings |
-| `embedder.config.host` | Host URL for self-hosted models (Ollama, OpenAI-compatible servers, etc.) |
+| `embedder.config.host` | Host URL for self-hosted models (converted internally to `openai_base_url` or `ollama_base_url`) |
 | `llm.provider` | LLM provider for memory extraction: `openai`, `ollama`, `anthropic` |
 | `llm.config.model` | Model name for the LLM |
 | `llm.config.temperature` | Temperature for LLM responses (e.g., `0.1`) |
-| `llm.config.ollama_base_url` | Host URL for Ollama LLM (when using `ollama` provider) |
+| `llm.config.host` | Host URL for Ollama LLM (converted internally to `ollama_base_url`) |
 
 ### Example with Ollama
 
@@ -94,7 +94,7 @@ memory:
     provider: ollama
     config:
       model: llama3.2
-      ollama_base_url: http://localhost:11434
+      host: http://localhost:11434
       temperature: 0.1
 ```
 
@@ -110,11 +110,11 @@ memory:
 ```
 User Message
     ↓
-┌──────────────────────────────────────────┐
-│ Search agent memories (default limit: 3) │
-│ + team memories (if agent is in a team)  │
-│ Search room memories (default limit: 3)  │
-└──────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│ Search agent memories (limit: 3)                                       │
+│ + team memories (merged, deduplicated, final result capped at limit)   │
+│ Search room memories (limit: 3)                                        │
+└────────────────────────────────────────────────────────────────────────┘
     ↓
 Enhanced prompt: [room context] + [agent context] + [original message]
     ↓

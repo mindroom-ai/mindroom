@@ -43,7 +43,7 @@ from mindroom.matrix.client import create_matrix_client, login
 client = create_matrix_client(
     homeserver="https://matrix.example.com",
     user_id="@mindroom_agent:example.com",
-    store_path="/path/to/encryption/keys"  # Optional, defaults to mindroom_data/encryption_keys/<user_id>
+    store_path="/path/to/encryption/keys"  # Optional, defaults to mindroom_data/encryption_keys/<sanitized_user_id>
 )
 
 # Login with password
@@ -85,7 +85,8 @@ agent_user = await create_agent_user(
     agent_name="assistant",
     agent_display_name="Assistant Agent"
 )
-# Returns AgentMatrixUser with user_id, password, etc.
+# Returns AgentMatrixUser with user_id, display_name, password
+# Note: access_token is None until login_agent_user() is called
 ```
 
 Credentials are persisted in `mindroom_data/matrix_state.yaml` for reuse across restarts.
@@ -168,52 +169,64 @@ from mindroom.matrix.message_builder import build_message_content
 content = build_message_content(
     body="Here's the solution...",
     thread_event_id="$original_message_id",
-    latest_thread_event_id="$latest_in_thread",  # For MSC3440 fallback
-    mentioned_user_ids=["@user:example.com"]
+    latest_thread_event_id="$latest_in_thread",  # Required for MSC3440 fallback when no reply_to
+    mentioned_user_ids=["@user:example.com"],
+    # Optional: formatted_body for custom HTML, reply_to_event_id for genuine replies
 )
 ```
 
 ### Event Analysis
 
-The `EventInfo` class analyzes all Matrix event relations:
+The `EventInfo` dataclass analyzes all Matrix event relations:
 
 ```python
 from mindroom.matrix.event_info import EventInfo
 
+# Parse event source dictionary (from nio event.source)
 info = EventInfo.from_event(event.source)
 
 if info.is_thread:
-    thread_root = info.thread_id
+    thread_root = info.thread_id  # Thread root event ID
 
 if info.is_edit:
-    original = info.original_event_id
+    original = info.original_event_id  # Event being edited
 
 if info.is_reply:
-    reply_target = info.reply_to_event_id
+    reply_target = info.reply_to_event_id  # Event being replied to
+
+if info.is_reaction:
+    emoji = info.reaction_key  # Reaction emoji/key
+    target = info.reaction_target_event_id
 
 if info.can_be_thread_root:
-    # Safe to start a new thread from this message
+    # Safe to start a new thread from this message (no existing relations)
     pass
+else:
+    # Use info.safe_thread_root as alternative thread root
+    safe_root = info.safe_thread_root
 ```
 
 ## Message Flow
 
 ### Sync Loop
 
-Each agent bot runs its own sync loop:
+Each agent bot runs its own sync loop (from `AgentBot` class in `bot.py`):
 
 ```python
-# From bot.py
-SYNC_TIMEOUT_MS = 30000
+# From bot.py - AgentBot.sync_forever()
+SYNC_TIMEOUT_MS = 30000  # 30 second timeout for long-polling
 
-async def sync_forever(self):
+async def sync_forever(self) -> None:
+    """Run the sync loop for this agent."""
     await self.client.sync_forever(timeout=SYNC_TIMEOUT_MS, full_state=True)
 ```
+
+Sync loops are wrapped with automatic restart logic via `_sync_forever_with_restart()` to handle connection failures gracefully.
 
 Events are processed in background tasks to prevent blocking:
 
 1. **Sync receives event** - Matrix server sends event via long-polling
-2. **Event callback triggered** - Appropriate handler based on event type
+2. **Event callback triggered** - Appropriate handler based on event type (`_on_message`, `_on_invite`, etc.)
 3. **Background task created** - Processing happens asynchronously
 4. **Response sent** - Agent responds in thread with streaming or full message
 
@@ -225,7 +238,8 @@ Agents can stream responses by editing messages progressively:
 from mindroom.matrix.presence import should_use_streaming
 
 # Only stream if user is online (saves API calls for offline users)
-if await should_use_streaming(client, room_id, requester_user_id):
+# requester_user_id is optional - if None, defaults to streaming
+if await should_use_streaming(client, room_id, requester_user_id=sender_id):
     # Use streaming (message edits)
 else:
     # Send complete message at once
@@ -248,7 +262,7 @@ await set_presence_status(client, status, presence="online")
 ### Presence States
 
 - **online** - Agent is running and ready (includes model info in status message)
-- **unavailable** - Agent is idle but still connected (client open)
+- **unavailable** - Agent is idle but still connected (treated as online for streaming)
 - **offline** - Agent is stopped or disconnected
 
 Presence is checked to decide whether to use streaming:
@@ -256,6 +270,7 @@ Presence is checked to decide whether to use streaming:
 ```python
 from mindroom.matrix.presence import is_user_online
 
+# Returns True if user is "online" or "unavailable" (client is open)
 if await is_user_online(client, user_id):
     # User is online, streaming will be visible
     pass
@@ -287,10 +302,10 @@ from mindroom.matrix.mentions import format_message_with_mentions
 
 # Parse @agent mentions and create proper Matrix content
 content = format_message_with_mentions(
-    config=config,
+    config,  # Config object (required, first positional argument)
     text="Hey @assistant can you help?",
     sender_domain="example.com",
-    thread_event_id="$thread_root"
+    thread_event_id="$thread_root",
 )
 # Returns content dict with m.mentions, formatted_body with links
 ```
@@ -307,15 +322,16 @@ Messages exceeding the 64KB Matrix event limit are automatically handled:
 ```python
 from mindroom.matrix.large_messages import prepare_large_message
 
-# Automatically uploads large content as MXC attachment
+# Automatically uploads large content as MXC attachment if needed
+# Returns original content if small enough, or modified content with preview + MXC
 content = await prepare_large_message(client, room_id, content)
 ```
 
-- Messages > 55KB: Uploaded as `message.txt` attachment
-- Edits > 27KB: Lower threshold due to edit structure doubling size
-- Preview text included in message body
+- Messages > 55KB (`NORMAL_MESSAGE_LIMIT`): Uploaded as `message.txt` attachment
+- Edits > 27KB (`EDIT_MESSAGE_LIMIT`): Lower threshold due to edit structure doubling size
+- Preview text included in message body (maximum size that fits)
 - Custom metadata (`io.mindroom.long_text`) for reconstruction
-- Supports encrypted rooms (content encrypted before upload)
+- Supports encrypted rooms (content encrypted before upload with `message.txt.enc` filename)
 
 ## Identity Management
 

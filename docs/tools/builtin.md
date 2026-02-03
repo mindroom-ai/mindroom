@@ -72,14 +72,12 @@ MindRoom includes 85+ built-in tool integrations organized by category.
 
 | Tool | Description | Config Required |
 |------|-------------|-----------------|
-| `arxiv` | Academic papers search | - |
-| `wikipedia` | Wikipedia lookups | - |
-| `pubmed` | Medical literature | - |
+| `arxiv` | Search and read academic papers from ArXiv | - |
+| `wikipedia` | Search and retrieve information from Wikipedia | - |
+| `pubmed` | Search and retrieve medical and life science literature | - |
 | `hackernews` | Get top stories and user details from Hacker News | - |
-| `youtube` | Extract video data, captions, and timestamps | - |
-| `reddit` | Reddit browsing and interaction | `client_id`, `client_secret` |
 
-## Communication
+## Communication & Social
 
 | Tool | Description | Config Required |
 |------|-------------|-----------------|
@@ -93,6 +91,8 @@ MindRoom includes 85+ built-in tool integrations organized by category.
 | `resend` | Transactional email | `api_key` |
 | `email` | Generic SMTP email | SMTP config |
 | `x` | X/Twitter posting and DMs | `bearer_token` or OAuth credentials |
+| `reddit` | Reddit browsing and interaction | `client_id`, `client_secret` |
+| `zoom` | Video conferencing and meetings | `account_id`, `client_id`, `client_secret` |
 
 ## Project Management
 
@@ -112,7 +112,6 @@ MindRoom includes 85+ built-in tool integrations organized by category.
 |------|-------------|-----------------|
 | `google_calendar` | View and schedule meetings | Google OAuth |
 | `cal_com` | Cal.com scheduling | `api_key` |
-| `zoom` | Video conferencing and meetings | `account_id`, `client_id`, `client_secret` |
 
 ## Data & Business
 
@@ -146,10 +145,11 @@ MindRoom includes 85+ built-in tool integrations organized by category.
 |------|-------------|-----------------|
 | `homeassistant` | Control and monitor smart home devices | `HOMEASSISTANT_URL`, `HOMEASSISTANT_TOKEN` |
 
-## Media
+## Media & Entertainment
 
 | Tool | Description | Config Required |
 |------|-------------|-----------------|
+| `youtube` | Extract video data, captions, and timestamps | - |
 | `giphy` | GIF search | `api_key` |
 | `moviepy_video_tools` | Video processing | - |
 

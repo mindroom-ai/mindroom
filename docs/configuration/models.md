@@ -86,6 +86,17 @@ models:
       base_url: http://localhost:8080/v1
 ```
 
+## Extra Kwargs
+
+The `extra_kwargs` field passes additional parameters directly to the underlying model class. Common options include:
+
+- `base_url` - Custom API endpoint (useful for OpenAI-compatible servers)
+- `api_key` - Override the API key from environment variables
+- `temperature` - Sampling temperature
+- `max_tokens` - Maximum tokens in response
+
+Each provider's model class may support additional parameters. Refer to the [Agno documentation](https://docs.agno.com/) for provider-specific options.
+
 ## Environment Variables
 
 API keys are read from environment variables:
@@ -105,3 +116,17 @@ For Ollama, you can also set:
 ```bash
 OLLAMA_HOST=http://localhost:11434
 ```
+
+### File-based Secrets
+
+For container environments (Kubernetes, Docker Swarm), you can also use file-based secrets by appending `_FILE` to any environment variable name:
+
+```bash
+# Instead of setting the key directly:
+ANTHROPIC_API_KEY=sk-ant-...
+
+# Point to a file containing the key:
+ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key
+```
+
+This works for all API key environment variables (e.g., `OPENAI_API_KEY_FILE`, `GOOGLE_API_KEY_FILE`, etc.).
