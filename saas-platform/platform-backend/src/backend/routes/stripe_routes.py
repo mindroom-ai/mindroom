@@ -43,11 +43,10 @@ async def create_checkout_session(
             detail=f"No price found for {payload.tier} ({payload.billing_cycle})",
         )
 
-    sb = ensure_supabase()
-
     customer_id: str | None = None
 
     if user:
+        sb = ensure_supabase()
         result = sb.table("accounts").select("stripe_customer_id").eq("id", user["account_id"]).single().execute()
         if result.data and result.data.get("stripe_customer_id"):
             customer_id = result.data["stripe_customer_id"]

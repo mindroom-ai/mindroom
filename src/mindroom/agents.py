@@ -13,6 +13,8 @@ from . import agent_prompts
 from . import tools as _tools_module  # noqa: F401
 from .constants import ROUTER_AGENT_NAME, SESSIONS_DIR
 from .logging_config import get_logger
+from .plugins import load_plugins
+from .skills import build_agent_skills
 from .tools_metadata import get_tool_by_name
 
 if TYPE_CHECKING:
@@ -82,9 +84,13 @@ def create_agent(agent_name: str, config: Config) -> Agent:
     agent_config = config.get_agent(agent_name)
     defaults = config.defaults
 
+    load_plugins(config)
+
+    tool_names = list(agent_config.tools)
+
     # Create tools
     tools: list = []  # Use list type to satisfy Agent's parameter type
-    for tool_name in agent_config.tools:
+    for tool_name in tool_names:
         try:
             tool = get_tool_by_name(tool_name)
             tools.append(tool)
@@ -135,6 +141,10 @@ def create_agent(agent_name: str, config: Config) -> Agent:
     model = get_model_instance(config, agent_config.model)
     logger.info(f"Creating agent '{agent_name}' with model: {model.__class__.__name__}(id={model.id})")
 
+    skills = build_agent_skills(agent_name, config)
+    if skills and skills.get_skill_names():
+        instructions.append(agent_prompts.SKILLS_TOOL_USAGE_PROMPT)
+
     instructions.append(agent_prompts.INTERACTIVE_QUESTION_PROMPT)
 
     agent = Agent(
@@ -142,6 +152,7 @@ def create_agent(agent_name: str, config: Config) -> Agent:
         role=role,
         model=model,
         tools=tools,
+        skills=skills,
         instructions=instructions,
         db=storage,
         add_history_to_context=agent_config.add_history_to_messages

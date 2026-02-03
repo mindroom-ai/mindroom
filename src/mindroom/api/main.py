@@ -52,6 +52,11 @@ CONFIG_PATH = DEFAULT_AGENTS_CONFIG
 CONFIG_TEMPLATE_PATH = DEFAULT_CONFIG_TEMPLATE
 
 
+def load_runtime_config() -> tuple[Config, Path]:
+    """Load the current runtime config and return it with its path."""
+    return Config.from_yaml(CONFIG_PATH), CONFIG_PATH
+
+
 def ensure_writable_config() -> None:
     """Ensure the config file exists at a writable location.
 

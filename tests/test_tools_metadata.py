@@ -1,12 +1,11 @@
 """Test tool metadata and generate JSON for widget consumption."""
 
 import json
-from dataclasses import asdict
 from pathlib import Path
 
 # Import tools to trigger tool registration
 import mindroom.tools  # noqa: F401
-from mindroom.tools_metadata import TOOL_METADATA
+from mindroom.tools_metadata import TOOL_METADATA, export_tools_metadata
 
 
 def test_export_tools_metadata_json() -> None:
@@ -17,23 +16,7 @@ def test_export_tools_metadata_json() -> None:
     """
     output_path = Path(__file__).parent.parent / "mindroom/tools_metadata.json"
 
-    tools = []
-    for metadata in TOOL_METADATA.values():
-        # Convert dataclass to dict
-        tool_dict = asdict(metadata)
-
-        # Convert enums to strings for JSON serialization
-        tool_dict["category"] = metadata.category.value
-        tool_dict["status"] = metadata.status.value
-        tool_dict["setup_type"] = metadata.setup_type.value
-
-        # Remove non-serializable fields
-        tool_dict.pop("factory", None)  # Callable is not JSON serializable
-
-        tools.append(tool_dict)
-
-    # Sort for consistent output
-    tools.sort(key=lambda t: (t["category"], t["name"]))
+    tools = export_tools_metadata()
 
     # Write the JSON file
     output_path.parent.mkdir(exist_ok=True)

@@ -104,6 +104,26 @@ def test_list_schedules_command() -> None:
         assert command.args == {}
 
 
+def test_skill_command() -> None:
+    """Test skill command parsing."""
+    command = command_parser.parse("!skill repo-quick-audit")
+    assert command is not None
+    assert command.type == CommandType.SKILL
+    assert command.args["skill_name"] == "repo-quick-audit"
+    assert command.args["args_text"] == ""
+
+    command = command_parser.parse("!skill summarize Release notes")
+    assert command is not None
+    assert command.type == CommandType.SKILL
+    assert command.args["skill_name"] == "summarize"
+    assert command.args["args_text"] == "Release notes"
+
+    command = command_parser.parse("!skill   ")
+    assert command is not None
+    assert command.type == CommandType.SKILL
+    assert command.args["skill_name"] is None
+
+
 def test_all_commands_have_documentation() -> None:
     """Test that all CommandType values have documentation."""
     # Check that all commands have documentation (except UNKNOWN which is special)

@@ -136,6 +136,63 @@ Teams (`src/mindroom/teams.py`) let multiple agents work together:
 - **Environment Setup**: Use `uv sync --all-extras` to install all dependencies and `source .venv/bin/activate` to activate the virtual environment.
 - **Adding Packages**: Use `uv add <package_name>` for new dependencies or `uv add --dev <package_name>` for development-only packages.
 
+### Local Live Run (non-docker backend) + Matty smoke test
+
+Use this when you want a full local Matrix stack with the Python backend running on the host (not in Docker).
+
+1) Start/refresh Matrix (Synapse + Postgres + Redis)
+```bash
+# Optional if switching between remote and local homeservers
+just local-matrix-reset
+just local-matrix-up
+curl -s http://localhost:8008/_matrix/client/versions | head -c 200
+```
+
+2) If you see login errors (M_FORBIDDEN) or changed homeserver, clear local Matrix state
+```bash
+rm -f mindroom_data/matrix_state.yaml
+```
+
+3) Ensure local OpenAI-compatible server is running on port 9292
+```bash
+curl -s http://localhost:9292/v1/models | head -c 200
+```
+
+4) Configure `config.yaml` to use the local OpenAI-compatible server
+- Set relevant models to `provider: openai`
+- Use a model ID that exists on the local server (e.g., `gpt-oss-low:20b`)
+- Add `extra_kwargs.base_url: http://localhost:9292/v1` for those models
+- For memory, prefer `provider: openai` and an embedding model that exists (e.g., `embeddinggemma:300m`)
+
+5) Run the backend with explicit env overrides (use Python 3.13)
+```bash
+MATRIX_HOMESERVER=http://localhost:8008 \
+MATRIX_SSL_VERIFY=false \
+OPENAI_BASE_URL=http://localhost:9292/v1 \
+OPENAI_API_KEY=sk-test \
+UV_PYTHON=3.13 \
+just start-backend-dev
+```
+
+6) Wait for API health, then for rooms to appear (room creation uses AI topics)
+```bash
+curl -s http://localhost:8765/api/health
+MATRIX_HOMESERVER=http://localhost:8008 MATRIX_SSL_VERIFY=false \
+uv run --python 3.13 matty rooms
+```
+
+7) Matty smoke test (agent reply in a thread)
+```bash
+MATRIX_HOMESERVER=http://localhost:8008 MATRIX_SSL_VERIFY=false \
+uv run --python 3.13 matty send "Lobby" "Hello @mindroom_general:localhost please reply with pong."
+
+MATRIX_HOMESERVER=http://localhost:8008 MATRIX_SSL_VERIFY=false \
+uv run --python 3.13 matty threads "Lobby"
+
+MATRIX_HOMESERVER=http://localhost:8008 MATRIX_SSL_VERIFY=false \
+uv run --python 3.13 matty thread "Lobby" t1
+```
+
 ### SaaS Platform Commands
 
 #### Development

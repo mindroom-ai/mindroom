@@ -24,6 +24,7 @@ class AgentConfig(BaseModel):
     display_name: str = Field(description="Human-readable name for the agent")
     role: str = Field(default="", description="Description of the agent's purpose")
     tools: list[str] = Field(default_factory=list, description="List of tool names")
+    skills: list[str] = Field(default_factory=list, description="List of skill names")
     instructions: list[str] = Field(default_factory=list, description="Agent instructions")
     rooms: list[str] = Field(default_factory=list, description="List of room IDs or names to auto-join")
     num_history_runs: int | None = Field(default=None, description="Number of history runs to include")
@@ -153,6 +154,7 @@ class Config(BaseModel):
     agents: dict[str, AgentConfig] = Field(default_factory=dict, description="Agent configurations")
     teams: dict[str, TeamConfig] = Field(default_factory=dict, description="Team configurations")
     room_models: dict[str, str] = Field(default_factory=dict, description="Room-specific model overrides")
+    plugins: list[str] = Field(default_factory=list, description="Plugin paths")
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig, description="Default values")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory configuration")
     models: dict[str, ModelConfig] = Field(default_factory=dict, description="Model configurations")
@@ -215,6 +217,8 @@ class Config(BaseModel):
             data["teams"] = {}
         if data.get("room_models") is None:
             data["room_models"] = {}
+        if data.get("plugins") is None:
+            data["plugins"] = []
 
         config = cls(**data)
         logger.info(f"Loaded agent configuration from {path}")

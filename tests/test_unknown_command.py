@@ -40,6 +40,10 @@ def test_valid_commands_not_unknown() -> None:
     assert command is not None
     assert command.type == CommandType.SCHEDULE
 
+    command = command_parser.parse("!skill demo")
+    assert command is not None
+    assert command.type == CommandType.SKILL
+
 
 def test_non_commands_return_none() -> None:
     """Test that non-commands still return None."""

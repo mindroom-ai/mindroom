@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import cached_property
@@ -55,6 +56,7 @@ from .matrix.state import MatrixState
 from .matrix.typing import typing_indicator
 from .matrix.users import AgentMatrixUser, create_agent_user, login_agent_user
 from .memory import store_conversation_memory
+from .plugins import load_plugins
 from .response_tracker import ResponseTracker
 from .room_cleanup import cleanup_all_orphaned_bots
 from .routing import suggest_agent_for_message
@@ -65,6 +67,7 @@ from .scheduling import (
     restore_scheduled_tasks,
     schedule_task,
 )
+from .skills import clear_skill_cache, get_skill_snapshot, resolve_skill_command_spec
 from .stop import StopManager
 from .streaming import (
     IN_PROGRESS_MARKER,
@@ -90,10 +93,15 @@ from .thread_utils import (
     is_authorized_sender,
     should_agent_respond,
 )
+from .tools_metadata import get_tool_by_name
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+
     import structlog
     from agno.agent import Agent
+    from agno.tools.function import Function
+    from agno.tools.toolkit import Toolkit
 
 logger = get_logger(__name__)
 
@@ -206,6 +214,250 @@ def _generate_welcome_message(room_id: str, config: Config) -> str:
     )
 
     return welcome_msg
+
+
+def _build_skill_command_prompt(skill_name: str, args_text: str) -> str:
+    args = args_text.strip()
+    args_section = args if args else "(no arguments provided)"
+    return (
+        "You were invoked via the !skill command.\n"
+        f"Skill: {skill_name}\n"
+        f"User input:\n{args_section}\n\n"
+        "Load the skill instructions with get_skill_instructions and follow them."
+    )
+
+
+def _resolve_skill_command_agent(  # noqa: C901
+    skill_name: str,
+    *,
+    config: Config,
+    room: nio.MatrixRoom,
+    mentioned_agents: list[MatrixID],
+) -> tuple[str | None, str | None]:
+    requested = skill_name.strip().lower()
+    mentioned_names: list[str] = []
+    for mid in mentioned_agents:
+        name = mid.agent_name(config)
+        if not name or name == ROUTER_AGENT_NAME:
+            continue
+        mentioned_names.append(name)
+    unique_mentions = list(dict.fromkeys(mentioned_names))
+    if len(unique_mentions) > 1:
+        return None, f"❌ Multiple agents mentioned: {', '.join(unique_mentions)}. Mention only one."
+
+    agents_in_room = get_available_agents_in_room(room, config)
+    candidate_names: list[str] = []
+    for mid in agents_in_room:
+        name = mid.agent_name(config)
+        if not name:
+            continue
+        if name not in config.agents:
+            continue
+        allowlist = {skill.lower() for skill in config.get_agent(name).skills}
+        if requested in allowlist:
+            candidate_names.append(name)
+    candidate_names = list(dict.fromkeys(candidate_names))
+
+    if unique_mentions:
+        target = unique_mentions[0]
+        if target not in candidate_names:
+            return None, f"❌ Agent '{target}' does not have skill '{skill_name}' enabled in this room."
+        return target, None
+
+    if len(candidate_names) == 1:
+        return candidate_names[0], None
+
+    if not candidate_names:
+        return None, f"❌ No agents in this room have skill '{skill_name}' enabled."
+
+    return None, (
+        f"❌ Multiple agents have skill '{skill_name}': {', '.join(candidate_names)}. "
+        "Mention one with @mindroom_<agent>."
+    )
+
+
+def _collect_agent_toolkits(config: Config, agent_name: str) -> list[tuple[str, Toolkit]]:
+    agent_config = config.get_agent(agent_name)
+    toolkits: list[tuple[str, Toolkit]] = []
+    for tool_name in agent_config.tools:
+        try:
+            toolkits.append((tool_name, get_tool_by_name(tool_name)))
+        except ValueError as exc:
+            logger.warning(
+                "Failed to load tool for skill dispatch",
+                tool=tool_name,
+                agent=agent_name,
+                error=str(exc),
+            )
+    return toolkits
+
+
+def _resolve_tool_dispatch_target(  # noqa: C901, PLR0911, PLR0912
+    toolkits: list[tuple[str, Toolkit]],
+    command_tool: str,
+) -> tuple[Function | None, Toolkit | None, str | None]:
+    if not command_tool:
+        return None, None, "Missing command-tool for tool dispatch."
+
+    if "." in command_tool:
+        toolkit_name, function_name = command_tool.split(".", 1)
+        for registered_name, toolkit in toolkits:
+            if registered_name != toolkit_name:
+                continue
+            function = toolkit.functions.get(function_name) or toolkit.async_functions.get(function_name)
+            if function:
+                return function, toolkit, None
+        return None, None, f"Tool '{toolkit_name}' does not expose '{function_name}'."
+
+    matches: list[tuple[Function, Toolkit, str]] = []
+    for registered_name, toolkit in toolkits:
+        function = toolkit.functions.get(command_tool) or toolkit.async_functions.get(command_tool)
+        if function:
+            matches.append((function, toolkit, registered_name))
+
+    if len(matches) == 1:
+        function, toolkit, _ = matches[0]
+        return function, toolkit, None
+
+    if len(matches) > 1:
+        toolkit_names = ", ".join(sorted({name for _, _, name in matches}))
+        return None, None, f"Command tool '{command_tool}' is ambiguous across toolkits: {toolkit_names}."
+
+    for registered_name, toolkit in toolkits:
+        if registered_name != command_tool:
+            continue
+        functions = {**toolkit.functions, **toolkit.async_functions}
+        if not functions:
+            return None, None, f"Tool '{command_tool}' has no callable functions."
+        if len(functions) == 1:
+            return next(iter(functions.values())), toolkit, None
+        return None, None, f"Tool '{command_tool}' exposes multiple functions; specify one."
+
+    return None, None, f"Tool '{command_tool}' not found for this agent."
+
+
+@dataclass(frozen=True)
+class ToolCallArguments:
+    """Prepared arguments for a tool call."""
+
+    args: tuple[object, ...]
+    kwargs: dict[str, object]
+    error: str | None = None
+
+
+def _prepare_tool_call_arguments(  # noqa: PLR0911
+    entrypoint: Callable[..., object] | None,
+    base_args: Mapping[str, object],
+) -> ToolCallArguments:
+    if entrypoint is None:
+        return ToolCallArguments((), {}, "Tool entrypoint is missing.")
+
+    signature = inspect.signature(entrypoint)
+    params = list(signature.parameters.values())
+    has_var_kw = any(param.kind == param.VAR_KEYWORD for param in params)
+    if has_var_kw:
+        return ToolCallArguments((), dict(base_args), None)
+
+    kwargs = {key: value for key, value in base_args.items() if key in signature.parameters}
+    if kwargs:
+        missing = [
+            param.name
+            for param in params
+            if param.default is param.empty
+            and param.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+            and param.name not in kwargs
+        ]
+        if missing:
+            return ToolCallArguments((), {}, f"Tool requires parameters: {', '.join(missing)}.")
+        return ToolCallArguments((), kwargs, None)
+
+    if not params:
+        return ToolCallArguments((), {}, None)
+
+    if len(params) == 1 and params[0].kind in (
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+    ):
+        return ToolCallArguments((base_args.get("command", ""),), {}, None)
+
+    missing = [
+        param.name
+        for param in params
+        if param.default is param.empty
+        and param.kind
+        in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+    ]
+    if missing:
+        return ToolCallArguments((), {}, f"Tool requires parameters: {', '.join(missing)}.")
+    return ToolCallArguments((), {}, None)
+
+
+async def _maybe_await(value: object) -> object:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _run_skill_command_tool(
+    *,
+    config: Config,
+    agent_name: str,
+    command_tool: str,
+    skill_name: str,
+    args_text: str,
+    command_name: str = "skill",
+) -> str:
+    toolkits = _collect_agent_toolkits(config, agent_name)
+    function, toolkit, error = _resolve_tool_dispatch_target(toolkits, command_tool)
+    if error:
+        return f"❌ {error}"
+    assert function is not None
+
+    base_args = {
+        "command": args_text,
+        "commandName": command_name,
+        "skillName": skill_name,
+    }
+    entrypoint = function.entrypoint
+    call_args = _prepare_tool_call_arguments(entrypoint, base_args)
+    if call_args.error:
+        return f"❌ {call_args.error}"
+    assert entrypoint is not None
+
+    try:
+        if toolkit and getattr(toolkit, "_requires_connect", False):
+            connect = getattr(toolkit, "connect", None)
+            close = getattr(toolkit, "close", None)
+            if connect:
+                await _maybe_await(connect())
+            try:
+                result = await _maybe_await(entrypoint(*call_args.args, **call_args.kwargs))
+            finally:
+                if close:
+                    await _maybe_await(close())
+        else:
+            result = await _maybe_await(entrypoint(*call_args.args, **call_args.kwargs))
+    except Exception as exc:
+        logger.warning(
+            "Skill command tool dispatch failed",
+            agent=agent_name,
+            tool=command_tool,
+            error=str(exc),
+        )
+        return f"❌ Tool '{command_tool}' failed: {exc}"
+
+    if result is None or result == "":
+        return "✅ Tool completed."
+    return str(result)
 
 
 def _should_skip_mentions(event_source: dict) -> bool:
@@ -1212,6 +1464,81 @@ class AgentBot:
 
         return event_id
 
+    async def _send_skill_command_response(
+        self,
+        *,
+        room_id: str,
+        reply_to_event_id: str,
+        thread_id: str | None,
+        thread_history: list[dict],
+        prompt: str,
+        agent_name: str,
+        user_id: str | None,
+        reply_to_event: nio.RoomMessageText | None = None,
+    ) -> str | None:
+        """Send a skill command response using a specific agent."""
+        assert self.client is not None
+        if not prompt.strip():
+            return None
+
+        session_id = create_session_id(room_id, thread_id)
+
+        async with typing_indicator(self.client, room_id):
+            response_text = await ai_response(
+                agent_name=agent_name,
+                prompt=prompt,
+                session_id=session_id,
+                storage_path=self.storage_path,
+                config=self.config,
+                thread_history=thread_history,
+                room_id=room_id,
+            )
+
+        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+        event_id = await self._send_response(
+            room_id,
+            reply_to_event_id,
+            response.formatted_text,
+            thread_id,
+            reply_to_event=reply_to_event,
+            skip_mentions=True,
+        )
+
+        if event_id and response.option_map and response.options_list:
+            thread_root_for_registration = thread_id if thread_id else reply_to_event_id
+            interactive.register_interactive_question(
+                event_id,
+                room_id,
+                thread_root_for_registration,
+                response.option_map,
+                agent_name,
+            )
+            await interactive.add_reaction_buttons(
+                self.client,
+                room_id,
+                event_id,
+                response.options_list,
+            )
+
+        try:
+            create_background_task(
+                store_conversation_memory(
+                    prompt,
+                    agent_name,
+                    self.storage_path,
+                    session_id,
+                    self.config,
+                    room_id,
+                    thread_history,
+                    user_id,
+                ),
+                name=f"memory_save_{agent_name}_{session_id}",
+            )
+        except Exception:  # pragma: no cover
+            self.logger.debug("Skipping memory storage due to configuration error")
+
+        return event_id
+
     async def _handle_interactive_question(
         self,
         event_id: str | None,
@@ -1655,7 +1982,7 @@ class AgentBot:
         self.response_tracker.mark_responded(event_info.original_event_id, response_event_id)
         self.logger.info("Successfully regenerated response for edited message")
 
-    async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:  # noqa: C901, PLR0912
+    async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:  # noqa: C901, PLR0912, PLR0915
         self.logger.info("Handling command", command_type=command.type.value)
 
         event_info = EventInfo.from_event(event.source)
@@ -1775,6 +2102,63 @@ class AgentBot:
                 self.response_tracker.mark_responded(event.event_id)
                 return  # Exit early since we've handled the response
 
+        elif command.type == CommandType.SKILL:
+            skill_name = command.args.get("skill_name")
+            args_text = command.args.get("args_text", "")
+            if not skill_name:
+                response_text = "Usage: !skill <name> [args]"
+            else:
+                mentioned_agents, _ = check_agent_mentioned(event.source, None, self.config)
+                target_agent, error = _resolve_skill_command_agent(
+                    skill_name,
+                    config=self.config,
+                    room=room,
+                    mentioned_agents=mentioned_agents,
+                )
+                if error:
+                    response_text = error
+                else:
+                    assert target_agent is not None
+                    spec = resolve_skill_command_spec(skill_name, self.config, target_agent)
+                    if spec is None:
+                        response_text = f"❌ Skill '{skill_name}' not found or not enabled for agent '{target_agent}'."
+                    elif not spec.user_invocable:
+                        response_text = f"❌ Skill '{spec.name}' is not user-invocable."
+                    elif spec.dispatch and spec.dispatch.kind == "tool":
+                        response_text = await _run_skill_command_tool(
+                            config=self.config,
+                            agent_name=target_agent,
+                            command_tool=spec.dispatch.tool_name,
+                            skill_name=spec.name,
+                            args_text=args_text,
+                        )
+                    elif spec.disable_model_invocation:
+                        response_text = (
+                            f"❌ Skill '{spec.name}' is configured to skip model invocation and has no tool dispatch."
+                        )
+                    else:
+                        thread_history = []
+                        if event_info.thread_id:
+                            thread_history = await fetch_thread_history(
+                                self.client,
+                                room.room_id,
+                                event_info.thread_id,
+                            )
+                        prompt = _build_skill_command_prompt(spec.name, args_text)
+                        event_id = await self._send_skill_command_response(
+                            room_id=room.room_id,
+                            reply_to_event_id=event.event_id,
+                            thread_id=effective_thread_id,
+                            thread_history=thread_history,
+                            prompt=prompt,
+                            agent_name=target_agent,
+                            user_id=event.sender,
+                            reply_to_event=event,
+                        )
+                        if event_id:
+                            self.response_tracker.mark_responded(event.event_id, event_id)
+                        return
+
         elif command.type == CommandType.UNKNOWN:
             # Handle unknown commands
             response_text = "❌ Unknown command. Try !help for available commands."
@@ -1888,6 +2272,7 @@ class MultiAgentOrchestrator:
         await self._ensure_user_account()
 
         config = Config.from_yaml()
+        load_plugins(config)
         self.config = config
 
         # Create bots for all configured entities
@@ -1969,7 +2354,7 @@ class MultiAgentOrchestrator:
         # Run all sync tasks
         await asyncio.gather(*tuple(self._sync_tasks.values()))
 
-    async def update_config(self) -> bool:  # noqa: C901, PLR0912
+    async def update_config(self) -> bool:  # noqa: C901, PLR0912, PLR0915
         """Update configuration with simplified self-managing agents.
 
         Each agent handles its own user account creation and room management.
@@ -1979,6 +2364,7 @@ class MultiAgentOrchestrator:
 
         """
         new_config = Config.from_yaml()
+        load_plugins(new_config)
 
         if not self.config:
             self.config = new_config
@@ -2409,6 +2795,18 @@ async def _watch_config_task(config_path: Path, orchestrator: MultiAgentOrchestr
     await watch_file(config_path, on_config_change, stop_watching)
 
 
+async def _watch_skills_task(orchestrator: MultiAgentOrchestrator) -> None:
+    """Watch skill roots for changes and clear cached skills."""
+    last_snapshot = get_skill_snapshot()
+    while orchestrator.running:
+        await asyncio.sleep(1.0)
+        snapshot = get_skill_snapshot()
+        if snapshot != last_snapshot:
+            last_snapshot = snapshot
+            clear_skill_cache()
+            logger.info("Skills changed; cache cleared")
+
+
 async def main(log_level: str, storage_path: Path) -> None:
     """Main entry point for the multi-agent bot system.
 
@@ -2441,8 +2839,14 @@ async def main(log_level: str, storage_path: Path) -> None:
         # Create task to watch config file for changes
         watcher_task = asyncio.create_task(_watch_config_task(config_path, orchestrator))
 
+        # Create task to watch skills for changes
+        skills_watcher_task = asyncio.create_task(_watch_skills_task(orchestrator))
+
         # Wait for either orchestrator or watcher to complete
-        done, pending = await asyncio.wait({orchestrator_task, watcher_task}, return_when=asyncio.FIRST_COMPLETED)
+        done, pending = await asyncio.wait(
+            {orchestrator_task, watcher_task, skills_watcher_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
 
         # Check if any completed task had an exception
         for task in done:

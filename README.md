@@ -208,6 +208,7 @@ Agents ONLY respond in threads (not main room). Within threads:
 - `!widget [url]` - Add configuration widget
 - `!config <operation>` - Manage configuration
 - `!hi` - Show welcome message
+- `!skill <name> [args]` - Run a skill by name
 
 <!-- OUTPUT:END -->
 

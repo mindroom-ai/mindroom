@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
 
 from loguru import logger
 
+from mindroom.config import Config
+from mindroom.plugins import load_plugins
+
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
     from agno.tools import Toolkit
 
@@ -218,3 +222,32 @@ def get_tool_metadata(name: str) -> ToolMetadata | None:
 def get_all_tool_metadata() -> dict[str, ToolMetadata]:
     """Get all tool metadata."""
     return TOOL_METADATA.copy()
+
+
+def ensure_tool_registry_loaded(config: Config | None = None, *, config_path: Path | None = None) -> None:
+    """Ensure core and plugin tools are registered in the metadata registry."""
+    import mindroom.tools  # noqa: F401, PLC0415  # import here to avoid tools_metadata cycle
+
+    if config is None and config_path is not None:
+        config = Config.from_yaml(config_path)
+
+    if config is None:
+        return
+
+    load_plugins(config, config_path=config_path)
+
+
+def export_tools_metadata() -> list[dict[str, Any]]:
+    """Export tool metadata as JSON-serializable dictionaries."""
+    tools: list[dict[str, Any]] = []
+
+    for metadata in TOOL_METADATA.values():
+        tool_dict = asdict(metadata)
+        tool_dict["category"] = metadata.category.value
+        tool_dict["status"] = metadata.status.value
+        tool_dict["setup_type"] = metadata.setup_type.value
+        tool_dict.pop("factory", None)
+        tools.append(tool_dict)
+
+    tools.sort(key=lambda tool: (tool["category"], tool["name"]))
+    return tools
