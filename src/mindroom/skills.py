@@ -1,21 +1,24 @@
-"""Skill discovery, parsing, and prompt injection utilities."""
+"""Skill integration built on Agno skills with OpenClaw-compatible metadata."""
 
 from __future__ import annotations
 
 import os
 import platform
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import json5
-import yaml
+from agno.skills import LocalSkills, Skills
+from agno.skills.loaders import SkillLoader
 
 from .credentials import get_credentials_manager
 from .logging_config import get_logger
 
 if TYPE_CHECKING:
+    from agno.skills.skill import Skill
+
     from .config import Config
 
 logger = get_logger(__name__)
@@ -28,26 +31,70 @@ _OS_ALIASES = {
     "windows": {"windows", "win", "win32"},
 }
 
-
-@dataclass(frozen=True)
-class Skill:
-    """Parsed skill metadata from a SKILL.md file."""
-
-    name: str
-    description: str
-    location: Path
-    metadata: dict[str, Any]
-    source: str
+_PLUGIN_SKILL_ROOTS: list[Path] = []
 
 
 @dataclass
-class _SkillCacheEntry:
-    mtime: float
-    skill: Skill | None
+class MindroomSkillsLoader(SkillLoader):
+    """Load skills via Agno with OpenClaw compatibility filtering."""
+
+    roots: Sequence[Path]
+    config: Config
+    allowlist: Sequence[str] | None = None
+    env_vars: Mapping[str, str] | None = None
+    credential_keys: set[str] | None = None
+
+    def load(self) -> list[Skill]:
+        """Return the eligible skills for the configured roots and allowlist."""
+        env_vars = os.environ if self.env_vars is None else self.env_vars
+        credential_keys = self.credential_keys if self.credential_keys is not None else _collect_credential_keys()
+        config_data = self.config.model_dump()
+        allowlist_set = set(self.allowlist or [])
+
+        skills_by_name: dict[str, Skill] = {}
+        for root in _unique_paths(self.roots):
+            for skill in _load_root_skills(root):
+                normalized = _normalize_skill(skill)
+                if normalized is None:
+                    continue
+                if self.allowlist and normalized.name not in allowlist_set:
+                    continue
+                if not _is_skill_eligible(
+                    normalized,
+                    config_data,
+                    env_vars=env_vars,
+                    credential_keys=credential_keys,
+                ):
+                    continue
+                skills_by_name[normalized.name] = normalized
+
+        if self.allowlist:
+            return [skills_by_name[name] for name in self.allowlist if name in skills_by_name]
+        return list(skills_by_name.values())
 
 
-_SKILL_CACHE: dict[Path, _SkillCacheEntry] = {}
-_PLUGIN_SKILL_ROOTS: list[Path] = []
+def build_agent_skills(
+    agent_name: str,
+    config: Config,
+    *,
+    skill_roots: Sequence[Path] | None = None,
+    env_vars: Mapping[str, str] | None = None,
+    credential_keys: set[str] | None = None,
+) -> Skills | None:
+    """Build an Agno Skills object for a specific agent."""
+    agent_config = config.get_agent(agent_name)
+    if not agent_config.skills:
+        return None
+
+    roots = list(skill_roots or get_default_skill_roots())
+    loader = MindroomSkillsLoader(
+        roots=roots,
+        config=config,
+        allowlist=agent_config.skills,
+        env_vars=env_vars,
+        credential_keys=credential_keys,
+    )
+    return Skills(loaders=[loader])
 
 
 def set_plugin_skill_roots(roots: Sequence[Path]) -> None:
@@ -73,198 +120,57 @@ def get_bundled_skills_dir() -> Path:
 
 def get_default_skill_roots() -> list[Path]:
     """Return the default skill search roots in precedence order."""
-    return _unique_paths([get_user_skills_dir(), *_PLUGIN_SKILL_ROOTS, get_bundled_skills_dir()])
+    return _unique_paths([get_bundled_skills_dir(), *_PLUGIN_SKILL_ROOTS, get_user_skills_dir()])
 
 
-def discover_skill_files(root: Path) -> list[Path]:
-    """Discover SKILL.md files under a root directory."""
+def _load_root_skills(root: Path) -> list[Skill]:
     if not root.exists() or not root.is_dir():
         return []
-    return sorted(root.rglob(SKILL_FILENAME))
 
-
-def load_skills(skill_roots: Sequence[Path] | None = None) -> list[Skill]:
-    """Load skills from search roots with user precedence."""
-    roots = list(skill_roots or get_default_skill_roots())
-    skills_by_name: dict[str, Skill] = {}
-
-    for root in roots:
-        for path in discover_skill_files(root):
-            skill = _load_skill_cached(path, source=str(root))
-            if skill is None:
-                continue
-            if skill.name in skills_by_name:
-                continue
-            skills_by_name[skill.name] = skill
-
-    return list(skills_by_name.values())
-
-
-def get_agent_skills(
-    agent_name: str,
-    config: Config,
-    *,
-    skill_roots: Sequence[Path] | None = None,
-    env_vars: Mapping[str, str] | None = None,
-    credential_keys: set[str] | None = None,
-) -> list[Skill]:
-    """Return eligible skills for a specific agent."""
-    agent_config = config.get_agent(agent_name)
-    if not agent_config.skills:
+    loader = LocalSkills(str(root), validate=False)
+    try:
+        return loader.load()
+    except Exception as exc:
+        logger.warning("Failed to load skills", path=str(root), error=str(exc))
         return []
 
-    all_skills = load_skills(skill_roots)
-    skills_by_name = {skill.name: skill for skill in all_skills}
-    selected = [skills_by_name[name] for name in agent_config.skills if name in skills_by_name]
-    return filter_skills_by_eligibility(
-        selected,
-        config,
-        env_vars=env_vars,
-        credential_keys=credential_keys,
-    )
 
-
-def filter_skills_by_eligibility(
-    skills: Iterable[Skill],
-    config: Config,
-    *,
-    env_vars: Mapping[str, str] | None = None,
-    credential_keys: set[str] | None = None,
-) -> list[Skill]:
-    """Filter skills based on OpenClaw eligibility rules."""
-    config_data = config.model_dump()
-    env_vars = os.environ if env_vars is None else env_vars
-    if credential_keys is None:
-        credential_keys = _collect_credential_keys()
-
-    return [
-        skill
-        for skill in skills
-        if _is_skill_eligible(
-            skill,
-            config_data,
-            env_vars=env_vars,
-            credential_keys=credential_keys,
-        )
-    ]
-
-
-def build_skills_prompt(skills: Sequence[Skill]) -> str:
-    """Build a compact skills prompt section."""
-    lines = [
-        "If a skill is clearly applicable, read its SKILL.md with the file tool before acting.",
-        "Read at most one skill up front.",
-        "<available_skills>",
-    ]
-    for skill in skills:
-        lines.extend(
-            [
-                "  <skill>",
-                f"    <name>{skill.name}</name>",
-                f"    <description>{skill.description}</description>",
-                f"    <location>{skill.location}</location>",
-                "  </skill>",
-            ],
-        )
-    lines.append("</available_skills>")
-    return "\n".join(lines)
-
-
-def parse_skill_file(path: Path, *, source: str) -> Skill | None:
-    """Parse a SKILL.md file into a Skill object."""
-    try:
-        content = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        logger.warning("Failed to read skill file", path=str(path), error=str(exc))
+def _normalize_skill(skill: Skill) -> Skill | None:
+    if not isinstance(skill.name, str) or not skill.name.strip():
+        logger.warning("Skill missing name", path=str(skill.source_path))
+        return None
+    if not isinstance(skill.description, str) or not skill.description.strip():
+        logger.warning("Skill missing description", name=skill.name, path=str(skill.source_path))
         return None
 
-    frontmatter = parse_frontmatter(content)
-    if frontmatter is None:
-        logger.warning("Skill missing or invalid frontmatter", path=str(path))
-        return None
+    skill.name = skill.name.strip()
+    skill.description = skill.description.strip()
 
-    name = frontmatter.get("name")
-    description = frontmatter.get("description")
-    if not isinstance(name, str) or not name.strip():
-        logger.warning("Skill missing name", path=str(path))
-        return None
-    if not isinstance(description, str) or not description.strip():
-        logger.warning("Skill missing description", path=str(path))
-        return None
-
-    metadata = _parse_metadata(frontmatter.get("metadata"), path)
+    metadata = _parse_metadata(skill.metadata, path=skill.source_path)
     if metadata is None:
         return None
-
-    return Skill(
-        name=name.strip(),
-        description=description.strip(),
-        location=path.resolve(),
-        metadata=metadata,
-        source=source,
-    )
-
-
-def parse_frontmatter(content: str) -> dict[str, Any] | None:
-    """Parse YAML frontmatter from a markdown file."""
-    lines = content.splitlines()
-    if not lines:
-        return None
-    if lines[0].strip() != "---":
-        return None
-
-    end_index = None
-    for idx in range(1, len(lines)):
-        if lines[idx].strip() in ("---", "..."):
-            end_index = idx
-            break
-    if end_index is None:
-        return None
-
-    frontmatter_text = "\n".join(lines[1:end_index])
-    try:
-        data = yaml.safe_load(frontmatter_text)
-    except yaml.YAMLError:
-        return None
-
-    if not isinstance(data, dict):
-        return None
-    return data
-
-
-def _load_skill_cached(path: Path, *, source: str) -> Skill | None:
-    try:
-        mtime = path.stat().st_mtime
-    except OSError:
-        _SKILL_CACHE.pop(path, None)
-        return None
-
-    entry = _SKILL_CACHE.get(path)
-    if entry and entry.mtime == mtime:
-        return entry.skill
-
-    skill = parse_skill_file(path, source=source)
-    _SKILL_CACHE[path] = _SkillCacheEntry(mtime=mtime, skill=skill)
+    skill.metadata = metadata
     return skill
 
 
-def _parse_metadata(raw: object, path: Path) -> dict[str, Any] | None:
-    if raw is None:
+def _parse_metadata(raw: object, *, path: str) -> dict[str, Any] | None:
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
         return {}
     if isinstance(raw, dict):
         return raw
-    if not isinstance(raw, str):
-        logger.warning("Skill metadata must be a JSON5 string", path=str(path))
+    if isinstance(raw, str):
+        try:
+            parsed = json5.loads(raw)
+        except Exception as exc:
+            logger.warning("Failed to parse skill metadata JSON5", path=path, error=str(exc))
+            return None
+        if isinstance(parsed, dict):
+            return parsed
+        logger.warning("Skill metadata JSON5 must be an object", path=path)
         return None
-    try:
-        parsed = json5.loads(raw)
-    except Exception as exc:
-        logger.warning("Failed to parse skill metadata JSON5", path=str(path), error=str(exc))
-        return None
-    if not isinstance(parsed, dict):
-        logger.warning("Skill metadata JSON5 must be an object", path=str(path))
-        return None
-    return parsed
+
+    logger.warning("Skill metadata must be a mapping or JSON5 string", path=path)
+    return None
 
 
 def _is_skill_eligible(
@@ -274,7 +180,8 @@ def _is_skill_eligible(
     env_vars: Mapping[str, str],
     credential_keys: set[str],
 ) -> bool:
-    openclaw = skill.metadata.get("openclaw")
+    metadata = skill.metadata or {}
+    openclaw = metadata.get("openclaw")
     if not isinstance(openclaw, dict):
         return True
 

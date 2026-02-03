@@ -1,6 +1,6 @@
 # Mindroom Skills + Plugins Plan
 
-Last updated: 2026-02-02
+Last updated: 2026-02-03
 
 This document is the entry point for all work on the "skills + plugins" feature. It is a
 living plan: update it as we learn, revise assumptions, or change direction.
@@ -21,6 +21,7 @@ an OpenClaw-style model:
 ## 2) Goals
 
 - Load OpenClaw-compatible skills from disk and expose them in the system prompt.
+- Use Agno's built-in Skills orchestrator and tools for skill access.
 - Add a plugin system that can register new tools without hard-coding imports in core.
 - Keep skills usable across agents and per-agent configurable.
 - Allow users to install custom skills to `~/.mindroom/skills`.
@@ -43,6 +44,7 @@ an OpenClaw-style model:
 - Plugins are declared in `config.yaml`.
 - Agents default to **no skills** when `skills` is not set.
 - OpenClaw `metadata` in `SKILL.md` must be parsed as JSON5.
+- Skill orchestration uses Agno's `Skills` (prompt snippet + get_skill_* tools).
 - Plugin manifest filename: `mindroom.plugin.json`.
 - Tool metadata delivery: API builds from the in-memory registry at runtime; `tools_metadata.json`
   remains for frontend/icon build scripts.
@@ -64,7 +66,11 @@ Inputs:
 
 Format:
 - `SKILL.md` with YAML frontmatter (OpenClaw compatible)
-- `metadata` field in frontmatter is JSON5 (single-line)
+- `metadata` field in frontmatter is JSON5 (single-line) and normalized to a dict
+
+Implementation (current):
+- Agno `Skills` orchestrator is used for prompt injection and skill tools.
+- A Mindroom loader wraps Agno `LocalSkills(validate=False)` to keep OpenClaw metadata.
 
 Eligibility (OpenClaw style):
 - `metadata.openclaw.always` bypasses other checks.
@@ -76,9 +82,8 @@ Eligibility (OpenClaw style):
 - Skill is excluded if disabled in config or not eligible.
 
 Prompt injection:
-- Build a compact `<available_skills>` list with `name`, `description`, `location`.
-- In system prompt, instruct the model to read the `SKILL.md` only if a skill is chosen.
-- Ensure any agent with skills has a read tool available (auto-add `file` if missing).
+- Use Agno's `<skills_system>` snippet (names, descriptions, scripts, references).
+- Agents access skills via `get_skill_instructions`, `get_skill_reference`, `get_skill_script`.
 
 Per-agent filtering:
 - `agent.skills` is the allowlist; empty list means no skills.
@@ -157,12 +162,13 @@ Supported frontmatter fields:
 - `homepage` (string, optional)
 - `metadata` (string, optional, JSON5; single-line in OpenClaw)
 
-Ignored for MVP (but preserved if present):
+Ignored for MVP (not yet wired):
 - `user-invocable`, `disable-model-invocation`, `command-dispatch`, `command-tool`, `command-arg-mode`
 
 Resolution rules:
 - `name` and `description` come from frontmatter only.
-- `location` is the absolute path to `SKILL.md`.
+- `metadata` is parsed from JSON5 (string) to a dict when present.
+- `source_path` is the skill directory path.
 - If frontmatter is missing/invalid, the skill is skipped.
 
 ### 8.2 Eligibility rules (OpenClaw-style)
@@ -178,21 +184,13 @@ Out of scope for MVP:
 
 ### 8.3 Prompt injection
 
-Inject only when the agent has `skills` configured and at least one is eligible.
+Inject only when the agent has `skills` configured.
 
 Format:
-```
-<available_skills>
-  <skill>
-    <name>...</name>
-    <description>...</description>
-    <location>...</location>
-  </skill>
-</available_skills>
-```
+Agno's `<skills_system>` snippet (see `agno.skills.Skills.get_system_prompt_snippet()`).
 
 Prompt rule:
-- Choose one skill if clearly applicable, then read its `SKILL.md` with the file tool.
+- Choose one skill if clearly applicable, then use `get_skill_instructions(...)`.
 - Read at most one skill up front.
 
 ### 8.4 Plugin manifest
@@ -215,8 +213,7 @@ Status: complete (2026-02-02)
 - [x] Add skill discovery for `skills/` and `~/.mindroom/skills`.
 - [x] Parse `SKILL.md` frontmatter + JSON5 metadata.
 - [x] Apply OpenClaw gating rules.
-- [x] Build `<available_skills>` prompt section.
-- [x] Ensure `file` tool available for agents with skills.
+- [x] Use Agno `Skills` system prompt snippet + get_skill_* tools.
 - [x] Add unit tests for parsing + gating.
 
 ### Phase 2: Plugin loader (local dirs)
@@ -289,3 +286,4 @@ Status: complete (2026-02-02)
 - 2026-02-02: Phase 3 complete (API tool metadata is runtime; JSON remains for frontend build).
 - 2026-02-02: Live skills smoke test performed via Matty (hello + repo-quick-audit) against local OpenAI-compatible server on port 9292.
 - 2026-02-02: Added Phase 4 plan for skill command/dispatch; moved optional enhancements to Phase 5.
+- 2026-02-03: Switched skills to Agno `Skills` + `LocalSkills(validate=False)` with OpenClaw JSON5 metadata normalization; prompt injection now uses Agno `<skills_system>` snippet.

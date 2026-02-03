@@ -14,7 +14,7 @@ from . import tools as _tools_module  # noqa: F401
 from .constants import ROUTER_AGENT_NAME, SESSIONS_DIR
 from .logging_config import get_logger
 from .plugins import load_plugins
-from .skills import build_skills_prompt, get_agent_skills
+from .skills import build_agent_skills
 from .tools_metadata import get_tool_by_name
 
 if TYPE_CHECKING:
@@ -87,8 +87,6 @@ def create_agent(agent_name: str, config: Config) -> Agent:
     load_plugins(config)
 
     tool_names = list(agent_config.tools)
-    if agent_config.skills and "file" not in tool_names:
-        tool_names.append("file")
 
     # Create tools
     tools: list = []  # Use list type to satisfy Agent's parameter type
@@ -143,10 +141,7 @@ def create_agent(agent_name: str, config: Config) -> Agent:
     model = get_model_instance(config, agent_config.model)
     logger.info(f"Creating agent '{agent_name}' with model: {model.__class__.__name__}(id={model.id})")
 
-    if agent_config.skills:
-        eligible_skills = get_agent_skills(agent_name, config)
-        if eligible_skills:
-            instructions.append(build_skills_prompt(eligible_skills))
+    skills = build_agent_skills(agent_name, config)
 
     instructions.append(agent_prompts.INTERACTIVE_QUESTION_PROMPT)
 
@@ -155,6 +150,7 @@ def create_agent(agent_name: str, config: Config) -> Agent:
         role=role,
         model=model,
         tools=tools,
+        skills=skills,
         instructions=instructions,
         db=storage,
         add_history_to_context=agent_config.add_history_to_messages
