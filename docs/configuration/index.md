@@ -61,3 +61,4 @@ timezone: America/Los_Angeles
 - [Models](models.md) - Configure AI model providers
 - [Teams](teams.md) - Configure multi-agent collaboration
 - [Router](router.md) - Configure message routing
+- [Skills and Plugins](skills-and-plugins.md) - Configure skill loading and plugins
