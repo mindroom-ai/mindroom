@@ -10,11 +10,23 @@ MindRoom can be deployed in various ways depending on your needs.
 
 | Method | Best For |
 |--------|----------|
-| [Docker](docker.md) | Single-instance deployments, development |
+| Full Stack (Docker Compose) | All-in-one: backend + frontend + Matrix (Synapse) + Element |
+| [Docker (single container)](docker.md) | Backend-only or when you already have Matrix |
 | [Kubernetes](kubernetes.md) | Multi-tenant SaaS, production |
 | Direct | Development, simple setups |
 
 ## Quick Start
+
+### Full Stack (recommended)
+
+```bash
+git clone https://github.com/mindroom-ai/mindroom-stack
+cd mindroom-stack
+cp .env.example .env
+$EDITOR .env  # add at least one AI provider key
+
+docker compose up -d
+```
 
 ### Direct (Development)
 
@@ -24,7 +36,7 @@ mindroom run --storage-path ./mindroom_data
 
 The config file path is set via `MINDROOM_CONFIG_PATH` (defaults to `./config.yaml`).
 
-### Docker
+### Docker (single container)
 
 ```bash
 docker run -d \
@@ -44,7 +56,15 @@ See the [Kubernetes deployment guide](kubernetes.md) for Helm chart configuratio
 
 ## Required Configuration
 
-All deployments need:
+Full stack:
+
+```bash
+# .env in the full stack repo
+ANTHROPIC_API_KEY=sk-ant-...
+# Add other providers as needed
+```
+
+Direct and single-container deployments:
 
 1. **Matrix homeserver** - Set `MATRIX_HOMESERVER` (must allow open registration for agent accounts)
 2. **AI provider keys** - At least one of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.

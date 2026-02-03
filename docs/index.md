@@ -24,17 +24,37 @@ MindRoom is an AI agent orchestration system with Matrix integration. It provide
 
 ## Quick Start
 
-### Installation
+### Recommended: Full Stack Docker Compose (backend + frontend + Matrix + Element)
+
+**Prereqs:** Docker + Docker Compose.
 
 ```bash
-# Using uv (recommended)
+git clone https://github.com/mindroom-ai/mindroom-stack
+cd mindroom-stack
+cp .env.example .env
+$EDITOR .env  # add at least one AI provider key
+
+docker compose up -d
+```
+
+Open:
+- MindRoom UI: http://localhost:3003
+- Element: http://localhost:8080
+- Matrix homeserver: http://matrix.localhost:8008
+
+### Manual Install (advanced)
+
+Use this if you already have a Matrix homeserver and want to run MindRoom directly.
+
+```bash
+# Using uv
 uv tool install mindroom
 
-# Using pip
+# Or using pip
 pip install mindroom
 ```
 
-### Basic Usage
+### Basic Usage (manual)
 
 1. Create a `config.yaml`:
 
