@@ -21,6 +21,7 @@
   "dependencies": {
     "@hookform/resolvers": "^3.3.2",
     "@lobehub/icons": "^2.27.0",
+    "@monaco-editor/react": "^4.6.0",
     "@radix-ui/react-checkbox": "^1.0.4",
     "@radix-ui/react-dialog": "^1.1.14",
     "@radix-ui/react-dropdown-menu": "^2.1.15",
@@ -40,6 +41,7 @@
     "js-yaml": "^4.1.0",
     "lucide-react": "^0.294.0",
     "matrix-widget-api": "^1.6.0",
+    "monaco-editor": "^0.50.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-hook-form": "^7.48.2",

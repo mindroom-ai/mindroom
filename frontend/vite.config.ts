@@ -7,12 +7,15 @@ const backendPort = process.env.BACKEND_PORT || '8765';
 const frontendPort = parseInt(process.env.FRONTEND_PORT || '3003');
 const isDocker = process.env.DOCKER_CONTAINER === '1';
 
+const monacoPath = path.resolve(__dirname, 'node_modules/monaco-editor/min');
+
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
+      '/monaco': monacoPath,
     },
   },
   server: {
@@ -25,5 +28,11 @@ export default defineConfig({
         changeOrigin: true,
       },
     },
+    fs: {
+      allow: [path.resolve(__dirname), monacoPath],
+    },
+  },
+  optimizeDeps: {
+    include: ['monaco-editor/esm/vs/editor/editor.api'],
   },
 });

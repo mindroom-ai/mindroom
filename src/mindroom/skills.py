@@ -123,6 +123,16 @@ class SkillCommandSpec:
     dispatch: SkillCommandDispatch | None = None
 
 
+@dataclass(frozen=True)
+class SkillListing:
+    """Summary information for a discoverable skill."""
+
+    name: str
+    description: str
+    path: Path
+    origin: str
+
+
 def resolve_skill_command_spec(  # noqa: C901
     skill_name: str,
     config: Config,
@@ -231,6 +241,62 @@ def get_bundled_skills_dir() -> Path:
 def get_default_skill_roots() -> list[Path]:
     """Return the default skill search roots in precedence order."""
     return _unique_paths([get_bundled_skills_dir(), *_PLUGIN_SKILL_ROOTS, get_user_skills_dir()])
+
+
+def list_skill_listings(roots: Sequence[Path] | None = None) -> list[SkillListing]:
+    """Return skill listings with precedence rules applied."""
+    roots = list(roots or get_default_skill_roots())
+    bundled_root = get_bundled_skills_dir().expanduser().resolve()
+    user_root = get_user_skills_dir().expanduser().resolve()
+    plugin_roots = {root.expanduser().resolve() for root in get_plugin_skill_roots()}
+
+    skills_by_name: dict[str, SkillListing] = {}
+    for root in _unique_paths(roots):
+        origin = _root_origin(root, bundled_root, user_root, plugin_roots)
+        for skill_dir in _iter_skill_dirs(root):
+            frontmatter = _read_skill_frontmatter(skill_dir / SKILL_FILENAME)
+            if frontmatter is None:
+                continue
+
+            name = frontmatter.get("name", skill_dir.name)
+            description = frontmatter.get("description", "")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            if not isinstance(description, str) or not description.strip():
+                continue
+
+            listing = SkillListing(
+                name=name.strip(),
+                description=description.strip(),
+                path=skill_dir / SKILL_FILENAME,
+                origin=origin,
+            )
+            skills_by_name[listing.name] = listing
+
+    return sorted(skills_by_name.values(), key=lambda item: item.name.lower())
+
+
+def resolve_skill_listing(skill_name: str, roots: Sequence[Path] | None = None) -> SkillListing | None:
+    """Resolve a skill listing by name, honoring precedence rules."""
+    normalized = skill_name.strip().lower()
+    if not normalized:
+        return None
+    for listing in list_skill_listings(roots):
+        if listing.name.lower() == normalized:
+            return listing
+    return None
+
+
+def skill_can_edit(skill_path: Path) -> bool:
+    """Return True if a skill file is editable by users."""
+    user_root = get_user_skills_dir().expanduser().resolve()
+    try:
+        resolved = skill_path.expanduser().resolve()
+    except OSError:
+        return False
+    if resolved != user_root and user_root not in resolved.parents:
+        return False
+    return os.access(resolved, os.W_OK)
 
 
 def clear_skill_cache() -> None:
@@ -549,3 +615,13 @@ def _unique_paths(paths: Sequence[Path]) -> list[Path]:
         seen.add(resolved)
         unique_paths.append(resolved)
     return unique_paths
+
+
+def _root_origin(root: Path, bundled_root: Path, user_root: Path, plugin_roots: set[Path]) -> str:
+    if root == bundled_root:
+        return "bundled"
+    if root == user_root:
+        return "user"
+    if root in plugin_roots:
+        return "plugin"
+    return "custom"
