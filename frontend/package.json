@@ -41,7 +41,6 @@
     "js-yaml": "^4.1.0",
     "lucide-react": "^0.294.0",
     "matrix-widget-api": "^1.6.0",
-    "monaco-editor": "^0.50.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-hook-form": "^7.48.2",

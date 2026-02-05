@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import Editor, { loader } from '@monaco-editor/react';
+import Editor from '@monaco-editor/react';
 import { ArrowLeft, FileCode, FolderOpen, Lock, Pencil, Save, ShieldAlert } from 'lucide-react';
 import { ListPanel, ListItem } from '@/components/shared/ListPanel';
 import { ItemCard, ItemCardBadge } from '@/components/shared/ItemCard';
@@ -20,10 +20,6 @@ interface SkillListItem extends ListItem {
   path: string;
   name: string;
 }
-
-loader.config({
-  paths: { vs: '/monaco/vs' },
-});
 
 export function Skills() {
   const { toast } = useToast();
