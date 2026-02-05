@@ -404,7 +404,12 @@ async def stream_agent_response(  # noqa: C901, PLR0912
 
     # Execute the streaming AI call - this can fail for network, rate limits, etc.
     try:
-        stream_generator = agent.arun(full_prompt, session_id=session_id, stream=True)
+        stream_generator = agent.arun(
+            full_prompt,
+            session_id=session_id,
+            stream=True,
+            stream_events=True,
+        )
     except Exception as e:
         logger.exception("Error starting streaming AI response")
         yield get_user_friendly_error_message(e, agent_name)
@@ -428,7 +433,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912
                     full_response += result_msg
                     yield result_msg
             else:
-                logger.warning(f"Unhandled event type: {type(event).__name__} - {event}")
+                logger.debug("Skipping stream event", event_type=type(event).__name__)
     except Exception as e:
         logger.exception("Error during streaming AI response")
         yield get_user_friendly_error_message(e, agent_name)
