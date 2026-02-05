@@ -611,7 +611,7 @@ async def team_response_stream_raw(
         logger.debug(f"Team member: {agent.name}")
 
     try:
-        return team.arun(prompt, stream=True)
+        return team.arun(prompt, stream=True, stream_events=True)
     except Exception as e:
         logger.exception(f"Error in team streaming with agents {agent_names}")
         team_name = f"Team ({', '.join(agent_names)})"
