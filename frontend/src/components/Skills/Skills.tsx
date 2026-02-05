@@ -71,15 +71,18 @@ export function Skills() {
     let isActive = true;
 
     const loadDetail = async () => {
-      if (!selectedSkill) {
+      if (!selectedSkillPath) {
         setDraftContent('');
         setOriginalContent('');
         return;
       }
 
+      const skill = skills.find(s => s.path === selectedSkillPath);
+      if (!skill) return;
+
       setLoadingDetail(true);
       try {
-        const detail = await getSkill(selectedSkill.name);
+        const detail = await getSkill(skill.name);
         if (!isActive) return;
         setDraftContent(detail.content);
         setOriginalContent(detail.content);
@@ -91,9 +94,7 @@ export function Skills() {
           variant: 'destructive',
         });
       } finally {
-        if (isActive) {
-          setLoadingDetail(false);
-        }
+        setLoadingDetail(false);
       }
     };
 
@@ -101,7 +102,7 @@ export function Skills() {
     return () => {
       isActive = false;
     };
-  }, [selectedSkill, toast]);
+  }, [selectedSkillPath]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSelect = (skillId: string) => {
     const nextSkill = skills.find(skill => skill.path === skillId);
@@ -278,6 +279,11 @@ export function Skills() {
                   theme={resolvedTheme === 'dark' ? 'vs-dark' : 'vs'}
                   value={draftContent}
                   onChange={value => setDraftContent(value ?? '')}
+                  loading={
+                    <div className="h-full flex items-center justify-center text-sm text-muted-foreground">
+                      Loading editor...
+                    </div>
+                  }
                   options={{
                     minimap: { enabled: false },
                     fontSize: 13,
