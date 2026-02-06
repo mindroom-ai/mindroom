@@ -28,7 +28,8 @@ from .thread_utils import get_available_agents_in_room
 from .tool_events import (
     StructuredStreamChunk,
     ToolTraceEntry,
-    format_tool_completed_event,
+    complete_pending_tool_block,
+    extract_tool_completed_info,
     format_tool_started_event,
 )
 
@@ -686,12 +687,16 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         # Agent tool call completed
         elif isinstance(event, AgentToolCallCompletedEvent):
             agent_name = event.agent_name
-            tool_msg, trace_entry = format_tool_completed_event(event)
-            if agent_name and tool_msg:
+            info = extract_tool_completed_info(event)
+            if agent_name and info:
+                tool_name, result = info
                 if agent_name not in per_member:
                     per_member[agent_name] = ""
-                per_member[agent_name] += tool_msg
-            if trace_entry:
+                per_member[agent_name], trace_entry = complete_pending_tool_block(
+                    per_member[agent_name],
+                    tool_name,
+                    result,
+                )
                 tool_trace.append(trace_entry)
 
         # Team consensus content event
@@ -702,15 +707,18 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                 logger.debug("Empty team consensus event received")
 
         # Team-level tool call events (no specific agent context)
-        elif isinstance(event, (TeamToolCallStartedEvent, TeamToolCallCompletedEvent)):
-            # Format with the same helper, both carry .tool/.content
-            if isinstance(event, TeamToolCallStartedEvent):
-                tool_msg, trace_entry = format_tool_started_event(event)
-            else:
-                tool_msg, trace_entry = format_tool_completed_event(event)
+        elif isinstance(event, TeamToolCallStartedEvent):
+            tool_msg, trace_entry = format_tool_started_event(event)
             if tool_msg:
                 consensus += tool_msg
             if trace_entry:
+                tool_trace.append(trace_entry)
+
+        elif isinstance(event, TeamToolCallCompletedEvent):
+            info = extract_tool_completed_info(event)
+            if info:
+                tool_name, result = info
+                consensus, trace_entry = complete_pending_tool_block(consensus, tool_name, result)
                 tool_trace.append(trace_entry)
 
         # Skip other event types

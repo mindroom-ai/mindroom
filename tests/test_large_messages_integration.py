@@ -5,6 +5,8 @@ from unittest.mock import MagicMock
 
 import nio
 import pytest
+from agno.models.response import ToolExecution
+from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 
 from mindroom.matrix.client import edit_message, send_message
 from mindroom.matrix.large_messages import NORMAL_MESSAGE_LIMIT, prepare_large_message
@@ -445,3 +447,32 @@ async def test_structured_stream_chunk_does_not_drop_trace_on_stale_snapshot() -
     target_content = client.messages_sent[-1][2].get("m.new_content", client.messages_sent[-1][2])
     assert TOOL_TRACE_KEY in target_content
     assert len(target_content[TOOL_TRACE_KEY]["events"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_replacement_streaming_preserves_text_on_tool_completion() -> None:
+    """ToolCallCompletedEvent through ReplacementStreamingResponse must not wipe accumulated_text."""
+    client = MockClient()
+    config = MockConfig()
+
+    tool = ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}, result="ok")
+
+    async def stream() -> AsyncIterator[StreamInputChunk]:
+        yield ToolCallStartedEvent(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
+        yield ToolCallCompletedEvent(tool=tool, content="ok")
+
+    event_id, accumulated = await send_streaming_response(
+        client=client,
+        room_id="!test:room",
+        reply_to_event_id=None,
+        thread_id=None,
+        sender_domain="example.com",
+        config=config,
+        response_stream=stream(),
+        streaming_cls=ReplacementStreamingResponse,
+    )
+
+    assert event_id is not None
+    # The accumulated text must still contain the tool block, not be empty
+    assert "save_file" in accumulated
+    assert accumulated.strip() != ""
