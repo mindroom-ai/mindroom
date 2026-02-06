@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import shutil
 
+import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -17,7 +18,7 @@ from mindroom.skills import (
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
 
-_VALID_SKILL_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+_VALID_SKILL_NAME = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 
 
 class SkillSummary(BaseModel):
@@ -121,9 +122,13 @@ async def create_skill(payload: CreateSkillRequest) -> SkillSummary:
 
     description = payload.description.strip() or name
     skill_dir = get_user_skills_dir() / name
-    skill_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        skill_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail="A skill with this name already exists") from exc
 
-    content = f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n"
+    frontmatter = yaml.dump({"name": name, "description": description}, default_flow_style=False).strip()
+    content = f"---\n{frontmatter}\n---\n\n# {name}\n"
     (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
 
     return SkillSummary(name=name, description=description, origin="user", can_edit=True)
@@ -139,7 +144,10 @@ async def delete_skill(skill_name: str) -> dict[str, bool]:
     if not skill_can_edit(listing.path):
         raise HTTPException(status_code=403, detail="Skill is read-only")
 
-    skill_dir = listing.path.parent
+    skill_dir = listing.path.parent.resolve()
+    user_root = get_user_skills_dir().expanduser().resolve()
+    if skill_dir == user_root:
+        raise HTTPException(status_code=400, detail="Cannot delete a root-level skill")
     shutil.rmtree(skill_dir)
 
     return {"success": True}

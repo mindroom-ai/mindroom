@@ -165,11 +165,35 @@ def test_delete_skill(
     _write_skill(tmp_path)
     monkeypatch.setattr(skills_module, "get_default_skill_roots", lambda: [tmp_path])
     monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: tmp_path)
+    monkeypatch.setattr(skills_api_module, "get_user_skills_dir", lambda: tmp_path)
 
     response = test_client.delete("/api/skills/test-skill")
     assert response.status_code == 200
     assert response.json()["success"] is True
     assert not (tmp_path / "test-skill").exists()
+
+
+def test_delete_skill_root_level_blocked(
+    test_client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DELETE on a root-level skill returns 400 to prevent deleting the entire skills dir."""
+    # Place SKILL.md directly in the root (no subdirectory)
+    skill_file = tmp_path / "SKILL.md"
+    skill_file.write_text(
+        "---\nname: root-skill\ndescription: Root skill\n---\n\n# root-skill",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(skills_module, "get_default_skill_roots", lambda: [tmp_path])
+    monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: tmp_path)
+    monkeypatch.setattr(skills_api_module, "get_user_skills_dir", lambda: tmp_path)
+
+    response = test_client.delete("/api/skills/root-skill")
+    assert response.status_code == 400
+    assert "root-level" in response.json()["detail"]
+    # Ensure the directory was NOT deleted
+    assert tmp_path.exists()
 
 
 def test_delete_skill_forbidden(

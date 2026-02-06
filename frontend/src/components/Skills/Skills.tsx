@@ -129,11 +129,21 @@ export function Skills() {
 
   const handleCreate = async (name?: string) => {
     if (!name) return;
+    const trimmed = name.trim();
+    if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(trimmed)) {
+      toast({
+        title: 'Invalid skill name',
+        description:
+          'Name must be lowercase alphanumeric with hyphens, starting and ending with a letter or digit.',
+        variant: 'destructive',
+      });
+      return;
+    }
     try {
-      await createSkill(name, name);
-      toast({ title: 'Skill created', description: `${name} is ready to edit.` });
+      await createSkill(trimmed, trimmed);
+      toast({ title: 'Skill created', description: `${trimmed} is ready to edit.` });
       await refreshSkills();
-      setSelectedName(name);
+      setSelectedName(trimmed);
     } catch (error) {
       toast({
         title: 'Failed to create skill',
