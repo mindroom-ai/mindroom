@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from html import escape
 from typing import TYPE_CHECKING, Literal
@@ -15,7 +16,7 @@ TOOL_TRACE_VERSION = 1
 
 MAX_TOOL_ARGS_PREVIEW_CHARS = 1200
 MAX_TOOL_ARG_VALUE_PREVIEW_CHARS = 250
-MAX_TOOL_RESULT_PREVIEW_CHARS = 4000
+MAX_TOOL_RESULT_DISPLAY_CHARS = 500
 MAX_TOOL_TRACE_EVENTS = 120
 
 
@@ -66,6 +67,10 @@ def _format_tool_args(tool_args: dict[str, object]) -> tuple[str, bool]:
     # Preserve insertion order for easier debugging of tool-call construction.
     for key, value in tool_args.items():
         value_text = _to_compact_text(value)
+        # Collapse newlines so the call line stays single-line.  This is
+        # critical: complete_pending_tool_block uses "\n" inside a <tool>
+        # block to distinguish pending (call-only) from completed (call+result).
+        value_text = value_text.replace("\n", " ")
         value_preview, value_truncated = _truncate(value_text, MAX_TOOL_ARG_VALUE_PREVIEW_CHARS)
         if value_truncated:
             truncated = True
@@ -94,24 +99,91 @@ def format_tool_started(tool_name: str, tool_args: dict[str, object]) -> tuple[s
     return f"\n\n<tool>{safe_display}</tool>\n", trace
 
 
-def format_tool_completed(tool_name: str, result: object | None) -> tuple[str, ToolTraceEntry]:
-    """Format a tool-call completion marker and return associated trace metadata."""
-    if result is None or result == "":
-        safe_body = escape(_neutralize_mentions(f"{tool_name}\ncompleted"))
-        trace = ToolTraceEntry(type="tool_call_completed", tool_name=tool_name)
-        return f"<validation>{safe_body}</validation>\n\n", trace
+def format_tool_combined(
+    tool_name: str,
+    tool_args: dict[str, object],
+    result: object | None,
+) -> tuple[str, ToolTraceEntry]:
+    """Format a complete tool call (call + result) as a single <tool> block."""
+    if tool_args:
+        args_preview, truncated = _format_tool_args(tool_args)
+        call_display = f"{tool_name}({args_preview})"
+    else:
+        args_preview = ""
+        truncated = False
+        call_display = f"{tool_name}()"
 
-    result_text = _to_compact_text(result)
-    result_preview, truncated = _truncate(result_text, MAX_TOOL_RESULT_PREVIEW_CHARS)
-    safe_result = escape(_neutralize_mentions(result_preview))
-    safe_tool_name = escape(_neutralize_mentions(tool_name))
+    result_display = ""
+    if result is not None and result != "":
+        result_text = _to_compact_text(result)
+        result_display, result_truncated = _truncate(result_text, MAX_TOOL_RESULT_DISPLAY_CHARS)
+        truncated = truncated or result_truncated
+
+    safe_call = escape(_neutralize_mentions(call_display))
+    if result_display:
+        safe_result = escape(_neutralize_mentions(result_display))
+        block = f"\n\n<tool>{safe_call}\n{safe_result}</tool>\n"
+    else:
+        # Trailing \n signals "completed" to the frontend (no-result tool).
+        # Without it the block looks identical to a pending/in-progress block.
+        block = f"\n\n<tool>{safe_call}\n</tool>\n"
+
     trace = ToolTraceEntry(
         type="tool_call_completed",
         tool_name=tool_name,
-        result_preview=result_preview,
+        args_preview=args_preview or None,
+        result_preview=result_display or None,
         truncated=truncated,
     )
-    return f"<validation>{safe_tool_name}\n{safe_result}</validation>\n\n", trace
+    return block, trace
+
+
+def complete_pending_tool_block(
+    accumulated_text: str,
+    tool_name: str,
+    result: object | None,
+) -> tuple[str, ToolTraceEntry]:
+    """Find the last pending <tool> block for tool_name and inject the result.
+
+    Returns (updated_text, trace_entry).
+    If no pending block is found, appends a new combined block instead.
+    """
+    result_display = ""
+    truncated = False
+    if result is not None and result != "":
+        result_text = _to_compact_text(result)
+        result_display, truncated = _truncate(result_text, MAX_TOOL_RESULT_DISPLAY_CHARS)
+
+    safe_result = escape(_neutralize_mentions(result_display)) if result_display else ""
+
+    # Search backwards for the last <tool>...tool_name(...</tool> without a newline
+    # (a newline inside means it already has a result).
+    safe_tool_name = re.escape(escape(_neutralize_mentions(tool_name)))
+    pattern = re.compile(rf"<tool>({safe_tool_name}\([^<]*)</tool>")
+    matches = list(pattern.finditer(accumulated_text))
+
+    updated = accumulated_text
+    for match in reversed(matches):
+        inner = match.group(1)
+        # Pending blocks have no newline (just the call). Completed blocks have \n.
+        if "\n" not in inner:
+            # Always inject \n to mark as completed, even when result is empty.
+            replacement = f"<tool>{inner}\n{safe_result}</tool>"
+            updated = updated[: match.start()] + replacement + updated[match.end() :]
+            break
+    else:
+        # No pending block found — append a standalone completed block
+        if safe_result:
+            escaped_name = escape(_neutralize_mentions(tool_name))
+            updated += f"<tool>{escaped_name}\n{safe_result}</tool>\n"
+
+    trace = ToolTraceEntry(
+        type="tool_call_completed",
+        tool_name=tool_name,
+        result_preview=result_display or None,
+        truncated=truncated,
+    )
+    return updated, trace
 
 
 def format_tool_started_event(event: object) -> tuple[str, ToolTraceEntry | None]:
@@ -126,15 +198,18 @@ def format_tool_started_event(event: object) -> tuple[str, ToolTraceEntry | None
     return text, trace
 
 
-def format_tool_completed_event(event: object) -> tuple[str, ToolTraceEntry | None]:
-    """Format an Agno tool-completed event into display text and trace metadata."""
+def extract_tool_completed_info(event: object) -> tuple[str, object | None] | None:
+    """Extract tool name and result from an Agno tool-completed event.
+
+    Returns (tool_name, result) or None if event has no tool payload.
+    """
     tool = getattr(event, "tool", None)
     if not tool:
-        return "", None
+        return None
     tool_name = getattr(tool, "tool_name", None) or "tool"
-    result = getattr(event, "content", None) or getattr(tool, "result", None)
-    text, trace = format_tool_completed(tool_name, result)
-    return text, trace
+    content = getattr(event, "content", None)
+    result = content if content is not None else getattr(tool, "result", None)
+    return tool_name, result
 
 
 def build_tool_trace_content(tool_trace: Sequence[ToolTraceEntry] | None) -> dict[str, object] | None:

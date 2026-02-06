@@ -15,7 +15,8 @@ from .matrix.mentions import format_message_with_mentions
 from .tool_events import (
     StructuredStreamChunk,
     ToolTraceEntry,
-    format_tool_completed_event,
+    complete_pending_tool_block,
+    extract_tool_completed_info,
     format_tool_started_event,
 )
 
@@ -83,14 +84,17 @@ class StreamingResponse:
         """Append new chunk to accumulated text."""
         self.accumulated_text += new_chunk
 
-    async def update_content(self, new_chunk: str, client: nio.AsyncClient) -> None:
-        """Add new content and potentially update the message."""
-        self._update(new_chunk)
-
+    async def _throttled_send(self, client: nio.AsyncClient) -> None:
+        """Send/edit the message if enough time has passed since the last update."""
         current_time = time.time()
         if current_time - self.last_update >= self.update_interval:
             await self._send_or_edit_message(client)
             self.last_update = current_time
+
+    async def update_content(self, new_chunk: str, client: nio.AsyncClient) -> None:
+        """Add new content and potentially update the message."""
+        self._update(new_chunk)
+        await self._throttled_send(client)
 
     async def finalize(self, client: nio.AsyncClient) -> None:
         """Send final message update."""
@@ -228,9 +232,18 @@ async def send_streaming_response(  # noqa: C901, PLR0912
             if trace_entry is not None:
                 streaming.tool_trace.append(trace_entry)
         elif isinstance(chunk, ToolCallCompletedEvent):
-            text_chunk, trace_entry = format_tool_completed_event(chunk)
-            if trace_entry is not None:
+            info = extract_tool_completed_info(chunk)
+            if info:
+                tool_name, result = info
+                streaming.accumulated_text, trace_entry = complete_pending_tool_block(
+                    streaming.accumulated_text,
+                    tool_name,
+                    result,
+                )
                 streaming.tool_trace.append(trace_entry)
+                await streaming._throttled_send(client)
+                continue
+            text_chunk = ""
         else:
             logger.debug(f"Unhandled streaming event type: {type(chunk).__name__}")
             continue

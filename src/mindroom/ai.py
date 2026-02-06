@@ -24,9 +24,9 @@ from .error_handling import get_user_friendly_error_message
 from .logging_config import get_logger
 from .memory import build_memory_enhanced_prompt
 from .tool_events import (
-    format_tool_completed,
-    format_tool_completed_event,
-    format_tool_started,
+    complete_pending_tool_block,
+    extract_tool_completed_info,
+    format_tool_combined,
     format_tool_started_event,
 )
 
@@ -57,10 +57,8 @@ def _extract_response_content(response: RunOutput) -> str:
         for tool in response.tools:
             tool_name = tool.tool_name or "tool"
             tool_args = tool.tool_args or {}
-            started, _ = format_tool_started(tool_name, tool_args)
-            completed, _ = format_tool_completed(tool_name, tool.result)
-            tool_sections.append(started.strip())
-            tool_sections.append(completed.strip())
+            combined, _ = format_tool_combined(tool_name, tool_args, tool.result)
+            tool_sections.append(combined.strip())
         if tool_sections:
             response_parts.append("\n\n".join(tool_sections))
 
@@ -396,9 +394,10 @@ async def stream_agent_response(  # noqa: C901, PLR0912
                     full_response += tool_msg
                     yield event
             elif isinstance(event, ToolCallCompletedEvent):
-                result_msg, _ = format_tool_completed_event(event)
-                if result_msg:
-                    full_response += result_msg
+                info = extract_tool_completed_info(event)
+                if info:
+                    tool_name, result = info
+                    full_response, _ = complete_pending_tool_block(full_response, tool_name, result)
                     yield event
             else:
                 logger.debug("Skipping stream event", event_type=type(event).__name__)
