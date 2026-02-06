@@ -250,6 +250,10 @@ async def prepare_large_message(
             "m.relates_to": content.get("m.relates_to", {}),
         }
 
+    final_size = _calculate_event_size(modified_content)
+    if final_size > 64000:
+        logger.warning(f"Large message still exceeds 64KB after preparation ({final_size} bytes)")
+
     logger.info(f"Large message prepared: {len(full_text)} bytes -> {len(preview)} preview + MXC attachment")
 
     return modified_content
