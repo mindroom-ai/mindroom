@@ -1,5 +1,6 @@
 """Integration tests for large message handling with streaming and regular messages."""
 
+from collections.abc import AsyncIterator
 from unittest.mock import MagicMock
 
 import nio
@@ -7,7 +8,12 @@ import pytest
 
 from mindroom.matrix.client import edit_message, send_message
 from mindroom.matrix.large_messages import NORMAL_MESSAGE_LIMIT, prepare_large_message
-from mindroom.streaming import ReplacementStreamingResponse, StreamingResponse, send_streaming_response
+from mindroom.streaming import (
+    ReplacementStreamingResponse,
+    StreamingResponse,
+    StreamInputChunk,
+    send_streaming_response,
+)
 from mindroom.tool_events import TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry
 
 
@@ -385,7 +391,7 @@ async def test_structured_stream_chunk_adds_tool_trace_metadata() -> None:
     client = MockClient()
     config = MockConfig()
 
-    async def stream() -> object:
+    async def stream() -> AsyncIterator[StreamInputChunk]:
         trace = [ToolTraceEntry(type="tool_call_started", tool_name="save_file", args_preview="file_name=a.py")]
         yield StructuredStreamChunk(content="<tool>save_file(file_name=a.py)</tool>", tool_trace=trace)
 
@@ -420,7 +426,7 @@ async def test_structured_stream_chunk_does_not_drop_trace_on_stale_snapshot() -
     ]
     trace_stale = [ToolTraceEntry(type="tool_call_started", tool_name="save_file")]
 
-    async def stream() -> object:
+    async def stream() -> AsyncIterator[StreamInputChunk]:
         yield StructuredStreamChunk(content="<tool>save_file()</tool>", tool_trace=trace_full)
         yield StructuredStreamChunk(content="<tool>save_file()</tool>", tool_trace=trace_stale)
 
