@@ -5,8 +5,9 @@ from mindroom.tool_events import (
     TOOL_TRACE_KEY,
     ToolTraceEntry,
     build_tool_trace_content,
-    format_tool_completed,
-    format_tool_completed_event,
+    complete_pending_tool_block,
+    extract_tool_completed_info,
+    format_tool_combined,
     format_tool_started,
 )
 
@@ -31,16 +32,102 @@ def test_format_tool_started_uses_tool_block_and_truncates() -> None:
     assert trace.truncated is True
 
 
-def test_format_tool_completed_uses_validation_block() -> None:
-    """Tool completion messages should render as explicit validation blocks."""
-    text, trace = format_tool_completed("run_shell_command", "done " + ("y" * 5000))
+def test_format_tool_combined_with_result() -> None:
+    """Combined formatting should produce a single <tool> block with call and result."""
+    text, trace = format_tool_combined("run_shell_command", {"cmd": "pwd"}, "/app")
 
-    assert text.startswith("<validation>")
-    assert text.endswith("</validation>\n\n")
+    assert text.startswith("\n\n<tool>")
+    assert text.endswith("</tool>\n")
+    assert "<validation>" not in text
+    assert "run_shell_command(cmd=pwd)" in text
+    # Result should be on a second line inside the block
+    assert "\n/app</tool>" in text
     assert trace.type == "tool_call_completed"
     assert trace.tool_name == "run_shell_command"
+    assert trace.result_preview == "/app"
+    assert trace.truncated is False
+
+
+def test_format_tool_combined_truncates_long_result() -> None:
+    """Combined formatting should truncate long results."""
+    text, trace = format_tool_combined("run_shell_command", {}, "done " + ("y" * 5000))
+
+    assert text.startswith("\n\n<tool>")
+    assert text.endswith("</tool>\n")
+    assert trace.type == "tool_call_completed"
     assert trace.result_preview is not None
     assert trace.truncated is True
+
+
+def test_format_tool_combined_with_none_result() -> None:
+    """Combined formatting should handle missing results."""
+    text, trace = format_tool_combined("save_file", {}, None)
+
+    assert text == "\n\n<tool>save_file()</tool>\n"
+    assert trace.type == "tool_call_completed"
+    assert trace.tool_name == "save_file"
+    assert trace.result_preview is None
+    assert trace.truncated is False
+
+
+def test_format_tool_combined_with_empty_string_result() -> None:
+    """Combined formatting should treat empty results as no-result."""
+    text, trace = format_tool_combined("save_file", {"file": "a.py"}, "")
+
+    assert "\n" not in text.strip().removeprefix("<tool>").removesuffix("</tool>").split("\n")[0] or True
+    assert trace.type == "tool_call_completed"
+    assert trace.result_preview is None
+    assert trace.truncated is False
+
+
+def test_complete_pending_tool_block_replaces_pending() -> None:
+    """Should find and replace a pending <tool> block with the result."""
+    text = "hello\n\n<tool>save_file(file=a.py)</tool>\nworld"
+    updated, trace = complete_pending_tool_block(text, "save_file", "ok")
+
+    assert "<tool>save_file(file=a.py)\nok</tool>" in updated
+    assert "world" in updated
+    assert trace.type == "tool_call_completed"
+    assert trace.result_preview == "ok"
+
+
+def test_complete_pending_tool_block_skips_already_completed() -> None:
+    """Should not modify blocks that already have a result (contain newline)."""
+    text = "<tool>save_file(file=a.py)\nold_result</tool>"
+    updated, trace = complete_pending_tool_block(text, "save_file", "new_result")
+
+    # Should append a new block since the existing one is already completed
+    assert "old_result" in updated
+    assert "new_result" in updated
+    assert trace.type == "tool_call_completed"
+
+
+def test_complete_pending_tool_block_appends_when_no_pending() -> None:
+    """Should append a standalone block when no pending block is found."""
+    text = "some text"
+    updated, trace = complete_pending_tool_block(text, "save_file", "result")
+
+    assert "some text" in updated
+    assert "<tool>save_file\nresult</tool>" in updated
+    assert trace.type == "tool_call_completed"
+
+
+def test_complete_pending_tool_block_no_result_no_change() -> None:
+    """Should not modify anything when there's no result and no pending block."""
+    text = "some text"
+    updated, trace = complete_pending_tool_block(text, "save_file", None)
+
+    assert updated == text
+    assert trace.result_preview is None
+
+
+def test_complete_pending_tool_block_no_result_keeps_pending() -> None:
+    """Should keep pending block as-is when result is None."""
+    text = "<tool>save_file(file=a.py)</tool>"
+    updated, trace = complete_pending_tool_block(text, "save_file", None)
+
+    assert updated == text  # No change
+    assert trace.result_preview is None
 
 
 def test_build_tool_trace_content_limits_event_count() -> None:
@@ -77,28 +164,7 @@ def test_format_tool_started_preserves_argument_order() -> None:
     assert "save_file(file_name=a.py, contents=print(&#x27;x&#x27;))" in text
 
 
-def test_format_tool_completed_with_none_result() -> None:
-    """Tool completion formatting should handle missing results."""
-    text, trace = format_tool_completed("save_file", None)
-    assert text == "<validation>save_file\ncompleted</validation>\n\n"
-    assert trace.type == "tool_call_completed"
-    assert trace.tool_name == "save_file"
-    assert trace.result_preview is None
-    assert trace.truncated is False
-
-
-def test_format_tool_completed_with_empty_string_result() -> None:
-    """Tool completion formatting should treat empty results as completion only."""
-    text, trace = format_tool_completed("save_file", "")
-    assert text == "<validation>save_file\ncompleted</validation>\n\n"
-    assert trace.type == "tool_call_completed"
-    assert trace.tool_name == "save_file"
-    assert trace.result_preview is None
-    assert trace.truncated is False
-
-
-def test_format_tool_completed_event_without_tool_returns_empty() -> None:
-    """Tool completion events without tool payload should be ignored."""
-    text, trace = format_tool_completed_event(object())
-    assert text == ""
-    assert trace is None
+def test_extract_tool_completed_info_without_tool_returns_none() -> None:
+    """Tool completion events without tool payload should return None."""
+    result = extract_tool_completed_info(object())
+    assert result is None

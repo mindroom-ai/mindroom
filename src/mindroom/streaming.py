@@ -15,7 +15,8 @@ from .matrix.mentions import format_message_with_mentions
 from .tool_events import (
     StructuredStreamChunk,
     ToolTraceEntry,
-    format_tool_completed_event,
+    complete_pending_tool_block,
+    extract_tool_completed_info,
     format_tool_started_event,
 )
 
@@ -228,9 +229,20 @@ async def send_streaming_response(  # noqa: C901, PLR0912
             if trace_entry is not None:
                 streaming.tool_trace.append(trace_entry)
         elif isinstance(chunk, ToolCallCompletedEvent):
-            text_chunk, trace_entry = format_tool_completed_event(chunk)
-            if trace_entry is not None:
+            info = extract_tool_completed_info(chunk)
+            if info:
+                tool_name, result = info
+                streaming.accumulated_text, trace_entry = complete_pending_tool_block(
+                    streaming.accumulated_text,
+                    tool_name,
+                    result,
+                )
                 streaming.tool_trace.append(trace_entry)
+                # Force an update since we modified accumulated_text directly
+                await streaming._send_or_edit_message(client)
+                streaming.last_update = time.time()
+                continue  # Skip the update_content path
+            text_chunk = ""
         else:
             logger.debug(f"Unhandled streaming event type: {type(chunk).__name__}")
             continue
