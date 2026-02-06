@@ -10,6 +10,7 @@ from mindroom.matrix.large_messages import (
     _is_edit_message,
     prepare_large_message,
 )
+from mindroom.tool_events import TOOL_TRACE_KEY
 
 
 def test_calculate_event_size() -> None:
@@ -175,3 +176,57 @@ async def test_prepare_edit_message() -> None:
     # Body should have preview
     assert len(result["body"]) < len("* " + text)
     assert "[Message continues in attached file]" in result["m.new_content"]["body"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_large_message_preserves_tool_trace_regular() -> None:
+    """Structured tool trace should survive regular large-message conversion."""
+
+    class MockClient:
+        rooms: dict = {}  # noqa: RUF012
+
+        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003, ARG002
+            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file789"})
+            return response, None
+
+    client = MockClient()
+    large_text = "z" * 100000
+    content = {
+        "body": large_text,
+        "msgtype": "m.text",
+        TOOL_TRACE_KEY: {"version": 1, "events": [{"type": "tool_call_started", "tool_name": "save_file"}]},
+    }
+
+    result = await prepare_large_message(client, "!room:server", content)
+    assert TOOL_TRACE_KEY in result
+    assert result[TOOL_TRACE_KEY]["events"][0]["tool_name"] == "save_file"
+
+
+@pytest.mark.asyncio
+async def test_prepare_large_message_preserves_tool_trace_edit() -> None:
+    """Structured tool trace should survive edit large-message conversion."""
+
+    class MockClient:
+        rooms: dict = {}  # noqa: RUF012
+
+        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003, ARG002
+            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file999"})
+            return response, None
+
+    client = MockClient()
+    large_text = "w" * 50000
+    edit_content = {
+        "body": "* " + large_text,
+        "m.new_content": {
+            "body": large_text,
+            "msgtype": "m.text",
+            TOOL_TRACE_KEY: {"version": 1, "events": [{"type": "tool_call_completed", "tool_name": "save_file"}]},
+        },
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$abc"},
+        "msgtype": "m.text",
+    }
+
+    result = await prepare_large_message(client, "!room:server", edit_content)
+    assert "m.new_content" in result
+    assert TOOL_TRACE_KEY in result["m.new_content"]
+    assert result["m.new_content"][TOOL_TRACE_KEY]["events"][0]["type"] == "tool_call_completed"

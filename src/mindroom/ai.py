@@ -23,6 +23,12 @@ from .credentials_sync import get_api_key_for_provider, get_ollama_host
 from .error_handling import get_user_friendly_error_message
 from .logging_config import get_logger
 from .memory import build_memory_enhanced_prompt
+from .tool_events import (
+    format_tool_completed,
+    format_tool_completed_event,
+    format_tool_started,
+    format_tool_started_event,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -43,60 +49,20 @@ def _extract_response_content(response: RunOutput) -> str:
     if response.content:
         response_parts.append(response.content)
 
-    # Add formatted tool calls if present (similar to agno's print_response)
+    # Add formatted tool call sections when present.
     if response.tools:
-        tool_lines: list[str] = []
+        tool_sections: list[str] = []
         for tool in response.tools:
             tool_name = tool.tool_name or "tool"
             tool_args = tool.tool_args or {}
-            if tool_args:
-                args_str = ", ".join(f"{k}={v}" for k, v in tool_args.items())
-                tool_line = f"{tool_name}({args_str})"
-            else:
-                tool_line = f"{tool_name}()"
-            if tool.result:
-                tool_line = f"{tool_line}: {tool.result}"
-            tool_lines.append(tool_line)
-        if tool_lines:
-            tool_calls_section = "\n\n**Tool Calls:**"
-            for tool_line in tool_lines:
-                tool_calls_section += f"\n• {tool_line}"
-            response_parts.append(tool_calls_section)
+            started, _ = format_tool_started(tool_name, tool_args)
+            completed, _ = format_tool_completed(tool_name, tool.result)
+            tool_sections.append(started.strip())
+            tool_sections.append(completed.strip())
+        if tool_sections:
+            response_parts.append("\n\n".join(tool_sections))
 
     return "\n".join(response_parts) if response_parts else ""
-
-
-def _format_tool_started_message(event: ToolCallStartedEvent) -> str:
-    if not event.tool:
-        return ""
-
-    tool_name = event.tool.tool_name if event.tool.tool_name else "tool"
-    tool_args = event.tool.tool_args if event.tool.tool_args else {}
-
-    # Format similar to agno's formatted_tool_calls
-    if tool_args:
-        args_str = ", ".join(f"{k}={v}" for k, v in tool_args.items())
-        msg = f"\n\n🔧 **Tool Call:** `{tool_name}({args_str})`\n"
-    else:
-        msg = f"\n\n🔧 **Tool Call:** `{tool_name}()`\n"
-
-    return msg
-
-
-def _format_tool_completed_message(event: ToolCallCompletedEvent) -> str:
-    if not event.tool:
-        return ""
-
-    tool_name = event.tool.tool_name if event.tool.tool_name else "tool"
-
-    # Check both event.content and tool.result for the output
-    result = event.content or (event.tool.result if event.tool else None)
-
-    if result:
-        # Format the result nicely
-        return f"✅ **`{tool_name}` result:**\n{result}\n\n"
-
-    return f"✅ **`{tool_name}`** completed\n\n"
 
 
 @functools.cache
@@ -351,7 +317,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912
     config: Config,
     thread_history: list[dict[str, Any]] | None = None,
     room_id: str | None = None,
-) -> AsyncIterator[str]:
+) -> AsyncIterator[object]:
     """Generate streaming AI response using Agno's streaming API.
 
     Checks cache first - if found, yields the cached response immediately.
@@ -367,7 +333,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912
         room_id: Optional room ID for room memory access
 
     Yields:
-        Chunks of the AI response as they become available
+        Streaming chunks/events as they become available
 
     """
     logger.info("AI streaming request", agent=agent_name)
@@ -421,17 +387,17 @@ async def stream_agent_response(  # noqa: C901, PLR0912
             if isinstance(event, RunContentEvent) and event.content:
                 chunk_text = str(event.content)
                 full_response += chunk_text
-                yield chunk_text
+                yield event
             elif isinstance(event, ToolCallStartedEvent):
-                tool_msg = _format_tool_started_message(event)
+                tool_msg, _ = format_tool_started_event(event)
                 if tool_msg:
                     full_response += tool_msg
-                    yield tool_msg
+                    yield event
             elif isinstance(event, ToolCallCompletedEvent):
-                result_msg = _format_tool_completed_message(event)
+                result_msg, _ = format_tool_completed_event(event)
                 if result_msg:
                     full_response += result_msg
-                    yield result_msg
+                    yield event
             else:
                 logger.debug("Skipping stream event", event_type=type(event).__name__)
     except Exception as e:

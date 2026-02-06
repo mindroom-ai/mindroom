@@ -7,7 +7,8 @@ import pytest
 
 from mindroom.matrix.client import edit_message, send_message
 from mindroom.matrix.large_messages import NORMAL_MESSAGE_LIMIT, prepare_large_message
-from mindroom.streaming import StreamingResponse
+from mindroom.streaming import ReplacementStreamingResponse, StreamingResponse, send_streaming_response
+from mindroom.tool_events import TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry
 
 
 class MockClient:
@@ -376,3 +377,32 @@ async def test_streaming_finalize() -> None:
     assert "io.mindroom.long_text" in sent_content
     # Should not have in-progress marker in final
     assert "⋯" not in sent_content["body"]
+
+
+@pytest.mark.asyncio
+async def test_structured_stream_chunk_adds_tool_trace_metadata() -> None:
+    """Structured streaming chunks should preserve tool trace metadata in sent content."""
+    client = MockClient()
+    config = MockConfig()
+
+    async def stream() -> object:
+        trace = [ToolTraceEntry(type="tool_call_started", tool_name="save_file", args_preview="file_name=a.py")]
+        yield StructuredStreamChunk(content="<tool>save_file(file_name=a.py)</tool>", tool_trace=trace)
+
+    event_id, _ = await send_streaming_response(
+        client=client,
+        room_id="!test:room",
+        reply_to_event_id=None,
+        thread_id=None,
+        sender_domain="example.com",
+        config=config,
+        response_stream=stream(),
+        streaming_cls=ReplacementStreamingResponse,
+    )
+
+    assert event_id is not None
+    assert len(client.messages_sent) >= 1
+    last_content = client.messages_sent[-1][2]
+    target_content = last_content.get("m.new_content", last_content)
+    assert TOOL_TRACE_KEY in target_content
+    assert target_content[TOOL_TRACE_KEY]["events"][0]["tool_name"] == "save_file"
