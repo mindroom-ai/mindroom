@@ -67,6 +67,10 @@ def _format_tool_args(tool_args: dict[str, object]) -> tuple[str, bool]:
     # Preserve insertion order for easier debugging of tool-call construction.
     for key, value in tool_args.items():
         value_text = _to_compact_text(value)
+        # Collapse newlines so the call line stays single-line.  This is
+        # critical: complete_pending_tool_block uses "\n" inside a <tool>
+        # block to distinguish pending (call-only) from completed (call+result).
+        value_text = value_text.replace("\n", " ")
         value_preview, value_truncated = _truncate(value_text, MAX_TOOL_ARG_VALUE_PREVIEW_CHARS)
         if value_truncated:
             truncated = True
@@ -120,7 +124,9 @@ def format_tool_combined(
         safe_result = escape(_neutralize_mentions(result_display))
         block = f"\n\n<tool>{safe_call}\n{safe_result}</tool>\n"
     else:
-        block = f"\n\n<tool>{safe_call}</tool>\n"
+        # Trailing \n signals "completed" to the frontend (no-result tool).
+        # Without it the block looks identical to a pending/in-progress block.
+        block = f"\n\n<tool>{safe_call}\n</tool>\n"
 
     trace = ToolTraceEntry(
         type="tool_call_completed",
@@ -161,7 +167,8 @@ def complete_pending_tool_block(
         inner = match.group(1)
         # Pending blocks have no newline (just the call). Completed blocks have \n.
         if "\n" not in inner:
-            replacement = f"<tool>{inner}\n{safe_result}</tool>" if safe_result else match.group(0)
+            # Always inject \n to mark as completed, even when result is empty.
+            replacement = f"<tool>{inner}\n{safe_result}</tool>"
             updated = updated[: match.start()] + replacement + updated[match.end() :]
             break
     else:

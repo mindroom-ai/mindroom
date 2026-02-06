@@ -63,7 +63,8 @@ def test_format_tool_combined_with_none_result() -> None:
     """Combined formatting should handle missing results."""
     text, trace = format_tool_combined("save_file", {}, None)
 
-    assert text == "\n\n<tool>save_file()</tool>\n"
+    # Trailing \n inside the block signals "completed" even without a result
+    assert text == "\n\n<tool>save_file()\n</tool>\n"
     assert trace.type == "tool_call_completed"
     assert trace.tool_name == "save_file"
     assert trace.result_preview is None
@@ -74,8 +75,8 @@ def test_format_tool_combined_with_empty_string_result() -> None:
     """Combined formatting should treat empty results as no-result."""
     text, trace = format_tool_combined("save_file", {"file": "a.py"}, "")
 
-    # Should produce a single-line block (no result line)
-    assert text == "\n\n<tool>save_file(file=a.py)</tool>\n"
+    # Trailing \n inside the block signals "completed" even with empty result
+    assert text == "\n\n<tool>save_file(file=a.py)\n</tool>\n"
     assert trace.type == "tool_call_completed"
     assert trace.result_preview is None
     assert trace.truncated is False
@@ -122,12 +123,13 @@ def test_complete_pending_tool_block_no_result_no_change() -> None:
     assert trace.result_preview is None
 
 
-def test_complete_pending_tool_block_no_result_keeps_pending() -> None:
-    """Should keep pending block as-is when result is None."""
+def test_complete_pending_tool_block_no_result_marks_completed() -> None:
+    """Should mark pending block as completed even when result is None."""
     text = "<tool>save_file(file=a.py)</tool>"
     updated, trace = complete_pending_tool_block(text, "save_file", None)
 
-    assert updated == text  # No change
+    # Newline injected to mark as completed, even without a result
+    assert updated == "<tool>save_file(file=a.py)\n</tool>"
     assert trace.result_preview is None
 
 
@@ -178,6 +180,40 @@ def test_complete_pending_tool_block_with_escaped_content() -> None:
     assert updated.count("<tool>") == 1
     assert updated.count("</tool>") == 1
     assert trace.result_preview == "ok"
+
+
+def test_format_tool_started_collapses_newlines_in_args() -> None:
+    """Tool args with newlines should be collapsed to spaces."""
+    text, trace = format_tool_started(
+        "save_file",
+        {"contents": "line1\nline2\nline3"},
+    )
+
+    # Newlines in args would break pending/completed detection
+    assert "\n" not in text.split("<tool>")[1].split("</tool>")[0]
+    assert "line1 line2 line3" in text
+    assert trace.args_preview is not None
+    assert "\n" not in trace.args_preview
+
+
+def test_complete_pending_tool_block_roundtrip_with_multiline_args() -> None:
+    """format_tool_started with multiline args -> complete_pending_tool_block should succeed."""
+    pending_text, _ = format_tool_started(
+        "save_file",
+        {"file": "test.py", "contents": "def foo():\n    return 42\n"},
+    )
+
+    # The pending block should have no newline inside (args were collapsed)
+    inner = pending_text.split("<tool>")[1].split("</tool>")[0]
+    assert "\n" not in inner
+
+    # Completing should work and produce exactly one block
+    updated, trace = complete_pending_tool_block(pending_text, "save_file", "saved")
+
+    assert "saved</tool>" in updated
+    assert updated.count("<tool>") == 1
+    assert updated.count("</tool>") == 1
+    assert trace.result_preview == "saved"
 
 
 def test_extract_tool_completed_info_without_tool_returns_none() -> None:
