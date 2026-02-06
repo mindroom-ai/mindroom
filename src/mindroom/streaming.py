@@ -84,14 +84,17 @@ class StreamingResponse:
         """Append new chunk to accumulated text."""
         self.accumulated_text += new_chunk
 
-    async def update_content(self, new_chunk: str, client: nio.AsyncClient) -> None:
-        """Add new content and potentially update the message."""
-        self._update(new_chunk)
-
+    async def _throttled_send(self, client: nio.AsyncClient) -> None:
+        """Send/edit the message if enough time has passed since the last update."""
         current_time = time.time()
         if current_time - self.last_update >= self.update_interval:
             await self._send_or_edit_message(client)
             self.last_update = current_time
+
+    async def update_content(self, new_chunk: str, client: nio.AsyncClient) -> None:
+        """Add new content and potentially update the message."""
+        self._update(new_chunk)
+        await self._throttled_send(client)
 
     async def finalize(self, client: nio.AsyncClient) -> None:
         """Send final message update."""
@@ -238,7 +241,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912
                     result,
                 )
                 streaming.tool_trace.append(trace_entry)
-                await streaming.update_content("", client)
+                await streaming._throttled_send(client)
                 continue
             text_chunk = ""
         else:
