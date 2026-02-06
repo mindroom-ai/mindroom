@@ -238,12 +238,8 @@ async def send_streaming_response(  # noqa: C901, PLR0912
                     result,
                 )
                 streaming.tool_trace.append(trace_entry)
-                # We modified accumulated_text directly; send an update respecting throttle
-                current_time = time.time()
-                if current_time - streaming.last_update >= streaming.update_interval:
-                    await streaming._send_or_edit_message(client)
-                    streaming.last_update = current_time
-                continue  # Skip the update_content path
+                await streaming.update_content("", client)
+                continue
             text_chunk = ""
         else:
             logger.debug(f"Unhandled streaming event type: {type(chunk).__name__}")

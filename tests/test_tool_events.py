@@ -220,3 +220,21 @@ def test_extract_tool_completed_info_without_tool_returns_none() -> None:
     """Tool completion events without tool payload should return None."""
     result = extract_tool_completed_info(object())
     assert result is None
+
+
+def test_extract_tool_completed_info_preserves_falsey_content() -> None:
+    """Falsey but valid content values (0, False, [], {}) should not be dropped."""
+
+    class FakeTool:
+        tool_name = "check"
+        result = "fallback"
+
+    class FakeEvent:
+        tool = FakeTool()
+        content = 0
+
+    info = extract_tool_completed_info(FakeEvent())
+    assert info is not None
+    tool_name, result = info
+    assert tool_name == "check"
+    assert result == 0  # not "fallback"

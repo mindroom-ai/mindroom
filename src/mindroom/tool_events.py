@@ -207,7 +207,8 @@ def extract_tool_completed_info(event: object) -> tuple[str, object | None] | No
     if not tool:
         return None
     tool_name = getattr(tool, "tool_name", None) or "tool"
-    result = getattr(event, "content", None) or getattr(tool, "result", None)
+    content = getattr(event, "content", None)
+    result = content if content is not None else getattr(tool, "result", None)
     return tool_name, result
 
 
