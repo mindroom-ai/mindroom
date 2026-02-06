@@ -47,6 +47,7 @@ logger = get_logger(__name__)
 # Message length limits for team context and logging
 MAX_CONTEXT_MESSAGE_LENGTH = 200  # Maximum length for messages to include in thread context
 MAX_LOG_MESSAGE_LENGTH = 500  # Maximum length for messages in team response logs
+TeamStreamChunk = str | StructuredStreamChunk
 
 
 class TeamMode(str, Enum):
@@ -615,7 +616,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     mode: TeamMode = TeamMode.COORDINATE,
     thread_history: list[dict] | None = None,
     model_name: str | None = None,
-) -> AsyncIterator[object]:
+) -> AsyncIterator[TeamStreamChunk]:
     """Aggregate team streaming into a non-stream-style document, live.
 
     Renders a header and per-member sections, optionally adding a team

@@ -63,8 +63,9 @@ def _neutralize_mentions(text: str) -> str:
 def _format_tool_args(tool_args: dict[str, object]) -> tuple[str, bool]:
     parts: list[str] = []
     truncated = False
-    for key in sorted(tool_args):
-        value_text = _to_compact_text(tool_args[key])
+    # Preserve insertion order for easier debugging of tool-call construction.
+    for key, value in tool_args.items():
+        value_text = _to_compact_text(value)
         value_preview, value_truncated = _truncate(value_text, MAX_TOOL_ARG_VALUE_PREVIEW_CHARS)
         if value_truncated:
             truncated = True
@@ -128,8 +129,10 @@ def format_tool_started_event(event: object) -> tuple[str, ToolTraceEntry | None
 def format_tool_completed_event(event: object) -> tuple[str, ToolTraceEntry | None]:
     """Format an Agno tool-completed event into display text and trace metadata."""
     tool = getattr(event, "tool", None)
+    if not tool:
+        return "", None
     tool_name = getattr(tool, "tool_name", None) or "tool"
-    result = getattr(event, "content", None) or (getattr(tool, "result", None) if tool else None)
+    result = getattr(event, "content", None) or getattr(tool, "result", None)
     text, trace = format_tool_completed(tool_name, result)
     return text, trace
 
