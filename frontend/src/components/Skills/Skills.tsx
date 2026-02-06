@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Editor from '@monaco-editor/react';
-import { ArrowLeft, FileCode, FolderOpen, Lock, Pencil, Save } from 'lucide-react';
+import { ArrowLeft, FileCode, FolderOpen, Lock, Pencil, Save, Trash2 } from 'lucide-react';
 import { ListPanel, ListItem } from '@/components/shared/ListPanel';
 import { ItemCard, ItemCardBadge } from '@/components/shared/ItemCard';
 import { EditorPanelEmptyState } from '@/components/shared';
@@ -10,7 +10,13 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { useToast } from '@/components/ui/use-toast';
 import { useTheme } from '@/contexts/ThemeContext';
 import { useSwipeBack } from '@/hooks/useSwipeBack';
-import { getSkill, listSkills, updateSkill } from '@/services/skillsService';
+import {
+  createSkill,
+  deleteSkill,
+  getSkill,
+  listSkills,
+  updateSkill,
+} from '@/services/skillsService';
 import { SkillSummary } from '@/types/skills';
 
 interface SkillListItem extends ListItem {
@@ -121,6 +127,49 @@ export function Skills() {
     }
   };
 
+  const handleCreate = async (name?: string) => {
+    if (!name) return;
+    const trimmed = name.trim();
+    if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(trimmed)) {
+      toast({
+        title: 'Invalid skill name',
+        description:
+          'Name must be lowercase alphanumeric with hyphens, starting and ending with a letter or digit.',
+        variant: 'destructive',
+      });
+      return;
+    }
+    try {
+      await createSkill(trimmed, trimmed);
+      toast({ title: 'Skill created', description: `${trimmed} is ready to edit.` });
+      await refreshSkills();
+      setSelectedName(trimmed);
+    } catch (error) {
+      toast({
+        title: 'Failed to create skill',
+        description: error instanceof Error ? error.message : 'Unknown error',
+        variant: 'destructive',
+      });
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!selectedSkill) return;
+    if (!window.confirm(`Delete skill "${selectedSkill.name}"? This cannot be undone.`)) return;
+    try {
+      await deleteSkill(selectedSkill.name);
+      toast({ title: 'Skill deleted', description: `${selectedSkill.name} removed.` });
+      setSelectedName(null);
+      await refreshSkills();
+    } catch (error) {
+      toast({
+        title: 'Failed to delete skill',
+        description: error instanceof Error ? error.message : 'Unknown error',
+        variant: 'destructive',
+      });
+    }
+  };
+
   const listItems: SkillListItem[] = skills.map(s => ({
     id: s.name,
     display_name: s.name,
@@ -167,7 +216,11 @@ export function Skills() {
           renderItem={renderSkill}
           showSearch={true}
           searchPlaceholder="Search skills..."
-          showCreateButton={false}
+          showCreateButton={true}
+          creationMode="inline-form"
+          createPlaceholder="Skill name..."
+          createButtonText="New"
+          onCreateItem={handleCreate}
           emptyIcon={FileCode}
           emptyMessage={loadingList ? 'Loading skills...' : 'No skills found'}
           emptySubtitle={
@@ -208,15 +261,20 @@ export function Skills() {
                   </div>
                 </div>
                 {selectedSkill.can_edit && (
-                  <Button
-                    variant="default"
-                    size="sm"
-                    onClick={handleSave}
-                    disabled={!isDirty || saving}
-                  >
-                    <Save className="h-4 w-4 sm:mr-1" />
-                    <span className="hidden sm:inline">{saving ? 'Saving...' : 'Save'}</span>
-                  </Button>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      variant="default"
+                      size="sm"
+                      onClick={handleSave}
+                      disabled={!isDirty || saving}
+                    >
+                      <Save className="h-4 w-4 sm:mr-1" />
+                      <span className="hidden sm:inline">{saving ? 'Saving...' : 'Save'}</span>
+                    </Button>
+                    <Button variant="ghost" size="sm" onClick={handleDelete}>
+                      <Trash2 className="h-4 w-4 text-destructive" />
+                    </Button>
+                  </div>
                 )}
               </div>
               <div className="flex flex-wrap items-center gap-2 mt-3">
