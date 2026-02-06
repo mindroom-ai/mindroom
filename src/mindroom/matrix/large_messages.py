@@ -14,14 +14,13 @@ import nio
 from nio import crypto
 
 from mindroom.logging_config import get_logger
-from mindroom.tool_events import TOOL_TRACE_KEY
 
 logger = get_logger(__name__)
 
 # Conservative limits accounting for Matrix overhead
 NORMAL_MESSAGE_LIMIT = 55000  # ~55KB for regular messages
 EDIT_MESSAGE_LIMIT = 27000  # ~27KB for edits (they roughly double in size)
-PASSTHROUGH_CONTENT_KEYS = ("m.mentions", "com.mindroom.skip_mentions", TOOL_TRACE_KEY)
+PASSTHROUGH_CONTENT_KEYS = ("m.mentions", "com.mindroom.skip_mentions")
 
 
 def _calculate_event_size(content: dict[str, Any]) -> int:
@@ -66,9 +65,10 @@ def _create_preview(text: str, max_bytes: int) -> str:
     if len(text.encode("utf-8")) <= max_bytes:
         return text
 
-    # Binary search for the maximum valid UTF-8 substring
-    # Account for the indicator from the start
+    # If budget is too small for any preview + indicator, return indicator only
     target_bytes = max_bytes - indicator_bytes
+    if target_bytes <= 0:
+        return indicator.lstrip()
 
     # Start with a reasonable estimate
     left, right = 0, min(len(text), target_bytes)
@@ -195,41 +195,30 @@ async def prepare_large_message(
         Original content (if small) or modified content with preview and MXC reference
 
     """
-    # Edit messages roughly double in size due to m.new_content structure
-    # which includes both the edit wrapper and the actual new content
     is_edit = _is_edit_message(content)
     size_limit = EDIT_MESSAGE_LIMIT if is_edit else NORMAL_MESSAGE_LIMIT
 
-    # Calculate current size
     current_size = _calculate_event_size(content)
-
-    # If it fits, return unchanged
     if current_size <= size_limit:
         return content
 
     source_content = content["m.new_content"] if is_edit and "m.new_content" in content else content
-
-    # Extract the text to upload (handle both regular and edit messages)
     full_text = source_content["body"]
 
     logger.info(f"Message too large ({current_size} bytes), uploading to MXC")
 
-    # Upload the full text
     mxc_uri, file_info = await _upload_text_as_mxc(client, full_text, room_id)
 
     # Calculate how much space we have for preview
-    # We'll be sending an m.file message, so account for the file attachment structure
     # The structure adds: filename, url, info object, custom metadata
     attachment_overhead = 5000  # Conservative estimate for attachment JSON structure
     available_for_preview = size_limit - attachment_overhead
 
-    # Create maximum-size preview
     preview = _create_preview(full_text, available_for_preview)
 
-    # Create a standard m.file message with preview body
-    modified_content = {
+    modified_content: dict[str, Any] = {
         "msgtype": "m.file",
-        "body": preview,  # Preview text for immediate readability
+        "body": preview,
         "filename": "message.txt",
         "info": file_info,
     }
@@ -238,16 +227,11 @@ async def prepare_large_message(
         if key in source_content:
             modified_content[key] = source_content[key]
 
-    # Add the file URL (either encrypted or plain)
     if room_id and room_id in client.rooms and client.rooms[room_id].encrypted:
-        # For encrypted rooms, use 'file' key
         modified_content["file"] = file_info
     else:
-        # For unencrypted rooms, use 'url' key
         modified_content["url"] = mxc_uri
 
-    # Add custom metadata to signal this is a long text message
-    # Future custom clients can use this to render as inline text instead of attachment
     modified_content["io.mindroom.long_text"] = {
         "version": 1,
         "original_size": len(full_text),
@@ -255,20 +239,20 @@ async def prepare_large_message(
         "is_complete_text": True,
     }
 
-    # Preserve thread/reply relationships if they exist
     if "m.relates_to" in content:
         modified_content["m.relates_to"] = content["m.relates_to"]
 
-    # Handle edit messages specially
     if is_edit and "m.new_content" in content:
-        # For edits, we need to wrap everything in the edit structure
-        edit_content = {
-            "msgtype": "m.text",  # Edit message type
+        modified_content = {
+            "msgtype": "m.text",
             "body": f"* {preview}",
             "m.new_content": modified_content,
             "m.relates_to": content.get("m.relates_to", {}),
         }
-        modified_content = edit_content
+
+    final_size = _calculate_event_size(modified_content)
+    if final_size > 64000:
+        logger.warning(f"Large message still exceeds 64KB after preparation ({final_size} bytes)")
 
     logger.info(f"Large message prepared: {len(full_text)} bytes -> {len(preview)} preview + MXC attachment")
 
