@@ -4,6 +4,7 @@ import nio
 import pytest
 
 from mindroom.matrix.large_messages import (
+    EDIT_MESSAGE_LIMIT,
     NORMAL_MESSAGE_LIMIT,
     _calculate_event_size,
     _create_preview,
@@ -179,8 +180,8 @@ async def test_prepare_edit_message() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prepare_large_message_preserves_tool_trace_regular() -> None:
-    """Structured tool trace should survive regular large-message conversion."""
+async def test_prepare_large_message_drops_tool_trace_regular() -> None:
+    """Large-message conversion should drop tool trace metadata to preserve size budget."""
 
     class MockClient:
         rooms: dict = {}  # noqa: RUF012
@@ -191,20 +192,24 @@ async def test_prepare_large_message_preserves_tool_trace_regular() -> None:
 
     client = MockClient()
     large_text = "z" * 100000
+    large_trace_events = [
+        {"type": "tool_call_completed", "tool_name": f"tool_{idx}", "result_preview": "x" * 4000, "truncated": True}
+        for idx in range(120)
+    ]
     content = {
         "body": large_text,
         "msgtype": "m.text",
-        TOOL_TRACE_KEY: {"version": 1, "events": [{"type": "tool_call_started", "tool_name": "save_file"}]},
+        TOOL_TRACE_KEY: {"version": 1, "events": large_trace_events, "content_truncated": True},
     }
 
     result = await prepare_large_message(client, "!room:server", content)
-    assert TOOL_TRACE_KEY in result
-    assert result[TOOL_TRACE_KEY]["events"][0]["tool_name"] == "save_file"
+    assert TOOL_TRACE_KEY not in result
+    assert _calculate_event_size(result) <= NORMAL_MESSAGE_LIMIT
 
 
 @pytest.mark.asyncio
-async def test_prepare_large_message_preserves_tool_trace_edit() -> None:
-    """Structured tool trace should survive edit large-message conversion."""
+async def test_prepare_large_message_drops_tool_trace_edit() -> None:
+    """Edit large-message conversion should drop tool trace metadata to preserve size budget."""
 
     class MockClient:
         rooms: dict = {}  # noqa: RUF012
@@ -215,12 +220,16 @@ async def test_prepare_large_message_preserves_tool_trace_edit() -> None:
 
     client = MockClient()
     large_text = "w" * 50000
+    large_trace_events = [
+        {"type": "tool_call_completed", "tool_name": f"tool_{idx}", "result_preview": "y" * 4000, "truncated": True}
+        for idx in range(120)
+    ]
     edit_content = {
         "body": "* " + large_text,
         "m.new_content": {
             "body": large_text,
             "msgtype": "m.text",
-            TOOL_TRACE_KEY: {"version": 1, "events": [{"type": "tool_call_completed", "tool_name": "save_file"}]},
+            TOOL_TRACE_KEY: {"version": 1, "events": large_trace_events, "content_truncated": True},
         },
         "m.relates_to": {"rel_type": "m.replace", "event_id": "$abc"},
         "msgtype": "m.text",
@@ -228,5 +237,5 @@ async def test_prepare_large_message_preserves_tool_trace_edit() -> None:
 
     result = await prepare_large_message(client, "!room:server", edit_content)
     assert "m.new_content" in result
-    assert TOOL_TRACE_KEY in result["m.new_content"]
-    assert result["m.new_content"][TOOL_TRACE_KEY]["events"][0]["type"] == "tool_call_completed"
+    assert TOOL_TRACE_KEY not in result["m.new_content"]
+    assert _calculate_event_size(result) <= EDIT_MESSAGE_LIMIT

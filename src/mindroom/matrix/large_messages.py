@@ -14,14 +14,15 @@ import nio
 from nio import crypto
 
 from mindroom.logging_config import get_logger
-from mindroom.tool_events import TOOL_TRACE_KEY
 
 logger = get_logger(__name__)
 
 # Conservative limits accounting for Matrix overhead
 NORMAL_MESSAGE_LIMIT = 55000  # ~55KB for regular messages
 EDIT_MESSAGE_LIMIT = 27000  # ~27KB for edits (they roughly double in size)
-PASSTHROUGH_CONTENT_KEYS = ("m.mentions", "com.mindroom.skip_mentions", TOOL_TRACE_KEY)
+ATTACHMENT_OVERHEAD_BYTES = 5000
+MIN_PREVIEW_BYTES = 200
+PASSTHROUGH_CONTENT_KEYS = ("m.mentions", "com.mindroom.skip_mentions")
 
 
 def _calculate_event_size(content: dict[str, Any]) -> int:
@@ -173,6 +174,55 @@ async def _upload_text_as_mxc(
         return mxc_uri, file_info
 
 
+def _build_long_text_content(
+    preview: str,
+    file_info: dict[str, Any] | None,
+    mxc_uri: str | None,
+    *,
+    room_encrypted: bool,
+    full_text: str,
+    content: dict[str, Any],
+    source_content: dict[str, Any],
+    is_edit: bool,
+) -> dict[str, Any]:
+    """Build m.file content (or edit wrapper) for long-text fallback."""
+    modified_content: dict[str, Any] = {
+        "msgtype": "m.file",
+        "body": preview,
+        "filename": "message.txt",
+        "info": file_info,
+    }
+
+    for key in PASSTHROUGH_CONTENT_KEYS:
+        if key in source_content:
+            modified_content[key] = source_content[key]
+
+    if room_encrypted:
+        modified_content["file"] = file_info
+    else:
+        modified_content["url"] = mxc_uri
+
+    modified_content["io.mindroom.long_text"] = {
+        "version": 1,
+        "original_size": len(full_text),
+        "preview_size": len(preview),
+        "is_complete_text": True,
+    }
+
+    if "m.relates_to" in content:
+        modified_content["m.relates_to"] = content["m.relates_to"]
+
+    if is_edit and "m.new_content" in content:
+        return {
+            "msgtype": "m.text",
+            "body": f"* {preview}",
+            "m.new_content": modified_content,
+            "m.relates_to": content.get("m.relates_to", {}),
+        }
+
+    return modified_content
+
+
 async def prepare_large_message(
     client: nio.AsyncClient,
     room_id: str,
@@ -217,58 +267,86 @@ async def prepare_large_message(
     # Upload the full text
     mxc_uri, file_info = await _upload_text_as_mxc(client, full_text, room_id)
 
-    # Calculate how much space we have for preview
-    # We'll be sending an m.file message, so account for the file attachment structure
-    # The structure adds: filename, url, info object, custom metadata
-    attachment_overhead = 5000  # Conservative estimate for attachment JSON structure
-    available_for_preview = size_limit - attachment_overhead
+    room_encrypted = bool(room_id and room_id in client.rooms and client.rooms[room_id].encrypted)
 
-    # Create maximum-size preview
-    preview = _create_preview(full_text, available_for_preview)
+    # Initial estimate for preview budget. We'll verify final event size below.
+    preview_budget = max(MIN_PREVIEW_BYTES, size_limit - ATTACHMENT_OVERHEAD_BYTES)
+    preview = _create_preview(full_text, preview_budget)
+    modified_content = _build_long_text_content(
+        preview,
+        file_info,
+        mxc_uri,
+        room_encrypted=room_encrypted,
+        full_text=full_text,
+        content=content,
+        source_content=source_content,
+        is_edit=is_edit,
+    )
 
-    # Create a standard m.file message with preview body
-    modified_content = {
-        "msgtype": "m.file",
-        "body": preview,  # Preview text for immediate readability
-        "filename": "message.txt",
-        "info": file_info,
-    }
+    prepared_size = _calculate_event_size(modified_content)
+    if prepared_size > size_limit:
+        logger.warning(
+            "Prepared large message still exceeds size limit; shrinking preview",
+            prepared_size=prepared_size,
+            size_limit=size_limit,
+        )
 
-    for key in PASSTHROUGH_CONTENT_KEYS:
-        if key in source_content:
-            modified_content[key] = source_content[key]
+        best_content: dict[str, Any] | None = None
+        best_preview = preview
+        low, high = MIN_PREVIEW_BYTES, preview_budget
+        while low <= high:
+            mid = (low + high) // 2
+            candidate_preview = _create_preview(full_text, mid)
+            candidate_content = _build_long_text_content(
+                candidate_preview,
+                file_info,
+                mxc_uri,
+                room_encrypted=room_encrypted,
+                full_text=full_text,
+                content=content,
+                source_content=source_content,
+                is_edit=is_edit,
+            )
+            candidate_size = _calculate_event_size(candidate_content)
+            if candidate_size <= size_limit:
+                best_content = candidate_content
+                best_preview = candidate_preview
+                low = mid + 1
+            else:
+                high = mid - 1
 
-    # Add the file URL (either encrypted or plain)
-    if room_id and room_id in client.rooms and client.rooms[room_id].encrypted:
-        # For encrypted rooms, use 'file' key
-        modified_content["file"] = file_info
-    else:
-        # For unencrypted rooms, use 'url' key
-        modified_content["url"] = mxc_uri
+        if best_content is not None:
+            modified_content = best_content
+            preview = best_preview
+        else:
+            # Extreme fallback: tiny preview and no optional passthrough fields.
+            preview = "[Message continues in attached file]"
+            modified_content = _build_long_text_content(
+                preview,
+                file_info,
+                mxc_uri,
+                room_encrypted=room_encrypted,
+                full_text=full_text,
+                content=content,
+                source_content=source_content,
+                is_edit=is_edit,
+            )
 
-    # Add custom metadata to signal this is a long text message
-    # Future custom clients can use this to render as inline text instead of attachment
-    modified_content["io.mindroom.long_text"] = {
-        "version": 1,
-        "original_size": len(full_text),
-        "preview_size": len(preview),
-        "is_complete_text": True,
-    }
+            target_content = (
+                modified_content["m.new_content"]
+                if is_edit and "m.new_content" in modified_content
+                else modified_content
+            )
+            for key in PASSTHROUGH_CONTENT_KEYS:
+                target_content.pop(key, None)
 
-    # Preserve thread/reply relationships if they exist
-    if "m.relates_to" in content:
-        modified_content["m.relates_to"] = content["m.relates_to"]
-
-    # Handle edit messages specially
-    if is_edit and "m.new_content" in content:
-        # For edits, we need to wrap everything in the edit structure
-        edit_content = {
-            "msgtype": "m.text",  # Edit message type
-            "body": f"* {preview}",
-            "m.new_content": modified_content,
-            "m.relates_to": content.get("m.relates_to", {}),
-        }
-        modified_content = edit_content
+            fallback_size = _calculate_event_size(modified_content)
+            if fallback_size > size_limit:
+                logger.warning(
+                    "Large-message fallback still exceeds size limit",
+                    prepared_size=fallback_size,
+                    size_limit=size_limit,
+                )
 
     logger.info(f"Large message prepared: {len(full_text)} bytes -> {len(preview)} preview + MXC attachment")
 
