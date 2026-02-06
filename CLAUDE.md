@@ -388,6 +388,28 @@ mindroom run --log-level DEBUG  # Surface routing decisions, tool calls, config 
 
 Inspect agent traces: `mindroom_data/sessions/<agent>.db`
 
+## 6. Releases
+
+Use `gh release create` to create releases. The tag is created automatically.
+
+```bash
+# IMPORTANT: Ensure you're on latest origin/main before releasing!
+git fetch origin
+git checkout origin/main
+
+# Check current version
+git tag --sort=-v:refname | head -1
+
+# Create release (minor version bump: v0.2.2 -> v0.3.0)
+gh release create v0.3.0 --title "v0.3.0" --notes "release notes here"
+```
+
+Versioning:
+- **Patch** (v0.2.2 -> v0.2.3): Bug fixes
+- **Minor** (v0.2.3 -> v0.3.0): New features, non-breaking changes
+
+Write release notes manually describing what changed. Group by features and bug fixes.
+
 # Important Instruction Reminders
 Do what has been asked; nothing more, nothing less.
 NEVER create files unless they're absolutely necessary for achieving your goal.
