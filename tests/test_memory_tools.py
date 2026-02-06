@@ -34,14 +34,6 @@ class TestMemoryTools:
         """Create a MemoryTools instance for testing."""
         return MemoryTools(agent_name="test_agent", storage_path=storage_path, config=config)
 
-    @pytest.fixture
-    def mock_memory(self) -> AsyncMock:
-        """Create a mock memory instance."""
-        memory = AsyncMock()
-        memory.add.return_value = None
-        memory.search.return_value = {"results": []}
-        return memory
-
     @pytest.mark.asyncio
     async def test_add_memory(self, tools: MemoryTools) -> None:
         """Test that add_memory stores content via add_agent_memory."""

@@ -276,16 +276,10 @@ def _resolve_skill_command_agent(  # noqa: C901
     )
 
 
-# Tools that require agent context injection and cannot be loaded via get_tool_by_name
-_CONTEXT_INJECTED_TOOLS = frozenset({"memory"})
-
-
 def _collect_agent_toolkits(config: Config, agent_name: str) -> list[tuple[str, Toolkit]]:
     agent_config = config.get_agent(agent_name)
     toolkits: list[tuple[str, Toolkit]] = []
     for tool_name in agent_config.tools:
-        if tool_name in _CONTEXT_INJECTED_TOOLS:
-            continue
         try:
             toolkits.append((tool_name, get_tool_by_name(tool_name)))
         except ValueError as exc:

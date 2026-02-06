@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.tools_metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
 
+from . import memory as _memory_registration  # noqa: F401
 from .agentql import agentql_tools
 from .airflow import airflow_tools
 from .apify import apify_tools
@@ -58,7 +59,6 @@ from .linear import linear_tools
 from .linkup import linkup_tools
 from .lumalabs import lumalabs_tools
 from .mem0 import mem0_tools
-from .memory import memory_tools
 from .modelslabs import modelslabs_tools
 from .moviepy_video_tools import moviepy_video_tools
 from .newspaper4k import newspaper4k_tools
@@ -150,7 +150,6 @@ __all__ = [
     "linkup_tools",
     "lumalabs_tools",
     "mem0_tools",
-    "memory_tools",
     "modelslabs_tools",
     "moviepy_video_tools",
     "newspaper4k_tools",

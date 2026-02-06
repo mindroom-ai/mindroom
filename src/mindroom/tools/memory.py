@@ -1,21 +1,20 @@
-"""Memory tool configuration.
+"""Memory tool metadata registration.
 
-This registers the ``memory`` tool in the metadata/UI registry.
-The actual toolkit class lives in ``mindroom.custom_tools.memory``
-and is instantiated with agent context in ``create_agent()``.
+Registers the ``memory`` tool in the metadata registry for UI display.
+The actual toolkit (``mindroom.custom_tools.memory.MemoryTools``) requires
+agent context and is instantiated directly in ``create_agent()``, so it
+is NOT added to ``TOOL_REGISTRY`` (no generic factory).
 """
 
-from __future__ import annotations
+from mindroom.tools_metadata import (
+    TOOL_METADATA,
+    SetupType,
+    ToolCategory,
+    ToolMetadata,
+    ToolStatus,
+)
 
-from typing import TYPE_CHECKING
-
-from mindroom.tools_metadata import SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
-
-if TYPE_CHECKING:
-    from mindroom.custom_tools.memory import MemoryTools
-
-
-@register_tool_with_metadata(
+TOOL_METADATA["memory"] = ToolMetadata(
     name="memory",
     display_name="Agent Memory",
     description="Explicitly store and search agent memories on demand",
@@ -27,8 +26,3 @@ if TYPE_CHECKING:
     config_fields=[],
     dependencies=[],
 )
-def memory_tools() -> type[MemoryTools]:
-    """Return the MemoryTools class (requires agent context at instantiation)."""
-    from mindroom.custom_tools.memory import MemoryTools
-
-    return MemoryTools
