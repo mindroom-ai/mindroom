@@ -74,7 +74,8 @@ def test_format_tool_combined_with_empty_string_result() -> None:
     """Combined formatting should treat empty results as no-result."""
     text, trace = format_tool_combined("save_file", {"file": "a.py"}, "")
 
-    assert "\n" not in text.strip().removeprefix("<tool>").removesuffix("</tool>").split("\n")[0] or True
+    # Should produce a single-line block (no result line)
+    assert text == "\n\n<tool>save_file(file=a.py)</tool>\n"
     assert trace.type == "tool_call_completed"
     assert trace.result_preview is None
     assert trace.truncated is False
@@ -162,6 +163,21 @@ def test_format_tool_started_preserves_argument_order() -> None:
         },
     )
     assert "save_file(file_name=a.py, contents=print(&#x27;x&#x27;))" in text
+
+
+def test_complete_pending_tool_block_with_escaped_content() -> None:
+    """Should match pending blocks produced by format_tool_started (HTML-escaped + mention-neutralized)."""
+    # format_tool_started produces HTML-escaped, mention-neutralized content
+    pending_text, _ = format_tool_started("save_file", {"file_name": "a.py", "contents": "print('hello')"})
+
+    # complete_pending_tool_block should find and replace this pending block
+    updated, trace = complete_pending_tool_block(pending_text, "save_file", "ok")
+
+    assert "ok</tool>" in updated
+    # The original call should still be present (not duplicated)
+    assert updated.count("<tool>") == 1
+    assert updated.count("</tool>") == 1
+    assert trace.result_preview == "ok"
 
 
 def test_extract_tool_completed_info_without_tool_returns_none() -> None:

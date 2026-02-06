@@ -238,9 +238,11 @@ async def send_streaming_response(  # noqa: C901, PLR0912
                     result,
                 )
                 streaming.tool_trace.append(trace_entry)
-                # Force an update since we modified accumulated_text directly
-                await streaming._send_or_edit_message(client)
-                streaming.last_update = time.time()
+                # We modified accumulated_text directly; send an update respecting throttle
+                current_time = time.time()
+                if current_time - streaming.last_update >= streaming.update_interval:
+                    await streaming._send_or_edit_message(client)
+                    streaming.last_update = current_time
                 continue  # Skip the update_content path
             text_chunk = ""
         else:
