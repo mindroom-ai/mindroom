@@ -15,7 +15,6 @@ class SkillSummary(BaseModel):
 
     name: str
     description: str
-    path: str
     origin: str
     can_edit: bool
 
@@ -40,7 +39,6 @@ async def list_skills() -> list[SkillSummary]:
         SkillSummary(
             name=listing.name,
             description=listing.description,
-            path=str(listing.path),
             origin=listing.origin,
             can_edit=skill_can_edit(listing.path),
         )
@@ -63,7 +61,6 @@ async def get_skill(skill_name: str) -> SkillDetail:
     return SkillDetail(
         name=listing.name,
         description=listing.description,
-        path=str(listing.path),
         origin=listing.origin,
         can_edit=skill_can_edit(listing.path),
         content=content,

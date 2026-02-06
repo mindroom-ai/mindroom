@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Editor from '@monaco-editor/react';
-import { ArrowLeft, FileCode, FolderOpen, Lock, Pencil, Save, ShieldAlert } from 'lucide-react';
+import { ArrowLeft, FileCode, FolderOpen, Lock, Pencil, Save } from 'lucide-react';
 import { ListPanel, ListItem } from '@/components/shared/ListPanel';
 import { ItemCard, ItemCardBadge } from '@/components/shared/ItemCard';
 import { EditorPanelEmptyState } from '@/components/shared';
@@ -17,30 +17,27 @@ interface SkillListItem extends ListItem {
   description: string;
   origin: SkillSummary['origin'];
   can_edit: boolean;
-  path: string;
-  name: string;
 }
 
 export function Skills() {
   const { toast } = useToast();
+  const toastRef = useRef(toast);
+  toastRef.current = toast;
+
   const { resolvedTheme } = useTheme();
   const [skills, setSkills] = useState<SkillSummary[]>([]);
-  const [selectedSkillPath, setSelectedSkillPath] = useState<string | null>(null);
+  const [selectedName, setSelectedName] = useState<string | null>(null);
   const [draftContent, setDraftContent] = useState('');
   const [originalContent, setOriginalContent] = useState('');
   const [loadingList, setLoadingList] = useState(true);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  const selectedSkill = useMemo(
-    () => skills.find(skill => skill.path === selectedSkillPath) || null,
-    [skills, selectedSkillPath]
-  );
-
+  const selectedSkill = selectedName ? skills.find(s => s.name === selectedName) ?? null : null;
   const isDirty = draftContent !== originalContent;
 
   useSwipeBack({
-    onSwipeBack: () => setSelectedSkillPath(null),
+    onSwipeBack: () => setSelectedName(null),
     enabled: !!selectedSkill && window.innerWidth < 1024,
   });
 
@@ -49,11 +46,9 @@ export function Skills() {
     try {
       const data = await listSkills();
       setSkills(data);
-      setSelectedSkillPath(current =>
-        current && data.some(skill => skill.path === current) ? current : null
-      );
+      setSelectedName(current => (current && data.some(s => s.name === current) ? current : null));
     } catch (error) {
-      toast({
+      toastRef.current({
         title: 'Failed to load skills',
         description: error instanceof Error ? error.message : 'Unknown error',
         variant: 'destructive',
@@ -61,7 +56,7 @@ export function Skills() {
     } finally {
       setLoadingList(false);
     }
-  }, [toast]);
+  }, []);
 
   useEffect(() => {
     refreshSkills();
@@ -70,58 +65,45 @@ export function Skills() {
   useEffect(() => {
     let isActive = true;
 
-    const loadDetail = async () => {
-      if (!selectedSkillPath) {
-        setDraftContent('');
-        setOriginalContent('');
-        return;
-      }
+    if (!selectedName) {
+      setDraftContent('');
+      setOriginalContent('');
+      return;
+    }
 
-      const skill = skills.find(s => s.path === selectedSkillPath);
-      if (!skill) return;
-
-      setLoadingDetail(true);
-      try {
-        const detail = await getSkill(skill.name);
+    setLoadingDetail(true);
+    getSkill(selectedName)
+      .then(detail => {
         if (!isActive) return;
         setDraftContent(detail.content);
         setOriginalContent(detail.content);
-      } catch (error) {
+      })
+      .catch(error => {
         if (!isActive) return;
-        toast({
+        toastRef.current({
           title: 'Failed to load skill',
           description: error instanceof Error ? error.message : 'Unknown error',
           variant: 'destructive',
         });
-      } finally {
+      })
+      .finally(() => {
         setLoadingDetail(false);
-      }
-    };
+      });
 
-    loadDetail();
     return () => {
       isActive = false;
     };
-  }, [selectedSkillPath]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedName]);
 
-  const handleSelect = (skillId: string) => {
-    const nextSkill = skills.find(skill => skill.path === skillId);
-    if (!nextSkill) {
-      return;
+  const handleSelect = (name: string) => {
+    if (isDirty && selectedName !== name) {
+      if (!window.confirm('Discard unsaved changes?')) return;
     }
-    if (isDirty && selectedSkillPath !== skillId) {
-      const confirmLeave = window.confirm('Discard unsaved changes?');
-      if (!confirmLeave) {
-        return;
-      }
-    }
-    setSelectedSkillPath(skillId);
+    setSelectedName(name);
   };
 
   const handleSave = async () => {
-    if (!selectedSkill) {
-      return;
-    }
+    if (!selectedSkill) return;
     setSaving(true);
     try {
       await updateSkill(selectedSkill.name, draftContent);
@@ -139,27 +121,17 @@ export function Skills() {
     }
   };
 
-  const listItems: SkillListItem[] = useMemo(
-    () =>
-      skills.map(skill => ({
-        id: skill.path,
-        display_name: skill.name,
-        description: skill.description,
-        origin: skill.origin,
-        can_edit: skill.can_edit,
-        path: skill.path,
-        name: skill.name,
-      })),
-    [skills]
-  );
+  const listItems: SkillListItem[] = skills.map(s => ({
+    id: s.name,
+    display_name: s.name,
+    description: s.description,
+    origin: s.origin,
+    can_edit: s.can_edit,
+  }));
 
   const renderSkill = (skill: SkillListItem, isSelected: boolean) => {
     const badges: ItemCardBadge[] = [
-      {
-        content: skill.origin,
-        variant: 'secondary' as const,
-        icon: FolderOpen,
-      },
+      { content: skill.origin, variant: 'secondary' as const, icon: FolderOpen },
       {
         content: skill.can_edit ? 'Editable' : 'Read-only',
         variant: skill.can_edit ? ('default' as const) : ('outline' as const),
@@ -175,11 +147,7 @@ export function Skills() {
         isSelected={isSelected}
         onClick={handleSelect}
         badges={badges}
-      >
-        <div className="text-xs text-muted-foreground truncate" title={skill.path}>
-          {skill.path}
-        </div>
-      </ItemCard>
+      />
     );
   };
 
@@ -194,13 +162,13 @@ export function Skills() {
           title="Skills"
           icon={FileCode}
           items={listItems}
-          selectedId={selectedSkillPath || undefined}
+          selectedId={selectedName || undefined}
           onItemSelect={handleSelect}
           renderItem={renderSkill}
           showSearch={true}
           searchPlaceholder="Search skills..."
           showCreateButton={false}
-          emptyIcon={loadingList ? ShieldAlert : FileCode}
+          emptyIcon={FileCode}
           emptyMessage={loadingList ? 'Loading skills...' : 'No skills found'}
           emptySubtitle={
             loadingList
@@ -215,7 +183,7 @@ export function Skills() {
         }`}
       >
         {!selectedSkill ? (
-          <EditorPanelEmptyState icon={FileCode} message="Select a skill to edit" />
+          <EditorPanelEmptyState icon={FileCode} message="Select a skill to view" />
         ) : (
           <Card className="h-full flex flex-col overflow-hidden">
             <CardHeader className="pb-3 flex-shrink-0">
@@ -224,7 +192,7 @@ export function Skills() {
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() => setSelectedSkillPath(null)}
+                    onClick={() => setSelectedName(null)}
                     className="lg:hidden -ml-2 mt-1"
                   >
                     <ArrowLeft className="h-4 w-4" />
@@ -239,32 +207,21 @@ export function Skills() {
                     </p>
                   </div>
                 </div>
-                <Button
-                  variant="default"
-                  size="sm"
-                  onClick={handleSave}
-                  disabled={!isDirty || !selectedSkill.can_edit || saving}
-                >
-                  <Save className="h-4 w-4 sm:mr-1" />
-                  <span className="hidden sm:inline">{saving ? 'Saving...' : 'Save'}</span>
-                </Button>
+                {selectedSkill.can_edit && (
+                  <Button
+                    variant="default"
+                    size="sm"
+                    onClick={handleSave}
+                    disabled={!isDirty || saving}
+                  >
+                    <Save className="h-4 w-4 sm:mr-1" />
+                    <span className="hidden sm:inline">{saving ? 'Saving...' : 'Save'}</span>
+                  </Button>
+                )}
               </div>
               <div className="flex flex-wrap items-center gap-2 mt-3">
                 <Badge variant="secondary">{selectedSkill.origin}</Badge>
-                <Badge variant={selectedSkill.can_edit ? 'default' : 'outline'}>
-                  {selectedSkill.can_edit ? 'Editable' : 'Read-only'}
-                </Badge>
-                {!selectedSkill.can_edit && (
-                  <span className="text-xs text-muted-foreground">
-                    This skill is read-only in the current environment.
-                  </span>
-                )}
-              </div>
-              <div
-                className="text-xs text-muted-foreground mt-2 truncate"
-                title={selectedSkill.path}
-              >
-                {selectedSkill.path}
+                {!selectedSkill.can_edit && <Badge variant="outline">Read-only</Badge>}
               </div>
             </CardHeader>
             <CardContent className="flex-1 min-h-0 p-0">
@@ -285,6 +242,7 @@ export function Skills() {
                     </div>
                   }
                   options={{
+                    readOnly: !selectedSkill.can_edit,
                     minimap: { enabled: false },
                     fontSize: 13,
                     scrollBeyondLastLine: false,

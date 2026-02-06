@@ -34,7 +34,7 @@ def test_list_skills(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """List skills with metadata."""
-    skill_file = _write_skill(tmp_path)
+    _write_skill(tmp_path)
     monkeypatch.setattr(skills_module, "get_default_skill_roots", lambda: [tmp_path])
     monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: tmp_path)
 
@@ -45,7 +45,6 @@ def test_list_skills(
     assert len(data) == 1
     assert data[0]["name"] == "test-skill"
     assert data[0]["description"] == "Test skill"
-    assert data[0]["path"] == str(skill_file)
     assert data[0]["can_edit"] is True
 
 
