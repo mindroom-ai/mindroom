@@ -41,6 +41,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+AIStreamChunk = str | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+
 
 def _extract_response_content(response: RunOutput) -> str:
     response_parts = []
@@ -317,7 +319,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912
     config: Config,
     thread_history: list[dict[str, Any]] | None = None,
     room_id: str | None = None,
-) -> AsyncIterator[object]:
+) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
 
     Checks cache first - if found, yields the cached response immediately.

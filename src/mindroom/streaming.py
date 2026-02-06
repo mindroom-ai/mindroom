@@ -32,6 +32,35 @@ logger = get_logger(__name__)
 
 # Global constant for the in-progress marker
 IN_PROGRESS_MARKER = " ⋯"
+StreamInputChunk = str | StructuredStreamChunk | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+
+
+def _longest_common_prefix_len(first: list[ToolTraceEntry], second: list[ToolTraceEntry]) -> int:
+    """Return the number of leading tool-trace entries shared by both lists."""
+    max_len = min(len(first), len(second))
+    index = 0
+    while index < max_len and first[index] == second[index]:
+        index += 1
+    return index
+
+
+def _merge_tool_trace(existing: list[ToolTraceEntry], incoming: list[ToolTraceEntry]) -> list[ToolTraceEntry]:
+    """Merge a trace snapshot without dropping entries when stream styles are mixed."""
+    if not existing:
+        return incoming.copy()
+    if not incoming:
+        return existing.copy()
+
+    shared_prefix = _longest_common_prefix_len(existing, incoming)
+    if shared_prefix == len(existing):
+        # Incoming is newer or equal.
+        return incoming.copy()
+    if shared_prefix == len(incoming):
+        # Incoming is an older prefix; keep current entries.
+        return existing.copy()
+
+    # Diverged snapshots: preserve known history and append unseen tail.
+    return existing + incoming[shared_prefix:]
 
 
 @dataclass
@@ -134,7 +163,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912
     thread_id: str | None,
     sender_domain: str,
     config: Config,
-    response_stream: AsyncIterator[object],
+    response_stream: AsyncIterator[StreamInputChunk],
     streaming_cls: type[StreamingResponse] = StreamingResponse,
     header: str | None = None,
     existing_event_id: str | None = None,
@@ -186,30 +215,27 @@ async def send_streaming_response(  # noqa: C901, PLR0912
 
     async for chunk in response_stream:
         # Handle different types of chunks from the stream
-        trace_entry: ToolTraceEntry | None = None
         if isinstance(chunk, str):
             text_chunk = chunk
         elif isinstance(chunk, StructuredStreamChunk):
             text_chunk = chunk.content
             if chunk.tool_trace is not None:
-                streaming.tool_trace = chunk.tool_trace
+                streaming.tool_trace = _merge_tool_trace(streaming.tool_trace, chunk.tool_trace)
         elif isinstance(chunk, RunContentEvent) and chunk.content:
             text_chunk = str(chunk.content)
         elif isinstance(chunk, ToolCallStartedEvent):
             text_chunk, trace_entry = format_tool_started_event(chunk)
-        elif isinstance(chunk, ToolCallCompletedEvent):
-            text_chunk, trace_entry = format_tool_completed_event(chunk)
-        else:
-            # Fallback for other event types - try to extract content
-            content = getattr(chunk, "content", None)
-            text_chunk = str(content) if content is not None else ""
-            if not text_chunk:
-                logger.debug(f"Unhandled streaming event type: {type(chunk).__name__}")
-                continue
-
-        if text_chunk:
             if trace_entry is not None:
                 streaming.tool_trace.append(trace_entry)
+        elif isinstance(chunk, ToolCallCompletedEvent):
+            text_chunk, trace_entry = format_tool_completed_event(chunk)
+            if trace_entry is not None:
+                streaming.tool_trace.append(trace_entry)
+        else:
+            logger.debug(f"Unhandled streaming event type: {type(chunk).__name__}")
+            continue
+
+        if text_chunk:
             await streaming.update_content(text_chunk, client)
 
     await streaming.finalize(client)

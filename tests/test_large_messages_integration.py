@@ -406,3 +406,36 @@ async def test_structured_stream_chunk_adds_tool_trace_metadata() -> None:
     target_content = last_content.get("m.new_content", last_content)
     assert TOOL_TRACE_KEY in target_content
     assert target_content[TOOL_TRACE_KEY]["events"][0]["tool_name"] == "save_file"
+
+
+@pytest.mark.asyncio
+async def test_structured_stream_chunk_does_not_drop_trace_on_stale_snapshot() -> None:
+    """Older structured snapshots should not remove already-seen tool trace entries."""
+    client = MockClient()
+    config = MockConfig()
+
+    trace_full = [
+        ToolTraceEntry(type="tool_call_started", tool_name="save_file"),
+        ToolTraceEntry(type="tool_call_completed", tool_name="save_file"),
+    ]
+    trace_stale = [ToolTraceEntry(type="tool_call_started", tool_name="save_file")]
+
+    async def stream() -> object:
+        yield StructuredStreamChunk(content="<tool>save_file()</tool>", tool_trace=trace_full)
+        yield StructuredStreamChunk(content="<tool>save_file()</tool>", tool_trace=trace_stale)
+
+    event_id, _ = await send_streaming_response(
+        client=client,
+        room_id="!test:room",
+        reply_to_event_id=None,
+        thread_id=None,
+        sender_domain="example.com",
+        config=config,
+        response_stream=stream(),
+        streaming_cls=ReplacementStreamingResponse,
+    )
+
+    assert event_id is not None
+    target_content = client.messages_sent[-1][2].get("m.new_content", client.messages_sent[-1][2])
+    assert TOOL_TRACE_KEY in target_content
+    assert len(target_content[TOOL_TRACE_KEY]["events"]) == 2
