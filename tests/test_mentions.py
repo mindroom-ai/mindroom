@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from mindroom.config import Config
 from mindroom.matrix.mentions import format_message_with_mentions, parse_mentions_in_text
+from mindroom.tool_events import TOOL_TRACE_KEY, ToolTraceEntry
 
 
 class TestMentionParsing:
@@ -113,6 +114,22 @@ class TestMentionParsing:
         }
         assert content["m.relates_to"]["event_id"] == "$thread123"
         assert content["m.relates_to"]["rel_type"] == "m.thread"
+
+    def test_format_message_with_mentions_includes_tool_trace(self) -> None:
+        """Structured tool traces should be attached to message content when provided."""
+        config = Config.from_yaml()
+        trace = [ToolTraceEntry(type="tool_call_started", tool_name="save_file", args_preview="file=a.py")]
+
+        content = format_message_with_mentions(
+            config,
+            "Done.",
+            sender_domain="matrix.org",
+            tool_trace=trace,
+        )
+
+        assert TOOL_TRACE_KEY in content
+        assert content[TOOL_TRACE_KEY]["version"] == 1
+        assert content[TOOL_TRACE_KEY]["events"][0]["tool_name"] == "save_file"
 
     def test_no_mentions_in_text(self) -> None:
         """Test text with no mentions."""

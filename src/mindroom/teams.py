@@ -25,6 +25,12 @@ from .error_handling import get_user_friendly_error_message
 from .logging_config import get_logger
 from .matrix.rooms import get_room_alias_from_id
 from .thread_utils import get_available_agents_in_room
+from .tool_events import (
+    StructuredStreamChunk,
+    ToolTraceEntry,
+    format_tool_completed_event,
+    format_tool_started_event,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -41,27 +47,7 @@ logger = get_logger(__name__)
 # Message length limits for team context and logging
 MAX_CONTEXT_MESSAGE_LENGTH = 200  # Maximum length for messages to include in thread context
 MAX_LOG_MESSAGE_LENGTH = 500  # Maximum length for messages in team response logs
-
-
-def _fmt_tool_started(event: AgentToolCallStartedEvent | TeamToolCallStartedEvent) -> str:
-    tool = getattr(event, "tool", None)
-    if not tool:
-        return ""
-    tool_name = getattr(tool, "tool_name", None) or "tool"
-    tool_args = getattr(tool, "tool_args", None) or {}
-    if tool_args:
-        args_str = ", ".join(f"{k}={v}" for k, v in tool_args.items())
-        return f"\n\n🔧 **Tool Call:** `{tool_name}({args_str})`\n"
-    return f"\n\n🔧 **Tool Call:** `{tool_name}()`\n"
-
-
-def _fmt_tool_completed(event: AgentToolCallCompletedEvent | TeamToolCallCompletedEvent) -> str:
-    tool = getattr(event, "tool", None)
-    tool_name = getattr(tool, "tool_name", None) or "tool"
-    result = getattr(event, "content", None) or (getattr(tool, "result", None) if tool else None)
-    if result:
-        return f"✅ **`{tool_name}` result:**\n{result}\n\n"
-    return f"✅ **`{tool_name}`** completed\n\n"
+TeamStreamChunk = str | StructuredStreamChunk
 
 
 class TeamMode(str, Enum):
@@ -630,7 +616,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     mode: TeamMode = TeamMode.COORDINATE,
     thread_history: list[dict] | None = None,
     model_name: str | None = None,
-) -> AsyncIterator[str]:
+) -> AsyncIterator[TeamStreamChunk]:
     """Aggregate team streaming into a non-stream-style document, live.
 
     Renders a header and per-member sections, optionally adding a team
@@ -653,6 +639,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     # Buffers keyed by display names (Agno emits display name as agent_name)
     per_member: dict[str, str] = dict.fromkeys(display_names, "")
     consensus: str = ""
+    tool_trace: list[ToolTraceEntry] = []
 
     logger.info(f"Team streaming setup - agents: {agent_names}, display names: {display_names}")
 
@@ -688,20 +675,24 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         # Agent tool call started
         elif isinstance(event, AgentToolCallStartedEvent):
             agent_name = event.agent_name
-            tool_msg = _fmt_tool_started(event)
+            tool_msg, trace_entry = format_tool_started_event(event)
             if agent_name and tool_msg:
                 if agent_name not in per_member:
                     per_member[agent_name] = ""
                 per_member[agent_name] += tool_msg
+            if trace_entry:
+                tool_trace.append(trace_entry)
 
         # Agent tool call completed
         elif isinstance(event, AgentToolCallCompletedEvent):
             agent_name = event.agent_name
-            tool_msg = _fmt_tool_completed(event)
+            tool_msg, trace_entry = format_tool_completed_event(event)
             if agent_name and tool_msg:
                 if agent_name not in per_member:
                     per_member[agent_name] = ""
                 per_member[agent_name] += tool_msg
+            if trace_entry:
+                tool_trace.append(trace_entry)
 
         # Team consensus content event
         elif isinstance(event, TeamRunContentEvent):
@@ -714,11 +705,13 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         elif isinstance(event, (TeamToolCallStartedEvent, TeamToolCallCompletedEvent)):
             # Format with the same helper, both carry .tool/.content
             if isinstance(event, TeamToolCallStartedEvent):
-                tool_msg = _fmt_tool_started(event)
+                tool_msg, trace_entry = format_tool_started_event(event)
             else:
-                tool_msg = _fmt_tool_completed(event)
+                tool_msg, trace_entry = format_tool_completed_event(event)
             if tool_msg:
                 consensus += tool_msg
+            if trace_entry:
+                tool_trace.append(trace_entry)
 
         # Skip other event types
         else:
@@ -745,4 +738,4 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         if parts:
             header = format_team_header(agent_names)
             full_text = "\n\n".join(parts)
-            yield header + full_text
+            yield StructuredStreamChunk(content=header + full_text, tool_trace=tool_trace.copy())

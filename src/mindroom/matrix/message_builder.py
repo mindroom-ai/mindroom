@@ -47,6 +47,7 @@ def build_message_content(
     thread_event_id: str | None = None,
     reply_to_event_id: str | None = None,
     latest_thread_event_id: str | None = None,
+    extra_content: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a complete Matrix message content dictionary.
 
@@ -64,6 +65,7 @@ def build_message_content(
         thread_event_id: Optional thread root event ID
         reply_to_event_id: Optional event ID to reply to
         latest_thread_event_id: Optional latest event in thread (for MSC3440 fallback)
+        extra_content: Optional extra content fields to merge into the message
 
     Returns:
         Complete content dictionary ready for room_send
@@ -90,5 +92,8 @@ def build_message_content(
     elif reply_to_event_id:
         # Plain reply without thread (shouldn't happen in this bot)
         content["m.relates_to"] = {"m.in_reply_to": {"event_id": reply_to_event_id}}
+
+    if extra_content:
+        content.update(extra_content)
 
     return content

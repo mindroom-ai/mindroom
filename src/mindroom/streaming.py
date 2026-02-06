@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
 from . import interactive
-from .ai import _format_tool_completed_message, _format_tool_started_message
 from .logging_config import get_logger
 from .matrix.client import edit_message, send_message
 from .matrix.mentions import format_message_with_mentions
+from .tool_events import (
+    StructuredStreamChunk,
+    ToolTraceEntry,
+    format_tool_completed_event,
+    format_tool_started_event,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -27,6 +32,35 @@ logger = get_logger(__name__)
 
 # Global constant for the in-progress marker
 IN_PROGRESS_MARKER = " ⋯"
+StreamInputChunk = str | StructuredStreamChunk | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+
+
+def _longest_common_prefix_len(first: list[ToolTraceEntry], second: list[ToolTraceEntry]) -> int:
+    """Return the number of leading tool-trace entries shared by both lists."""
+    max_len = min(len(first), len(second))
+    index = 0
+    while index < max_len and first[index] == second[index]:
+        index += 1
+    return index
+
+
+def _merge_tool_trace(existing: list[ToolTraceEntry], incoming: list[ToolTraceEntry]) -> list[ToolTraceEntry]:
+    """Merge a trace snapshot without dropping entries when stream styles are mixed."""
+    if not existing:
+        return incoming.copy()
+    if not incoming:
+        return existing.copy()
+
+    shared_prefix = _longest_common_prefix_len(existing, incoming)
+    if shared_prefix == len(existing):
+        # Incoming is newer or equal.
+        return incoming.copy()
+    if shared_prefix == len(incoming):
+        # Incoming is an older prefix; keep current entries.
+        return existing.copy()
+
+    # Diverged snapshots: preserve known history and append unseen tail.
+    return existing + incoming[shared_prefix:]
 
 
 @dataclass
@@ -43,6 +77,7 @@ class StreamingResponse:
     last_update: float = 0.0
     update_interval: float = 1.0
     latest_thread_event_id: str | None = None  # For MSC3440 compliance
+    tool_trace: list[ToolTraceEntry] = field(default_factory=list)
 
     def _update(self, new_chunk: str) -> None:
         """Append new chunk to accumulated text."""
@@ -88,6 +123,7 @@ class StreamingResponse:
             thread_event_id=effective_thread_id,
             reply_to_event_id=self.reply_to_event_id,
             latest_thread_event_id=latest_for_message,
+            tool_trace=self.tool_trace,
         )
 
         if self.event_id is None:
@@ -120,14 +156,14 @@ class ReplacementStreamingResponse(StreamingResponse):
         self.accumulated_text = new_chunk
 
 
-async def send_streaming_response(
+async def send_streaming_response(  # noqa: C901, PLR0912
     client: nio.AsyncClient,
     room_id: str,
     reply_to_event_id: str | None,
     thread_id: str | None,
     sender_domain: str,
     config: Config,
-    response_stream: AsyncIterator[object],
+    response_stream: AsyncIterator[StreamInputChunk],
     streaming_cls: type[StreamingResponse] = StreamingResponse,
     header: str | None = None,
     existing_event_id: str | None = None,
@@ -181,19 +217,23 @@ async def send_streaming_response(
         # Handle different types of chunks from the stream
         if isinstance(chunk, str):
             text_chunk = chunk
+        elif isinstance(chunk, StructuredStreamChunk):
+            text_chunk = chunk.content
+            if chunk.tool_trace is not None:
+                streaming.tool_trace = _merge_tool_trace(streaming.tool_trace, chunk.tool_trace)
         elif isinstance(chunk, RunContentEvent) and chunk.content:
             text_chunk = str(chunk.content)
         elif isinstance(chunk, ToolCallStartedEvent):
-            text_chunk = _format_tool_started_message(chunk)
+            text_chunk, trace_entry = format_tool_started_event(chunk)
+            if trace_entry is not None:
+                streaming.tool_trace.append(trace_entry)
         elif isinstance(chunk, ToolCallCompletedEvent):
-            text_chunk = _format_tool_completed_message(chunk)
+            text_chunk, trace_entry = format_tool_completed_event(chunk)
+            if trace_entry is not None:
+                streaming.tool_trace.append(trace_entry)
         else:
-            # Fallback for other event types - try to extract content
-            content = getattr(chunk, "content", None)
-            text_chunk = str(content) if content is not None else ""
-            if not text_chunk:
-                logger.debug(f"Unhandled streaming event type: {type(chunk).__name__}")
-                continue
+            logger.debug(f"Unhandled streaming event type: {type(chunk).__name__}")
+            continue
 
         if text_chunk:
             await streaming.update_content(text_chunk, client)
