@@ -9,6 +9,9 @@ import pytest
 
 from mindroom.tools_metadata import TOOL_METADATA, TOOL_REGISTRY, ToolStatus, get_tool_by_name
 
+# Tools that require agent context injection and can't be instantiated via get_tool_by_name
+SKIP_CONTEXT_INJECTED = {"memory"}
+
 
 def test_all_tools_can_be_imported() -> None:
     """Test that all registered tools can be imported and instantiated."""
@@ -17,6 +20,10 @@ def test_all_tools_can_be_imported() -> None:
     failed = []
 
     for tool_name in TOOL_REGISTRY:
+        if tool_name in SKIP_CONTEXT_INJECTED:
+            print(f"⊘ {tool_name}: requires agent context injection, skipped")
+            continue
+
         # Check if tool requires configuration based on metadata
         metadata = TOOL_METADATA.get(tool_name)
         requires_config = metadata and metadata.status == ToolStatus.REQUIRES_CONFIG

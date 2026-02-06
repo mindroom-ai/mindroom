@@ -11,7 +11,7 @@ from agno.db.sqlite import SqliteDb
 
 from . import agent_prompts
 from . import tools as _tools_module  # noqa: F401
-from .constants import ROUTER_AGENT_NAME, SESSIONS_DIR
+from .constants import ROUTER_AGENT_NAME, SESSIONS_DIR, STORAGE_PATH_OBJ
 from .logging_config import get_logger
 from .plugins import load_plugins
 from .skills import build_agent_skills
@@ -92,8 +92,18 @@ def create_agent(agent_name: str, config: Config) -> Agent:
     tools: list = []  # Use list type to satisfy Agent's parameter type
     for tool_name in tool_names:
         try:
-            tool = get_tool_by_name(tool_name)
-            tools.append(tool)
+            if tool_name == "memory":
+                from .custom_tools.memory import MemoryTools  # noqa: PLC0415
+
+                tools.append(
+                    MemoryTools(
+                        agent_name=agent_name,
+                        storage_path=STORAGE_PATH_OBJ,
+                        config=config,
+                    ),
+                )
+            else:
+                tools.append(get_tool_by_name(tool_name))
         except ValueError as e:
             logger.warning(f"Could not load tool '{tool_name}' for agent '{agent_name}': {e}")
 
