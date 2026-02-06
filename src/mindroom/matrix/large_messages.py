@@ -21,7 +21,6 @@ logger = get_logger(__name__)
 NORMAL_MESSAGE_LIMIT = 55000  # ~55KB for regular messages
 EDIT_MESSAGE_LIMIT = 27000  # ~27KB for edits (they roughly double in size)
 ATTACHMENT_OVERHEAD_BYTES = 5000
-MIN_PREVIEW_BYTES = 200
 PASSTHROUGH_CONTENT_KEYS = ("m.mentions", "com.mindroom.skip_mentions")
 
 
@@ -178,11 +177,11 @@ def _build_long_text_content(
     preview: str,
     file_info: dict[str, Any] | None,
     mxc_uri: str | None,
-    *,
-    room_encrypted: bool,
     full_text: str,
     content: dict[str, Any],
     source_content: dict[str, Any],
+    *,
+    room_encrypted: bool,
     is_edit: bool,
 ) -> dict[str, Any]:
     """Build m.file content (or edit wrapper) for long-text fallback."""
@@ -245,108 +244,50 @@ async def prepare_large_message(
         Original content (if small) or modified content with preview and MXC reference
 
     """
-    # Edit messages roughly double in size due to m.new_content structure
-    # which includes both the edit wrapper and the actual new content
     is_edit = _is_edit_message(content)
     size_limit = EDIT_MESSAGE_LIMIT if is_edit else NORMAL_MESSAGE_LIMIT
 
-    # Calculate current size
     current_size = _calculate_event_size(content)
-
-    # If it fits, return unchanged
     if current_size <= size_limit:
         return content
 
     source_content = content["m.new_content"] if is_edit and "m.new_content" in content else content
-
-    # Extract the text to upload (handle both regular and edit messages)
     full_text = source_content["body"]
 
     logger.info(f"Message too large ({current_size} bytes), uploading to MXC")
 
-    # Upload the full text
     mxc_uri, file_info = await _upload_text_as_mxc(client, full_text, room_id)
-
     room_encrypted = bool(room_id and room_id in client.rooms and client.rooms[room_id].encrypted)
 
-    # Initial estimate for preview budget. We'll verify final event size below.
-    preview_budget = max(MIN_PREVIEW_BYTES, size_limit - ATTACHMENT_OVERHEAD_BYTES)
+    preview_budget = size_limit - ATTACHMENT_OVERHEAD_BYTES
     preview = _create_preview(full_text, preview_budget)
     modified_content = _build_long_text_content(
         preview,
         file_info,
         mxc_uri,
+        full_text,
+        content,
+        source_content,
         room_encrypted=room_encrypted,
-        full_text=full_text,
-        content=content,
-        source_content=source_content,
         is_edit=is_edit,
     )
 
+    # Post-build size check: if passthrough metadata pushed us over, shrink the preview.
     prepared_size = _calculate_event_size(modified_content)
     if prepared_size > size_limit:
-        logger.warning(
-            "Prepared large message still exceeds size limit; shrinking preview",
-            prepared_size=prepared_size,
-            size_limit=size_limit,
+        overshoot = prepared_size - size_limit
+        shrunk_budget = max(0, len(preview.encode("utf-8")) - overshoot)
+        preview = _create_preview(full_text, shrunk_budget)
+        modified_content = _build_long_text_content(
+            preview,
+            file_info,
+            mxc_uri,
+            full_text,
+            content,
+            source_content,
+            room_encrypted=room_encrypted,
+            is_edit=is_edit,
         )
-
-        best_content: dict[str, Any] | None = None
-        best_preview = preview
-        low, high = MIN_PREVIEW_BYTES, preview_budget
-        while low <= high:
-            mid = (low + high) // 2
-            candidate_preview = _create_preview(full_text, mid)
-            candidate_content = _build_long_text_content(
-                candidate_preview,
-                file_info,
-                mxc_uri,
-                room_encrypted=room_encrypted,
-                full_text=full_text,
-                content=content,
-                source_content=source_content,
-                is_edit=is_edit,
-            )
-            candidate_size = _calculate_event_size(candidate_content)
-            if candidate_size <= size_limit:
-                best_content = candidate_content
-                best_preview = candidate_preview
-                low = mid + 1
-            else:
-                high = mid - 1
-
-        if best_content is not None:
-            modified_content = best_content
-            preview = best_preview
-        else:
-            # Extreme fallback: tiny preview and no optional passthrough fields.
-            preview = "[Message continues in attached file]"
-            modified_content = _build_long_text_content(
-                preview,
-                file_info,
-                mxc_uri,
-                room_encrypted=room_encrypted,
-                full_text=full_text,
-                content=content,
-                source_content=source_content,
-                is_edit=is_edit,
-            )
-
-            target_content = (
-                modified_content["m.new_content"]
-                if is_edit and "m.new_content" in modified_content
-                else modified_content
-            )
-            for key in PASSTHROUGH_CONTENT_KEYS:
-                target_content.pop(key, None)
-
-            fallback_size = _calculate_event_size(modified_content)
-            if fallback_size > size_limit:
-                logger.warning(
-                    "Large-message fallback still exceeds size limit",
-                    prepared_size=fallback_size,
-                    size_limit=size_limit,
-                )
 
     logger.info(f"Large message prepared: {len(full_text)} bytes -> {len(preview)} preview + MXC attachment")
 
