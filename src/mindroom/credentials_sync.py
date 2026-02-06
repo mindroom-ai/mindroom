@@ -1,8 +1,9 @@
 """Sync API keys from environment variables to CredentialsManager.
 
-This module ensures that API keys defined in .env are automatically
-synchronized to the CredentialsManager, making .env the source of truth
-while allowing the frontend to read the current state.
+On first run, API keys from .env are seeded into the CredentialsManager.
+Once a credential exists on disk (whether from .env or from the UI), the
+.env value will NOT overwrite it. This lets users change keys via the UI
+without losing them on restart.
 """
 
 import os
@@ -47,18 +48,19 @@ def _get_secret(name: str) -> str | None:
 
 
 def sync_env_to_credentials() -> None:
-    """Sync API keys from environment variables to CredentialsManager.
+    """Seed API keys from environment variables into CredentialsManager.
 
-    This function reads API keys from environment variables and updates
-    the CredentialsManager with any new or changed values. This ensures
-    that .env remains the source of truth while making keys available
-    to the frontend.
+    Only writes a credential when no file exists for that service yet.
+    This means .env acts as the initial seed, but once a credential is
+    stored (whether from .env or from the UI) it won't be overwritten.
+
+    Environment variables are still exported to ``os.environ`` so that
+    libraries like mem0 can pick them up regardless.
     """
     creds_manager = get_credentials_manager()
-    updated_count = 0
+    seeded_count = 0
 
     for env_var, service in ENV_TO_SERVICE_MAP.items():
-        # Prefer file-based secrets if provided (NAME_FILE), fallback to NAME
         env_value = _get_secret(env_var)
 
         if not env_value:
@@ -67,31 +69,27 @@ def sync_env_to_credentials() -> None:
 
         logger.debug(f"Found value for {env_var}: length={len(env_value)}")
 
-        # Special handling for Ollama (it's a host, not an API key)
+        # Always export to os.environ so libraries (mem0, etc.) can use it
+        if service != "ollama":
+            os.environ[env_var] = env_value
+
+        # Only seed if no credential file exists yet for this service
+        existing = creds_manager.load_credentials(service)
+        if existing is not None:
+            logger.debug(f"Credentials for {service} already exist, skipping env seed")
+            continue
+
         if service == "ollama":
-            current_creds = creds_manager.load_credentials(service) or {}
-            if current_creds.get("host") != env_value:
-                current_creds["host"] = env_value
-                creds_manager.save_credentials(service, current_creds)
-                logger.info(f"Updated {service} host from environment")
-                updated_count += 1
+            creds_manager.save_credentials(service, {"host": env_value, "_source": "env"})
         else:
-            # Regular API key handling
-            current_key = creds_manager.get_api_key(service)
-            if env_value and current_key != env_value:
-                creds_manager.set_api_key(service, env_value)
-                logger.info(f"Updated {service} API key from environment")
-                updated_count += 1
+            creds_manager.save_credentials(service, {"api_key": env_value, "_source": "env"})
+        logger.info(f"Seeded {service} credentials from environment")
+        seeded_count += 1
 
-            # Also set the environment variable directly for libraries that need it
-            # This ensures mem0 and other libraries can access the keys
-            if env_value:
-                os.environ[env_var] = env_value
-
-    if updated_count > 0:
-        logger.info(f"Synchronized {updated_count} credentials from environment")
+    if seeded_count > 0:
+        logger.info(f"Seeded {seeded_count} new credentials from environment")
     else:
-        logger.debug("All credentials already in sync with environment")
+        logger.debug("No new credentials to seed from environment")
 
 
 def get_api_key_for_provider(provider: str) -> str | None:

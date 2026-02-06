@@ -51,7 +51,7 @@ class TestCredentialsAPI:
             "message": "Credentials saved for email",
         }
 
-        # Verify the manager was called correctly
+        # Verify the manager was called correctly (includes _source: ui)
         mock_credentials_manager.save_credentials.assert_called_once_with(
             "email",
             {
@@ -59,6 +59,7 @@ class TestCredentialsAPI:
                 "SMTP_PORT": "587",
                 "SMTP_USERNAME": "user@example.com",
                 "SMTP_PASSWORD": "secret",
+                "_source": "ui",
             },
         )
 
@@ -68,6 +69,8 @@ class TestCredentialsAPI:
         mock_credentials_manager: MagicMock,
     ) -> None:
         """Test setting a single API key."""
+        mock_credentials_manager.load_credentials.return_value = None
+
         response = client.post(
             "/api/credentials/openai/api-key",
             json={
@@ -83,10 +86,9 @@ class TestCredentialsAPI:
             "message": "API key set for openai",
         }
 
-        mock_credentials_manager.set_api_key.assert_called_once_with(
+        mock_credentials_manager.save_credentials.assert_called_once_with(
             "openai",
-            "sk-test123",
-            "api_key",
+            {"api_key": "sk-test123", "_source": "ui"},
         )
 
     def test_get_credentials(

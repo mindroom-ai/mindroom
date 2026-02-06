@@ -27,6 +27,7 @@ export function ApiKeyConfig({
   const [loading, setLoading] = useState(false);
   const [hasKey, setHasKey] = useState<boolean | null>(null);
   const [maskedKey, setMaskedKey] = useState<string | null>(null);
+  const [source, setSource] = useState<string | null>(null);
   const { toast } = useToast();
 
   // Check if API key is already configured
@@ -41,6 +42,7 @@ export function ApiKeyConfig({
         const data = await response.json();
         setHasKey(data.has_key);
         setMaskedKey(data.masked_key || null);
+        setSource(data.source || null);
       }
     } catch (error) {
       console.error('Failed to check API key:', error);
@@ -165,6 +167,11 @@ export function ApiKeyConfig({
             {hasKey ? <Check className="h-3 w-3 mr-1" /> : <X className="h-3 w-3 mr-1" />}
             {hasKey ? 'Configured' : 'Not Configured'}
           </Badge>
+          {hasKey && source === 'env' && (
+            <Badge variant="outline" className="text-xs">
+              From environment
+            </Badge>
+          )}
           {hasKey && maskedKey && (
             <span className="text-sm text-muted-foreground font-mono">{maskedKey}</span>
           )}
