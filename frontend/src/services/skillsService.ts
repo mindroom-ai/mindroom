@@ -17,3 +17,16 @@ export async function updateSkill(skillName: string, content: string): Promise<v
     body: JSON.stringify({ content }),
   });
 }
+
+export async function createSkill(name: string, description: string): Promise<SkillSummary> {
+  return fetchAPI(`${API_BASE_URL}/api/skills`, {
+    method: 'POST',
+    body: JSON.stringify({ name, description }),
+  }) as Promise<SkillSummary>;
+}
+
+export async function deleteSkill(skillName: string): Promise<void> {
+  await fetchAPI(`${API_BASE_URL}/api/skills/${encodeURIComponent(skillName)}`, {
+    method: 'DELETE',
+  });
+}
