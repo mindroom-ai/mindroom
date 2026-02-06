@@ -276,10 +276,16 @@ def _resolve_skill_command_agent(  # noqa: C901
     )
 
 
+# Tools that require agent context injection and cannot be loaded via get_tool_by_name
+_CONTEXT_INJECTED_TOOLS = frozenset({"memory"})
+
+
 def _collect_agent_toolkits(config: Config, agent_name: str) -> list[tuple[str, Toolkit]]:
     agent_config = config.get_agent(agent_name)
     toolkits: list[tuple[str, Toolkit]] = []
     for tool_name in agent_config.tools:
+        if tool_name in _CONTEXT_INJECTED_TOOLS:
+            continue
         try:
             toolkits.append((tool_name, get_tool_by_name(tool_name)))
         except ValueError as exc:
@@ -570,7 +576,7 @@ class AgentBot:
     @property  # Not cached_property because Team mutates it!
     def agent(self) -> Agent:
         """Get the Agno Agent instance for this bot."""
-        return create_agent(agent_name=self.agent_name, config=self.config)
+        return create_agent(agent_name=self.agent_name, config=self.config, storage_path=self.storage_path)
 
     @cached_property
     def response_tracker(self) -> ResponseTracker:
@@ -2798,7 +2804,7 @@ async def _watch_config_task(config_path: Path, orchestrator: MultiAgentOrchestr
 async def _watch_skills_task(orchestrator: MultiAgentOrchestrator) -> None:
     """Watch skill roots for changes and clear cached skills."""
     # Wait for orchestrator to start before watching
-    while not orchestrator.running:
+    while not orchestrator.running:  # noqa: ASYNC110
         await asyncio.sleep(0.1)
     last_snapshot = get_skill_snapshot()
     while orchestrator.running:

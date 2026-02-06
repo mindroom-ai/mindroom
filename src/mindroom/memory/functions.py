@@ -59,8 +59,9 @@ async def add_agent_memory(
     try:
         await memory.add(messages, user_id=f"agent_{agent_name}", metadata=metadata)
         logger.info("Memory added", agent=agent_name)
-    except Exception as e:
-        logger.exception("Failed to add memory", agent=agent_name, error=str(e))
+    except Exception:
+        logger.exception("Failed to add memory", agent=agent_name)
+        raise
 
 
 def get_team_ids_for_agent(agent_name: str, config: Config) -> list[str]:
