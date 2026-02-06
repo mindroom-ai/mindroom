@@ -65,6 +65,13 @@ def test__create_preview() -> None:
     assert len(preview.encode("utf-8")) <= 1000
     assert "[Message continues in attached file]" in preview
 
+    # Budget too small for any preview text — should return indicator only
+    tiny_preview = _create_preview("Hello world. " * 1000, 10)
+    assert tiny_preview == "[Message continues in attached file]"
+
+    zero_preview = _create_preview("Hello world", 0)
+    assert zero_preview == "[Message continues in attached file]"
+
     # Test natural break points
     paragraph_text = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph." * 100
     preview = _create_preview(paragraph_text, 500)

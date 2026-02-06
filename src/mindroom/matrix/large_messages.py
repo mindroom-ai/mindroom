@@ -66,9 +66,10 @@ def _create_preview(text: str, max_bytes: int) -> str:
     if len(text.encode("utf-8")) <= max_bytes:
         return text
 
-    # Binary search for the maximum valid UTF-8 substring
-    # Account for the indicator from the start
+    # If budget is too small for any preview + indicator, return indicator only
     target_bytes = max_bytes - indicator_bytes
+    if target_bytes <= 0:
+        return indicator.lstrip()
 
     # Start with a reasonable estimate
     left, right = 0, min(len(text), target_bytes)
