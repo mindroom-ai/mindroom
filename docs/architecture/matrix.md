@@ -104,7 +104,7 @@ Messages exceeding the 64KB Matrix event limit are automatically handled by `pre
 - Edits > 27,000 bytes: Lower threshold since edit structure roughly doubles size
 - Preview text included in message body (maximum that fits)
 - Custom metadata (`io.mindroom.long_text`) for reconstruction
-- Preserves structured metadata keys like `io.mindroom.tool_trace`
+- Preserves essential metadata (for example mentions) while dropping bulky optional fields to stay within event limits
 - Encrypted rooms: Content encrypted before upload as `message.txt.enc`
 
 ## Identity Management

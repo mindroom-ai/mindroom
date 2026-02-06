@@ -64,6 +64,13 @@ def test__create_preview() -> None:
     assert len(preview.encode("utf-8")) <= 1000
     assert "[Message continues in attached file]" in preview
 
+    # Budget too small for any preview text — should return indicator only
+    tiny_preview = _create_preview("Hello world. " * 1000, 10)
+    assert tiny_preview == "[Message continues in attached file]"
+
+    zero_preview = _create_preview("Hello world", 0)
+    assert zero_preview == "[Message continues in attached file]"
+
     # Test natural break points
     paragraph_text = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph." * 100
     preview = _create_preview(paragraph_text, 500)
@@ -179,8 +186,8 @@ async def test_prepare_edit_message() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prepare_large_message_preserves_tool_trace_regular() -> None:
-    """Structured tool trace should survive regular large-message conversion."""
+async def test_prepare_large_message_drops_tool_trace_regular() -> None:
+    """Large-message conversion should drop tool trace metadata."""
 
     class MockClient:
         rooms: dict = {}  # noqa: RUF012
@@ -190,21 +197,19 @@ async def test_prepare_large_message_preserves_tool_trace_regular() -> None:
             return response, None
 
     client = MockClient()
-    large_text = "z" * 100000
     content = {
-        "body": large_text,
+        "body": "z" * 100000,
         "msgtype": "m.text",
         TOOL_TRACE_KEY: {"version": 1, "events": [{"type": "tool_call_started", "tool_name": "save_file"}]},
     }
 
     result = await prepare_large_message(client, "!room:server", content)
-    assert TOOL_TRACE_KEY in result
-    assert result[TOOL_TRACE_KEY]["events"][0]["tool_name"] == "save_file"
+    assert TOOL_TRACE_KEY not in result
 
 
 @pytest.mark.asyncio
-async def test_prepare_large_message_preserves_tool_trace_edit() -> None:
-    """Structured tool trace should survive edit large-message conversion."""
+async def test_prepare_large_message_drops_tool_trace_edit() -> None:
+    """Edit large-message conversion should drop tool trace metadata."""
 
     class MockClient:
         rooms: dict = {}  # noqa: RUF012
@@ -214,11 +219,10 @@ async def test_prepare_large_message_preserves_tool_trace_edit() -> None:
             return response, None
 
     client = MockClient()
-    large_text = "w" * 50000
     edit_content = {
-        "body": "* " + large_text,
+        "body": "* " + "w" * 50000,
         "m.new_content": {
-            "body": large_text,
+            "body": "w" * 50000,
             "msgtype": "m.text",
             TOOL_TRACE_KEY: {"version": 1, "events": [{"type": "tool_call_completed", "tool_name": "save_file"}]},
         },
@@ -228,5 +232,4 @@ async def test_prepare_large_message_preserves_tool_trace_edit() -> None:
 
     result = await prepare_large_message(client, "!room:server", edit_content)
     assert "m.new_content" in result
-    assert TOOL_TRACE_KEY in result["m.new_content"]
-    assert result["m.new_content"][TOOL_TRACE_KEY]["events"][0]["type"] == "tool_call_completed"
+    assert TOOL_TRACE_KEY not in result["m.new_content"]
