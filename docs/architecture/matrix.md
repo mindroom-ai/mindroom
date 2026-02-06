@@ -72,6 +72,8 @@ Events are processed in background tasks:
 
 Agents stream responses by progressively editing messages. Streaming is enabled only when the requesting user is online (checked via `should_use_streaming()`), saving API calls for offline users.
 
+Tool call telemetry is emitted as structured collapsible blocks (`<tool>...</tool>`, `<validation>...</validation>`) and mirrored in `io.mindroom.tool_trace` metadata on the same message content.
+
 ## Presence
 
 Agents set their Matrix presence with status messages containing model and role information (e.g., "🤖 Model: anthropic/claude-sonnet-4-latest | 💼 Code assistant | 🔧 5 tools available").
@@ -102,6 +104,7 @@ Messages exceeding the 64KB Matrix event limit are automatically handled by `pre
 - Edits > 27,000 bytes: Lower threshold since edit structure roughly doubles size
 - Preview text included in message body (maximum that fits)
 - Custom metadata (`io.mindroom.long_text`) for reconstruction
+- Preserves structured metadata keys like `io.mindroom.tool_trace`
 - Encrypted rooms: Content encrypted before upload as `message.txt.enc`
 
 ## Identity Management

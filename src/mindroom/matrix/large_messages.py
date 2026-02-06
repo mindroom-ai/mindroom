@@ -14,12 +14,14 @@ import nio
 from nio import crypto
 
 from mindroom.logging_config import get_logger
+from mindroom.tool_events import TOOL_TRACE_KEY
 
 logger = get_logger(__name__)
 
 # Conservative limits accounting for Matrix overhead
 NORMAL_MESSAGE_LIMIT = 55000  # ~55KB for regular messages
 EDIT_MESSAGE_LIMIT = 27000  # ~27KB for edits (they roughly double in size)
+PASSTHROUGH_CONTENT_KEYS = ("m.mentions", "com.mindroom.skip_mentions", TOOL_TRACE_KEY)
 
 
 def _calculate_event_size(content: dict[str, Any]) -> int:
@@ -205,8 +207,10 @@ async def prepare_large_message(
     if current_size <= size_limit:
         return content
 
+    source_content = content["m.new_content"] if is_edit and "m.new_content" in content else content
+
     # Extract the text to upload (handle both regular and edit messages)
-    full_text = content["m.new_content"]["body"] if is_edit and "m.new_content" in content else content["body"]
+    full_text = source_content["body"]
 
     logger.info(f"Message too large ({current_size} bytes), uploading to MXC")
 
@@ -229,6 +233,10 @@ async def prepare_large_message(
         "filename": "message.txt",
         "info": file_info,
     }
+
+    for key in PASSTHROUGH_CONTENT_KEYS:
+        if key in source_content:
+            modified_content[key] = source_content[key]
 
     # Add the file URL (either encrypted or plain)
     if room_id and room_id in client.rooms and client.rooms[room_id].encrypted:

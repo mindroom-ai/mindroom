@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
 from . import interactive
-from .ai import _format_tool_completed_message, _format_tool_started_message
 from .logging_config import get_logger
 from .matrix.client import edit_message, send_message
 from .matrix.mentions import format_message_with_mentions
+from .tool_events import (
+    StructuredStreamChunk,
+    ToolTraceEntry,
+    format_tool_completed_event,
+    format_tool_started_event,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -43,6 +48,7 @@ class StreamingResponse:
     last_update: float = 0.0
     update_interval: float = 1.0
     latest_thread_event_id: str | None = None  # For MSC3440 compliance
+    tool_trace: list[ToolTraceEntry] = field(default_factory=list)
 
     def _update(self, new_chunk: str) -> None:
         """Append new chunk to accumulated text."""
@@ -88,6 +94,7 @@ class StreamingResponse:
             thread_event_id=effective_thread_id,
             reply_to_event_id=self.reply_to_event_id,
             latest_thread_event_id=latest_for_message,
+            tool_trace=self.tool_trace,
         )
 
         if self.event_id is None:
@@ -120,7 +127,7 @@ class ReplacementStreamingResponse(StreamingResponse):
         self.accumulated_text = new_chunk
 
 
-async def send_streaming_response(
+async def send_streaming_response(  # noqa: C901, PLR0912
     client: nio.AsyncClient,
     room_id: str,
     reply_to_event_id: str | None,
@@ -179,14 +186,19 @@ async def send_streaming_response(
 
     async for chunk in response_stream:
         # Handle different types of chunks from the stream
+        trace_entry: ToolTraceEntry | None = None
         if isinstance(chunk, str):
             text_chunk = chunk
+        elif isinstance(chunk, StructuredStreamChunk):
+            text_chunk = chunk.content
+            if chunk.tool_trace is not None:
+                streaming.tool_trace = chunk.tool_trace
         elif isinstance(chunk, RunContentEvent) and chunk.content:
             text_chunk = str(chunk.content)
         elif isinstance(chunk, ToolCallStartedEvent):
-            text_chunk = _format_tool_started_message(chunk)
+            text_chunk, trace_entry = format_tool_started_event(chunk)
         elif isinstance(chunk, ToolCallCompletedEvent):
-            text_chunk = _format_tool_completed_message(chunk)
+            text_chunk, trace_entry = format_tool_completed_event(chunk)
         else:
             # Fallback for other event types - try to extract content
             content = getattr(chunk, "content", None)
@@ -196,6 +208,8 @@ async def send_streaming_response(
                 continue
 
         if text_chunk:
+            if trace_entry is not None:
+                streaming.tool_trace.append(trace_entry)
             await streaming.update_content(text_chunk, client)
 
     await streaming.finalize(client)
