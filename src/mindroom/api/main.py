@@ -19,6 +19,7 @@ from mindroom.api.google_integration import router as google_router
 from mindroom.api.homeassistant_integration import router as homeassistant_router
 from mindroom.api.integrations import router as integrations_router
 from mindroom.api.matrix_operations import router as matrix_router
+from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
 from mindroom.config import Config
 from mindroom.constants import DEFAULT_AGENTS_CONFIG, DEFAULT_CONFIG_TEMPLATE
@@ -191,6 +192,7 @@ app.include_router(google_router, dependencies=[Depends(verify_user)])
 app.include_router(homeassistant_router, dependencies=[Depends(verify_user)])
 app.include_router(integrations_router, dependencies=[Depends(verify_user)])
 app.include_router(matrix_router, dependencies=[Depends(verify_user)])
+app.include_router(skills_router, dependencies=[Depends(verify_user)])
 app.include_router(tools_router, dependencies=[Depends(verify_user)])
 
 

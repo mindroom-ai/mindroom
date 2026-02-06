@@ -15,6 +15,7 @@ import { Integrations } from '@/components/Integrations/Integrations';
 import { UnconfiguredRooms } from '@/components/UnconfiguredRooms/UnconfiguredRooms';
 import { SyncStatus } from '@/components/SyncStatus/SyncStatus';
 import { Dashboard } from '@/components/Dashboard/Dashboard';
+import { Skills } from '@/components/Skills/Skills';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Toaster } from '@/components/ui/toaster';
 import { ThemeProvider } from '@/contexts/ThemeContext';
@@ -211,6 +212,12 @@ function AppContent() {
               >
                 🔌 Integrations
               </TabsTrigger>
+              <TabsTrigger
+                value="skills"
+                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap"
+              >
+                🧩 Skills
+              </TabsTrigger>
             </TabsList>
 
             <TabsContent value="dashboard" className="flex-1 p-2 sm:p-4 overflow-auto min-h-0">
@@ -306,6 +313,12 @@ function AppContent() {
             <TabsContent value="integrations" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
               <div className="h-full overflow-hidden">
                 <Integrations />
+              </div>
+            </TabsContent>
+
+            <TabsContent value="skills" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
+              <div className="h-full overflow-hidden">
+                <Skills />
               </div>
             </TabsContent>
           </Tabs>
