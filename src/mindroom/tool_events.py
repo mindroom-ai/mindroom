@@ -188,16 +188,10 @@ def complete_pending_tool_block(
     return updated, trace
 
 
-def _get_tool_execution(event: object) -> ToolExecution | None:
-    """Extract the ToolExecution from an Agno event, if present."""
-    tool = getattr(event, "tool", None)
-    return tool if isinstance(tool, ToolExecution) else None
-
-
 def format_tool_started_event(event: object) -> tuple[str, ToolTraceEntry | None]:
     """Format an Agno tool-start event into display text and trace metadata."""
-    tool = _get_tool_execution(event)
-    if not tool:
+    tool = getattr(event, "tool", None)
+    if not isinstance(tool, ToolExecution):
         return "", None
     tool_name = tool.tool_name or "tool"
     tool_args = {str(k): v for k, v in tool.tool_args.items()} if isinstance(tool.tool_args, dict) else {}
@@ -212,8 +206,8 @@ def extract_tool_completed_info(event: object) -> tuple[str, str | None] | None:
     Uses ``tool.result`` (actual tool output), not ``event.content``
     which Agno sets to a timing string like ``"tool() completed in 0.12s"``.
     """
-    tool = _get_tool_execution(event)
-    if not tool:
+    tool = getattr(event, "tool", None)
+    if not isinstance(tool, ToolExecution):
         return None
     tool_name = tool.tool_name or "tool"
     return tool_name, tool.result
