@@ -59,23 +59,18 @@ class TestDMPreservationDuringCleanup:
 
         with (
             patch("mindroom.bot.get_joined_rooms", return_value=joined_rooms),
-            patch("mindroom.bot.leave_room", return_value=True) as mock_leave,
-            patch("mindroom.bot.is_dm_room", side_effect=mock_is_dm_room),
+            patch("mindroom.matrix.rooms.leave_room", return_value=True) as mock_leave,
+            patch("mindroom.matrix.rooms.is_dm_room", side_effect=mock_is_dm_room),
         ):
             await bot.cleanup()
 
             # Should leave configured rooms but not the DM rooms
             assert mock_leave.call_count == 2
-            # Get the actual arguments from the calls
-            leave_calls = [call[0][1] for call in mock_leave.call_args_list]  # call[0][1] is the room_id
+            leave_calls = [call[0][1] for call in mock_leave.call_args_list]
             assert "!regular:server" in leave_calls
             assert "!another:server" in leave_calls
             assert "!dm:server" not in leave_calls
             assert "!otherdm:server" not in leave_calls
-
-            # Check logging
-            bot.logger.debug.assert_any_call("Preserving DM room !dm:server during cleanup")
-            bot.logger.debug.assert_any_call("Preserving DM room !otherdm:server during cleanup")
 
     async def test_agent_cleanup_leaves_all_rooms(self, tmp_path: Path) -> None:
         """Test that AgentBot.cleanup() leaves all non-DM rooms."""
@@ -116,8 +111,8 @@ class TestDMPreservationDuringCleanup:
 
         with (
             patch("mindroom.bot.get_joined_rooms", return_value=joined_rooms),
-            patch("mindroom.bot.leave_room", return_value=True) as mock_leave,
-            patch("mindroom.bot.is_dm_room", side_effect=mock_is_dm_room),
+            patch("mindroom.matrix.rooms.leave_room", return_value=True) as mock_leave,
+            patch("mindroom.matrix.rooms.is_dm_room", side_effect=mock_is_dm_room),
         ):
             await bot.cleanup()
 

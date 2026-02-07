@@ -159,7 +159,7 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
         return True
 
     monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
-    monkeypatch.setattr("mindroom.bot.leave_room", mock_leave_room)
+    monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
     async def mock_restore_scheduled_tasks(_client: AsyncMock, _room_id: str, _config: Config) -> int:
@@ -235,7 +235,7 @@ async def test_router_updates_rooms_on_config_reload(
         return True
 
     monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
-    monkeypatch.setattr("mindroom.bot.leave_room", mock_leave_room)
+    monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
     async def mock_restore_scheduled_tasks(_client: AsyncMock, _room_id: str, _config: Config) -> int:
@@ -380,7 +380,7 @@ async def test_team_room_changes_on_config_reload(
         return True
 
     monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
-    monkeypatch.setattr("mindroom.bot.leave_room", mock_leave_room)
+    monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
     async def mock_restore_scheduled_tasks(_client: AsyncMock, _room_id: str, _config: Config) -> int:
@@ -582,7 +582,7 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
         return True
 
     monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
-    monkeypatch.setattr("mindroom.bot.leave_room", mock_leave_room)
+    monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
     async def mock_restore_scheduled_tasks(_client: AsyncMock, _room_id: str, _config: Config) -> int:

@@ -40,7 +40,6 @@ from .matrix.client import (
     get_room_members,
     invite_to_room,
     join_room,
-    leave_room,
     send_message,
 )
 from .matrix.event_info import EventInfo
@@ -51,7 +50,14 @@ from .matrix.identity import (
 )
 from .matrix.mentions import format_message_with_mentions
 from .matrix.presence import build_agent_status_message, is_user_online, set_presence_status, should_use_streaming
-from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, is_dm_room, load_rooms, resolve_room_aliases
+from .matrix.rooms import (
+    ensure_all_rooms_exist,
+    ensure_user_in_rooms,
+    is_dm_room,
+    leave_non_dm_rooms,
+    load_rooms,
+    resolve_room_aliases,
+)
 from .matrix.state import MatrixState
 from .matrix.typing import typing_indicator
 from .matrix.users import AgentMatrixUser, create_agent_user, login_agent_user
@@ -620,16 +626,8 @@ class AgentBot:
         current_rooms = set(joined_rooms)
         configured_rooms = set(self.rooms)
 
-        # Leave rooms we're no longer configured for
-        for room_id in current_rooms - configured_rooms:
-            if await is_dm_room(self.client, room_id):
-                self.logger.debug(f"Preserving DM room {room_id} during cleanup")
-                continue
-            success = await leave_room(self.client, room_id)
-            if success:
-                self.logger.info(f"Left unconfigured room {room_id}")
-            else:
-                self.logger.error(f"Failed to leave unconfigured room {room_id}")
+        # Leave rooms we're no longer configured for (preserving DM rooms)
+        await leave_non_dm_rooms(self.client, list(current_rooms - configured_rooms))
 
     async def ensure_user_account(self) -> None:
         """Ensure this agent has a Matrix user account.
@@ -769,20 +767,11 @@ class AgentBot:
         This method ensures clean shutdown when an agent is removed from config.
         """
         assert self.client is not None
-        # Leave all rooms
+        # Leave all rooms (preserving DM rooms)
         try:
             joined_rooms = await get_joined_rooms(self.client)
             if joined_rooms:
-                for room_id in joined_rooms:
-                    if await is_dm_room(self.client, room_id):
-                        self.logger.debug(f"Preserving DM room {room_id} during cleanup")
-                        continue
-
-                    success = await leave_room(self.client, room_id)
-                    if success:
-                        self.logger.info(f"Left room {room_id} during cleanup")
-                    else:
-                        self.logger.error(f"Failed to leave room {room_id} during cleanup")
+                await leave_non_dm_rooms(self.client, joined_rooms)
         except Exception:
             self.logger.exception("Error leaving rooms during cleanup")
 
