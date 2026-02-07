@@ -13,26 +13,31 @@ import { Brain } from 'lucide-react';
 import { useState, useEffect } from 'react';
 
 const EMBEDDER_PROVIDERS = [
-  { value: 'ollama', label: 'Ollama (Local)' },
   { value: 'openai', label: 'OpenAI' },
-  { value: 'huggingface', label: 'HuggingFace' },
-  { value: 'sentence-transformers', label: 'Sentence Transformers' },
+  { value: 'ollama', label: 'Ollama' },
 ];
 
-const OLLAMA_MODELS = ['nomic-embed-text', 'all-minilm', 'mxbai-embed-large'];
+const DEFAULT_MODELS: Record<string, string> = {
+  openai: 'text-embedding-3-small',
+  ollama: 'nomic-embed-text',
+};
 
-const OPENAI_MODELS = [
-  'text-embedding-ada-002',
-  'text-embedding-3-small',
-  'text-embedding-3-large',
-];
+const DEFAULT_HOSTS: Record<string, string> = {
+  openai: '',
+  ollama: 'http://localhost:11434',
+};
+
+const MODEL_PLACEHOLDERS: Record<string, string> = {
+  openai: 'e.g. text-embedding-3-small',
+  ollama: 'e.g. nomic-embed-text',
+};
 
 export function MemoryConfig() {
   const { config, updateMemoryConfig, saveConfig, isDirty } = useConfigStore();
   const [localConfig, setLocalConfig] = useState({
-    provider: 'ollama',
-    model: 'nomic-embed-text',
-    host: 'http://localhost:11434',
+    provider: 'openai',
+    model: 'text-embedding-3-small',
+    host: '',
   });
 
   useEffect(() => {
@@ -40,29 +45,21 @@ export function MemoryConfig() {
       setLocalConfig({
         provider: config.memory.embedder.provider,
         model: config.memory.embedder.config.model,
-        host: config.memory.embedder.config.host || 'http://localhost:11434',
+        host:
+          config.memory.embedder.config.host ||
+          DEFAULT_HOSTS[config.memory.embedder.provider] ||
+          '',
       });
     }
   }, [config]);
 
   const handleProviderChange = (provider: string) => {
-    let defaultModel = '';
-    switch (provider) {
-      case 'ollama':
-        defaultModel = 'nomic-embed-text';
-        break;
-      case 'openai':
-        defaultModel = 'text-embedding-ada-002';
-        break;
-      case 'huggingface':
-        defaultModel = 'sentence-transformers/all-MiniLM-L6-v2';
-        break;
-      case 'sentence-transformers':
-        defaultModel = 'all-MiniLM-L6-v2';
-        break;
-    }
-
-    const updated = { ...localConfig, provider, model: defaultModel };
+    const updated = {
+      ...localConfig,
+      provider,
+      model: DEFAULT_MODELS[provider] || '',
+      host: DEFAULT_HOSTS[provider] || '',
+    };
     setLocalConfig(updated);
     updateMemoryConfig(updated);
   };
@@ -81,24 +78,6 @@ export function MemoryConfig() {
 
   const handleSave = async () => {
     await saveConfig();
-  };
-
-  const getAvailableModels = () => {
-    switch (localConfig.provider) {
-      case 'ollama':
-        return OLLAMA_MODELS;
-      case 'openai':
-        return OPENAI_MODELS;
-      case 'huggingface':
-        return [
-          'sentence-transformers/all-MiniLM-L6-v2',
-          'sentence-transformers/all-mpnet-base-v2',
-        ];
-      case 'sentence-transformers':
-        return ['all-MiniLM-L6-v2', 'all-mpnet-base-v2', 'multi-qa-MiniLM-L6-cos-v1'];
-      default:
-        return [];
-    }
   };
 
   return (
@@ -128,12 +107,8 @@ export function MemoryConfig() {
               localConfig.provider === 'ollama'
                 ? 'Local embeddings using Ollama'
                 : localConfig.provider === 'openai'
-                  ? 'Cloud embeddings using OpenAI API'
-                  : localConfig.provider === 'huggingface'
-                    ? 'Cloud embeddings using HuggingFace API'
-                    : localConfig.provider === 'sentence-transformers'
-                      ? 'Local embeddings using sentence-transformers'
-                      : 'Choose your embedding provider'
+                  ? 'OpenAI or any OpenAI-compatible API (set Base URL below)'
+                  : 'Choose your embedding provider'
             }
             required
             htmlFor="provider"
@@ -158,46 +133,48 @@ export function MemoryConfig() {
             required
             htmlFor="model"
           >
-            <Select value={localConfig.model} onValueChange={handleModelChange}>
-              <SelectTrigger id="model" className="transition-colors hover:border-ring">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {getAvailableModels().map(model => (
-                  <SelectItem key={model} value={model}>
-                    {model}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <Input
+              id="model"
+              type="text"
+              value={localConfig.model}
+              onChange={e => handleModelChange(e.target.value)}
+              placeholder={MODEL_PLACEHOLDERS[localConfig.provider] || 'Model name'}
+              className="transition-colors hover:border-ring focus:border-ring"
+            />
           </FieldGroup>
 
-          {/* Host Configuration (for Ollama) */}
-          {localConfig.provider === 'ollama' && (
-            <FieldGroup
-              label="Ollama Host URL"
-              helperText="The URL where your Ollama server is running"
-              required
-              htmlFor="host"
-            >
-              <Input
-                id="host"
-                type="url"
-                value={localConfig.host}
-                onChange={e => handleHostChange(e.target.value)}
-                placeholder="http://localhost:11434"
-                className="transition-colors hover:border-ring focus:border-ring"
-              />
-            </FieldGroup>
-          )}
+          {/* Host / Base URL */}
+          <FieldGroup
+            label={localConfig.provider === 'ollama' ? 'Ollama Host URL' : 'Base URL'}
+            helperText={
+              localConfig.provider === 'ollama'
+                ? 'The URL where your Ollama server is running'
+                : 'Leave empty for official OpenAI API, or set for OpenAI-compatible servers'
+            }
+            required={localConfig.provider === 'ollama'}
+            htmlFor="host"
+          >
+            <Input
+              id="host"
+              type="url"
+              value={localConfig.host}
+              onChange={e => handleHostChange(e.target.value)}
+              placeholder={
+                localConfig.provider === 'ollama'
+                  ? 'http://localhost:11434'
+                  : 'https://api.openai.com/v1'
+              }
+              className="transition-colors hover:border-ring focus:border-ring"
+            />
+          </FieldGroup>
         </div>
 
         {/* API Key Notice */}
-        {(localConfig.provider === 'openai' || localConfig.provider === 'huggingface') && (
+        {localConfig.provider === 'openai' && !localConfig.host && (
           <div className="p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800/30 rounded-lg shadow-sm">
             <p className="text-sm text-yellow-800 dark:text-yellow-300">
-              <strong>Note:</strong> You'll need to set the {localConfig.provider.toUpperCase()}
-              _API_KEY environment variable for this provider to work.
+              <strong>Note:</strong> You'll need to set the OPENAI_API_KEY environment variable for
+              this provider to work.
             </p>
           </div>
         )}
@@ -214,9 +191,11 @@ export function MemoryConfig() {
               <span className="text-muted-foreground">Model:</span>
               <span className="font-mono text-foreground">{localConfig.model}</span>
             </div>
-            {localConfig.provider === 'ollama' && (
+            {localConfig.host && (
               <div className="flex justify-between">
-                <span className="text-muted-foreground">Host:</span>
+                <span className="text-muted-foreground">
+                  {localConfig.provider === 'ollama' ? 'Host:' : 'Base URL:'}
+                </span>
                 <span className="font-mono text-foreground">{localConfig.host}</span>
               </div>
             )}
