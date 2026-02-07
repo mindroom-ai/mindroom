@@ -314,6 +314,32 @@ describe('AgentEditor', () => {
     );
   });
 
+  it('renders missing assigned skills so they can be removed', () => {
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [
+        {
+          ...mockAgent,
+          skills: ['ghost-skill'],
+        },
+      ],
+      rooms: mockStore.rooms,
+    });
+
+    render(<AgentEditor />);
+
+    const ghostSkillCheckbox = screen.getByRole('checkbox', { name: /ghost-skill/i });
+    expect(ghostSkillCheckbox).toBeChecked();
+
+    fireEvent.click(ghostSkillCheckbox);
+    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+      'test_agent',
+      expect.objectContaining({
+        skills: [],
+      })
+    );
+  });
+
   it('handles model selection', () => {
     render(<AgentEditor />);
 

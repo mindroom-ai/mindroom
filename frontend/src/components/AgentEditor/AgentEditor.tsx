@@ -371,45 +371,55 @@ export function AgentEditor() {
       <FieldGroup label="Skills" helperText="Select skills this agent can invoke">
         {skillsLoading ? (
           <div className="text-sm text-muted-foreground text-center py-2">Loading skills...</div>
-        ) : availableSkills.length === 0 ? (
-          <div className="text-sm text-muted-foreground text-center py-2">
-            No skills available. Create skills in the Skills tab first.
-          </div>
         ) : (
           <Controller
             name="skills"
             control={control}
             render={({ field }) => {
               const selectedSkills = field.value ?? [];
+              const availableSkillsByName = new Map(
+                availableSkills.map(skill => [skill.name, skill])
+              );
+              const skillNamesToRender = [
+                ...availableSkills.map(skill => skill.name),
+                ...selectedSkills.filter(skillName => !availableSkillsByName.has(skillName)),
+              ];
+
+              if (skillNamesToRender.length === 0) {
+                return (
+                  <div className="text-sm text-muted-foreground text-center py-2">
+                    No skills available. Create skills in the Skills tab first.
+                  </div>
+                );
+              }
 
               return (
                 <div className="space-y-2 max-h-56 overflow-y-auto border rounded-lg p-2">
-                  {availableSkills.map(skill => {
-                    const isChecked = selectedSkills.includes(skill.name);
+                  {skillNamesToRender.map(skillName => {
+                    const isChecked = selectedSkills.includes(skillName);
+                    const skill = availableSkillsByName.get(skillName);
                     return (
                       <div
-                        key={skill.name}
+                        key={skillName}
                         className="flex items-center space-x-2 p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-all duration-200"
                       >
                         <Checkbox
-                          id={`skill-${skill.name}`}
+                          id={`skill-${skillName}`}
                           checked={isChecked}
                           onCheckedChange={checked => {
                             const newSkills =
                               checked === true
-                                ? [...selectedSkills, skill.name]
-                                : selectedSkills.filter(s => s !== skill.name);
+                                ? [...selectedSkills, skillName]
+                                : selectedSkills.filter(s => s !== skillName);
                             field.onChange(newSkills);
                             handleFieldChange('skills', newSkills);
                           }}
                         />
-                        <label htmlFor={`skill-${skill.name}`} className="flex-1 cursor-pointer">
-                          <div className="font-medium text-sm">{skill.name}</div>
-                          {skill.description && (
-                            <div className="text-xs text-gray-500 dark:text-gray-400">
-                              {skill.description}
-                            </div>
-                          )}
+                        <label htmlFor={`skill-${skillName}`} className="flex-1 cursor-pointer">
+                          <div className="font-medium text-sm">{skillName}</div>
+                          <div className="text-xs text-gray-500 dark:text-gray-400">
+                            {skill?.description || 'Skill not available; uncheck to remove'}
+                          </div>
                         </label>
                       </div>
                     );
