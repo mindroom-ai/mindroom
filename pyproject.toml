@@ -6,6 +6,7 @@ requires = [ "hatch-vcs", "hatchling" ]
 name = "mindroom"
 description = "A universal interface for AI agents with persistent memory, where every conversation has a home"
 readme = "README.md"
+license = "Apache-2.0"
 authors = [
   { name = "mindroom team" },
 ]

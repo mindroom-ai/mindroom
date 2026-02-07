@@ -305,7 +305,8 @@ From the developer of 10+ successful open source projects with thousands of user
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+- **Core MindRoom** (`src/mindroom/`, `frontend/`): [Apache License 2.0](LICENSE)
+- **SaaS Platform** (`saas-platform/`): [Business Source License 1.1](saas-platform/LICENSE) (converts to Apache 2.0 on 2030-02-06)
 
 ## Acknowledgments
 
