@@ -676,7 +676,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         # Agent tool call started
         elif isinstance(event, AgentToolCallStartedEvent):
             agent_name = event.agent_name
-            tool_msg, trace_entry = format_tool_started_event(event)
+            tool_msg, trace_entry = format_tool_started_event(event.tool)
             if agent_name and tool_msg:
                 if agent_name not in per_member:
                     per_member[agent_name] = ""
@@ -687,7 +687,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         # Agent tool call completed
         elif isinstance(event, AgentToolCallCompletedEvent):
             agent_name = event.agent_name
-            info = extract_tool_completed_info(event)
+            info = extract_tool_completed_info(event.tool)
             if agent_name and info:
                 tool_name, result = info
                 if agent_name not in per_member:
@@ -708,14 +708,14 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
 
         # Team-level tool call events (no specific agent context)
         elif isinstance(event, TeamToolCallStartedEvent):
-            tool_msg, trace_entry = format_tool_started_event(event)
+            tool_msg, trace_entry = format_tool_started_event(event.tool)
             if tool_msg:
                 consensus += tool_msg
             if trace_entry:
                 tool_trace.append(trace_entry)
 
         elif isinstance(event, TeamToolCallCompletedEvent):
-            info = extract_tool_completed_info(event)
+            info = extract_tool_completed_info(event.tool)
             if info:
                 tool_name, result = info
                 consensus, trace_entry = complete_pending_tool_block(consensus, tool_name, result)
