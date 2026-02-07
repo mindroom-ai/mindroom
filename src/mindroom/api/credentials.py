@@ -46,10 +46,11 @@ async def get_credential_status(service: str) -> CredentialStatus:
     credentials = manager.load_credentials(service)
 
     if credentials:
+        filtered = _filter_internal_keys(credentials) if isinstance(credentials, dict) else {}
         return CredentialStatus(
             service=service,
             has_credentials=True,
-            key_names=list(credentials.keys()) if isinstance(credentials, dict) else None,
+            key_names=list(filtered.keys()) if filtered else None,
         )
 
     return CredentialStatus(service=service, has_credentials=False)
@@ -86,12 +87,11 @@ async def set_api_key(service: str, request: SetApiKeyRequest) -> dict[str, str]
 async def get_api_key(service: str, key_name: str = "api_key") -> dict[str, Any]:
     """Get the API key for a service (returns only existence status for security)."""
     manager = get_credentials_manager()
-    api_key = manager.get_api_key(service, key_name)
+    credentials = manager.load_credentials(service) or {}
+    api_key = credentials.get(key_name)
 
     if api_key:
-        # Don't return the actual key for security
-        credentials = manager.load_credentials(service) or {}
-        source = credentials.get("_source", "ui")
+        source = credentials.get("_source")
         return {
             "service": service,
             "has_key": True,
@@ -104,6 +104,11 @@ async def get_api_key(service: str, key_name: str = "api_key") -> dict[str, Any]
     return {"service": service, "has_key": False, "key_name": key_name}
 
 
+def _filter_internal_keys(credentials: dict[str, Any]) -> dict[str, Any]:
+    """Remove internal metadata keys (prefixed with _) from credentials."""
+    return {k: v for k, v in credentials.items() if not k.startswith("_")}
+
+
 @router.get("/{service}")
 async def get_credentials(service: str) -> dict[str, Any]:
     """Get credentials for a service (for editing)."""
@@ -113,7 +118,7 @@ async def get_credentials(service: str) -> dict[str, Any]:
     if not credentials:
         return {"service": service, "credentials": {}}
 
-    return {"service": service, "credentials": credentials}
+    return {"service": service, "credentials": _filter_internal_keys(credentials)}
 
 
 @router.delete("/{service}")

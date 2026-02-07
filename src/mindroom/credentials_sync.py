@@ -82,7 +82,7 @@ def sync_env_to_credentials() -> None:
             source = existing.get("_source")
             if source != "env":
                 # UI-set or legacy (no _source) — don't overwrite
-                logger.debug(f"Credentials for {service} set via UI, skipping env sync")
+                logger.debug(f"Credentials for {service} not env-sourced, skipping env sync")
                 continue
 
         if service == "ollama":
