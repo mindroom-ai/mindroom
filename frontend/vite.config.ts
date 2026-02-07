@@ -17,8 +17,7 @@ export default defineConfig({
   },
   server: {
     port: frontendPort,
-    // Allow all hosts when running in Docker
-    allowedHosts: isDocker ? ['.nijho.lt', '.local', '.mindroom.chat'] : [],
+    allowedHosts: ['.nijho.lt', '.local', '.mindroom.chat'],
     proxy: {
       '/api': {
         target: `http://localhost:${backendPort}`,

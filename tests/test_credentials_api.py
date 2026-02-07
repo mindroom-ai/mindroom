@@ -173,6 +173,24 @@ class TestCredentialsAPI:
         assert data["has_key"] is True
         assert data["key_name"] == "token"
 
+    def test_get_api_key_include_value(
+        self,
+        test_client: TestClient,
+        mock_credentials_manager: CredentialsManager,
+    ) -> None:
+        """Test getting API key value when include_value=true."""
+        mock_credentials_manager.save_credentials(
+            "openai",
+            {"api_key": "sk-real-secret", "_source": "ui"},
+        )
+
+        response = test_client.get("/api/credentials/openai/api-key?include_value=true")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["has_key"] is True
+        assert data["api_key"] == "sk-real-secret"
+        assert data["source"] == "ui"
+
     def test_delete_credentials(
         self,
         test_client: TestClient,

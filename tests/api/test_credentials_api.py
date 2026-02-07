@@ -212,6 +212,25 @@ class TestCredentialsAPI:
         assert data["has_key"] is True
         assert data["source"] == "ui"
 
+    def test_get_api_key_include_value(
+        self,
+        client: TestClient,
+        mock_credentials_manager: MagicMock,
+    ) -> None:
+        """Test that get_api_key can return the full value when explicitly requested."""
+        mock_credentials_manager.load_credentials.return_value = {
+            "api_key": "sk-real-value",
+            "_source": "ui",
+        }
+
+        response = client.get("/api/credentials/openai/api-key?include_value=true")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["has_key"] is True
+        assert data["api_key"] == "sk-real-value"
+        assert data["source"] == "ui"
+
     def test_get_api_key_returns_source_none_for_legacy(
         self,
         client: TestClient,

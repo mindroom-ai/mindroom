@@ -1,8 +1,23 @@
-import { useState, useMemo, useEffect, useCallback } from 'react';
+import {
+  type Dispatch,
+  type SetStateAction,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from 'react';
+import {
+  type Column,
+  type ColumnDef,
+  type SortingState,
+  flexRender,
+  getCoreRowModel,
+  getSortedRowModel,
+  useReactTable,
+} from '@tanstack/react-table';
 import { useConfigStore } from '@/store/configStore';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
 import {
   Select,
   SelectContent,
@@ -10,30 +25,22 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-} from '@/components/ui/dialog';
 import { EditorPanel } from '@/components/shared/EditorPanel';
-import { FieldGroup } from '@/components/shared/FieldGroup';
-import { Save, Trash2, Settings, Plus, Key, X, Copy, Pencil } from 'lucide-react';
+import { ArrowUpDown, Copy, Pencil, Plus, Save, Settings, Trash2, X } from 'lucide-react';
 import { toast } from '@/components/ui/toaster';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { ProviderLogo } from './ProviderLogos';
 import { getProviderInfo, getProviderList } from '@/lib/providers';
+import type { ProviderType } from '@/types/config';
 
-interface ModelFormData {
+interface RowDraft {
+  modelName: string;
   provider: string;
-  id: string;
-  host?: string;
-  configId?: string;
-  extra_kwargs?: string;
-  base_url?: string;
-  api_key?: string;
+  modelId: string;
+  apiKey: string;
+  selectedKeySourceModel: string;
+  clearCustomKey: boolean;
 }
 
 interface KeyStatus {
@@ -42,11 +49,95 @@ interface KeyStatus {
   maskedKey: string | null;
 }
 
-const EMPTY_FORM: ModelFormData = { provider: 'ollama', id: '', configId: '' };
+interface KeyDisplayInfo {
+  hasKey: boolean;
+  label: string;
+  maskedKey: string | null;
+  keyId: string | null;
+  sourceLabel: string;
+}
+
+interface ModelRowData {
+  modelName: string;
+  provider: string;
+  providerName: string;
+  modelId: string;
+  modelConfig: {
+    provider: string;
+    id: string;
+    host?: string;
+    extra_kwargs?: Record<string, unknown>;
+  };
+  keyDisplay: KeyDisplayInfo | null;
+}
+
+const EMPTY_DRAFT: RowDraft = {
+  modelName: '',
+  provider: 'openrouter',
+  modelId: '',
+  apiKey: '',
+  selectedKeySourceModel: '',
+  clearCustomKey: false,
+};
+
+const NONE_OPTION_VALUE = '__none__';
+
+const KEY_BADGE_COLORS = [
+  'bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-500/25',
+  'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/25',
+  'bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/25',
+  'bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/25',
+  'bg-cyan-500/10 text-cyan-700 dark:text-cyan-300 border-cyan-500/25',
+  'bg-lime-500/10 text-lime-700 dark:text-lime-300 border-lime-500/25',
+  'bg-orange-500/10 text-orange-700 dark:text-orange-300 border-orange-500/25',
+  'bg-teal-500/10 text-teal-700 dark:text-teal-300 border-teal-500/25',
+  'bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 border-indigo-500/25',
+];
+
+const NO_KEY_BADGE_COLOR = 'bg-red-500/10 text-red-700 dark:text-red-300 border-red-500/25';
+
+function hashString(value: string): number {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) % 2147483647;
+  }
+  return Math.abs(hash);
+}
+
+function getKeyBadgeColorClass(keyId: string | null): string {
+  if (!keyId) {
+    return NO_KEY_BADGE_COLOR;
+  }
+  return KEY_BADGE_COLORS[hashString(keyId) % KEY_BADGE_COLORS.length];
+}
+
+function providerToService(provider: string): string {
+  return provider === 'gemini' ? 'google' : provider;
+}
+
+function sourceToLabel(source: string | null, hasKey: boolean): string {
+  if (!hasKey) {
+    return 'Not set';
+  }
+  if (source === 'env') {
+    return '.env';
+  }
+  if (source === 'ui') {
+    return 'UI';
+  }
+  if (source) {
+    return source;
+  }
+  return 'Stored';
+}
 
 async function fetchKeyStatus(service: string): Promise<KeyStatus> {
   try {
     const res = await fetch(`/api/credentials/${service}/api-key?key_name=api_key`);
+    if (!res.ok) {
+      return { hasKey: false, source: null, maskedKey: null };
+    }
+
     const data = await res.json();
     return {
       hasKey: data.has_key,
@@ -58,222 +149,441 @@ async function fetchKeyStatus(service: string): Promise<KeyStatus> {
   }
 }
 
+async function fetchApiKeyValue(service: string): Promise<string | null> {
+  try {
+    const res = await fetch(
+      `/api/credentials/${service}/api-key?key_name=api_key&include_value=true`
+    );
+    if (!res.ok) {
+      return null;
+    }
+    const data = await res.json();
+    return data.api_key || null;
+  } catch {
+    return null;
+  }
+}
+
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return true;
+  }
+
+  if (typeof document === 'undefined') {
+    return false;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  const copied = document.execCommand('copy');
+  document.body.removeChild(textarea);
+  return copied;
+}
+
 function getKeyStatusDisplay(
-  modelId: string,
+  modelName: string,
   provider: string,
   modelKeys: Record<string, KeyStatus>,
   providerKeys: Record<string, KeyStatus>
-) {
-  if (provider === 'ollama') return null;
+): KeyDisplayInfo | null {
+  if (provider === 'ollama') {
+    return null;
+  }
 
-  const modelKey = modelKeys[modelId];
+  const modelKey = modelKeys[modelName];
   if (modelKey?.hasKey) {
     return {
+      hasKey: true,
       label: 'Custom key',
       maskedKey: modelKey.maskedKey,
-      className: 'bg-green-500/10 text-green-600 dark:text-green-400 border-green-500/20',
+      keyId: modelKey.maskedKey ? `key:${modelKey.maskedKey}` : `model:${modelName}`,
+      sourceLabel: sourceToLabel(modelKey.source, true),
     };
   }
 
   const providerKey = providerKeys[provider];
   if (providerKey?.hasKey) {
     return {
-      label: providerKey.source === 'env' ? 'From env' : 'Provider key',
+      hasKey: true,
+      label: 'Provider key',
       maskedKey: providerKey.maskedKey,
-      className: '',
+      keyId: providerKey.maskedKey ? `key:${providerKey.maskedKey}` : `provider:${provider}`,
+      sourceLabel: sourceToLabel(providerKey.source, true),
     };
   }
 
   return {
+    hasKey: false,
     label: 'No API key',
     maskedKey: null,
-    className: 'border-destructive/50 text-destructive',
+    keyId: null,
+    sourceLabel: sourceToLabel(null, false),
   };
+}
+
+function SortableHeader({
+  label,
+  column,
+}: {
+  label: string;
+  column: Column<ModelRowData, unknown>;
+}) {
+  return (
+    <Button
+      variant="ghost"
+      className="h-auto px-0 py-0 font-medium hover:bg-transparent"
+      onClick={() => column.toggleSorting(column.getIsSorted() === 'asc')}
+    >
+      <span>{label}</span>
+      <ArrowUpDown className="ml-1.5 h-3.5 w-3.5 opacity-60" />
+    </Button>
+  );
 }
 
 export function ModelConfig() {
   const { config, updateModel, deleteModel, saveConfig } = useConfigStore();
-  const [editingModel, setEditingModel] = useState<string | null>(null);
-  const [isAddingModel, setIsAddingModel] = useState(false);
-  const [showKeyInput, setShowKeyInput] = useState(false);
-  const [modelForm, setModelForm] = useState<ModelFormData>(EMPTY_FORM);
 
   const [providerKeys, setProviderKeys] = useState<Record<string, KeyStatus>>({});
   const [modelKeys, setModelKeys] = useState<Record<string, KeyStatus>>({});
+  const [sorting, setSorting] = useState<SortingState>([
+    { id: 'provider', desc: false },
+    { id: 'modelName', desc: false },
+  ]);
 
-  const dialogOpen = editingModel !== null || isAddingModel;
+  const [editingRowId, setEditingRowId] = useState<string | null>(null);
+  const [rowDraft, setRowDraft] = useState<RowDraft | null>(null);
+  const [isSavingRow, setIsSavingRow] = useState(false);
+
+  const [isAddingRow, setIsAddingRow] = useState(false);
+  const [newRowDraft, setNewRowDraft] = useState<RowDraft>(EMPTY_DRAFT);
+  const [isSavingNewRow, setIsSavingNewRow] = useState(false);
+
+  const models = useMemo(() => config?.models ?? {}, [config?.models]);
 
   const fetchAllKeyStatuses = useCallback(async () => {
-    if (!config) return;
+    if (!config) {
+      return;
+    }
 
-    const models = Object.entries(config.models);
-    const uniqueProviders = [...new Set(models.map(([_, m]) => m.provider))].filter(
-      p => p !== 'ollama'
+    const modelEntries = Object.entries(config.models);
+    const uniqueProviders = [...new Set(modelEntries.map(([_, model]) => model.provider))].filter(
+      provider => provider !== 'ollama'
     );
 
-    const [providerEntries, modelEntries] = await Promise.all([
+    const [providerResults, modelResults] = await Promise.all([
       Promise.all(
         uniqueProviders.map(async provider => {
-          const service = provider === 'gemini' ? 'google' : provider;
-          return [provider, await fetchKeyStatus(service)] as const;
+          return [provider, await fetchKeyStatus(providerToService(provider))] as const;
         })
       ),
       Promise.all(
-        models
-          .filter(([_, m]) => m.provider !== 'ollama')
-          .map(async ([modelId]) => {
-            return [modelId, await fetchKeyStatus(`model:${modelId}`)] as const;
+        modelEntries
+          .filter(([_, model]) => model.provider !== 'ollama')
+          .map(async ([modelName]) => {
+            return [modelName, await fetchKeyStatus(`model:${modelName}`)] as const;
           })
       ),
     ]);
 
-    setProviderKeys(Object.fromEntries(providerEntries));
-    setModelKeys(Object.fromEntries(modelEntries));
+    setProviderKeys(Object.fromEntries(providerResults));
+    setModelKeys(Object.fromEntries(modelResults));
   }, [config]);
 
   useEffect(() => {
     fetchAllKeyStatuses();
   }, [fetchAllKeyStatuses]);
 
-  const sortedModels = useMemo(() => {
-    if (!config) return [];
-    return Object.entries(config.models).sort(([a], [b]) => a.localeCompare(b));
-  }, [config?.models]);
+  const saveModelApiKey = async (modelName: string, apiKey: string): Promise<boolean> => {
+    try {
+      const res = await fetch(`/api/credentials/model:${modelName}/api-key`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          service: `model:${modelName}`,
+          api_key: apiKey,
+          key_name: 'api_key',
+        }),
+      });
 
-  if (!config) return null;
-
-  const resetForm = () => {
-    setEditingModel(null);
-    setIsAddingModel(false);
-    setShowKeyInput(false);
-    setModelForm(EMPTY_FORM);
-  };
-
-  const openAddDialog = () => {
-    setIsAddingModel(true);
-    setEditingModel(null);
-    setShowKeyInput(false);
-    setModelForm({ ...EMPTY_FORM, provider: 'openrouter' });
-  };
-
-  const openEditDialog = (
-    modelId: string,
-    modelConfig: { provider: string; id: string; host?: string; extra_kwargs?: Record<string, any> }
-  ) => {
-    setEditingModel(modelId);
-    setIsAddingModel(false);
-    setShowKeyInput(false);
-    const { base_url, ...restKwargs } = modelConfig.extra_kwargs || {};
-    setModelForm({
-      provider: modelConfig.provider,
-      id: modelConfig.id,
-      host: modelConfig.host,
-      base_url: base_url as string | undefined,
-      extra_kwargs: Object.keys(restKwargs).length > 0 ? JSON.stringify(restKwargs, null, 2) : '',
-    });
-  };
-
-  const handleSaveModel = async () => {
-    let parsedExtraKwargs = undefined;
-    if (modelForm.extra_kwargs) {
-      try {
-        parsedExtraKwargs = JSON.parse(modelForm.extra_kwargs);
-      } catch {
-        toast({
-          title: 'Invalid JSON',
-          description: 'The Advanced Settings must be valid JSON',
-          variant: 'destructive',
-        });
-        return;
+      if (!res.ok) {
+        throw new Error('Failed to save API key');
       }
+
+      return true;
+    } catch {
+      toast({ title: 'Error', description: 'Failed to save API key', variant: 'destructive' });
+      return false;
     }
-
-    if (modelForm.base_url) {
-      parsedExtraKwargs = { ...(parsedExtraKwargs || {}), base_url: modelForm.base_url };
-    }
-
-    const targetModelId = isAddingModel ? modelForm.configId! : editingModel!;
-
-    if (modelForm.api_key) {
-      try {
-        const res = await fetch(`/api/credentials/model:${targetModelId}/api-key`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            service: `model:${targetModelId}`,
-            api_key: modelForm.api_key,
-            key_name: 'api_key',
-          }),
-        });
-        if (!res.ok) throw new Error();
-      } catch {
-        toast({ title: 'Error', description: 'Failed to save API key', variant: 'destructive' });
-        return;
-      }
-    }
-
-    if (isAddingModel) {
-      if (!modelForm.configId || !modelForm.id) {
-        toast({
-          title: 'Error',
-          description: 'Please provide both a configuration name and model ID',
-          variant: 'destructive',
-        });
-        return;
-      }
-      if (config.models[modelForm.configId]) {
-        toast({
-          title: 'Error',
-          description: 'A model with this configuration name already exists',
-          variant: 'destructive',
-        });
-        return;
-      }
-    }
-
-    const modelData = {
-      provider: modelForm.provider as any,
-      id: modelForm.id,
-      ...(modelForm.host && { host: modelForm.host }),
-      ...(parsedExtraKwargs && { extra_kwargs: parsedExtraKwargs }),
-    };
-
-    updateModel(targetModelId, modelData);
-    const action = isAddingModel ? 'Added' : 'Updated';
-    resetForm();
-    toast({
-      title: `Model ${action}`,
-      description: `Model ${targetModelId} has been ${action.toLowerCase()}`,
-    });
-    await fetchAllKeyStatuses();
   };
 
-  const handleClearModelKey = async (modelId: string) => {
-    const res = await fetch(`/api/credentials/model:${modelId}`, { method: 'DELETE' });
-    if (!res.ok) throw new Error('Failed to clear API key');
-    await fetchAllKeyStatuses();
-    toast({ title: 'API Key Cleared', description: `Custom API key removed for ${modelId}` });
-  };
-
-  const handleCopyKeyFrom = async (targetModelId: string, sourceModelId: string) => {
+  const copyModelApiKey = async (
+    targetModelName: string,
+    sourceModelName: string
+  ): Promise<boolean> => {
     try {
       const res = await fetch(
-        `/api/credentials/model:${targetModelId}/copy-from/model:${sourceModelId}`,
+        `/api/credentials/model:${targetModelName}/copy-from/model:${sourceModelName}`,
         { method: 'POST' }
       );
-      if (!res.ok) throw new Error();
-      await fetchAllKeyStatuses();
-      toast({
-        title: 'API Key Copied',
-        description: `Key from ${sourceModelId} applied to ${targetModelId}`,
-      });
+
+      if (!res.ok) {
+        throw new Error('Failed to copy API key');
+      }
+
+      return true;
     } catch {
       toast({ title: 'Error', description: 'Failed to copy API key', variant: 'destructive' });
+      return false;
     }
   };
 
-  const handleDeleteModel = (modelId: string) => {
-    if (modelId === 'default') {
+  const deleteModelApiKey = async (modelName: string): Promise<boolean> => {
+    try {
+      const res = await fetch(`/api/credentials/model:${modelName}`, { method: 'DELETE' });
+      if (!res.ok) {
+        throw new Error('Failed to clear API key');
+      }
+
+      return true;
+    } catch {
+      toast({ title: 'Error', description: 'Failed to clear API key', variant: 'destructive' });
+      return false;
+    }
+  };
+
+  const getProviderScopedKeyModels = (provider: string, excludedModelNames: string[] = []) => {
+    return Object.entries(models)
+      .filter(
+        ([modelName, modelConfig]) =>
+          !excludedModelNames.includes(modelName) &&
+          modelConfig.provider === provider &&
+          modelConfig.provider !== 'ollama' &&
+          modelKeys[modelName]?.hasKey
+      )
+      .map(([modelName]) => ({ modelName, maskedKey: modelKeys[modelName]?.maskedKey || null }));
+  };
+
+  const copyApiKeyForRow = async (modelName: string, provider: string) => {
+    const service = modelKeys[modelName]?.hasKey
+      ? `model:${modelName}`
+      : providerToService(provider);
+
+    const apiKey = await fetchApiKeyValue(service);
+    if (!apiKey) {
+      toast({
+        title: 'Error',
+        description: 'API key is not available for copying',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    const copied = await copyTextToClipboard(apiKey);
+    if (!copied) {
+      toast({
+        title: 'Error',
+        description: 'Failed to copy API key',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    toast({ title: 'Copied', description: `API key copied from ${service}` });
+  };
+
+  const startEditingRow = (row: ModelRowData) => {
+    setEditingRowId(row.modelName);
+    setRowDraft({
+      modelName: row.modelName,
+      provider: row.provider,
+      modelId: row.modelId,
+      apiKey: '',
+      selectedKeySourceModel: '',
+      clearCustomKey: false,
+    });
+  };
+
+  const cancelEditingRow = () => {
+    setEditingRowId(null);
+    setRowDraft(null);
+  };
+
+  const startAddingRow = () => {
+    if (editingRowId) {
+      toast({
+        title: 'Finish current edit first',
+        description: 'Save or cancel the active row before adding a new model.',
+      });
+      return;
+    }
+
+    setIsAddingRow(true);
+    setNewRowDraft({ ...EMPTY_DRAFT });
+  };
+
+  const cancelAddingRow = () => {
+    setIsAddingRow(false);
+    setNewRowDraft({ ...EMPTY_DRAFT });
+  };
+
+  const handleSaveRow = async () => {
+    if (!editingRowId || !rowDraft) {
+      return;
+    }
+
+    const originalModelName = editingRowId;
+    const targetModelName = rowDraft.modelName.trim();
+    const targetModelId = rowDraft.modelId.trim();
+    const originalModelConfig = models[originalModelName];
+
+    if (!originalModelConfig) {
+      return;
+    }
+
+    if (!targetModelName || !targetModelId) {
+      toast({
+        title: 'Error',
+        description: 'Model name and model ID are required',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    if (originalModelName === 'default' && targetModelName !== 'default') {
+      toast({
+        title: 'Error',
+        description: 'The default model name cannot be changed',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    if (targetModelName !== originalModelName && models[targetModelName]) {
+      toast({
+        title: 'Error',
+        description: 'A model with this name already exists',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    setIsSavingRow(true);
+
+    const renamed = targetModelName !== originalModelName;
+    const hadCustomKey = Boolean(modelKeys[originalModelName]?.hasKey);
+    const hasManualApiKey = Boolean(rowDraft.apiKey.trim());
+    const hasKeyReuseSource = Boolean(rowDraft.selectedKeySourceModel);
+
+    let keyOperationOk = true;
+
+    if (rowDraft.provider !== 'ollama') {
+      if (hasKeyReuseSource) {
+        keyOperationOk = await copyModelApiKey(targetModelName, rowDraft.selectedKeySourceModel);
+      } else if (hasManualApiKey) {
+        keyOperationOk = await saveModelApiKey(targetModelName, rowDraft.apiKey.trim());
+      } else if (rowDraft.clearCustomKey && hadCustomKey) {
+        keyOperationOk = await deleteModelApiKey(originalModelName);
+      } else if (renamed && hadCustomKey) {
+        keyOperationOk = await copyModelApiKey(targetModelName, originalModelName);
+      }
+    } else if (hadCustomKey) {
+      keyOperationOk = await deleteModelApiKey(originalModelName);
+    }
+
+    if (keyOperationOk && renamed && hadCustomKey && (hasKeyReuseSource || hasManualApiKey)) {
+      keyOperationOk = await deleteModelApiKey(originalModelName);
+    }
+
+    if (!keyOperationOk) {
+      setIsSavingRow(false);
+      return;
+    }
+
+    const nextModelConfig = {
+      ...originalModelConfig,
+      provider: rowDraft.provider as ProviderType,
+      id: targetModelId,
+    };
+
+    if (rowDraft.provider !== 'ollama') {
+      delete nextModelConfig.host;
+    }
+
+    updateModel(targetModelName, nextModelConfig);
+    if (renamed) {
+      deleteModel(originalModelName);
+    }
+
+    await fetchAllKeyStatuses();
+    setIsSavingRow(false);
+    cancelEditingRow();
+
+    toast({
+      title: 'Model Updated',
+      description: renamed
+        ? `Model ${originalModelName} renamed to ${targetModelName}`
+        : `Model ${targetModelName} updated`,
+    });
+  };
+
+  const handleSaveNewRow = async () => {
+    const modelName = newRowDraft.modelName.trim();
+    const modelId = newRowDraft.modelId.trim();
+
+    if (!modelName || !modelId) {
+      toast({
+        title: 'Error',
+        description: 'Model name and model ID are required',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    if (models[modelName]) {
+      toast({
+        title: 'Error',
+        description: 'A model with this name already exists',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    setIsSavingNewRow(true);
+
+    let keyOperationOk = true;
+    if (newRowDraft.provider !== 'ollama') {
+      if (newRowDraft.selectedKeySourceModel) {
+        keyOperationOk = await copyModelApiKey(modelName, newRowDraft.selectedKeySourceModel);
+      } else if (newRowDraft.apiKey.trim()) {
+        keyOperationOk = await saveModelApiKey(modelName, newRowDraft.apiKey.trim());
+      }
+    }
+
+    if (!keyOperationOk) {
+      setIsSavingNewRow(false);
+      return;
+    }
+
+    updateModel(modelName, {
+      provider: newRowDraft.provider as ProviderType,
+      id: modelId,
+    });
+
+    await fetchAllKeyStatuses();
+    setIsSavingNewRow(false);
+    cancelAddingRow();
+
+    toast({ title: 'Model Added', description: `Model ${modelName} has been added` });
+  };
+
+  const handleDeleteModel = (modelName: string) => {
+    if (modelName === 'default') {
       toast({
         title: 'Cannot Delete',
         description: 'The default model cannot be deleted',
@@ -281,110 +591,375 @@ export function ModelConfig() {
       });
       return;
     }
-    if (confirm(`Delete model "${modelId}"?`)) {
-      deleteModel(modelId);
-      toast({ title: 'Model Deleted', description: `Model ${modelId} has been removed` });
+
+    if (confirm(`Delete model "${modelName}"?`)) {
+      deleteModel(modelName);
+      toast({ title: 'Model Deleted', description: `Model ${modelName} has been removed` });
     }
   };
 
-  const modelsWithKeys = Object.entries(config.models)
-    .filter(([id, m]) => m.provider !== 'ollama' && modelKeys[id]?.hasKey)
-    .map(([id, m]) => ({ id, provider: m.provider }));
+  const rows = useMemo<ModelRowData[]>(() => {
+    return Object.entries(models).map(([modelName, modelConfig]) => {
+      const keyDisplay = getKeyStatusDisplay(
+        modelName,
+        modelConfig.provider,
+        modelKeys,
+        providerKeys
+      );
 
-  const currentEditId = isAddingModel ? modelForm.configId : editingModel;
-  const copyableModels = modelsWithKeys.filter(m => m.id !== currentEditId);
+      return {
+        modelName,
+        provider: modelConfig.provider,
+        providerName: getProviderInfo(modelConfig.provider).name,
+        modelId: modelConfig.id,
+        modelConfig,
+        keyDisplay,
+      };
+    });
+  }, [models, modelKeys, providerKeys]);
 
-  const renderApiKeyField = () => {
-    if (modelForm.provider === 'ollama') return null;
-
-    const targetId = isAddingModel ? modelForm.configId : editingModel;
-    const modelKey = targetId ? modelKeys[targetId] : undefined;
-    const hasCustomKey = modelKey?.hasKey;
+  const renderReadonlyKeyStatus = (
+    keyDisplay: KeyDisplayInfo | null,
+    modelName?: string,
+    provider?: string
+  ) => {
+    if (!keyDisplay) {
+      return <span className="text-sm text-muted-foreground">N/A</span>;
+    }
 
     return (
-      <FieldGroup label="API Key" htmlFor="dialog-api-key">
-        {hasCustomKey && !showKeyInput ? (
-          <div className="flex items-center gap-2">
-            <Badge variant="outline" className="bg-green-500/10 text-green-600 dark:text-green-400">
-              <Key className="h-3 w-3 mr-1" />
-              {modelKey.maskedKey}
-            </Badge>
+      <div className="space-y-1">
+        <div className="flex items-center gap-1.5">
+          <Badge
+            variant="outline"
+            className={cn(
+              'text-xs',
+              getKeyBadgeColorClass(keyDisplay.hasKey ? keyDisplay.keyId : null)
+            )}
+          >
+            {keyDisplay.label}
+            {keyDisplay.maskedKey && (
+              <span className="ml-1 font-mono opacity-80">{keyDisplay.maskedKey}</span>
+            )}
+          </Badge>
+          {keyDisplay.hasKey && modelName && provider && (
             <Button
-              size="sm"
+              size="icon"
               variant="ghost"
-              onClick={() => setShowKeyInput(true)}
-              className="h-7 text-xs"
+              className="h-6 w-6"
+              title="Copy API key"
+              onClick={event => {
+                event.stopPropagation();
+                void copyApiKeyForRow(modelName, provider);
+              }}
             >
-              Change
+              <Copy className="h-3.5 w-3.5" />
             </Button>
-            {targetId && (
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground">Source: {keyDisplay.sourceLabel}</p>
+      </div>
+    );
+  };
+
+  const renderEditableApiCell = (
+    draft: RowDraft,
+    setDraft: Dispatch<SetStateAction<RowDraft>>,
+    currentModelName?: string
+  ) => {
+    if (draft.provider === 'ollama') {
+      return <span className="text-xs text-muted-foreground">No key needed for Ollama</span>;
+    }
+
+    const providerKeyOptions = getProviderScopedKeyModels(
+      draft.provider,
+      currentModelName ? [currentModelName] : []
+    );
+
+    const hasCustomKey = Boolean(currentModelName && modelKeys[currentModelName]?.hasKey);
+    const currentStatus = currentModelName
+      ? getKeyStatusDisplay(currentModelName, draft.provider, modelKeys, providerKeys)
+      : null;
+
+    return (
+      <div className="space-y-2" onClick={event => event.stopPropagation()}>
+        {currentStatus && currentModelName && (
+          <div className="space-y-1">
+            {renderReadonlyKeyStatus(currentStatus, currentModelName, draft.provider)}
+            {hasCustomKey && (
               <Button
                 size="sm"
                 variant="ghost"
-                onClick={() => handleClearModelKey(targetId)}
-                className="h-7 text-xs text-destructive hover:text-destructive"
+                className="h-7 px-2 text-xs text-destructive hover:text-destructive"
+                onClick={() => {
+                  setDraft(current => ({
+                    ...current,
+                    clearCustomKey: true,
+                    apiKey: '',
+                    selectedKeySourceModel: '',
+                  }));
+                }}
               >
-                <X className="h-3 w-3 mr-1" />
-                Clear
+                <X className="mr-1 h-3 w-3" />
+                Clear custom key
               </Button>
             )}
           </div>
-        ) : (
-          <div className="space-y-2">
-            <div className="flex gap-1">
-              <Input
-                id="dialog-api-key"
-                type="password"
-                value={modelForm.api_key || ''}
-                onChange={e => setModelForm({ ...modelForm, api_key: e.target.value })}
-                placeholder="Leave blank to use provider-level key"
-                className="h-9 text-sm"
-              />
-              {hasCustomKey && showKeyInput && (
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  onClick={() => setShowKeyInput(false)}
-                  className="h-9 w-9 shrink-0"
-                  title="Cancel"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </Button>
-              )}
-            </div>
-            {copyableModels.length > 0 && (
-              <Select
-                onValueChange={sourceId => targetId && handleCopyKeyFrom(targetId, sourceId)}
-                value=""
-              >
-                <SelectTrigger className="h-8 text-xs text-muted-foreground">
-                  <div className="flex items-center gap-1.5">
-                    <Copy className="h-3 w-3" />
-                    <span>Use key from another model...</span>
-                  </div>
-                </SelectTrigger>
-                <SelectContent>
-                  {copyableModels.map(m => (
-                    <SelectItem key={m.id} value={m.id}>
-                      <div className="flex items-center gap-2">
-                        <ProviderLogo provider={m.provider} className="h-3.5 w-3.5" />
-                        <span>{m.id}</span>
-                        {modelKeys[m.id]?.maskedKey && (
-                          <span className="text-muted-foreground text-xs">
-                            ({modelKeys[m.id].maskedKey})
-                          </span>
-                        )}
-                      </div>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            )}
-          </div>
         )}
-      </FieldGroup>
+
+        <Input
+          type="password"
+          value={draft.apiKey}
+          onChange={event => {
+            const apiKey = event.target.value;
+            setDraft(current => ({
+              ...current,
+              apiKey,
+              selectedKeySourceModel: '',
+              clearCustomKey: false,
+            }));
+          }}
+          placeholder="Paste new API key"
+          className="h-8 text-xs"
+        />
+
+        {providerKeyOptions.length > 0 && (
+          <Select
+            value={draft.selectedKeySourceModel || NONE_OPTION_VALUE}
+            onValueChange={modelName => {
+              if (modelName === NONE_OPTION_VALUE) {
+                setDraft(current => ({ ...current, selectedKeySourceModel: '' }));
+                return;
+              }
+
+              setDraft(current => ({
+                ...current,
+                selectedKeySourceModel: modelName,
+                apiKey: '',
+                clearCustomKey: false,
+              }));
+            }}
+          >
+            <SelectTrigger className="h-8 text-xs">
+              <div className="flex items-center gap-1.5 truncate">
+                <Copy className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">
+                  {draft.selectedKeySourceModel
+                    ? `Reuse key from ${draft.selectedKeySourceModel}`
+                    : 'Reuse from same provider'}
+                </span>
+              </div>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={NONE_OPTION_VALUE}>Do not reuse key</SelectItem>
+              {providerKeyOptions.map(option => (
+                <SelectItem key={option.modelName} value={option.modelName}>
+                  <div className="flex items-center gap-2">
+                    <span>{option.modelName}</span>
+                    {option.maskedKey && (
+                      <span className="text-xs text-muted-foreground">({option.maskedKey})</span>
+                    )}
+                  </div>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+      </div>
     );
   };
+
+  const columns: ColumnDef<ModelRowData>[] = [
+    {
+      accessorKey: 'modelName',
+      header: ({ column }) => <SortableHeader label="Name" column={column} />,
+      cell: ({ row }) => {
+        const isEditing = editingRowId === row.original.modelName && rowDraft;
+        if (!isEditing) {
+          return <span className="font-medium">{row.original.modelName}</span>;
+        }
+
+        return (
+          <Input
+            value={rowDraft.modelName}
+            onChange={event => {
+              const modelName = event.target.value;
+              setRowDraft(current => (current ? { ...current, modelName } : current));
+            }}
+            onClick={event => event.stopPropagation()}
+            disabled={row.original.modelName === 'default'}
+            className="h-8 text-xs"
+          />
+        );
+      },
+    },
+    {
+      id: 'provider',
+      accessorFn: row => row.providerName,
+      header: ({ column }) => <SortableHeader label="Provider" column={column} />,
+      cell: ({ row }) => {
+        const isEditing = editingRowId === row.original.modelName && rowDraft;
+        if (!isEditing) {
+          return (
+            <div className="flex items-center gap-1.5">
+              <ProviderLogo provider={row.original.provider} className="h-4 w-4" />
+              <span>{row.original.providerName}</span>
+            </div>
+          );
+        }
+
+        return (
+          <div onClick={event => event.stopPropagation()}>
+            <Select
+              value={rowDraft.provider}
+              onValueChange={provider => {
+                setRowDraft(current =>
+                  current
+                    ? {
+                        ...current,
+                        provider,
+                        apiKey: '',
+                        selectedKeySourceModel: '',
+                        clearCustomKey: provider === 'ollama' ? true : current.clearCustomKey,
+                      }
+                    : current
+                );
+              }}
+            >
+              <SelectTrigger className="h-8 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {getProviderList().map(provider => (
+                  <SelectItem key={provider.id} value={provider.id}>
+                    <div className="flex items-center gap-2">
+                      <ProviderLogo provider={provider.id} className="h-4 w-4" />
+                      <span>{provider.name}</span>
+                    </div>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        );
+      },
+    },
+    {
+      accessorKey: 'modelId',
+      header: ({ column }) => <SortableHeader label="Model ID" column={column} />,
+      cell: ({ row }) => {
+        const isEditing = editingRowId === row.original.modelName && rowDraft;
+        if (!isEditing) {
+          return (
+            <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{row.original.modelId}</code>
+          );
+        }
+
+        return (
+          <Input
+            value={rowDraft.modelId}
+            onChange={event => {
+              const modelId = event.target.value;
+              setRowDraft(current => (current ? { ...current, modelId } : current));
+            }}
+            onClick={event => event.stopPropagation()}
+            className="h-8 text-xs"
+          />
+        );
+      },
+    },
+    {
+      id: 'apiKey',
+      accessorFn: row => row.keyDisplay?.keyId || '',
+      header: ({ column }) => <SortableHeader label="API Key" column={column} />,
+      cell: ({ row }) => {
+        const isEditing = editingRowId === row.original.modelName && rowDraft;
+        if (!isEditing) {
+          return renderReadonlyKeyStatus(
+            row.original.keyDisplay,
+            row.original.modelName,
+            row.original.provider
+          );
+        }
+
+        return renderEditableApiCell(
+          rowDraft,
+          setRowDraft as Dispatch<SetStateAction<RowDraft>>,
+          row.original.modelName
+        );
+      },
+    },
+    {
+      id: 'actions',
+      header: () => <span className="font-medium">Actions</span>,
+      enableSorting: false,
+      cell: ({ row }) => {
+        const isEditing = editingRowId === row.original.modelName;
+
+        if (isEditing) {
+          return (
+            <div className="flex justify-end gap-1" onClick={event => event.stopPropagation()}>
+              <Button
+                size="sm"
+                onClick={handleSaveRow}
+                disabled={isSavingRow}
+                className="h-7 px-2 text-xs"
+              >
+                Save
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={cancelEditingRow}
+                disabled={isSavingRow}
+                className="h-7 px-2 text-xs"
+              >
+                Cancel
+              </Button>
+            </div>
+          );
+        }
+
+        return (
+          <div className="flex justify-end gap-1" onClick={event => event.stopPropagation()}>
+            <Button
+              size="icon"
+              variant="ghost"
+              onClick={() => startEditingRow(row.original)}
+              className="h-7 w-7"
+              title="Edit"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </Button>
+            {row.original.modelName !== 'default' && (
+              <Button
+                size="icon"
+                variant="ghost"
+                onClick={() => handleDeleteModel(row.original.modelName)}
+                className="h-7 w-7 hover:bg-destructive/10"
+                title="Delete"
+              >
+                <Trash2 className="h-3.5 w-3.5 text-destructive" />
+              </Button>
+            )}
+          </div>
+        );
+      },
+    },
+  ];
+
+  const table = useReactTable({
+    data: rows,
+    columns,
+    state: { sorting },
+    onSortingChange: setSorting,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+  });
+
+  if (!config) {
+    return null;
+  }
 
   return (
     <EditorPanel
@@ -398,202 +973,177 @@ export function ModelConfig() {
     >
       <div className="space-y-4">
         <div className="flex justify-end">
-          <Button onClick={openAddDialog} variant="outline" size="sm">
-            <Plus className="h-4 w-4 mr-1.5" />
+          <Button onClick={startAddingRow} variant="outline" size="sm" disabled={isAddingRow}>
+            <Plus className="mr-1.5 h-4 w-4" />
             Add Model
           </Button>
         </div>
 
-        {/* Models Table */}
-        <div className="border rounded-lg overflow-hidden">
+        <div className="overflow-hidden rounded-lg border">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b bg-muted/50">
-                <th className="text-left font-medium px-4 py-2.5">Name</th>
-                <th className="text-left font-medium px-4 py-2.5">Provider</th>
-                <th className="text-left font-medium px-4 py-2.5">Model ID</th>
-                <th className="text-left font-medium px-4 py-2.5">API Key</th>
-                <th className="text-right font-medium px-4 py-2.5 w-20">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {sortedModels.map(([modelId, modelConfig]) => {
-                const providerInfo = getProviderInfo(modelConfig.provider);
-                const keyStatus = getKeyStatusDisplay(
-                  modelId,
-                  modelConfig.provider,
-                  modelKeys,
-                  providerKeys
-                );
-                return (
-                  <tr
-                    key={modelId}
-                    className="border-b last:border-b-0 hover:bg-muted/30 transition-colors"
-                  >
-                    <td className="px-4 py-2.5 font-medium">{modelId}</td>
-                    <td className="px-4 py-2.5">
-                      <div className="flex items-center gap-1.5">
-                        <ProviderLogo provider={modelConfig.provider} className="h-4 w-4" />
-                        <span>{providerInfo.name}</span>
-                      </div>
-                    </td>
-                    <td className="px-4 py-2.5">
-                      <code className="text-xs bg-muted px-1.5 py-0.5 rounded">
-                        {modelConfig.id}
-                      </code>
-                    </td>
-                    <td className="px-4 py-2.5">
-                      {keyStatus && (
-                        <Badge variant="outline" className={cn('text-xs', keyStatus.className)}>
-                          {keyStatus.label}
-                          {keyStatus.maskedKey && (
-                            <span className="ml-1 opacity-70">{keyStatus.maskedKey}</span>
-                          )}
-                        </Badge>
+              {table.getHeaderGroups().map(headerGroup => (
+                <tr key={headerGroup.id} className="border-b bg-muted/50">
+                  {headerGroup.headers.map(header => (
+                    <th
+                      key={header.id}
+                      className={cn(
+                        'px-4 py-2.5 text-left align-middle',
+                        header.column.id === 'actions' ? 'w-40 text-right' : ''
                       )}
-                    </td>
-                    <td className="px-4 py-2.5 text-right">
-                      <div className="flex justify-end gap-1">
-                        <Button
-                          size="icon"
-                          variant="ghost"
-                          onClick={() => openEditDialog(modelId, modelConfig)}
-                          className="h-7 w-7"
-                          title="Edit"
+                    >
+                      {header.isPlaceholder
+                        ? null
+                        : flexRender(header.column.columnDef.header, header.getContext())}
+                    </th>
+                  ))}
+                </tr>
+              ))}
+            </thead>
+
+            <tbody>
+              {isAddingRow && (
+                <tr className="border-b bg-muted/20">
+                  <td className="px-4 py-2.5 align-middle">
+                    <Input
+                      value={newRowDraft.modelName}
+                      onChange={event => {
+                        const modelName = event.target.value;
+                        setNewRowDraft(current => ({ ...current, modelName }));
+                      }}
+                      className="h-8 text-xs"
+                      placeholder="model name"
+                    />
+                  </td>
+                  <td className="px-4 py-2.5 align-middle">
+                    <Select
+                      value={newRowDraft.provider}
+                      onValueChange={provider => {
+                        setNewRowDraft(current => ({
+                          ...current,
+                          provider,
+                          apiKey: '',
+                          selectedKeySourceModel: '',
+                        }));
+                      }}
+                    >
+                      <SelectTrigger className="h-8 text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {getProviderList().map(provider => (
+                          <SelectItem key={provider.id} value={provider.id}>
+                            <div className="flex items-center gap-2">
+                              <ProviderLogo provider={provider.id} className="h-4 w-4" />
+                              <span>{provider.name}</span>
+                            </div>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </td>
+                  <td className="px-4 py-2.5 align-middle">
+                    <Input
+                      value={newRowDraft.modelId}
+                      onChange={event => {
+                        const modelId = event.target.value;
+                        setNewRowDraft(current => ({ ...current, modelId }));
+                      }}
+                      className="h-8 text-xs"
+                      placeholder="provider model id"
+                    />
+                  </td>
+                  <td className="px-4 py-2.5 align-middle">
+                    {renderEditableApiCell(newRowDraft, setNewRowDraft)}
+                  </td>
+                  <td className="px-4 py-2.5 align-middle text-right">
+                    <div className="flex justify-end gap-1">
+                      <Button
+                        size="sm"
+                        onClick={handleSaveNewRow}
+                        disabled={isSavingNewRow}
+                        className="h-7 px-2 text-xs"
+                      >
+                        Add
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={cancelAddingRow}
+                        disabled={isSavingNewRow}
+                        className="h-7 px-2 text-xs"
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  </td>
+                </tr>
+              )}
+
+              {table.getRowModel().rows.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="px-4 py-6 text-center text-sm text-muted-foreground">
+                    No models configured.
+                  </td>
+                </tr>
+              ) : (
+                table.getRowModel().rows.map(row => {
+                  const isEditing = editingRowId === row.original.modelName;
+                  return (
+                    <tr
+                      key={row.id}
+                      onClick={() => {
+                        if (isAddingRow) {
+                          toast({
+                            title: 'Finish adding first',
+                            description:
+                              'Save or cancel the new model row before editing another row.',
+                          });
+                          return;
+                        }
+
+                        if (editingRowId && editingRowId !== row.original.modelName) {
+                          toast({
+                            title: 'Finish current edit first',
+                            description:
+                              'Save or cancel the active row before editing another one.',
+                          });
+                          return;
+                        }
+
+                        if (!editingRowId) {
+                          startEditingRow(row.original);
+                        }
+                      }}
+                      className={cn(
+                        'border-b transition-colors last:border-b-0',
+                        isEditing ? 'bg-muted/20' : 'cursor-pointer hover:bg-muted/30'
+                      )}
+                    >
+                      {row.getVisibleCells().map(cell => (
+                        <td
+                          key={cell.id}
+                          className={cn(
+                            'px-4 py-2.5 align-middle',
+                            cell.column.id === 'actions' ? 'text-right' : ''
+                          )}
                         >
-                          <Pencil className="h-3.5 w-3.5" />
-                        </Button>
-                        {modelId !== 'default' && (
-                          <Button
-                            size="icon"
-                            variant="ghost"
-                            onClick={() => handleDeleteModel(modelId)}
-                            className="h-7 w-7 hover:bg-destructive/10"
-                            title="Delete"
-                          >
-                            <Trash2 className="h-3.5 w-3.5 text-destructive" />
-                          </Button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
+                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                        </td>
+                      ))}
+                    </tr>
+                  );
+                })
+              )}
             </tbody>
           </table>
         </div>
 
-        {/* Save All Changes */}
         <Button onClick={() => saveConfig()} variant="default" className="w-full">
-          <Save className="h-4 w-4 mr-2" />
+          <Save className="mr-2 h-4 w-4" />
           Save All Changes
         </Button>
       </div>
-
-      {/* Add/Edit Dialog */}
-      <Dialog
-        open={dialogOpen}
-        onOpenChange={open => {
-          if (!open) resetForm();
-        }}
-      >
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>{isAddingModel ? 'Add New Model' : `Edit: ${editingModel}`}</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4 py-2">
-            {isAddingModel && (
-              <FieldGroup label="Configuration Name" required htmlFor="dialog-config-name">
-                <Input
-                  id="dialog-config-name"
-                  value={modelForm.configId}
-                  onChange={e => setModelForm({ ...modelForm, configId: e.target.value })}
-                  placeholder="e.g., my-gpt4, claude-sonnet"
-                  className="h-9"
-                />
-              </FieldGroup>
-            )}
-
-            <FieldGroup label="Provider" required htmlFor="dialog-provider">
-              <Select
-                value={modelForm.provider}
-                onValueChange={value => setModelForm({ ...modelForm, provider: value })}
-              >
-                <SelectTrigger id="dialog-provider" className="h-9">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {getProviderList().map(provider => (
-                    <SelectItem key={provider.id} value={provider.id}>
-                      <div className="flex items-center gap-2">
-                        <ProviderLogo provider={provider.id} className="h-4 w-4" />
-                        <span>{provider.name}</span>
-                      </div>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </FieldGroup>
-
-            <FieldGroup label="Model ID" required htmlFor="dialog-model-id">
-              <Input
-                id="dialog-model-id"
-                value={modelForm.id}
-                onChange={e => setModelForm({ ...modelForm, id: e.target.value })}
-                placeholder="e.g., gpt-4, claude-sonnet-4-latest"
-                className="h-9"
-              />
-            </FieldGroup>
-
-            {modelForm.provider === 'ollama' && (
-              <FieldGroup label="Host" htmlFor="dialog-host">
-                <Input
-                  id="dialog-host"
-                  value={modelForm.host || ''}
-                  onChange={e => setModelForm({ ...modelForm, host: e.target.value })}
-                  placeholder="http://localhost:11434"
-                  className="h-9"
-                />
-              </FieldGroup>
-            )}
-
-            {modelForm.provider === 'openai' && (
-              <FieldGroup label="Base URL" htmlFor="dialog-base-url">
-                <Input
-                  id="dialog-base-url"
-                  value={modelForm.base_url || ''}
-                  onChange={e => setModelForm({ ...modelForm, base_url: e.target.value })}
-                  placeholder="https://api.openai.com/v1"
-                  className="h-9"
-                />
-              </FieldGroup>
-            )}
-
-            {renderApiKeyField()}
-
-            <FieldGroup label="Advanced Settings (JSON)" htmlFor="dialog-extra-kwargs">
-              <Textarea
-                id="dialog-extra-kwargs"
-                value={modelForm.extra_kwargs || ''}
-                onChange={e => setModelForm({ ...modelForm, extra_kwargs: e.target.value })}
-                placeholder='{ "temperature": 0.7 }'
-                className="font-mono text-xs min-h-[60px]"
-              />
-            </FieldGroup>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={resetForm}>
-              Cancel
-            </Button>
-            <Button
-              onClick={handleSaveModel}
-              disabled={isAddingModel ? !modelForm.configId || !modelForm.id : !modelForm.id}
-            >
-              {isAddingModel ? 'Add' : 'Save'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </EditorPanel>
   );
 }
