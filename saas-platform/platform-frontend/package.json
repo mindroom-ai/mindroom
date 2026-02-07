@@ -2,6 +2,7 @@
   "name": "platform-frontend",
   "version": "0.1.0",
   "private": true,
+  "license": "BUSL-1.1",
   "scripts": {
     "dev": "NEXT_PUBLIC_DEV_AUTH=true next dev --turbopack -H 0.0.0.0",
     "build": "next build",
