@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { Config, Agent, Team, Room, ModelConfig, APIKey } from '@/types/config';
+import { Config, Agent, Team, Room, ModelConfig } from '@/types/config';
 import * as configService from '@/services/configService';
 
 interface ConfigState {
@@ -11,7 +11,6 @@ interface ConfigState {
   selectedAgentId: string | null;
   selectedTeamId: string | null;
   selectedRoomId: string | null;
-  apiKeys: Record<string, APIKey>;
   isDirty: boolean;
   isLoading: boolean;
   error: string | null;
@@ -38,8 +37,6 @@ interface ConfigState {
   updateMemoryConfig: (memoryConfig: { provider: string; model: string; host?: string }) => void;
   updateModel: (modelId: string, updates: Partial<ModelConfig>) => void;
   deleteModel: (modelId: string) => void;
-  setAPIKey: (provider: string, key: string) => void;
-  testModel: (modelId: string) => Promise<boolean>;
   updateToolConfig: (toolId: string, config: any) => void;
   markDirty: () => void;
   clearError: () => void;
@@ -54,7 +51,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   selectedAgentId: null,
   selectedTeamId: null,
   selectedRoomId: null,
-  apiKeys: {},
   isDirty: false,
   isLoading: false,
   error: null,
@@ -493,31 +489,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         isDirty: true,
       };
     });
-  },
-
-  // Set an API key
-  setAPIKey: (provider, key) => {
-    set(state => ({
-      apiKeys: {
-        ...state.apiKeys,
-        [provider]: {
-          provider,
-          key,
-          isEncrypted: false,
-        },
-      },
-    }));
-  },
-
-  // Test a model connection
-  testModel: async modelId => {
-    try {
-      const result = await configService.testModel(modelId);
-      return result;
-    } catch (error) {
-      console.error('Failed to test model:', error);
-      return false;
-    }
   },
 
   // Update tool configuration

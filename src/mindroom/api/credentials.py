@@ -130,6 +130,23 @@ async def delete_credentials(service: str) -> dict[str, str]:
     return {"status": "success", "message": f"Credentials deleted for {service}"}
 
 
+@router.post("/{service}/copy-from/{source_service}")
+async def copy_credentials(service: str, source_service: str) -> dict[str, str]:
+    """Copy credentials from one service to another."""
+    manager = get_credentials_manager()
+    source_creds = manager.load_credentials(source_service)
+
+    if not source_creds:
+        raise HTTPException(status_code=404, detail=f"No credentials found for {source_service}")
+
+    # Copy credentials, marking as UI-sourced
+    target_creds = {k: v for k, v in source_creds.items() if not k.startswith("_")}
+    target_creds["_source"] = "ui"
+    manager.save_credentials(service, target_creds)
+
+    return {"status": "success", "message": f"Credentials copied from {source_service} to {service}"}
+
+
 @router.post("/{service}/test")
 async def test_credentials(service: str) -> dict[str, Any]:
     """Test if credentials are valid for a service."""

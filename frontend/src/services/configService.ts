@@ -37,23 +37,6 @@ export async function saveConfig(config: Config): Promise<void> {
   }
 }
 
-export async function testModel(modelId: string): Promise<boolean> {
-  const response = await fetch(`${API_BASE}/test/model`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ modelId }),
-  });
-
-  if (!response.ok) {
-    return false;
-  }
-
-  const result = await response.json();
-  return result.success;
-}
-
 export async function encryptAPIKey(provider: string, key: string): Promise<string> {
   const response = await fetch(`${API_BASE}/keys/encrypt`, {
     method: 'POST',
