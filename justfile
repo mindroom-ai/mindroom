@@ -10,18 +10,17 @@ default:
 # Local dev (all-in-one)
 ###########################
 
-# Start full local dev stack (Matrix + Element + Backend + Frontend)
+# Start MindRoom backend + frontend (expects Matrix already running on :8008)
 dev:
     #!/usr/bin/env bash
     set -euo pipefail
     trap 'kill $(jobs -p) 2>/dev/null' EXIT
 
-    # Start Matrix + Element containers
-    (cd local/matrix && docker compose up -d)
-
-    echo "⏳ Waiting for Synapse..."
-    until curl -sf http://localhost:8008/_matrix/client/versions >/dev/null 2>&1; do sleep 1; done
-    echo "✅ Synapse ready"
+    # Verify Matrix is reachable
+    if ! curl -sf http://localhost:8008/_matrix/client/versions >/dev/null 2>&1; then
+        echo "❌ Matrix not running on :8008. Start it first (e.g. mindroom-stack or just local-matrix-up)"
+        exit 1
+    fi
 
     # Use local Matrix homeserver
     export MATRIX_HOMESERVER=http://localhost:8008
@@ -42,16 +41,11 @@ dev:
 
     echo ""
     echo "✅ Dev stack running:"
-    echo "   Frontend:  http://localhost:3003        → https://mindroom-dev.lab.nijho.lt"
-    echo "   Backend:   http://localhost:8765/api     → https://mindroom-dev.lab.nijho.lt/api"
-    echo "   Matrix:    http://localhost:8008         → https://matrix-dev.lab.nijho.lt"
+    echo "   Frontend:  http://localhost:3003    → https://mindroom-dev.lab.nijho.lt"
+    echo "   Backend:   http://localhost:8765    → https://mindroom-dev.lab.nijho.lt/api"
     echo ""
 
     wait
-
-# Stop local dev containers (Matrix + Element)
-dev-down:
-    cd local/matrix && docker compose down
 
 default_instance := env_var_or_default("INSTANCE", "default")
 default_matrix   := env_var_or_default("MATRIX", "tuwunel")
