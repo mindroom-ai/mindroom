@@ -266,3 +266,37 @@ def test_markdown_to_html_does_not_group_separated_tools() -> None:
     body = "<tool>a\nb</tool>\n\nSome text\n\n<tool>c\nd</tool>"
     html = markdown_to_html(body)
     assert "<tool-group>" not in html
+
+
+# --- Contract test: full pending→completed→HTML pipeline ---
+
+
+def test_tool_lifecycle_produces_expected_html() -> None:
+    """Full pipeline: started → completed → markdown_to_html must produce the exact HTML the frontend expects.
+
+    This is a contract test — if the output format changes, the corresponding
+    frontend test (collapsible-test.tsx "renders backend contract HTML") must
+    be updated in sync.
+    """
+    # 1. Two tool calls start (pending)
+    text1, _ = format_tool_started("save_file", {"file": "a.py"})
+    text2, _ = format_tool_started("run_shell", {"cmd": "pwd"})
+    body = text1 + text2
+
+    # 2. Both complete
+    body, _ = complete_pending_tool_block(body, "save_file", "ok")
+    body, _ = complete_pending_tool_block(body, "run_shell", "/app")
+
+    # 3. Convert to HTML
+    html = markdown_to_html(body)
+
+    # Contract assertions — the frontend relies on this exact structure:
+    # - No <p> wrapping, no <br> conversion
+    assert "<p>" not in html
+    assert "<br" not in html
+    # - Consecutive completed blocks grouped in <tool-group>
+    assert "<tool-group>" in html
+    assert html.count("<tool>") == 2
+    # - Call and result separated by \n inside each <tool> block
+    assert "save_file(file=a.py)\nok</tool>" in html
+    assert "run_shell(cmd=pwd)\n/app</tool>" in html
