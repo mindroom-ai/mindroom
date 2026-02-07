@@ -314,82 +314,58 @@ defaults:
 memory:
   embedder:
     config:
-      host: http://localhost:9292/v1
+      host: http://llama.local/v1
       model: embeddinggemma:300m
     provider: openai
   llm:
     config:
       model: gpt-oss-low:20b
-      openai_base_url: http://localhost:9292/v1
+      openai_base_url: http://llama.local/v1
       temperature: 0.1
-      top_p: 1
     provider: openai
 models:
   default:
     id: gpt-oss-low:20b
     provider: openai
     extra_kwargs:
-      base_url: http://localhost:9292/v1
+      base_url: http://llama.local/v1
   deepseek:
-    id: gpt-oss-low:20b
-    provider: openai
-    extra_kwargs:
-      base_url: http://localhost:9292/v1
+    id: deepseek-ai/deepseek-chat:free
+    provider: openrouter
   gpt_oss_120b:
-    id: gpt-oss-low:20b
-    provider: openai
-    extra_kwargs:
-      base_url: http://localhost:9292/v1
+    id: openai/gpt-oss-120b
+    provider: openrouter
   devstral:
-    id: gpt-oss-low:20b
-    provider: openai
-    extra_kwargs:
-      base_url: http://localhost:9292/v1
+    id: devstral:24b
+    provider: ollama
   glm45:
-    id: gpt-oss-low:20b
-    provider: openai
-    extra_kwargs:
-      base_url: http://localhost:9292/v1
+    id: z-ai/glm-4.5-air:free
+    provider: openrouter
   gpt4o:
-    id: gpt-oss-low:20b
+    id: gpt-4o
     provider: openai
-    extra_kwargs:
-      base_url: http://localhost:9292/v1
   gpt5mini:
-    id: gpt-oss-low:20b
+    id: gpt-5-mini
     provider: openai
-    extra_kwargs:
-      base_url: http://localhost:9292/v1
   gpt_oss:
-    id: gpt-oss-low:20b
-    provider: openai
-    extra_kwargs:
-      base_url: http://localhost:9292/v1
+    id: openai/gpt-oss-120b
+    provider: openrouter
   haiku:
-    id: gpt-oss-low:20b
-    provider: openai
-    extra_kwargs:
-      base_url: http://localhost:9292/v1
+    id: claude-3-5-haiku-latest
+    provider: anthropic
   ollama:
-    id: gpt-oss-low:20b
-    provider: openai
-    extra_kwargs:
-      base_url: http://localhost:9292/v1
+    id: devstral:24b
+    provider: ollama
+    host: http://192.168.1.143:11434
   opus:
-    id: gpt-oss-low:20b
-    provider: openai
-    extra_kwargs:
-      base_url: http://localhost:9292/v1
+    id: claude-opus-4-latest
+    provider: anthropic
   sonnet:
-    id: gpt-oss-low:20b
-    provider: openai
-    extra_kwargs:
-      base_url: http://localhost:9292/v1
+    id: claude-sonnet-4-latest
+    provider: anthropic
   gemini_flash:
-    id: gpt-oss-low:20b
-    provider: openai
-    extra_kwargs:
-      base_url: http://localhost:9292/v1
+    id: gemini-2.5-flash
+    provider: google
 room_models:
   research: haiku
 router:
