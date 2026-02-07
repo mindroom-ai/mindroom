@@ -117,7 +117,6 @@ class VoiceLLMConfig(BaseModel):
     """Configuration for voice command intelligence."""
 
     model: str = Field(default="default", description="Model for command recognition")
-    confidence_threshold: float = Field(default=0.7, description="Confidence threshold for commands")
 
 
 class VoiceConfig(BaseModel):

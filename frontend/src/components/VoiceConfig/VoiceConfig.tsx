@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Mic, Settings, Volume2, Info, ExternalLink } from 'lucide-react';
+import { Mic, Settings, Volume2, Info } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
@@ -31,12 +31,9 @@ export function VoiceConfig() {
     },
     intelligence: {
       model: 'default',
-      confidence_threshold: 0.7,
     },
     ...(config?.voice || {}),
   });
-
-  const [showAdvanced, setShowAdvanced] = useState(false);
 
   // Update local state when config changes
   useEffect(() => {
@@ -68,6 +65,9 @@ export function VoiceConfig() {
     });
   };
 
+  // Get available models from config
+  const availableModels = config?.models ? Object.keys(config.models) : [];
+
   const handleSave = async () => {
     try {
       await saveConfig();
@@ -83,9 +83,6 @@ export function VoiceConfig() {
       });
     }
   };
-
-  // Get available models from config
-  const availableModels = config?.models ? Object.keys(config.models) : [];
 
   return (
     <div className="space-y-6">
@@ -189,73 +186,38 @@ export function VoiceConfig() {
               </div>
             </div>
 
-            {/* Intelligence Configuration */}
+            {/* Command Intelligence Model */}
             <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Settings className="h-4 w-4" />
-                  <Label className="text-base font-semibold">Command Intelligence</Label>
-                </div>
-                <Button variant="ghost" size="sm" onClick={() => setShowAdvanced(!showAdvanced)}>
-                  {showAdvanced ? 'Hide' : 'Show'} Advanced
-                </Button>
+              <div className="flex items-center gap-2">
+                <Settings className="h-4 w-4" />
+                <Label className="text-base font-semibold">Command Intelligence</Label>
               </div>
 
-              {showAdvanced && (
-                <div className="grid gap-4 pl-6">
-                  <div className="space-y-2">
-                    <Label htmlFor="intelligence-model">AI Model for Processing</Label>
-                    <Select
-                      value={voiceConfig.intelligence.model}
-                      onValueChange={value => handleIntelligenceChange({ model: value })}
-                    >
-                      <SelectTrigger id="intelligence-model">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {availableModels.length > 0 ? (
-                          availableModels.map(model => (
-                            <SelectItem key={model} value={model}>
-                              {model}
-                            </SelectItem>
-                          ))
-                        ) : (
-                          <SelectItem value="default">Default Model</SelectItem>
-                        )}
-                      </SelectContent>
-                    </Select>
-                    <p className="text-xs text-muted-foreground">
-                      Model used to process transcriptions into commands and agent mentions
-                    </p>
-                  </div>
-
-                  <div className="space-y-2">
-                    <div className="flex justify-between">
-                      <Label htmlFor="confidence-threshold">Confidence Threshold</Label>
-                      <span className="text-sm text-muted-foreground">
-                        {voiceConfig.intelligence.confidence_threshold.toFixed(2)}
-                      </span>
-                    </div>
-                    <input
-                      id="confidence-threshold"
-                      type="range"
-                      min={0}
-                      max={1}
-                      step={0.05}
-                      value={voiceConfig.intelligence.confidence_threshold}
-                      onChange={e =>
-                        handleIntelligenceChange({
-                          confidence_threshold: parseFloat(e.target.value),
-                        })
-                      }
-                      className="w-full"
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      Higher values require more confidence for command recognition
-                    </p>
-                  </div>
-                </div>
-              )}
+              <div className="space-y-2">
+                <Label htmlFor="intelligence-model">AI Model for Processing</Label>
+                <Select
+                  value={voiceConfig.intelligence.model}
+                  onValueChange={value => handleIntelligenceChange({ model: value })}
+                >
+                  <SelectTrigger id="intelligence-model">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {availableModels.length > 0 ? (
+                      availableModels.map(model => (
+                        <SelectItem key={model} value={model}>
+                          {model}
+                        </SelectItem>
+                      ))
+                    ) : (
+                      <SelectItem value="default">Default Model</SelectItem>
+                    )}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Model used to process transcriptions into commands and agent mentions
+                </p>
+              </div>
             </div>
 
             {/* Save Button */}
@@ -299,20 +261,6 @@ export function VoiceConfig() {
               <span>Multi-language support (depends on STT provider)</span>
             </li>
           </ul>
-
-          <div className="mt-4 pt-4 border-t">
-            <Button variant="outline" size="sm" asChild>
-              <a
-                href="/docs/VOICE_MESSAGES.md"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-2"
-              >
-                <ExternalLink className="h-3 w-3" />
-                View Documentation
-              </a>
-            </Button>
-          </div>
         </CardContent>
       </Card>
     </div>
