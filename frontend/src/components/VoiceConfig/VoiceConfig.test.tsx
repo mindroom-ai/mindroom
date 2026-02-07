@@ -86,7 +86,6 @@ describe('VoiceConfig', () => {
     fireEvent.click(openAiOption);
 
     await waitFor(() => {
-      expect(config.voice?.stt.host).toBe('');
       expect(mockMarkDirty).toHaveBeenCalled();
       expect(
         screen.getByText('https://api.openai.com/v1/audio/transcriptions')

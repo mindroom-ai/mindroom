@@ -266,8 +266,9 @@ export function VoiceConfig() {
                     placeholder="http://localhost:8080"
                   />
                   <p className="text-xs text-muted-foreground">
-                    Base URL of your STT service. Do not include <code>/v1</code>; MindRoom appends
-                    <code> /v1/audio/transcriptions</code> automatically.
+                    {voiceConfig.stt.provider === 'openai' && normalizedHost
+                      ? 'A custom host is set. Clear it to use the default OpenAI endpoint, or switch provider to "OpenAI-compatible Endpoint".'
+                      : 'Base URL of your STT service. Do not include /v1; MindRoom appends /v1/audio/transcriptions automatically.'}
                   </p>
                 </div>
               )}
