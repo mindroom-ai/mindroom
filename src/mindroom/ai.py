@@ -19,6 +19,7 @@ from agno.run.agent import RunContentEvent, RunOutput, ToolCallCompletedEvent, T
 
 from .agents import create_agent
 from .constants import ENABLE_AI_CACHE
+from .credentials import get_credentials_manager
 from .credentials_sync import get_api_key_for_provider, get_ollama_host
 from .error_handling import get_user_friendly_error_message
 from .logging_config import get_logger
@@ -133,7 +134,7 @@ def _create_model_for_provider(provider: str, model_id: str, model_config: Model
     if provider == "openrouter":
         # OpenRouter needs the API key passed explicitly because it captures
         # the environment variable at import time, not at instantiation time
-        api_key = get_api_key_for_provider(provider)
+        api_key = extra_kwargs.pop("api_key", None) or get_api_key_for_provider(provider)
         if not api_key:
             logger.warning("No OpenRouter API key found in environment or CredentialsManager")
         return OpenRouter(id=model_id, api_key=api_key, **extra_kwargs)
@@ -182,11 +183,19 @@ def get_model_instance(config: Config, model_name: str = "default") -> Model:
 
     logger.info("Using AI model", model=model_name, provider=provider, id=model_id)
 
-    # Set environment variable from CredentialsManager for Agno to use
-    _set_api_key_env_var(provider)
-
     # Get extra kwargs if specified
-    extra_kwargs = model_config.extra_kwargs or {}
+    extra_kwargs = dict(model_config.extra_kwargs or {})
+
+    # Check for model-specific API key first, then fall back to provider-level
+    creds_manager = get_credentials_manager()
+    model_creds = creds_manager.load_credentials(f"model:{model_name}")
+    model_api_key = model_creds.get("api_key") if model_creds else None
+
+    if model_api_key:
+        extra_kwargs["api_key"] = model_api_key
+    else:
+        # Set environment variable from CredentialsManager for Agno to use
+        _set_api_key_env_var(provider)
 
     return _create_model_for_provider(provider, model_id, model_config, extra_kwargs)
 

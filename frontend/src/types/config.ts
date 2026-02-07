@@ -82,9 +82,3 @@ export interface Config {
   tools?: Record<string, any>; // Tool configurations
   voice?: VoiceConfig; // Voice configuration
 }
-
-export interface APIKey {
-  provider: string;
-  key: string;
-  isEncrypted: boolean;
-}

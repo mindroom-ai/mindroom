@@ -89,15 +89,19 @@ async def set_api_key(service: str, request: SetApiKeyRequest) -> dict[str, str]
 
 
 @router.get("/{service}/api-key")
-async def get_api_key(service: str, key_name: str = "api_key") -> dict[str, Any]:
-    """Get the API key for a service (returns only existence status for security)."""
+async def get_api_key(
+    service: str,
+    key_name: str = "api_key",
+    include_value: bool = False,
+) -> dict[str, Any]:
+    """Get API key metadata for a service, and optionally the full key value."""
     manager = get_credentials_manager()
     credentials = manager.load_credentials(service) or {}
     api_key = credentials.get(key_name)
 
     if api_key:
         source = credentials.get("_source")
-        return {
+        response = {
             "service": service,
             "has_key": True,
             "key_name": key_name,
@@ -105,6 +109,9 @@ async def get_api_key(service: str, key_name: str = "api_key") -> dict[str, Any]
             "masked_key": f"{api_key[:4]}...{api_key[-4:]}" if len(api_key) > 8 else "****",
             "source": source,
         }
+        if include_value:
+            response["api_key"] = api_key
+        return response
 
     return {"service": service, "has_key": False, "key_name": key_name}
 
@@ -128,6 +135,23 @@ async def delete_credentials(service: str) -> dict[str, str]:
     manager.delete_credentials(service)
 
     return {"status": "success", "message": f"Credentials deleted for {service}"}
+
+
+@router.post("/{service}/copy-from/{source_service}")
+async def copy_credentials(service: str, source_service: str) -> dict[str, str]:
+    """Copy credentials from one service to another."""
+    manager = get_credentials_manager()
+    source_creds = manager.load_credentials(source_service)
+
+    if not source_creds:
+        raise HTTPException(status_code=404, detail=f"No credentials found for {source_service}")
+
+    # Copy credentials, marking as UI-sourced
+    target_creds = {k: v for k, v in source_creds.items() if not k.startswith("_")}
+    target_creds["_source"] = "ui"
+    manager.save_credentials(service, target_creds)
+
+    return {"status": "success", "message": f"Credentials copied from {source_service} to {service}"}
 
 
 @router.post("/{service}/test")
