@@ -99,8 +99,10 @@ class TestMemoryFunctions:
         """Test error handling in add_agent_memory."""
         mock_memory.add.side_effect = Exception("Memory error")
 
-        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
-            # Should not raise, just log error
+        with (
+            patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory),
+            pytest.raises(Exception, match="Memory error"),
+        ):
             await add_agent_memory("Test content", "test_agent", storage_path, config)
 
     @pytest.mark.asyncio

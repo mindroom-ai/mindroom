@@ -180,6 +180,45 @@ class TestConsolidatedConfigManager:
         assert "Error: Unknown operation" in result
         assert "Valid options: create, update, validate" in result
 
+    def test_manage_agent_with_memory_tool(self) -> None:
+        """Regression: memory tool must be accepted in create/update/validate."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            config_path = Path(f.name)
+            Config(agents={}).save_to_yaml(config_path)
+
+        try:
+            cm = ConfigManagerTools(config_path)
+
+            # Create accepts memory
+            result = cm.manage_agent(
+                operation="create",
+                agent_name="mem_agent",
+                display_name="Mem Agent",
+                role="Remembers things",
+                tools=["memory"],
+                model="default",
+            )
+            assert "Successfully created" in result
+            assert "Error" not in result
+
+            # Update accepts memory alongside other tools
+            result = cm.manage_agent(
+                operation="update",
+                agent_name="mem_agent",
+                tools=["memory", "calculator"],
+            )
+            assert "Successfully updated" in result
+            assert "Error" not in result
+
+            # Validate does not flag memory as invalid
+            result = cm.manage_agent(
+                operation="validate",
+                agent_name="mem_agent",
+            )
+            assert "Invalid tools" not in result
+        finally:
+            config_path.unlink(missing_ok=True)
+
     def test_manage_team(self) -> None:
         """Test manage_team tool."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
