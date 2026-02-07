@@ -10,6 +10,11 @@ from mindroom.credentials import get_credentials_manager
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 
 
+def _filter_internal_keys(credentials: dict[str, Any]) -> dict[str, Any]:
+    """Remove internal metadata keys (prefixed with _) from credentials."""
+    return {k: v for k, v in credentials.items() if not k.startswith("_")}
+
+
 class SetApiKeyRequest(BaseModel):
     """Request to set an API key."""
 
@@ -102,11 +107,6 @@ async def get_api_key(service: str, key_name: str = "api_key") -> dict[str, Any]
         }
 
     return {"service": service, "has_key": False, "key_name": key_name}
-
-
-def _filter_internal_keys(credentials: dict[str, Any]) -> dict[str, Any]:
-    """Remove internal metadata keys (prefixed with _) from credentials."""
-    return {k: v for k, v in credentials.items() if not k.startswith("_")}
 
 
 @router.get("/{service}")
