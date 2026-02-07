@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Mic, Settings, Volume2, Info } from 'lucide-react';
+import { Mic, Settings, Volume2, Info, AlertTriangle } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
@@ -117,6 +117,9 @@ export function VoiceConfig() {
 
   const handleSave = async () => {
     try {
+      if (config?.voice?.stt) {
+        config.voice.stt.host = normalizeHost(config.voice.stt.host);
+      }
       await saveConfig();
       toast({
         title: 'Voice Configuration Saved',
@@ -271,7 +274,7 @@ export function VoiceConfig() {
 
               {missingHostForCustomProvider && (
                 <Alert variant="destructive">
-                  <Info className="h-4 w-4" />
+                  <AlertTriangle className="h-4 w-4" />
                   <AlertDescription>
                     OpenAI-compatible endpoint is selected, but the Host URL is empty.
                   </AlertDescription>
