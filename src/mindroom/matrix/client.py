@@ -567,8 +567,8 @@ _CONSECUTIVE_TOOL_BLOCKS = re.compile(
 
 _HTML_TAG_PATTERN = re.compile(r"</?([A-Za-z][A-Za-z0-9-]*)(?:\s+[^<>]*)?\s*/?>")
 
-# Keep standard Matrix-safe HTML plus MindRoom's tool tags.
-_ALLOWED_FORMATTED_BODY_TAGS = frozenset(
+# Standard Matrix-safe HTML tags.
+_GENERAL_FORMATTED_BODY_TAGS = frozenset(
     {
         "a",
         "b",
@@ -591,7 +591,6 @@ _ALLOWED_FORMATTED_BODY_TAGS = frozenset(
         "i",
         "img",
         "li",
-        "nl",
         "ol",
         "p",
         "pre",
@@ -607,13 +606,21 @@ _ALLOWED_FORMATTED_BODY_TAGS = frozenset(
         "td",
         "th",
         "thead",
-        "tool",
-        "tool-group",
         "tr",
         "u",
         "ul",
     },
 )
+
+# MindRoom custom tags intentionally rendered by custom Element forks.
+_MINDROOM_FORMATTED_BODY_TAGS = frozenset(
+    {
+        "tool",  # MindRoom: single tool call block (call + optional result), rendered as a collapsible entry.
+        "tool-group",  # MindRoom: wrapper for consecutive tool blocks so the UI renders one grouped collapsible.
+    },
+)
+
+_ALLOWED_FORMATTED_BODY_TAGS = _GENERAL_FORMATTED_BODY_TAGS | _MINDROOM_FORMATTED_BODY_TAGS
 
 
 def _escape_unsupported_html_tags(html_text: str) -> str:
@@ -660,7 +667,7 @@ def markdown_to_html(text: str) -> str:
         ],
         extension_configs={
             "markdown.extensions.codehilite": {
-                "use_pygments": True,  # Don't use pygments for syntax highlighting
+                "use_pygments": True,  # Use Pygments for syntax highlighting.
                 "noclasses": True,  # Use inline styles instead of CSS classes
             },
         },

@@ -262,9 +262,13 @@ def test_markdown_to_html_does_not_group_separated_tools() -> None:
 
 
 def test_markdown_to_html_escapes_unknown_tool_like_tags() -> None:
-    """Unknown raw tags should be escaped so they remain visible on strict clients."""
-    body = "<search>\n<query>Mindroom docs</query>\n</search>"
+    """Unknown raw tags are escaped while allowed tags stay intact."""
+    body = (
+        "<tool>save_file(file=a.py)\nok</tool>\n<code>example</code>\n<search>\n<query>Mindroom docs</query>\n</search>"
+    )
     html = markdown_to_html(body)
+    assert "<tool>save_file(file=a.py)\nok</tool>" in html
+    assert "<code>example</code>" in html
     assert "<search>" not in html
     assert "<query>" not in html
     assert "&lt;search&gt;" in html
