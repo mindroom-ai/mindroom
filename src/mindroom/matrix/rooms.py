@@ -275,8 +275,9 @@ async def ensure_user_in_rooms(homeserver: str, room_ids: dict[str, str]) -> Non
                 logger.warning(f"User {user_id} failed to join room {room_key} - may need invitation")
 
 
-DM_ROOM_CACHE: dict[tuple[str, str], bool] = {}
+DM_ROOM_CACHE: dict[tuple[str, str], tuple[float, bool]] = {}
 DIRECT_ROOMS_CACHE: dict[str, tuple[float, set[str]]] = {}
+_DM_ROOM_TTL: float = 300  # seconds
 _DIRECT_ROOMS_TTL: float = 300  # seconds
 
 
@@ -310,6 +311,9 @@ async def _get_direct_room_ids(client: nio.AsyncClient) -> set[str]:
         direct_room_ids = {room_id for room_ids in response.rooms.values() for room_id in room_ids}
         DIRECT_ROOMS_CACHE[user_id] = (time.monotonic(), direct_room_ids)
         return direct_room_ids
+    if isinstance(response, nio.DirectRoomsErrorResponse) and response.status_code == "M_NOT_FOUND":
+        # No m.direct account data is a stable empty state for this user.
+        DIRECT_ROOMS_CACHE[user_id] = (time.monotonic(), set())
 
     return set()
 
@@ -362,16 +366,18 @@ async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool:
     cache_key = _dm_cache_key(client, room_id)
     cached = DM_ROOM_CACHE.get(cache_key)
     if cached is not None:
-        return cached
+        ts, is_dm = cached
+        if time.monotonic() - ts < _DM_ROOM_TTL:
+            return is_dm
 
     direct_room_ids = await _get_direct_room_ids(client)
     if room_id in direct_room_ids:
-        DM_ROOM_CACHE[cache_key] = True
+        DM_ROOM_CACHE[cache_key] = (time.monotonic(), True)
         return True
 
     # Preserve DM-like rooms even when servers don't expose `is_direct` in state.
     if _is_two_member_group_room(client, room_id):
-        DM_ROOM_CACHE[cache_key] = True
+        DM_ROOM_CACHE[cache_key] = (time.monotonic(), True)
         return True
 
     # Get the room state events, specifically member events.
@@ -380,5 +386,5 @@ async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool:
         return False
 
     is_dm = _has_is_direct_marker(response.events)
-    DM_ROOM_CACHE[cache_key] = is_dm
+    DM_ROOM_CACHE[cache_key] = (time.monotonic(), is_dm)
     return is_dm

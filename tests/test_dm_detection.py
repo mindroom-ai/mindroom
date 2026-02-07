@@ -164,3 +164,47 @@ class TestDMDetection:
         assert first_result is False
         assert second_result is False
         assert client.room_get_state.call_count == 2
+
+    async def test_caches_empty_m_direct_results_for_not_found(self) -> None:
+        """Test M_NOT_FOUND m.direct responses are cached as empty results."""
+        client = AsyncMock()
+        client.user_id = "@agent:server"
+        client.list_direct_rooms.return_value = nio.DirectRoomsErrorResponse("No direct rooms", "M_NOT_FOUND")
+
+        non_dm_state_response = MagicMock(spec=nio.RoomGetStateResponse)
+        non_dm_state_response.events = [
+            {"type": "m.room.member", "content": {"membership": "join"}},
+        ]
+        client.room_get_state.return_value = non_dm_state_response
+
+        first_result = await is_dm_room(client, "!room1:server")
+        second_result = await is_dm_room(client, "!room2:server")
+
+        assert first_result is False
+        assert second_result is False
+        assert client.list_direct_rooms.call_count == 1
+
+    async def test_dm_cache_expires_and_rechecks_m_direct(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test stale DM cache entries are refreshed after TTL."""
+        client = AsyncMock()
+        client.user_id = "@agent:server"
+        client.list_direct_rooms.side_effect = [
+            nio.DirectRoomsResponse({"@user:server": ["!room:server"]}),
+            nio.DirectRoomsResponse({"@user:server": []}),
+        ]
+
+        non_dm_state_response = MagicMock(spec=nio.RoomGetStateResponse)
+        non_dm_state_response.events = [
+            {"type": "m.room.member", "content": {"membership": "join"}},
+        ]
+        client.room_get_state.return_value = non_dm_state_response
+
+        monkeypatch.setattr(rooms, "_DM_ROOM_TTL", 0)
+        monkeypatch.setattr(rooms, "_DIRECT_ROOMS_TTL", 0)
+
+        first_result = await is_dm_room(client, "!room:server")
+        second_result = await is_dm_room(client, "!room:server")
+
+        assert first_result is True
+        assert second_result is False
+        assert client.list_direct_rooms.call_count == 2
