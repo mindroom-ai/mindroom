@@ -84,4 +84,34 @@ describe('ListPanel', () => {
     expect(screen.getByPlaceholderText('Skill name...')).toBeInTheDocument();
     expect((screen.getByPlaceholderText('Skill name...') as HTMLInputElement).value).toBe('bad!');
   });
+
+  it('prevents duplicate create submissions while async create is in flight', async () => {
+    let resolveCreate: ((value: boolean) => void) | undefined;
+    const onCreateItem = vi.fn().mockImplementation(
+      () =>
+        new Promise<boolean>(resolve => {
+          resolveCreate = resolve;
+        })
+    );
+    renderPanel(onCreateItem);
+
+    fireEvent.click(screen.getByTestId('create-button'));
+    fireEvent.change(screen.getByPlaceholderText('Skill name...'), {
+      target: { value: 'new' },
+    });
+
+    const submitButton = screen.getByTestId('form-create-button');
+    fireEvent.click(submitButton);
+    fireEvent.click(submitButton);
+
+    expect(onCreateItem).toHaveBeenCalledTimes(1);
+    expect(submitButton).toBeDisabled();
+    expect(screen.getByPlaceholderText('Skill name...')).toBeDisabled();
+
+    resolveCreate?.(true);
+
+    await waitFor(() => {
+      expect(screen.queryByPlaceholderText('Skill name...')).not.toBeInTheDocument();
+    });
+  });
 });
