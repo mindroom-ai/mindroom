@@ -1,4 +1,4 @@
-import React, { ReactNode, useState } from 'react';
+import React, { ReactNode, useRef, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -48,7 +48,7 @@ export interface ListPanelProps<T extends ListItem> {
   /**
    * Function to handle item creation
    */
-  onCreateItem?: (data?: string) => void;
+  onCreateItem?: (data?: string) => void | boolean | Promise<void | boolean>;
   /**
    * Function to render each item
    */
@@ -142,27 +142,52 @@ export function ListPanel<T extends ListItem>({
   const [searchTerm, setSearchTerm] = useState('');
   const [isCreating, setIsCreating] = useState(false);
   const [newItemName, setNewItemName] = useState('');
+  const [isSubmittingCreate, setIsSubmittingCreate] = useState(false);
+  const createInFlightRef = useRef(false);
 
   // Filter items based on search term
   const filteredItems = showSearch ? items.filter(item => searchFilter(item, searchTerm)) : items;
 
-  const handleCreateItem = () => {
+  const handleCreateItem = async () => {
+    if (createInFlightRef.current) return;
+    if (creationMode === 'inline-form' && !newItemName.trim()) return;
+
+    createInFlightRef.current = true;
+    setIsSubmittingCreate(true);
+
     if (creationMode === 'instant') {
-      onCreateItem?.();
+      try {
+        await onCreateItem?.();
+      } finally {
+        createInFlightRef.current = false;
+        setIsSubmittingCreate(false);
+      }
     } else if (creationMode === 'inline-form') {
-      if (newItemName.trim()) {
-        onCreateItem?.(newItemName.trim());
-        setNewItemName('');
-        setIsCreating(false);
+      try {
+        const shouldClose = (await onCreateItem?.(newItemName.trim())) !== false;
+        if (shouldClose) {
+          setNewItemName('');
+          setIsCreating(false);
+        }
+      } finally {
+        createInFlightRef.current = false;
+        setIsSubmittingCreate(false);
       }
     } else if (creationMode === 'dialog') {
-      onCreateItem?.();
+      try {
+        await onCreateItem?.();
+      } finally {
+        createInFlightRef.current = false;
+        setIsSubmittingCreate(false);
+      }
     }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (isSubmittingCreate) return;
+
     if (e.key === 'Enter') {
-      handleCreateItem();
+      void handleCreateItem();
     } else if (e.key === 'Escape') {
       setIsCreating(false);
       setNewItemName('');
@@ -187,11 +212,12 @@ export function ListPanel<T extends ListItem>({
           <Button
             size="sm"
             variant="default"
+            disabled={isSubmittingCreate}
             onClick={() => {
               if (creationMode === 'inline-form') {
                 setIsCreating(true);
               } else {
-                handleCreateItem();
+                void handleCreateItem();
               }
             }}
             className={sharedStyles.header.createButton}
@@ -228,13 +254,15 @@ export function ListPanel<T extends ListItem>({
                 value={newItemName}
                 onChange={e => setNewItemName(e.target.value)}
                 onKeyDown={handleKeyDown}
+                disabled={isSubmittingCreate}
                 autoFocus
                 className={sharedStyles.creation.input}
               />
               <Button
                 size="sm"
-                onClick={handleCreateItem}
+                onClick={() => void handleCreateItem()}
                 variant="default"
+                disabled={isSubmittingCreate || !newItemName.trim()}
                 data-testid="form-create-button"
               >
                 <Check className="h-4 w-4" />
@@ -246,6 +274,7 @@ export function ListPanel<T extends ListItem>({
                   setNewItemName('');
                 }}
                 variant="ghost"
+                disabled={isSubmittingCreate}
                 data-testid="form-cancel-button"
               >
                 <X className="h-4 w-4" />

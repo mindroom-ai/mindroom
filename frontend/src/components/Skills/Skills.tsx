@@ -127,29 +127,31 @@ export function Skills() {
     }
   };
 
-  const handleCreate = async (name?: string) => {
-    if (!name) return;
-    const trimmed = name.trim();
+  const handleCreate = async (name?: string): Promise<boolean> => {
+    if (!name) return false;
+    const trimmed = name.trim().toLowerCase();
     if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(trimmed)) {
       toast({
         title: 'Invalid skill name',
         description:
-          'Name must be lowercase alphanumeric with hyphens, starting and ending with a letter or digit.',
+          'Name must be alphanumeric with optional hyphens, starting and ending with a letter or digit.',
         variant: 'destructive',
       });
-      return;
+      return false;
     }
     try {
       await createSkill(trimmed, trimmed);
       toast({ title: 'Skill created', description: `${trimmed} is ready to edit.` });
       await refreshSkills();
       setSelectedName(trimmed);
+      return true;
     } catch (error) {
       toast({
         title: 'Failed to create skill',
         description: error instanceof Error ? error.message : 'Unknown error',
         variant: 'destructive',
       });
+      return false;
     }
   };
 
