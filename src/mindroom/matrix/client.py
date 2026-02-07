@@ -2,6 +2,7 @@
 
 import io
 import os
+import re
 import ssl as ssl_module
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -559,6 +560,11 @@ async def get_latest_thread_event_id_if_needed(
     return None
 
 
+_CONSECUTIVE_TOOL_BLOCKS = re.compile(
+    r"(<tool>[\s\S]*?</tool>)(\s*<tool>[\s\S]*?</tool>)+",
+)
+
+
 def markdown_to_html(text: str) -> str:
     """Convert markdown text to HTML for Matrix formatted messages.
 
@@ -569,6 +575,13 @@ def markdown_to_html(text: str) -> str:
         HTML formatted text
 
     """
+    # Group consecutive <tool> blocks into <tool-group> so the frontend
+    # can render them as a single merged collapsible.
+    text = _CONSECUTIVE_TOOL_BLOCKS.sub(
+        lambda m: f"<tool-group>{m.group(0)}</tool-group>",
+        text,
+    )
+
     # Configure markdown with common extensions
     md = markdown.Markdown(
         extensions=[
@@ -584,6 +597,9 @@ def markdown_to_html(text: str) -> str:
             },
         },
     )
+    # Register custom elements as block-level so markdown doesn't wrap them
+    # in <p> tags or convert \n to <br /> inside them.
+    md.block_level_elements.extend(["tool", "tool-group"])
     html_text: str = md.convert(text)
     return html_text
 
