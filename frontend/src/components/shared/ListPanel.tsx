@@ -48,7 +48,7 @@ export interface ListPanelProps<T extends ListItem> {
   /**
    * Function to handle item creation
    */
-  onCreateItem?: (data?: string) => void;
+  onCreateItem?: (data?: string) => void | boolean | Promise<void | boolean>;
   /**
    * Function to render each item
    */
@@ -146,23 +146,25 @@ export function ListPanel<T extends ListItem>({
   // Filter items based on search term
   const filteredItems = showSearch ? items.filter(item => searchFilter(item, searchTerm)) : items;
 
-  const handleCreateItem = () => {
+  const handleCreateItem = async () => {
     if (creationMode === 'instant') {
-      onCreateItem?.();
+      await onCreateItem?.();
     } else if (creationMode === 'inline-form') {
       if (newItemName.trim()) {
-        onCreateItem?.(newItemName.trim());
-        setNewItemName('');
-        setIsCreating(false);
+        const shouldClose = (await onCreateItem?.(newItemName.trim())) !== false;
+        if (shouldClose) {
+          setNewItemName('');
+          setIsCreating(false);
+        }
       }
     } else if (creationMode === 'dialog') {
-      onCreateItem?.();
+      await onCreateItem?.();
     }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
-      handleCreateItem();
+      void handleCreateItem();
     } else if (e.key === 'Escape') {
       setIsCreating(false);
       setNewItemName('');
@@ -191,7 +193,7 @@ export function ListPanel<T extends ListItem>({
               if (creationMode === 'inline-form') {
                 setIsCreating(true);
               } else {
-                handleCreateItem();
+                void handleCreateItem();
               }
             }}
             className={sharedStyles.header.createButton}
@@ -233,7 +235,7 @@ export function ListPanel<T extends ListItem>({
               />
               <Button
                 size="sm"
-                onClick={handleCreateItem}
+                onClick={() => void handleCreateItem()}
                 variant="default"
                 data-testid="form-create-button"
               >
