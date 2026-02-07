@@ -9,6 +9,7 @@ import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from mindroom.constants import safe_replace
 from mindroom.skills import (
     get_user_skills_dir,
     list_skill_listings,
@@ -98,7 +99,7 @@ async def update_skill(skill_name: str, payload: SkillUpdateRequest) -> dict[str
     tmp_path = listing.path.with_suffix(listing.path.suffix + ".tmp")
     try:
         tmp_path.write_text(payload.content, encoding="utf-8")
-        tmp_path.replace(listing.path)
+        safe_replace(tmp_path, listing.path)
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to update skill") from exc
 
