@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from html import escape
 from typing import TYPE_CHECKING, Literal
 
-from agno.models.response import ToolExecution
+from agno.models.response import ToolExecution  # noqa: TC002 - used in isinstance checks
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -188,10 +188,9 @@ def complete_pending_tool_block(
     return updated, trace
 
 
-def format_tool_started_event(event: object) -> tuple[str, ToolTraceEntry | None]:
-    """Format an Agno tool-start event into display text and trace metadata."""
-    tool = getattr(event, "tool", None)
-    if not isinstance(tool, ToolExecution):
+def format_tool_started_event(tool: ToolExecution | None) -> tuple[str, ToolTraceEntry | None]:
+    """Format an Agno tool-call start into display text and trace metadata."""
+    if tool is None:
         return "", None
     tool_name = tool.tool_name or "tool"
     tool_args = {str(k): v for k, v in tool.tool_args.items()} if isinstance(tool.tool_args, dict) else {}
@@ -199,15 +198,14 @@ def format_tool_started_event(event: object) -> tuple[str, ToolTraceEntry | None
     return text, trace
 
 
-def extract_tool_completed_info(event: object) -> tuple[str, str | None] | None:
-    """Extract tool name and result from an Agno tool-completed event.
+def extract_tool_completed_info(tool: ToolExecution | None) -> tuple[str, str | None] | None:
+    """Extract tool name and result from a ToolExecution.
 
-    Returns (tool_name, result) or None if event has no tool payload.
+    Returns (tool_name, result) or None if tool is absent.
     Uses ``tool.result`` (actual tool output), not ``event.content``
     which Agno sets to a timing string like ``"tool() completed in 0.12s"``.
     """
-    tool = getattr(event, "tool", None)
-    if not isinstance(tool, ToolExecution):
+    if tool is None:
         return None
     tool_name = tool.tool_name or "tool"
     return tool_name, tool.result

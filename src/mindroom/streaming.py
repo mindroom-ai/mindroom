@@ -228,11 +228,11 @@ async def send_streaming_response(  # noqa: C901, PLR0912
         elif isinstance(chunk, RunContentEvent) and chunk.content:
             text_chunk = str(chunk.content)
         elif isinstance(chunk, ToolCallStartedEvent):
-            text_chunk, trace_entry = format_tool_started_event(chunk)
+            text_chunk, trace_entry = format_tool_started_event(chunk.tool)
             if trace_entry is not None:
                 streaming.tool_trace.append(trace_entry)
         elif isinstance(chunk, ToolCallCompletedEvent):
-            info = extract_tool_completed_info(chunk)
+            info = extract_tool_completed_info(chunk.tool)
             if info:
                 tool_name, result = info
                 streaming.accumulated_text, trace_entry = complete_pending_tool_block(

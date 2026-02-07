@@ -220,23 +220,18 @@ def test_complete_pending_tool_block_roundtrip_with_multiline_args() -> None:
 
 
 def test_extract_tool_completed_info_without_tool_returns_none() -> None:
-    """Tool completion events without tool payload should return None."""
-    result = extract_tool_completed_info(object())
-    assert result is None
+    """None tool should return None."""
+    assert extract_tool_completed_info(None) is None
 
 
 def test_extract_tool_completed_info_uses_tool_result() -> None:
-    """Should use tool.result (actual output), not event.content (timing string)."""
-
-    class FakeEvent:
-        tool = ToolExecution(tool_name="check", result="actual output")
-        content = "check() completed in 0.12s. "
-
-    info = extract_tool_completed_info(FakeEvent())
+    """Should return tool.result (actual output)."""
+    tool = ToolExecution(tool_name="check", result="actual output")
+    info = extract_tool_completed_info(tool)
     assert info is not None
     tool_name, result = info
     assert tool_name == "check"
-    assert result == "actual output"  # not the timing string
+    assert result == "actual output"
 
 
 # --- markdown_to_html: tool block handling ---

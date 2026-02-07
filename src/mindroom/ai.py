@@ -389,12 +389,12 @@ async def stream_agent_response(  # noqa: C901, PLR0912
                 full_response += chunk_text
                 yield event
             elif isinstance(event, ToolCallStartedEvent):
-                tool_msg, _ = format_tool_started_event(event)
+                tool_msg, _ = format_tool_started_event(event.tool)
                 if tool_msg:
                     full_response += tool_msg
                     yield event
             elif isinstance(event, ToolCallCompletedEvent):
-                info = extract_tool_completed_info(event)
+                info = extract_tool_completed_info(event.tool)
                 if info:
                     tool_name, result = info
                     full_response, _ = complete_pending_tool_block(full_response, tool_name, result)
