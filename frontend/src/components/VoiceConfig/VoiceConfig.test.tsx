@@ -53,11 +53,12 @@ describe('VoiceConfig', () => {
 
     expect(screen.getByText('Current Effective Settings')).toBeInTheDocument();
     expect(screen.getByText('OpenAI-compatible API')).toBeInTheDocument();
+    expect(screen.getByText('OpenAI')).toBeInTheDocument();
     expect(screen.getByText('http://localhost:8080/v1/audio/transcriptions')).toBeInTheDocument();
     expect(screen.getByText('OPENAI_API_KEY environment variable')).toBeInTheDocument();
   });
 
-  it('shows host input when host exists even with openai provider', () => {
+  it('always shows optional base url input', () => {
     const config = createConfig();
     if (!config.voice) throw new Error('Expected voice config');
     config.voice.stt.provider = 'openai';
@@ -66,30 +67,40 @@ describe('VoiceConfig', () => {
 
     render(<VoiceConfig />);
 
-    const hostInput = document.getElementById('stt-host') as HTMLInputElement;
+    const hostInput = document.getElementById('stt-base-url') as HTMLInputElement;
     expect(hostInput).toBeInTheDocument();
     expect(hostInput).toHaveValue('http://localhost:8080');
   });
 
-  it('clears host when switching provider to openai', async () => {
-    const config = createConfig();
-
-    setMockStore(config);
-
+  it('uses default openai endpoint when base url is cleared', async () => {
     render(<VoiceConfig />);
 
-    const providerSelect = document.getElementById('stt-provider');
-    expect(providerSelect).toBeInTheDocument();
-    fireEvent.click(providerSelect!);
-
-    const openAiOption = await screen.findByText('OpenAI API (Cloud)');
-    fireEvent.click(openAiOption);
+    const hostInput = document.getElementById('stt-base-url') as HTMLInputElement;
+    fireEvent.change(hostInput, { target: { value: '' } });
 
     await waitFor(() => {
       expect(mockMarkDirty).toHaveBeenCalled();
       expect(
         screen.getByText('https://api.openai.com/v1/audio/transcriptions')
       ).toBeInTheDocument();
+    });
+  });
+
+  it('normalizes and saves voice settings as openai provider', async () => {
+    const config = createConfig();
+    if (!config.voice) throw new Error('Expected voice config');
+    config.voice.stt.host = 'http://localhost:8080/';
+    setMockStore(config);
+
+    render(<VoiceConfig />);
+
+    const saveButton = screen.getByRole('button', { name: 'Save Voice Configuration' });
+    fireEvent.click(saveButton);
+
+    await waitFor(() => {
+      expect(mockSaveConfig).toHaveBeenCalled();
+      expect(config.voice?.stt.provider).toBe('openai');
+      expect(config.voice?.stt.host).toBe('http://localhost:8080');
     });
   });
 

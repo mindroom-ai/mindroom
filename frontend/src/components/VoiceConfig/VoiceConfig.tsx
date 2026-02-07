@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Mic, Settings, Volume2, Info, AlertTriangle } from 'lucide-react';
+import { Mic, Settings, Volume2, Info } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
@@ -32,11 +32,6 @@ const DEFAULT_VOICE_CONFIG: VoiceConfigType = {
   },
 };
 
-const STT_PROVIDER_LABELS: Record<string, string> = {
-  openai: 'OpenAI API (Cloud)',
-  custom: 'OpenAI-compatible Endpoint',
-};
-
 function mergeVoiceConfig(config?: Partial<VoiceConfigType>): VoiceConfigType {
   return {
     ...DEFAULT_VOICE_CONFIG,
@@ -44,6 +39,7 @@ function mergeVoiceConfig(config?: Partial<VoiceConfigType>): VoiceConfigType {
     stt: {
       ...DEFAULT_VOICE_CONFIG.stt,
       ...(config?.stt || {}),
+      provider: 'openai',
     },
     intelligence: {
       ...DEFAULT_VOICE_CONFIG.intelligence,
@@ -84,14 +80,7 @@ export function VoiceConfig() {
 
   const handleSTTChange = (updates: Partial<VoiceConfigType['stt']>) => {
     handleVoiceConfigChange({
-      stt: { ...voiceConfig.stt, ...updates },
-    });
-  };
-
-  const handleSTTProviderChange = (provider: string) => {
-    handleSTTChange({
-      provider,
-      host: provider === 'openai' ? '' : voiceConfig.stt.host,
+      stt: { ...voiceConfig.stt, ...updates, provider: 'openai' },
     });
   };
 
@@ -104,8 +93,6 @@ export function VoiceConfig() {
   // Get available models from config
   const availableModels = config?.models ? Object.keys(config.models) : [];
   const normalizedHost = normalizeHost(voiceConfig.stt.host);
-  const showHostField = voiceConfig.stt.provider === 'custom' || Boolean(normalizedHost);
-  const missingHostForCustomProvider = voiceConfig.stt.provider === 'custom' && !normalizedHost;
   const effectiveEndpoint = normalizedHost
     ? `${normalizedHost}/v1/audio/transcriptions`
     : OPENAI_TRANSCRIPTION_ENDPOINT;
@@ -113,11 +100,12 @@ export function VoiceConfig() {
   const keySource = voiceConfig.stt.api_key?.trim()
     ? 'Stored in voice settings'
     : 'OPENAI_API_KEY environment variable';
-  const providerLabel = STT_PROVIDER_LABELS[voiceConfig.stt.provider] || voiceConfig.stt.provider;
+  const providerLabel = 'OpenAI';
 
   const handleSave = async () => {
     try {
       if (config?.voice?.stt) {
+        config.voice.stt.provider = 'openai';
         config.voice.stt.host = normalizeHost(config.voice.stt.host);
       }
       await saveConfig();
@@ -181,7 +169,7 @@ export function VoiceConfig() {
                 <span className="font-mono text-right text-foreground">{effectiveMode}</span>
               </div>
               <div className="flex items-start justify-between gap-4">
-                <span className="text-muted-foreground">Provider Setting:</span>
+                <span className="text-muted-foreground">Provider:</span>
                 <span className="font-mono text-right text-foreground">{providerLabel}</span>
               </div>
               <div className="flex items-start justify-between gap-4">
@@ -217,29 +205,14 @@ export function VoiceConfig() {
             </div>
 
             <div className="grid gap-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label htmlFor="stt-provider">Provider</Label>
-                  <Select value={voiceConfig.stt.provider} onValueChange={handleSTTProviderChange}>
-                    <SelectTrigger id="stt-provider">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="openai">OpenAI API (Cloud)</SelectItem>
-                      <SelectItem value="custom">OpenAI-compatible Endpoint</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="stt-model">Model</Label>
-                  <Input
-                    id="stt-model"
-                    value={voiceConfig.stt.model}
-                    onChange={e => handleSTTChange({ model: e.target.value })}
-                    placeholder="whisper-1"
-                  />
-                </div>
+              <div className="space-y-2">
+                <Label htmlFor="stt-model">Model</Label>
+                <Input
+                  id="stt-model"
+                  value={voiceConfig.stt.model}
+                  onChange={e => handleSTTChange({ model: e.target.value })}
+                  placeholder="whisper-1"
+                />
               </div>
 
               <div className="space-y-2">
@@ -256,31 +229,19 @@ export function VoiceConfig() {
                 </p>
               </div>
 
-              {showHostField && (
-                <div className="space-y-2">
-                  <Label htmlFor="stt-host">Host URL</Label>
-                  <Input
-                    id="stt-host"
-                    value={voiceConfig.stt.host || ''}
-                    onChange={e => handleSTTChange({ host: e.target.value })}
-                    placeholder="http://localhost:8080"
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    {voiceConfig.stt.provider === 'openai' && normalizedHost
-                      ? 'A custom host is set. Clear it to use the default OpenAI endpoint, or switch provider to "OpenAI-compatible Endpoint".'
-                      : 'Base URL of your STT service. Do not include /v1; MindRoom appends /v1/audio/transcriptions automatically.'}
-                  </p>
-                </div>
-              )}
-
-              {missingHostForCustomProvider && (
-                <Alert variant="destructive">
-                  <AlertTriangle className="h-4 w-4" />
-                  <AlertDescription>
-                    OpenAI-compatible endpoint is selected, but the Host URL is empty.
-                  </AlertDescription>
-                </Alert>
-              )}
+              <div className="space-y-2">
+                <Label htmlFor="stt-base-url">Base URL (Optional)</Label>
+                <Input
+                  id="stt-base-url"
+                  value={voiceConfig.stt.host || ''}
+                  onChange={e => handleSTTChange({ host: e.target.value })}
+                  placeholder="https://api.openai.com"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Leave empty to use the default OpenAI endpoint. For self-hosted OpenAI-compatible
+                  services, provide the base host URL without <code>/v1</code>.
+                </p>
+              </div>
             </div>
           </div>
 
