@@ -10,6 +10,11 @@ from mindroom.credentials import get_credentials_manager
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 
 
+def _filter_internal_keys(credentials: dict[str, Any]) -> dict[str, Any]:
+    """Remove internal metadata keys (prefixed with _) from credentials."""
+    return {k: v for k, v in credentials.items() if not k.startswith("_")}
+
+
 class SetApiKeyRequest(BaseModel):
     """Request to set an API key."""
 
@@ -46,10 +51,11 @@ async def get_credential_status(service: str) -> CredentialStatus:
     credentials = manager.load_credentials(service)
 
     if credentials:
+        filtered = _filter_internal_keys(credentials) if isinstance(credentials, dict) else {}
         return CredentialStatus(
             service=service,
             has_credentials=True,
-            key_names=list(credentials.keys()) if isinstance(credentials, dict) else None,
+            key_names=list(filtered.keys()) if filtered else None,
         )
 
     return CredentialStatus(service=service, has_credentials=False)
@@ -60,8 +66,9 @@ async def set_credentials(service: str, request: SetCredentialsRequest) -> dict[
     """Set multiple credentials for a service."""
     manager = get_credentials_manager()
 
-    # Save all credentials for the service
-    manager.save_credentials(service, request.credentials)
+    # Mark as UI-sourced and save
+    creds = {**request.credentials, "_source": "ui"}
+    manager.save_credentials(service, creds)
 
     return {"status": "success", "message": f"Credentials saved for {service}"}
 
@@ -73,7 +80,10 @@ async def set_api_key(service: str, request: SetApiKeyRequest) -> dict[str, str]
         raise HTTPException(status_code=400, detail="Service mismatch in request")
 
     manager = get_credentials_manager()
-    manager.set_api_key(service, request.api_key, request.key_name)
+    credentials = manager.load_credentials(service) or {}
+    credentials[request.key_name] = request.api_key
+    credentials["_source"] = "ui"
+    manager.save_credentials(service, credentials)
 
     return {"status": "success", "message": f"API key set for {service}"}
 
@@ -82,16 +92,18 @@ async def set_api_key(service: str, request: SetApiKeyRequest) -> dict[str, str]
 async def get_api_key(service: str, key_name: str = "api_key") -> dict[str, Any]:
     """Get the API key for a service (returns only existence status for security)."""
     manager = get_credentials_manager()
-    api_key = manager.get_api_key(service, key_name)
+    credentials = manager.load_credentials(service) or {}
+    api_key = credentials.get(key_name)
 
     if api_key:
-        # Don't return the actual key for security
+        source = credentials.get("_source")
         return {
             "service": service,
             "has_key": True,
             "key_name": key_name,
             # Return masked version
             "masked_key": f"{api_key[:4]}...{api_key[-4:]}" if len(api_key) > 8 else "****",
+            "source": source,
         }
 
     return {"service": service, "has_key": False, "key_name": key_name}
@@ -106,7 +118,7 @@ async def get_credentials(service: str) -> dict[str, Any]:
     if not credentials:
         return {"service": service, "credentials": {}}
 
-    return {"service": service, "credentials": credentials}
+    return {"service": service, "credentials": _filter_internal_keys(credentials)}
 
 
 @router.delete("/{service}")

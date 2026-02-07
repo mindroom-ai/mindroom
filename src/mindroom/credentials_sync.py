@@ -1,8 +1,10 @@
 """Sync API keys from environment variables to CredentialsManager.
 
-This module ensures that API keys defined in .env are automatically
-synchronized to the CredentialsManager, making .env the source of truth
-while allowing the frontend to read the current state.
+On first run, API keys from .env are seeded into the CredentialsManager.
+On subsequent runs, env-sourced credentials (_source=env) are updated from
+.env, but UI-sourced credentials (_source=ui) are never overwritten.
+This lets users change keys via the UI without losing them on restart,
+while still picking up .env changes for keys that were never manually set.
 """
 
 import os
@@ -47,18 +49,21 @@ def _get_secret(name: str) -> str | None:
 
 
 def sync_env_to_credentials() -> None:
-    """Sync API keys from environment variables to CredentialsManager.
+    """Sync API keys from environment variables into CredentialsManager.
 
-    This function reads API keys from environment variables and updates
-    the CredentialsManager with any new or changed values. This ensures
-    that .env remains the source of truth while making keys available
-    to the frontend.
+    - If no credential file exists for a service, seed it from .env.
+    - If the existing credential has ``_source=env``, update it from .env
+      (the user never touched it via UI, so .env should still win).
+    - If the existing credential has ``_source=ui`` (or no ``_source``,
+      for legacy files), skip it to protect the user's manual override.
+
+    Environment variables are always exported to ``os.environ`` so that
+    libraries like mem0 can pick them up regardless.
     """
     creds_manager = get_credentials_manager()
-    updated_count = 0
+    synced_count = 0
 
     for env_var, service in ENV_TO_SERVICE_MAP.items():
-        # Prefer file-based secrets if provided (NAME_FILE), fallback to NAME
         env_value = _get_secret(env_var)
 
         if not env_value:
@@ -67,31 +72,35 @@ def sync_env_to_credentials() -> None:
 
         logger.debug(f"Found value for {env_var}: length={len(env_value)}")
 
-        # Special handling for Ollama (it's a host, not an API key)
+        # Always export to os.environ so libraries (mem0, etc.) can use it
+        if service != "ollama":
+            os.environ[env_var] = env_value
+
+        # Check existing credentials and their source
+        existing = creds_manager.load_credentials(service)
+        if existing is not None:
+            source = existing.get("_source")
+            if source != "env":
+                # UI-set or legacy (no _source) — don't overwrite
+                logger.debug(f"Credentials for {service} not env-sourced, skipping env sync")
+                continue
+
         if service == "ollama":
-            current_creds = creds_manager.load_credentials(service) or {}
-            if current_creds.get("host") != env_value:
-                current_creds["host"] = env_value
-                creds_manager.save_credentials(service, current_creds)
-                logger.info(f"Updated {service} host from environment")
-                updated_count += 1
+            new_creds = {"host": env_value, "_source": "env"}
         else:
-            # Regular API key handling
-            current_key = creds_manager.get_api_key(service)
-            if env_value and current_key != env_value:
-                creds_manager.set_api_key(service, env_value)
-                logger.info(f"Updated {service} API key from environment")
-                updated_count += 1
+            new_creds = {"api_key": env_value, "_source": "env"}
 
-            # Also set the environment variable directly for libraries that need it
-            # This ensures mem0 and other libraries can access the keys
-            if env_value:
-                os.environ[env_var] = env_value
+        creds_manager.save_credentials(service, new_creds)
+        if existing is None:
+            logger.info(f"Seeded {service} credentials from environment")
+        else:
+            logger.info(f"Updated {service} credentials from environment")
+        synced_count += 1
 
-    if updated_count > 0:
-        logger.info(f"Synchronized {updated_count} credentials from environment")
+    if synced_count > 0:
+        logger.info(f"Synced {synced_count} credentials from environment")
     else:
-        logger.debug("All credentials already in sync with environment")
+        logger.debug("No credentials to sync from environment")
 
 
 def get_api_key_for_provider(provider: str) -> str | None:
