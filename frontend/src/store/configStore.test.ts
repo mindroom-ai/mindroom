@@ -28,6 +28,7 @@ describe('configStore', () => {
             display_name: 'Test Agent',
             role: 'Test role',
             tools: ['calculator'],
+            skills: [],
             instructions: ['Test instruction'],
             rooms: ['lobby'],
             num_history_runs: 5,
@@ -77,6 +78,7 @@ describe('configStore', () => {
             display_name: 'Test',
             role: 'Test role',
             tools: [],
+            skills: [],
             instructions: [],
             rooms: [],
             num_history_runs: 5,
@@ -106,6 +108,7 @@ describe('configStore', () => {
           display_name: 'Test',
           role: 'Test role',
           tools: [],
+          skills: [],
           instructions: [],
           rooms: [],
           num_history_runs: 5,
@@ -126,7 +129,7 @@ describe('configStore', () => {
       await saveConfig();
 
       // The saveConfig removes the id field when saving
-      const { id, ...agentWithoutId } = mockAgents[0];
+      const { id: _id, ...agentWithoutId } = mockAgents[0];
       expect(global.fetch).toHaveBeenCalledWith('/api/config/save', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -152,6 +155,7 @@ describe('configStore', () => {
           display_name: 'Agent 1',
           role: 'Role 1',
           tools: [],
+          skills: [],
           instructions: [],
           rooms: [],
           num_history_runs: 5,
@@ -161,6 +165,7 @@ describe('configStore', () => {
           display_name: 'Agent 2',
           role: 'Role 2',
           tools: ['calculator'],
+          skills: [],
           instructions: ['Test'],
           rooms: ['lobby'],
           num_history_runs: 5,
@@ -192,6 +197,7 @@ describe('configStore', () => {
         display_name: 'New Agent',
         role: 'New role',
         tools: [],
+        skills: [],
         instructions: [],
         rooms: [],
         num_history_runs: 5,
@@ -438,6 +444,7 @@ describe('configStore', () => {
           display_name: 'Agent 1',
           role: 'Test agent',
           tools: [],
+          skills: [],
           instructions: [],
           rooms: ['lobby'],
           num_history_runs: 5,
@@ -447,6 +454,7 @@ describe('configStore', () => {
           display_name: 'Agent 2',
           role: 'Test agent 2',
           tools: [],
+          skills: [],
           instructions: [],
           rooms: ['dev'],
           num_history_runs: 5,
@@ -561,6 +569,7 @@ describe('configStore', () => {
             display_name: 'Agent 1',
             role: 'Test agent',
             tools: [],
+            skills: [],
             instructions: [],
             rooms: [],
             num_history_runs: 5,
@@ -611,6 +620,7 @@ describe('configStore', () => {
             display_name: 'Agent 1',
             role: 'Test agent',
             tools: [],
+            skills: [],
             instructions: [],
             rooms: [],
             num_history_runs: 5,

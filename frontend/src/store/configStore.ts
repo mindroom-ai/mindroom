@@ -64,6 +64,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const agents = Object.entries(config.agents).map(([id, agent]) => ({
         id,
         ...agent,
+        skills: agent.skills ?? [],
       }));
       const teams = config.teams
         ? Object.entries(config.teams).map(([id, team]) => ({

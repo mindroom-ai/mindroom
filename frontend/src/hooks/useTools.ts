@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useMemo } from 'react';
 import { API_ENDPOINTS, fetchAPI } from '@/lib/api';
+import { useFetchData } from './useFetchData';
 
 export interface ToolInfo {
   name: string;
@@ -21,32 +22,18 @@ export interface ToolsResponse {
   tools: ToolInfo[];
 }
 
+const DEFAULT: ToolInfo[] = [];
+
 export function useTools() {
-  const [tools, setTools] = useState<ToolInfo[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const fetchTools = async () => {
-    try {
-      setLoading(true);
+  const fetcher = useMemo(
+    () => async () => {
       const response = (await fetchAPI(API_ENDPOINTS.tools)) as ToolsResponse;
-      setTools(response.tools);
-      setError(null);
-    } catch (err) {
-      console.error('Failed to fetch tools:', err);
-      setError(err instanceof Error ? err.message : 'Failed to fetch tools');
-      // Fall back to empty array on error
-      setTools([]);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchTools();
-  }, []);
-
-  return { tools, loading, error, refetch: fetchTools };
+      return response.tools;
+    },
+    []
+  );
+  const { data: tools, ...rest } = useFetchData(fetcher, DEFAULT);
+  return { tools, ...rest };
 }
 
 // Helper function to map backend tool to frontend integration format

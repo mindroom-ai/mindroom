@@ -30,12 +30,33 @@ vi.mock('@/hooks/useTools', () => ({
   })),
 }));
 
+vi.mock('@/hooks/useSkills', () => ({
+  useSkills: vi.fn(() => ({
+    skills: [
+      {
+        name: 'debugging',
+        description: 'Debug issues quickly',
+        origin: 'bundled',
+        can_edit: false,
+      },
+      {
+        name: 'code-review',
+        description: 'Perform code reviews',
+        origin: 'user',
+        can_edit: true,
+      },
+    ],
+    loading: false,
+  })),
+}));
+
 describe('AgentEditor', () => {
   const mockAgent: Agent = {
     id: 'test_agent',
     display_name: 'Test Agent',
     role: 'Test role',
     tools: ['calculator'],
+    skills: ['debugging'],
     instructions: ['Test instruction'],
     rooms: ['test_room'],
     num_history_runs: 5,
@@ -265,6 +286,56 @@ describe('AgentEditor', () => {
       'test_agent',
       expect.objectContaining({
         tools: ['file'],
+      })
+    );
+  });
+
+  it('updates skills when checkboxes are toggled', async () => {
+    render(<AgentEditor />);
+
+    const debuggingCheckbox = await screen.findByRole('checkbox', { name: /debugging/i });
+    expect(debuggingCheckbox).toBeChecked();
+
+    fireEvent.click(debuggingCheckbox);
+    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+      'test_agent',
+      expect.objectContaining({
+        skills: [],
+      })
+    );
+
+    const codeReviewCheckbox = screen.getByRole('checkbox', { name: /code-review/i });
+    fireEvent.click(codeReviewCheckbox);
+    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+      'test_agent',
+      expect.objectContaining({
+        skills: ['code-review'],
+      })
+    );
+  });
+
+  it('renders missing assigned skills so they can be removed', () => {
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [
+        {
+          ...mockAgent,
+          skills: ['ghost-skill'],
+        },
+      ],
+      rooms: mockStore.rooms,
+    });
+
+    render(<AgentEditor />);
+
+    const ghostSkillCheckbox = screen.getByRole('checkbox', { name: /ghost-skill/i });
+    expect(ghostSkillCheckbox).toBeChecked();
+
+    fireEvent.click(ghostSkillCheckbox);
+    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+      'test_agent',
+      expect.objectContaining({
+        skills: [],
       })
     );
   });

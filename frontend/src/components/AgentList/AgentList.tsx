@@ -20,6 +20,7 @@ export function AgentList() {
       display_name: agentName || 'New Agent',
       role: 'A new agent that needs configuration',
       tools: [],
+      skills: [],
       instructions: [],
       rooms: ['lobby'],
       num_history_runs: 5,

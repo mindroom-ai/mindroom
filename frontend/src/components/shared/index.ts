@@ -17,4 +17,7 @@ export type { EditorPanelProps, EditorPanelEmptyStateProps } from './EditorPanel
 export { FieldGroup } from './FieldGroup';
 export type { FieldGroupProps } from './FieldGroup';
 
+export { CheckboxListField } from './CheckboxListField';
+export type { CheckboxListFieldProps, CheckboxListItem } from './CheckboxListField';
+
 export { sharedStyles, getSelectionStyles, getIconStyles } from './styles';
