@@ -24,6 +24,7 @@ export interface Agent {
   display_name: string;
   role: string;
   tools: string[];
+  skills: string[];
   instructions: string[];
   rooms: string[];
   num_history_runs: number;

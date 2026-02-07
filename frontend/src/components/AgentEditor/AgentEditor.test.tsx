@@ -30,12 +30,30 @@ vi.mock('@/hooks/useTools', () => ({
   })),
 }));
 
+vi.mock('@/services/skillsService', () => ({
+  listSkills: vi.fn(() => [
+    {
+      name: 'debugging',
+      description: 'Debug issues quickly',
+      origin: 'bundled',
+      can_edit: false,
+    },
+    {
+      name: 'code-review',
+      description: 'Perform code reviews',
+      origin: 'user',
+      can_edit: true,
+    },
+  ]),
+}));
+
 describe('AgentEditor', () => {
   const mockAgent: Agent = {
     id: 'test_agent',
     display_name: 'Test Agent',
     role: 'Test role',
     tools: ['calculator'],
+    skills: ['debugging'],
     instructions: ['Test instruction'],
     rooms: ['test_room'],
     num_history_runs: 5,
@@ -265,6 +283,30 @@ describe('AgentEditor', () => {
       'test_agent',
       expect.objectContaining({
         tools: ['file'],
+      })
+    );
+  });
+
+  it('updates skills when checkboxes are toggled', async () => {
+    render(<AgentEditor />);
+
+    const debuggingCheckbox = await screen.findByRole('checkbox', { name: /debugging/i });
+    expect(debuggingCheckbox).toBeChecked();
+
+    fireEvent.click(debuggingCheckbox);
+    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+      'test_agent',
+      expect.objectContaining({
+        skills: [],
+      })
+    );
+
+    const codeReviewCheckbox = screen.getByRole('checkbox', { name: /code-review/i });
+    fireEvent.click(codeReviewCheckbox);
+    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+      'test_agent',
+      expect.objectContaining({
+        skills: ['code-review'],
       })
     );
   });

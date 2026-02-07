@@ -20,6 +20,8 @@ import { ToolConfigDialog } from '@/components/ToolConfig/ToolConfigDialog';
 import { TOOL_SCHEMAS } from '@/types/toolConfig';
 import { Badge } from '@/components/ui/badge';
 import { useTools } from '@/hooks/useTools';
+import { listSkills } from '@/services/skillsService';
+import { SkillSummary } from '@/types/skills';
 
 export function AgentEditor() {
   const {
@@ -35,6 +37,8 @@ export function AgentEditor() {
   } = useConfigStore();
 
   const [configDialogTool, setConfigDialogTool] = useState<string | null>(null);
+  const [availableSkills, setAvailableSkills] = useState<SkillSummary[]>([]);
+  const [skillsLoading, setSkillsLoading] = useState(true);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
 
   // Fetch tools from backend
@@ -75,16 +79,49 @@ export function AgentEditor() {
       display_name: '',
       role: '',
       tools: [],
+      skills: [],
       instructions: [],
       rooms: [],
       num_history_runs: 5,
     },
   });
 
+  useEffect(() => {
+    let isMounted = true;
+
+    const fetchSkills = async () => {
+      setSkillsLoading(true);
+      try {
+        const skills = await listSkills();
+        if (isMounted) {
+          setAvailableSkills(skills);
+        }
+      } catch (error) {
+        console.error('Failed to fetch skills:', error);
+        if (isMounted) {
+          setAvailableSkills([]);
+        }
+      } finally {
+        if (isMounted) {
+          setSkillsLoading(false);
+        }
+      }
+    };
+
+    fetchSkills();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
   // Reset form when selected agent changes
   useEffect(() => {
     if (selectedAgent) {
-      reset(selectedAgent);
+      reset({
+        ...selectedAgent,
+        skills: selectedAgent.skills ?? [],
+      });
     }
   }, [selectedAgent, reset]);
 
@@ -359,6 +396,60 @@ export function AgentEditor() {
             </>
           )}
         </div>
+      </FieldGroup>
+
+      {/* Skills */}
+      <FieldGroup label="Skills" helperText="Select skills this agent can invoke">
+        {skillsLoading ? (
+          <div className="text-sm text-muted-foreground text-center py-2">Loading skills...</div>
+        ) : availableSkills.length === 0 ? (
+          <div className="text-sm text-muted-foreground text-center py-2">
+            No skills available. Create skills in the Skills tab first.
+          </div>
+        ) : (
+          <Controller
+            name="skills"
+            control={control}
+            render={({ field }) => {
+              const selectedSkills = field.value ?? [];
+
+              return (
+                <div className="space-y-2 max-h-56 overflow-y-auto border rounded-lg p-2">
+                  {availableSkills.map(skill => {
+                    const isChecked = selectedSkills.includes(skill.name);
+                    return (
+                      <div
+                        key={skill.name}
+                        className="flex items-center space-x-2 p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-all duration-200"
+                      >
+                        <Checkbox
+                          id={`skill-${skill.name}`}
+                          checked={isChecked}
+                          onCheckedChange={checked => {
+                            const newSkills =
+                              checked === true
+                                ? [...selectedSkills, skill.name]
+                                : selectedSkills.filter(s => s !== skill.name);
+                            field.onChange(newSkills);
+                            handleFieldChange('skills', newSkills);
+                          }}
+                        />
+                        <label htmlFor={`skill-${skill.name}`} className="flex-1 cursor-pointer">
+                          <div className="font-medium text-sm">{skill.name}</div>
+                          {skill.description && (
+                            <div className="text-xs text-gray-500 dark:text-gray-400">
+                              {skill.description}
+                            </div>
+                          )}
+                        </label>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            }}
+          />
+        )}
       </FieldGroup>
 
       {/* Instructions */}
