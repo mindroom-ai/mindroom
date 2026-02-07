@@ -77,17 +77,38 @@ class StreamingResponse:
     event_id: str | None = None  # None until first message sent
     last_update: float = 0.0
     update_interval: float = 1.0
+    initial_update_interval: float = 0.25
+    interval_ramp_seconds: float = 12.0
     latest_thread_event_id: str | None = None  # For MSC3440 compliance
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
+    stream_started_at: float = field(default_factory=time.time)
 
     def _update(self, new_chunk: str) -> None:
         """Append new chunk to accumulated text."""
         self.accumulated_text += new_chunk
 
+    def _current_update_interval(self, current_time: float) -> float:
+        """Return the current throttling interval.
+
+        Streaming starts with faster edits, then ramps toward the steady-state
+        interval to reduce edit noise for long responses.
+        """
+        if self.interval_ramp_seconds <= 0:
+            return self.update_interval
+
+        fast_interval = min(self.initial_update_interval, self.update_interval)
+        elapsed = max(0.0, current_time - self.stream_started_at)
+        if elapsed >= self.interval_ramp_seconds:
+            return self.update_interval
+
+        progress = elapsed / self.interval_ramp_seconds
+        return fast_interval + (self.update_interval - fast_interval) * progress
+
     async def _throttled_send(self, client: nio.AsyncClient) -> None:
         """Send/edit the message if enough time has passed since the last update."""
         current_time = time.time()
-        if current_time - self.last_update >= self.update_interval:
+        current_interval = self._current_update_interval(current_time)
+        if current_time - self.last_update >= current_interval:
             await self._send_or_edit_message(client)
             self.last_update = current_time
 

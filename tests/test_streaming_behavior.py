@@ -353,6 +353,30 @@ class TestStreamingBehavior:
         assert content["m.relates_to"]["rel_type"] == "m.replace"
         assert content["m.relates_to"]["event_id"] == "$stream_123"
 
+    def test_streaming_update_interval_starts_fast_then_slows(self) -> None:
+        """Test progressive throttling: frequent edits first, slower later."""
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            update_interval=1.0,
+            initial_update_interval=0.2,
+            interval_ramp_seconds=8.0,
+        )
+        streaming.stream_started_at = 100.0
+
+        start = streaming._current_update_interval(100.0)
+        mid = streaming._current_update_interval(104.0)
+        end = streaming._current_update_interval(108.0)
+        after = streaming._current_update_interval(120.0)
+
+        assert start == pytest.approx(0.2)
+        assert mid == pytest.approx(0.6)
+        assert end == pytest.approx(1.0)
+        assert after == pytest.approx(1.0)
+
     @pytest.mark.asyncio
     async def test_streaming_in_progress_marker(
         self,
