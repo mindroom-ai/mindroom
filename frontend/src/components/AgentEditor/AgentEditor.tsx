@@ -13,7 +13,13 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Plus, X, Bot, Settings } from 'lucide-react';
-import { EditorPanel, EditorPanelEmptyState, FieldGroup } from '@/components/shared';
+import {
+  EditorPanel,
+  EditorPanelEmptyState,
+  FieldGroup,
+  CheckboxListField,
+  CheckboxListItem,
+} from '@/components/shared';
 import { useForm, Controller } from 'react-hook-form';
 import { Agent } from '@/types/config';
 import { ToolConfigDialog } from '@/components/ToolConfig/ToolConfigDialog';
@@ -84,13 +90,37 @@ export function AgentEditor() {
     },
   });
 
+  // Prepare checkbox items for skills (includes orphaned selected skills)
+  const skillItems: CheckboxListItem[] = useMemo(() => {
+    const selected = selectedAgent?.skills ?? [];
+    const availableByName = new Map(availableSkills.map(s => [s.name, s]));
+    const allNames = [
+      ...availableSkills.map(s => s.name),
+      ...selected.filter(name => !availableByName.has(name)),
+    ];
+    return allNames.map(name => ({
+      value: name,
+      label: name,
+      description:
+        availableByName.get(name)?.description || 'Skill not available; uncheck to remove',
+    }));
+  }, [availableSkills, selectedAgent?.skills]);
+
+  // Prepare checkbox items for rooms
+  const roomItems: CheckboxListItem[] = useMemo(
+    () =>
+      rooms.map(room => ({
+        value: room.id,
+        label: room.display_name,
+        description: room.description,
+      })),
+    [rooms]
+  );
+
   // Reset form when selected agent changes
   useEffect(() => {
     if (selectedAgent) {
-      reset({
-        ...selectedAgent,
-        skills: selectedAgent.skills ?? [],
-      });
+      reset(selectedAgent);
     }
   }, [selectedAgent, reset]);
 
@@ -372,61 +402,14 @@ export function AgentEditor() {
         {skillsLoading ? (
           <div className="text-sm text-muted-foreground text-center py-2">Loading skills...</div>
         ) : (
-          <Controller
+          <CheckboxListField
             name="skills"
             control={control}
-            render={({ field }) => {
-              const selectedSkills = field.value ?? [];
-              const availableSkillsByName = new Map(
-                availableSkills.map(skill => [skill.name, skill])
-              );
-              const skillNamesToRender = [
-                ...availableSkills.map(skill => skill.name),
-                ...selectedSkills.filter(skillName => !availableSkillsByName.has(skillName)),
-              ];
-
-              if (skillNamesToRender.length === 0) {
-                return (
-                  <div className="text-sm text-muted-foreground text-center py-2">
-                    No skills available. Create skills in the Skills tab first.
-                  </div>
-                );
-              }
-
-              return (
-                <div className="space-y-2 max-h-56 overflow-y-auto border rounded-lg p-2">
-                  {skillNamesToRender.map(skillName => {
-                    const isChecked = selectedSkills.includes(skillName);
-                    const skill = availableSkillsByName.get(skillName);
-                    return (
-                      <div
-                        key={skillName}
-                        className="flex items-center space-x-2 p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-all duration-200"
-                      >
-                        <Checkbox
-                          id={`skill-${skillName}`}
-                          checked={isChecked}
-                          onCheckedChange={checked => {
-                            const newSkills =
-                              checked === true
-                                ? [...selectedSkills, skillName]
-                                : selectedSkills.filter(s => s !== skillName);
-                            field.onChange(newSkills);
-                            handleFieldChange('skills', newSkills);
-                          }}
-                        />
-                        <label htmlFor={`skill-${skillName}`} className="flex-1 cursor-pointer">
-                          <div className="font-medium text-sm">{skillName}</div>
-                          <div className="text-xs text-gray-500 dark:text-gray-400">
-                            {skill?.description || 'Skill not available; uncheck to remove'}
-                          </div>
-                        </label>
-                      </div>
-                    );
-                  })}
-                </div>
-              );
-            }}
+            items={skillItems}
+            fieldName="skills"
+            onFieldChange={handleFieldChange}
+            idPrefix="skill"
+            emptyMessage="No skills available. Create skills in the Skills tab first."
           />
         )}
       </FieldGroup>
@@ -483,48 +466,15 @@ export function AgentEditor() {
 
       {/* Rooms */}
       <FieldGroup label="Agent Rooms" helperText="Select rooms where this agent can operate">
-        <Controller
+        <CheckboxListField
           name="rooms"
           control={control}
-          render={({ field }) => (
-            <div className="space-y-2 max-h-48 overflow-y-auto border rounded-lg p-2">
-              {rooms.length === 0 ? (
-                <p className="text-sm text-muted-foreground text-center py-2">
-                  No rooms available. Create rooms in the Rooms tab.
-                </p>
-              ) : (
-                rooms.map(room => {
-                  const isChecked = field.value.includes(room.id);
-                  return (
-                    <div
-                      key={room.id}
-                      className="flex items-center space-x-2 p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-all duration-200"
-                    >
-                      <Checkbox
-                        id={`room-${room.id}`}
-                        checked={isChecked}
-                        onCheckedChange={checked => {
-                          const newRooms = checked
-                            ? [...field.value, room.id]
-                            : field.value.filter(r => r !== room.id);
-                          field.onChange(newRooms);
-                          handleFieldChange('rooms', newRooms);
-                        }}
-                      />
-                      <label htmlFor={`room-${room.id}`} className="flex-1 cursor-pointer">
-                        <div className="font-medium text-sm">{room.display_name}</div>
-                        {room.description && (
-                          <div className="text-xs text-gray-500 dark:text-gray-400">
-                            {room.description}
-                          </div>
-                        )}
-                      </label>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          )}
+          items={roomItems}
+          fieldName="rooms"
+          onFieldChange={handleFieldChange}
+          idPrefix="room"
+          emptyMessage="No rooms available. Create rooms in the Rooms tab."
+          className="space-y-2 max-h-48 overflow-y-auto border rounded-lg p-2"
         />
       </FieldGroup>
 
