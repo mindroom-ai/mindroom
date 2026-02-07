@@ -22,7 +22,7 @@ from mindroom.api.matrix_operations import router as matrix_router
 from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
 from mindroom.config import Config
-from mindroom.constants import DEFAULT_AGENTS_CONFIG, DEFAULT_CONFIG_TEMPLATE
+from mindroom.constants import DEFAULT_AGENTS_CONFIG, DEFAULT_CONFIG_TEMPLATE, safe_replace
 from mindroom.credentials_sync import sync_env_to_credentials
 
 # Load environment variables from .env file
@@ -94,7 +94,7 @@ def save_config_to_file(config: dict[str, Any]) -> None:
             sort_keys=True,
             allow_unicode=True,
         )
-    tmp_path.replace(CONFIG_PATH)
+    safe_replace(tmp_path, CONFIG_PATH)
 
 
 # Global variable to store current config

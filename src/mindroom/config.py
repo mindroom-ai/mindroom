@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 from pydantic import BaseModel, Field
 
-from .constants import DEFAULT_AGENTS_CONFIG, MATRIX_HOMESERVER, ROUTER_AGENT_NAME
+from .constants import DEFAULT_AGENTS_CONFIG, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, safe_replace
 from .logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -342,5 +342,5 @@ class Config(BaseModel):
                 allow_unicode=True,  # Preserve Unicode characters like ë
                 width=120,  # Wider lines to reduce wrapping
             )
-        tmp_path.replace(path_obj)
+        safe_replace(tmp_path, path_obj)
         logger.info(f"Saved configuration to {path}")
