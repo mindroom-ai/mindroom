@@ -274,14 +274,69 @@ async def ensure_user_in_rooms(homeserver: str, room_ids: dict[str, str]) -> Non
                 logger.warning(f"User {user_id} failed to join room {room_key} - may need invitation")
 
 
-DM_ROOM_CACHE: dict[str, bool] = {}
+DM_ROOM_CACHE: dict[tuple[str, str], bool] = {}
+DIRECT_ROOMS_CACHE: dict[str, set[str]] = {}
+
+
+def _dm_cache_key(client: nio.AsyncClient, room_id: str) -> tuple[str, str]:
+    """Build a cache key that is scoped per user.
+
+    DM membership via ``m.direct`` is account-specific, so room-only cache keys
+    can leak incorrect results between different bot users.
+    """
+    return (str(client.user_id or ""), room_id)
+
+
+async def _get_direct_room_ids(client: nio.AsyncClient) -> set[str]:
+    """Get DM room IDs from the user's ``m.direct`` account data."""
+    user_id = str(client.user_id or "")
+    if not user_id:
+        return set()
+
+    cached_room_ids = DIRECT_ROOMS_CACHE.get(user_id)
+    if cached_room_ids is not None:
+        return cached_room_ids
+
+    response = await client.list_direct_rooms()
+    if isinstance(response, nio.DirectRoomsResponse):
+        direct_room_ids = {room_id for room_ids in response.rooms.values() for room_id in room_ids}
+        DIRECT_ROOMS_CACHE[user_id] = direct_room_ids
+        return direct_room_ids
+
+    return set()
+
+
+def _is_two_member_group_room(client: nio.AsyncClient, room_id: str) -> bool:
+    """Check if nio models this room as an unnamed two-member group."""
+    room_lookup = getattr(client, "rooms", None)
+    if not isinstance(room_lookup, dict):
+        return False
+
+    room = room_lookup.get(room_id)
+    return room is not None and room.is_group and room.member_count == 2
+
+
+def _has_is_direct_marker(state_events: list[dict[str, object]]) -> bool:
+    """Check room state events for Matrix direct-message markers."""
+    for event in state_events:
+        event_type = event.get("type")
+        if event_type not in {"m.room.member", "m.room.create"}:
+            continue
+
+        content = event.get("content")
+        if isinstance(content, dict) and content.get("is_direct") is True:
+            return True
+
+    return False
 
 
 async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool:
     """Check if a room is a Direct Message (DM) room.
 
-    DM rooms have the "is_direct" flag set to true in member state events.
-    This function checks the room state to determine if it's a DM.
+    Detection uses multiple signals in this order:
+    1. ``m.direct`` account data (via ``/account_data/m.direct``)
+    2. Nio's in-memory room model for 2-member ad-hoc rooms
+    3. Room state events with ``is_direct=true``
 
     Args:
         client: The Matrix client
@@ -291,21 +346,26 @@ async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool:
         True if the room is a DM room, False otherwise
 
     """
-    if room_id in DM_ROOM_CACHE:
-        return DM_ROOM_CACHE[room_id]
-    # Get the room state events, specifically member events
+    cache_key = _dm_cache_key(client, room_id)
+    cached = DM_ROOM_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    direct_room_ids = await _get_direct_room_ids(client)
+    if room_id in direct_room_ids:
+        DM_ROOM_CACHE[cache_key] = True
+        return True
+
+    # Preserve DM-like rooms even when servers don't expose `is_direct` in state.
+    if _is_two_member_group_room(client, room_id):
+        DM_ROOM_CACHE[cache_key] = True
+        return True
+
+    # Get the room state events, specifically member events.
     response = await client.room_get_state(room_id)
+    if not isinstance(response, nio.RoomGetStateResponse):
+        return False
 
-    if isinstance(response, nio.RoomGetStateResponse):
-        # Check member events for the is_direct flag
-        for event in response.events:
-            if event.get("type") == "m.room.member":
-                content = event.get("content", {})
-                if content.get("is_direct") is True:
-                    # Cache the result for this room ID
-                    DM_ROOM_CACHE[room_id] = True
-                    return True
-
-    # If we can't find is_direct=true in any member event, it's not a DM
-    DM_ROOM_CACHE[room_id] = False
-    return False
+    is_dm = _has_is_direct_marker(response.events)
+    DM_ROOM_CACHE[cache_key] = is_dm
+    return is_dm
