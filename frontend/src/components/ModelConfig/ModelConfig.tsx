@@ -38,6 +38,8 @@ interface RowDraft {
   modelName: string;
   provider: string;
   modelId: string;
+  endpointMode: 'openai' | 'openai-compatible';
+  baseUrl: string;
   apiKey: string;
   selectedKeySourceModel: string;
   clearCustomKey: boolean;
@@ -62,6 +64,7 @@ interface ModelRowData {
   provider: string;
   providerName: string;
   modelId: string;
+  openAIBaseUrl: string | null;
   keyDisplay: KeyDisplayInfo | null;
 }
 
@@ -69,6 +72,8 @@ const EMPTY_DRAFT: RowDraft = {
   modelName: '',
   provider: 'openrouter',
   modelId: '',
+  endpointMode: 'openai',
+  baseUrl: '',
   apiKey: '',
   selectedKeySourceModel: '',
   clearCustomKey: false,
@@ -125,6 +130,28 @@ function sourceToLabel(source: string | null, hasKey: boolean): string {
   return '.env';
 }
 
+function getOpenAIBaseUrl(modelConfig: { extra_kwargs?: Record<string, unknown> }): string | null {
+  const extraKwargs = modelConfig.extra_kwargs;
+  if (!extraKwargs || typeof extraKwargs !== 'object') {
+    return null;
+  }
+  const baseUrl = (extraKwargs as Record<string, unknown>).base_url;
+  if (typeof baseUrl !== 'string') {
+    return null;
+  }
+  const trimmed = baseUrl.trim();
+  return trimmed || null;
+}
+
+function isValidHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 async function fetchKeyStatus(service: string): Promise<KeyStatus> {
   try {
     const res = await fetch(`/api/credentials/${service}/api-key?key_name=api_key`);
@@ -169,8 +196,12 @@ async function fetchApiKeyValue(service: string): Promise<string | null> {
 
 async function copyTextToClipboard(text: string): Promise<boolean> {
   if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return true;
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Fall back to document.execCommand below
+    }
   }
 
   if (typeof document === 'undefined') {
@@ -254,7 +285,6 @@ export function ModelConfig() {
 
   const [providerKeys, setProviderKeys] = useState<Record<string, KeyStatus>>({});
   const [modelKeys, setModelKeys] = useState<Record<string, KeyStatus>>({});
-  const [copyableServices, setCopyableServices] = useState<Record<string, boolean>>({});
   const [sorting, setSorting] = useState<SortingState>([
     { id: 'provider', desc: false },
     { id: 'modelName', desc: false },
@@ -299,26 +329,6 @@ export function ModelConfig() {
     const nextModelKeys = Object.fromEntries(modelResults);
     setProviderKeys(nextProviderKeys);
     setModelKeys(nextModelKeys);
-
-    const servicesToCheck = new Set<string>();
-    for (const [provider, status] of Object.entries(nextProviderKeys)) {
-      if (status.hasKey) {
-        servicesToCheck.add(providerToService(provider));
-      }
-    }
-    for (const [modelName, status] of Object.entries(nextModelKeys)) {
-      if (status.hasKey) {
-        servicesToCheck.add(`model:${modelName}`);
-      }
-    }
-
-    const copyableResults = await Promise.all(
-      [...servicesToCheck].map(async service => {
-        const keyValue = await fetchApiKeyValue(service);
-        return [service, Boolean(keyValue)] as const;
-      })
-    );
-    setCopyableServices(Object.fromEntries(copyableResults));
   }, [config]);
 
   useEffect(() => {
@@ -429,6 +439,8 @@ export function ModelConfig() {
       modelName: row.modelName,
       provider: row.provider,
       modelId: row.modelId,
+      endpointMode: row.provider === 'openai' && row.openAIBaseUrl ? 'openai-compatible' : 'openai',
+      baseUrl: row.openAIBaseUrl || '',
       apiKey: '',
       selectedKeySourceModel: '',
       clearCustomKey: false,
@@ -499,6 +511,26 @@ export function ModelConfig() {
       return;
     }
 
+    const normalizedBaseUrl = rowDraft.baseUrl.trim();
+    if (rowDraft.provider === 'openai' && rowDraft.endpointMode === 'openai-compatible') {
+      if (!normalizedBaseUrl) {
+        toast({
+          title: 'Error',
+          description: 'Base URL is required for OpenAI-compatible mode',
+          variant: 'destructive',
+        });
+        return;
+      }
+      if (!isValidHttpUrl(normalizedBaseUrl)) {
+        toast({
+          title: 'Error',
+          description: 'Base URL must be a valid http(s) URL',
+          variant: 'destructive',
+        });
+        return;
+      }
+    }
+
     setIsSavingRow(true);
 
     const renamed = targetModelName !== originalModelName;
@@ -522,7 +554,7 @@ export function ModelConfig() {
       keyOperationOk = await deleteModelApiKey(originalModelName);
     }
 
-    if (keyOperationOk && renamed && hadCustomKey) {
+    if (keyOperationOk && renamed && hadCustomKey && !rowDraft.clearCustomKey) {
       keyOperationOk = await deleteModelApiKey(originalModelName);
     }
 
@@ -536,6 +568,22 @@ export function ModelConfig() {
       provider: rowDraft.provider as ProviderType,
       id: targetModelId,
     };
+
+    const nextExtraKwargs = { ...(originalModelConfig.extra_kwargs ?? {}) };
+    if (rowDraft.provider === 'openai') {
+      if (rowDraft.endpointMode === 'openai-compatible') {
+        nextExtraKwargs.base_url = normalizedBaseUrl;
+      } else {
+        delete nextExtraKwargs.base_url;
+      }
+    } else {
+      delete nextExtraKwargs.base_url;
+    }
+    if (Object.keys(nextExtraKwargs).length > 0) {
+      nextModelConfig.extra_kwargs = nextExtraKwargs;
+    } else {
+      delete nextModelConfig.extra_kwargs;
+    }
 
     if (rowDraft.provider !== 'ollama') {
       delete nextModelConfig.host;
@@ -580,6 +628,26 @@ export function ModelConfig() {
       return;
     }
 
+    const normalizedBaseUrl = newRowDraft.baseUrl.trim();
+    if (newRowDraft.provider === 'openai' && newRowDraft.endpointMode === 'openai-compatible') {
+      if (!normalizedBaseUrl) {
+        toast({
+          title: 'Error',
+          description: 'Base URL is required for OpenAI-compatible mode',
+          variant: 'destructive',
+        });
+        return;
+      }
+      if (!isValidHttpUrl(normalizedBaseUrl)) {
+        toast({
+          title: 'Error',
+          description: 'Base URL must be a valid http(s) URL',
+          variant: 'destructive',
+        });
+        return;
+      }
+    }
+
     setIsSavingNewRow(true);
 
     let keyOperationOk = true;
@@ -596,10 +664,19 @@ export function ModelConfig() {
       return;
     }
 
-    updateModel(modelName, {
+    const nextModelConfig: {
+      provider: ProviderType;
+      id: string;
+      extra_kwargs?: Record<string, unknown>;
+    } = {
       provider: newRowDraft.provider as ProviderType,
       id: modelId,
-    });
+    };
+    if (newRowDraft.provider === 'openai' && newRowDraft.endpointMode === 'openai-compatible') {
+      nextModelConfig.extra_kwargs = { base_url: normalizedBaseUrl };
+    }
+
+    updateModel(modelName, nextModelConfig);
 
     await fetchAllKeyStatuses();
     setIsSavingNewRow(false);
@@ -632,12 +709,15 @@ export function ModelConfig() {
         modelKeys,
         providerKeys
       );
+      const openAIBaseUrl =
+        modelConfig.provider === 'openai' ? getOpenAIBaseUrl(modelConfig) : null;
 
       return {
         modelName,
         provider: modelConfig.provider,
         providerName: getProviderInfo(modelConfig.provider).name,
         modelId: modelConfig.id,
+        openAIBaseUrl,
         keyDisplay,
       };
     });
@@ -646,8 +726,7 @@ export function ModelConfig() {
   const renderReadonlyKeyStatus = (
     keyDisplay: KeyDisplayInfo | null,
     modelName?: string,
-    provider?: string,
-    isCopyable?: boolean
+    provider?: string
   ) => {
     if (!keyDisplay) {
       return <span className="text-sm text-muted-foreground">N/A</span>;
@@ -668,7 +747,7 @@ export function ModelConfig() {
               <span className="ml-1 font-mono opacity-80">{keyDisplay.maskedKey}</span>
             )}
           </Badge>
-          {keyDisplay.hasKey && modelName && provider && isCopyable && (
+          {keyDisplay.hasKey && modelName && provider && (
             <Button
               size="icon"
               variant="ghost"
@@ -718,22 +797,12 @@ export function ModelConfig() {
     const currentStatus = currentModelName
       ? getKeyStatusDisplay(currentModelName, draft.provider, modelKeys, providerKeys)
       : null;
-    const currentCopyService =
-      currentModelName && modelKeys[currentModelName]?.hasKey
-        ? `model:${currentModelName}`
-        : providerToService(draft.provider);
-    const isCurrentCopyable = Boolean(currentCopyService && copyableServices[currentCopyService]);
 
     return (
       <div className="space-y-2" onClick={event => event.stopPropagation()}>
         {currentStatus && currentModelName && (
           <div className="space-y-1">
-            {renderReadonlyKeyStatus(
-              currentStatus,
-              currentModelName,
-              draft.provider,
-              isCurrentCopyable
-            )}
+            {renderReadonlyKeyStatus(currentStatus, currentModelName, draft.provider)}
             {hasCustomKey && (
               <>
                 <Button
@@ -840,6 +909,50 @@ export function ModelConfig() {
     );
   };
 
+  const renderOpenAIEndpointEditor = (
+    draft: RowDraft,
+    setDraft: Dispatch<SetStateAction<RowDraft>>
+  ) => {
+    if (draft.provider !== 'openai') {
+      return null;
+    }
+
+    return (
+      <div className="space-y-2" onClick={event => event.stopPropagation()}>
+        <Select
+          value={draft.endpointMode}
+          onValueChange={mode => {
+            setDraft(current => ({
+              ...current,
+              endpointMode: mode as 'openai' | 'openai-compatible',
+              baseUrl: mode === 'openai' ? '' : current.baseUrl,
+            }));
+          }}
+        >
+          <SelectTrigger className="h-8 text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="openai">OpenAI</SelectItem>
+            <SelectItem value="openai-compatible">OpenAI-compatible</SelectItem>
+          </SelectContent>
+        </Select>
+        {draft.endpointMode === 'openai-compatible' && (
+          <Input
+            value={draft.baseUrl}
+            onChange={event => {
+              const baseUrl = event.target.value;
+              setDraft(current => ({ ...current, baseUrl }));
+            }}
+            onClick={event => event.stopPropagation()}
+            placeholder="https://api.example.com/v1"
+            className="h-8 text-xs"
+          />
+        )}
+      </div>
+    );
+  };
+
   const columns: ColumnDef<ModelRowData>[] = [
     {
       accessorKey: 'modelName',
@@ -889,6 +1002,8 @@ export function ModelConfig() {
                     ? {
                         ...current,
                         provider,
+                        endpointMode: 'openai',
+                        baseUrl: '',
                         apiKey: '',
                         selectedKeySourceModel: '',
                         clearCustomKey: provider === 'ollama' ? true : current.clearCustomKey,
@@ -922,20 +1037,36 @@ export function ModelConfig() {
         const isEditing = editingRowId === row.original.modelName && rowDraft;
         if (!isEditing) {
           return (
-            <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{row.original.modelId}</code>
+            <div className="space-y-1">
+              <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{row.original.modelId}</code>
+              {row.original.provider === 'openai' && row.original.openAIBaseUrl && (
+                <p className="text-xs text-muted-foreground">
+                  OpenAI-compatible:{' '}
+                  <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
+                    {row.original.openAIBaseUrl}
+                  </code>
+                </p>
+              )}
+            </div>
           );
         }
 
         return (
-          <Input
-            value={rowDraft.modelId}
-            onChange={event => {
-              const modelId = event.target.value;
-              setRowDraft(current => (current ? { ...current, modelId } : current));
-            }}
-            onClick={event => event.stopPropagation()}
-            className="h-8 text-xs"
-          />
+          <div className="space-y-2">
+            <Input
+              value={rowDraft.modelId}
+              onChange={event => {
+                const modelId = event.target.value;
+                setRowDraft(current => (current ? { ...current, modelId } : current));
+              }}
+              onClick={event => event.stopPropagation()}
+              className="h-8 text-xs"
+            />
+            {renderOpenAIEndpointEditor(
+              rowDraft,
+              setRowDraft as Dispatch<SetStateAction<RowDraft>>
+            )}
+          </div>
         );
       },
     },
@@ -949,14 +1080,7 @@ export function ModelConfig() {
           return renderReadonlyKeyStatus(
             row.original.keyDisplay,
             row.original.modelName,
-            row.original.provider,
-            Boolean(
-              copyableServices[
-                modelKeys[row.original.modelName]?.hasKey
-                  ? `model:${row.original.modelName}`
-                  : providerToService(row.original.provider)
-              ]
-            )
+            row.original.provider
           );
         }
 
@@ -1102,6 +1226,8 @@ export function ModelConfig() {
                           provider,
                           apiKey: '',
                           selectedKeySourceModel: '',
+                          endpointMode: 'openai',
+                          baseUrl: '',
                         }));
                       }}
                     >
@@ -1121,15 +1247,18 @@ export function ModelConfig() {
                     </Select>
                   </td>
                   <td className="px-4 py-2.5 align-middle">
-                    <Input
-                      value={newRowDraft.modelId}
-                      onChange={event => {
-                        const modelId = event.target.value;
-                        setNewRowDraft(current => ({ ...current, modelId }));
-                      }}
-                      className="h-8 text-xs"
-                      placeholder="provider model id"
-                    />
+                    <div className="space-y-2">
+                      <Input
+                        value={newRowDraft.modelId}
+                        onChange={event => {
+                          const modelId = event.target.value;
+                          setNewRowDraft(current => ({ ...current, modelId }));
+                        }}
+                        className="h-8 text-xs"
+                        placeholder="provider model id"
+                      />
+                      {renderOpenAIEndpointEditor(newRowDraft, setNewRowDraft)}
+                    </div>
                   </td>
                   <td className="px-4 py-2.5 align-middle">
                     {renderEditableApiCell(newRowDraft, setNewRowDraft)}

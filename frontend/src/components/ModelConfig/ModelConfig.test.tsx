@@ -37,6 +37,11 @@ describe('ModelConfig', () => {
         anthropic: { provider: 'anthropic', id: 'claude-3-5-haiku-latest' },
         openrouter: { provider: 'openrouter', id: 'z-ai/glm-4.5-air:free' },
         openrouter_backup: { provider: 'openrouter', id: 'openai/gpt-4o-mini' },
+        openai_local: {
+          provider: 'openai',
+          id: 'gpt-4.1-mini',
+          extra_kwargs: { base_url: 'http://localhost:9292/v1' },
+        },
       },
       agents: {},
       defaults: { num_history_runs: 5, markdown: true, add_history_to_messages: true },
@@ -122,6 +127,7 @@ describe('ModelConfig', () => {
     expect(screen.getByText('default')).toBeTruthy();
     expect(screen.getByText('anthropic')).toBeTruthy();
     expect(screen.getByText('openrouter')).toBeTruthy();
+    expect(screen.getByText('openai_local')).toBeTruthy();
   });
 
   it('starts inline editing when a row is clicked', () => {
@@ -191,6 +197,39 @@ describe('ModelConfig', () => {
       expect(fetchMock).toHaveBeenCalledWith('/api/credentials/model:anthropic', {
         method: 'DELETE',
       });
+    });
+  });
+
+  it('shows OpenAI-compatible endpoint details and allows editing base URL', async () => {
+    render(<ModelConfig />);
+
+    expect(
+      screen.getAllByText(
+        (_, element) =>
+          element?.textContent?.includes('OpenAI-compatible: http://localhost:9292/v1') ?? false
+      ).length
+    ).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByText('openai_local'));
+    const row = screen.getByDisplayValue('openai_local').closest('tr');
+    if (!row) throw new Error('row not found');
+
+    expect(within(row).getByDisplayValue('http://localhost:9292/v1')).toBeTruthy();
+
+    fireEvent.change(within(row).getByDisplayValue('http://localhost:9292/v1'), {
+      target: { value: 'http://localhost:11434/v1' },
+    });
+    fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(mockStore.updateModel).toHaveBeenCalledWith(
+        'openai_local',
+        expect.objectContaining({
+          provider: 'openai',
+          id: 'gpt-4.1-mini',
+          extra_kwargs: { base_url: 'http://localhost:11434/v1' },
+        })
+      );
     });
   });
 
@@ -322,23 +361,6 @@ describe('ModelConfig', () => {
     });
   });
 
-  it('hides copy button when key value is not retrievable', async () => {
-    keyStatusByService['model:anthropic'] = {
-      has_key: true,
-      source: 'ui',
-      masked_key: 'sk-an...1234',
-    };
-
-    render(<ModelConfig />);
-
-    const row = screen.getByText('anthropic').closest('tr');
-    if (!row) throw new Error('row not found');
-
-    await waitFor(() => {
-      expect(within(row).queryByTitle('Copy API key')).toBeNull();
-    });
-  });
-
   it('adds a model using the top add row', async () => {
     render(<ModelConfig />);
 
@@ -363,6 +385,73 @@ describe('ModelConfig', () => {
       expect(mockStore.updateModel).toHaveBeenCalledWith('new-model', {
         provider: 'openrouter',
         id: 'gpt-4o-mini',
+      });
+    });
+  });
+
+  it('requires base URL for OpenAI-compatible mode', async () => {
+    const { toast } = await import('@/components/ui/toaster');
+
+    render(<ModelConfig />);
+
+    fireEvent.click(screen.getByRole('button', { name: /add model/i }));
+    const addRow = screen.getByPlaceholderText('model name').closest('tr');
+    if (!addRow) throw new Error('add row not found');
+
+    fireEvent.click(within(addRow).getAllByRole('combobox')[0]);
+    fireEvent.click(screen.getByRole('option', { name: /OpenAI OpenAI/ }));
+    fireEvent.click(within(addRow).getAllByRole('combobox')[1]);
+    fireEvent.click(screen.getByRole('option', { name: 'OpenAI-compatible' }));
+
+    fireEvent.change(within(addRow).getByPlaceholderText('model name'), {
+      target: { value: 'openai_compat' },
+    });
+    fireEvent.change(within(addRow).getByPlaceholderText('provider model id'), {
+      target: { value: 'gpt-4.1-mini' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /^Add$/ }));
+
+    await waitFor(() => {
+      expect(toast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'Error',
+          description: 'Base URL is required for OpenAI-compatible mode',
+          variant: 'destructive',
+        })
+      );
+    });
+  });
+
+  it('saves OpenAI-compatible base URL on add', async () => {
+    render(<ModelConfig />);
+
+    fireEvent.click(screen.getByRole('button', { name: /add model/i }));
+    const addRow = screen.getByPlaceholderText('model name').closest('tr');
+    if (!addRow) throw new Error('add row not found');
+
+    fireEvent.click(within(addRow).getAllByRole('combobox')[0]);
+    fireEvent.click(screen.getByRole('option', { name: /OpenAI OpenAI/ }));
+    fireEvent.click(within(addRow).getAllByRole('combobox')[1]);
+    fireEvent.click(screen.getByRole('option', { name: 'OpenAI-compatible' }));
+
+    fireEvent.change(within(addRow).getByPlaceholderText('model name'), {
+      target: { value: 'openai_compat' },
+    });
+    fireEvent.change(within(addRow).getByPlaceholderText('provider model id'), {
+      target: { value: 'gpt-4.1-mini' },
+    });
+    fireEvent.change(within(addRow).getByPlaceholderText('https://api.example.com/v1'), {
+      target: { value: 'http://localhost:9292/v1' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /^Add$/ }));
+
+    await waitFor(() => {
+      expect(mockStore.updateModel).toHaveBeenCalledWith('openai_compat', {
+        provider: 'openai',
+        id: 'gpt-4.1-mini',
+        extra_kwargs: { base_url: 'http://localhost:9292/v1' },
       });
     });
   });
@@ -396,6 +485,45 @@ describe('ModelConfig', () => {
       expect(fetchMock).toHaveBeenCalledWith('/api/credentials/model:anthropic', {
         method: 'DELETE',
       });
+    });
+  });
+
+  it('deletes custom key only once when clearing key and renaming model', async () => {
+    keyStatusByService['model:anthropic'] = {
+      has_key: true,
+      source: 'ui',
+      masked_key: 'sk-an...1234',
+      api_key: 'sk-anthropic-real',
+    };
+
+    render(<ModelConfig />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText('Source: UI').length).toBeGreaterThan(0);
+    });
+
+    fireEvent.click(screen.getByText('anthropic'));
+    const row = screen.getByDisplayValue('anthropic').closest('tr');
+    if (!row) throw new Error('row not found');
+
+    fireEvent.change(within(row).getByDisplayValue('anthropic'), {
+      target: { value: 'anthropic-cleared' },
+    });
+    fireEvent.click(within(row).getByRole('button', { name: 'Clear custom key' }));
+    fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      const deleteCalls = fetchMock.mock.calls.filter(
+        ([url, init]) =>
+          url === '/api/credentials/model:anthropic' &&
+          typeof init === 'object' &&
+          init?.method === 'DELETE'
+      );
+      expect(deleteCalls).toHaveLength(1);
+      expect(fetchMock).not.toHaveBeenCalledWith(
+        '/api/credentials/model:anthropic-cleared/copy-from/model:anthropic',
+        { method: 'POST' }
+      );
     });
   });
 
