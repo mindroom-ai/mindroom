@@ -30,21 +30,24 @@ vi.mock('@/hooks/useTools', () => ({
   })),
 }));
 
-vi.mock('@/services/skillsService', () => ({
-  listSkills: vi.fn(() => [
-    {
-      name: 'debugging',
-      description: 'Debug issues quickly',
-      origin: 'bundled',
-      can_edit: false,
-    },
-    {
-      name: 'code-review',
-      description: 'Perform code reviews',
-      origin: 'user',
-      can_edit: true,
-    },
-  ]),
+vi.mock('@/hooks/useSkills', () => ({
+  useSkills: vi.fn(() => ({
+    skills: [
+      {
+        name: 'debugging',
+        description: 'Debug issues quickly',
+        origin: 'bundled',
+        can_edit: false,
+      },
+      {
+        name: 'code-review',
+        description: 'Perform code reviews',
+        origin: 'user',
+        can_edit: true,
+      },
+    ],
+    loading: false,
+  })),
 }));
 
 describe('AgentEditor', () => {

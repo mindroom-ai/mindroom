@@ -20,8 +20,7 @@ import { ToolConfigDialog } from '@/components/ToolConfig/ToolConfigDialog';
 import { TOOL_SCHEMAS } from '@/types/toolConfig';
 import { Badge } from '@/components/ui/badge';
 import { useTools } from '@/hooks/useTools';
-import { listSkills } from '@/services/skillsService';
-import { SkillSummary } from '@/types/skills';
+import { useSkills } from '@/hooks/useSkills';
 
 export function AgentEditor() {
   const {
@@ -37,12 +36,11 @@ export function AgentEditor() {
   } = useConfigStore();
 
   const [configDialogTool, setConfigDialogTool] = useState<string | null>(null);
-  const [availableSkills, setAvailableSkills] = useState<SkillSummary[]>([]);
-  const [skillsLoading, setSkillsLoading] = useState(true);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
 
-  // Fetch tools from backend
+  // Fetch tools and skills from backend
   const { tools: backendTools, loading: toolsLoading } = useTools();
+  const { skills: availableSkills, loading: skillsLoading } = useSkills();
 
   // Split tools into configured and unconfigured (but usable) categories
   const { configuredTools, unconfiguredTools } = useMemo(() => {
@@ -85,35 +83,6 @@ export function AgentEditor() {
       num_history_runs: 5,
     },
   });
-
-  useEffect(() => {
-    let isMounted = true;
-
-    const fetchSkills = async () => {
-      setSkillsLoading(true);
-      try {
-        const skills = await listSkills();
-        if (isMounted) {
-          setAvailableSkills(skills);
-        }
-      } catch (error) {
-        console.error('Failed to fetch skills:', error);
-        if (isMounted) {
-          setAvailableSkills([]);
-        }
-      } finally {
-        if (isMounted) {
-          setSkillsLoading(false);
-        }
-      }
-    };
-
-    fetchSkills();
-
-    return () => {
-      isMounted = false;
-    };
-  }, []);
 
   // Reset form when selected agent changes
   useEffect(() => {
