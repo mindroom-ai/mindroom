@@ -59,8 +59,9 @@ async def add_agent_memory(
     try:
         await memory.add(messages, user_id=f"agent_{agent_name}", metadata=metadata)
         logger.info("Memory added", agent=agent_name)
-    except Exception as e:
-        logger.exception("Failed to add memory", agent=agent_name, error=str(e))
+    except Exception:
+        logger.exception("Failed to add memory", agent=agent_name)
+        raise
 
 
 def get_team_ids_for_agent(agent_name: str, config: Config) -> list[str]:
@@ -133,6 +134,29 @@ async def search_agent_memories(
 
     # Return top results after merging
     return results[:limit]
+
+
+async def list_all_agent_memories(
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+    limit: int = 100,
+) -> list[MemoryResult]:
+    """List all memories for an agent.
+
+    Args:
+        agent_name: Name of the agent
+        storage_path: Storage path for memory
+        config: Application configuration
+        limit: Maximum number of memories to return
+
+    Returns:
+        List of all agent memories
+
+    """
+    memory = await create_memory_instance(storage_path, config)
+    result = await memory.get_all(user_id=f"agent_{agent_name}", limit=limit)
+    return result["results"] if isinstance(result, dict) and "results" in result else []
 
 
 async def add_room_memory(

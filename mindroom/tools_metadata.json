@@ -4520,6 +4520,21 @@
     {
       "auth_provider": null,
       "category": "productivity",
+      "config_fields": [],
+      "dependencies": [],
+      "description": "Explicitly store and search agent memories on demand",
+      "display_name": "Agent Memory",
+      "docs_url": null,
+      "helper_text": null,
+      "icon": "Brain",
+      "icon_color": "text-violet-500",
+      "name": "memory",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "auth_provider": null,
+      "category": "productivity",
       "config_fields": [
         {
           "default": true,

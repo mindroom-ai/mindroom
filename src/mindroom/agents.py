@@ -11,13 +11,15 @@ from agno.db.sqlite import SqliteDb
 
 from . import agent_prompts
 from . import tools as _tools_module  # noqa: F401
-from .constants import ROUTER_AGENT_NAME, SESSIONS_DIR
+from .constants import ROUTER_AGENT_NAME, SESSIONS_DIR, STORAGE_PATH_OBJ
 from .logging_config import get_logger
 from .plugins import load_plugins
 from .skills import build_agent_skills
 from .tools_metadata import get_tool_by_name
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from .config import Config
 
 logger = get_logger(__name__)
@@ -64,12 +66,14 @@ RICH_PROMPTS = {
 }
 
 
-def create_agent(agent_name: str, config: Config) -> Agent:
+def create_agent(agent_name: str, config: Config, *, storage_path: Path | None = None) -> Agent:
     """Create an agent instance from configuration.
 
     Args:
         agent_name: Name of the agent to create
         config: Application configuration
+        storage_path: Runtime storage path. Falls back to the
+            module-level ``STORAGE_PATH_OBJ`` when *None*.
 
     Returns:
         Configured Agent instance
@@ -79,6 +83,8 @@ def create_agent(agent_name: str, config: Config) -> Agent:
 
     """
     from .ai import get_model_instance  # noqa: PLC0415
+
+    resolved_storage_path = storage_path if storage_path is not None else STORAGE_PATH_OBJ
 
     # Use passed config (config_path is deprecated)
     agent_config = config.get_agent(agent_name)
@@ -92,8 +98,18 @@ def create_agent(agent_name: str, config: Config) -> Agent:
     tools: list = []  # Use list type to satisfy Agent's parameter type
     for tool_name in tool_names:
         try:
-            tool = get_tool_by_name(tool_name)
-            tools.append(tool)
+            if tool_name == "memory":
+                from .custom_tools.memory import MemoryTools  # noqa: PLC0415
+
+                tools.append(
+                    MemoryTools(
+                        agent_name=agent_name,
+                        storage_path=resolved_storage_path,
+                        config=config,
+                    ),
+                )
+            else:
+                tools.append(get_tool_by_name(tool_name))
         except ValueError as e:
             logger.warning(f"Could not load tool '{tool_name}' for agent '{agent_name}': {e}")
 

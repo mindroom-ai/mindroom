@@ -570,7 +570,7 @@ class AgentBot:
     @property  # Not cached_property because Team mutates it!
     def agent(self) -> Agent:
         """Get the Agno Agent instance for this bot."""
-        return create_agent(agent_name=self.agent_name, config=self.config)
+        return create_agent(agent_name=self.agent_name, config=self.config, storage_path=self.storage_path)
 
     @cached_property
     def response_tracker(self) -> ResponseTracker:
@@ -2798,7 +2798,7 @@ async def _watch_config_task(config_path: Path, orchestrator: MultiAgentOrchestr
 async def _watch_skills_task(orchestrator: MultiAgentOrchestrator) -> None:
     """Watch skill roots for changes and clear cached skills."""
     # Wait for orchestrator to start before watching
-    while not orchestrator.running:
+    while not orchestrator.running:  # noqa: ASYNC110
         await asyncio.sleep(0.1)
     last_snapshot = get_skill_snapshot()
     while orchestrator.running:

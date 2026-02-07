@@ -14,7 +14,7 @@ from mindroom.commands import get_command_help
 from mindroom.config import AgentConfig, Config, TeamConfig
 from mindroom.constants import DEFAULT_AGENTS_CONFIG
 from mindroom.logging_config import get_logger
-from mindroom.tools_metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory, ToolStatus
+from mindroom.tools_metadata import TOOL_METADATA, ToolCategory, ToolStatus
 
 logger = get_logger(__name__)
 
@@ -383,7 +383,7 @@ class ConfigManagerTools(Toolkit):
         """List all available tools that can be used by agents."""
         tools_by_category: dict[str, list[tuple[str, str]]] = {}
 
-        for tool_name in sorted(TOOL_REGISTRY.keys()):
+        for tool_name in sorted(TOOL_METADATA.keys()):
             if tool_name in TOOL_METADATA:
                 metadata = TOOL_METADATA[tool_name]
                 category = metadata.category.value
@@ -407,8 +407,8 @@ class ConfigManagerTools(Toolkit):
 
     def _get_tool_details(self, tool_name: str) -> str:
         """Get detailed information about a specific tool."""
-        if tool_name not in TOOL_REGISTRY:
-            available = ", ".join(sorted(TOOL_REGISTRY.keys()))
+        if tool_name not in TOOL_METADATA:
+            available = ", ".join(sorted(TOOL_METADATA.keys()))
             return f"Unknown tool: {tool_name}\n\nAvailable tools: {available}"
 
         output = [f"## Tool: {tool_name}\n"]
@@ -458,7 +458,7 @@ class ConfigManagerTools(Toolkit):
             return "Error: Agent name must be lowercase alphanumeric with underscores only"
 
         # Validate tools
-        invalid_tools = [t for t in tools if t not in TOOL_REGISTRY]
+        invalid_tools = [t for t in tools if t not in TOOL_METADATA]
         if invalid_tools:
             return f"Error: Unknown tools: {', '.join(invalid_tools)}\n\nUse get_info with info_type='available_tools' to see valid tools."
 
@@ -528,7 +528,7 @@ class ConfigManagerTools(Toolkit):
 
             # Validate tools if provided
             if tools is not None:
-                invalid_tools = [t for t in tools if t not in TOOL_REGISTRY]
+                invalid_tools = [t for t in tools if t not in TOOL_METADATA]
                 if invalid_tools:
                     return f"Error: Unknown tools: {', '.join(invalid_tools)}"
 
@@ -644,7 +644,7 @@ class ConfigManagerTools(Toolkit):
             if not agent.tools:
                 warnings.append("No tools configured")
             else:
-                invalid_tools = [t for t in agent.tools if t not in TOOL_REGISTRY]
+                invalid_tools = [t for t in agent.tools if t not in TOOL_METADATA]
                 if invalid_tools:
                     issues.append(f"Invalid tools: {', '.join(invalid_tools)}")
 
