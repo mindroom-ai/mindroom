@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -275,7 +276,8 @@ async def ensure_user_in_rooms(homeserver: str, room_ids: dict[str, str]) -> Non
 
 
 DM_ROOM_CACHE: dict[tuple[str, str], bool] = {}
-DIRECT_ROOMS_CACHE: dict[str, set[str]] = {}
+DIRECT_ROOMS_CACHE: dict[str, tuple[float, set[str]]] = {}
+_DIRECT_ROOMS_TTL: float = 300  # seconds
 
 
 def _dm_cache_key(client: nio.AsyncClient, room_id: str) -> tuple[str, str]:
@@ -288,39 +290,50 @@ def _dm_cache_key(client: nio.AsyncClient, room_id: str) -> tuple[str, str]:
 
 
 async def _get_direct_room_ids(client: nio.AsyncClient) -> set[str]:
-    """Get DM room IDs from the user's ``m.direct`` account data."""
+    """Get DM room IDs from the user's ``m.direct`` account data.
+
+    Results are cached per user for ``_DIRECT_ROOMS_TTL`` seconds so that
+    newly created DM rooms are picked up without a restart.
+    """
     user_id = str(client.user_id or "")
     if not user_id:
         return set()
 
-    cached_room_ids = DIRECT_ROOMS_CACHE.get(user_id)
-    if cached_room_ids is not None:
-        return cached_room_ids
+    cached = DIRECT_ROOMS_CACHE.get(user_id)
+    if cached is not None:
+        ts, room_ids = cached
+        if time.monotonic() - ts < _DIRECT_ROOMS_TTL:
+            return room_ids
 
     response = await client.list_direct_rooms()
     if isinstance(response, nio.DirectRoomsResponse):
         direct_room_ids = {room_id for room_ids in response.rooms.values() for room_id in room_ids}
-        DIRECT_ROOMS_CACHE[user_id] = direct_room_ids
+        DIRECT_ROOMS_CACHE[user_id] = (time.monotonic(), direct_room_ids)
         return direct_room_ids
 
     return set()
 
 
 def _is_two_member_group_room(client: nio.AsyncClient, room_id: str) -> bool:
-    """Check if nio models this room as an unnamed two-member group."""
+    """Check if nio models this room as an unnamed two-member group.
+
+    Rooms with an explicit topic are excluded because DMs almost never have one,
+    while small project rooms often do.
+    """
     room_lookup = getattr(client, "rooms", None)
     if not isinstance(room_lookup, dict):
         return False
 
     room = room_lookup.get(room_id)
-    return room is not None and room.is_group and room.member_count == 2
+    if room is None or not room.is_group or room.member_count != 2:
+        return False
+    return not room.topic
 
 
 def _has_is_direct_marker(state_events: list[dict[str, object]]) -> bool:
-    """Check room state events for Matrix direct-message markers."""
+    """Check ``m.room.member`` state events for the ``is_direct`` flag."""
     for event in state_events:
-        event_type = event.get("type")
-        if event_type not in {"m.room.member", "m.room.create"}:
+        if event.get("type") != "m.room.member":
             continue
 
         content = event.get("content")

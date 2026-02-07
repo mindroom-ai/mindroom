@@ -23,6 +23,12 @@ class TestDMDetection:
     async def test_detects_dm_room_with_is_direct_flag(self) -> None:
         """Test that a room with is_direct=true in member state is detected as DM."""
         client = AsyncMock()
+        client.user_id = "@agent:server"
+        # m.direct returns nothing so we fall through to state events
+        client.list_direct_rooms.return_value = nio.DirectRoomsErrorResponse(
+            "No direct rooms",
+            "M_NOT_FOUND",
+        )
 
         # Mock response with a member event that has is_direct=true
         mock_response = MagicMock(spec=nio.RoomGetStateResponse)
@@ -85,6 +91,11 @@ class TestDMDetection:
     async def test_detects_non_dm_room(self) -> None:
         """Test that a room without is_direct flag is not detected as DM."""
         client = AsyncMock()
+        client.user_id = "@agent:server"
+        client.list_direct_rooms.return_value = nio.DirectRoomsErrorResponse(
+            "No direct rooms",
+            "M_NOT_FOUND",
+        )
 
         # Mock response with member events but no is_direct flag
         mock_response = MagicMock(spec=nio.RoomGetStateResponse)
