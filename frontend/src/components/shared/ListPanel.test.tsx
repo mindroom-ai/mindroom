@@ -2,13 +2,9 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { ListItem, ListPanel } from './ListPanel';
 
-interface TestListItem extends ListItem {
-  description?: string;
-}
-
 const renderPanel = (onCreateItem: (name?: string) => void | boolean | Promise<void | boolean>) => {
   render(
-    <ListPanel<TestListItem>
+    <ListPanel<ListItem>
       title="Skills"
       items={[]}
       onCreateItem={onCreateItem}
@@ -52,5 +48,40 @@ describe('ListPanel', () => {
     await waitFor(() => {
       expect(screen.queryByPlaceholderText('Skill name...')).not.toBeInTheDocument();
     });
+  });
+
+  it('closes inline creation form on Enter key when create succeeds', async () => {
+    const onCreateItem = vi.fn().mockResolvedValue(true);
+    renderPanel(onCreateItem);
+
+    fireEvent.click(screen.getByTestId('create-button'));
+    const input = screen.getByPlaceholderText('Skill name...');
+    fireEvent.change(input, { target: { value: 'new' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    await waitFor(() => {
+      expect(onCreateItem).toHaveBeenCalledWith('new');
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByPlaceholderText('Skill name...')).not.toBeInTheDocument();
+    });
+  });
+
+  it('keeps inline creation form open on Enter key when create fails', async () => {
+    const onCreateItem = vi.fn().mockResolvedValue(false);
+    renderPanel(onCreateItem);
+
+    fireEvent.click(screen.getByTestId('create-button'));
+    const input = screen.getByPlaceholderText('Skill name...');
+    fireEvent.change(input, { target: { value: 'bad!' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    await waitFor(() => {
+      expect(onCreateItem).toHaveBeenCalledWith('bad!');
+    });
+
+    expect(screen.getByPlaceholderText('Skill name...')).toBeInTheDocument();
+    expect((screen.getByPlaceholderText('Skill name...') as HTMLInputElement).value).toBe('bad!');
   });
 });

@@ -134,7 +134,7 @@ export function Skills() {
       toast({
         title: 'Invalid skill name',
         description:
-          'Name must be lowercase alphanumeric with hyphens, starting and ending with a letter or digit.',
+          'Name must be alphanumeric with optional hyphens, starting and ending with a letter or digit.',
         variant: 'destructive',
       });
       return false;
