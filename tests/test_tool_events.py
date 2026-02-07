@@ -1,5 +1,6 @@
 """Tests for tool event formatting and metadata payloads."""
 
+from mindroom.matrix.client import markdown_to_html
 from mindroom.tool_events import (
     MAX_TOOL_TRACE_EVENTS,
     TOOL_TRACE_KEY,
@@ -238,3 +239,64 @@ def test_extract_tool_completed_info_preserves_falsey_content() -> None:
     tool_name, result = info
     assert tool_name == "check"
     assert result == 0  # not "fallback"
+
+
+# --- markdown_to_html: tool block handling ---
+
+
+def test_markdown_to_html_tool_not_wrapped_in_p() -> None:
+    """<tool> should be block-level, not wrapped in <p> tags."""
+    html = markdown_to_html("<tool>save_file(file=a.py)\nok</tool>")
+    assert "<p>" not in html
+    assert "<br" not in html
+    assert html == "<tool>save_file(file=a.py)\nok</tool>"
+
+
+def test_markdown_to_html_groups_consecutive_tools() -> None:
+    """Consecutive <tool> blocks should be wrapped in <tool-group>."""
+    body = "\n\n<tool>save_file(file=a.py)\nok</tool>\n\n<tool>run_shell(cmd=pwd)\n/app</tool>\n"
+    html = markdown_to_html(body)
+    assert "<tool-group>" in html
+    assert html.count("<tool>") == 2
+    assert "<p>" not in html
+
+
+def test_markdown_to_html_does_not_group_separated_tools() -> None:
+    """Tool blocks separated by non-tool content should not be grouped."""
+    body = "<tool>a\nb</tool>\n\nSome text\n\n<tool>c\nd</tool>"
+    html = markdown_to_html(body)
+    assert "<tool-group>" not in html
+
+
+# --- Contract test: full pending→completed→HTML pipeline ---
+
+
+def test_tool_lifecycle_produces_expected_html() -> None:
+    """Full pipeline: started → completed → markdown_to_html must produce the exact HTML the frontend expects.
+
+    This is a contract test — if the output format changes, the corresponding
+    frontend test (collapsible-test.tsx "renders backend contract HTML") must
+    be updated in sync.
+    """
+    # 1. Two tool calls start (pending)
+    text1, _ = format_tool_started("save_file", {"file": "a.py"})
+    text2, _ = format_tool_started("run_shell", {"cmd": "pwd"})
+    body = text1 + text2
+
+    # 2. Both complete
+    body, _ = complete_pending_tool_block(body, "save_file", "ok")
+    body, _ = complete_pending_tool_block(body, "run_shell", "/app")
+
+    # 3. Convert to HTML
+    html = markdown_to_html(body)
+
+    # Contract assertions — the frontend relies on this exact structure:
+    # - No <p> wrapping, no <br> conversion
+    assert "<p>" not in html
+    assert "<br" not in html
+    # - Consecutive completed blocks grouped in <tool-group>
+    assert "<tool-group>" in html
+    assert html.count("<tool>") == 2
+    # - Call and result separated by \n inside each <tool> block
+    assert "save_file(file=a.py)\nok</tool>" in html
+    assert "run_shell(cmd=pwd)\n/app</tool>" in html
