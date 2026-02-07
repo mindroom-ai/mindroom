@@ -153,7 +153,7 @@ class MemoryTools(Toolkit):
 
         """
         try:
-            result = await get_agent_memory(memory_id, self._storage_path, self._config)
+            result = await get_agent_memory(memory_id, self._agent_name, self._storage_path, self._config)
             if result is None:
                 return f"No memory found with id={memory_id}"
             return f"[id={result.get('id', memory_id)}] {result.get('memory', '')}"
@@ -175,7 +175,7 @@ class MemoryTools(Toolkit):
 
         """
         try:
-            await update_agent_memory(memory_id, new_content, self._storage_path, self._config)
+            await update_agent_memory(memory_id, new_content, self._agent_name, self._storage_path, self._config)
         except Exception as e:
             logger.exception(
                 "Failed to update memory via tool",
@@ -201,7 +201,7 @@ class MemoryTools(Toolkit):
 
         """
         try:
-            await delete_agent_memory(memory_id, self._storage_path, self._config)
+            await delete_agent_memory(memory_id, self._agent_name, self._storage_path, self._config)
         except Exception as e:
             logger.exception(
                 "Failed to delete memory via tool",

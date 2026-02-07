@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict, cast
 
 from mindroom.logging_config import get_logger
 
@@ -28,6 +28,60 @@ class MemoryResult(TypedDict, total=False):
 
 
 logger = get_logger(__name__)
+
+
+class ScopedMemoryReader(Protocol):
+    """Minimal protocol for reading a memory by ID."""
+
+    async def get(self, memory_id: str) -> object:
+        """Return the memory payload for a given memory ID."""
+
+
+class MemoryNotFoundError(ValueError):
+    """Raised when a memory ID does not exist in the caller's allowed scope."""
+
+    def __init__(self, memory_id: str) -> None:
+        super().__init__(f"No memory found with id={memory_id}")
+
+
+def _build_team_user_id(agent_names: list[str]) -> str:
+    """Build a canonical team user_id from agent names."""
+    return f"team_{'+'.join(sorted(agent_names))}"
+
+
+def _get_allowed_memory_user_ids(caller_context: str | list[str], config: Config) -> set[str]:
+    """Get all user_id scopes the caller is allowed to access."""
+    if isinstance(caller_context, list):
+        return {_build_team_user_id(caller_context)}
+
+    allowed_user_ids = {f"agent_{caller_context}"}
+    allowed_user_ids.update(get_team_ids_for_agent(caller_context, config))
+    return allowed_user_ids
+
+
+async def _get_scoped_memory_by_id(
+    memory: ScopedMemoryReader,
+    memory_id: str,
+    caller_context: str | list[str],
+    config: Config,
+) -> MemoryResult | None:
+    """Fetch a memory and ensure it belongs to the caller's allowed scopes."""
+    result = await memory.get(memory_id)
+    if not isinstance(result, dict):
+        return None
+
+    allowed_user_ids = _get_allowed_memory_user_ids(caller_context, config)
+    memory_user_id = result.get("user_id")
+    if memory_user_id not in allowed_user_ids:
+        logger.warning(
+            "Memory access denied",
+            memory_id=memory_id,
+            memory_user_id=memory_user_id,
+            allowed_user_ids=sorted(allowed_user_ids),
+        )
+        return None
+
+    return cast("MemoryResult", result)
 
 
 async def add_agent_memory(
@@ -161,6 +215,7 @@ async def list_all_agent_memories(
 
 async def get_agent_memory(
     memory_id: str,
+    caller_context: str | list[str],
     storage_path: Path,
     config: Config,
 ) -> MemoryResult | None:
@@ -168,6 +223,7 @@ async def get_agent_memory(
 
     Args:
         memory_id: The memory ID to retrieve
+        caller_context: Agent name or team members requesting this memory
         storage_path: Storage path for memory
         config: Application configuration
 
@@ -176,12 +232,13 @@ async def get_agent_memory(
 
     """
     memory = await create_memory_instance(storage_path, config)
-    return await memory.get(memory_id)  # type: ignore[no-any-return]
+    return await _get_scoped_memory_by_id(memory, memory_id, caller_context, config)
 
 
 async def update_agent_memory(
     memory_id: str,
     content: str,
+    caller_context: str | list[str],
     storage_path: Path,
     config: Config,
 ) -> None:
@@ -190,17 +247,22 @@ async def update_agent_memory(
     Args:
         memory_id: The memory ID to update
         content: The new content for the memory
+        caller_context: Agent name or team members requesting this update
         storage_path: Storage path for memory
         config: Application configuration
 
     """
     memory = await create_memory_instance(storage_path, config)
+    scoped_memory = await _get_scoped_memory_by_id(memory, memory_id, caller_context, config)
+    if scoped_memory is None:
+        raise MemoryNotFoundError(memory_id)
     await memory.update(memory_id, content)
     logger.info("Memory updated", memory_id=memory_id)
 
 
 async def delete_agent_memory(
     memory_id: str,
+    caller_context: str | list[str],
     storage_path: Path,
     config: Config,
 ) -> None:
@@ -208,11 +270,15 @@ async def delete_agent_memory(
 
     Args:
         memory_id: The memory ID to delete
+        caller_context: Agent name or team members requesting this deletion
         storage_path: Storage path for memory
         config: Application configuration
 
     """
     memory = await create_memory_instance(storage_path, config)
+    scoped_memory = await _get_scoped_memory_by_id(memory, memory_id, caller_context, config)
+    if scoped_memory is None:
+        raise MemoryNotFoundError(memory_id)
     await memory.delete(memory_id)
     logger.info("Memory deleted", memory_id=memory_id)
 
@@ -426,13 +492,10 @@ async def store_conversation_memory(
     memory = await create_memory_instance(storage_path, config)
 
     # Handle both single agents and teams
-    is_team = isinstance(agent_name, list)
-
-    if is_team:
+    if isinstance(agent_name, list):
         # For teams, store once under a team namespace
         # Sort agent names for consistent team ID
-        sorted_agents = sorted(agent_name)
-        team_id = f"team_{'+'.join(sorted_agents)}"
+        team_id = _build_team_user_id(agent_name)
 
         metadata = {
             "type": "conversation",

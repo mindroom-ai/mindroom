@@ -197,7 +197,7 @@ class TestMemoryTools:
         ) as mock_get:
             result = await tools.get_memory("abc-123")
 
-            mock_get.assert_called_once_with("abc-123", tools._storage_path, tools._config)
+            mock_get.assert_called_once_with("abc-123", "test_agent", tools._storage_path, tools._config)
             assert "[id=abc-123]" in result
             assert "User likes Python" in result
 
@@ -235,7 +235,13 @@ class TestMemoryTools:
         ) as mock_update:
             result = await tools.update_memory("abc-123", "Updated content")
 
-            mock_update.assert_called_once_with("abc-123", "Updated content", tools._storage_path, tools._config)
+            mock_update.assert_called_once_with(
+                "abc-123",
+                "Updated content",
+                "test_agent",
+                tools._storage_path,
+                tools._config,
+            )
             assert "Updated memory" in result
             assert "[id=abc-123]" in result
             assert "Updated content" in result
@@ -262,7 +268,7 @@ class TestMemoryTools:
         ) as mock_delete:
             result = await tools.delete_memory("abc-123")
 
-            mock_delete.assert_called_once_with("abc-123", tools._storage_path, tools._config)
+            mock_delete.assert_called_once_with("abc-123", "test_agent", tools._storage_path, tools._config)
             assert "Deleted memory" in result
             assert "[id=abc-123]" in result
 
