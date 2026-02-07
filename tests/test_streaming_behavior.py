@@ -353,6 +353,69 @@ class TestStreamingBehavior:
         assert content["m.relates_to"]["rel_type"] == "m.replace"
         assert content["m.relates_to"]["event_id"] == "$stream_123"
 
+    def test_streaming_update_interval_starts_fast_then_slows(self) -> None:
+        """Test progressive throttling: frequent edits first, slower later."""
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            update_interval=5.0,
+            min_update_interval=0.5,
+            interval_ramp_seconds=15.0,
+        )
+        streaming.stream_started_at = 100.0
+
+        start = streaming._current_update_interval(100.0)
+        mid = streaming._current_update_interval(107.5)
+        end = streaming._current_update_interval(115.0)
+        after = streaming._current_update_interval(130.0)
+
+        assert start == pytest.approx(0.5)
+        assert mid == pytest.approx(2.75)
+        assert end == pytest.approx(5.0)
+        assert after == pytest.approx(5.0)
+
+    def test_stream_started_at_not_set_before_first_send(self) -> None:
+        """Test that stream_started_at is None until first _throttled_send."""
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+        )
+        assert streaming.stream_started_at is None
+        # Before stream starts, ramp is inactive so steady-state interval is returned
+        assert streaming._current_update_interval(999.0) == streaming.update_interval
+
+    @pytest.mark.asyncio
+    async def test_throttled_send_uses_ramp_interval(self) -> None:
+        """Integration test: _throttled_send respects the ramped interval."""
+        mock_client = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.__class__ = nio.RoomSendResponse
+        mock_response.event_id = "$stream_456"
+        mock_client.room_send.return_value = mock_response
+
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            update_interval=5.0,
+            min_update_interval=0.5,
+            interval_ramp_seconds=15.0,
+        )
+        streaming.accumulated_text = "hello"
+
+        # First call sets stream_started_at and sends immediately (last_update=0)
+        await streaming._throttled_send(mock_client)
+        assert streaming.stream_started_at is not None
+        assert mock_client.room_send.call_count == 1
+
     @pytest.mark.asyncio
     async def test_streaming_in_progress_marker(
         self,
