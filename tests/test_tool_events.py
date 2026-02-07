@@ -261,6 +261,19 @@ def test_markdown_to_html_does_not_group_separated_tools() -> None:
     assert "<tool-group>" not in html
 
 
+def test_markdown_to_html_escapes_unknown_tool_like_tags() -> None:
+    """Unknown raw tags should be escaped so they remain visible on strict clients."""
+    body = "<search>\n<query>Mindroom docs</query>\n</search>"
+    html = markdown_to_html(body)
+    assert "<search>" not in html
+    assert "<query>" not in html
+    assert "&lt;search&gt;" in html
+    assert "&lt;query&gt;" in html
+    assert "&lt;/query&gt;" in html
+    assert "&lt;/search&gt;" in html
+    assert "Mindroom docs" in html
+
+
 # --- Contract test: full pending→completed→HTML pipeline ---
 
 

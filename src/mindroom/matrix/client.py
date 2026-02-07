@@ -6,6 +6,7 @@ import re
 import ssl as ssl_module
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from html import escape
 from pathlib import Path
 from typing import Any
 
@@ -564,6 +565,73 @@ _CONSECUTIVE_TOOL_BLOCKS = re.compile(
     r"(<tool>[\s\S]*?</tool>)(\s*<tool>[\s\S]*?</tool>)+",
 )
 
+_HTML_TAG_PATTERN = re.compile(r"</?([A-Za-z][A-Za-z0-9-]*)(?:\s+[^<>]*)?\s*/?>")
+
+# Keep standard Matrix-safe HTML plus MindRoom's tool tags.
+_ALLOWED_FORMATTED_BODY_TAGS = frozenset(
+    {
+        "a",
+        "b",
+        "blockquote",
+        "br",
+        "caption",
+        "code",
+        "del",
+        "details",
+        "div",
+        "em",
+        "font",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "hr",
+        "i",
+        "img",
+        "li",
+        "nl",
+        "ol",
+        "p",
+        "pre",
+        "s",
+        "span",
+        "strike",
+        "strong",
+        "sub",
+        "summary",
+        "sup",
+        "table",
+        "tbody",
+        "td",
+        "th",
+        "thead",
+        "tool",
+        "tool-group",
+        "tr",
+        "u",
+        "ul",
+    },
+)
+
+
+def _escape_unsupported_html_tags(html_text: str) -> str:
+    """Escape raw tags that Matrix clients commonly strip entirely.
+
+    Unknown tags from model output (e.g. ``<search>``) can disappear in some
+    clients. Escaping only the unsupported tags keeps them visible while still
+    preserving intentional tags like ``<tool>`` for custom renderers.
+    """
+
+    def _replace_tag(match: re.Match[str]) -> str:
+        tag_name = match.group(1).lower()
+        if tag_name in _ALLOWED_FORMATTED_BODY_TAGS:
+            return match.group(0)
+        return escape(match.group(0))
+
+    return _HTML_TAG_PATTERN.sub(_replace_tag, html_text)
+
 
 def markdown_to_html(text: str) -> str:
     """Convert markdown text to HTML for Matrix formatted messages.
@@ -601,7 +669,7 @@ def markdown_to_html(text: str) -> str:
     # in <p> tags or convert \n to <br /> inside them.
     md.block_level_elements.extend(["tool", "tool-group"])
     html_text: str = md.convert(text)
-    return html_text
+    return _escape_unsupported_html_tags(html_text)
 
 
 async def edit_message(
