@@ -1160,168 +1160,170 @@ export function ModelConfig() {
           </Button>
         </div>
 
-        <div className="overflow-hidden rounded-lg border">
-          <table className="w-full text-sm">
-            <thead>
-              {table.getHeaderGroups().map(headerGroup => (
-                <tr key={headerGroup.id} className="border-b bg-muted/50">
-                  {headerGroup.headers.map(header => (
-                    <th
-                      key={header.id}
-                      className={cn(
-                        'px-4 py-2.5 text-left align-middle',
-                        header.column.id === 'actions' ? 'w-40 text-right' : ''
-                      )}
-                    >
-                      {header.isPlaceholder
-                        ? null
-                        : flexRender(header.column.columnDef.header, header.getContext())}
-                    </th>
-                  ))}
-                </tr>
-              ))}
-            </thead>
+        <div className="rounded-lg border">
+          <div className="overflow-x-auto" data-testid="models-table-scroll-container">
+            <table className="w-full min-w-[840px] text-sm">
+              <thead>
+                {table.getHeaderGroups().map(headerGroup => (
+                  <tr key={headerGroup.id} className="border-b bg-muted/50">
+                    {headerGroup.headers.map(header => (
+                      <th
+                        key={header.id}
+                        className={cn(
+                          'px-4 py-2.5 text-left align-middle',
+                          header.column.id === 'actions' ? 'w-40 text-right' : ''
+                        )}
+                      >
+                        {header.isPlaceholder
+                          ? null
+                          : flexRender(header.column.columnDef.header, header.getContext())}
+                      </th>
+                    ))}
+                  </tr>
+                ))}
+              </thead>
 
-            <tbody>
-              {isAddingRow && (
-                <tr className="border-b bg-muted/20">
-                  <td className="px-4 py-2.5 align-middle">
-                    <Input
-                      value={newRowDraft.modelName}
-                      onChange={event => {
-                        const modelName = event.target.value;
-                        setNewRowDraft(current => ({ ...current, modelName }));
-                      }}
-                      className="h-8 text-xs"
-                      placeholder="model name"
-                    />
-                  </td>
-                  <td className="px-4 py-2.5 align-middle">
-                    <Select
-                      value={newRowDraft.provider}
-                      onValueChange={provider => {
-                        setNewRowDraft(current => ({
-                          ...current,
-                          provider,
-                          apiKey: '',
-                          selectedKeySourceModel: '',
-                          baseUrl: provider === 'openai' ? current.baseUrl : '',
-                        }));
-                      }}
-                    >
-                      <SelectTrigger className="h-8 text-xs">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {getProviderList().map(provider => (
-                          <SelectItem key={provider.id} value={provider.id}>
-                            <div className="flex items-center gap-2">
-                              <ProviderLogo provider={provider.id} className="h-4 w-4" />
-                              <span>{provider.name}</span>
-                            </div>
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </td>
-                  <td className="px-4 py-2.5 align-middle">
-                    <div className="space-y-2">
+              <tbody>
+                {isAddingRow && (
+                  <tr className="border-b bg-muted/20">
+                    <td className="px-4 py-2.5 align-middle">
                       <Input
-                        value={newRowDraft.modelId}
+                        value={newRowDraft.modelName}
                         onChange={event => {
-                          const modelId = event.target.value;
-                          setNewRowDraft(current => ({ ...current, modelId }));
+                          const modelName = event.target.value;
+                          setNewRowDraft(current => ({ ...current, modelName }));
                         }}
                         className="h-8 text-xs"
-                        placeholder="provider model id"
+                        placeholder="model name"
                       />
-                      {renderOpenAIEndpointEditor(newRowDraft, setNewRowDraft)}
-                    </div>
-                  </td>
-                  <td className="px-4 py-2.5 align-middle">
-                    {renderEditableApiCell(newRowDraft, setNewRowDraft)}
-                  </td>
-                  <td className="px-4 py-2.5 align-middle text-right">
-                    <div className="flex justify-end gap-1">
-                      <Button
-                        size="sm"
-                        onClick={handleSaveNewRow}
-                        disabled={isSavingNewRow}
-                        className="h-7 px-2 text-xs"
+                    </td>
+                    <td className="px-4 py-2.5 align-middle">
+                      <Select
+                        value={newRowDraft.provider}
+                        onValueChange={provider => {
+                          setNewRowDraft(current => ({
+                            ...current,
+                            provider,
+                            apiKey: '',
+                            selectedKeySourceModel: '',
+                            baseUrl: provider === 'openai' ? current.baseUrl : '',
+                          }));
+                        }}
                       >
-                        Add
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={cancelAddingRow}
-                        disabled={isSavingNewRow}
-                        className="h-7 px-2 text-xs"
-                      >
-                        Cancel
-                      </Button>
-                    </div>
-                  </td>
-                </tr>
-              )}
-
-              {table.getRowModel().rows.length === 0 ? (
-                <tr>
-                  <td colSpan={5} className="px-4 py-6 text-center text-sm text-muted-foreground">
-                    No models configured.
-                  </td>
-                </tr>
-              ) : (
-                table.getRowModel().rows.map(row => {
-                  const isEditing = editingRowId === row.original.modelName;
-                  return (
-                    <tr
-                      key={row.id}
-                      onClick={() => {
-                        if (isAddingRow) {
-                          toast({
-                            title: 'Finish adding first',
-                            description:
-                              'Save or cancel the new model row before editing another row.',
-                          });
-                          return;
-                        }
-
-                        if (editingRowId && editingRowId !== row.original.modelName) {
-                          toast({
-                            title: 'Finish current edit first',
-                            description:
-                              'Save or cancel the active row before editing another one.',
-                          });
-                          return;
-                        }
-
-                        if (!editingRowId) {
-                          startEditingRow(row.original);
-                        }
-                      }}
-                      className={cn(
-                        'border-b transition-colors last:border-b-0',
-                        isEditing ? 'bg-muted/20' : 'cursor-pointer hover:bg-muted/30'
-                      )}
-                    >
-                      {row.getVisibleCells().map(cell => (
-                        <td
-                          key={cell.id}
-                          className={cn(
-                            'px-4 py-2.5 align-middle',
-                            cell.column.id === 'actions' ? 'text-right' : ''
-                          )}
+                        <SelectTrigger className="h-8 text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {getProviderList().map(provider => (
+                            <SelectItem key={provider.id} value={provider.id}>
+                              <div className="flex items-center gap-2">
+                                <ProviderLogo provider={provider.id} className="h-4 w-4" />
+                                <span>{provider.name}</span>
+                              </div>
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </td>
+                    <td className="px-4 py-2.5 align-middle">
+                      <div className="space-y-2">
+                        <Input
+                          value={newRowDraft.modelId}
+                          onChange={event => {
+                            const modelId = event.target.value;
+                            setNewRowDraft(current => ({ ...current, modelId }));
+                          }}
+                          className="h-8 text-xs"
+                          placeholder="provider model id"
+                        />
+                        {renderOpenAIEndpointEditor(newRowDraft, setNewRowDraft)}
+                      </div>
+                    </td>
+                    <td className="px-4 py-2.5 align-middle">
+                      {renderEditableApiCell(newRowDraft, setNewRowDraft)}
+                    </td>
+                    <td className="px-4 py-2.5 align-middle text-right">
+                      <div className="flex justify-end gap-1">
+                        <Button
+                          size="sm"
+                          onClick={handleSaveNewRow}
+                          disabled={isSavingNewRow}
+                          className="h-7 px-2 text-xs"
                         >
-                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                        </td>
-                      ))}
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
+                          Add
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={cancelAddingRow}
+                          disabled={isSavingNewRow}
+                          className="h-7 px-2 text-xs"
+                        >
+                          Cancel
+                        </Button>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+
+                {table.getRowModel().rows.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="px-4 py-6 text-center text-sm text-muted-foreground">
+                      No models configured.
+                    </td>
+                  </tr>
+                ) : (
+                  table.getRowModel().rows.map(row => {
+                    const isEditing = editingRowId === row.original.modelName;
+                    return (
+                      <tr
+                        key={row.id}
+                        onClick={() => {
+                          if (isAddingRow) {
+                            toast({
+                              title: 'Finish adding first',
+                              description:
+                                'Save or cancel the new model row before editing another row.',
+                            });
+                            return;
+                          }
+
+                          if (editingRowId && editingRowId !== row.original.modelName) {
+                            toast({
+                              title: 'Finish current edit first',
+                              description:
+                                'Save or cancel the active row before editing another one.',
+                            });
+                            return;
+                          }
+
+                          if (!editingRowId) {
+                            startEditingRow(row.original);
+                          }
+                        }}
+                        className={cn(
+                          'border-b transition-colors last:border-b-0',
+                          isEditing ? 'bg-muted/20' : 'cursor-pointer hover:bg-muted/30'
+                        )}
+                      >
+                        {row.getVisibleCells().map(cell => (
+                          <td
+                            key={cell.id}
+                            className={cn(
+                              'px-4 py-2.5 align-middle',
+                              cell.column.id === 'actions' ? 'text-right' : ''
+                            )}
+                          >
+                            {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                          </td>
+                        ))}
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
 
         <Button onClick={() => saveConfig()} variant="default" className="w-full">
