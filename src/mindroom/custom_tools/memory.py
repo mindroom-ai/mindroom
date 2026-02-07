@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from agno.tools import Toolkit
 
 from mindroom.logging_config import get_logger
-from mindroom.memory.functions import add_agent_memory, search_agent_memories
+from mindroom.memory.functions import add_agent_memory, list_all_agent_memories, search_agent_memories
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -32,7 +32,7 @@ class MemoryTools(Toolkit):
 
         super().__init__(
             name="memory",
-            tools=[self.add_memory, self.search_memories],
+            tools=[self.add_memory, self.search_memories, self.list_memories],
         )
 
     async def add_memory(self, content: str) -> str:
@@ -93,3 +93,33 @@ class MemoryTools(Toolkit):
         except Exception as e:
             logger.exception("Failed to search memories via tool", agent=self._agent_name, error=str(e))
             return f"Failed to search memories: {e}"
+
+    async def list_memories(self, limit: int = 50) -> str:
+        """List all your stored memories.
+
+        Use this when asked to show, list, or dump all memories.
+
+        Args:
+            limit: Maximum number of memories to return (default 50).
+
+        Returns:
+            Formatted list of all memories, or a message if none exist.
+
+        """
+        try:
+            results = await list_all_agent_memories(
+                self._agent_name,
+                self._storage_path,
+                self._config,
+                limit=limit,
+            )
+            if not results:
+                return "No memories stored yet."
+
+            lines = [f"All memories ({len(results)}):"]
+            for i, mem in enumerate(results, 1):
+                lines.append(f"{i}. {mem.get('memory', '')}")
+            return "\n".join(lines)
+        except Exception as e:
+            logger.exception("Failed to list memories via tool", agent=self._agent_name, error=str(e))
+            return f"Failed to list memories: {e}"

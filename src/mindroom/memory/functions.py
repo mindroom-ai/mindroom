@@ -136,6 +136,29 @@ async def search_agent_memories(
     return results[:limit]
 
 
+async def list_all_agent_memories(
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+    limit: int = 100,
+) -> list[MemoryResult]:
+    """List all memories for an agent.
+
+    Args:
+        agent_name: Name of the agent
+        storage_path: Storage path for memory
+        config: Application configuration
+        limit: Maximum number of memories to return
+
+    Returns:
+        List of all agent memories
+
+    """
+    memory = await create_memory_instance(storage_path, config)
+    result = await memory.get_all(user_id=f"agent_{agent_name}", limit=limit)
+    return result["results"] if isinstance(result, dict) and "results" in result else []
+
+
 async def add_room_memory(
     content: str,
     room_id: str,

@@ -118,12 +118,65 @@ class TestMemoryTools:
         """Test that the toolkit is registered with the correct name."""
         assert tools.name == "memory"
 
-    def test_toolkit_has_two_tools(self, tools: MemoryTools) -> None:
-        """Test that the toolkit exposes both add_memory and search_memories."""
+    def test_toolkit_has_three_tools(self, tools: MemoryTools) -> None:
+        """Test that the toolkit exposes add_memory, search_memories, and list_memories."""
         # Async tools are registered in async_functions (agno Function uses .name)
         func_names = [f.name for f in tools.async_functions.values()]
         assert "add_memory" in func_names
         assert "search_memories" in func_names
+        assert "list_memories" in func_names
+
+    @pytest.mark.asyncio
+    async def test_list_memories(self, tools: MemoryTools) -> None:
+        """Test that list_memories calls list_all_agent_memories and formats results."""
+        mock_results = [
+            {"memory": "User likes Python"},
+            {"memory": "User prefers dark mode"},
+            {"memory": "Project uses FastAPI"},
+        ]
+
+        with patch(
+            "mindroom.custom_tools.memory.list_all_agent_memories",
+            new_callable=AsyncMock,
+            return_value=mock_results,
+        ) as mock_list:
+            result = await tools.list_memories(limit=10)
+
+            mock_list.assert_called_once_with(
+                "test_agent",
+                tools._storage_path,
+                tools._config,
+                limit=10,
+            )
+            assert "All memories (3)" in result
+            assert "User likes Python" in result
+            assert "User prefers dark mode" in result
+            assert "Project uses FastAPI" in result
+
+    @pytest.mark.asyncio
+    async def test_list_memories_empty(self, tools: MemoryTools) -> None:
+        """Test that list_memories returns a message when no memories exist."""
+        with patch(
+            "mindroom.custom_tools.memory.list_all_agent_memories",
+            new_callable=AsyncMock,
+            return_value=[],
+        ):
+            result = await tools.list_memories()
+
+            assert result == "No memories stored yet."
+
+    @pytest.mark.asyncio
+    async def test_list_memories_error(self, tools: MemoryTools) -> None:
+        """Test that list_memories handles errors gracefully."""
+        with patch(
+            "mindroom.custom_tools.memory.list_all_agent_memories",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("DB down"),
+        ):
+            result = await tools.list_memories()
+
+            assert "Failed to list memories" in result
+            assert "DB down" in result
 
 
 class TestMemoryToolRegistration:
