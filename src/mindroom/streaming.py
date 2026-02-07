@@ -76,9 +76,9 @@ class StreamingResponse:
     accumulated_text: str = ""
     event_id: str | None = None  # None until first message sent
     last_update: float = 0.0
-    update_interval: float = 1.0
-    min_update_interval: float = 0.25
-    interval_ramp_seconds: float = 12.0
+    update_interval: float = 5.0
+    min_update_interval: float = 0.5
+    interval_ramp_seconds: float = 15.0
     latest_thread_event_id: str | None = None  # For MSC3440 compliance
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
     stream_started_at: float | None = None

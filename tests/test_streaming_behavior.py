@@ -361,21 +361,21 @@ class TestStreamingBehavior:
             thread_id=None,
             sender_domain="localhost",
             config=self.config,
-            update_interval=1.0,
-            min_update_interval=0.2,
-            interval_ramp_seconds=8.0,
+            update_interval=5.0,
+            min_update_interval=0.5,
+            interval_ramp_seconds=15.0,
         )
         streaming.stream_started_at = 100.0
 
         start = streaming._current_update_interval(100.0)
-        mid = streaming._current_update_interval(104.0)
-        end = streaming._current_update_interval(108.0)
-        after = streaming._current_update_interval(120.0)
+        mid = streaming._current_update_interval(107.5)
+        end = streaming._current_update_interval(115.0)
+        after = streaming._current_update_interval(130.0)
 
-        assert start == pytest.approx(0.2)
-        assert mid == pytest.approx(0.6)
-        assert end == pytest.approx(1.0)
-        assert after == pytest.approx(1.0)
+        assert start == pytest.approx(0.5)
+        assert mid == pytest.approx(2.75)
+        assert end == pytest.approx(5.0)
+        assert after == pytest.approx(5.0)
 
     def test_stream_started_at_not_set_before_first_send(self) -> None:
         """Test that stream_started_at is None until first _throttled_send."""
@@ -405,9 +405,9 @@ class TestStreamingBehavior:
             thread_id=None,
             sender_domain="localhost",
             config=self.config,
-            update_interval=1.0,
-            min_update_interval=0.2,
-            interval_ramp_seconds=8.0,
+            update_interval=5.0,
+            min_update_interval=0.5,
+            interval_ramp_seconds=15.0,
         )
         streaming.accumulated_text = "hello"
 
