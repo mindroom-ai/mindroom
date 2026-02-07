@@ -159,6 +159,64 @@ async def list_all_agent_memories(
     return result["results"] if isinstance(result, dict) and "results" in result else []
 
 
+async def get_agent_memory(
+    memory_id: str,
+    storage_path: Path,
+    config: Config,
+) -> MemoryResult | None:
+    """Get a single memory by ID.
+
+    Args:
+        memory_id: The memory ID to retrieve
+        storage_path: Storage path for memory
+        config: Application configuration
+
+    Returns:
+        The memory dict, or None if not found
+
+    """
+    memory = await create_memory_instance(storage_path, config)
+    return await memory.get(memory_id)  # type: ignore[no-any-return]
+
+
+async def update_agent_memory(
+    memory_id: str,
+    content: str,
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Update a single memory by ID.
+
+    Args:
+        memory_id: The memory ID to update
+        content: The new content for the memory
+        storage_path: Storage path for memory
+        config: Application configuration
+
+    """
+    memory = await create_memory_instance(storage_path, config)
+    await memory.update(memory_id, content)
+    logger.info("Memory updated", memory_id=memory_id)
+
+
+async def delete_agent_memory(
+    memory_id: str,
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Delete a single memory by ID.
+
+    Args:
+        memory_id: The memory ID to delete
+        storage_path: Storage path for memory
+        config: Application configuration
+
+    """
+    memory = await create_memory_instance(storage_path, config)
+    await memory.delete(memory_id)
+    logger.info("Memory deleted", memory_id=memory_id)
+
+
 async def add_room_memory(
     content: str,
     room_id: str,

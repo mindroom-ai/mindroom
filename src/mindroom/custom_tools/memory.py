@@ -12,7 +12,14 @@ from typing import TYPE_CHECKING
 from agno.tools import Toolkit
 
 from mindroom.logging_config import get_logger
-from mindroom.memory.functions import add_agent_memory, list_all_agent_memories, search_agent_memories
+from mindroom.memory.functions import (
+    add_agent_memory,
+    delete_agent_memory,
+    get_agent_memory,
+    list_all_agent_memories,
+    search_agent_memories,
+    update_agent_memory,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -32,7 +39,14 @@ class MemoryTools(Toolkit):
 
         super().__init__(
             name="memory",
-            tools=[self.add_memory, self.search_memories, self.list_memories],
+            tools=[
+                self.add_memory,
+                self.search_memories,
+                self.list_memories,
+                self.get_memory,
+                self.update_memory,
+                self.delete_memory,
+            ],
         )
 
     async def add_memory(self, content: str) -> str:
@@ -88,7 +102,8 @@ class MemoryTools(Toolkit):
 
             lines = [f"Found {len(results)} memory(ies):"]
             for i, mem in enumerate(results, 1):
-                lines.append(f"{i}. {mem.get('memory', '')}")
+                mid = mem.get("id", "?")
+                lines.append(f"{i}. [id={mid}] {mem.get('memory', '')}")
             return "\n".join(lines)
         except Exception as e:
             logger.exception("Failed to search memories via tool", agent=self._agent_name, error=str(e))
@@ -118,8 +133,82 @@ class MemoryTools(Toolkit):
 
             lines = [f"All memories ({len(results)}):"]
             for i, mem in enumerate(results, 1):
-                lines.append(f"{i}. {mem.get('memory', '')}")
+                mid = mem.get("id", "?")
+                lines.append(f"{i}. [id={mid}] {mem.get('memory', '')}")
             return "\n".join(lines)
         except Exception as e:
             logger.exception("Failed to list memories via tool", agent=self._agent_name, error=str(e))
             return f"Failed to list memories: {e}"
+
+    async def get_memory(self, memory_id: str) -> str:
+        """Retrieve a single memory by its ID.
+
+        Use this to inspect the full details of a specific memory.
+
+        Args:
+            memory_id: The ID of the memory to retrieve (shown in search/list results as [id=...]).
+
+        Returns:
+            The memory content, or an error message if not found.
+
+        """
+        try:
+            result = await get_agent_memory(memory_id, self._storage_path, self._config)
+            if result is None:
+                return f"No memory found with id={memory_id}"
+            return f"[id={result.get('id', memory_id)}] {result.get('memory', '')}"
+        except Exception as e:
+            logger.exception("Failed to get memory via tool", agent=self._agent_name, memory_id=memory_id, error=str(e))
+            return f"Failed to get memory: {e}"
+
+    async def update_memory(self, memory_id: str, new_content: str) -> str:
+        """Update the content of a specific memory by its ID.
+
+        Use this to correct or refine a previously stored memory.
+
+        Args:
+            memory_id: The ID of the memory to update (shown in search/list results as [id=...]).
+            new_content: The new content to replace the existing memory with.
+
+        Returns:
+            Confirmation message.
+
+        """
+        try:
+            await update_agent_memory(memory_id, new_content, self._storage_path, self._config)
+        except Exception as e:
+            logger.exception(
+                "Failed to update memory via tool",
+                agent=self._agent_name,
+                memory_id=memory_id,
+                error=str(e),
+            )
+            return f"Failed to update memory: {e}"
+        else:
+            return f"Updated memory [id={memory_id}]: {new_content}"
+
+    async def delete_memory(self, memory_id: str) -> str:
+        """Delete a single memory by its ID.
+
+        Use this to remove a specific outdated or incorrect memory
+        without affecting other memories.
+
+        Args:
+            memory_id: The ID of the memory to delete (shown in search/list results as [id=...]).
+
+        Returns:
+            Confirmation message.
+
+        """
+        try:
+            await delete_agent_memory(memory_id, self._storage_path, self._config)
+        except Exception as e:
+            logger.exception(
+                "Failed to delete memory via tool",
+                agent=self._agent_name,
+                memory_id=memory_id,
+                error=str(e),
+            )
+            return f"Failed to delete memory: {e}"
+        else:
+            return f"Deleted memory [id={memory_id}]"

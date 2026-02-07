@@ -67,8 +67,8 @@ class TestMemoryTools:
     async def test_search_memories(self, tools: MemoryTools) -> None:
         """Test that search_memories calls search_agent_memories and formats results."""
         mock_results = [
-            {"memory": "User likes Python", "score": 0.9},
-            {"memory": "User prefers dark mode", "score": 0.8},
+            {"id": "abc-1", "memory": "User likes Python", "score": 0.9},
+            {"id": "abc-2", "memory": "User prefers dark mode", "score": 0.8},
         ]
 
         with patch(
@@ -86,7 +86,9 @@ class TestMemoryTools:
                 limit=3,
             )
             assert "Found 2 memory(ies)" in result
+            assert "[id=abc-1]" in result
             assert "User likes Python" in result
+            assert "[id=abc-2]" in result
             assert "User prefers dark mode" in result
 
     @pytest.mark.asyncio
@@ -118,21 +120,23 @@ class TestMemoryTools:
         """Test that the toolkit is registered with the correct name."""
         assert tools.name == "memory"
 
-    def test_toolkit_has_three_tools(self, tools: MemoryTools) -> None:
-        """Test that the toolkit exposes add_memory, search_memories, and list_memories."""
-        # Async tools are registered in async_functions (agno Function uses .name)
+    def test_toolkit_has_six_tools(self, tools: MemoryTools) -> None:
+        """Test that the toolkit exposes all memory tools."""
         func_names = [f.name for f in tools.async_functions.values()]
         assert "add_memory" in func_names
         assert "search_memories" in func_names
         assert "list_memories" in func_names
+        assert "get_memory" in func_names
+        assert "update_memory" in func_names
+        assert "delete_memory" in func_names
 
     @pytest.mark.asyncio
     async def test_list_memories(self, tools: MemoryTools) -> None:
         """Test that list_memories calls list_all_agent_memories and formats results."""
         mock_results = [
-            {"memory": "User likes Python"},
-            {"memory": "User prefers dark mode"},
-            {"memory": "Project uses FastAPI"},
+            {"id": "m1", "memory": "User likes Python"},
+            {"id": "m2", "memory": "User prefers dark mode"},
+            {"id": "m3", "memory": "Project uses FastAPI"},
         ]
 
         with patch(
@@ -149,8 +153,11 @@ class TestMemoryTools:
                 limit=10,
             )
             assert "All memories (3)" in result
+            assert "[id=m1]" in result
             assert "User likes Python" in result
+            assert "[id=m2]" in result
             assert "User prefers dark mode" in result
+            assert "[id=m3]" in result
             assert "Project uses FastAPI" in result
 
     @pytest.mark.asyncio
@@ -177,6 +184,100 @@ class TestMemoryTools:
 
             assert "Failed to list memories" in result
             assert "DB down" in result
+
+    @pytest.mark.asyncio
+    async def test_get_memory(self, tools: MemoryTools) -> None:
+        """Test that get_memory retrieves a single memory by ID."""
+        mock_result = {"id": "abc-123", "memory": "User likes Python"}
+
+        with patch(
+            "mindroom.custom_tools.memory.get_agent_memory",
+            new_callable=AsyncMock,
+            return_value=mock_result,
+        ) as mock_get:
+            result = await tools.get_memory("abc-123")
+
+            mock_get.assert_called_once_with("abc-123", tools._storage_path, tools._config)
+            assert "[id=abc-123]" in result
+            assert "User likes Python" in result
+
+    @pytest.mark.asyncio
+    async def test_get_memory_not_found(self, tools: MemoryTools) -> None:
+        """Test that get_memory returns a message when memory not found."""
+        with patch(
+            "mindroom.custom_tools.memory.get_agent_memory",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            result = await tools.get_memory("nonexistent")
+
+            assert "No memory found" in result
+
+    @pytest.mark.asyncio
+    async def test_get_memory_error(self, tools: MemoryTools) -> None:
+        """Test that get_memory handles errors gracefully."""
+        with patch(
+            "mindroom.custom_tools.memory.get_agent_memory",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("DB down"),
+        ):
+            result = await tools.get_memory("abc-123")
+
+            assert "Failed to get memory" in result
+            assert "DB down" in result
+
+    @pytest.mark.asyncio
+    async def test_update_memory(self, tools: MemoryTools) -> None:
+        """Test that update_memory updates a memory by ID."""
+        with patch(
+            "mindroom.custom_tools.memory.update_agent_memory",
+            new_callable=AsyncMock,
+        ) as mock_update:
+            result = await tools.update_memory("abc-123", "Updated content")
+
+            mock_update.assert_called_once_with("abc-123", "Updated content", tools._storage_path, tools._config)
+            assert "Updated memory" in result
+            assert "[id=abc-123]" in result
+            assert "Updated content" in result
+
+    @pytest.mark.asyncio
+    async def test_update_memory_error(self, tools: MemoryTools) -> None:
+        """Test that update_memory handles errors gracefully."""
+        with patch(
+            "mindroom.custom_tools.memory.update_agent_memory",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("Not found"),
+        ):
+            result = await tools.update_memory("abc-123", "new content")
+
+            assert "Failed to update memory" in result
+            assert "Not found" in result
+
+    @pytest.mark.asyncio
+    async def test_delete_memory(self, tools: MemoryTools) -> None:
+        """Test that delete_memory deletes a memory by ID."""
+        with patch(
+            "mindroom.custom_tools.memory.delete_agent_memory",
+            new_callable=AsyncMock,
+        ) as mock_delete:
+            result = await tools.delete_memory("abc-123")
+
+            mock_delete.assert_called_once_with("abc-123", tools._storage_path, tools._config)
+            assert "Deleted memory" in result
+            assert "[id=abc-123]" in result
+
+    @pytest.mark.asyncio
+    async def test_delete_memory_error(self, tools: MemoryTools) -> None:
+        """Test that delete_memory handles errors gracefully."""
+        with patch(
+            "mindroom.custom_tools.memory.delete_agent_memory",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("Not found"),
+        ):
+            result = await tools.delete_memory("abc-123")
+
+            assert "Failed to delete memory" in result
+            assert "Not found" in result
 
 
 class TestMemoryToolRegistration:
