@@ -1,5 +1,7 @@
 """Tests for tool event formatting and metadata payloads."""
 
+from agno.models.response import ToolExecution
+
 from mindroom.matrix.client import markdown_to_html
 from mindroom.tool_events import (
     MAX_TOOL_TRACE_EVENTS,
@@ -223,22 +225,18 @@ def test_extract_tool_completed_info_without_tool_returns_none() -> None:
     assert result is None
 
 
-def test_extract_tool_completed_info_preserves_falsey_content() -> None:
-    """Falsey but valid content values (0, False, [], {}) should not be dropped."""
-
-    class FakeTool:
-        tool_name = "check"
-        result = "fallback"
+def test_extract_tool_completed_info_uses_tool_result() -> None:
+    """Should use tool.result (actual output), not event.content (timing string)."""
 
     class FakeEvent:
-        tool = FakeTool()
-        content = 0
+        tool = ToolExecution(tool_name="check", result="actual output")
+        content = "check() completed in 0.12s. "
 
     info = extract_tool_completed_info(FakeEvent())
     assert info is not None
     tool_name, result = info
     assert tool_name == "check"
-    assert result == 0  # not "fallback"
+    assert result == "actual output"  # not the timing string
 
 
 # --- markdown_to_html: tool block handling ---
