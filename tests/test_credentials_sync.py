@@ -73,28 +73,57 @@ class TestCredentialsSync:
             assert ollama_creds["host"] == "http://test:11434"
             assert ollama_creds["_source"] == "env"
 
-    def test_sync_env_does_not_overwrite_existing(
+    def test_sync_env_does_not_overwrite_ui_credentials(
         self,
         temp_credentials_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Test that env sync does NOT overwrite existing credentials."""
-        # Create initial credentials (as if set via UI)
+        """Test that env sync does NOT overwrite UI-set credentials."""
         cm = CredentialsManager(base_path=temp_credentials_dir)
-        cm.set_api_key("openai", "ui-set-key")
+        cm.save_credentials("openai", {"api_key": "ui-set-key", "_source": "ui"})
 
-        # Set a different environment variable
         monkeypatch.setenv("OPENAI_API_KEY", "env-key")
 
-        # Mock get_credentials_manager
         with patch("mindroom.credentials_sync.get_credentials_manager") as mock_get_cm:
             mock_get_cm.return_value = cm
-
-            # Run sync
             sync_env_to_credentials()
 
-            # Verify the existing key was NOT overwritten
             assert cm.get_api_key("openai") == "ui-set-key"
+
+    def test_sync_env_does_not_overwrite_legacy_credentials(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Test that env sync does NOT overwrite legacy credentials (no _source)."""
+        cm = CredentialsManager(base_path=temp_credentials_dir)
+        # Legacy credential without _source field
+        cm.set_api_key("openai", "legacy-key")
+
+        monkeypatch.setenv("OPENAI_API_KEY", "env-key")
+
+        with patch("mindroom.credentials_sync.get_credentials_manager") as mock_get_cm:
+            mock_get_cm.return_value = cm
+            sync_env_to_credentials()
+
+            assert cm.get_api_key("openai") == "legacy-key"
+
+    def test_sync_env_updates_env_sourced_credentials(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Test that env sync DOES update env-sourced credentials."""
+        cm = CredentialsManager(base_path=temp_credentials_dir)
+        cm.save_credentials("openai", {"api_key": "old-env-key", "_source": "env"})
+
+        monkeypatch.setenv("OPENAI_API_KEY", "new-env-key")
+
+        with patch("mindroom.credentials_sync.get_credentials_manager") as mock_get_cm:
+            mock_get_cm.return_value = cm
+            sync_env_to_credentials()
+
+            assert cm.get_api_key("openai") == "new-env-key"
 
     def test_sync_env_to_credentials_skip_empty(
         self,

@@ -1,9 +1,10 @@
 """Sync API keys from environment variables to CredentialsManager.
 
 On first run, API keys from .env are seeded into the CredentialsManager.
-Once a credential exists on disk (whether from .env or from the UI), the
-.env value will NOT overwrite it. This lets users change keys via the UI
-without losing them on restart.
+On subsequent runs, env-sourced credentials (_source=env) are updated from
+.env, but UI-sourced credentials (_source=ui) are never overwritten.
+This lets users change keys via the UI without losing them on restart,
+while still picking up .env changes for keys that were never manually set.
 """
 
 import os
@@ -48,17 +49,19 @@ def _get_secret(name: str) -> str | None:
 
 
 def sync_env_to_credentials() -> None:
-    """Seed API keys from environment variables into CredentialsManager.
+    """Sync API keys from environment variables into CredentialsManager.
 
-    Only writes a credential when no file exists for that service yet.
-    This means .env acts as the initial seed, but once a credential is
-    stored (whether from .env or from the UI) it won't be overwritten.
+    - If no credential file exists for a service, seed it from .env.
+    - If the existing credential has ``_source=env``, update it from .env
+      (the user never touched it via UI, so .env should still win).
+    - If the existing credential has ``_source=ui`` (or no ``_source``,
+      for legacy files), skip it to protect the user's manual override.
 
-    Environment variables are still exported to ``os.environ`` so that
+    Environment variables are always exported to ``os.environ`` so that
     libraries like mem0 can pick them up regardless.
     """
     creds_manager = get_credentials_manager()
-    seeded_count = 0
+    synced_count = 0
 
     for env_var, service in ENV_TO_SERVICE_MAP.items():
         env_value = _get_secret(env_var)
@@ -73,23 +76,31 @@ def sync_env_to_credentials() -> None:
         if service != "ollama":
             os.environ[env_var] = env_value
 
-        # Only seed if no credential file exists yet for this service
+        # Check existing credentials and their source
         existing = creds_manager.load_credentials(service)
         if existing is not None:
-            logger.debug(f"Credentials for {service} already exist, skipping env seed")
-            continue
+            source = existing.get("_source")
+            if source != "env":
+                # UI-set or legacy (no _source) — don't overwrite
+                logger.debug(f"Credentials for {service} set via UI, skipping env sync")
+                continue
 
         if service == "ollama":
-            creds_manager.save_credentials(service, {"host": env_value, "_source": "env"})
+            new_creds = {"host": env_value, "_source": "env"}
         else:
-            creds_manager.save_credentials(service, {"api_key": env_value, "_source": "env"})
-        logger.info(f"Seeded {service} credentials from environment")
-        seeded_count += 1
+            new_creds = {"api_key": env_value, "_source": "env"}
 
-    if seeded_count > 0:
-        logger.info(f"Seeded {seeded_count} new credentials from environment")
+        creds_manager.save_credentials(service, new_creds)
+        if existing is None:
+            logger.info(f"Seeded {service} credentials from environment")
+        else:
+            logger.info(f"Updated {service} credentials from environment")
+        synced_count += 1
+
+    if synced_count > 0:
+        logger.info(f"Synced {synced_count} credentials from environment")
     else:
-        logger.debug("No new credentials to seed from environment")
+        logger.debug("No credentials to sync from environment")
 
 
 def get_api_key_for_provider(provider: str) -> str | None:
