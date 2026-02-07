@@ -24,7 +24,9 @@ function extractService(url: string): string {
   if (start === -1) return '';
   const rest = url.slice(start + marker.length);
   const end = rest.indexOf('/api-key');
-  return end === -1 ? rest : rest.slice(0, end);
+  const service = end === -1 ? rest : rest.slice(0, end);
+  const queryIndex = service.indexOf('?');
+  return queryIndex === -1 ? service : service.slice(0, queryIndex);
 }
 
 describe('ModelConfig', () => {
@@ -46,6 +48,7 @@ describe('ModelConfig', () => {
   };
 
   let keyStatusByService: Record<string, KeyStatusResponse>;
+  let keyValueByService: Record<string, string>;
   let fetchMock: ReturnType<typeof vi.fn>;
   const writeTextMock = vi.fn();
 
@@ -65,6 +68,9 @@ describe('ModelConfig', () => {
         api_key: 'sk-openrouter-backup-real',
       },
     };
+    keyValueByService = {
+      'model:openrouter_backup': 'sk-openrouter-backup-real',
+    };
 
     fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const method = init?.method || 'GET';
@@ -76,6 +82,18 @@ describe('ModelConfig', () => {
         return {
           ok: true,
           json: async () => payload,
+        };
+      }
+
+      if (method === 'GET' && url.includes('/api/credentials/')) {
+        const service = extractService(url);
+        const apiKey = keyValueByService[service];
+        return {
+          ok: true,
+          json: async () => ({
+            service,
+            credentials: apiKey ? { api_key: apiKey } : {},
+          }),
         };
       }
 
@@ -180,7 +198,10 @@ describe('ModelConfig', () => {
 
     await waitFor(() => {
       expect(screen.getAllByText('Source: UI').length).toBeGreaterThan(0);
-      expect(screen.getAllByText('Source: .env').length).toBeGreaterThan(0);
+      expect(
+        screen.getAllByText((_, element) => element?.textContent?.includes('Source: .env') ?? false)
+          .length
+      ).toBeGreaterThan(0);
     });
   });
 
@@ -238,10 +259,61 @@ describe('ModelConfig', () => {
     });
   });
 
+  it('copies API key via legacy credentials endpoint fallback', async () => {
+    keyStatusByService['model:anthropic'] = {
+      has_key: true,
+      source: 'ui',
+      masked_key: 'sk-an...1234',
+    };
+    keyValueByService['model:anthropic'] = 'sk-anthropic-legacy-real';
+
+    render(<ModelConfig />);
+
+    const row = screen.getByText('anthropic').closest('tr');
+    if (!row) throw new Error('row not found');
+
+    await waitFor(() => {
+      expect(within(row).getByTitle('Copy API key')).toBeTruthy();
+    });
+
+    fireEvent.click(within(row).getByTitle('Copy API key'));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/credentials/model:anthropic/api-key?key_name=api_key&include_value=true'
+      );
+      expect(fetchMock).toHaveBeenCalledWith('/api/credentials/model:anthropic');
+      expect(writeTextMock).toHaveBeenCalledWith('sk-anthropic-legacy-real');
+    });
+  });
+
+  it('hides copy button when key value is not retrievable', async () => {
+    keyStatusByService['model:anthropic'] = {
+      has_key: true,
+      source: 'ui',
+      masked_key: 'sk-an...1234',
+    };
+
+    render(<ModelConfig />);
+
+    const row = screen.getByText('anthropic').closest('tr');
+    if (!row) throw new Error('row not found');
+
+    await waitFor(() => {
+      expect(within(row).queryByTitle('Copy API key')).toBeNull();
+    });
+  });
+
   it('adds a model using the top add row', async () => {
     render(<ModelConfig />);
 
     fireEvent.click(screen.getByRole('button', { name: /add model/i }));
+
+    expect(
+      screen.getByText(
+        'No custom key provided. This model will use the provider key (for example from .env) when available.'
+      )
+    ).toBeTruthy();
 
     fireEvent.change(screen.getByPlaceholderText('model name'), {
       target: { value: 'new-model' },
@@ -256,6 +328,38 @@ describe('ModelConfig', () => {
       expect(mockStore.updateModel).toHaveBeenCalledWith('new-model', {
         provider: 'openrouter',
         id: 'gpt-4o-mini',
+      });
+    });
+  });
+
+  it('shows immediate feedback when clearing a custom key', async () => {
+    keyStatusByService['model:anthropic'] = {
+      has_key: true,
+      source: 'ui',
+      masked_key: 'sk-an...1234',
+      api_key: 'sk-anthropic-real',
+    };
+
+    render(<ModelConfig />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText('Source: UI').length).toBeGreaterThan(0);
+    });
+
+    fireEvent.click(screen.getByText('anthropic'));
+    const row = screen.getByDisplayValue('anthropic').closest('tr');
+    if (!row) throw new Error('row not found');
+
+    fireEvent.click(within(row).getByRole('button', { name: 'Clear custom key' }));
+
+    expect(within(row).getByText('Custom key will be removed on save.')).toBeTruthy();
+    expect(within(row).getByRole('button', { name: 'Undo clear key' })).toBeTruthy();
+
+    fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith('/api/credentials/model:anthropic', {
+        method: 'DELETE',
       });
     });
   });

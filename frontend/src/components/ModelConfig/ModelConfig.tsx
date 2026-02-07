@@ -128,7 +128,7 @@ function sourceToLabel(source: string | null, hasKey: boolean): string {
   if (source) {
     return source;
   }
-  return 'Stored';
+  return '.env';
 }
 
 async function fetchKeyStatus(service: string): Promise<KeyStatus> {
@@ -154,11 +154,20 @@ async function fetchApiKeyValue(service: string): Promise<string | null> {
     const res = await fetch(
       `/api/credentials/${service}/api-key?key_name=api_key&include_value=true`
     );
-    if (!res.ok) {
+    if (res.ok) {
+      const data = await res.json();
+      if (data.api_key) {
+        return data.api_key;
+      }
+    }
+
+    // Fallback for older backends that don't support include_value
+    const legacyRes = await fetch(`/api/credentials/${service}`);
+    if (!legacyRes.ok) {
       return null;
     }
-    const data = await res.json();
-    return data.api_key || null;
+    const legacyData = await legacyRes.json();
+    return legacyData.credentials?.api_key || null;
   } catch {
     return null;
   }
@@ -251,6 +260,7 @@ export function ModelConfig() {
 
   const [providerKeys, setProviderKeys] = useState<Record<string, KeyStatus>>({});
   const [modelKeys, setModelKeys] = useState<Record<string, KeyStatus>>({});
+  const [copyableServices, setCopyableServices] = useState<Record<string, boolean>>({});
   const [sorting, setSorting] = useState<SortingState>([
     { id: 'provider', desc: false },
     { id: 'modelName', desc: false },
@@ -291,8 +301,30 @@ export function ModelConfig() {
       ),
     ]);
 
-    setProviderKeys(Object.fromEntries(providerResults));
-    setModelKeys(Object.fromEntries(modelResults));
+    const nextProviderKeys = Object.fromEntries(providerResults);
+    const nextModelKeys = Object.fromEntries(modelResults);
+    setProviderKeys(nextProviderKeys);
+    setModelKeys(nextModelKeys);
+
+    const servicesToCheck = new Set<string>();
+    for (const [provider, status] of Object.entries(nextProviderKeys)) {
+      if (status.hasKey) {
+        servicesToCheck.add(providerToService(provider));
+      }
+    }
+    for (const [modelName, status] of Object.entries(nextModelKeys)) {
+      if (status.hasKey) {
+        servicesToCheck.add(`model:${modelName}`);
+      }
+    }
+
+    const copyableResults = await Promise.all(
+      [...servicesToCheck].map(async service => {
+        const keyValue = await fetchApiKeyValue(service);
+        return [service, Boolean(keyValue)] as const;
+      })
+    );
+    setCopyableServices(Object.fromEntries(copyableResults));
   }, [config]);
 
   useEffect(() => {
@@ -621,7 +653,8 @@ export function ModelConfig() {
   const renderReadonlyKeyStatus = (
     keyDisplay: KeyDisplayInfo | null,
     modelName?: string,
-    provider?: string
+    provider?: string,
+    isCopyable?: boolean
   ) => {
     if (!keyDisplay) {
       return <span className="text-sm text-muted-foreground">N/A</span>;
@@ -642,7 +675,7 @@ export function ModelConfig() {
               <span className="ml-1 font-mono opacity-80">{keyDisplay.maskedKey}</span>
             )}
           </Badge>
-          {keyDisplay.hasKey && modelName && provider && (
+          {keyDisplay.hasKey && modelName && provider && isCopyable && (
             <Button
               size="icon"
               variant="ghost"
@@ -657,7 +690,14 @@ export function ModelConfig() {
             </Button>
           )}
         </div>
-        <p className="text-xs text-muted-foreground">Source: {keyDisplay.sourceLabel}</p>
+        <p className="text-xs text-muted-foreground">
+          Source:{' '}
+          {keyDisplay.sourceLabel === '.env' ? (
+            <code className="rounded bg-muted px-1 py-0.5 text-[10px]">.env</code>
+          ) : (
+            keyDisplay.sourceLabel
+          )}
+        </p>
       </div>
     );
   };
@@ -677,32 +717,59 @@ export function ModelConfig() {
     );
 
     const hasCustomKey = Boolean(currentModelName && modelKeys[currentModelName]?.hasKey);
+    const hasManualApiKey = Boolean(draft.apiKey.trim());
+    const hasReuseSource = Boolean(draft.selectedKeySourceModel);
+    const isClearingCustomKey =
+      hasCustomKey && draft.clearCustomKey && !hasManualApiKey && !hasReuseSource;
+    const providerFallbackKey = providerKeys[draft.provider];
     const currentStatus = currentModelName
       ? getKeyStatusDisplay(currentModelName, draft.provider, modelKeys, providerKeys)
       : null;
+    const currentCopyService =
+      currentModelName && modelKeys[currentModelName]?.hasKey
+        ? `model:${currentModelName}`
+        : providerToService(draft.provider);
+    const isCurrentCopyable = Boolean(currentCopyService && copyableServices[currentCopyService]);
 
     return (
       <div className="space-y-2" onClick={event => event.stopPropagation()}>
         {currentStatus && currentModelName && (
           <div className="space-y-1">
-            {renderReadonlyKeyStatus(currentStatus, currentModelName, draft.provider)}
+            {renderReadonlyKeyStatus(
+              currentStatus,
+              currentModelName,
+              draft.provider,
+              isCurrentCopyable
+            )}
             {hasCustomKey && (
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-7 px-2 text-xs text-destructive hover:text-destructive"
-                onClick={() => {
-                  setDraft(current => ({
-                    ...current,
-                    clearCustomKey: true,
-                    apiKey: '',
-                    selectedKeySourceModel: '',
-                  }));
-                }}
-              >
-                <X className="mr-1 h-3 w-3" />
-                Clear custom key
-              </Button>
+              <>
+                <Button
+                  size="sm"
+                  variant={isClearingCustomKey ? 'outline' : 'ghost'}
+                  className={cn(
+                    'h-7 px-2 text-xs',
+                    isClearingCustomKey
+                      ? 'border-amber-500/40 text-amber-700 dark:text-amber-300'
+                      : 'text-destructive hover:text-destructive'
+                  )}
+                  onClick={() => {
+                    setDraft(current => ({
+                      ...current,
+                      clearCustomKey: !isClearingCustomKey,
+                      apiKey: '',
+                      selectedKeySourceModel: '',
+                    }));
+                  }}
+                >
+                  <X className="mr-1 h-3 w-3" />
+                  {isClearingCustomKey ? 'Undo clear key' : 'Clear custom key'}
+                </Button>
+                {isClearingCustomKey && (
+                  <p className="text-xs text-amber-700 dark:text-amber-300">
+                    Custom key will be removed on save.
+                  </p>
+                )}
+              </>
             )}
           </div>
         )}
@@ -764,6 +831,17 @@ export function ModelConfig() {
               ))}
             </SelectContent>
           </Select>
+        )}
+
+        {!hasManualApiKey && !hasReuseSource && (
+          <p className="text-xs text-muted-foreground">
+            {providerFallbackKey?.hasKey
+              ? `No custom key provided. This model will use the provider key (${sourceToLabel(
+                  providerFallbackKey.source,
+                  true
+                )}${providerFallbackKey.maskedKey ? ` ${providerFallbackKey.maskedKey}` : ''}).`
+              : 'No custom key provided. This model will use the provider key (for example from .env) when available.'}
+          </p>
         )}
       </div>
     );
@@ -878,7 +956,14 @@ export function ModelConfig() {
           return renderReadonlyKeyStatus(
             row.original.keyDisplay,
             row.original.modelName,
-            row.original.provider
+            row.original.provider,
+            Boolean(
+              copyableServices[
+                modelKeys[row.original.modelName]?.hasKey
+                  ? `model:${row.original.modelName}`
+                  : providerToService(row.original.provider)
+              ]
+            )
           );
         }
 
