@@ -200,13 +200,13 @@ describe('ModelConfig', () => {
     });
   });
 
-  it('shows OpenAI-compatible endpoint details and allows editing base URL', async () => {
+  it('shows OpenAI endpoint details and allows editing base URL', async () => {
     render(<ModelConfig />);
 
     expect(
       screen.getAllByText(
         (_, element) =>
-          element?.textContent?.includes('OpenAI-compatible: http://localhost:9292/v1') ?? false
+          element?.textContent?.includes('Endpoint: http://localhost:9292/v1') ?? false
       ).length
     ).toBeGreaterThan(0);
 
@@ -389,7 +389,35 @@ describe('ModelConfig', () => {
     });
   });
 
-  it('requires base URL for OpenAI-compatible mode', async () => {
+  it('accepts empty base URL for OpenAI and uses default endpoint', async () => {
+    render(<ModelConfig />);
+
+    fireEvent.click(screen.getByRole('button', { name: /add model/i }));
+    const addRow = screen.getByPlaceholderText('model name').closest('tr');
+    if (!addRow) throw new Error('add row not found');
+
+    fireEvent.click(within(addRow).getAllByRole('combobox')[0]);
+    fireEvent.click(screen.getByRole('option', { name: /OpenAI OpenAI/i }));
+
+    fireEvent.change(within(addRow).getByPlaceholderText('model name'), {
+      target: { value: 'openai_default' },
+    });
+    fireEvent.change(within(addRow).getByPlaceholderText('provider model id'), {
+      target: { value: 'gpt-4.1-mini' },
+    });
+
+    expect(within(addRow).getByPlaceholderText('https://api.openai.com/v1')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /^Add$/ }));
+
+    await waitFor(() => {
+      expect(mockStore.updateModel).toHaveBeenCalledWith('openai_default', {
+        provider: 'openai',
+        id: 'gpt-4.1-mini',
+      });
+    });
+  });
+
+  it('validates custom OpenAI base URL on add', async () => {
     const { toast } = await import('@/components/ui/toaster');
 
     render(<ModelConfig />);
@@ -399,15 +427,16 @@ describe('ModelConfig', () => {
     if (!addRow) throw new Error('add row not found');
 
     fireEvent.click(within(addRow).getAllByRole('combobox')[0]);
-    fireEvent.click(screen.getByRole('option', { name: /OpenAI OpenAI/ }));
-    fireEvent.click(within(addRow).getAllByRole('combobox')[1]);
-    fireEvent.click(screen.getByRole('option', { name: 'OpenAI-compatible' }));
+    fireEvent.click(screen.getByRole('option', { name: /OpenAI OpenAI/i }));
 
     fireEvent.change(within(addRow).getByPlaceholderText('model name'), {
       target: { value: 'openai_compat' },
     });
     fireEvent.change(within(addRow).getByPlaceholderText('provider model id'), {
       target: { value: 'gpt-4.1-mini' },
+    });
+    fireEvent.change(within(addRow).getByPlaceholderText('https://api.openai.com/v1'), {
+      target: { value: 'not-a-url' },
     });
 
     fireEvent.click(screen.getByRole('button', { name: /^Add$/ }));
@@ -416,14 +445,14 @@ describe('ModelConfig', () => {
       expect(toast).toHaveBeenCalledWith(
         expect.objectContaining({
           title: 'Error',
-          description: 'Base URL is required for OpenAI-compatible mode',
+          description: 'Base URL must be a valid http(s) URL',
           variant: 'destructive',
         })
       );
     });
   });
 
-  it('saves OpenAI-compatible base URL on add', async () => {
+  it('saves custom OpenAI base URL on add', async () => {
     render(<ModelConfig />);
 
     fireEvent.click(screen.getByRole('button', { name: /add model/i }));
@@ -431,9 +460,7 @@ describe('ModelConfig', () => {
     if (!addRow) throw new Error('add row not found');
 
     fireEvent.click(within(addRow).getAllByRole('combobox')[0]);
-    fireEvent.click(screen.getByRole('option', { name: /OpenAI OpenAI/ }));
-    fireEvent.click(within(addRow).getAllByRole('combobox')[1]);
-    fireEvent.click(screen.getByRole('option', { name: 'OpenAI-compatible' }));
+    fireEvent.click(screen.getByRole('option', { name: /OpenAI OpenAI/i }));
 
     fireEvent.change(within(addRow).getByPlaceholderText('model name'), {
       target: { value: 'openai_compat' },
@@ -441,7 +468,7 @@ describe('ModelConfig', () => {
     fireEvent.change(within(addRow).getByPlaceholderText('provider model id'), {
       target: { value: 'gpt-4.1-mini' },
     });
-    fireEvent.change(within(addRow).getByPlaceholderText('https://api.example.com/v1'), {
+    fireEvent.change(within(addRow).getByPlaceholderText('https://api.openai.com/v1'), {
       target: { value: 'http://localhost:9292/v1' },
     });
 

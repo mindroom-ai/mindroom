@@ -38,7 +38,6 @@ interface RowDraft {
   modelName: string;
   provider: string;
   modelId: string;
-  endpointMode: 'openai' | 'openai-compatible';
   baseUrl: string;
   apiKey: string;
   selectedKeySourceModel: string;
@@ -72,7 +71,6 @@ const EMPTY_DRAFT: RowDraft = {
   modelName: '',
   provider: 'openrouter',
   modelId: '',
-  endpointMode: 'openai',
   baseUrl: '',
   apiKey: '',
   selectedKeySourceModel: '',
@@ -94,6 +92,7 @@ const KEY_BADGE_COLORS = [
 ];
 
 const NO_KEY_BADGE_COLOR = 'bg-red-500/10 text-red-700 dark:text-red-300 border-red-500/25';
+const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
 
 function hashString(value: string): number {
   let hash = 0;
@@ -132,10 +131,10 @@ function sourceToLabel(source: string | null, hasKey: boolean): string {
 
 function getOpenAIBaseUrl(modelConfig: { extra_kwargs?: Record<string, unknown> }): string | null {
   const extraKwargs = modelConfig.extra_kwargs;
-  if (!extraKwargs || typeof extraKwargs !== 'object') {
+  if (!extraKwargs) {
     return null;
   }
-  const baseUrl = (extraKwargs as Record<string, unknown>).base_url;
+  const baseUrl = extraKwargs.base_url;
   if (typeof baseUrl !== 'string') {
     return null;
   }
@@ -399,7 +398,6 @@ export function ModelConfig() {
         ([modelName, modelConfig]) =>
           !excludedModelNames.includes(modelName) &&
           modelConfig.provider === provider &&
-          modelConfig.provider !== 'ollama' &&
           modelKeys[modelName]?.hasKey
       )
       .map(([modelName]) => ({ modelName, maskedKey: modelKeys[modelName]?.maskedKey || null }));
@@ -439,7 +437,6 @@ export function ModelConfig() {
       modelName: row.modelName,
       provider: row.provider,
       modelId: row.modelId,
-      endpointMode: row.provider === 'openai' && row.openAIBaseUrl ? 'openai-compatible' : 'openai',
       baseUrl: row.openAIBaseUrl || '',
       apiKey: '',
       selectedKeySourceModel: '',
@@ -468,6 +465,30 @@ export function ModelConfig() {
   const cancelAddingRow = () => {
     setIsAddingRow(false);
     setNewRowDraft({ ...EMPTY_DRAFT });
+  };
+
+  const validateOpenAIBaseUrl = (
+    draft: Pick<RowDraft, 'provider' | 'baseUrl'>
+  ): { valid: true; value: string | null } | { valid: false } => {
+    if (draft.provider !== 'openai') {
+      return { valid: true, value: null };
+    }
+
+    const normalizedBaseUrl = draft.baseUrl.trim();
+    if (!normalizedBaseUrl) {
+      return { valid: true, value: null };
+    }
+
+    if (!isValidHttpUrl(normalizedBaseUrl)) {
+      toast({
+        title: 'Error',
+        description: 'Base URL must be a valid http(s) URL',
+        variant: 'destructive',
+      });
+      return { valid: false };
+    }
+
+    return { valid: true, value: normalizedBaseUrl };
   };
 
   const handleSaveRow = async () => {
@@ -511,25 +532,11 @@ export function ModelConfig() {
       return;
     }
 
-    const normalizedBaseUrl = rowDraft.baseUrl.trim();
-    if (rowDraft.provider === 'openai' && rowDraft.endpointMode === 'openai-compatible') {
-      if (!normalizedBaseUrl) {
-        toast({
-          title: 'Error',
-          description: 'Base URL is required for OpenAI-compatible mode',
-          variant: 'destructive',
-        });
-        return;
-      }
-      if (!isValidHttpUrl(normalizedBaseUrl)) {
-        toast({
-          title: 'Error',
-          description: 'Base URL must be a valid http(s) URL',
-          variant: 'destructive',
-        });
-        return;
-      }
+    const baseUrlValidation = validateOpenAIBaseUrl(rowDraft);
+    if (!baseUrlValidation.valid) {
+      return;
     }
+    const normalizedBaseUrl = baseUrlValidation.value;
 
     setIsSavingRow(true);
 
@@ -571,7 +578,7 @@ export function ModelConfig() {
 
     const nextExtraKwargs = { ...(originalModelConfig.extra_kwargs ?? {}) };
     if (rowDraft.provider === 'openai') {
-      if (rowDraft.endpointMode === 'openai-compatible') {
+      if (normalizedBaseUrl) {
         nextExtraKwargs.base_url = normalizedBaseUrl;
       } else {
         delete nextExtraKwargs.base_url;
@@ -628,25 +635,11 @@ export function ModelConfig() {
       return;
     }
 
-    const normalizedBaseUrl = newRowDraft.baseUrl.trim();
-    if (newRowDraft.provider === 'openai' && newRowDraft.endpointMode === 'openai-compatible') {
-      if (!normalizedBaseUrl) {
-        toast({
-          title: 'Error',
-          description: 'Base URL is required for OpenAI-compatible mode',
-          variant: 'destructive',
-        });
-        return;
-      }
-      if (!isValidHttpUrl(normalizedBaseUrl)) {
-        toast({
-          title: 'Error',
-          description: 'Base URL must be a valid http(s) URL',
-          variant: 'destructive',
-        });
-        return;
-      }
+    const baseUrlValidation = validateOpenAIBaseUrl(newRowDraft);
+    if (!baseUrlValidation.valid) {
+      return;
     }
+    const normalizedBaseUrl = baseUrlValidation.value;
 
     setIsSavingNewRow(true);
 
@@ -672,7 +665,7 @@ export function ModelConfig() {
       provider: newRowDraft.provider as ProviderType,
       id: modelId,
     };
-    if (newRowDraft.provider === 'openai' && newRowDraft.endpointMode === 'openai-compatible') {
+    if (newRowDraft.provider === 'openai' && normalizedBaseUrl) {
       nextModelConfig.extra_kwargs = { base_url: normalizedBaseUrl };
     }
 
@@ -919,36 +912,23 @@ export function ModelConfig() {
 
     return (
       <div className="space-y-2" onClick={event => event.stopPropagation()}>
-        <Select
-          value={draft.endpointMode}
-          onValueChange={mode => {
-            setDraft(current => ({
-              ...current,
-              endpointMode: mode as 'openai' | 'openai-compatible',
-              baseUrl: mode === 'openai' ? '' : current.baseUrl,
-            }));
+        <Input
+          value={draft.baseUrl}
+          onChange={event => {
+            const baseUrl = event.target.value;
+            setDraft(current => ({ ...current, baseUrl }));
           }}
-        >
-          <SelectTrigger className="h-8 text-xs">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="openai">OpenAI</SelectItem>
-            <SelectItem value="openai-compatible">OpenAI-compatible</SelectItem>
-          </SelectContent>
-        </Select>
-        {draft.endpointMode === 'openai-compatible' && (
-          <Input
-            value={draft.baseUrl}
-            onChange={event => {
-              const baseUrl = event.target.value;
-              setDraft(current => ({ ...current, baseUrl }));
-            }}
-            onClick={event => event.stopPropagation()}
-            placeholder="https://api.example.com/v1"
-            className="h-8 text-xs"
-          />
-        )}
+          onClick={event => event.stopPropagation()}
+          placeholder={DEFAULT_OPENAI_BASE_URL}
+          className="h-8 text-xs"
+        />
+        <p className="text-xs text-muted-foreground">
+          Leave empty to use{' '}
+          <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
+            {DEFAULT_OPENAI_BASE_URL}
+          </code>
+          .
+        </p>
       </div>
     );
   };
@@ -1002,8 +982,7 @@ export function ModelConfig() {
                     ? {
                         ...current,
                         provider,
-                        endpointMode: 'openai',
-                        baseUrl: '',
+                        baseUrl: provider === 'openai' ? current.baseUrl : '',
                         apiKey: '',
                         selectedKeySourceModel: '',
                         clearCustomKey: provider === 'ollama' ? true : current.clearCustomKey,
@@ -1041,7 +1020,7 @@ export function ModelConfig() {
               <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{row.original.modelId}</code>
               {row.original.provider === 'openai' && row.original.openAIBaseUrl && (
                 <p className="text-xs text-muted-foreground">
-                  OpenAI-compatible:{' '}
+                  Endpoint:{' '}
                   <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
                     {row.original.openAIBaseUrl}
                   </code>
@@ -1226,8 +1205,7 @@ export function ModelConfig() {
                           provider,
                           apiKey: '',
                           selectedKeySourceModel: '',
-                          endpointMode: 'openai',
-                          baseUrl: '',
+                          baseUrl: provider === 'openai' ? current.baseUrl : '',
                         }));
                       }}
                     >
