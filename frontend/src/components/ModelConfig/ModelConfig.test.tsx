@@ -159,6 +159,41 @@ describe('ModelConfig', () => {
     });
   });
 
+  it('deletes old custom credential when renaming a model', async () => {
+    keyStatusByService['model:anthropic'] = {
+      has_key: true,
+      source: 'ui',
+      masked_key: 'sk-an...1234',
+      api_key: 'sk-anthropic-real',
+    };
+
+    render(<ModelConfig />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText('Source: UI').length).toBeGreaterThan(0);
+    });
+
+    fireEvent.click(screen.getByText('anthropic'));
+
+    const row = screen.getByDisplayValue('anthropic').closest('tr');
+    if (!row) throw new Error('row not found');
+
+    fireEvent.change(within(row).getByDisplayValue('anthropic'), {
+      target: { value: 'anthropic-renamed' },
+    });
+    fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/credentials/model:anthropic-renamed/copy-from/model:anthropic',
+        { method: 'POST' }
+      );
+      expect(fetchMock).toHaveBeenCalledWith('/api/credentials/model:anthropic', {
+        method: 'DELETE',
+      });
+    });
+  });
+
   it('changes provider with inline dropdown', async () => {
     render(<ModelConfig />);
 

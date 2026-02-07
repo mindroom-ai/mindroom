@@ -62,12 +62,6 @@ interface ModelRowData {
   provider: string;
   providerName: string;
   modelId: string;
-  modelConfig: {
-    provider: string;
-    id: string;
-    host?: string;
-    extra_kwargs?: Record<string, unknown>;
-  };
   keyDisplay: KeyDisplayInfo | null;
 }
 
@@ -528,7 +522,7 @@ export function ModelConfig() {
       keyOperationOk = await deleteModelApiKey(originalModelName);
     }
 
-    if (keyOperationOk && renamed && hadCustomKey && (hasKeyReuseSource || hasManualApiKey)) {
+    if (keyOperationOk && renamed && hadCustomKey) {
       keyOperationOk = await deleteModelApiKey(originalModelName);
     }
 
@@ -644,7 +638,6 @@ export function ModelConfig() {
         provider: modelConfig.provider,
         providerName: getProviderInfo(modelConfig.provider).name,
         modelId: modelConfig.id,
-        modelConfig,
         keyDisplay,
       };
     });
