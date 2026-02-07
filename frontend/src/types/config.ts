@@ -57,7 +57,6 @@ export interface VoiceSTTConfig {
 
 export interface VoiceLLMConfig {
   model: string;
-  confidence_threshold: number;
 }
 
 export interface VoiceConfig {
