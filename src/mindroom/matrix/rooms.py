@@ -11,7 +11,7 @@ import nio
 from mindroom.logging_config import get_logger
 from mindroom.topic_generator import ensure_room_has_topic, generate_room_topic_ai
 
-from .client import check_and_set_avatar, create_room, join_room, matrix_client
+from .client import check_and_set_avatar, create_room, join_room, leave_room, matrix_client
 from .identity import MatrixID, extract_server_name_from_homeserver
 from .state import MatrixRoom, MatrixState
 
@@ -388,3 +388,19 @@ async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool:
     is_dm = _has_is_direct_marker(response.events)
     DM_ROOM_CACHE[cache_key] = (time.monotonic(), is_dm)
     return is_dm
+
+
+async def leave_non_dm_rooms(
+    client: nio.AsyncClient,
+    room_ids: list[str],
+) -> None:
+    """Leave all rooms in *room_ids* that are not DM rooms."""
+    for room_id in room_ids:
+        if await is_dm_room(client, room_id):
+            logger.debug(f"Preserving DM room {room_id}")
+            continue
+        success = await leave_room(client, room_id)
+        if success:
+            logger.info(f"Left room {room_id}")
+        else:
+            logger.error(f"Failed to leave room {room_id}")
