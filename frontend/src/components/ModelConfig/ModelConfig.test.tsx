@@ -130,6 +130,14 @@ describe('ModelConfig', () => {
     expect(screen.getByText('openai_local')).toBeTruthy();
   });
 
+  it('keeps the models table horizontally scrollable', () => {
+    render(<ModelConfig />);
+
+    const scrollContainer = screen.getByTestId('models-table-scroll-container');
+    expect(scrollContainer).toHaveClass('overflow-x-auto');
+    expect(within(scrollContainer).getByRole('table')).toBeTruthy();
+  });
+
   it('starts inline editing when a row is clicked', () => {
     render(<ModelConfig />);
 
