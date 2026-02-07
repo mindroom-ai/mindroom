@@ -6,6 +6,53 @@
 default:
     @just --list
 
+###########################
+# Local dev (all-in-one)
+###########################
+
+# Start full local dev stack (Matrix + Element + Backend + Frontend)
+dev:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    trap 'kill $(jobs -p) 2>/dev/null' EXIT
+
+    # Start Matrix + Element containers
+    (cd local/matrix && docker compose up -d)
+
+    echo "⏳ Waiting for Synapse..."
+    until curl -sf http://localhost:8008/_matrix/client/versions >/dev/null 2>&1; do sleep 1; done
+    echo "✅ Synapse ready"
+
+    # Use local Matrix homeserver
+    export MATRIX_HOMESERVER=http://localhost:8008
+    export MATRIX_SSL_VERIFY=false
+
+    # Use relative API URLs so Traefik and Vite proxy both work
+    export VITE_API_URL=''
+
+    # Sync Python deps
+    uv sync --all-extras
+
+    # Start bot + API server
+    uv run python -m mindroom.cli run --log-level INFO &
+    uv run uvicorn mindroom.api.main:app --host 0.0.0.0 --port 8765 &
+
+    # Start frontend
+    (cd frontend && bun install --silent && exec bun run dev -- --host 0.0.0.0 --port 3003) &
+
+    echo ""
+    echo "✅ Dev stack running:"
+    echo "   Frontend:  http://localhost:3003        → https://mindroom-dev.lab.nijho.lt"
+    echo "   Backend:   http://localhost:8765/api     → https://mindroom-dev.lab.nijho.lt/api"
+    echo "   Matrix:    http://localhost:8008         → https://matrix-dev.lab.nijho.lt"
+    echo ""
+
+    wait
+
+# Stop local dev containers (Matrix + Element)
+dev-down:
+    cd local/matrix && docker compose down
+
 default_instance := env_var_or_default("INSTANCE", "default")
 default_matrix   := env_var_or_default("MATRIX", "tuwunel")
 
