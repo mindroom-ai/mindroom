@@ -613,12 +613,11 @@ _GENERAL_FORMATTED_BODY_TAGS = frozenset(
 )
 
 # MindRoom custom tags intentionally rendered by custom Element forks.
-_MINDROOM_FORMATTED_BODY_TAGS = frozenset(
-    {
-        "tool",  # MindRoom: single tool call block (call + optional result), rendered as a collapsible entry.
-        "tool-group",  # MindRoom: wrapper for consecutive tool blocks so the UI renders one grouped collapsible.
-    },
+_MINDROOM_CUSTOM_TAGS = (
+    "tool",  # MindRoom: single tool call block (call + optional result), rendered as a collapsible entry.
+    "tool-group",  # MindRoom: wrapper for consecutive tool blocks so the UI renders one grouped collapsible.
 )
+_MINDROOM_FORMATTED_BODY_TAGS = frozenset(_MINDROOM_CUSTOM_TAGS)
 
 _ALLOWED_FORMATTED_BODY_TAGS = _GENERAL_FORMATTED_BODY_TAGS | _MINDROOM_FORMATTED_BODY_TAGS
 
@@ -674,7 +673,7 @@ def markdown_to_html(text: str) -> str:
     )
     # Register custom elements as block-level so markdown doesn't wrap them
     # in <p> tags or convert \n to <br /> inside them.
-    md.block_level_elements.extend(["tool", "tool-group"])
+    md.block_level_elements.extend(_MINDROOM_CUSTOM_TAGS)
     html_text: str = md.convert(text)
     return _escape_unsupported_html_tags(html_text)
 
