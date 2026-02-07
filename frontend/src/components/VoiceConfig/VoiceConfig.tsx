@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Mic, Settings, Volume2, Info } from 'lucide-react';
+import { Mic, Settings, Volume2, Info, AlertTriangle } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
@@ -12,34 +12,63 @@ import {
 } from '@/components/ui/select';
 import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/components/ui/use-toast';
 import { useConfigStore } from '@/store/configStore';
 import { VoiceConfig as VoiceConfigType } from '@/types/config';
+
+const OPENAI_TRANSCRIPTION_ENDPOINT = 'https://api.openai.com/v1/audio/transcriptions';
+
+const DEFAULT_VOICE_CONFIG: VoiceConfigType = {
+  enabled: false,
+  stt: {
+    provider: 'openai',
+    model: 'whisper-1',
+    api_key: '',
+    host: '',
+  },
+  intelligence: {
+    model: 'default',
+  },
+};
+
+const STT_PROVIDER_LABELS: Record<string, string> = {
+  openai: 'OpenAI API (Cloud)',
+  custom: 'OpenAI-compatible Endpoint',
+};
+
+function mergeVoiceConfig(config?: Partial<VoiceConfigType>): VoiceConfigType {
+  return {
+    ...DEFAULT_VOICE_CONFIG,
+    ...config,
+    stt: {
+      ...DEFAULT_VOICE_CONFIG.stt,
+      ...(config?.stt || {}),
+    },
+    intelligence: {
+      ...DEFAULT_VOICE_CONFIG.intelligence,
+      ...(config?.intelligence || {}),
+    },
+  };
+}
+
+function normalizeHost(host?: string): string {
+  if (!host) return '';
+  return host.trim().replace(/\/+$/, '');
+}
 
 export function VoiceConfig() {
   const { config, saveConfig, markDirty } = useConfigStore();
   const { toast } = useToast();
 
   // Initialize local state with default values if voice config doesn't exist
-  const [voiceConfig, setVoiceConfig] = useState<VoiceConfigType>({
-    enabled: false,
-    stt: {
-      provider: 'openai',
-      model: 'whisper-1',
-      api_key: '',
-      host: '',
-    },
-    intelligence: {
-      model: 'default',
-    },
-    ...(config?.voice || {}),
-  });
+  const [voiceConfig, setVoiceConfig] = useState<VoiceConfigType>(() =>
+    mergeVoiceConfig(config?.voice)
+  );
 
   // Update local state when config changes
   useEffect(() => {
-    if (config?.voice) {
-      setVoiceConfig(config.voice);
-    }
+    setVoiceConfig(mergeVoiceConfig(config?.voice));
   }, [config?.voice]);
 
   const handleVoiceConfigChange = (updates: Partial<VoiceConfigType>) => {
@@ -59,6 +88,13 @@ export function VoiceConfig() {
     });
   };
 
+  const handleSTTProviderChange = (provider: string) => {
+    handleSTTChange({
+      provider,
+      host: provider === 'openai' ? '' : voiceConfig.stt.host,
+    });
+  };
+
   const handleIntelligenceChange = (updates: Partial<VoiceConfigType['intelligence']>) => {
     handleVoiceConfigChange({
       intelligence: { ...voiceConfig.intelligence, ...updates },
@@ -67,9 +103,23 @@ export function VoiceConfig() {
 
   // Get available models from config
   const availableModels = config?.models ? Object.keys(config.models) : [];
+  const normalizedHost = normalizeHost(voiceConfig.stt.host);
+  const showHostField = voiceConfig.stt.provider === 'custom' || Boolean(normalizedHost);
+  const missingHostForCustomProvider = voiceConfig.stt.provider === 'custom' && !normalizedHost;
+  const effectiveEndpoint = normalizedHost
+    ? `${normalizedHost}/v1/audio/transcriptions`
+    : OPENAI_TRANSCRIPTION_ENDPOINT;
+  const effectiveMode = normalizedHost ? 'OpenAI-compatible API' : 'OpenAI API';
+  const keySource = voiceConfig.stt.api_key?.trim()
+    ? 'Stored in voice settings'
+    : 'OPENAI_API_KEY environment variable';
+  const providerLabel = STT_PROVIDER_LABELS[voiceConfig.stt.provider] || voiceConfig.stt.provider;
 
   const handleSave = async () => {
     try {
+      if (config?.voice?.stt) {
+        config.voice.stt.host = normalizeHost(config.voice.stt.host);
+      }
       await saveConfig();
       toast({
         title: 'Voice Configuration Saved',
@@ -106,126 +156,173 @@ export function VoiceConfig() {
           </CardDescription>
         </CardHeader>
 
-        {voiceConfig.enabled && (
-          <CardContent className="space-y-6">
-            {/* Status Alert */}
-            <Alert>
-              <Info className="h-4 w-4" />
-              <AlertDescription>
-                Voice messages will be automatically transcribed and processed. The router agent
-                handles all voice messages to avoid duplicates.
-              </AlertDescription>
-            </Alert>
+        <CardContent className="space-y-6">
+          {/* Status Alert */}
+          <Alert>
+            <Info className="h-4 w-4" />
+            <AlertDescription>
+              {voiceConfig.enabled
+                ? 'Voice messages will be automatically transcribed and processed. The router agent handles all voice messages to avoid duplicates.'
+                : 'Voice message handling is currently disabled. You can still review and edit settings below.'}
+            </AlertDescription>
+          </Alert>
 
-            {/* STT Configuration */}
-            <div className="space-y-4">
-              <div className="flex items-center gap-2">
-                <Mic className="h-4 w-4" />
-                <Label className="text-base font-semibold">Speech-to-Text (STT)</Label>
+          {/* Current Settings Summary */}
+          <div className="rounded-lg border border-border bg-muted/40 p-4 shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold">Current Effective Settings</h3>
+              <Badge variant={voiceConfig.enabled ? 'default' : 'secondary'}>
+                {voiceConfig.enabled ? 'Enabled' : 'Disabled'}
+              </Badge>
+            </div>
+            <div className="mt-3 space-y-2 text-sm">
+              <div className="flex items-start justify-between gap-4">
+                <span className="text-muted-foreground">Mode:</span>
+                <span className="font-mono text-right text-foreground">{effectiveMode}</span>
               </div>
-
-              <div className="grid gap-4">
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <Label htmlFor="stt-provider">Provider</Label>
-                    <Select
-                      value={voiceConfig.stt.provider}
-                      onValueChange={value => handleSTTChange({ provider: value })}
-                    >
-                      <SelectTrigger id="stt-provider">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="openai">OpenAI Whisper (Cloud)</SelectItem>
-                        <SelectItem value="custom">Self-hosted (OpenAI-compatible)</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="stt-model">Model</Label>
-                    <Input
-                      id="stt-model"
-                      value={voiceConfig.stt.model}
-                      onChange={e => handleSTTChange({ model: e.target.value })}
-                      placeholder="whisper-1"
-                    />
-                  </div>
-                </div>
-
-                {voiceConfig.stt.provider === 'openai' && (
-                  <div className="space-y-2">
-                    <Label htmlFor="stt-api-key">API Key (Optional)</Label>
-                    <Input
-                      id="stt-api-key"
-                      type="password"
-                      value={voiceConfig.stt.api_key || ''}
-                      onChange={e => handleSTTChange({ api_key: e.target.value })}
-                      placeholder="Uses OPENAI_API_KEY env var if not set"
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      Leave empty to use the OPENAI_API_KEY environment variable
-                    </p>
-                  </div>
-                )}
-
-                {voiceConfig.stt.provider === 'custom' && (
-                  <div className="space-y-2">
-                    <Label htmlFor="stt-host">Host URL</Label>
-                    <Input
-                      id="stt-host"
-                      value={voiceConfig.stt.host || ''}
-                      onChange={e => handleSTTChange({ host: e.target.value })}
-                      placeholder="http://localhost:8080/v1"
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      URL of your self-hosted STT service (OpenAI-compatible API)
-                    </p>
-                  </div>
-                )}
+              <div className="flex items-start justify-between gap-4">
+                <span className="text-muted-foreground">Provider Setting:</span>
+                <span className="font-mono text-right text-foreground">{providerLabel}</span>
+              </div>
+              <div className="flex items-start justify-between gap-4">
+                <span className="text-muted-foreground">STT Model:</span>
+                <span className="font-mono text-right text-foreground">
+                  {voiceConfig.stt.model}
+                </span>
+              </div>
+              <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+                <span className="text-muted-foreground">Endpoint:</span>
+                <span className="font-mono text-foreground break-all sm:text-right">
+                  {effectiveEndpoint}
+                </span>
+              </div>
+              <div className="flex items-start justify-between gap-4">
+                <span className="text-muted-foreground">API Key Source:</span>
+                <span className="font-mono text-right text-foreground">{keySource}</span>
+              </div>
+              <div className="flex items-start justify-between gap-4">
+                <span className="text-muted-foreground">Command Model:</span>
+                <span className="font-mono text-right text-foreground">
+                  {voiceConfig.intelligence.model}
+                </span>
               </div>
             </div>
+          </div>
 
-            {/* Command Intelligence Model */}
-            <div className="space-y-4">
-              <div className="flex items-center gap-2">
-                <Settings className="h-4 w-4" />
-                <Label className="text-base font-semibold">Command Intelligence</Label>
+          {/* STT Configuration */}
+          <div className="space-y-4">
+            <div className="flex items-center gap-2">
+              <Mic className="h-4 w-4" />
+              <Label className="text-base font-semibold">Speech-to-Text (STT)</Label>
+            </div>
+
+            <div className="grid gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="stt-provider">Provider</Label>
+                  <Select value={voiceConfig.stt.provider} onValueChange={handleSTTProviderChange}>
+                    <SelectTrigger id="stt-provider">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="openai">OpenAI API (Cloud)</SelectItem>
+                      <SelectItem value="custom">OpenAI-compatible Endpoint</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="stt-model">Model</Label>
+                  <Input
+                    id="stt-model"
+                    value={voiceConfig.stt.model}
+                    onChange={e => handleSTTChange({ model: e.target.value })}
+                    placeholder="whisper-1"
+                  />
+                </div>
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="intelligence-model">AI Model for Processing</Label>
-                <Select
-                  value={voiceConfig.intelligence.model}
-                  onValueChange={value => handleIntelligenceChange({ model: value })}
-                >
-                  <SelectTrigger id="intelligence-model">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {availableModels.length > 0 ? (
-                      availableModels.map(model => (
-                        <SelectItem key={model} value={model}>
-                          {model}
-                        </SelectItem>
-                      ))
-                    ) : (
-                      <SelectItem value="default">Default Model</SelectItem>
-                    )}
-                  </SelectContent>
-                </Select>
+                <Label htmlFor="stt-api-key">API Key (Optional)</Label>
+                <Input
+                  id="stt-api-key"
+                  type="password"
+                  value={voiceConfig.stt.api_key || ''}
+                  onChange={e => handleSTTChange({ api_key: e.target.value })}
+                  placeholder="Uses OPENAI_API_KEY env var if not set"
+                />
                 <p className="text-xs text-muted-foreground">
-                  Model used to process transcriptions into commands and agent mentions
+                  Leave empty to use the OPENAI_API_KEY environment variable
                 </p>
               </div>
+
+              {showHostField && (
+                <div className="space-y-2">
+                  <Label htmlFor="stt-host">Host URL</Label>
+                  <Input
+                    id="stt-host"
+                    value={voiceConfig.stt.host || ''}
+                    onChange={e => handleSTTChange({ host: e.target.value })}
+                    placeholder="http://localhost:8080"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {voiceConfig.stt.provider === 'openai' && normalizedHost
+                      ? 'A custom host is set. Clear it to use the default OpenAI endpoint, or switch provider to "OpenAI-compatible Endpoint".'
+                      : 'Base URL of your STT service. Do not include /v1; MindRoom appends /v1/audio/transcriptions automatically.'}
+                  </p>
+                </div>
+              )}
+
+              {missingHostForCustomProvider && (
+                <Alert variant="destructive">
+                  <AlertTriangle className="h-4 w-4" />
+                  <AlertDescription>
+                    OpenAI-compatible endpoint is selected, but the Host URL is empty.
+                  </AlertDescription>
+                </Alert>
+              )}
+            </div>
+          </div>
+
+          {/* Command Intelligence Model */}
+          <div className="space-y-4">
+            <div className="flex items-center gap-2">
+              <Settings className="h-4 w-4" />
+              <Label className="text-base font-semibold">Command Intelligence</Label>
             </div>
 
-            {/* Save Button */}
-            <div className="flex justify-end">
-              <Button onClick={handleSave}>Save Voice Configuration</Button>
+            <div className="space-y-2">
+              <Label htmlFor="intelligence-model">AI Model for Processing</Label>
+              <Select
+                value={voiceConfig.intelligence.model}
+                onValueChange={value => handleIntelligenceChange({ model: value })}
+              >
+                <SelectTrigger id="intelligence-model">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {availableModels.length > 0 ? (
+                    availableModels.map(model => (
+                      <SelectItem key={model} value={model}>
+                        {model}
+                      </SelectItem>
+                    ))
+                  ) : (
+                    <SelectItem value="default">Default Model</SelectItem>
+                  )}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Model used to process transcriptions into commands and agent mentions
+              </p>
             </div>
-          </CardContent>
-        )}
+          </div>
+
+          {/* Save Button */}
+          <div className="flex justify-end">
+            <Button onClick={handleSave}>Save Voice Configuration</Button>
+          </div>
+        </CardContent>
       </Card>
 
       {/* Voice Features Card */}
@@ -245,12 +342,12 @@ export function VoiceConfig() {
             <li className="flex items-start gap-2">
               <span className="text-primary mt-0.5">🤖</span>
               <span>
-                Smart command recognition (e.g., "schedule a meeting" → "!schedule meeting")
+                {'Smart command recognition (e.g., "schedule a meeting" -> "!schedule meeting")'}
               </span>
             </li>
             <li className="flex items-start gap-2">
               <span className="text-primary mt-0.5">👥</span>
-              <span>Agent name detection (e.g., "ask research" → "@research")</span>
+              <span>{'Agent name detection (e.g., "ask research" -> "@research")'}</span>
             </li>
             <li className="flex items-start gap-2">
               <span className="text-primary mt-0.5">🔒</span>
