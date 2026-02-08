@@ -187,6 +187,8 @@ class KnowledgeManager:
 
         async with self._lock:
             try:
+                if upsert:
+                    await asyncio.to_thread(self._knowledge.remove_vectors_by_metadata, metadata)
                 await asyncio.to_thread(
                     self._knowledge.insert,
                     path=str(resolved_path),

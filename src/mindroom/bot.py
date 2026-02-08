@@ -8,7 +8,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import nio
 from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
@@ -107,6 +107,7 @@ if TYPE_CHECKING:
 
     import structlog
     from agno.agent import Agent
+    from agno.knowledge.knowledge import Knowledge
     from agno.tools.function import Function
     from agno.tools.toolkit import Toolkit
 
@@ -576,10 +577,25 @@ class AgentBot:
         """Get the Matrix ID for this agent bot."""
         return self.agent_user.matrix_id
 
+    def _get_shared_knowledge(self) -> Knowledge | None:
+        """Get shared knowledge instance when the orchestrator has one."""
+        orchestrator = cast("MultiAgentOrchestrator | None", getattr(self, "orchestrator", None))
+        if orchestrator is None or orchestrator.knowledge_manager is None:
+            return None
+        return orchestrator.knowledge_manager.get_knowledge()
+
+    def _knowledge_kwargs_for_agent(self, agent_name: str) -> dict[str, Knowledge]:
+        """Return kwargs for knowledge-enabled agents only."""
+        knowledge = self._get_shared_knowledge()
+        agent_config = self.config.agents.get(agent_name)
+        if knowledge is None or agent_config is None or not agent_config.knowledge:
+            return {}
+        return {"knowledge": knowledge}
+
     @property  # Not cached_property because Team mutates it!
     def agent(self) -> Agent:
         """Get the Agno Agent instance for this bot."""
-        knowledge = self.orchestrator.knowledge_manager.get_knowledge() if self.orchestrator.knowledge_manager else None
+        knowledge = self._get_shared_knowledge()
         return create_agent(
             agent_name=self.agent_name,
             config=self.config,
@@ -1414,6 +1430,7 @@ class AgentBot:
             return None
 
         session_id = create_session_id(room_id, thread_id)
+        knowledge_kwargs = self._knowledge_kwargs_for_agent(self.agent_name)
 
         try:
             # Show typing indicator while generating response
@@ -1426,6 +1443,7 @@ class AgentBot:
                     config=self.config,
                     thread_history=thread_history,
                     room_id=room_id,
+                    **knowledge_kwargs,
                 )
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
@@ -1480,6 +1498,7 @@ class AgentBot:
             return None
 
         session_id = create_session_id(room_id, thread_id)
+        knowledge_kwargs = self._knowledge_kwargs_for_agent(agent_name)
 
         async with typing_indicator(self.client, room_id):
             response_text = await ai_response(
@@ -1490,6 +1509,7 @@ class AgentBot:
                 config=self.config,
                 thread_history=thread_history,
                 room_id=room_id,
+                **knowledge_kwargs,
             )
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
@@ -1593,6 +1613,7 @@ class AgentBot:
             return None
 
         session_id = create_session_id(room_id, thread_id)
+        knowledge_kwargs = self._knowledge_kwargs_for_agent(self.agent_name)
 
         try:
             # Show typing indicator while generating response
@@ -1605,6 +1626,7 @@ class AgentBot:
                     config=self.config,
                     thread_history=thread_history,
                     room_id=room_id,
+                    **knowledge_kwargs,
                 )
 
                 event_id, accumulated = await send_streaming_response(
