@@ -219,12 +219,8 @@ function AppContent() {
                 <Menu className="h-4 w-4 shrink-0 text-gray-600 dark:text-gray-300" />
               </button>
               <ThemeToggle className="h-8 w-8 sm:h-9 sm:w-9 rounded-lg border-white/60 dark:border-white/10 bg-white/80 dark:bg-stone-900/70 backdrop-blur-xl shadow-sm hover:bg-white/90 dark:hover:bg-stone-900/80" />
-              <div className="sm:hidden">
-                <SyncStatus status={syncStatus} compact />
-              </div>
-              <div className="hidden sm:block">
-                <SyncStatus status={syncStatus} />
-              </div>
+              <SyncStatus status={syncStatus} compact className="sm:hidden" />
+              <SyncStatus status={syncStatus} className="hidden sm:flex" />
             </div>
           </div>
         </header>
@@ -238,7 +234,7 @@ function AppContent() {
                 const ItemIcon = item.icon;
                 return (
                   <TabsTrigger key={item.value} value={item.value} className={TAB_TRIGGER_CLASS}>
-                    <ItemIcon className="h-4 w-4" />
+                    <ItemIcon className="h-4 w-4" aria-hidden="true" />
                     <span>{item.label}</span>
                   </TabsTrigger>
                 );
@@ -278,7 +274,7 @@ function AppContent() {
                               }`}
                             >
                               <span className="flex items-center gap-2">
-                                <ItemIcon className="h-4 w-4" />
+                                <ItemIcon className="h-4 w-4" aria-hidden="true" />
                                 <span>{item.label}</span>
                               </span>
                               {isActive ? <Check className="h-4 w-4" /> : null}
