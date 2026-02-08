@@ -50,19 +50,6 @@ interface KnowledgeFilesResponse {
   file_count: number;
 }
 
-interface KnowledgeBaseSummary {
-  name: string;
-  path: string;
-  watch: boolean;
-  file_count: number;
-  indexed_count: number;
-}
-
-interface KnowledgeBasesResponse {
-  bases: KnowledgeBaseSummary[];
-  count: number;
-}
-
 const DEFAULT_BASE_SETTINGS: KnowledgeBaseConfig = {
   path: './knowledge_docs/default',
   watch: true,
@@ -112,19 +99,12 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
 }
 
 export function Knowledge() {
-  const {
-    config,
-    updateKnowledgeBase,
-    createKnowledgeBase,
-    deleteKnowledgeBase,
-    saveConfig,
-    isDirty,
-  } = useConfigStore();
+  const { config, updateKnowledgeBase, deleteKnowledgeBase, saveConfig, isDirty } =
+    useConfigStore();
   const { toast } = useToast();
 
   const [selectedBase, setSelectedBase] = useState<string>('');
   const [newBaseName, setNewBaseName] = useState('');
-  const [baseSummaries, setBaseSummaries] = useState<KnowledgeBaseSummary[]>([]);
   const [files, setFiles] = useState<KnowledgeFile[]>([]);
   const [status, setStatus] = useState<KnowledgeStatus | null>(null);
   const [settings, setSettings] = useState<KnowledgeBaseConfig>(DEFAULT_BASE_SETTINGS);
@@ -180,9 +160,6 @@ export function Knowledge() {
     setError(null);
 
     try {
-      const summaries = await fetchJson<KnowledgeBasesResponse>(API_ENDPOINTS.knowledge.bases);
-      setBaseSummaries(summaries.bases);
-
       if (!baseId) {
         setFiles([]);
         setStatus(null);
@@ -265,7 +242,7 @@ export function Knowledge() {
     setError(null);
 
     try {
-      createKnowledgeBase(baseName, {
+      updateKnowledgeBase(baseName, {
         path: defaultPathForBase(baseName),
         watch: true,
       });
@@ -288,7 +265,7 @@ export function Knowledge() {
     } finally {
       setCreatingBase(false);
     }
-  }, [baseNames, createKnowledgeBase, loadData, newBaseName, saveConfig, toast]);
+  }, [baseNames, updateKnowledgeBase, loadData, newBaseName, saveConfig, toast]);
 
   const handleDeleteBase = useCallback(async () => {
     if (!selectedBase) {
@@ -521,7 +498,7 @@ export function Knowledge() {
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex flex-wrap items-center gap-2">
-              <Badge variant="outline">Configured Bases: {baseSummaries.length}</Badge>
+              <Badge variant="outline">Configured Bases: {baseNames.length}</Badge>
               {selectedBase && <Badge variant="default">Active: {selectedBase}</Badge>}
             </div>
 

@@ -384,11 +384,6 @@ def get_knowledge_manager(base_id: str) -> KnowledgeManager | None:
     return _knowledge_managers.get(base_id)
 
 
-def get_knowledge_managers() -> dict[str, KnowledgeManager]:
-    """Get all process-wide knowledge managers keyed by base ID."""
-    return dict(_knowledge_managers)
-
-
 async def shutdown_knowledge_managers() -> None:
     """Shutdown and clear all process-wide knowledge managers."""
     global _knowledge_managers

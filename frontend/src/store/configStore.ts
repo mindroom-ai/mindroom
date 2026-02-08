@@ -36,7 +36,6 @@ interface ConfigState {
   updateRoomModels: (roomModels: Record<string, string>) => void;
   updateMemoryConfig: (memoryConfig: { provider: string; model: string; host?: string }) => void;
   updateKnowledgeBase: (baseName: string, baseConfig: KnowledgeBaseConfig) => void;
-  createKnowledgeBase: (baseName: string, baseConfig: KnowledgeBaseConfig) => void;
   deleteKnowledgeBase: (baseName: string) => void;
   updateModel: (modelId: string, updates: Partial<ModelConfig>) => void;
   deleteModel: (modelId: string) => void;
@@ -476,25 +475,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
   // Update one knowledge base configuration
   updateKnowledgeBase: (baseName, baseConfig) => {
-    set(state => {
-      if (!state.config) return state;
-      return {
-        config: {
-          ...state.config,
-          knowledge_bases: {
-            ...(state.config.knowledge_bases || {}),
-            [baseName]: {
-              ...baseConfig,
-            },
-          },
-        },
-        isDirty: true,
-      };
-    });
-  },
-
-  // Create a new knowledge base
-  createKnowledgeBase: (baseName, baseConfig) => {
     set(state => {
       if (!state.config) return state;
       return {
