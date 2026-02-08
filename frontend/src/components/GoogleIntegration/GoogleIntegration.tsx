@@ -186,7 +186,8 @@ export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
           Google Services Integration
         </CardTitle>
         <CardDescription>
-          One-time admin setup, then users can connect Gmail with one click.
+          One-time admin setup, then users connect in one click. If setup is missing, follow the
+          step-by-step guide below.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -209,20 +210,25 @@ export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
                     An administrator must configure Google OAuth once for this MindRoom deployment
                     before users can connect.
                   </p>
+                  <ol className="list-decimal ml-5 space-y-1">
+                    <li>Open the Admin Setup guide.</li>
+                    <li>Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` on the backend.</li>
+                    <li>Restart the backend, then refresh this page.</li>
+                  </ol>
                   <div className="flex flex-wrap gap-2">
                     <Button
                       size="sm"
                       variant="outline"
                       onClick={() => window.open(GOOGLE_ADMIN_SETUP_DOCS_URL, '_blank')}
                     >
-                      Admin Setup Guide
+                      Admin Setup Steps
                     </Button>
                     <Button
                       size="sm"
                       variant="outline"
                       onClick={() => window.open(GOOGLE_USER_SETUP_DOCS_URL, '_blank')}
                     >
-                      Individual Setup Guide
+                      Individual Setup Steps
                     </Button>
                   </div>
                 </AlertDescription>
@@ -266,6 +272,11 @@ export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
                 </>
               )}
             </Button>
+            {!status.has_credentials && (
+              <p className="text-xs text-muted-foreground">
+                Login is disabled until backend Google OAuth credentials are configured.
+              </p>
+            )}
           </>
         ) : (
           <>

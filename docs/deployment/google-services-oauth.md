@@ -4,9 +4,8 @@ icon: lucide/mail
 
 # Google Services OAuth (Admin Setup)
 
-This guide covers the one-time admin setup for Google Services in MindRoom (Gmail, Calendar, Drive, and Sheets).
-
-After this is configured, end users only need to click **Login with Google** in the MindRoom frontend.
+This is the one-time setup for a shared Google OAuth app in MindRoom.
+After you finish these steps, users only click **Login with Google** in the frontend.
 
 ## Who This Is For
 
@@ -14,52 +13,70 @@ Use this guide if you are running MindRoom for a team, organization, or hosted d
 
 If you are a single local user and want to bring your own Google OAuth app, see [Google Services OAuth (Individual Setup)](google-services-user-oauth.md).
 
-## Overview
+## What You Need Before Starting
 
-MindRoom backend uses these environment variables for Google OAuth:
+- Your backend URL (local example: `http://localhost:8765`, production example: `https://mindroom.example.com`)
+- Access to [Google Cloud Console](https://console.cloud.google.com/)
+- Access to set backend environment variables
 
-- `GOOGLE_CLIENT_ID`
-- `GOOGLE_CLIENT_SECRET`
-- `GOOGLE_REDIRECT_URI` (optional, defaults to `http://localhost:8765/api/google/callback`)
-- `GOOGLE_PROJECT_ID` (optional metadata)
-
-The OAuth callback endpoint in MindRoom is:
+The MindRoom callback path is always:
 
 ```text
 /api/google/callback
 ```
 
-## Step 1: Create OAuth App in Google Cloud
+Your full callback URL is:
+
+```text
+<your-backend-origin>/api/google/callback
+```
+
+## Step 1: Create a Google Cloud Project
 
 1. Open [Google Cloud Console](https://console.cloud.google.com/).
-2. Create or select a project.
-3. Enable these APIs:
+2. Create a new project (or select an existing one).
+3. Save the project ID. You will use it as `GOOGLE_PROJECT_ID`.
+
+## Step 2: Enable APIs
+
+1. In Google Cloud Console, go to **APIs & Services → Library**.
+2. Enable:
    - Gmail API
    - Google Calendar API
    - Google Drive API
    - Google Sheets API
-4. Configure OAuth consent screen:
-   - User type: `External` (or `Internal` for Workspace-only)
-   - Add test users while app is in testing mode
-   - Add these scopes:
-     - `https://www.googleapis.com/auth/gmail.readonly`
-     - `https://www.googleapis.com/auth/gmail.modify`
-     - `https://www.googleapis.com/auth/gmail.compose`
-     - `https://www.googleapis.com/auth/calendar`
-     - `https://www.googleapis.com/auth/spreadsheets`
-     - `https://www.googleapis.com/auth/drive.file`
-     - `openid`
-     - `https://www.googleapis.com/auth/userinfo.email`
-     - `https://www.googleapis.com/auth/userinfo.profile`
-5. Create OAuth 2.0 credentials:
-   - Application type: `Web application`
-   - Add authorized redirect URI(s), for example:
-     - `http://localhost:8765/api/google/callback` (local)
-     - `https://<your-domain>/api/google/callback` (production)
+## Step 3: Configure OAuth Consent Screen
 
-## Step 2: Configure MindRoom Backend
+1. Go to **APIs & Services → OAuth consent screen**.
+2. User type:
+   - `External` for public or mixed users
+   - `Internal` for Google Workspace-only
+3. Fill required app info and save.
+4. Add test users if app is still in testing mode.
+5. Add scopes:
+   - `https://www.googleapis.com/auth/gmail.readonly`
+   - `https://www.googleapis.com/auth/gmail.modify`
+   - `https://www.googleapis.com/auth/gmail.compose`
+   - `https://www.googleapis.com/auth/calendar`
+   - `https://www.googleapis.com/auth/spreadsheets`
+   - `https://www.googleapis.com/auth/drive.file`
+   - `openid`
+   - `https://www.googleapis.com/auth/userinfo.email`
+   - `https://www.googleapis.com/auth/userinfo.profile`
 
-Set environment variables for the backend process:
+## Step 4: Create OAuth Client ID
+
+1. Go to **APIs & Services → Credentials**.
+2. Click **Create Credentials → OAuth client ID**.
+3. Choose **Web application**.
+4. Under **Authorized redirect URIs**, add:
+   - Local: `http://localhost:8765/api/google/callback`
+   - Production: `https://<your-domain>/api/google/callback`
+5. Copy the generated client ID and client secret.
+
+## Step 5: Configure MindRoom Backend Environment
+
+Set these env vars in your backend deployment (`.env`, Kubernetes secret, or hosting config):
 
 ```bash
 GOOGLE_CLIENT_ID=your-app-client-id.apps.googleusercontent.com
@@ -68,13 +85,38 @@ GOOGLE_PROJECT_ID=your-project-id
 GOOGLE_REDIRECT_URI=http://localhost:8765/api/google/callback
 ```
 
-You can set them in `.env` (local) or your secret manager/deployment config (production).
+Notes:
+- `GOOGLE_REDIRECT_URI` must match one of your Google Console redirect URIs exactly.
+- If omitted, MindRoom defaults to `http://localhost:8765/api/google/callback`.
 
-## Step 3: Verify in MindRoom Frontend
+Restart the MindRoom backend after setting env vars.
+
+## Step 6: Verify Backend Is Configured
+
+Run:
+
+```bash
+curl -s http://localhost:8765/api/google/status
+```
+
+Expected result includes:
+- `"has_credentials": true`
+
+If `connected` is false at this point, that is normal until a user authorizes.
+
+## Step 7: Verify Frontend User Flow
 
 1. Open **Integrations → Google Services**.
 2. If setup is correct, the card shows **Ready to Connect**.
 3. Users can now click **Login with Google** and authorize access.
+
+## End User Steps (After Admin Setup)
+
+Each user does only this:
+1. Open **Integrations → Google Services**.
+2. Click **Login with Google**.
+3. Approve scopes.
+4. Confirm status shows **Connected**.
 
 ## Production Notes
 
@@ -97,7 +139,10 @@ You can set them in `.env` (local) or your secret manager/deployment config (pro
 
 ### "Redirect URI mismatch"
 
-Ensure the URI in Google Cloud Console exactly matches the backend callback URL.
+Ensure all three are identical:
+- `GOOGLE_REDIRECT_URI` in backend env
+- Redirect URI in Google Console
+- Actual backend callback URL
 
 ### Users cannot authorize while app is in testing mode
 

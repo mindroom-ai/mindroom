@@ -4,34 +4,72 @@ icon: lucide/user-round
 
 # Google Services OAuth (Individual Setup)
 
-This guide is for a single user running MindRoom and bringing their own Google OAuth app.
+This guide is for one person running MindRoom and creating their own Google OAuth app.
 
 For team/shared deployments, use [Google Services OAuth (Admin Setup)](google-services-oauth.md).
 
-## Prerequisites
+## What You Need Before Starting
 
 - A Google account
 - Access to Google Cloud Console
-- A running MindRoom backend/frontend
+- A running MindRoom backend/frontend (default backend URL: `http://localhost:8765`)
 
-## Step 1: Create Google OAuth Credentials
+The callback path is always:
+
+```text
+/api/google/callback
+```
+
+So the default full callback URL is:
+
+```text
+http://localhost:8765/api/google/callback
+```
+
+## Step 1: Create Google Cloud Project
 
 1. Open [Google Cloud Console](https://console.cloud.google.com/).
-2. Create/select a project.
-3. Enable APIs:
+2. Create or select a project.
+3. Save the project ID for `GOOGLE_PROJECT_ID`.
+
+## Step 2: Enable APIs
+
+1. Go to **APIs & Services → Library**.
+2. Enable:
    - Gmail API
    - Google Calendar API
    - Google Drive API
    - Google Sheets API
-4. Configure OAuth consent screen and add yourself as a test user.
-5. Create OAuth 2.0 Web Application credentials.
-6. Add redirect URI:
+
+## Step 3: Configure OAuth Consent Screen
+
+1. Go to **APIs & Services → OAuth consent screen**.
+2. Choose `External`.
+3. Fill required fields and save.
+4. Add your own email as a test user.
+5. Add scopes:
+   - `https://www.googleapis.com/auth/gmail.readonly`
+   - `https://www.googleapis.com/auth/gmail.modify`
+   - `https://www.googleapis.com/auth/gmail.compose`
+   - `https://www.googleapis.com/auth/calendar`
+   - `https://www.googleapis.com/auth/spreadsheets`
+   - `https://www.googleapis.com/auth/drive.file`
+   - `openid`
+   - `https://www.googleapis.com/auth/userinfo.email`
+   - `https://www.googleapis.com/auth/userinfo.profile`
+
+## Step 4: Create OAuth Client ID
+
+1. Go to **APIs & Services → Credentials**.
+2. Click **Create Credentials → OAuth client ID**.
+3. Choose **Web application**.
+4. Add redirect URI:
    - `http://localhost:8765/api/google/callback`
-   - Adjust host/port/path if your backend runs elsewhere.
+5. Copy client ID and client secret.
 
-## Step 2: Configure MindRoom
+## Step 5: Configure MindRoom Backend
 
-Set env vars in `.env` or shell:
+Add this to `.env` (or export in your shell):
 
 ```bash
 BACKEND_PORT=8765
@@ -41,18 +79,34 @@ GOOGLE_PROJECT_ID=your-project-id
 GOOGLE_REDIRECT_URI=http://localhost:8765/api/google/callback
 ```
 
-Restart MindRoom backend after changes.
+Restart the MindRoom backend.
 
-## Step 3: Connect in Frontend
+## Step 6: Verify Backend Reads Credentials
+
+Run:
+
+```bash
+curl -s http://localhost:8765/api/google/status
+```
+
+Expected:
+- `"has_credentials": true`
+
+## Step 7: Connect in Frontend
 
 1. Open **Integrations → Google Services**.
 2. Click **Login with Google**.
-3. Approve the requested scopes.
+3. Sign in and approve requested scopes.
 4. You should see **Connected** and your available services.
 
 ## Use With Tools
 
 After connecting, tools that depend on Google auth (for example `gmail`, `google_calendar`, `google_sheets`) can use the shared Google token.
+
+## Disconnect Later (Optional)
+
+1. In MindRoom frontend, click **Disconnect Google Account**.
+2. Optional: also revoke app access in [Google Account Permissions](https://myaccount.google.com/permissions).
 
 ## Troubleshooting
 
