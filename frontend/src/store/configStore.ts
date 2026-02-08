@@ -523,11 +523,20 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const agents = state.agents.map(agent =>
         agent.knowledge_base === baseName ? { ...agent, knowledge_base: null } : agent
       );
+      const configAgents = Object.fromEntries(
+        Object.entries(state.config.agents).map(([agentId, agentConfig]) => [
+          agentId,
+          agentConfig.knowledge_base === baseName
+            ? { ...agentConfig, knowledge_base: null }
+            : agentConfig,
+        ])
+      );
 
       return {
         config: {
           ...state.config,
           knowledge_bases: knowledgeBases,
+          agents: configAgents,
         },
         agents,
         isDirty: true,
