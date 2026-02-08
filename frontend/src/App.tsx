@@ -1,7 +1,22 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { BrowserRouter, useNavigate, useLocation } from 'react-router-dom';
-import { Check, Menu } from 'lucide-react';
+import {
+  BookOpen,
+  Bot,
+  Brain,
+  Check,
+  DoorOpen,
+  Home,
+  LayoutDashboard,
+  Menu,
+  Mic,
+  Plug,
+  Puzzle,
+  Settings2,
+  type LucideIcon,
+  Users,
+} from 'lucide-react';
 import { useConfigStore } from '@/store/configStore';
 import { AgentList } from '@/components/AgentList/AgentList';
 import { AgentEditor } from '@/components/AgentEditor/AgentEditor';
@@ -29,34 +44,37 @@ import {
 import { Toaster } from '@/components/ui/toaster';
 import { ThemeProvider } from '@/contexts/ThemeContext';
 import { ThemeToggle } from '@/components/ThemeToggle/ThemeToggle';
+import { cn } from '@/lib/utils';
 
 const queryClient = new QueryClient();
 
 type NavItem = {
   value: string;
   label: string;
-  icon: string;
+  icon: LucideIcon;
   group: 'Workspace' | 'Configuration';
 };
 
 const NAV_ITEMS: NavItem[] = [
-  { value: 'dashboard', label: 'Dashboard', icon: '📊', group: 'Workspace' },
-  { value: 'agents', label: 'Agents', icon: '👥', group: 'Workspace' },
-  { value: 'teams', label: 'Teams', icon: '👫', group: 'Workspace' },
-  { value: 'rooms', label: 'Rooms', icon: '🏠', group: 'Workspace' },
-  { value: 'unconfigured-rooms', label: 'External', icon: '🚪', group: 'Workspace' },
-  { value: 'models', label: 'Models & API Keys', icon: '🔧', group: 'Configuration' },
-  { value: 'memory', label: 'Memory', icon: '🧠', group: 'Configuration' },
-  { value: 'knowledge', label: 'Knowledge', icon: '📚', group: 'Configuration' },
-  { value: 'voice', label: 'Voice', icon: '🎤', group: 'Configuration' },
-  { value: 'integrations', label: 'Integrations', icon: '🔌', group: 'Configuration' },
-  { value: 'skills', label: 'Skills', icon: '🧩', group: 'Configuration' },
+  { value: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, group: 'Workspace' },
+  { value: 'agents', label: 'Agents', icon: Bot, group: 'Workspace' },
+  { value: 'teams', label: 'Teams', icon: Users, group: 'Workspace' },
+  { value: 'rooms', label: 'Rooms', icon: Home, group: 'Workspace' },
+  { value: 'unconfigured-rooms', label: 'External', icon: DoorOpen, group: 'Workspace' },
+  { value: 'models', label: 'Models', icon: Settings2, group: 'Configuration' },
+  { value: 'memory', label: 'Memory', icon: Brain, group: 'Configuration' },
+  { value: 'knowledge', label: 'Knowledge', icon: BookOpen, group: 'Configuration' },
+  { value: 'voice', label: 'Voice', icon: Mic, group: 'Configuration' },
+  { value: 'integrations', label: 'Tools', icon: Plug, group: 'Configuration' },
+  { value: 'skills', label: 'Skills', icon: Puzzle, group: 'Configuration' },
 ];
 
 const NAV_GROUPS: NavItem['group'][] = ['Workspace', 'Configuration'];
 
 const TAB_TRIGGER_CLASS =
-  'rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap';
+  'inline-flex items-center gap-1.5 rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap';
+const NAV_OVERFLOW_ENTER_PX = 1;
+const NAV_OVERFLOW_EXIT_BUFFER_PX = 24;
 
 function AppContent() {
   const { loadConfig, syncStatus, error, selectedAgentId, selectedTeamId, selectedRoomId } =
@@ -64,10 +82,14 @@ function AppContent() {
   const navigate = useNavigate();
   const location = useLocation();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [desktopCompactNav, setDesktopCompactNav] = useState(false);
+  const tabsListRef = useRef<HTMLDivElement | null>(null);
+  const compactNavEnteredWidthRef = useRef<number | null>(null);
 
   // Get the current tab from URL or default to 'dashboard'
   const currentTab = location.pathname.slice(1) || 'dashboard';
   const currentNavItem = NAV_ITEMS.find(item => item.value === currentTab) || NAV_ITEMS[0];
+  const CurrentNavIcon = currentNavItem.icon;
 
   useEffect(() => {
     // Load configuration on mount
@@ -77,6 +99,52 @@ function AppContent() {
   useEffect(() => {
     setMobileMenuOpen(false);
   }, [currentTab]);
+
+  useEffect(() => {
+    const tabsList = tabsListRef.current;
+    if (!tabsList) return;
+
+    let frameId: number | null = null;
+    const updateDesktopNavMode = () => {
+      if (frameId !== null) {
+        cancelAnimationFrame(frameId);
+      }
+      frameId = requestAnimationFrame(() => {
+        const clientWidth = tabsList.clientWidth;
+        const hasHorizontalOverflow = tabsList.scrollWidth > clientWidth + NAV_OVERFLOW_ENTER_PX;
+        setDesktopCompactNav(prevCompact => {
+          if (!prevCompact) {
+            if (hasHorizontalOverflow) {
+              compactNavEnteredWidthRef.current = clientWidth;
+              return true;
+            }
+            return false;
+          }
+          const enteredWidth = compactNavEnteredWidthRef.current ?? clientWidth;
+          const hasGrownEnoughToExit = clientWidth >= enteredWidth + NAV_OVERFLOW_EXIT_BUFFER_PX;
+          if (!hasHorizontalOverflow && hasGrownEnoughToExit) {
+            compactNavEnteredWidthRef.current = null;
+            return false;
+          }
+          return true;
+        });
+      });
+    };
+
+    updateDesktopNavMode();
+
+    const resizeObserver = new ResizeObserver(updateDesktopNavMode);
+    resizeObserver.observe(tabsList);
+    window.addEventListener('resize', updateDesktopNavMode);
+
+    return () => {
+      resizeObserver.disconnect();
+      window.removeEventListener('resize', updateDesktopNavMode);
+      if (frameId !== null) {
+        cancelAnimationFrame(frameId);
+      }
+    };
+  }, []);
 
   // Handle tab change - update the URL
   const handleTabChange = (value: string) => {
@@ -175,59 +243,73 @@ function AppContent() {
       <div className="relative z-10 flex flex-col h-full">
         {/* Header */}
         <header className="bg-white/80 dark:bg-stone-900/50 backdrop-blur-xl border-b border-gray-200/50 dark:border-white/10 shadow-sm dark:shadow-2xl">
-          <div className="px-3 sm:px-6 py-3 sm:py-4 flex items-center justify-between">
+          <div className="px-3 sm:px-6 py-2 sm:py-4 flex items-center justify-between gap-2">
             <h1 className="flex items-center gap-2 sm:gap-3">
-              <span className="text-3xl sm:text-4xl">🧠</span>
+              <span className="text-2xl sm:text-4xl">🧠</span>
               <div className="flex flex-col">
-                <span className="text-2xl sm:text-3xl font-bold tracking-tight text-gray-900 dark:text-white">
+                <span className="text-base sm:text-3xl font-bold tracking-tight text-gray-900 dark:text-white">
                   MindRoom
                 </span>
-                <span className="text-xs sm:text-sm font-normal text-gray-600 dark:text-gray-400 -mt-1">
+                <span className="hidden sm:block text-xs sm:text-sm font-normal text-gray-600 dark:text-gray-400 -mt-1">
                   Configuration
                 </span>
               </div>
             </h1>
-            <div className="flex items-center gap-4">
-              <ThemeToggle />
-              <SyncStatus status={syncStatus} />
+
+            <div className="flex items-center gap-1.5 sm:gap-4">
+              <button
+                type="button"
+                onClick={() => setMobileMenuOpen(true)}
+                aria-haspopup="dialog"
+                aria-expanded={mobileMenuOpen}
+                className={cn(
+                  'h-[30px] max-w-[8.5rem] sm:max-w-[11rem] rounded-lg border border-white/60 dark:border-white/10 bg-white/80 dark:bg-stone-900/70 backdrop-blur-xl px-2 py-1.5 items-center gap-1.5 min-w-0 text-left shadow-sm',
+                  desktopCompactNav ? 'flex' : 'flex sm:hidden'
+                )}
+              >
+                <CurrentNavIcon className="h-4 w-4 shrink-0 text-gray-700 dark:text-gray-200" />
+                <span className="text-xs font-medium text-gray-900 dark:text-gray-100 truncate">
+                  {currentNavItem.label}
+                </span>
+                <Menu className="h-4 w-4 shrink-0 text-gray-600 dark:text-gray-300" />
+              </button>
+              <ThemeToggle
+                className={cn(
+                  'h-[30px] w-[30px] rounded-lg border-white/60 dark:border-white/10 bg-white/80 dark:bg-stone-900/70 backdrop-blur-xl shadow-sm hover:bg-white/90 dark:hover:bg-stone-900/80',
+                  desktopCompactNav ? 'sm:h-[30px] sm:w-[30px]' : 'sm:h-9 sm:w-9'
+                )}
+              />
+              <SyncStatus status={syncStatus} compact className="sm:hidden" />
+              <SyncStatus status={syncStatus} className="hidden sm:flex" />
             </div>
           </div>
         </header>
 
         {/* Main Content */}
         <div className="flex-1 overflow-hidden">
-          <Tabs value={currentTab} onValueChange={handleTabChange} className="h-full flex flex-col">
-            {/* Mobile Navigation */}
-            <div className="sm:hidden px-3 py-2 bg-white/70 dark:bg-stone-900/50 backdrop-blur-lg border-b border-gray-200/50 dark:border-white/10 flex-shrink-0">
-              <button
-                type="button"
-                onClick={() => setMobileMenuOpen(true)}
-                aria-haspopup="dialog"
-                aria-expanded={mobileMenuOpen}
-                className="w-full rounded-xl border border-white/60 dark:border-white/10 bg-white/80 dark:bg-stone-900/70 backdrop-blur-xl px-3 py-2 flex items-center justify-between text-left shadow-sm"
-              >
-                <span className="flex items-center gap-2 min-w-0">
-                  <span className="text-lg leading-none">{currentNavItem.icon}</span>
-                  <span className="min-w-0">
-                    <span className="block text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">
-                      Section
-                    </span>
-                    <span className="block text-sm font-medium text-gray-900 dark:text-gray-100 truncate">
-                      {currentNavItem.label}
-                    </span>
-                  </span>
-                </span>
-                <Menu className="h-5 w-5 text-gray-600 dark:text-gray-300" />
-              </button>
-            </div>
-
+          <Tabs
+            value={currentTab}
+            onValueChange={handleTabChange}
+            className="h-full flex flex-col relative"
+          >
             {/* Desktop Tab Navigation */}
-            <TabsList className="hidden sm:flex px-3 sm:px-6 py-3 bg-white/70 dark:bg-stone-900/50 backdrop-blur-lg border-b border-gray-200/50 dark:border-white/10 flex-shrink-0 overflow-x-auto">
-              {NAV_ITEMS.map(item => (
-                <TabsTrigger key={item.value} value={item.value} className={TAB_TRIGGER_CLASS}>
-                  {item.icon} {item.label}
-                </TabsTrigger>
-              ))}
+            <TabsList
+              ref={tabsListRef}
+              className={cn(
+                'hidden sm:flex px-3 sm:px-6 py-3 bg-white/70 dark:bg-stone-900/50 backdrop-blur-lg border-b border-gray-200/50 dark:border-white/10 flex-shrink-0 overflow-x-auto overflow-y-hidden',
+                desktopCompactNav &&
+                  'sm:absolute sm:inset-x-0 sm:top-0 sm:opacity-0 sm:pointer-events-none sm:overflow-hidden'
+              )}
+            >
+              {NAV_ITEMS.map(item => {
+                const ItemIcon = item.icon;
+                return (
+                  <TabsTrigger key={item.value} value={item.value} className={TAB_TRIGGER_CLASS}>
+                    <ItemIcon className="h-4 w-4" aria-hidden="true" />
+                    <span>{item.label}</span>
+                  </TabsTrigger>
+                );
+              })}
             </TabsList>
 
             <Dialog open={mobileMenuOpen} onOpenChange={setMobileMenuOpen}>
@@ -249,6 +331,7 @@ function AppContent() {
                       <div className="space-y-1">
                         {NAV_ITEMS.filter(item => item.group === group).map(item => {
                           const isActive = item.value === currentTab;
+                          const ItemIcon = item.icon;
                           return (
                             <button
                               key={item.value}
@@ -262,7 +345,7 @@ function AppContent() {
                               }`}
                             >
                               <span className="flex items-center gap-2">
-                                <span className="text-base leading-none">{item.icon}</span>
+                                <ItemIcon className="h-4 w-4" aria-hidden="true" />
                                 <span>{item.label}</span>
                               </span>
                               {isActive ? <Check className="h-4 w-4" /> : null}

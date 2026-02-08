@@ -211,7 +211,7 @@ describe('Integrations', () => {
     render(<Integrations />);
 
     await waitFor(() => {
-      expect(screen.getByText('Service Integrations')).toBeInTheDocument();
+      expect(screen.getByText('Tools')).toBeInTheDocument();
       expect(
         screen.getByText('Connect external services to enable agent capabilities')
       ).toBeInTheDocument();
@@ -262,7 +262,7 @@ describe('Integrations', () => {
       expect(screen.getByText('Google Services')).toBeInTheDocument();
     });
 
-    const searchInput = screen.getByPlaceholderText('Search integrations...');
+    const searchInput = screen.getByPlaceholderText('Search tools...');
     fireEvent.change(searchInput, { target: { value: 'spotify' } });
 
     await waitFor(() => {
