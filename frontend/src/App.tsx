@@ -74,7 +74,7 @@ const NAV_GROUPS: NavItem['group'][] = ['Workspace', 'Configuration'];
 const TAB_TRIGGER_CLASS =
   'inline-flex items-center gap-1.5 rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap';
 const NAV_OVERFLOW_ENTER_PX = 1;
-const NAV_OVERFLOW_EXIT_BUFFER_PX = 56;
+const NAV_OVERFLOW_EXIT_BUFFER_PX = 24;
 
 function AppContent() {
   const { loadConfig, syncStatus, error, selectedAgentId, selectedTeamId, selectedRoomId } =
@@ -84,6 +84,7 @@ function AppContent() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [desktopCompactNav, setDesktopCompactNav] = useState(false);
   const tabsListRef = useRef<HTMLDivElement | null>(null);
+  const compactNavEnteredWidthRef = useRef<number | null>(null);
 
   // Get the current tab from URL or default to 'dashboard'
   const currentTab = location.pathname.slice(1) || 'dashboard';
@@ -109,13 +110,23 @@ function AppContent() {
         cancelAnimationFrame(frameId);
       }
       frameId = requestAnimationFrame(() => {
-        const overflowDelta = tabsList.scrollWidth - tabsList.clientWidth;
+        const clientWidth = tabsList.clientWidth;
+        const hasHorizontalOverflow = tabsList.scrollWidth > clientWidth + NAV_OVERFLOW_ENTER_PX;
         setDesktopCompactNav(prevCompact => {
           if (!prevCompact) {
-            return overflowDelta > NAV_OVERFLOW_ENTER_PX;
+            if (hasHorizontalOverflow) {
+              compactNavEnteredWidthRef.current = clientWidth;
+              return true;
+            }
+            return false;
           }
-          // Hysteresis prevents rapid toggling near the threshold.
-          return overflowDelta > -NAV_OVERFLOW_EXIT_BUFFER_PX;
+          const enteredWidth = compactNavEnteredWidthRef.current ?? clientWidth;
+          const hasGrownEnoughToExit = clientWidth >= enteredWidth + NAV_OVERFLOW_EXIT_BUFFER_PX;
+          if (!hasHorizontalOverflow && hasGrownEnoughToExit) {
+            compactNavEnteredWidthRef.current = null;
+            return false;
+          }
+          return true;
         });
       });
     };
