@@ -23,7 +23,7 @@ if TYPE_CHECKING:
         ConfigField(
             name="host",
             label="Host",
-            type="text",
+            type="url",
             required=True,
             placeholder="my-cluster.xxxx.region.redshift.amazonaws.com",
             description="Redshift cluster endpoint (falls back to REDSHIFT_HOST env var)",
