@@ -78,6 +78,8 @@ export interface Config {
     num_history_runs: number;
     markdown: boolean;
     add_history_to_messages: boolean;
+    learning?: boolean;
+    learning_mode?: LearningMode;
   };
   router: {
     model: string;

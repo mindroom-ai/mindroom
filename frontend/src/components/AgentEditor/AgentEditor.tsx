@@ -43,6 +43,8 @@ export function AgentEditor() {
 
   const [configDialogTool, setConfigDialogTool] = useState<string | null>(null);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
+  const defaultLearning = config?.defaults.learning ?? true;
+  const defaultLearningMode = config?.defaults.learning_mode ?? 'always';
 
   // Fetch tools and skills from backend
   const { tools: backendTools, loading: toolsLoading } = useTools();
@@ -87,11 +89,12 @@ export function AgentEditor() {
       instructions: [],
       rooms: [],
       num_history_runs: 5,
-      learning: true,
-      learning_mode: 'always',
+      learning: defaultLearning,
+      learning_mode: defaultLearningMode,
     },
   });
   const learningEnabled = useWatch({ name: 'learning', control });
+  const effectiveLearningEnabled = learningEnabled ?? defaultLearning;
 
   // Prepare checkbox items for skills (includes orphaned selected skills)
   const skillItems: CheckboxListItem[] = useMemo(() => {
@@ -125,11 +128,11 @@ export function AgentEditor() {
     if (selectedAgent) {
       reset({
         ...selectedAgent,
-        learning: selectedAgent.learning ?? true,
-        learning_mode: selectedAgent.learning_mode ?? 'always',
+        learning: selectedAgent.learning ?? defaultLearning,
+        learning_mode: selectedAgent.learning_mode ?? defaultLearningMode,
       });
     }
-  }, [selectedAgent, reset]);
+  }, [defaultLearning, defaultLearningMode, selectedAgent, reset]);
 
   // Create a debounced update function
   const handleFieldChange = useCallback(
@@ -498,7 +501,7 @@ export function AgentEditor() {
             <div className="flex items-center gap-2">
               <Checkbox
                 id="learning"
-                checked={field.value ?? true}
+                checked={field.value ?? defaultLearning}
                 onCheckedChange={checked => {
                   const value = checked === true;
                   field.onChange(value);
@@ -523,12 +526,12 @@ export function AgentEditor() {
           control={control}
           render={({ field }) => (
             <Select
-              value={field.value || 'always'}
+              value={field.value ?? defaultLearningMode}
               onValueChange={value => {
                 field.onChange(value);
                 handleFieldChange('learning_mode', value);
               }}
-              disabled={learningEnabled === false}
+              disabled={effectiveLearningEnabled === false}
             >
               <SelectTrigger id="learning_mode">
                 <SelectValue />

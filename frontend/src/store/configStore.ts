@@ -61,12 +61,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set({ isLoading: true, error: null });
     try {
       const config = await configService.loadConfig();
+      const defaultLearning = config.defaults?.learning ?? true;
+      const defaultLearningMode = config.defaults?.learning_mode ?? 'always';
       const agents = Object.entries(config.agents).map(([id, agent]) => ({
         id,
         ...agent,
         skills: agent.skills ?? [],
-        learning: agent.learning ?? true,
-        learning_mode: agent.learning_mode ?? 'always',
+        learning: agent.learning ?? defaultLearning,
+        learning_mode: agent.learning_mode ?? defaultLearningMode,
       }));
       const teams = config.teams
         ? Object.entries(config.teams).map(([id, team]) => ({
@@ -184,11 +186,13 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   // Create a new agent
   createAgent: agentData => {
     const id = agentData.display_name.toLowerCase().replace(/\s+/g, '_');
+    const defaultLearning = get().config?.defaults.learning ?? true;
+    const defaultLearningMode = get().config?.defaults.learning_mode ?? 'always';
     const newAgent: Agent = {
       id,
       ...agentData,
-      learning: agentData.learning ?? true,
-      learning_mode: agentData.learning_mode ?? 'always',
+      learning: agentData.learning ?? defaultLearning,
+      learning_mode: agentData.learning_mode ?? defaultLearningMode,
     };
     set(state => ({
       agents: [...state.agents, newAgent],

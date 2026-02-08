@@ -378,6 +378,33 @@ describe('AgentEditor', () => {
     );
   });
 
+  it('uses config defaults when agent learning fields are omitted', () => {
+    const agentWithoutLearning = {
+      ...mockAgent,
+      learning: undefined,
+      learning_mode: undefined,
+    };
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [agentWithoutLearning],
+      config: {
+        ...mockConfig,
+        defaults: {
+          ...mockConfig.defaults,
+          learning: false,
+          learning_mode: 'agentic',
+        },
+      },
+      rooms: mockStore.rooms,
+    });
+
+    render(<AgentEditor />);
+
+    const learningCheckbox = screen.getByRole('checkbox', { name: /enable learning/i });
+    expect(learningCheckbox).not.toBeChecked();
+    expect(screen.getByLabelText('Learning Mode')).toHaveTextContent('Agentic (tool-driven)');
+  });
+
   it('updates learning when checkbox is toggled', () => {
     render(<AgentEditor />);
 
