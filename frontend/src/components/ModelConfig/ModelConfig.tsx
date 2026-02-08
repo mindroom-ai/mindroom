@@ -1,5 +1,6 @@
 import {
   type Dispatch,
+  type ReactNode,
   type SetStateAction,
   useCallback,
   useEffect,
@@ -10,7 +11,6 @@ import {
   type Column,
   type ColumnDef,
   type SortingState,
-  flexRender,
   getCoreRowModel,
   getSortedRowModel,
   useReactTable,
@@ -277,6 +277,16 @@ function SortableHeader({
       <ArrowUpDown className="ml-1.5 h-3.5 w-3.5 opacity-60" />
     </Button>
   );
+}
+
+function renderTableValue<TContext>(
+  renderer: ((context: TContext) => ReactNode) | ReactNode,
+  context: TContext
+): ReactNode {
+  if (typeof renderer === 'function') {
+    return renderer(context);
+  }
+  return renderer;
 }
 
 export function ModelConfig() {
@@ -1176,7 +1186,7 @@ export function ModelConfig() {
                       >
                         {header.isPlaceholder
                           ? null
-                          : flexRender(header.column.columnDef.header, header.getContext())}
+                          : renderTableValue(header.column.columnDef.header, header.getContext())}
                       </th>
                     ))}
                   </tr>
@@ -1314,7 +1324,7 @@ export function ModelConfig() {
                               cell.column.id === 'actions' ? 'text-right' : ''
                             )}
                           >
-                            {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                            {renderTableValue(cell.column.columnDef.cell, cell.getContext())}
                           </td>
                         ))}
                       </tr>
