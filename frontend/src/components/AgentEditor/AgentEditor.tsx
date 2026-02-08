@@ -310,7 +310,7 @@ export function AgentEditor() {
             </div>
           ) : configuredTools.length === 0 && unconfiguredTools.length === 0 ? (
             <div className="text-sm text-muted-foreground text-center py-4">
-              No tools are available. Please configure tools in the Integrations tab first.
+              No tools are available. Please configure tools in the Tools tab first.
             </div>
           ) : (
             <>

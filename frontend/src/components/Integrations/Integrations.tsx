@@ -599,11 +599,11 @@ export function Integrations() {
       <div className="h-full flex flex-col">
         <div className="flex-shrink-0 mb-4">
           <div className="flex items-center justify-between mb-2">
-            <h2 className="text-2xl font-bold">Service Integrations</h2>
+            <h2 className="text-2xl font-bold">Tools</h2>
             <div className="flex items-center gap-2">
               <Input
                 type="search"
-                placeholder="Search integrations..."
+                placeholder="Search tools..."
                 value={searchTerm}
                 onChange={e => setSearchTerm(e.target.value)}
                 className="w-64"

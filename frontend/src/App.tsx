@@ -64,7 +64,7 @@ const NAV_ITEMS: NavItem[] = [
   { value: 'memory', label: 'Memory', icon: Brain, group: 'Configuration' },
   { value: 'knowledge', label: 'Knowledge', icon: BookOpen, group: 'Configuration' },
   { value: 'voice', label: 'Voice', icon: Mic, group: 'Configuration' },
-  { value: 'integrations', label: 'Integrations', icon: Plug, group: 'Configuration' },
+  { value: 'integrations', label: 'Tools', icon: Plug, group: 'Configuration' },
   { value: 'skills', label: 'Skills', icon: Puzzle, group: 'Configuration' },
 ];
 
