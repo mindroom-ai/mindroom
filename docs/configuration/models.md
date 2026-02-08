@@ -36,7 +36,7 @@ models:
   # Anthropic Claude
   sonnet:
     provider: anthropic
-    id: claude-sonnet-4-latest
+    id: claude-sonnet-4-5-latest
 
   haiku:
     provider: anthropic

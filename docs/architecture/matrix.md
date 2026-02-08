@@ -76,7 +76,7 @@ Tool call telemetry is emitted as structured collapsible blocks (`<tool>...</too
 
 ## Presence
 
-Agents set their Matrix presence with status messages containing model and role information (e.g., "🤖 Model: anthropic/claude-sonnet-4-latest | 💼 Code assistant | 🔧 5 tools available").
+Agents set their Matrix presence with status messages containing model and role information (e.g., "🤖 Model: anthropic/claude-sonnet-4-5-latest | 💼 Code assistant | 🔧 5 tools available").
 
 **Presence States:**
 - **online** - Agent running and ready

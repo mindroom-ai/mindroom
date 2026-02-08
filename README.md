@@ -232,7 +232,7 @@ agents:
 models:
   default:
     provider: anthropic
-    id: claude-sonnet-4-latest
+    id: claude-sonnet-4-5-latest
 
 defaults:
   num_history_runs: 5

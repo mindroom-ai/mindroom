@@ -11,6 +11,8 @@ agents:
     - Provide clear explanations of MindRoom features and capabilities
     - Test agent configurations when requested
     - Help users understand how agents, teams, and tools work together
+    learning: true
+    learning_mode: always
     model: sonnet
     num_history_runs: 5
     role: Expert MindRoom agent builder that helps create and configure custom AI agents with deep knowledge of the system
@@ -18,6 +20,7 @@ agents:
     - lobby
     - dev
     - help
+    skills: []
     tools:
     - config_manager
   analyst:
@@ -27,12 +30,15 @@ agents:
     - Provide structured insights.
     - Consider multiple perspectives.
     - Make evidence-based recommendations.
+    learning: true
+    learning_mode: always
     model: sonnet
     num_history_runs: 5
     role: Provide analytical insights and recommendations.
     rooms:
     - lobby
     - analysis
+    skills: []
     tools: []
   calculator:
     display_name: CalculatorAgent
@@ -41,6 +47,8 @@ agents:
     - Show your work step by step.
     - Explain the mathematical concepts when helpful.
     - Double-check calculations for accuracy.
+    learning: true
+    learning_mode: always
     model: sonnet
     num_history_runs: 5
     role: Solve mathematical problems.
@@ -48,6 +56,7 @@ agents:
     - lobby
     - science
     - analysis
+    skills: []
     tools:
     - calculator
   callagent:
@@ -60,12 +69,15 @@ agents:
     - Handle phone numbers in international format when possible
     - Be concise and clear in SMS messages due to character limits
     - For calls, prepare a brief script of what will be communicated
+    learning: true
+    learning_mode: always
     model: sonnet
     num_history_runs: 5
     role: Manage phone calls and SMS messages through Twilio integration.
     rooms:
     - lobby
     - communication
+    skills: []
     tools:
     - twilio
   code:
@@ -78,13 +90,16 @@ agents:
     - Be careful with shell commands - explain what they do
     - Always read files before modifying them
     - Follow the project's existing style and conventions
-    model: sonnet
+    learning: true
+    learning_mode: always
+    model: opus
     num_history_runs: 5
     role: Generate code, manage files, and execute shell commands.
     rooms:
     - lobby
     - dev
     - automation
+    skills: []
     tools:
     - file
     - shell
@@ -97,6 +112,8 @@ agents:
     - Identify patterns and trends in data.
     - Provide actionable insights and recommendations.
     - Handle missing or inconsistent data appropriately.
+    learning: true
+    learning_mode: always
     model: sonnet
     num_history_runs: 5
     role: Analyze data, create visualizations, and provide insights.
@@ -106,6 +123,7 @@ agents:
     - science
     - finance
     - business
+    skills: []
     tools:
     - csv
     - calculator
@@ -122,6 +140,8 @@ agents:
     - Respect privacy - only access emails when specifically requested
     - When summarizing, focus on sender, subject, and key points
     - For email drafts, maintain appropriate tone and formality based on context
+    learning: true
+    learning_mode: always
     model: gpt5mini
     num_history_runs: 5
     role: Manage and respond to emails efficiently using Gmail with Claude Sonnet's intelligence
@@ -129,6 +149,7 @@ agents:
     - lobby
     - communication
     - productivity
+    skills: []
     tools:
     - gmail
     - file
@@ -141,6 +162,8 @@ agents:
     - Explain financial concepts clearly.
     - Include relevant disclaimers about investment advice.
     - Present data in a clear, organized format.
+    learning: true
+    learning_mode: always
     model: sonnet
     num_history_runs: 5
     role: Analyze financial data, stock information, and perform calculations.
@@ -149,6 +172,7 @@ agents:
     - finance
     - analysis
     - business
+    skills: []
     tools:
     - yfinance
     - calculator
@@ -159,12 +183,15 @@ agents:
     - Remember context from the conversation.
     - Be conversational and friendly.
     - Ask clarifying questions when needed.
+    learning: true
+    learning_mode: always
     model: sonnet
     num_history_runs: 5
     role: A general-purpose assistant that provides helpful, conversational responses to users.
     rooms:
     - lobby
     - help
+    skills: []
     tools: []
   home:
     display_name: HomeAssistant
@@ -178,6 +205,8 @@ agents:
     - List available devices when asked about what you can control
     - Provide clear status updates after performing actions
     - Group related actions together for efficiency
+    learning: true
+    learning_mode: always
     model: sonnet
     num_history_runs: 5
     role: Control and monitor smart home devices through Home Assistant
@@ -185,6 +214,7 @@ agents:
     - lobby
     - automation
     - home
+    skills: []
     tools:
     - homeassistant
   news:
@@ -196,6 +226,8 @@ agents:
     - Include publication dates and sources.
     - Distinguish between news and opinion pieces.
     - Highlight key developments and their significance.
+    learning: true
+    learning_mode: always
     model: gpt_oss_120b
     num_history_runs: 5
     role: Gather and summarize news and current events.
@@ -204,6 +236,7 @@ agents:
     - news
     - research
     - business
+    skills: []
     tools:
     - duckduckgo
     - newspaper
@@ -216,6 +249,8 @@ agents:
     - Distinguish between facts and opinions.
     - Provide balanced viewpoints on controversial topics.
     - Summarize findings in a clear, organized manner.
+    learning: true
+    learning_mode: always
     model: gpt5mini
     num_history_runs: 5
     role: Conduct research using web sources, Wikipedia, and academic papers.
@@ -224,6 +259,7 @@ agents:
     - research
     - science
     - news
+    skills: []
     tools:
     - duckduckgo
     - wikipedia
@@ -235,12 +271,15 @@ agents:
     - Provide security best practices.
     - Identify potential vulnerabilities.
     - Suggest mitigation strategies.
+    learning: true
+    learning_mode: always
     model: sonnet
     num_history_runs: 5
     role: Analyze security aspects and provide recommendations.
     rooms:
     - lobby
     - dev
+    skills: []
     tools: []
   shell:
     display_name: ShellAgent
@@ -251,6 +290,8 @@ agents:
     - Provide clear output and error messages.
     - Suggest safer alternatives when appropriate.
     - Remember the user's working directory context.
+    learning: true
+    learning_mode: always
     model: sonnet
     num_history_runs: 5
     role: Execute shell commands and manage system operations.
@@ -259,6 +300,7 @@ agents:
     - dev
     - automation
     - ops
+    skills: []
     tools:
     - shell
   summary:
@@ -270,6 +312,8 @@ agents:
     - Use bullet points for clarity when appropriate.
     - Indicate the level of detail in your summary.
     - Preserve important quotes or specific data points.
+    learning: true
+    learning_mode: always
     model: sonnet
     num_history_runs: 5
     role: Summarize long texts and extract key information.
@@ -277,12 +321,21 @@ agents:
     - lobby
     - research
     - docs
+    skills: []
     tools: []
+authorization:
+  default_room_access: false
+  global_users:
+  - '@test:m-test-4.mindroom.chat'
+  room_permissions: {}
 defaults:
   add_history_to_messages: true
+  learning: true
+  learning_mode: always
   markdown: true
   num_history_runs: 5
   show_stop_button: true
+knowledge_bases: {}
 memory:
   embedder:
     provider: openai
@@ -303,7 +356,7 @@ models:
     id: gpt-5-nano-2025-08-07
   sonnet:
     provider: openrouter
-    id: anthropic/claude-sonnet-4
+    id: anthropic/claude-sonnet-4-5
   deepseek:
     provider: openrouter
     id: deepseek/deepseek-chat-v3.1:free
@@ -321,13 +374,14 @@ models:
     id: google/gemini-2.5-flash
   opus:
     provider: openrouter
-    id: anthropic/claude-sonnet-4
+    id: anthropic/claude-sonnet-4-5
   gpt4o:
     provider: openrouter
-    id: anthropic/claude-sonnet-4
+    id: anthropic/claude-sonnet-4-5
   gpt_oss_120b:
     provider: openrouter
     id: google/gemini-2.5-flash
+plugins: []
 room_models:
   research: haiku
 router:
@@ -338,6 +392,7 @@ teams:
     - shell
     display_name: Code Team
     mode: coordinate
+    model: default
     role: New team description
     rooms: []
   super_team:
@@ -356,14 +411,8 @@ teams:
 timezone: America/Los_Angeles
 voice:
   enabled: true
-  stt:
-    provider: openai
-    model: whisper-1
   intelligence:
     model: sonnet
-    confidence_threshold: 0.7
-authorization:
-  global_users:
-  - '@test:m-test-4.mindroom.chat'
-  room_permissions: {}
-  default_room_access: false
+  stt:
+    model: whisper-1
+    provider: openai

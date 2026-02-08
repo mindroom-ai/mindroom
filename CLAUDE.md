@@ -85,10 +85,10 @@ defaults:
 models:
   default:
     provider: anthropic
-    id: claude-sonnet-4-latest
+    id: claude-sonnet-4-5-latest
   sonnet:
     provider: anthropic
-    id: claude-sonnet-4-latest
+    id: claude-sonnet-4-5-latest
 
 router:
   model: default
