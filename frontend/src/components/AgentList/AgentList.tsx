@@ -1,4 +1,5 @@
 import { useConfigStore } from '@/store/configStore';
+import type { Agent } from '@/types/config';
 import { Bot, MapPin } from 'lucide-react';
 import { ListPanel, ListItem } from '@/components/shared/ListPanel';
 import { ItemCard, ItemCardBadge } from '@/components/shared/ItemCard';
@@ -16,7 +17,7 @@ export function AgentList() {
   const { agents, selectedAgentId, selectAgent, createAgent } = useConfigStore();
 
   const handleCreateAgent = (agentName?: string) => {
-    const newAgent = {
+    const newAgent: Omit<Agent, 'id'> = {
       display_name: agentName || 'New Agent',
       role: 'A new agent that needs configuration',
       tools: [],

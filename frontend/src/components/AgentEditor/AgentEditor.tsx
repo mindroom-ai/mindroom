@@ -20,7 +20,7 @@ import {
   CheckboxListField,
   CheckboxListItem,
 } from '@/components/shared';
-import { useForm, Controller } from 'react-hook-form';
+import { useForm, useWatch, Controller } from 'react-hook-form';
 import { Agent } from '@/types/config';
 import { ToolConfigDialog } from '@/components/ToolConfig/ToolConfigDialog';
 import { TOOL_SCHEMAS } from '@/types/toolConfig';
@@ -43,6 +43,8 @@ export function AgentEditor() {
 
   const [configDialogTool, setConfigDialogTool] = useState<string | null>(null);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
+  const defaultLearning = config?.defaults.learning ?? true;
+  const defaultLearningMode = config?.defaults.learning_mode ?? 'always';
 
   // Fetch tools and skills from backend
   const { tools: backendTools, loading: toolsLoading } = useTools();
@@ -87,8 +89,12 @@ export function AgentEditor() {
       instructions: [],
       rooms: [],
       num_history_runs: 5,
+      learning: defaultLearning,
+      learning_mode: defaultLearningMode,
     },
   });
+  const learningEnabled = useWatch({ name: 'learning', control });
+  const effectiveLearningEnabled = learningEnabled ?? defaultLearning;
 
   // Prepare checkbox items for skills (includes orphaned selected skills)
   const skillItems: CheckboxListItem[] = useMemo(() => {
@@ -120,9 +126,13 @@ export function AgentEditor() {
   // Reset form when selected agent changes
   useEffect(() => {
     if (selectedAgent) {
-      reset(selectedAgent);
+      reset({
+        ...selectedAgent,
+        learning: selectedAgent.learning ?? defaultLearning,
+        learning_mode: selectedAgent.learning_mode ?? defaultLearningMode,
+      });
     }
-  }, [selectedAgent, reset]);
+  }, [defaultLearning, defaultLearningMode, selectedAgent, reset]);
 
   // Create a debounced update function
   const handleFieldChange = useCallback(
@@ -475,6 +485,63 @@ export function AgentEditor() {
           idPrefix="room"
           emptyMessage="No rooms available. Create rooms in the Rooms tab."
           className="space-y-2 max-h-48 overflow-y-auto border rounded-lg p-2"
+        />
+      </FieldGroup>
+
+      {/* Learning */}
+      <FieldGroup
+        label="Learning"
+        helperText="Enable Agno Learning so this agent can learn from conversations"
+        htmlFor="learning"
+      >
+        <Controller
+          name="learning"
+          control={control}
+          render={({ field }) => (
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="learning"
+                checked={field.value ?? defaultLearning}
+                onCheckedChange={checked => {
+                  const value = checked === true;
+                  field.onChange(value);
+                  handleFieldChange('learning', value);
+                }}
+              />
+              <label htmlFor="learning" className="text-sm font-medium cursor-pointer select-none">
+                Enable learning
+              </label>
+            </div>
+          )}
+        />
+      </FieldGroup>
+
+      <FieldGroup
+        label="Learning Mode"
+        helperText="Always: automatic extraction. Agentic: agent decides via tools."
+        htmlFor="learning_mode"
+      >
+        <Controller
+          name="learning_mode"
+          control={control}
+          render={({ field }) => (
+            <Select
+              value={field.value ?? defaultLearningMode}
+              onValueChange={value => {
+                field.onChange(value);
+                handleFieldChange('learning_mode', value);
+              }}
+              disabled={effectiveLearningEnabled === false}
+            >
+              <SelectTrigger id="learning_mode">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="always">Always (automatic)</SelectItem>
+                <SelectItem value="agentic">Agentic (tool-driven)</SelectItem>
+              </SelectContent>
+            </Select>
+          )}
         />
       </FieldGroup>
 

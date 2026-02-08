@@ -60,6 +60,12 @@ agents:
 
     # Whether to add history to messages (for context)
     add_history_to_messages: true
+
+    # Enable Agno Learning for this agent
+    learning: true
+
+    # Learning mode: always (automatic) or agentic (tool-driven)
+    learning_mode: always
 ```
 
 ## Configuration Options
@@ -76,6 +82,10 @@ agents:
 | `num_history_runs` | int | from defaults | Previous conversation runs to include for context |
 | `markdown` | bool | from defaults | Format responses as markdown |
 | `add_history_to_messages` | bool | from defaults | Include conversation history in context |
+| `learning` | bool | from defaults | Enable Agno Learning for this agent |
+| `learning_mode` | string | from defaults | Learning mode: `always` or `agentic` |
+
+Learning data is persisted to `STORAGE_PATH/learning/<agent>.db` (default: `mindroom_data/learning/<agent>.db`), so it survives container restarts when `mindroom_data` is mounted.
 
 ## Rich Prompt Agents
 
@@ -92,5 +102,9 @@ defaults:
   num_history_runs: 5
   markdown: true
   add_history_to_messages: true
+  learning: true
+  learning_mode: always
   show_stop_button: false  # global-only, cannot be overridden per-agent
 ```
+
+When an agent omits `learning` or `learning_mode`, MindRoom inherits those values from `defaults`.

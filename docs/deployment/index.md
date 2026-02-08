@@ -68,6 +68,6 @@ Direct and single-container deployments:
 
 1. **Matrix homeserver** - Set `MATRIX_HOMESERVER` (must allow open registration for agent accounts)
 2. **AI provider keys** - At least one of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.
-3. **Persistent storage** - Mount `mindroom_data/` to persist agent state
+3. **Persistent storage** - Mount `mindroom_data/` to persist agent state (including `sessions/`, `learning/`, and memory data)
 
 See the [Docker guide](docker.md#environment-variables) for the complete environment variable reference.
