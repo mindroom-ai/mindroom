@@ -8,10 +8,11 @@ from zoneinfo import ZoneInfo
 
 from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
+from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
 
 from . import agent_prompts
 from . import tools as _tools_module  # noqa: F401
-from .constants import ROUTER_AGENT_NAME, SESSIONS_DIR, STORAGE_PATH_OBJ
+from .constants import ROUTER_AGENT_NAME, STORAGE_PATH_OBJ
 from .logging_config import get_logger
 from .plugins import load_plugins
 from .skills import build_agent_skills
@@ -20,7 +21,7 @@ from .tools_metadata import get_tool_by_name
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from .config import Config
+    from .config import AgentConfig, Config
 
 logger = get_logger(__name__)
 
@@ -64,6 +65,39 @@ RICH_PROMPTS = {
     "news": agent_prompts.NEWS_AGENT_PROMPT,
     "data_analyst": agent_prompts.DATA_ANALYST_AGENT_PROMPT,
 }
+
+
+def resolve_agent_learning(
+    agent_config: AgentConfig,
+    learning_storage: SqliteDb | None = None,
+) -> bool | LearningMachine:
+    """Resolve Agent.learning setting from MindRoom agent configuration."""
+    learning_enabled = agent_config.learning if agent_config.learning is not None else True
+    if not learning_enabled:
+        return False
+
+    learning_mode = agent_config.learning_mode or "always"
+    learning_mode_value = LearningMode.AGENTIC if learning_mode == "agentic" else LearningMode.ALWAYS
+
+    return LearningMachine(
+        db=learning_storage,
+        user_profile=UserProfileConfig(mode=learning_mode_value),
+        user_memory=UserMemoryConfig(mode=learning_mode_value),
+    )
+
+
+def create_session_storage(agent_name: str, storage_path: Path) -> SqliteDb:
+    """Create persistent session storage for an agent."""
+    sessions_dir = storage_path / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    return SqliteDb(session_table=f"{agent_name}_sessions", db_file=str(sessions_dir / f"{agent_name}.db"))
+
+
+def create_learning_storage(agent_name: str, storage_path: Path) -> SqliteDb:
+    """Create persistent learning storage for an agent."""
+    learning_dir = storage_path / "learning"
+    learning_dir.mkdir(parents=True, exist_ok=True)
+    return SqliteDb(session_table=f"{agent_name}_learning_sessions", db_file=str(learning_dir / f"{agent_name}.db"))
 
 
 def create_agent(agent_name: str, config: Config, *, storage_path: Path | None = None) -> Agent:
@@ -113,8 +147,10 @@ def create_agent(agent_name: str, config: Config, *, storage_path: Path | None =
         except ValueError as e:
             logger.warning(f"Could not load tool '{tool_name}' for agent '{agent_name}': {e}")
 
-    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-    storage = SqliteDb(session_table=f"{agent_name}_sessions", db_file=str(SESSIONS_DIR / f"{agent_name}.db"))
+    storage = create_session_storage(agent_name, resolved_storage_path)
+    learning_storage = (
+        create_learning_storage(agent_name, resolved_storage_path) if agent_config.learning is not False else None
+    )
 
     # Get model config for identity context
     model_name = agent_config.model or "default"
@@ -171,6 +207,7 @@ def create_agent(agent_name: str, config: Config, *, storage_path: Path | None =
         skills=skills,
         instructions=instructions,
         db=storage,
+        learning=resolve_agent_learning(agent_config, learning_storage),
         add_history_to_context=agent_config.add_history_to_messages
         if agent_config.add_history_to_messages is not None
         else defaults.add_history_to_messages,

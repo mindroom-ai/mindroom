@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -16,6 +16,8 @@ if TYPE_CHECKING:
     from .matrix.identity import MatrixID
 
 logger = get_logger(__name__)
+
+AgentLearningMode = Literal["always", "agentic"]
 
 
 class AgentConfig(BaseModel):
@@ -30,6 +32,11 @@ class AgentConfig(BaseModel):
     num_history_runs: int | None = Field(default=None, description="Number of history runs to include")
     markdown: bool | None = Field(default=None, description="Whether to use markdown formatting")
     add_history_to_messages: bool | None = Field(default=None, description="Whether to add history to messages")
+    learning: bool | None = Field(default=None, description="Enable Agno Learning (defaults to true when omitted)")
+    learning_mode: AgentLearningMode | None = Field(
+        default=None,
+        description="Learning mode for Agno Learning: always (automatic) or agentic (tool-driven)",
+    )
     model: str = Field(default="default", description="Model name")
 
 

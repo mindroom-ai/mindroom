@@ -77,7 +77,7 @@ export function AgentEditor() {
     enabled: !!selectedAgentId && window.innerWidth < 1024, // Only on mobile when agent is selected
   });
 
-  const { control, reset, setValue, getValues } = useForm<Agent>({
+  const { control, reset, setValue, getValues, watch } = useForm<Agent>({
     defaultValues: selectedAgent || {
       id: '',
       display_name: '',
@@ -87,8 +87,11 @@ export function AgentEditor() {
       instructions: [],
       rooms: [],
       num_history_runs: 5,
+      learning: true,
+      learning_mode: 'always',
     },
   });
+  const learningEnabled = watch('learning');
 
   // Prepare checkbox items for skills (includes orphaned selected skills)
   const skillItems: CheckboxListItem[] = useMemo(() => {
@@ -120,7 +123,11 @@ export function AgentEditor() {
   // Reset form when selected agent changes
   useEffect(() => {
     if (selectedAgent) {
-      reset(selectedAgent);
+      reset({
+        ...selectedAgent,
+        learning: selectedAgent.learning ?? true,
+        learning_mode: selectedAgent.learning_mode ?? 'always',
+      });
     }
   }, [selectedAgent, reset]);
 
@@ -475,6 +482,63 @@ export function AgentEditor() {
           idPrefix="room"
           emptyMessage="No rooms available. Create rooms in the Rooms tab."
           className="space-y-2 max-h-48 overflow-y-auto border rounded-lg p-2"
+        />
+      </FieldGroup>
+
+      {/* Learning */}
+      <FieldGroup
+        label="Learning"
+        helperText="Enable Agno Learning so this agent can learn from conversations"
+        htmlFor="learning"
+      >
+        <Controller
+          name="learning"
+          control={control}
+          render={({ field }) => (
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="learning"
+                checked={field.value ?? true}
+                onCheckedChange={checked => {
+                  const value = checked === true;
+                  field.onChange(value);
+                  handleFieldChange('learning', value);
+                }}
+              />
+              <label htmlFor="learning" className="text-sm font-medium cursor-pointer select-none">
+                Enable learning
+              </label>
+            </div>
+          )}
+        />
+      </FieldGroup>
+
+      <FieldGroup
+        label="Learning Mode"
+        helperText="Always: automatic extraction. Agentic: agent decides via tools."
+        htmlFor="learning_mode"
+      >
+        <Controller
+          name="learning_mode"
+          control={control}
+          render={({ field }) => (
+            <Select
+              value={field.value || 'always'}
+              onValueChange={value => {
+                field.onChange(value);
+                handleFieldChange('learning_mode', value);
+              }}
+              disabled={learningEnabled === false}
+            >
+              <SelectTrigger id="learning_mode">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="always">Always (automatic)</SelectItem>
+                <SelectItem value="agentic">Agentic (tool-driven)</SelectItem>
+              </SelectContent>
+            </Select>
+          )}
         />
       </FieldGroup>
 

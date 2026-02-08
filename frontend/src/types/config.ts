@@ -19,6 +19,8 @@ export interface MemoryConfig {
   };
 }
 
+export type LearningMode = 'always' | 'agentic';
+
 export interface Agent {
   id: string; // The key in the agents object
   display_name: string;
@@ -28,6 +30,8 @@ export interface Agent {
   instructions: string[];
   rooms: string[];
   num_history_runs: number;
+  learning?: boolean; // Defaults to true when omitted
+  learning_mode?: LearningMode; // Defaults to always when omitted
   model?: string; // Reference to a model in the models section
 }
 

@@ -55,7 +55,79 @@ describe('configStore', () => {
       expect(state.agents).toHaveLength(1);
       expect(state.agents[0].id).toBe('test');
       expect(state.agents[0].display_name).toBe('Test Agent');
+      expect(state.agents[0].learning).toBe(true);
+      expect(state.agents[0].learning_mode).toBe('always');
       expect(state.syncStatus).toBe('synced');
+    });
+
+    it('should preserve explicit learning=false from configuration', async () => {
+      const mockConfig = {
+        agents: {
+          test: {
+            display_name: 'Test Agent',
+            role: 'Test role',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+            num_history_runs: 5,
+            learning: false,
+          },
+        },
+        models: {
+          default: {
+            provider: 'ollama',
+            id: 'test-model',
+          },
+        },
+      };
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockConfig,
+      });
+
+      const { loadConfig } = useConfigStore.getState();
+      await loadConfig();
+
+      const state = useConfigStore.getState();
+      expect(state.agents[0].learning).toBe(false);
+      expect(state.agents[0].learning_mode).toBe('always');
+    });
+
+    it('should preserve explicit learning_mode from configuration', async () => {
+      const mockConfig = {
+        agents: {
+          test: {
+            display_name: 'Test Agent',
+            role: 'Test role',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+            num_history_runs: 5,
+            learning: true,
+            learning_mode: 'agentic',
+          },
+        },
+        models: {
+          default: {
+            provider: 'ollama',
+            id: 'test-model',
+          },
+        },
+      };
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockConfig,
+      });
+
+      const { loadConfig } = useConfigStore.getState();
+      await loadConfig();
+
+      const state = useConfigStore.getState();
+      expect(state.agents[0].learning_mode).toBe('agentic');
     });
 
     it('should handle load errors', async () => {
@@ -210,6 +282,8 @@ describe('configStore', () => {
       expect(state.agents).toHaveLength(3);
       const newAgent = state.agents[2];
       expect(newAgent.display_name).toBe('New Agent');
+      expect(newAgent.learning).toBe(true);
+      expect(newAgent.learning_mode).toBe('always');
       expect(state.selectedAgentId).toBe(newAgent.id);
       expect(state.isDirty).toBe(true);
     });

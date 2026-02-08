@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from agno.agent import Agent
+from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
 
 from mindroom.agents import create_agent
 from mindroom.config import Config
@@ -27,6 +29,11 @@ def test_get_agent_general(mock_storage: MagicMock) -> None:  # noqa: ARG001
     agent = create_agent("general", config=config)
     assert isinstance(agent, Agent)
     assert agent.name == "GeneralAgent"
+    assert isinstance(agent.learning, LearningMachine)
+    assert isinstance(agent.learning.user_profile, UserProfileConfig)
+    assert agent.learning.user_profile.mode is LearningMode.ALWAYS
+    assert isinstance(agent.learning.user_memory, UserMemoryConfig)
+    assert agent.learning.user_memory.mode is LearningMode.ALWAYS
 
 
 @patch("mindroom.agents.SqliteDb")
@@ -61,3 +68,39 @@ def test_get_agent_unknown() -> None:
     config = Config.from_yaml()
     with pytest.raises(ValueError, match="Unknown agent: unknown"):
         create_agent("unknown", config=config)
+
+
+@patch("mindroom.agents.SqliteDb")
+def test_get_agent_learning_can_be_disabled(mock_storage: MagicMock) -> None:
+    """Tests that learning can be disabled per agent."""
+    config = Config.from_yaml()
+    config.agents["general"].learning = False
+    agent = create_agent("general", config=config)
+    assert isinstance(agent, Agent)
+    assert agent.learning is False
+    assert mock_storage.call_count == 1
+
+
+@patch("mindroom.agents.SqliteDb")
+def test_get_agent_learning_agentic_mode(mock_storage: MagicMock) -> None:  # noqa: ARG001
+    """Tests that learning mode can be configured as agentic."""
+    config = Config.from_yaml()
+    config.agents["general"].learning_mode = "agentic"
+    agent = create_agent("general", config=config)
+    assert isinstance(agent, Agent)
+    assert isinstance(agent.learning, LearningMachine)
+    assert isinstance(agent.learning.user_profile, UserProfileConfig)
+    assert agent.learning.user_profile.mode is LearningMode.AGENTIC
+    assert isinstance(agent.learning.user_memory, UserMemoryConfig)
+    assert agent.learning.user_memory.mode is LearningMode.AGENTIC
+
+
+@patch("mindroom.agents.SqliteDb")
+def test_get_agent_uses_storage_path_for_sessions_and_learning(mock_storage: MagicMock, tmp_path: Path) -> None:
+    """Tests that session and learning databases are created under the resolved storage path."""
+    config = Config.from_yaml()
+    create_agent("general", config=config, storage_path=tmp_path)
+
+    db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
+    assert tmp_path / "sessions" / "general.db" in db_files
+    assert tmp_path / "learning" / "general.db" in db_files

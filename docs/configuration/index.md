@@ -30,6 +30,8 @@ agents:
     num_history_runs: 5            # Optional: Override default (inherits from defaults section)
     markdown: true                 # Optional: Override default (inherits from defaults section)
     add_history_to_messages: true  # Optional: Override default (inherits from defaults section)
+    learning: true                 # Optional: Enable Agno Learning (default: true)
+    learning_mode: always          # Optional: always (automatic) or agentic (tool-driven)
 
 # Model configurations (at least a "default" model is recommended)
 models:
