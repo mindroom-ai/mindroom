@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { Config, Agent, Team, Room, ModelConfig } from '@/types/config';
+import { Config, Agent, Team, Room, ModelConfig, KnowledgeConfig } from '@/types/config';
 import * as configService from '@/services/configService';
 
 interface ConfigState {
@@ -35,6 +35,7 @@ interface ConfigState {
   removeAgentFromRoom: (roomId: string, agentId: string) => void;
   updateRoomModels: (roomModels: Record<string, string>) => void;
   updateMemoryConfig: (memoryConfig: { provider: string; model: string; host?: string }) => void;
+  updateKnowledgeConfig: (knowledgeConfig: KnowledgeConfig) => void;
   updateModel: (modelId: string, updates: Partial<ModelConfig>) => void;
   deleteModel: (modelId: string) => void;
   updateToolConfig: (toolId: string, config: any) => void;
@@ -67,6 +68,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         id,
         ...agent,
         skills: agent.skills ?? [],
+        knowledge: agent.knowledge ?? false,
         learning: agent.learning ?? defaultLearning,
         learning_mode: agent.learning_mode ?? defaultLearningMode,
       }));
@@ -191,6 +193,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     const newAgent: Agent = {
       id,
       ...agentData,
+      knowledge: agentData.knowledge ?? false,
       learning: agentData.learning ?? defaultLearning,
       learning_mode: agentData.learning_mode ?? defaultLearningMode,
     };
@@ -458,6 +461,22 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
                 ...(memoryConfig.host ? { host: memoryConfig.host } : {}),
               },
             },
+          },
+        },
+        isDirty: true,
+      };
+    });
+  },
+
+  // Update knowledge configuration
+  updateKnowledgeConfig: knowledgeConfig => {
+    set(state => {
+      if (!state.config) return state;
+      return {
+        config: {
+          ...state.config,
+          knowledge: {
+            ...knowledgeConfig,
           },
         },
         isDirty: true,

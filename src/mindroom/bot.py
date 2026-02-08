@@ -29,6 +29,7 @@ from .config_commands import handle_config_command
 from .constants import ENABLE_STREAMING, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, VOICE_PREFIX
 from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
+from .knowledge import initialize_knowledge_manager, shutdown_knowledge_manager
 from .logging_config import emoji, get_logger, setup_logging
 from .matrix.client import (
     _latest_thread_event_id,
@@ -106,8 +107,11 @@ if TYPE_CHECKING:
 
     import structlog
     from agno.agent import Agent
+    from agno.knowledge.knowledge import Knowledge
     from agno.tools.function import Function
     from agno.tools.toolkit import Toolkit
+
+    from .knowledge import KnowledgeManager
 
 logger = get_logger(__name__)
 
@@ -556,7 +560,7 @@ class AgentBot:
     client: nio.AsyncClient | None = field(default=None, init=False)
     running: bool = field(default=False, init=False)
     enable_streaming: bool = field(default=True)  # Enable/disable streaming responses
-    orchestrator: MultiAgentOrchestrator = field(init=False)  # Reference to orchestrator
+    orchestrator: MultiAgentOrchestrator | None = field(default=None, init=False)  # Reference to orchestrator
 
     @property
     def agent_name(self) -> str:
@@ -573,10 +577,31 @@ class AgentBot:
         """Get the Matrix ID for this agent bot."""
         return self.agent_user.matrix_id
 
+    def _get_shared_knowledge(self) -> Knowledge | None:
+        """Get shared knowledge instance when the orchestrator has one."""
+        orchestrator = self.orchestrator
+        if orchestrator is None or orchestrator.knowledge_manager is None:
+            return None
+        return orchestrator.knowledge_manager.get_knowledge()
+
+    def _knowledge_for_agent(self, agent_name: str) -> Knowledge | None:
+        """Return shared knowledge for knowledge-enabled agents only."""
+        knowledge = self._get_shared_knowledge()
+        agent_config = self.config.agents.get(agent_name)
+        if knowledge is None or agent_config is None or not agent_config.knowledge:
+            return None
+        return knowledge
+
     @property  # Not cached_property because Team mutates it!
     def agent(self) -> Agent:
         """Get the Agno Agent instance for this bot."""
-        return create_agent(agent_name=self.agent_name, config=self.config, storage_path=self.storage_path)
+        knowledge = self._knowledge_for_agent(self.agent_name)
+        return create_agent(
+            agent_name=self.agent_name,
+            config=self.config,
+            storage_path=self.storage_path,
+            knowledge=knowledge,
+        )
 
     @cached_property
     def response_tracker(self) -> ResponseTracker:
@@ -1203,6 +1228,10 @@ class AgentBot:
 
         # Convert MatrixID list to agent names for non-streaming APIs
         agent_names = [mid.agent_name(self.config) or mid.username for mid in team_agents]
+        orchestrator = self.orchestrator
+        if orchestrator is None:
+            msg = "Orchestrator is not set"
+            raise RuntimeError(msg)
 
         # Create async function for team response generation that takes message_id as parameter
         async def generate_team_response(message_id: str | None) -> None:
@@ -1212,7 +1241,7 @@ class AgentBot:
                     response_stream = team_response_stream(
                         agent_ids=team_agents,
                         message=message,
-                        orchestrator=self.orchestrator,
+                        orchestrator=orchestrator,
                         mode=mode,
                         thread_history=thread_history,
                         model_name=model_name,
@@ -1247,7 +1276,7 @@ class AgentBot:
                         agent_names=agent_names,
                         mode=mode,
                         message=message,
-                        orchestrator=self.orchestrator,
+                        orchestrator=orchestrator,
                         thread_history=thread_history,
                         model_name=model_name,
                     )
@@ -1405,6 +1434,7 @@ class AgentBot:
             return None
 
         session_id = create_session_id(room_id, thread_id)
+        knowledge = self._knowledge_for_agent(self.agent_name)
 
         try:
             # Show typing indicator while generating response
@@ -1417,6 +1447,7 @@ class AgentBot:
                     config=self.config,
                     thread_history=thread_history,
                     room_id=room_id,
+                    knowledge=knowledge,
                 )
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
@@ -1471,6 +1502,7 @@ class AgentBot:
             return None
 
         session_id = create_session_id(room_id, thread_id)
+        knowledge = self._knowledge_for_agent(agent_name)
 
         async with typing_indicator(self.client, room_id):
             response_text = await ai_response(
@@ -1481,6 +1513,7 @@ class AgentBot:
                 config=self.config,
                 thread_history=thread_history,
                 room_id=room_id,
+                knowledge=knowledge,
             )
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
@@ -1584,6 +1617,7 @@ class AgentBot:
             return None
 
         session_id = create_session_id(room_id, thread_id)
+        knowledge = self._knowledge_for_agent(self.agent_name)
 
         try:
             # Show typing indicator while generating response
@@ -1596,6 +1630,7 @@ class AgentBot:
                     config=self.config,
                     thread_history=thread_history,
                     room_id=room_id,
+                    knowledge=knowledge,
                 )
 
                 event_id, accumulated = await send_streaming_response(
@@ -2235,6 +2270,7 @@ class MultiAgentOrchestrator:
     running: bool = field(default=False, init=False)
     config: Config | None = field(default=None, init=False)
     _sync_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
+    knowledge_manager: KnowledgeManager | None = field(default=None, init=False)
 
     async def _ensure_user_account(self) -> None:
         """Ensure a user account exists, creating one if necessary.
@@ -2250,6 +2286,14 @@ class MultiAgentOrchestrator:
         )
         logger.info(f"User account ready: {user_account.user_id}")
 
+    async def _configure_knowledge(self, config: Config, *, start_watcher: bool) -> None:
+        """Initialize or reconfigure the knowledge manager for the current config."""
+        self.knowledge_manager = await initialize_knowledge_manager(
+            config=config,
+            storage_path=self.storage_path,
+            start_watcher=start_watcher,
+        )
+
     async def initialize(self) -> None:
         """Initialize all agent bots with self-management.
 
@@ -2263,6 +2307,7 @@ class MultiAgentOrchestrator:
         config = Config.from_yaml()
         load_plugins(config)
         self.config = config
+        await self._configure_knowledge(config, start_watcher=False)
 
         # Create bots for all configured entities
         # Make Router the first so that it can manage room invitations
@@ -2329,6 +2374,11 @@ class MultiAgentOrchestrator:
             logger.info("All agent bots started successfully")
 
         self.running = True
+        config = self.config
+        if config is None:
+            msg = "Configuration not loaded"
+            raise RuntimeError(msg)
+        await self._configure_knowledge(config, start_watcher=True)
 
         # Setup rooms and have all bots join them
         await self._setup_rooms_and_memberships(list(self.agent_bots.values()))
@@ -2357,6 +2407,7 @@ class MultiAgentOrchestrator:
 
         if not self.config:
             self.config = new_config
+            await self._configure_knowledge(new_config, start_watcher=self.running)
             return False
 
         # Identify what changed - we can keep using the existing helper functions
@@ -2369,6 +2420,7 @@ class MultiAgentOrchestrator:
 
         # Always update the orchestrator's config first
         self.config = new_config
+        await self._configure_knowledge(new_config, start_watcher=self.running)
 
         # Always update config for ALL existing bots (even those being restarted will get new config when recreated)
         logger.info(
@@ -2450,6 +2502,8 @@ class MultiAgentOrchestrator:
     async def stop(self) -> None:
         """Stop all agent bots."""
         self.running = False
+        await shutdown_knowledge_manager()
+        self.knowledge_manager = None
 
         # First cancel all sync tasks
         for entity_name in list(self._sync_tasks.keys()):
@@ -2478,10 +2532,13 @@ class MultiAgentOrchestrator:
         await self._ensure_rooms_exist()
 
         # After rooms exist, update each bot's room list to use room IDs instead of aliases
-        assert self.config is not None
+        config = self.config
+        if config is None:
+            msg = "Configuration not loaded"
+            raise RuntimeError(msg)
         for bot in bots:
             # Get the room aliases for this entity from config and resolve to IDs
-            room_aliases = get_rooms_for_entity(bot.agent_name, self.config)
+            room_aliases = get_rooms_for_entity(bot.agent_name, config)
             bot.rooms = resolve_room_aliases(room_aliases)
 
         # After rooms exist, ensure room invitations are up to date
@@ -2514,8 +2571,11 @@ class MultiAgentOrchestrator:
             return
 
         # Directly create rooms using the router's client
-        assert self.config is not None
-        room_ids = await ensure_all_rooms_exist(router_bot.client, self.config)
+        config = self.config
+        if config is None:
+            msg = "Configuration not loaded"
+            raise RuntimeError(msg)
+        room_ids = await ensure_all_rooms_exist(router_bot.client, config)
         logger.info(f"Ensured existence of {len(room_ids)} rooms")
 
     async def _ensure_room_invitations(self) -> None:  # noqa: C901, PLR0912
