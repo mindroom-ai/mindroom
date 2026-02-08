@@ -259,6 +259,7 @@ async def initialize_knowledge_manager(
     storage_path: Path,
     *,
     start_watcher: bool = False,
+    reindex_on_create: bool = True,
 ) -> KnowledgeManager | None:
     """Initialize the process-wide knowledge manager for the given config."""
     global _knowledge_manager
@@ -276,7 +277,10 @@ async def initialize_knowledge_manager(
         await _knowledge_manager.shutdown()
 
     _knowledge_manager = KnowledgeManager(config=config, storage_path=storage_path)
-    await _knowledge_manager.initialize()
+    if reindex_on_create:
+        await _knowledge_manager.initialize()
+    else:
+        logger.info("Knowledge manager initialized without full reindex", path=str(_knowledge_manager.knowledge_path))
 
     if start_watcher:
         await _knowledge_manager.start_watcher()

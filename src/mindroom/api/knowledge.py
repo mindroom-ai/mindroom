@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, NoReturn
 from urllib.parse import unquote
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
@@ -18,6 +18,9 @@ from mindroom.knowledge import (
 )
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
+
+_MAX_UPLOAD_BYTES = 1024 * 1024 * 1024  # 1 GiB
+_UPLOAD_CHUNK_BYTES = 1024 * 1024  # 1 MiB
 
 
 def _knowledge_root(config: Config) -> Path:
@@ -63,7 +66,41 @@ def _list_file_info(root: Path) -> tuple[list[dict[str, Any]], int]:
 async def _ensure_manager(config: Config) -> KnowledgeManager | None:
     if not config.knowledge.enabled:
         return None
-    return await initialize_knowledge_manager(config, STORAGE_PATH_OBJ, start_watcher=False)
+    return await initialize_knowledge_manager(
+        config,
+        STORAGE_PATH_OBJ,
+        start_watcher=False,
+        reindex_on_create=False,
+    )
+
+
+def _rollback_uploaded_files(uploaded_paths: list[Path]) -> None:
+    for uploaded_path in uploaded_paths:
+        uploaded_path.unlink(missing_ok=True)
+
+
+def _validate_upload_size_hint(upload: UploadFile, filename: str) -> None:
+    if not upload.file.seekable():
+        return
+
+    current_position = upload.file.tell()
+    upload.file.seek(0, 2)
+    size_hint = upload.file.tell()
+    upload.file.seek(current_position)
+
+    if size_hint > _MAX_UPLOAD_BYTES:
+        raise _upload_limit_error(filename)
+
+
+def _upload_limit_error(filename: str) -> HTTPException:
+    return HTTPException(
+        status_code=413,
+        detail=f"File '{filename}' exceeds the {_MAX_UPLOAD_BYTES // (1024 * 1024)} MiB upload limit",
+    )
+
+
+def _raise_upload_limit_error(filename: str) -> NoReturn:
+    raise _upload_limit_error(filename)
 
 
 @router.get("/files")
@@ -87,6 +124,7 @@ async def upload_knowledge_files(files: Annotated[list[UploadFile], File(...)]) 
     root = _knowledge_root(config)
 
     uploaded: list[str] = []
+    uploaded_paths: list[Path] = []
     for upload in files:
         filename = Path(upload.filename or "").name
         if not filename:
@@ -94,10 +132,26 @@ async def upload_knowledge_files(files: Annotated[list[UploadFile], File(...)]) 
             continue
 
         destination = _resolve_within_root(root, filename)
-        content = await upload.read()
-        destination.write_bytes(content)
+        bytes_written = 0
+
+        try:
+            _validate_upload_size_hint(upload, filename)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with destination.open("wb") as handle:
+                while chunk := await upload.read(_UPLOAD_CHUNK_BYTES):
+                    bytes_written += len(chunk)
+                    if bytes_written > _MAX_UPLOAD_BYTES:
+                        _raise_upload_limit_error(filename)
+                    handle.write(chunk)
+        except Exception:
+            destination.unlink(missing_ok=True)
+            _rollback_uploaded_files(uploaded_paths)
+            raise
+        finally:
+            await upload.close()
+
+        uploaded_paths.append(destination)
         uploaded.append(destination.relative_to(root).as_posix())
-        await upload.close()
 
     if config.knowledge.enabled:
         manager = await _ensure_manager(config)
@@ -145,9 +199,6 @@ async def knowledge_status() -> dict[str, Any]:
 
     indexed_count = 0
     manager = get_knowledge_manager()
-    if config.knowledge.enabled:
-        manager = await _ensure_manager(config)
-
     if manager is not None:
         indexed_count = manager.get_status()["indexed_count"]
 
@@ -168,7 +219,12 @@ async def reindex_knowledge() -> dict[str, Any]:
 
     manager = get_knowledge_manager()
     if manager is None or not manager.matches(config, STORAGE_PATH_OBJ):
-        manager = await initialize_knowledge_manager(config, STORAGE_PATH_OBJ, start_watcher=False)
+        manager = await initialize_knowledge_manager(
+            config,
+            STORAGE_PATH_OBJ,
+            start_watcher=False,
+            reindex_on_create=False,
+        )
 
     if manager is None:
         raise HTTPException(status_code=500, detail="Knowledge manager is unavailable")

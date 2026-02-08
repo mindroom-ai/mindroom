@@ -584,18 +584,18 @@ class AgentBot:
             return None
         return orchestrator.knowledge_manager.get_knowledge()
 
-    def _knowledge_kwargs_for_agent(self, agent_name: str) -> dict[str, Knowledge]:
-        """Return kwargs for knowledge-enabled agents only."""
+    def _knowledge_for_agent(self, agent_name: str) -> Knowledge | None:
+        """Return shared knowledge for knowledge-enabled agents only."""
         knowledge = self._get_shared_knowledge()
         agent_config = self.config.agents.get(agent_name)
         if knowledge is None or agent_config is None or not agent_config.knowledge:
-            return {}
-        return {"knowledge": knowledge}
+            return None
+        return knowledge
 
     @property  # Not cached_property because Team mutates it!
     def agent(self) -> Agent:
         """Get the Agno Agent instance for this bot."""
-        knowledge = self._get_shared_knowledge()
+        knowledge = self._knowledge_for_agent(self.agent_name)
         return create_agent(
             agent_name=self.agent_name,
             config=self.config,
@@ -1430,7 +1430,10 @@ class AgentBot:
             return None
 
         session_id = create_session_id(room_id, thread_id)
-        knowledge_kwargs = self._knowledge_kwargs_for_agent(self.agent_name)
+        knowledge = self._knowledge_for_agent(self.agent_name)
+        knowledge_kwargs: dict[str, Knowledge] = {}
+        if knowledge is not None:
+            knowledge_kwargs["knowledge"] = knowledge
 
         try:
             # Show typing indicator while generating response
@@ -1498,7 +1501,10 @@ class AgentBot:
             return None
 
         session_id = create_session_id(room_id, thread_id)
-        knowledge_kwargs = self._knowledge_kwargs_for_agent(agent_name)
+        knowledge = self._knowledge_for_agent(agent_name)
+        knowledge_kwargs: dict[str, Knowledge] = {}
+        if knowledge is not None:
+            knowledge_kwargs["knowledge"] = knowledge
 
         async with typing_indicator(self.client, room_id):
             response_text = await ai_response(
@@ -1613,7 +1619,10 @@ class AgentBot:
             return None
 
         session_id = create_session_id(room_id, thread_id)
-        knowledge_kwargs = self._knowledge_kwargs_for_agent(self.agent_name)
+        knowledge = self._knowledge_for_agent(self.agent_name)
+        knowledge_kwargs: dict[str, Knowledge] = {}
+        if knowledge is not None:
+            knowledge_kwargs["knowledge"] = knowledge
 
         try:
             # Show typing indicator while generating response
