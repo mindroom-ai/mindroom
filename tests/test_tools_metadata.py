@@ -14,7 +14,7 @@ def test_export_tools_metadata_json() -> None:
     This test generates a JSON file that the widget backend can read directly,
     avoiding the need to import the entire mindroom.tools module at runtime.
     """
-    output_path = Path(__file__).parent.parent / "mindroom/tools_metadata.json"
+    output_path = Path(__file__).parent.parent / "src/mindroom/tools_metadata.json"
 
     tools = export_tools_metadata()
 
