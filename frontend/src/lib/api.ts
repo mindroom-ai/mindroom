@@ -53,11 +53,19 @@ export const API_ENDPOINTS = {
 
   // Knowledge base operations
   knowledge: {
-    files: `${API_BASE_URL}/api/knowledge/files`,
-    upload: `${API_BASE_URL}/api/knowledge/upload`,
-    deleteFile: (path: string) => `${API_BASE_URL}/api/knowledge/files/${encodeURIComponent(path)}`,
-    status: `${API_BASE_URL}/api/knowledge/status`,
-    reindex: `${API_BASE_URL}/api/knowledge/reindex`,
+    bases: `${API_BASE_URL}/api/knowledge/bases`,
+    files: (baseId: string) =>
+      `${API_BASE_URL}/api/knowledge/bases/${encodeURIComponent(baseId)}/files`,
+    upload: (baseId: string) =>
+      `${API_BASE_URL}/api/knowledge/bases/${encodeURIComponent(baseId)}/upload`,
+    deleteFile: (baseId: string, path: string) =>
+      `${API_BASE_URL}/api/knowledge/bases/${encodeURIComponent(baseId)}/files/${encodeURIComponent(
+        path
+      )}`,
+    status: (baseId: string) =>
+      `${API_BASE_URL}/api/knowledge/bases/${encodeURIComponent(baseId)}/status`,
+    reindex: (baseId: string) =>
+      `${API_BASE_URL}/api/knowledge/bases/${encodeURIComponent(baseId)}/reindex`,
   },
 
   // Other endpoints

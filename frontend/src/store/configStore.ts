@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { Config, Agent, Team, Room, ModelConfig, KnowledgeConfig } from '@/types/config';
+import { Config, Agent, Team, Room, ModelConfig, KnowledgeBaseConfig } from '@/types/config';
 import * as configService from '@/services/configService';
 
 interface ConfigState {
@@ -35,7 +35,9 @@ interface ConfigState {
   removeAgentFromRoom: (roomId: string, agentId: string) => void;
   updateRoomModels: (roomModels: Record<string, string>) => void;
   updateMemoryConfig: (memoryConfig: { provider: string; model: string; host?: string }) => void;
-  updateKnowledgeConfig: (knowledgeConfig: KnowledgeConfig) => void;
+  updateKnowledgeBase: (baseName: string, baseConfig: KnowledgeBaseConfig) => void;
+  createKnowledgeBase: (baseName: string, baseConfig: KnowledgeBaseConfig) => void;
+  deleteKnowledgeBase: (baseName: string) => void;
   updateModel: (modelId: string, updates: Partial<ModelConfig>) => void;
   deleteModel: (modelId: string) => void;
   updateToolConfig: (toolId: string, config: any) => void;
@@ -62,18 +64,22 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set({ isLoading: true, error: null });
     try {
       const config = await configService.loadConfig();
+      const normalizedConfig: Config = {
+        ...config,
+        knowledge_bases: config.knowledge_bases || {},
+      };
       const defaultLearning = config.defaults?.learning ?? true;
       const defaultLearningMode = config.defaults?.learning_mode ?? 'always';
-      const agents = Object.entries(config.agents).map(([id, agent]) => ({
+      const agents = Object.entries(normalizedConfig.agents).map(([id, agent]) => ({
         id,
         ...agent,
         skills: agent.skills ?? [],
-        knowledge: agent.knowledge ?? false,
+        knowledge_base: agent.knowledge_base ?? null,
         learning: agent.learning ?? defaultLearning,
         learning_mode: agent.learning_mode ?? defaultLearningMode,
       }));
-      const teams = config.teams
-        ? Object.entries(config.teams).map(([id, team]) => ({
+      const teams = normalizedConfig.teams
+        ? Object.entries(normalizedConfig.teams).map(([id, team]) => ({
             id,
             ...team,
           }))
@@ -98,7 +104,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       });
 
       set({
-        config,
+        config: normalizedConfig,
         agents,
         teams,
         rooms,
@@ -193,7 +199,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     const newAgent: Agent = {
       id,
       ...agentData,
-      knowledge: agentData.knowledge ?? false,
+      knowledge_base: agentData.knowledge_base ?? null,
       learning: agentData.learning ?? defaultLearning,
       learning_mode: agentData.learning_mode ?? defaultLearningMode,
     };
@@ -468,17 +474,62 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     });
   },
 
-  // Update knowledge configuration
-  updateKnowledgeConfig: knowledgeConfig => {
+  // Update one knowledge base configuration
+  updateKnowledgeBase: (baseName, baseConfig) => {
     set(state => {
       if (!state.config) return state;
       return {
         config: {
           ...state.config,
-          knowledge: {
-            ...knowledgeConfig,
+          knowledge_bases: {
+            ...(state.config.knowledge_bases || {}),
+            [baseName]: {
+              ...baseConfig,
+            },
           },
         },
+        isDirty: true,
+      };
+    });
+  },
+
+  // Create a new knowledge base
+  createKnowledgeBase: (baseName, baseConfig) => {
+    set(state => {
+      if (!state.config) return state;
+      return {
+        config: {
+          ...state.config,
+          knowledge_bases: {
+            ...(state.config.knowledge_bases || {}),
+            [baseName]: {
+              ...baseConfig,
+            },
+          },
+        },
+        isDirty: true,
+      };
+    });
+  },
+
+  // Delete a knowledge base and unassign it from agents
+  deleteKnowledgeBase: baseName => {
+    set(state => {
+      if (!state.config) return state;
+
+      const knowledgeBases = { ...(state.config.knowledge_bases || {}) };
+      delete knowledgeBases[baseName];
+
+      const agents = state.agents.map(agent =>
+        agent.knowledge_base === baseName ? { ...agent, knowledge_base: null } : agent
+      );
+
+      return {
+        config: {
+          ...state.config,
+          knowledge_bases: knowledgeBases,
+        },
+        agents,
         isDirty: true,
       };
     });

@@ -19,8 +19,7 @@ export interface MemoryConfig {
   };
 }
 
-export interface KnowledgeConfig {
-  enabled: boolean;
+export interface KnowledgeBaseConfig {
   path: string;
   watch: boolean;
 }
@@ -35,7 +34,7 @@ export interface Agent {
   skills: string[];
   instructions: string[];
   rooms: string[];
-  knowledge?: boolean;
+  knowledge_base?: string | null;
   num_history_runs: number;
   learning?: boolean; // Defaults to true when omitted
   learning_mode?: LearningMode; // Defaults to always when omitted
@@ -79,7 +78,7 @@ export interface VoiceConfig {
 
 export interface Config {
   memory: MemoryConfig;
-  knowledge?: KnowledgeConfig;
+  knowledge_bases?: Record<string, KnowledgeBaseConfig>;
   models: Record<string, ModelConfig>;
   agents: Record<string, Omit<Agent, 'id'>>;
   defaults: {

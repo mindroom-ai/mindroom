@@ -29,7 +29,7 @@ from .config_commands import handle_config_command
 from .constants import ENABLE_STREAMING, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, VOICE_PREFIX
 from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
-from .knowledge import initialize_knowledge_manager, shutdown_knowledge_manager
+from .knowledge import initialize_knowledge_managers, shutdown_knowledge_managers
 from .logging_config import emoji, get_logger, setup_logging
 from .matrix.client import (
     _latest_thread_event_id,
@@ -577,18 +577,29 @@ class AgentBot:
         """Get the Matrix ID for this agent bot."""
         return self.agent_user.matrix_id
 
-    def _get_shared_knowledge(self) -> Knowledge | None:
-        """Get shared knowledge instance when the orchestrator has one."""
+    def _get_shared_knowledge(self, base_id: str) -> Knowledge | None:
+        """Get shared knowledge instance for a configured knowledge base."""
         orchestrator = self.orchestrator
-        if orchestrator is None or orchestrator.knowledge_manager is None:
+        if orchestrator is None:
             return None
-        return orchestrator.knowledge_manager.get_knowledge()
+        manager = orchestrator.knowledge_managers.get(base_id)
+        if manager is None:
+            return None
+        return manager.get_knowledge()
 
     def _knowledge_for_agent(self, agent_name: str) -> Knowledge | None:
-        """Return shared knowledge for knowledge-enabled agents only."""
-        knowledge = self._get_shared_knowledge()
+        """Return shared knowledge for agents assigned to a knowledge base."""
         agent_config = self.config.agents.get(agent_name)
-        if knowledge is None or agent_config is None or not agent_config.knowledge:
+        if agent_config is None or agent_config.knowledge_base is None:
+            return None
+
+        knowledge = self._get_shared_knowledge(agent_config.knowledge_base)
+        if knowledge is None:
+            self.logger.warning(
+                "Knowledge base not available for agent",
+                agent_name=agent_name,
+                knowledge_base=agent_config.knowledge_base,
+            )
             return None
         return knowledge
 
@@ -2270,7 +2281,7 @@ class MultiAgentOrchestrator:
     running: bool = field(default=False, init=False)
     config: Config | None = field(default=None, init=False)
     _sync_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
-    knowledge_manager: KnowledgeManager | None = field(default=None, init=False)
+    knowledge_managers: dict[str, KnowledgeManager] = field(default_factory=dict, init=False)
 
     async def _ensure_user_account(self) -> None:
         """Ensure a user account exists, creating one if necessary.
@@ -2287,11 +2298,11 @@ class MultiAgentOrchestrator:
         logger.info(f"User account ready: {user_account.user_id}")
 
     async def _configure_knowledge(self, config: Config, *, start_watcher: bool) -> None:
-        """Initialize or reconfigure the knowledge manager for the current config."""
-        self.knowledge_manager = await initialize_knowledge_manager(
+        """Initialize or reconfigure knowledge managers for the current config."""
+        self.knowledge_managers = await initialize_knowledge_managers(
             config=config,
             storage_path=self.storage_path,
-            start_watcher=start_watcher,
+            start_watchers=start_watcher,
         )
 
     async def initialize(self) -> None:
@@ -2502,8 +2513,8 @@ class MultiAgentOrchestrator:
     async def stop(self) -> None:
         """Stop all agent bots."""
         self.running = False
-        await shutdown_knowledge_manager()
-        self.knowledge_manager = None
+        await shutdown_knowledge_managers()
+        self.knowledge_managers = {}
 
         # First cancel all sync tasks
         for entity_name in list(self._sync_tasks.keys()):

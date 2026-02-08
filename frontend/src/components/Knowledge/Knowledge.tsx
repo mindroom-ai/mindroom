@@ -11,14 +11,21 @@ import { type ColumnDef, flexRender, getCoreRowModel, useReactTable } from '@tan
 import { API_ENDPOINTS } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { useConfigStore } from '@/store/configStore';
-import type { KnowledgeConfig as KnowledgeSettings } from '@/types/config';
+import type { KnowledgeBaseConfig } from '@/types/config';
 import { useToast } from '@/components/ui/use-toast';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
-import { RefreshCw, Trash2, Upload } from 'lucide-react';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Plus, RefreshCw, Trash2, Upload } from 'lucide-react';
 
 interface KnowledgeFile {
   name: string;
@@ -29,21 +36,35 @@ interface KnowledgeFile {
 }
 
 interface KnowledgeStatus {
-  enabled: boolean;
+  base_id: string;
   folder_path: string;
+  watch: boolean;
   file_count: number;
   indexed_count: number;
 }
 
 interface KnowledgeFilesResponse {
+  base_id: string;
   files: KnowledgeFile[];
   total_size: number;
   file_count: number;
 }
 
-const DEFAULT_SETTINGS: KnowledgeSettings = {
-  enabled: false,
-  path: './knowledge_docs',
+interface KnowledgeBaseSummary {
+  name: string;
+  path: string;
+  watch: boolean;
+  file_count: number;
+  indexed_count: number;
+}
+
+interface KnowledgeBasesResponse {
+  bases: KnowledgeBaseSummary[];
+  count: number;
+}
+
+const DEFAULT_BASE_SETTINGS: KnowledgeBaseConfig = {
+  path: './knowledge_docs/default',
   watch: true,
 };
 
@@ -57,6 +78,20 @@ function formatBytes(bytes: number): string {
 function formatModifiedDate(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function defaultPathForBase(baseName: string): string {
+  return `./knowledge_docs/${baseName}`;
+}
+
+function validateBaseName(baseName: string): string | null {
+  if (!baseName.trim()) {
+    return 'Base name is required';
+  }
+  if (!/^[a-zA-Z0-9_-]+$/.test(baseName)) {
+    return 'Base name can only contain letters, numbers, underscores, and hyphens';
+  }
+  return null;
 }
 
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
@@ -77,31 +112,87 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
 }
 
 export function Knowledge() {
-  const { config, updateKnowledgeConfig, saveConfig, isDirty } = useConfigStore();
+  const {
+    config,
+    updateKnowledgeBase,
+    createKnowledgeBase,
+    deleteKnowledgeBase,
+    saveConfig,
+    isDirty,
+  } = useConfigStore();
   const { toast } = useToast();
 
+  const [selectedBase, setSelectedBase] = useState<string>('');
+  const [newBaseName, setNewBaseName] = useState('');
+  const [baseSummaries, setBaseSummaries] = useState<KnowledgeBaseSummary[]>([]);
   const [files, setFiles] = useState<KnowledgeFile[]>([]);
   const [status, setStatus] = useState<KnowledgeStatus | null>(null);
-  const [settings, setSettings] = useState<KnowledgeSettings>(DEFAULT_SETTINGS);
+  const [settings, setSettings] = useState<KnowledgeBaseConfig>(DEFAULT_BASE_SETTINGS);
   const [totalSize, setTotalSize] = useState(0);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [reindexing, setReindexing] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
+  const [creatingBase, setCreatingBase] = useState(false);
+  const [deletingBase, setDeletingBase] = useState(false);
   const [deletingPath, setDeletingPath] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const loadData = useCallback(async () => {
+  const knowledgeBases = config?.knowledge_bases || {};
+  const baseNames = useMemo(() => Object.keys(knowledgeBases).sort(), [knowledgeBases]);
+
+  useEffect(() => {
+    if (baseNames.length === 0) {
+      if (selectedBase !== '') {
+        setSelectedBase('');
+      }
+      return;
+    }
+
+    if (!selectedBase || !baseNames.includes(selectedBase)) {
+      setSelectedBase(baseNames[0]);
+    }
+  }, [baseNames, selectedBase]);
+
+  useEffect(() => {
+    if (!selectedBase) {
+      setSettings(DEFAULT_BASE_SETTINGS);
+      return;
+    }
+
+    const selectedConfig = knowledgeBases[selectedBase];
+    if (!selectedConfig) {
+      setSettings(DEFAULT_BASE_SETTINGS);
+      return;
+    }
+
+    setSettings({
+      path: selectedConfig.path,
+      watch: selectedConfig.watch,
+    });
+  }, [knowledgeBases, selectedBase]);
+
+  const loadData = useCallback(async (baseId: string | null) => {
     setLoading(true);
     setError(null);
 
     try {
+      const summaries = await fetchJson<KnowledgeBasesResponse>(API_ENDPOINTS.knowledge.bases);
+      setBaseSummaries(summaries.bases);
+
+      if (!baseId) {
+        setFiles([]);
+        setStatus(null);
+        setTotalSize(0);
+        return;
+      }
+
       const [statusData, filesData] = await Promise.all([
-        fetchJson<KnowledgeStatus>(API_ENDPOINTS.knowledge.status),
-        fetchJson<KnowledgeFilesResponse>(API_ENDPOINTS.knowledge.files),
+        fetchJson<KnowledgeStatus>(API_ENDPOINTS.knowledge.status(baseId)),
+        fetchJson<KnowledgeFilesResponse>(API_ENDPOINTS.knowledge.files(baseId)),
       ]);
 
       setStatus(statusData);
@@ -116,31 +207,22 @@ export function Knowledge() {
   }, []);
 
   useEffect(() => {
-    loadData();
-  }, [loadData]);
-
-  useEffect(() => {
-    const knowledgeConfig = config?.knowledge;
-    if (!knowledgeConfig) {
-      setSettings(DEFAULT_SETTINGS);
-      return;
-    }
-    setSettings({
-      enabled: knowledgeConfig.enabled,
-      path: knowledgeConfig.path,
-      watch: knowledgeConfig.watch,
-    });
-  }, [config]);
+    void loadData(selectedBase || null);
+  }, [selectedBase, loadData]);
 
   const updateSettings = useCallback(
-    (updates: Partial<KnowledgeSettings>) => {
+    (updates: Partial<KnowledgeBaseConfig>) => {
+      if (!selectedBase) {
+        return;
+      }
+
       setSettings(previous => {
         const next = { ...previous, ...updates };
-        updateKnowledgeConfig(next);
+        updateKnowledgeBase(selectedBase, next);
         return next;
       });
     },
-    [updateKnowledgeConfig]
+    [selectedBase, updateKnowledgeBase]
   );
 
   const handleSaveSettings = useCallback(async () => {
@@ -148,7 +230,7 @@ export function Knowledge() {
     setError(null);
     try {
       await saveConfig();
-      await loadData();
+      await loadData(selectedBase || null);
       toast({
         title: 'Knowledge settings saved',
         description: 'Configuration has been updated.',
@@ -164,11 +246,89 @@ export function Knowledge() {
     } finally {
       setSavingSettings(false);
     }
-  }, [loadData, saveConfig, toast]);
+  }, [loadData, saveConfig, selectedBase, toast]);
+
+  const handleCreateBase = useCallback(async () => {
+    const baseName = newBaseName.trim();
+    const validationError = validateBaseName(baseName);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+
+    if (baseNames.includes(baseName)) {
+      setError(`Knowledge base '${baseName}' already exists`);
+      return;
+    }
+
+    setCreatingBase(true);
+    setError(null);
+
+    try {
+      createKnowledgeBase(baseName, {
+        path: defaultPathForBase(baseName),
+        watch: true,
+      });
+      await saveConfig();
+      setSelectedBase(baseName);
+      setNewBaseName('');
+      await loadData(baseName);
+      toast({
+        title: 'Knowledge base created',
+        description: `Base '${baseName}' is ready for uploads.`,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to create knowledge base';
+      setError(message);
+      toast({
+        title: 'Create failed',
+        description: message,
+        variant: 'destructive',
+      });
+    } finally {
+      setCreatingBase(false);
+    }
+  }, [baseNames, createKnowledgeBase, loadData, newBaseName, saveConfig, toast]);
+
+  const handleDeleteBase = useCallback(async () => {
+    if (!selectedBase) {
+      return;
+    }
+
+    if (!window.confirm(`Delete knowledge base '${selectedBase}'?`)) {
+      return;
+    }
+
+    const nextBase = baseNames.filter(name => name !== selectedBase)[0] || null;
+
+    setDeletingBase(true);
+    setError(null);
+
+    try {
+      deleteKnowledgeBase(selectedBase);
+      await saveConfig();
+      setSelectedBase(nextBase || '');
+      await loadData(nextBase);
+      toast({
+        title: 'Knowledge base deleted',
+        description: `Deleted '${selectedBase}'.`,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to delete knowledge base';
+      setError(message);
+      toast({
+        title: 'Delete failed',
+        description: message,
+        variant: 'destructive',
+      });
+    } finally {
+      setDeletingBase(false);
+    }
+  }, [baseNames, deleteKnowledgeBase, loadData, saveConfig, selectedBase, toast]);
 
   const uploadFiles = useCallback(
     async (selectedFiles: File[]) => {
-      if (selectedFiles.length === 0) {
+      if (selectedFiles.length === 0 || !selectedBase) {
         return;
       }
 
@@ -181,16 +341,16 @@ export function Knowledge() {
       setError(null);
 
       try {
-        await fetchJson<{ uploaded: string[] }>(API_ENDPOINTS.knowledge.upload, {
+        await fetchJson<{ uploaded: string[] }>(API_ENDPOINTS.knowledge.upload(selectedBase), {
           method: 'POST',
           body: formData,
         });
-        await loadData();
+        await loadData(selectedBase);
         toast({
           title: 'Upload complete',
           description: `Uploaded ${selectedFiles.length} file${
             selectedFiles.length === 1 ? '' : 's'
-          }.`,
+          } to '${selectedBase}'.`,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Failed to upload files';
@@ -204,12 +364,16 @@ export function Knowledge() {
         setUploading(false);
       }
     },
-    [loadData, toast]
+    [loadData, selectedBase, toast]
   );
 
-  const handleDelete = useCallback(
+  const handleDeleteFile = useCallback(
     async (path: string) => {
-      if (!window.confirm(`Delete '${path}' from the knowledge folder?`)) {
+      if (!selectedBase) {
+        return;
+      }
+
+      if (!window.confirm(`Delete '${path}' from knowledge base '${selectedBase}'?`)) {
         return;
       }
 
@@ -217,10 +381,13 @@ export function Knowledge() {
       setError(null);
 
       try {
-        await fetchJson<{ success: boolean }>(API_ENDPOINTS.knowledge.deleteFile(path), {
-          method: 'DELETE',
-        });
-        await loadData();
+        await fetchJson<{ success: boolean }>(
+          API_ENDPOINTS.knowledge.deleteFile(selectedBase, path),
+          {
+            method: 'DELETE',
+          }
+        );
+        await loadData(selectedBase);
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Failed to delete file';
         setError(message);
@@ -233,21 +400,25 @@ export function Knowledge() {
         setDeletingPath(null);
       }
     },
-    [loadData, toast]
+    [loadData, selectedBase, toast]
   );
 
   const handleReindex = useCallback(async () => {
+    if (!selectedBase) {
+      return;
+    }
+
     setReindexing(true);
     setError(null);
 
     try {
-      await fetchJson<{ indexed_count: number }>(API_ENDPOINTS.knowledge.reindex, {
+      await fetchJson<{ indexed_count: number }>(API_ENDPOINTS.knowledge.reindex(selectedBase), {
         method: 'POST',
       });
-      await loadData();
+      await loadData(selectedBase);
       toast({
         title: 'Reindex complete',
-        description: 'Knowledge index rebuilt successfully.',
+        description: `Knowledge base '${selectedBase}' rebuilt successfully.`,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to reindex knowledge files';
@@ -260,7 +431,7 @@ export function Knowledge() {
     } finally {
       setReindexing(false);
     }
-  }, [loadData, toast]);
+  }, [loadData, selectedBase, toast]);
 
   const columns: ColumnDef<KnowledgeFile>[] = useMemo(
     () => [
@@ -297,8 +468,8 @@ export function Knowledge() {
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => handleDelete(row.original.path)}
-              disabled={deletingPath === row.original.path}
+              onClick={() => handleDeleteFile(row.original.path)}
+              disabled={deletingPath === row.original.path || isDirty}
               title="Delete file"
             >
               <Trash2 className="h-4 w-4 text-destructive" />
@@ -307,7 +478,7 @@ export function Knowledge() {
         ),
       },
     ],
-    [deletingPath, handleDelete]
+    [deletingPath, handleDeleteFile, isDirty]
   );
 
   const table = useReactTable({
@@ -338,103 +509,143 @@ export function Knowledge() {
     );
   }
 
-  const enabled = status?.enabled ?? false;
-
   return (
     <div className="h-full overflow-hidden">
       <div className="h-full flex flex-col gap-4">
         <Card>
           <CardHeader className="pb-3">
-            <CardTitle className="text-xl">Knowledge Base</CardTitle>
+            <CardTitle className="text-xl">Knowledge Bases</CardTitle>
             <CardDescription>
-              Upload files to make them searchable by knowledge-enabled agents.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge variant={enabled ? 'default' : 'secondary'}>
-                {enabled ? 'Enabled' : 'Disabled'}
-              </Badge>
-              <Badge variant="outline">Files: {status?.file_count ?? 0}</Badge>
-              <Badge variant="outline">Indexed: {status?.indexed_count ?? 0}</Badge>
-              <Badge variant="outline">Total Size: {formatBytes(totalSize)}</Badge>
-            </div>
-            <p className="text-sm text-muted-foreground">
-              Folder: <code>{status?.folder_path ?? '-'}</code>
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base">Knowledge Settings</CardTitle>
-            <CardDescription>
-              Configure whether knowledge is enabled, where files are stored, and watcher behavior.
+              Manage separate knowledge bases and assign agents to a specific base.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="flex items-center justify-between rounded-md border p-3">
-              <div className="space-y-1">
-                <p className="text-sm font-medium">Enable Knowledge</p>
-                <p className="text-xs text-muted-foreground">
-                  Turn knowledge indexing and search on or off globally.
-                </p>
-              </div>
-              <Checkbox
-                checked={settings.enabled}
-                onCheckedChange={checked => updateSettings({ enabled: checked === true })}
-              />
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="outline">Configured Bases: {baseSummaries.length}</Badge>
+              {selectedBase && <Badge variant="default">Active: {selectedBase}</Badge>}
             </div>
 
-            <div className="space-y-2">
-              <label className="text-sm font-medium" htmlFor="knowledge-path">
-                Knowledge Folder Path
-              </label>
-              <Input
-                id="knowledge-path"
-                value={settings.path}
-                onChange={event => updateSettings({ path: event.target.value })}
-                placeholder="./knowledge_docs"
-              />
-            </div>
+            <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-3">
+              <Select value={selectedBase || undefined} onValueChange={setSelectedBase}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select a knowledge base" />
+                </SelectTrigger>
+                <SelectContent>
+                  {baseNames.map(baseName => (
+                    <SelectItem key={baseName} value={baseName}>
+                      {baseName}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
 
-            <div className="flex items-center justify-between rounded-md border p-3">
-              <div className="space-y-1">
-                <p className="text-sm font-medium">Watch Folder</p>
-                <p className="text-xs text-muted-foreground">
-                  Automatically index file additions and updates.
-                </p>
-              </div>
-              <Checkbox
-                checked={settings.watch}
-                onCheckedChange={checked => updateSettings({ watch: checked === true })}
-              />
-            </div>
-
-            <div className="flex justify-end">
               <Button
                 variant="outline"
-                onClick={handleSaveSettings}
-                disabled={savingSettings || !isDirty}
+                onClick={handleDeleteBase}
+                disabled={!selectedBase || deletingBase || isDirty}
               >
-                {savingSettings ? 'Saving...' : 'Save Settings'}
+                <Trash2 className="h-4 w-4 mr-2" />
+                {deletingBase ? 'Deleting...' : 'Delete Base'}
+              </Button>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-3">
+              <Input
+                value={newBaseName}
+                onChange={event => setNewBaseName(event.target.value)}
+                placeholder="new_base_name"
+              />
+              <Button
+                variant="outline"
+                onClick={handleCreateBase}
+                disabled={creatingBase || isDirty}
+              >
+                <Plus className="h-4 w-4 mr-2" />
+                {creatingBase ? 'Creating...' : 'Add Base'}
               </Button>
             </div>
           </CardContent>
         </Card>
 
-        {error && (
-          <Card className="border-destructive/30">
-            <CardContent className="py-3 text-sm text-destructive">{error}</CardContent>
+        {selectedBase ? (
+          <>
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base">Base Settings</CardTitle>
+                <CardDescription>
+                  Configure folder path and watcher behavior for <code>{selectedBase}</code>.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium" htmlFor="knowledge-path">
+                    Folder Path
+                  </label>
+                  <Input
+                    id="knowledge-path"
+                    value={settings.path}
+                    onChange={event => updateSettings({ path: event.target.value })}
+                    placeholder={defaultPathForBase(selectedBase)}
+                  />
+                </div>
+
+                <div className="flex items-center justify-between rounded-md border p-3">
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium">Watch Folder</p>
+                    <p className="text-xs text-muted-foreground">
+                      Automatically index file additions and updates.
+                    </p>
+                  </div>
+                  <Checkbox
+                    checked={settings.watch}
+                    onCheckedChange={checked => updateSettings({ watch: checked === true })}
+                  />
+                </div>
+
+                <div className="flex justify-end">
+                  <Button
+                    variant="outline"
+                    onClick={handleSaveSettings}
+                    disabled={savingSettings || !isDirty}
+                  >
+                    {savingSettings ? 'Saving...' : 'Save Settings'}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardContent className="py-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant="outline">Files: {status?.file_count ?? 0}</Badge>
+                  <Badge variant="outline">Indexed: {status?.indexed_count ?? 0}</Badge>
+                  <Badge variant="outline">Total Size: {formatBytes(totalSize)}</Badge>
+                </div>
+                <p className="text-sm text-muted-foreground mt-2">
+                  Folder: <code>{status?.folder_path ?? '-'}</code>
+                </p>
+              </CardContent>
+            </Card>
+          </>
+        ) : (
+          <Card>
+            <CardContent className="py-4 text-sm text-muted-foreground">
+              No knowledge bases configured yet. Add one above to start uploading files.
+            </CardContent>
           </Card>
         )}
 
-        {!enabled && (
-          <Card>
-            <CardContent className="py-4 text-sm text-muted-foreground">
-              Knowledge is disabled in configuration. Set <code>knowledge.enabled: true</code> to
-              enable indexing.
+        {isDirty && (
+          <Card className="border-amber-500/30">
+            <CardContent className="py-3 text-sm text-amber-700 dark:text-amber-300">
+              Save settings before uploading, deleting, or reindexing files.
             </CardContent>
+          </Card>
+        )}
+
+        {error && (
+          <Card className="border-destructive/30">
+            <CardContent className="py-3 text-sm text-destructive">{error}</CardContent>
           </Card>
         )}
 
@@ -472,12 +683,16 @@ export function Knowledge() {
                 <Button
                   variant="outline"
                   onClick={() => fileInputRef.current?.click()}
-                  disabled={uploading}
+                  disabled={uploading || !selectedBase || isDirty}
                 >
                   <Upload className="h-4 w-4 mr-2" />
                   {uploading ? 'Uploading...' : 'Upload'}
                 </Button>
-                <Button variant="outline" onClick={handleReindex} disabled={reindexing || !enabled}>
+                <Button
+                  variant="outline"
+                  onClick={handleReindex}
+                  disabled={reindexing || !selectedBase || isDirty}
+                >
                   <RefreshCw className={cn('h-4 w-4 mr-2', reindexing && 'animate-spin')} />
                   {reindexing ? 'Reindexing...' : 'Reindex'}
                 </Button>

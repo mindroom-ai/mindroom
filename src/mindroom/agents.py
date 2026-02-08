@@ -216,7 +216,7 @@ def create_agent(
 
     instructions.append(agent_prompts.INTERACTIVE_QUESTION_PROMPT)
 
-    knowledge_enabled = agent_config.knowledge and knowledge is not None
+    knowledge_enabled = agent_config.knowledge_base is not None and knowledge is not None
 
     agent = Agent(
         name=agent_config.display_name,
