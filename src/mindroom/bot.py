@@ -2433,7 +2433,7 @@ class MultiAgentOrchestrator:
         # Also check for new entities that didn't exist before
         all_new_entities = set(new_config.agents.keys()) | set(new_config.teams.keys()) | {ROUTER_AGENT_NAME}
         existing_entities = set(self.agent_bots.keys())
-        new_entities = all_new_entities - existing_entities
+        new_entities = all_new_entities - existing_entities - entities_to_restart
 
         # Always update the orchestrator's config first
         self.config = new_config

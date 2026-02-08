@@ -197,6 +197,98 @@ async def test_orchestrator_update_config_cancels_old_tasks() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(10)
+async def test_new_agent_not_started_twice() -> None:
+    """Regression: a brand-new agent must only be started once.
+
+    Before the fix, _get_changed_agents treated a new agent (old=None,
+    new=exists) as "changed", so the agent appeared in both
+    entities_to_restart AND new_entities.  update_config processed both
+    sets, creating two bot instances with two sync loops for the same
+    agent — causing duplicate replies.
+    """
+    with (
+        patch("mindroom.bot.Config.from_yaml") as mock_from_yaml,
+        patch("mindroom.bot.create_bot_for_entity") as mock_create_bot,
+        patch("mindroom.bot._sync_forever_with_restart"),
+        patch("mindroom.bot._stop_entities") as mock_stop_entities,
+        patch("mindroom.bot._create_temp_user") as mock_create_temp_user,
+        patch.object(MultiAgentOrchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
+    ):
+        # --- existing orchestrator with one agent running ---
+        orchestrator = MultiAgentOrchestrator(storage_path=MagicMock())
+
+        old_config = Config(
+            agents={  # type: ignore[arg-type]
+                "general": {
+                    "display_name": "GeneralAgent",
+                    "role": "General assistant",
+                    "model": "default",
+                    "rooms": ["lobby"],
+                },
+            },
+            models={"default": {"provider": "test", "id": "test-model"}},  # type: ignore[arg-type]
+        )
+        orchestrator.config = old_config
+
+        mock_existing_bot = AsyncMock()
+        mock_existing_bot.config = old_config
+        orchestrator.agent_bots = {"general": mock_existing_bot, "router": AsyncMock()}
+        orchestrator._sync_tasks = {
+            "general": MagicMock(spec=asyncio.Task),
+            "router": MagicMock(spec=asyncio.Task),
+        }
+
+        # --- new config adds "coach" ---
+        new_config = Config(
+            agents={  # type: ignore[arg-type]
+                "general": {
+                    "display_name": "GeneralAgent",
+                    "role": "General assistant",
+                    "model": "default",
+                    "rooms": ["lobby"],
+                },
+                "coach": {
+                    "display_name": "Coach",
+                    "role": "Personal coaching",
+                    "model": "default",
+                    "rooms": ["lobby", "personal"],
+                },
+            },
+            models={"default": {"provider": "test", "id": "test-model"}},  # type: ignore[arg-type]
+        )
+        mock_from_yaml.return_value = new_config
+
+        # Mock bot creation — record every call
+        created_bots: list[AsyncMock] = []
+
+        def make_bot(*args, **kwargs):  # noqa: ANN002, ANN003, ARG001, ANN201
+            bot = AsyncMock()
+            bot.try_start = AsyncMock(return_value=True)
+            bot.sync_forever = AsyncMock()
+            created_bots.append(bot)
+            return bot
+
+        mock_create_bot.side_effect = make_bot
+        mock_create_temp_user.return_value = MagicMock()
+
+        # --- act ---
+        await orchestrator.update_config()
+
+        # --- assert: create_bot_for_entity called exactly once for "coach" ---
+        coach_calls = [
+            c for c in mock_create_bot.call_args_list if c[0][0] == "coach"
+        ]
+        assert len(coach_calls) == 1, (
+            f"Expected create_bot_for_entity to be called once for 'coach', "
+            f"but was called {len(coach_calls)} times"
+        )
+
+        # Also verify only one sync task is tracked for coach
+        assert "coach" in orchestrator._sync_tasks
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_stop_cancels_all_tasks() -> None:
     """Test that stop() cancels all sync tasks."""
     with patch("mindroom.bot._cancel_sync_task") as mock_cancel:
