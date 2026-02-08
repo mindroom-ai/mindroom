@@ -82,13 +82,13 @@ agents:
   assistant:
     display_name: Assistant
     role: A helpful AI assistant that can answer questions
-    model: sonnet
+    model: default
     rooms: [lobby]
 
 models:
-  sonnet:
+  default:
     provider: anthropic
-    id: claude-sonnet-4-latest
+    id: claude-sonnet-4-5-latest
 
 defaults:
   num_history_runs: 5

@@ -23,7 +23,7 @@ SAAS_MODELS = {
     },
     "sonnet": {
         "provider": "openrouter",
-        "id": "anthropic/claude-sonnet-4",
+        "id": "anthropic/claude-sonnet-4-5",
     },
     "deepseek": {
         "provider": "openrouter",
@@ -48,11 +48,11 @@ SAAS_MODELS = {
     },
     "opus": {
         "provider": "openrouter",
-        "id": "anthropic/claude-sonnet-4",
+        "id": "anthropic/claude-sonnet-4-5",
     },
     "gpt4o": {
         "provider": "openrouter",
-        "id": "anthropic/claude-sonnet-4",
+        "id": "anthropic/claude-sonnet-4-5",
     },
     "gpt_oss_120b": {
         "provider": "openrouter",

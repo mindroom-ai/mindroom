@@ -122,11 +122,11 @@ Email: I'll compile and send every Friday
 
 ### 🔐 Intelligent Trust Boundaries
 - Route sensitive data to local Ollama models on your hardware
-- Use GPT-5 for complex reasoning
+- Use GPT-5.2 for complex reasoning
 - Send general queries to cost-effective cloud models
 - You decide which AI sees what
 
-### 🔌 80+ Integrations
+### 🔌 100+ Integrations
 Gmail, GitHub, Spotify, Home Assistant, Google Drive, Reddit, weather services, news APIs, financial data, and many more. Your agents can interact with all your tools.
 
 ### 📅 Automation & Scheduling
@@ -220,25 +220,31 @@ This repository contains everything you need to self-host MindRoom. The `saas-pl
 
 ### Basic Setup
 
-1. Copy the example configuration:
-```bash
-cp config.example.yaml config.yaml
-```
-
-2. Edit `config.yaml` to add your API keys (optional):
+1. Create `config.yaml` (for example):
 ```yaml
+agents:
+  assistant:
+    display_name: Assistant
+    role: A helpful AI assistant
+    model: default
+    rooms: [lobby]
+
 models:
-  - provider: openai
-    api_key: your-key-here  # Or use environment variable
-  - provider: anthropic
-    api_key: your-key-here
-  - provider: ollama
-    host: http://localhost:11434  # For local models
+  default:
+    provider: anthropic
+    id: claude-sonnet-4-5-latest
+
+defaults:
+  num_history_runs: 5
+  markdown: true
 ```
 
-3. Configure your Matrix homeserver (optional, defaults to localhost:8008):
+2. Configure your Matrix homeserver and API keys (optional, defaults shown):
 ```bash
 export MATRIX_HOMESERVER=https://your-matrix.server
+export ANTHROPIC_API_KEY=your-key-here
+# Optional: use a non-default config location
+# export MINDROOM_CONFIG_PATH=/path/to/config.yaml
 ```
 
 ## Deployment Options
@@ -269,10 +275,10 @@ Mix and match:
 ## Architecture
 
 ### Technical Stack
-- **Matrix**: Conduit server (only 20-30MB RAM!)
+- **Matrix**: Any homeserver (Synapse, Conduit, Dendrite, etc.)
 - **Agents**: Python with matrix-nio
 - **AI Models**: OpenAI, Anthropic, Ollama, or any provider
-- **Memory**: Conversation-based (no separate database)
+- **Memory**: Mem0 + ChromaDB vector storage (persistent on disk)
 - **UI**: Web widget + any Matrix client
 
 ## Philosophy
@@ -288,11 +294,12 @@ We believe AI should be:
 ## Status
 
 - ✅ **Production ready** with 1000+ commits
-- ✅ **80+ integrations** working today
+- ✅ **100+ integrations** working today
 - ✅ **Multi-agent collaboration** with persistent memory
 - ✅ **Federation** across organizations and platforms
 - ✅ **Self-hosted & cloud** options available
-- 🚧 Voice interaction (STT/TTS) coming soon
+- ✅ **Voice transcription** for Matrix voice messages
+- ✅ **Text-to-speech tools** via OpenAI, Groq, ElevenLabs, and Cartesia
 - 🚧 Mobile apps in development
 - 🚧 Agent marketplace planned
 

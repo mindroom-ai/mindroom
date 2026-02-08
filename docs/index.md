@@ -13,7 +13,7 @@ MindRoom is an AI agent orchestration system with Matrix integration. It provide
 - **Multi-agent collaboration** - Configure multiple specialized agents that can work together
 - **Matrix-native** - Agents live in Matrix rooms and respond to messages
 - **Persistent memory** - Agent, room, and team-scoped memory that persists across conversations
-- **120+ tool integrations** - Connect to external services like GitHub, Slack, Gmail, and more
+- **100+ tool integrations** - Connect to external services like GitHub, Slack, Gmail, and more
 - **Hot-reload configuration** - Update `config.yaml` and agents restart automatically
 - **Scheduled tasks** - Schedule agents to run at specific times with cron expressions or natural language
 - **Voice messages** - Speech-to-text transcription with intelligent command recognition
@@ -64,13 +64,13 @@ agents:
   assistant:
     display_name: Assistant
     role: A helpful AI assistant
-    model: sonnet
+    model: default
     rooms: [lobby]
 
 models:
-  sonnet:
+  default:
     provider: anthropic
-    id: claude-sonnet-4-latest
+    id: claude-sonnet-4-5-latest
 
 defaults:
   num_history_runs: 5
@@ -101,7 +101,8 @@ mindroom run
 | **Teams** | Collaborative bundles of agents (coordinate or collaborate modes) |
 | **Router** | Built-in traffic director that routes messages to the right agent |
 | **Memory** | Mem0-inspired memory system with agent, room, and team scopes |
-| **Tools** | 120+ integrations for external services |
+| **Knowledge Bases** | File-backed RAG indexing with per-agent base assignment |
+| **Tools** | 100+ integrations for external services |
 | **Skills** | OpenClaw-compatible skills system for extended agent capabilities |
 | **Scheduling** | Schedule tasks with cron expressions or natural language |
 | **Voice** | Speech-to-text transcription for voice messages |
@@ -128,6 +129,7 @@ mindroom run
 - [Getting Started](getting-started.md) - Installation and first steps
 - [Configuration](configuration/index.md) - All configuration options
 - [Dashboard](dashboard.md) - Web UI for configuration
+- [Knowledge Bases](dashboard.md#knowledge) - Manage file-backed RAG bases and indexing
 - [Tools](tools/index.md) - Available tool integrations
 - [Skills](skills.md) - OpenClaw-compatible skills system
 - [Plugins](plugins.md) - Extend with custom tools and skills
@@ -142,4 +144,5 @@ mindroom run
 
 ## License
 
-MIT
+- **Repository (except `saas-platform/`)**: Apache License 2.0
+- **SaaS Platform** (`saas-platform/`): Business Source License 1.1 (converts to Apache 2.0 on 2030-02-06)

@@ -11,13 +11,17 @@ agents:
     - Provide clear explanations of MindRoom features and capabilities
     - Test agent configurations when requested
     - Help users understand how agents, teams, and tools work together
+    learning: true
+    learning_mode: always
     model: sonnet
     num_history_runs: 5
-    role: Expert MindRoom agent builder that helps create and configure custom AI agents with deep knowledge of the system
+    role: Expert MindRoom agent builder that helps create and configure custom AI
+      agents with deep knowledge of the system
     rooms:
     - lobby
     - dev
     - help
+    skills: []
     tools:
     - config_manager
   analyst:
@@ -27,12 +31,15 @@ agents:
     - Provide structured insights.
     - Consider multiple perspectives.
     - Make evidence-based recommendations.
+    learning: true
+    learning_mode: always
     model: sonnet
     num_history_runs: 5
     role: Provide analytical insights and recommendations.
     rooms:
     - lobby
     - analysis
+    skills: []
     tools: []
   calculator:
     display_name: CalculatorAgent
@@ -41,6 +48,8 @@ agents:
     - Show your work step by step.
     - Explain the mathematical concepts when helpful.
     - Double-check calculations for accuracy.
+    learning: true
+    learning_mode: always
     model: sonnet
     num_history_runs: 5
     role: Solve mathematical problems.
@@ -48,6 +57,7 @@ agents:
     - lobby
     - science
     - analysis
+    skills: []
     tools:
     - calculator
   callagent:
@@ -60,12 +70,15 @@ agents:
     - Handle phone numbers in international format when possible
     - Be concise and clear in SMS messages due to character limits
     - For calls, prepare a brief script of what will be communicated
+    learning: true
+    learning_mode: always
     model: sonnet
     num_history_runs: 5
     role: Manage phone calls and SMS messages through Twilio integration.
     rooms:
     - lobby
     - communication
+    skills: []
     tools:
     - twilio
   code:
@@ -78,13 +91,16 @@ agents:
     - Be careful with shell commands - explain what they do
     - Always read files before modifying them
     - Follow the project's existing style and conventions
-    model: sonnet
+    learning: true
+    learning_mode: always
+    model: opus
     num_history_runs: 5
     role: Generate code, manage files, and execute shell commands.
     rooms:
     - lobby
     - dev
     - automation
+    skills: []
     tools:
     - file
     - shell
@@ -97,6 +113,8 @@ agents:
     - Identify patterns and trends in data.
     - Provide actionable insights and recommendations.
     - Handle missing or inconsistent data appropriately.
+    learning: true
+    learning_mode: always
     model: sonnet
     num_history_runs: 5
     role: Analyze data, create visualizations, and provide insights.
@@ -106,6 +124,7 @@ agents:
     - science
     - finance
     - business
+    skills: []
     tools:
     - csv
     - calculator
@@ -122,13 +141,17 @@ agents:
     - Respect privacy - only access emails when specifically requested
     - When summarizing, focus on sender, subject, and key points
     - For email drafts, maintain appropriate tone and formality based on context
+    learning: true
+    learning_mode: always
     model: gpt5mini
     num_history_runs: 5
-    role: Manage and respond to emails efficiently using Gmail with Claude Sonnet's intelligence
+    role: Manage and respond to emails efficiently using Gmail with Claude Sonnet's
+      intelligence
     rooms:
     - lobby
     - communication
     - productivity
+    skills: []
     tools:
     - gmail
     - file
@@ -141,6 +164,8 @@ agents:
     - Explain financial concepts clearly.
     - Include relevant disclaimers about investment advice.
     - Present data in a clear, organized format.
+    learning: true
+    learning_mode: always
     model: sonnet
     num_history_runs: 5
     role: Analyze financial data, stock information, and perform calculations.
@@ -149,6 +174,7 @@ agents:
     - finance
     - analysis
     - business
+    skills: []
     tools:
     - yfinance
     - calculator
@@ -159,25 +185,31 @@ agents:
     - Remember context from the conversation.
     - Be conversational and friendly.
     - Ask clarifying questions when needed.
+    learning: true
+    learning_mode: always
     model: sonnet
     num_history_runs: 5
-    role: A general-purpose assistant that provides helpful, conversational responses to users.
+    role: A general-purpose assistant that provides helpful, conversational responses
+      to users.
     rooms:
     - lobby
     - help
+    skills: []
     tools: []
   home:
     display_name: HomeAssistant
     instructions:
     - You are a helpful home automation assistant
     - You can control lights, switches, climate devices, and other smart home devices
-    - Always confirm with the user before making significant changes, but go ahead with minor adjustments like turning lights
-      on/off
+    - Always confirm with the user before making significant changes, but go ahead
+      with minor adjustments like turning lights on/off
     - Provide helpful suggestions for automations and energy savings
     - Be proactive in suggesting improvements to the home setup
     - List available devices when asked about what you can control
     - Provide clear status updates after performing actions
     - Group related actions together for efficiency
+    learning: true
+    learning_mode: always
     model: sonnet
     num_history_runs: 5
     role: Control and monitor smart home devices through Home Assistant
@@ -185,6 +217,7 @@ agents:
     - lobby
     - automation
     - home
+    skills: []
     tools:
     - homeassistant
   news:
@@ -196,6 +229,8 @@ agents:
     - Include publication dates and sources.
     - Distinguish between news and opinion pieces.
     - Highlight key developments and their significance.
+    learning: true
+    learning_mode: always
     model: gpt_oss_120b
     num_history_runs: 5
     role: Gather and summarize news and current events.
@@ -204,6 +239,7 @@ agents:
     - news
     - research
     - business
+    skills: []
     tools:
     - duckduckgo
     - newspaper
@@ -216,6 +252,8 @@ agents:
     - Distinguish between facts and opinions.
     - Provide balanced viewpoints on controversial topics.
     - Summarize findings in a clear, organized manner.
+    learning: true
+    learning_mode: always
     model: gpt5mini
     num_history_runs: 5
     role: Conduct research using web sources, Wikipedia, and academic papers.
@@ -224,6 +262,7 @@ agents:
     - research
     - science
     - news
+    skills: []
     tools:
     - duckduckgo
     - wikipedia
@@ -235,12 +274,15 @@ agents:
     - Provide security best practices.
     - Identify potential vulnerabilities.
     - Suggest mitigation strategies.
+    learning: true
+    learning_mode: always
     model: sonnet
     num_history_runs: 5
     role: Analyze security aspects and provide recommendations.
     rooms:
     - lobby
     - dev
+    skills: []
     tools: []
   shell:
     display_name: ShellAgent
@@ -251,6 +293,8 @@ agents:
     - Provide clear output and error messages.
     - Suggest safer alternatives when appropriate.
     - Remember the user's working directory context.
+    learning: true
+    learning_mode: always
     model: sonnet
     num_history_runs: 5
     role: Execute shell commands and manage system operations.
@@ -259,6 +303,7 @@ agents:
     - dev
     - automation
     - ops
+    skills: []
     tools:
     - shell
   sleepy_paws:
@@ -266,28 +311,38 @@ agents:
     display_name: Sleepy Paws 🐾
     instructions:
     - Vertel altijd verhalen in het Nederlands
-    - Maak slaapverhaaltjes met Tom de Tijger (speels, nieuwsgierig, zacht) en Leo de Leeuw (moedig, beschermend, zorgzaam)
+    - Maak slaapverhaaltjes met Tom de Tijger (speels, nieuwsgierig, zacht) en Leo
+      de Leeuw (moedig, beschermend, zorgzaam)
     - Gebruik eenvoudige Nederlandse woorden geschikt voor 2-jarigen
-    - Voeg herhalende zinnen en patronen toe die peuters leuk vinden zoals 'Tom en Leo liepen en liepen...'
+    - Voeg herhalende zinnen en patronen toe die peuters leuk vinden zoals 'Tom en
+      Leo liepen en liepen...'
     - Houd verhalen 5-7 minuten lang voor optimale aandachtsspanne
     - Eindig verhalen altijd met de tweeling veilig thuis en klaar om te slapen
     - Voeg zachte dierengeluiden toe en eenvoudige interactieve elementen in het Nederlands
-    - 'Focus op positieve thema''s: vriendschap, vriendelijkheid, anderen helpen, familieliefde'
+    - 'Focus op positieve thema''s: vriendschap, vriendelijkheid, anderen helpen,
+      familieliefde'
     - Gebruik een steeds kalmere toon naarmate het verhaal naar het einde gaat
     - Vermijd enge, luide of overstimulerende inhoud
-    - 'Stel eenvoudige vragen om het kind te betrekken: ''Wat denk je dat Tom zag?'' of ''Moet Leo zijn vriend helpen?'''
-    - 'Voeg slaperige signalen toe tegen het einde: gapen, gezellige bedjes, sterrenlight, zachte wiegenliedjes'
-    - Gebruik Nederlandse uitdrukkingen en culturele elementen die geschikt zijn voor Nederlandse kinderen
+    - 'Stel eenvoudige vragen om het kind te betrekken: ''Wat denk je dat Tom zag?''
+      of ''Moet Leo zijn vriend helpen?'''
+    - 'Voeg slaperige signalen toe tegen het einde: gapen, gezellige bedjes, sterrenlight,
+      zachte wiegenliedjes'
+    - Gebruik Nederlandse uitdrukkingen en culturele elementen die geschikt zijn voor
+      Nederlandse kinderen
     - Maak de verhalen warm, gezellig en vertrouwd voor Nederlandse gezinnen
+    learning: true
+    learning_mode: always
     markdown: true
     model: sonnet
     num_history_runs: 5
-    role: Je bent Sleepy Paws, een magische verhalenverteller die zachte dierenaventuren creëert met de tweelingbroertjes
-      Tom de Tijger en Leo de Leeuw. Je specialiseert je in verhalen voor 2-jarigen met eenvoudige Nederlandse woordenschat,
-      herhalende patronen, rustgevende thema's en gezellige eindjes die kinderen helpen vredig in slaap te vallen. Vertel
-      altijd verhalen in het Nederlands.
+    role: Je bent Sleepy Paws, een magische verhalenverteller die zachte dierenaventuren
+      creëert met de tweelingbroertjes Tom de Tijger en Leo de Leeuw. Je specialiseert
+      je in verhalen voor 2-jarigen met eenvoudige Nederlandse woordenschat, herhalende
+      patronen, rustgevende thema's en gezellige eindjes die kinderen helpen vredig
+      in slaap te vallen. Vertel altijd verhalen in het Nederlands.
     rooms:
     - lobby
+    skills: []
     tools: []
   summary:
     display_name: SummaryAgent
@@ -298,6 +353,8 @@ agents:
     - Use bullet points for clarity when appropriate.
     - Indicate the level of detail in your summary.
     - Preserve important quotes or specific data points.
+    learning: true
+    learning_mode: always
     model: sonnet
     num_history_runs: 5
     role: Summarize long texts and extract key information.
@@ -305,12 +362,21 @@ agents:
     - lobby
     - research
     - docs
+    skills: []
     tools: []
+authorization:
+  default_room_access: false
+  global_users:
+  - '@test:m-test-4.mindroom.chat'
+  room_permissions: {}
 defaults:
   add_history_to_messages: true
+  learning: true
+  learning_mode: always
   markdown: true
   num_history_runs: 5
   show_stop_button: true
+knowledge_bases: {}
 memory:
   embedder:
     config:
@@ -324,20 +390,20 @@ memory:
       temperature: 0.1
     provider: openai
 models:
-  default:
-    id: gpt-oss-low:20b
-    provider: openai
-    extra_kwargs:
-      base_url: http://llama.local/v1
   deepseek:
     id: deepseek-ai/deepseek-chat:free
     provider: openrouter
-  gpt_oss_120b:
-    id: openai/gpt-oss-120b
-    provider: openrouter
+  default:
+    extra_kwargs:
+      base_url: http://llama.local/v1
+    id: gpt-oss-low:20b
+    provider: openai
   devstral:
     id: devstral:24b
     provider: ollama
+  gemini_flash:
+    id: gemini-2.5-flash
+    provider: google
   glm45:
     id: z-ai/glm-4.5-air:free
     provider: openrouter
@@ -350,22 +416,23 @@ models:
   gpt_oss:
     id: openai/gpt-oss-120b
     provider: openrouter
+  gpt_oss_120b:
+    id: openai/gpt-oss-120b
+    provider: openrouter
   haiku:
     id: claude-3-5-haiku-latest
     provider: anthropic
   ollama:
+    host: http://192.168.1.143:11434
     id: devstral:24b
     provider: ollama
-    host: http://192.168.1.143:11434
   opus:
-    id: claude-opus-4-latest
+    id: claude-opus-4-6-latest
     provider: anthropic
   sonnet:
-    id: claude-sonnet-4-latest
+    id: claude-sonnet-4-5-latest
     provider: anthropic
-  gemini_flash:
-    id: gemini-2.5-flash
-    provider: google
+plugins: []
 room_models:
   research: haiku
 router:
@@ -376,6 +443,7 @@ teams:
     - shell
     display_name: Code Team
     mode: coordinate
+    model: default
     role: New team description
     rooms: []
   super_team:
@@ -391,34 +459,11 @@ teams:
     rooms:
     - research
     - lobby
-
-# Timezone for displaying scheduled tasks (Seattle/Pacific Time)
 timezone: America/Los_Angeles
-
-# Voice message handling configuration
-# Configure to enable voice message transcription
 voice:
   enabled: true
-  stt:
-    provider: openai
-    model: whisper-1
-    # api_key: your-api-key-here  # Optional, uses OPENAI_API_KEY env var by default
-    # host: http://localhost:8080  # For self-hosted STT services
   intelligence:
-    model: sonnet  # Model for command recognition
-    confidence_threshold: 0.7
-
-# Authorization configuration with fine-grained permissions
-authorization:
-  # Users with access to all rooms
-  global_users:
-    - '@test:m-test-4.mindroom.chat'
-
-  # Room-specific permissions (example)
-  room_permissions: {}
-    # '!specific_room:example.com':
-    #   - '@user1:example.com'
-    #   - '@user2:example.com'
-
-  # Default permission for rooms not explicitly configured
-  default_room_access: false
+    model: sonnet
+  stt:
+    model: whisper-1
+    provider: openai

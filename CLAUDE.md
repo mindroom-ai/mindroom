@@ -31,7 +31,11 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 | `routing.py` | Intelligent agent selection when no agent is mentioned |
 | `teams.py` | Multi-agent collaboration (coordinate vs collaborate modes) |
 | `memory/` | Mem0-inspired dual memory: agent, room, and team-scoped |
-| `tools/` | 120+ tool integrations |
+| `knowledge.py` | Knowledge base / RAG file indexing with watcher |
+| `skills.py` | Skill integration system (OpenClaw-compatible) |
+| `plugins.py` | Plugin loading and tool/skill extension |
+| `scheduling.py` | Cron and natural-language task scheduling |
+| `tools/` | 100+ tool integrations |
 | `matrix/` | Matrix protocol integration (client, users, rooms, presence) |
 
 **Persistent state** lives under `mindroom_data/` (overridable via `STORAGE_PATH`):
@@ -79,17 +83,21 @@ defaults:
   markdown: true
 
 models:
+  default:
+    provider: anthropic
+    id: claude-sonnet-4-5-latest
   sonnet:
     provider: anthropic
-    id: claude-sonnet-4-latest
+    id: claude-sonnet-4-5-latest
 
 router:
-  model: ollama
+  model: default
 
 teams:
   super_team:
     display_name: Super Team
-    agents: [code, research, finance]
+    role: Collaborative engineering assistant
+    agents: [code]
     mode: collaborate
 
 timezone: America/Los_Angeles

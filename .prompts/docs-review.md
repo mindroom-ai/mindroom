@@ -77,6 +77,7 @@ For examples in any doc:
 - Would the `config.yaml` snippets actually work?
 - Are names and references realistic and current?
 - Do examples use current syntax (not deprecated options)?
+- Do setup snippets reference real files/flags/commands that exist in this repo/CLI?
 
 ### 6. Cross-Reference Consistency
 

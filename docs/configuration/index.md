@@ -8,10 +8,18 @@ MindRoom is configured through a `config.yaml` file. This section covers all con
 
 ## Configuration File
 
-The configuration file is loaded from the current directory by default. You can specify a different path:
+The configuration file defaults to `./config.yaml`. To use a different path:
 
 ```bash
-mindroom run --config /path/to/config.yaml
+MINDROOM_CONFIG_PATH=/path/to/config.yaml mindroom run
+```
+
+(`CONFIG_PATH` is also supported for compatibility.)
+
+You can also validate a specific file directly:
+
+```bash
+mindroom validate --config /path/to/config.yaml
 ```
 
 ## Basic Structure
@@ -32,12 +40,16 @@ agents:
     add_history_to_messages: true  # Optional: Override default (inherits from defaults section)
     learning: true                 # Optional: Override default (inherits from defaults section)
     learning_mode: always          # Optional: Override default (inherits from defaults section)
+    knowledge_base: docs           # Optional: Assign this agent to a configured knowledge base
 
 # Model configurations (at least a "default" model is recommended)
 models:
+  default:
+    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, groq, cerebras, openrouter, deepseek
+    id: claude-sonnet-4-5-latest     # Required: Model ID for the provider
   sonnet:
     provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, groq, cerebras, openrouter, deepseek
-    id: claude-sonnet-4-latest     # Required: Model ID for the provider
+    id: claude-sonnet-4-5-latest     # Required: Model ID for the provider
     host: null                     # Optional: Host URL (e.g., for Ollama)
     api_key: null                  # Optional: API key (usually from env vars)
     extra_kwargs: null             # Optional: Provider-specific parameters
@@ -54,14 +66,14 @@ teams:
 
 # Router configuration (optional)
 router:
-  model: haiku                     # Optional: Model for routing (default: "default")
+  model: default                   # Optional: Model for routing (default: "default")
 
 # Default settings for all agents (optional)
 defaults:
   num_history_runs: 5              # Default: 5
   markdown: true                   # Default: true
   add_history_to_messages: true    # Default: true
-  show_stop_button: false          # Default: false
+  show_stop_button: false          # Default: false (global only, cannot be overridden per-agent)
   learning: true                   # Default: true
   learning_mode: always            # Default: always (or agentic)
 
@@ -77,6 +89,12 @@ memory:
     provider: ollama
     config: {}
 
+# Knowledge base configuration (optional)
+knowledge_bases:
+  docs:
+    path: ./knowledge_docs/default # Folder containing documents for this base
+    watch: true                    # Reindex automatically when files change
+
 # Voice message handling (optional)
 voice:
   enabled: false                   # Default: false
@@ -87,7 +105,6 @@ voice:
     host: null
   intelligence:
     model: default                 # Model for command recognition
-    confidence_threshold: 0.7      # Default: 0.7
 
 # Authorization (optional)
 authorization:
@@ -96,6 +113,8 @@ authorization:
   default_room_access: false       # Default: false
 
 # Room-specific model overrides (optional)
+# Keys are room aliases, values are model names from the models section
+# Example: room_models: {dev: sonnet, lobby: gpt4o}
 room_models: {}
 
 # Plugin paths (optional)
@@ -111,6 +130,10 @@ timezone: America/Los_Angeles      # Default: UTC
 - [Models](models.md) - Configure AI model providers
 - [Teams](teams.md) - Configure multi-agent collaboration
 - [Router](router.md) - Configure message routing
+- [Memory](../memory.md) - Configure memory providers and behavior
+- [Knowledge](../dashboard.md#knowledge) - Configure file-backed knowledge bases
+- [Voice](../voice.md) - Configure speech-to-text voice processing
+- [Authorization](../authorization.md) - Configure user and room access control
 - [Skills](../skills.md) - Skill format, gating, and allowlists
 - [Plugins](../plugins.md) - Plugin manifest and tool/skill loading
 
@@ -118,5 +141,6 @@ timezone: America/Los_Angeles      # Default: UTC
 
 - All top-level sections are optional with sensible defaults, but you need at least one agent
 - A model named `default` is required unless all agents/teams specify explicit models
+- Agents can set `knowledge_base`, but the value must exist in `knowledge_bases`
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
 - The `memory` system works out of the box with OpenAI; use `memory.llm` for memory summarization with a different provider

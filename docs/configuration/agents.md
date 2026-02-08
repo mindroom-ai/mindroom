@@ -66,6 +66,9 @@ agents:
 
     # Learning mode: always (automatic) or agentic (tool-driven)
     learning_mode: always
+
+    # Assign agent to a configured knowledge base (optional)
+    knowledge_base: docs
 ```
 
 ## Configuration Options
@@ -84,6 +87,9 @@ agents:
 | `add_history_to_messages` | bool | from defaults | Include conversation history in context |
 | `learning` | bool | from defaults | Enable Agno Learning for this agent |
 | `learning_mode` | string | from defaults | Learning mode: `always` or `agentic` |
+| `knowledge_base` | string or null | `null` | Knowledge base ID from top-level `knowledge_bases` |
+
+If `knowledge_base` is set, it must match a key under `knowledge_bases` in `config.yaml`.
 
 Learning data is persisted to `STORAGE_PATH/learning/<agent>.db` (default: `mindroom_data/learning/<agent>.db`), so it survives container restarts when `mindroom_data` is mounted.
 
