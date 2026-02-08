@@ -206,10 +206,6 @@ class KnowledgeManager:
         self._watch_task = None
         logger.info("Knowledge folder watcher stopped")
 
-    async def shutdown(self) -> None:
-        """Shutdown all background work for this manager."""
-        await self.stop_watcher()
-
     async def _index_file_locked(self, resolved_path: Path, *, upsert: bool) -> bool:
         """Index one file while holding the manager lock."""
         relative_path = self._relative_path(resolved_path)
@@ -325,7 +321,7 @@ async def initialize_knowledge_manager(
         return _knowledge_manager
 
     if _knowledge_manager is not None:
-        await _knowledge_manager.shutdown()
+        await _knowledge_manager.stop_watcher()
 
     _knowledge_manager = KnowledgeManager(config=config, storage_path=storage_path)
     if reindex_on_create:
@@ -354,5 +350,5 @@ async def shutdown_knowledge_manager() -> None:
     global _knowledge_manager
 
     if _knowledge_manager is not None:
-        await _knowledge_manager.shutdown()
+        await _knowledge_manager.stop_watcher()
     _knowledge_manager = None

@@ -8,7 +8,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import nio
 from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
@@ -560,7 +560,7 @@ class AgentBot:
     client: nio.AsyncClient | None = field(default=None, init=False)
     running: bool = field(default=False, init=False)
     enable_streaming: bool = field(default=True)  # Enable/disable streaming responses
-    orchestrator: MultiAgentOrchestrator = field(init=False)  # Reference to orchestrator
+    orchestrator: MultiAgentOrchestrator | None = field(default=None, init=False)  # Reference to orchestrator
 
     @property
     def agent_name(self) -> str:
@@ -579,7 +579,7 @@ class AgentBot:
 
     def _get_shared_knowledge(self) -> Knowledge | None:
         """Get shared knowledge instance when the orchestrator has one."""
-        orchestrator = cast("MultiAgentOrchestrator | None", getattr(self, "orchestrator", None))
+        orchestrator = self.orchestrator
         if orchestrator is None or orchestrator.knowledge_manager is None:
             return None
         return orchestrator.knowledge_manager.get_knowledge()
@@ -1228,6 +1228,10 @@ class AgentBot:
 
         # Convert MatrixID list to agent names for non-streaming APIs
         agent_names = [mid.agent_name(self.config) or mid.username for mid in team_agents]
+        orchestrator = self.orchestrator
+        if orchestrator is None:
+            msg = "Orchestrator is not set"
+            raise RuntimeError(msg)
 
         # Create async function for team response generation that takes message_id as parameter
         async def generate_team_response(message_id: str | None) -> None:
@@ -1237,7 +1241,7 @@ class AgentBot:
                     response_stream = team_response_stream(
                         agent_ids=team_agents,
                         message=message,
-                        orchestrator=self.orchestrator,
+                        orchestrator=orchestrator,
                         mode=mode,
                         thread_history=thread_history,
                         model_name=model_name,
@@ -1272,7 +1276,7 @@ class AgentBot:
                         agent_names=agent_names,
                         mode=mode,
                         message=message,
-                        orchestrator=self.orchestrator,
+                        orchestrator=orchestrator,
                         thread_history=thread_history,
                         model_name=model_name,
                     )

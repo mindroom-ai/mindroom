@@ -200,12 +200,13 @@ async def knowledge_status() -> dict[str, Any]:
     config = Config.from_yaml()
     root = _knowledge_root(config)
     manager = await _ensure_manager(config)
-    indexed_count = 0
-    file_count = len(_list_file_info(root)[0])
     if manager is not None:
         manager_status = manager.get_status()
         indexed_count = int(manager_status["indexed_count"])
         file_count = int(manager_status["file_count"])
+    else:
+        indexed_count = 0
+        file_count = len(_list_file_info(root)[0])
 
     return {
         "enabled": config.knowledge.enabled,
