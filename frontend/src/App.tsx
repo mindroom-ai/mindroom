@@ -1,7 +1,22 @@
 import { useEffect, useState } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { BrowserRouter, useNavigate, useLocation } from 'react-router-dom';
-import { Check, Menu } from 'lucide-react';
+import {
+  BookOpen,
+  Bot,
+  Brain,
+  Check,
+  DoorOpen,
+  Home,
+  LayoutDashboard,
+  Menu,
+  Mic,
+  Plug,
+  Puzzle,
+  Settings2,
+  type LucideIcon,
+  Users,
+} from 'lucide-react';
 import { useConfigStore } from '@/store/configStore';
 import { AgentList } from '@/components/AgentList/AgentList';
 import { AgentEditor } from '@/components/AgentEditor/AgentEditor';
@@ -35,28 +50,28 @@ const queryClient = new QueryClient();
 type NavItem = {
   value: string;
   label: string;
-  icon: string;
+  icon: LucideIcon;
   group: 'Workspace' | 'Configuration';
 };
 
 const NAV_ITEMS: NavItem[] = [
-  { value: 'dashboard', label: 'Dashboard', icon: '📊', group: 'Workspace' },
-  { value: 'agents', label: 'Agents', icon: '👥', group: 'Workspace' },
-  { value: 'teams', label: 'Teams', icon: '👫', group: 'Workspace' },
-  { value: 'rooms', label: 'Rooms', icon: '🏠', group: 'Workspace' },
-  { value: 'unconfigured-rooms', label: 'External', icon: '🚪', group: 'Workspace' },
-  { value: 'models', label: 'Models & API Keys', icon: '🔧', group: 'Configuration' },
-  { value: 'memory', label: 'Memory', icon: '🧠', group: 'Configuration' },
-  { value: 'knowledge', label: 'Knowledge', icon: '📚', group: 'Configuration' },
-  { value: 'voice', label: 'Voice', icon: '🎤', group: 'Configuration' },
-  { value: 'integrations', label: 'Integrations', icon: '🔌', group: 'Configuration' },
-  { value: 'skills', label: 'Skills', icon: '🧩', group: 'Configuration' },
+  { value: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, group: 'Workspace' },
+  { value: 'agents', label: 'Agents', icon: Bot, group: 'Workspace' },
+  { value: 'teams', label: 'Teams', icon: Users, group: 'Workspace' },
+  { value: 'rooms', label: 'Rooms', icon: Home, group: 'Workspace' },
+  { value: 'unconfigured-rooms', label: 'External', icon: DoorOpen, group: 'Workspace' },
+  { value: 'models', label: 'Models & API Keys', icon: Settings2, group: 'Configuration' },
+  { value: 'memory', label: 'Memory', icon: Brain, group: 'Configuration' },
+  { value: 'knowledge', label: 'Knowledge', icon: BookOpen, group: 'Configuration' },
+  { value: 'voice', label: 'Voice', icon: Mic, group: 'Configuration' },
+  { value: 'integrations', label: 'Integrations', icon: Plug, group: 'Configuration' },
+  { value: 'skills', label: 'Skills', icon: Puzzle, group: 'Configuration' },
 ];
 
 const NAV_GROUPS: NavItem['group'][] = ['Workspace', 'Configuration'];
 
 const TAB_TRIGGER_CLASS =
-  'rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap';
+  'inline-flex items-center gap-1.5 rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap';
 
 function AppContent() {
   const { loadConfig, syncStatus, error, selectedAgentId, selectedTeamId, selectedRoomId } =
@@ -68,6 +83,7 @@ function AppContent() {
   // Get the current tab from URL or default to 'dashboard'
   const currentTab = location.pathname.slice(1) || 'dashboard';
   const currentNavItem = NAV_ITEMS.find(item => item.value === currentTab) || NAV_ITEMS[0];
+  const CurrentNavIcon = currentNavItem.icon;
 
   useEffect(() => {
     // Load configuration on mount
@@ -196,7 +212,7 @@ function AppContent() {
                 aria-expanded={mobileMenuOpen}
                 className="sm:hidden max-w-[8.5rem] rounded-lg border border-white/60 dark:border-white/10 bg-white/80 dark:bg-stone-900/70 backdrop-blur-xl px-2 py-1.5 flex items-center gap-1.5 min-w-0 text-left shadow-sm"
               >
-                <span className="text-base leading-none">{currentNavItem.icon}</span>
+                <CurrentNavIcon className="h-4 w-4 shrink-0 text-gray-700 dark:text-gray-200" />
                 <span className="text-xs font-medium text-gray-900 dark:text-gray-100 truncate">
                   {currentNavItem.label}
                 </span>
@@ -218,11 +234,15 @@ function AppContent() {
           <Tabs value={currentTab} onValueChange={handleTabChange} className="h-full flex flex-col">
             {/* Desktop Tab Navigation */}
             <TabsList className="hidden sm:flex px-3 sm:px-6 py-3 bg-white/70 dark:bg-stone-900/50 backdrop-blur-lg border-b border-gray-200/50 dark:border-white/10 flex-shrink-0 overflow-x-auto">
-              {NAV_ITEMS.map(item => (
-                <TabsTrigger key={item.value} value={item.value} className={TAB_TRIGGER_CLASS}>
-                  {item.icon} {item.label}
-                </TabsTrigger>
-              ))}
+              {NAV_ITEMS.map(item => {
+                const ItemIcon = item.icon;
+                return (
+                  <TabsTrigger key={item.value} value={item.value} className={TAB_TRIGGER_CLASS}>
+                    <ItemIcon className="h-4 w-4" />
+                    <span>{item.label}</span>
+                  </TabsTrigger>
+                );
+              })}
             </TabsList>
 
             <Dialog open={mobileMenuOpen} onOpenChange={setMobileMenuOpen}>
@@ -244,6 +264,7 @@ function AppContent() {
                       <div className="space-y-1">
                         {NAV_ITEMS.filter(item => item.group === group).map(item => {
                           const isActive = item.value === currentTab;
+                          const ItemIcon = item.icon;
                           return (
                             <button
                               key={item.value}
@@ -257,7 +278,7 @@ function AppContent() {
                               }`}
                             >
                               <span className="flex items-center gap-2">
-                                <span className="text-base leading-none">{item.icon}</span>
+                                <ItemIcon className="h-4 w-4" />
                                 <span>{item.label}</span>
                               </span>
                               {isActive ? <Check className="h-4 w-4" /> : null}
