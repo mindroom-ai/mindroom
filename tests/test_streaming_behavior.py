@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+from mindroom.ai import AIResponse
 from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
@@ -123,7 +124,7 @@ class TestStreamingBehavior:
         calc_bot.client.room_send.return_value = mock_send_response
 
         # Mock AI responses
-        mock_ai_response.return_value = "4"
+        mock_ai_response.return_value = AIResponse(text="4", tool_trace=[])
 
         # Create a generator that yields the streaming response
         async def streaming_generator() -> AsyncIterator[str]:
@@ -243,7 +244,7 @@ class TestStreamingBehavior:
         calc_bot.client.room_send.return_value = mock_send_response
 
         # Mock AI response
-        mock_ai_response.return_value = "4"
+        mock_ai_response.return_value = AIResponse(text="4", tool_trace=[])
 
         # Set up room
         mock_room = MagicMock()

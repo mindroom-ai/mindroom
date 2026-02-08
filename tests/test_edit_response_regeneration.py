@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import nio
 import pytest
 
+from mindroom.ai import AIResponse
 from mindroom.bot import AgentBot
 from mindroom.config import Config
 from mindroom.matrix.users import AgentMatrixUser
@@ -135,7 +136,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
         )
         mock_should_respond.return_value = True
         mock_streaming.return_value = False  # Use non-streaming for simpler test
-        mock_ai_response.return_value = "The answer is 6"
+        mock_ai_response.return_value = AIResponse(text="The answer is 6", tool_trace=[])
 
         # Process the edit event
         await bot._on_message(room, edit_event)

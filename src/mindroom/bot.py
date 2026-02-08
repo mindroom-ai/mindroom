@@ -1411,7 +1411,7 @@ class AgentBot:
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
-                response_text = await ai_response(
+                ai_result = await ai_response(
                     agent_name=self.agent_name,
                     prompt=prompt,
                     session_id=session_id,
@@ -1420,7 +1420,6 @@ class AgentBot:
                     thread_history=thread_history,
                     room_id=room_id,
                 )
-                tool_trace = getattr(response_text, "tool_trace", None)
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
             self.logger.info("Non-streaming response cancelled by user", message_id=existing_event_id)
@@ -1437,19 +1436,19 @@ class AgentBot:
             await self._edit_message(
                 room_id,
                 existing_event_id,
-                response_text,
+                ai_result.text,
                 thread_id,
-                tool_trace=tool_trace,
+                tool_trace=ai_result.tool_trace or None,
             )
             return existing_event_id
 
-        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+        response = interactive.parse_and_format_interactive(ai_result.text, extract_mapping=True)
         event_id = await self._send_response(
             room_id,
             reply_to_event_id,
             response.formatted_text,
             thread_id,
-            tool_trace=tool_trace,
+            tool_trace=ai_result.tool_trace or None,
         )
         if event_id and response.option_map and response.options_list:
             # For interactive questions, use the same thread root that _send_response uses:
@@ -1488,7 +1487,7 @@ class AgentBot:
         session_id = create_session_id(room_id, thread_id)
 
         async with typing_indicator(self.client, room_id):
-            response_text = await ai_response(
+            ai_result = await ai_response(
                 agent_name=agent_name,
                 prompt=prompt,
                 session_id=session_id,
@@ -1497,9 +1496,8 @@ class AgentBot:
                 thread_history=thread_history,
                 room_id=room_id,
             )
-            tool_trace = getattr(response_text, "tool_trace", None)
 
-        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+        response = interactive.parse_and_format_interactive(ai_result.text, extract_mapping=True)
         event_id = await self._send_response(
             room_id,
             reply_to_event_id,
@@ -1507,7 +1505,7 @@ class AgentBot:
             thread_id,
             reply_to_event=reply_to_event,
             skip_mentions=True,
-            tool_trace=tool_trace,
+            tool_trace=ai_result.tool_trace or None,
         )
 
         if event_id and response.option_map and response.options_list:

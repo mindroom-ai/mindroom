@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mindroom.ai import AIResponse
 from mindroom.bot import AgentBot
 from mindroom.config import Config
 
@@ -52,7 +53,7 @@ class TestAIErrorDisplay:
         # Mock ai_response to return an error message
         with patch("mindroom.bot.ai_response") as mock_ai:
             error_msg = "[test_agent] 🔴 Authentication failed. Please check your API key configuration."
-            mock_ai.return_value = error_msg
+            mock_ai.return_value = AIResponse(text=error_msg, tool_trace=[])
 
             # Call the method with an existing_event_id (simulating thinking message edit)
             await process_method(
@@ -226,7 +227,7 @@ class TestAIErrorDisplay:
             edited_messages.clear()
 
             with patch("mindroom.bot.ai_response") as mock_ai:
-                mock_ai.return_value = error_msg
+                mock_ai.return_value = AIResponse(text=error_msg, tool_trace=[])
 
                 await process_method(
                     bot,

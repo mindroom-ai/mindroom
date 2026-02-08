@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+from mindroom.ai import AIResponse
 from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
@@ -88,7 +89,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     original_event.source = original_event.__dict__["source"]
 
     # Process original message with mocked AI response
-    with patch("mindroom.bot.ai_response", AsyncMock(return_value="Original: 4")):
+    with patch("mindroom.bot.ai_response", AsyncMock(return_value=AIResponse(text="Original: 4", tool_trace=[]))):
         await bot._on_message(room, original_event)
 
     # Verify bot responded
@@ -124,7 +125,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     edit1_event.source = edit1_event.__dict__["source"]
 
     # Process first edit with mocked AI response
-    with patch("mindroom.bot.ai_response", AsyncMock(return_value="Edit 1: 6")):
+    with patch("mindroom.bot.ai_response", AsyncMock(return_value=AIResponse(text="Edit 1: 6", tool_trace=[]))):
         await bot._on_message(room, edit1_event)
 
     # Verify bot regenerated (sends thinking message when editing)
@@ -161,7 +162,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     edit2_event.source = edit2_event.__dict__["source"]
 
     # Process second edit with mocked AI response
-    with patch("mindroom.bot.ai_response", AsyncMock(return_value="Edit 2: 8")):
+    with patch("mindroom.bot.ai_response", AsyncMock(return_value=AIResponse(text="Edit 2: 8", tool_trace=[]))):
         await bot._on_message(room, edit2_event)
 
     # Verify bot regenerated again
@@ -198,7 +199,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     bot.client.room_send.reset_mock()
 
     # Process third edit with mocked AI response
-    with patch("mindroom.bot.ai_response", AsyncMock(return_value="Edit 3: 10")):
+    with patch("mindroom.bot.ai_response", AsyncMock(return_value=AIResponse(text="Edit 3: 10", tool_trace=[]))):
         await bot._on_message(room, edit3_event)
 
     # Verify bot regenerated yet again

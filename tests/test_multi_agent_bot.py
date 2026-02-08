@@ -13,6 +13,7 @@ from agno.models.ollama import Ollama
 from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
 
+from mindroom.ai import AIResponse
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.config import Config, ModelConfig
 from mindroom.matrix.identity import MatrixID
@@ -259,7 +260,7 @@ class TestAgentBot:
             yield " response"
 
         mock_stream_agent_response.return_value = mock_streaming_response()
-        mock_ai_response.return_value = "Test response"
+        mock_ai_response.return_value = AIResponse(text="Test response", tool_trace=[])
         mock_fetch_history.return_value = []
         # Mock the presence check to return same value as enable_streaming
         mock_should_use_streaming.return_value = enable_streaming
@@ -451,7 +452,7 @@ class TestAgentBot:
             yield " response"
 
         mock_stream_agent_response.return_value = mock_streaming_response()
-        mock_ai_response.return_value = "Thread response"
+        mock_ai_response.return_value = AIResponse(text="Thread response", tool_trace=[])
 
         # Mock team arun to return either a string or async iterator based on stream parameter
 
@@ -583,7 +584,7 @@ class TestAgentBot:
             yield " response"
 
         mock_stream_agent_response.return_value = mock_streaming_response2()
-        mock_ai_response.return_value = "Mentioned response"
+        mock_ai_response.return_value = AIResponse(text="Mentioned response", tool_trace=[])
 
         await bot._on_message(mock_room, mock_event_with_mention)
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import functools
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Self, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import diskcache
 from agno.models.anthropic import Claude
@@ -51,19 +51,6 @@ class AIResponse:
 
     text: str
     tool_trace: list[ToolTraceEntry]
-
-
-class AITextResponse(str):
-    """String response carrying optional tool trace metadata."""
-
-    __slots__ = ("tool_trace",)
-    tool_trace: list[ToolTraceEntry]
-
-    def __new__(cls, text: str, tool_trace: list[ToolTraceEntry] | None = None) -> Self:
-        """Create a text response carrying an optional tool trace payload."""
-        obj = super().__new__(cls, text)
-        obj.tool_trace = tool_trace if tool_trace is not None else []
-        return obj
 
 
 def _extract_response_content(response: RunOutput) -> AIResponse:
@@ -292,28 +279,6 @@ async def ai_response(
     config: Config,
     thread_history: list[dict[str, Any]] | None = None,
     room_id: str | None = None,
-) -> str:
-    """Backward-compatible wrapper that returns only response text."""
-    result = await ai_response_with_tool_trace(
-        agent_name=agent_name,
-        prompt=prompt,
-        session_id=session_id,
-        storage_path=storage_path,
-        config=config,
-        thread_history=thread_history,
-        room_id=room_id,
-    )
-    return AITextResponse(result.text, result.tool_trace)
-
-
-async def ai_response_with_tool_trace(
-    agent_name: str,
-    prompt: str,
-    session_id: str,
-    storage_path: Path,
-    config: Config,
-    thread_history: list[dict[str, Any]] | None = None,
-    room_id: str | None = None,
 ) -> AIResponse:
     """Generates a response using the specified agno Agent with memory integration.
 
@@ -327,7 +292,7 @@ async def ai_response_with_tool_trace(
         room_id: Optional room ID for room memory access
 
     Returns:
-        Agent response text plus tool trace metadata.
+        AIResponse with text and tool trace metadata.
 
     """
     logger.info("AI request", agent=agent_name)

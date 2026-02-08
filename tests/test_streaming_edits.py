@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+from mindroom.ai import AIResponse
 from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
@@ -86,7 +87,7 @@ class TestStreamingEdits:
         bot.client.room_send.return_value = mock_send_response  # type: ignore[union-attr]
 
         # Mock AI response
-        mock_ai_response.return_value = "I can help with that!"
+        mock_ai_response.return_value = AIResponse(text="I can help with that!", tool_trace=[])
 
         # Set up room
         mock_room = MagicMock()
@@ -186,7 +187,7 @@ class TestStreamingEdits:
         bot.client.room_send.return_value = mock_send_response  # type: ignore[union-attr]
 
         # Mock AI response
-        mock_ai_response.return_value = "Here's the answer!"
+        mock_ai_response.return_value = AIResponse(text="Here's the answer!", tool_trace=[])
 
         # Set up room
         mock_room = MagicMock()
@@ -230,7 +231,7 @@ class TestStreamingEdits:
         bot.client.room_send.return_value = mock_send_response  # type: ignore[union-attr]
 
         # Mock AI response
-        mock_ai_response.return_value = "I can help with that!"
+        mock_ai_response.return_value = AIResponse(text="I can help with that!", tool_trace=[])
 
         # Set up room
         mock_room = MagicMock()
@@ -302,7 +303,7 @@ class TestStreamingEdits:
         bot.client.room_send.return_value = mock_send_response  # type: ignore[union-attr]
 
         # Mock AI response
-        mock_ai_response.return_value = "I can help with that!"
+        mock_ai_response.return_value = AIResponse(text="I can help with that!", tool_trace=[])
 
         # Set up room
         mock_room = MagicMock()
