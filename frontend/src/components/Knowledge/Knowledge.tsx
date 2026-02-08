@@ -604,13 +604,13 @@ export function Knowledge() {
               </CardContent>
             </Card>
           </>
-        ) : (
+        ) : baseNames.length === 0 ? (
           <Card>
             <CardContent className="py-4 text-sm text-muted-foreground">
               No knowledge bases configured yet. Add one above to start uploading files.
             </CardContent>
           </Card>
-        )}
+        ) : null}
 
         {isDirty && (
           <Card className="border-amber-500/30">
