@@ -82,8 +82,8 @@ agents:
 | `num_history_runs` | int | from defaults | Previous conversation runs to include for context |
 | `markdown` | bool | from defaults | Format responses as markdown |
 | `add_history_to_messages` | bool | from defaults | Include conversation history in context |
-| `learning` | bool | `true` | Enable Agno Learning for this agent |
-| `learning_mode` | string | `always` | Learning mode: `always` or `agentic` |
+| `learning` | bool | from defaults | Enable Agno Learning for this agent |
+| `learning_mode` | string | from defaults | Learning mode: `always` or `agentic` |
 
 Learning data is persisted to `STORAGE_PATH/learning/<agent>.db` (default: `mindroom_data/learning/<agent>.db`), so it survives container restarts when `mindroom_data` is mounted.
 

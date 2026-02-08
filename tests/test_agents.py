@@ -82,6 +82,21 @@ def test_get_agent_learning_can_be_disabled(mock_storage: MagicMock) -> None:
 
 
 @patch("mindroom.agents.SqliteDb")
+def test_get_agent_learning_defaults_fallback_when_agent_setting_omitted(mock_storage: MagicMock) -> None:
+    """Tests that defaults.learning is used when per-agent learning is omitted."""
+    config = Config.from_yaml()
+    config.defaults.learning = False
+    config.agents["general"].learning = None
+
+    agent = create_agent("general", config=config)
+
+    assert isinstance(agent, Agent)
+    assert agent.learning is False
+    # Learning storage should not be created when defaults disable learning.
+    assert mock_storage.call_count == 1
+
+
+@patch("mindroom.agents.SqliteDb")
 def test_get_agent_learning_agentic_mode(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that learning mode can be configured as agentic."""
     config = Config.from_yaml()
@@ -93,6 +108,21 @@ def test_get_agent_learning_agentic_mode(mock_storage: MagicMock) -> None:  # no
     assert agent.learning.user_profile.mode is LearningMode.AGENTIC
     assert isinstance(agent.learning.user_memory, UserMemoryConfig)
     assert agent.learning.user_memory.mode is LearningMode.AGENTIC
+
+
+@patch("mindroom.agents.SqliteDb")
+def test_get_agent_learning_inherits_defaults(mock_storage: MagicMock) -> None:
+    """Tests that learning settings fall back to defaults when agent config is None."""
+    config = Config.from_yaml()
+    # Agent has no explicit learning settings (None), defaults say disabled + agentic
+    config.agents["general"].learning = None
+    config.agents["general"].learning_mode = None
+    config.defaults.learning = False
+    config.defaults.learning_mode = "agentic"
+    agent = create_agent("general", config=config)
+    assert isinstance(agent, Agent)
+    assert agent.learning is False
+    assert mock_storage.call_count == 1
 
 
 @patch("mindroom.agents.SqliteDb")
