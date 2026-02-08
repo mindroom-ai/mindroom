@@ -332,6 +332,7 @@ class TestAgentBot:
                 config=config,
                 thread_history=[],
                 room_id="!test:localhost",
+                knowledge=None,
             )
             mock_ai_response.assert_not_called()
             # With streaming and stop button: initial message + reaction + edits
@@ -346,6 +347,7 @@ class TestAgentBot:
                 config=config,
                 thread_history=[],
                 room_id="!test:localhost",
+                knowledge=None,
             )
             mock_stream_agent_response.assert_not_called()
             # With stop button support: initial + reaction + final

@@ -133,6 +133,7 @@ async def test_agent_processes_direct_mention(
                     storage_path=tmp_path,
                     config=config,
                     room_id=test_room_id,
+                    knowledge=None,
                 )
 
                 # Verify message was sent (thinking + streaming updates)
@@ -415,6 +416,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 storage_path=tmp_path,
                 config=config,
                 room_id=test_room_id,
+                knowledge=None,
             )
 
             # Verify thread response format (team response with mocking issue)
