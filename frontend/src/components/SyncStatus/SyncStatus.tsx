@@ -3,38 +3,56 @@ import { cn } from '@/lib/utils';
 
 interface SyncStatusProps {
   status: 'synced' | 'syncing' | 'error' | 'disconnected';
+  compact?: boolean;
 }
 
-export function SyncStatus({ status }: SyncStatusProps) {
+export function SyncStatus({ status, compact = false }: SyncStatusProps) {
   const statusConfig = {
     synced: {
       icon: Check,
       text: 'Synced',
       className: 'text-green-300',
       iconClassName: 'text-green-300',
+      dotClassName: 'bg-green-400',
     },
     syncing: {
       icon: RefreshCw,
       text: 'Syncing...',
       className: 'text-blue-300',
       iconClassName: 'text-blue-300 animate-spin',
+      dotClassName: 'bg-blue-400 animate-pulse',
     },
     error: {
       icon: AlertCircle,
       text: 'Sync Error',
       className: 'text-red-300',
       iconClassName: 'text-red-300',
+      dotClassName: 'bg-red-400',
     },
     disconnected: {
       icon: WifiOff,
       text: 'Disconnected',
       className: 'text-gray-300',
       iconClassName: 'text-gray-300',
+      dotClassName: 'bg-gray-400',
     },
   };
 
   const config = statusConfig[status];
   const Icon = config.icon;
+
+  if (compact) {
+    return (
+      <div
+        className="flex h-9 w-9 items-center justify-center"
+        aria-label={config.text}
+        role="status"
+      >
+        <span className={cn('h-2.5 w-2.5 rounded-full', config.dotClassName)} />
+        <span className="sr-only">{config.text}</span>
+      </div>
+    );
+  }
 
   return (
     <div className={cn('flex items-center gap-2 text-sm', config.className)}>

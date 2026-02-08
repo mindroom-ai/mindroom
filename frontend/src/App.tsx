@@ -175,21 +175,40 @@ function AppContent() {
       <div className="relative z-10 flex flex-col h-full">
         {/* Header */}
         <header className="bg-white/80 dark:bg-stone-900/50 backdrop-blur-xl border-b border-gray-200/50 dark:border-white/10 shadow-sm dark:shadow-2xl">
-          <div className="px-3 sm:px-6 py-3 sm:py-4 flex items-center justify-between">
+          <div className="px-3 sm:px-6 py-2 sm:py-4 flex items-center justify-between gap-2">
             <h1 className="flex items-center gap-2 sm:gap-3">
-              <span className="text-3xl sm:text-4xl">🧠</span>
+              <span className="text-2xl sm:text-4xl">🧠</span>
               <div className="flex flex-col">
-                <span className="text-2xl sm:text-3xl font-bold tracking-tight text-gray-900 dark:text-white">
+                <span className="text-base sm:text-3xl font-bold tracking-tight text-gray-900 dark:text-white">
                   MindRoom
                 </span>
-                <span className="text-xs sm:text-sm font-normal text-gray-600 dark:text-gray-400 -mt-1">
+                <span className="hidden sm:block text-xs sm:text-sm font-normal text-gray-600 dark:text-gray-400 -mt-1">
                   Configuration
                 </span>
               </div>
             </h1>
-            <div className="flex items-center gap-4">
+
+            <div className="flex items-center gap-1.5 sm:gap-4">
+              <button
+                type="button"
+                onClick={() => setMobileMenuOpen(true)}
+                aria-haspopup="dialog"
+                aria-expanded={mobileMenuOpen}
+                className="sm:hidden max-w-[8.5rem] rounded-lg border border-white/60 dark:border-white/10 bg-white/80 dark:bg-stone-900/70 backdrop-blur-xl px-2 py-1.5 flex items-center gap-1.5 min-w-0 text-left shadow-sm"
+              >
+                <span className="text-base leading-none">{currentNavItem.icon}</span>
+                <span className="text-xs font-medium text-gray-900 dark:text-gray-100 truncate">
+                  {currentNavItem.label}
+                </span>
+                <Menu className="h-4 w-4 shrink-0 text-gray-600 dark:text-gray-300" />
+              </button>
               <ThemeToggle />
-              <SyncStatus status={syncStatus} />
+              <div className="sm:hidden">
+                <SyncStatus status={syncStatus} compact />
+              </div>
+              <div className="hidden sm:block">
+                <SyncStatus status={syncStatus} />
+              </div>
             </div>
           </div>
         </header>
@@ -197,30 +216,6 @@ function AppContent() {
         {/* Main Content */}
         <div className="flex-1 overflow-hidden">
           <Tabs value={currentTab} onValueChange={handleTabChange} className="h-full flex flex-col">
-            {/* Mobile Navigation */}
-            <div className="sm:hidden px-3 py-2 bg-white/70 dark:bg-stone-900/50 backdrop-blur-lg border-b border-gray-200/50 dark:border-white/10 flex-shrink-0">
-              <button
-                type="button"
-                onClick={() => setMobileMenuOpen(true)}
-                aria-haspopup="dialog"
-                aria-expanded={mobileMenuOpen}
-                className="w-full rounded-xl border border-white/60 dark:border-white/10 bg-white/80 dark:bg-stone-900/70 backdrop-blur-xl px-3 py-2 flex items-center justify-between text-left shadow-sm"
-              >
-                <span className="flex items-center gap-2 min-w-0">
-                  <span className="text-lg leading-none">{currentNavItem.icon}</span>
-                  <span className="min-w-0">
-                    <span className="block text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">
-                      Section
-                    </span>
-                    <span className="block text-sm font-medium text-gray-900 dark:text-gray-100 truncate">
-                      {currentNavItem.label}
-                    </span>
-                  </span>
-                </span>
-                <Menu className="h-5 w-5 text-gray-600 dark:text-gray-300" />
-              </button>
-            </div>
-
             {/* Desktop Tab Navigation */}
             <TabsList className="hidden sm:flex px-3 sm:px-6 py-3 bg-white/70 dark:bg-stone-900/50 backdrop-blur-lg border-b border-gray-200/50 dark:border-white/10 flex-shrink-0 overflow-x-auto">
               {NAV_ITEMS.map(item => (
