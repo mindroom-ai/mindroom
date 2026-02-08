@@ -7,20 +7,17 @@ Keep it simple and avoid adding features.
 ## First steps
 
 - Read project-specific instructions (CLAUDE.md, AGENTS.md, or similar) and follow them.
-- MindRoom prefers functional style over classes, uses dataclasses over dicts, and
-  keeps imports at the top of files. Respect these conventions.
 - Ask a brief clarification if the request is ambiguous (for example: report only vs refactor).
 
 ## Objective
 
 Identify and consolidate duplicated functionality across the codebase. Duplication includes:
 - Multiple functions that parse or validate the same data in slightly different ways
-- Repeated config parsing or Pydantic model manipulation
-- Similar Matrix client operations across different modules
+- Repeated config parsing or data model manipulation
+- Similar external service calls across different modules
 - Near-identical error handling or logging patterns
-- Repeated agent/team setup or teardown logic
-- Similar tool registration or event handling patterns
-- Duplicated memory operations (agent, room, team scopes)
+- Repeated setup/teardown logic
+- Similar data transforms that can become a shared helper
 
 The goal is to propose a general, reusable abstraction that reduces duplication while
 preserving behavior. Keep changes minimal and easy to review.
@@ -28,14 +25,12 @@ preserving behavior. Keep changes minimal and easy to review.
 ## Search strategy
 
 1) Map the hot paths
-- Scan entry points (CLI in `cli.py`, bot in `bot.py`, API handlers) to see what they do repeatedly.
-- Look for cross-module patterns: same steps in `agents.py`, `teams.py`, `routing.py`, etc.
-- Check `tools/` subdirectory for repeated patterns across tool implementations.
+- Scan entry points (CLI, main loops, API handlers) to see what they do repeatedly.
+- Look for cross-module patterns: same steps, different files.
 
 2) Find duplicate operations
-- Check for repeated Matrix client calls, config parsing, memory operations,
-  agent creation, streaming logic, or response formatting.
-- Look at `memory/functions.py` vs memory usage sites for duplicated logic.
+- Use fast search tools to find repeated keywords and patterns.
+- Check for repeated parsing, IO, validation, or response formatting.
 
 3) Validate duplication is real
 - Confirm the functional intent matches (not just similar code).
@@ -80,5 +75,5 @@ If the user asked you to implement changes:
 
 - Do not add new features or change behavior beyond deduplication.
 - Avoid deep refactors without explicit request.
-- Preserve existing style conventions (functional style, top-level imports, dataclasses over dicts).
+- Preserve existing style conventions and import rules.
 - If a duplication is better left alone (e.g., clarity, single usage), say so.
