@@ -626,7 +626,7 @@ export function Knowledge() {
           </Card>
         )}
 
-        {selectedBase ? (
+        {selectedBase && (
           <>
             <Card
               className={cn(
@@ -662,7 +662,7 @@ export function Knowledge() {
                     <Button
                       variant="outline"
                       onClick={() => fileInputRef.current?.click()}
-                      disabled={uploading || !selectedBase || isDirty}
+                      disabled={uploading || isDirty}
                     >
                       <Upload className="h-4 w-4 mr-2" />
                       {uploading ? 'Uploading...' : 'Upload'}
@@ -670,7 +670,7 @@ export function Knowledge() {
                     <Button
                       variant="outline"
                       onClick={handleReindex}
-                      disabled={reindexing || !selectedBase || isDirty}
+                      disabled={reindexing || isDirty}
                     >
                       <RefreshCw className={cn('h-4 w-4 mr-2', reindexing && 'animate-spin')} />
                       {reindexing ? 'Reindexing...' : 'Reindex'}
@@ -727,10 +727,11 @@ export function Knowledge() {
               </CardContent>
             </Card>
           </>
-        ) : (
+        )}
+        {!selectedBase && baseNames.length > 0 && (
           <Card>
             <CardContent className="py-4 text-sm text-muted-foreground">
-              Select or create a knowledge base to view and manage files.
+              Select a knowledge base to view and manage files.
             </CardContent>
           </Card>
         )}

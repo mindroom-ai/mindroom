@@ -311,11 +311,8 @@ function AppContent() {
               </div>
             </TabsContent>
 
-            <TabsContent
-              value="knowledge"
-              className="flex-1 p-2 sm:p-4 overflow-y-auto overflow-x-hidden min-h-0"
-            >
-              <div className="h-full overflow-y-auto overflow-x-hidden">
+            <TabsContent value="knowledge" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
+              <div className="h-full overflow-hidden">
                 <Knowledge />
               </div>
             </TabsContent>
