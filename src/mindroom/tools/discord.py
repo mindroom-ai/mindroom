@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     category=ToolCategory.COMMUNICATION,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
-    icon="FaDiscord",
+    icon="SiDiscord",
     icon_color="text-indigo-500",  # Discord brand color
     config_fields=[
         ConfigField(

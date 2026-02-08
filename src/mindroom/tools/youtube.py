@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     category=ToolCategory.ENTERTAINMENT,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
-    icon="FaYoutube",
+    icon="SiYoutube",
     icon_color="text-red-600",
     config_fields=[
         ConfigField(

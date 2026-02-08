@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     category=ToolCategory.RESEARCH,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
-    icon="FaWikipediaW",
+    icon="SiWikipedia",
     icon_color="text-gray-700",
     config_fields=[
         ConfigField(

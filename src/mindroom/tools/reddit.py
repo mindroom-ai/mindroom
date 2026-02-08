@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     category=ToolCategory.SOCIAL,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
-    icon="FaReddit",
+    icon="SiReddit",
     icon_color="text-orange-500",  # Reddit's signature orange color
     config_fields=[
         ConfigField(

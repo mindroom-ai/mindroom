@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     category=ToolCategory.RESEARCH,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
-    icon="FaSearch",
+    icon="SiDuckduckgo",
     icon_color="text-orange-500",  # DuckDuckGo orange
     config_fields=[
         ConfigField(

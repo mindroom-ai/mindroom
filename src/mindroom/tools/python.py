@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
-    icon="FaPython",
+    icon="SiPython",
     icon_color="text-blue-500",
     config_fields=[
         ConfigField(

@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     category=ToolCategory.RESEARCH,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
-    icon="FaFileAlt",
+    icon="SiArxiv",
     icon_color="text-red-600",  # ArXiv red
     config_fields=[
         ConfigField(

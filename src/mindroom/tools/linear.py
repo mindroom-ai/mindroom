@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
-    icon="FaLinear",
+    icon="SiLinear",
     icon_color="text-purple-600",
     config_fields=[
         ConfigField(

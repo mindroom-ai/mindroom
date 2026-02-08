@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
-    icon="FaConfluence",
+    icon="SiConfluence",
     icon_color="text-blue-600",
     config_fields=[
         # Authentication/Connection parameters

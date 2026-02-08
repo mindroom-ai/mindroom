@@ -4,7 +4,7 @@ icon: lucide/wrench
 
 # Tools
 
-MindRoom includes 85+ tool integrations that agents can use to interact with external services.
+MindRoom includes 120+ tool integrations that agents can use to interact with external services.
 
 ## Enabling Tools
 

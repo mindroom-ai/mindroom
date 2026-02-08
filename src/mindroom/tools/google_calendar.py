@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.SPECIAL,
     auth_provider="google",  # Authentication provided by Google Services integration
-    icon="FaCalendarAlt",
+    icon="SiGooglecalendar",
     icon_color="text-blue-600",  # Google Calendar blue
     config_fields=[
         ConfigField(

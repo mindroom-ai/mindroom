@@ -18,11 +18,15 @@ from .arxiv import arxiv_tools
 from .aws_lambda import aws_lambda_tools
 from .aws_ses import aws_ses_tools
 from .baidusearch import baidusearch_tools
+from .bitbucket import bitbucket_tools
+from .brandfetch import brandfetch_tools
+from .bravesearch import bravesearch_tools
 from .brightdata import brightdata_tools
 from .browserbase import browserbase_tools
 from .cal_com import cal_com_tools
 from .calculator import calculator_tools
 from .cartesia import cartesia_tools
+from .clickup import clickup_tools
 from .composio import composio_tools
 from .config_manager import config_manager_tools
 from .confluence import confluence_tools
@@ -31,6 +35,7 @@ from .csv import csv_tools
 from .custom_api import custom_api_tools
 from .dalle import dalle_tools
 from .daytona import daytona_tools
+from .desi_vocal import desi_vocal_tools
 from .discord import discord_tools
 from .docker import docker_tools
 from .duckdb import duckdb_tools
@@ -41,12 +46,14 @@ from .email import email_tools
 from .exa import exa_tools
 from .fal import fal_tools
 from .file import file_tools
+from .file_generation import file_generation_tools
 from .financial_datasets_api import financial_datasets_api_tools
 from .firecrawl import firecrawl_tools
 from .gemini import gemini_tools
 from .giphy import giphy_tools
 from .github import github_tools
 from .gmail import gmail_tools
+from .google_bigquery import google_bigquery_tools
 from .google_calendar import google_calendar_tools
 from .google_maps import google_maps_tools
 from .google_sheets import google_sheets_tools
@@ -61,14 +68,20 @@ from .lumalabs import lumalabs_tools
 from .mem0 import mem0_tools
 from .modelslabs import modelslabs_tools
 from .moviepy_video_tools import moviepy_video_tools
+from .neo4j import neo4j_tools
 from .newspaper4k import newspaper4k_tools
+from .notion import notion_tools
 from .openai import openai_tools
+from .openbb import openbb_tools
 from .openweather import openweather_tools
 from .oxylabs import oxylabs_tools
 from .pandas import pandas_tools
+from .postgres import postgres_tools
 from .pubmed import pubmed_tools
 from .python import python_tools
+from .reasoning import reasoning_tools
 from .reddit import reddit_tools
+from .redshift import redshift_tools
 from .replicate import replicate_tools
 from .resend import resend_tools
 from .scrapegraph import scrapegraph_tools
@@ -76,15 +89,20 @@ from .searxng import searxng_tools
 from .serpapi import serpapi_tools
 from .serper import serper_tools
 from .shell import shell_tools
+from .shopify import shopify_tools
 from .slack import slack_tools
 from .sleep import sleep_tools
 from .spider import spider_tools
+from .spotify import spotify_tools
 from .sql import sql_tools
 from .tavily import tavily_tools
 from .telegram import telegram_tools
 from .todoist import todoist_tools
+from .trafilatura import trafilatura_tools
 from .trello import trello_tools
 from .twilio import twilio_tools
+from .unsplash import unsplash_tools
+from .visualization import visualization_tools
 from .web_browser_tools import web_browser_tools
 from .webex import webex_tools
 from .website import website_tools
@@ -109,11 +127,15 @@ __all__ = [
     "aws_lambda_tools",
     "aws_ses_tools",
     "baidusearch_tools",
+    "bitbucket_tools",
+    "brandfetch_tools",
+    "bravesearch_tools",
     "brightdata_tools",
     "browserbase_tools",
     "cal_com_tools",
     "calculator_tools",
     "cartesia_tools",
+    "clickup_tools",
     "composio_tools",
     "config_manager_tools",
     "confluence_tools",
@@ -122,6 +144,7 @@ __all__ = [
     "custom_api_tools",
     "dalle_tools",
     "daytona_tools",
+    "desi_vocal_tools",
     "discord_tools",
     "docker_tools",
     "duckdb_tools",
@@ -131,6 +154,7 @@ __all__ = [
     "email_tools",
     "exa_tools",
     "fal_tools",
+    "file_generation_tools",
     "file_tools",
     "financial_datasets_api_tools",
     "firecrawl_tools",
@@ -138,6 +162,7 @@ __all__ = [
     "giphy_tools",
     "github_tools",
     "gmail_tools",
+    "google_bigquery_tools",
     "google_calendar_tools",
     "google_maps_tools",
     "google_sheets_tools",
@@ -152,15 +177,20 @@ __all__ = [
     "mem0_tools",
     "modelslabs_tools",
     "moviepy_video_tools",
+    "neo4j_tools",
     "newspaper4k_tools",
-    "newspaper_tools",
+    "notion_tools",
     "openai_tools",
+    "openbb_tools",
     "openweather_tools",
     "oxylabs_tools",
     "pandas_tools",
+    "postgres_tools",
     "pubmed_tools",
     "python_tools",
+    "reasoning_tools",
     "reddit_tools",
+    "redshift_tools",
     "replicate_tools",
     "resend_tools",
     "scrapegraph_tools",
@@ -168,15 +198,20 @@ __all__ = [
     "serpapi_tools",
     "serper_tools",
     "shell_tools",
+    "shopify_tools",
     "slack_tools",
     "sleep_tools",
     "spider_tools",
+    "spotify_tools",
     "sql_tools",
     "tavily_tools",
     "telegram_tools",
     "todoist_tools",
+    "trafilatura_tools",
     "trello_tools",
     "twilio_tools",
+    "unsplash_tools",
+    "visualization_tools",
     "web_browser_tools",
     "webex_tools",
     "website_tools",
@@ -272,7 +307,7 @@ def yahoo_mail_tools() -> type[Toolkit]:
     category=ToolCategory.SHOPPING,
     status=ToolStatus.COMING_SOON,
     setup_type=SetupType.COMING_SOON,
-    icon="FaAmazon",
+    icon="SiAmazon",
     icon_color="text-orange-500",
 )
 def amazon_tools() -> type[Toolkit]:
@@ -304,7 +339,7 @@ def walmart_tools() -> type[Toolkit]:
     category=ToolCategory.SHOPPING,
     status=ToolStatus.COMING_SOON,
     setup_type=SetupType.COMING_SOON,
-    icon="FaEbay",
+    icon="SiEbay",
     icon_color="text-blue-500",  # eBay blue
 )
 def ebay_tools() -> type[Toolkit]:
@@ -347,29 +382,13 @@ def netflix_tools() -> type[Toolkit]:
 
 
 @register_tool_with_metadata(
-    name="spotify",
-    display_name="Spotify",
-    description="Music streaming and playlist management",
-    category=ToolCategory.ENTERTAINMENT,
-    status=ToolStatus.COMING_SOON,
-    setup_type=SetupType.COMING_SOON,
-    icon="FaSpotify",
-    icon_color="text-green-500",
-)
-def spotify_tools() -> type[Toolkit]:
-    """Spotify integration - coming soon."""
-    msg = "Spotify integration is coming soon"
-    raise NotImplementedError(msg)
-
-
-@register_tool_with_metadata(
     name="apple_music",
     display_name="Apple Music",
     description="Library and playlist management",
     category=ToolCategory.ENTERTAINMENT,
     status=ToolStatus.COMING_SOON,
     setup_type=SetupType.COMING_SOON,
-    icon="FaApple",
+    icon="SiApplemusic",
     icon_color="text-gray-800",
 )
 def apple_music_tools() -> type[Toolkit]:
@@ -402,7 +421,7 @@ def hbo_tools() -> type[Toolkit]:
     category=ToolCategory.SOCIAL,
     status=ToolStatus.COMING_SOON,
     setup_type=SetupType.COMING_SOON,
-    icon="FaFacebook",
+    icon="SiFacebook",
     icon_color="text-blue-600",
 )
 def facebook_tools() -> type[Toolkit]:
@@ -418,7 +437,7 @@ def facebook_tools() -> type[Toolkit]:
     category=ToolCategory.SOCIAL,
     status=ToolStatus.COMING_SOON,
     setup_type=SetupType.COMING_SOON,
-    icon="FaInstagram",
+    icon="SiInstagram",
     icon_color="text-pink-600",
 )
 def instagram_tools() -> type[Toolkit]:
@@ -434,7 +453,7 @@ def instagram_tools() -> type[Toolkit]:
     category=ToolCategory.SOCIAL,
     status=ToolStatus.COMING_SOON,
     setup_type=SetupType.COMING_SOON,
-    icon="FaLinkedin",
+    icon="SiLinkedin",
     icon_color="text-blue-700",
 )
 def linkedin_tools() -> type[Toolkit]:
@@ -451,7 +470,7 @@ def linkedin_tools() -> type[Toolkit]:
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.COMING_SOON,
     setup_type=SetupType.COMING_SOON,
-    icon="FaGitlab",
+    icon="SiGitlab",
     icon_color="text-orange-600",
 )
 def gitlab_tools() -> type[Toolkit]:
@@ -467,7 +486,7 @@ def gitlab_tools() -> type[Toolkit]:
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.COMING_SOON,
     setup_type=SetupType.COMING_SOON,
-    icon="FaDropbox",
+    icon="SiDropbox",
     icon_color="text-blue-600",
 )
 def dropbox_tools() -> type[Toolkit]:
@@ -484,7 +503,7 @@ def dropbox_tools() -> type[Toolkit]:
     category=ToolCategory.INFORMATION,
     status=ToolStatus.COMING_SOON,
     setup_type=SetupType.COMING_SOON,
-    icon="FaGoodreads",
+    icon="SiGoodreads",
     icon_color="text-amber-700",
 )
 def goodreads_tools() -> type[Toolkit]:

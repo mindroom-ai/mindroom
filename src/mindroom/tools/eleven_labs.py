@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
-    icon="FaVolumeUp",
+    icon="SiElevenlabs",
     icon_color="text-orange-500",
     config_fields=[
         ConfigField(

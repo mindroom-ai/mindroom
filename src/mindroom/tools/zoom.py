@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     category=ToolCategory.SOCIAL,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.OAUTH,
-    icon="FaVideo",
+    icon="SiZoom",
     icon_color="text-blue-500",  # Zoom blue
     config_fields=[
         # Authentication parameters

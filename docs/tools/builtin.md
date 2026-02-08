@@ -4,7 +4,7 @@ icon: lucide/box
 
 # Built-in Tools
 
-MindRoom includes 86 built-in tool integrations organized by category.
+MindRoom includes 120+ built-in tool integrations organized by category.
 
 ## File & System
 
@@ -15,10 +15,16 @@ MindRoom includes 86 built-in tool integrations organized by category.
 | `docker` | Manage Docker containers and images | - |
 | `python` | Execute Python code | - |
 | `sql` | Database query and management for SQL databases | `db_url` or connection params |
+| `postgres` | Query PostgreSQL databases - list tables, describe schemas, run SQL | Connection params |
+| `redshift` | Query Amazon Redshift data warehouse | Connection params |
+| `neo4j` | Query Neo4j graph databases with Cypher | `uri`, `user`, `password` |
 | `duckdb` | Query data with DuckDB | - |
 | `pandas` | Data manipulation with Pandas | - |
 | `csv` | Read and write CSV files | - |
 | `calculator` | Mathematical calculations | - |
+| `reasoning` | Step-by-step reasoning scratchpad for structured problem solving | - |
+| `file_generation` | Generate JSON, CSV, PDF, and text files from data | - |
+| `visualization` | Create bar, line, pie charts, scatter plots, and histograms | - |
 | `sleep` | Pause execution | - |
 
 ## Web Search & Research
@@ -28,6 +34,7 @@ MindRoom includes 86 built-in tool integrations organized by category.
 | `duckduckgo` | DuckDuckGo web search | - |
 | `googlesearch` | Google search via WebSearch backend | - |
 | `baidusearch` | Baidu search | - |
+| `bravesearch` | Brave Search web search API | `api_key` |
 | `tavily` | Real-time web search API | `api_key` |
 | `exa` | AI-powered web search and research | `api_key` |
 | `serpapi` | Search API aggregator | `api_key` |
@@ -50,6 +57,7 @@ MindRoom includes 86 built-in tool integrations organized by category.
 | `oxylabs` | Web scraping proxy | `api_key` |
 | `jina` | Web content reading and search | `api_key` (optional) |
 | `website` | Simple web fetching | - |
+| `trafilatura` | Web content and metadata extraction | - |
 | `newspaper4k` | Article extraction | - |
 | `web_browser_tools` | Browser automation | - |
 
@@ -65,6 +73,7 @@ MindRoom includes 86 built-in tool integrations organized by category.
 | `dalle` | DALL-E image generation | `api_key` |
 | `cartesia` | Text-to-speech and voice localization | `api_key` |
 | `eleven_labs` | Text-to-speech and sound effects | `api_key` |
+| `desi_vocal` | Hindi and Indian language text-to-speech | `api_key` |
 | `lumalabs` | 3D content creation and video generation | `api_key` |
 | `modelslabs` | Generate videos, audio, and GIFs from text | `api_key` |
 
@@ -99,9 +108,12 @@ MindRoom includes 86 built-in tool integrations organized by category.
 | Tool | Description | Config Required |
 |------|-------------|-----------------|
 | `github` | Repository and issue management | `access_token` |
+| `bitbucket` | Bitbucket repository, PR, and issue management | `username`, `password` or `token` |
 | `jira` | Issue tracking and project management | `server_url`, `username`, `password` or `token` |
 | `linear` | Issue tracking and project management | `api_key` |
+| `clickup` | ClickUp task, space, and list management | `api_key`, `master_space_id` |
 | `confluence` | Retrieve, create, and update wiki pages | `url`, `username`, `password` or `api_key` |
+| `notion` | Create, update, and search pages in Notion databases | `api_key`, `database_id` |
 | `trello` | Trello boards | `api_key`, `token` |
 | `todoist` | Todoist task management | `api_token` |
 | `zendesk` | Search help center articles | `username`, `password`, `company_name` |
@@ -119,6 +131,8 @@ MindRoom includes 86 built-in tool integrations organized by category.
 |------|-------------|-----------------|
 | `google_sheets` | Read, create, update spreadsheets | Google OAuth |
 | `yfinance` | Financial data | - |
+| `openbb` | Stock prices, company news, price targets via OpenBB | `openbb_pat` (optional) |
+| `shopify` | Shopify store sales data, products, orders | `shop_name`, `access_token` |
 | `financial_datasets_api` | Financial datasets | `api_key` |
 
 ## Location & Maps
@@ -138,6 +152,7 @@ MindRoom includes 86 built-in tool integrations organized by category.
 | `e2b` | Code execution sandbox | `api_key` |
 | `daytona` | Development environments | `api_key` |
 | `composio` | API composition | `api_key` |
+| `google_bigquery` | Query Google BigQuery - list tables, schemas, run SQL | `dataset`, `project`, `location` |
 
 ## Smart Home
 
@@ -150,8 +165,11 @@ MindRoom includes 86 built-in tool integrations organized by category.
 | Tool | Description | Config Required |
 |------|-------------|-----------------|
 | `youtube` | Extract video data, captions, and timestamps | - |
+| `spotify` | Search tracks, manage playlists, get recommendations | `access_token` |
 | `giphy` | GIF search | `api_key` |
 | `moviepy_video_tools` | Video processing | - |
+| `unsplash` | Search and retrieve royalty-free images | `access_key` |
+| `brandfetch` | Retrieve brand logos, colors, and fonts by domain | `api_key` |
 
 ## Memory & Storage
 
