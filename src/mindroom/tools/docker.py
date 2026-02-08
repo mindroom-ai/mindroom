@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
-    icon="FaDocker",
+    icon="SiDocker",
     icon_color="text-blue-500",
     config_fields=[],
     dependencies=["docker"],

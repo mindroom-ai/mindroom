@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     category=ToolCategory.COMMUNICATION,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
-    icon="FaSlack",
+    icon="SiSlack",
     icon_color="text-purple-600",
     config_fields=[
         ConfigField(

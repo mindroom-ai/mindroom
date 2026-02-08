@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     category=ToolCategory.COMMUNICATION,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
-    icon="FaVideo",
+    icon="SiWebex",
     icon_color="text-blue-600",
     config_fields=[
         ConfigField(

@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     category=ToolCategory.RESEARCH,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
-    icon="FaStethoscope",
+    icon="SiPubmed",
     icon_color="text-blue-600",  # Medical blue
     config_fields=[
         ConfigField(

@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     category=ToolCategory.COMMUNICATION,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
-    icon="FaTelegram",
+    icon="SiTelegram",
     icon_color="text-blue-500",  # Telegram blue
     config_fields=[
         ConfigField(

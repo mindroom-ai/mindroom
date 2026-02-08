@@ -307,7 +307,7 @@ def yahoo_mail_tools() -> type[Toolkit]:
     category=ToolCategory.SHOPPING,
     status=ToolStatus.COMING_SOON,
     setup_type=SetupType.COMING_SOON,
-    icon="FaAmazon",
+    icon="SiAmazon",
     icon_color="text-orange-500",
 )
 def amazon_tools() -> type[Toolkit]:
@@ -339,7 +339,7 @@ def walmart_tools() -> type[Toolkit]:
     category=ToolCategory.SHOPPING,
     status=ToolStatus.COMING_SOON,
     setup_type=SetupType.COMING_SOON,
-    icon="FaEbay",
+    icon="SiEbay",
     icon_color="text-blue-500",  # eBay blue
 )
 def ebay_tools() -> type[Toolkit]:
@@ -388,7 +388,7 @@ def netflix_tools() -> type[Toolkit]:
     category=ToolCategory.ENTERTAINMENT,
     status=ToolStatus.COMING_SOON,
     setup_type=SetupType.COMING_SOON,
-    icon="FaApple",
+    icon="SiApplemusic",
     icon_color="text-gray-800",
 )
 def apple_music_tools() -> type[Toolkit]:
@@ -421,7 +421,7 @@ def hbo_tools() -> type[Toolkit]:
     category=ToolCategory.SOCIAL,
     status=ToolStatus.COMING_SOON,
     setup_type=SetupType.COMING_SOON,
-    icon="FaFacebook",
+    icon="SiFacebook",
     icon_color="text-blue-600",
 )
 def facebook_tools() -> type[Toolkit]:
@@ -437,7 +437,7 @@ def facebook_tools() -> type[Toolkit]:
     category=ToolCategory.SOCIAL,
     status=ToolStatus.COMING_SOON,
     setup_type=SetupType.COMING_SOON,
-    icon="FaInstagram",
+    icon="SiInstagram",
     icon_color="text-pink-600",
 )
 def instagram_tools() -> type[Toolkit]:
@@ -453,7 +453,7 @@ def instagram_tools() -> type[Toolkit]:
     category=ToolCategory.SOCIAL,
     status=ToolStatus.COMING_SOON,
     setup_type=SetupType.COMING_SOON,
-    icon="FaLinkedin",
+    icon="SiLinkedin",
     icon_color="text-blue-700",
 )
 def linkedin_tools() -> type[Toolkit]:
@@ -470,7 +470,7 @@ def linkedin_tools() -> type[Toolkit]:
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.COMING_SOON,
     setup_type=SetupType.COMING_SOON,
-    icon="FaGitlab",
+    icon="SiGitlab",
     icon_color="text-orange-600",
 )
 def gitlab_tools() -> type[Toolkit]:
@@ -486,7 +486,7 @@ def gitlab_tools() -> type[Toolkit]:
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.COMING_SOON,
     setup_type=SetupType.COMING_SOON,
-    icon="FaDropbox",
+    icon="SiDropbox",
     icon_color="text-blue-600",
 )
 def dropbox_tools() -> type[Toolkit]:
@@ -503,7 +503,7 @@ def dropbox_tools() -> type[Toolkit]:
     category=ToolCategory.INFORMATION,
     status=ToolStatus.COMING_SOON,
     setup_type=SetupType.COMING_SOON,
-    icon="FaGoodreads",
+    icon="SiGoodreads",
     icon_color="text-amber-700",
 )
 def goodreads_tools() -> type[Toolkit]:

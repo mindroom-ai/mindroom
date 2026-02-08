@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     category=ToolCategory.SOCIAL,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
-    icon="FaTwitter",
+    icon="SiX",
     icon_color="text-blue-400",
     config_fields=[
         # Authentication/Connection parameters first

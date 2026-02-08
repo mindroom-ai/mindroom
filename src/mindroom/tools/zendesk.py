@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     category=ToolCategory.DEVELOPMENT,  # From others/ category
     status=ToolStatus.REQUIRES_CONFIG,  # Requires username, password, company_name
     setup_type=SetupType.API_KEY,  # Uses username/password authentication
-    icon="HelpCircle",  # React icon for help/support
+    icon="SiZendesk",  # React icon for help/support
     icon_color="text-green-600",  # Zendesk brand green
     config_fields=[
         ConfigField(

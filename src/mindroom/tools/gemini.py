@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
-    icon="FaGoogle",
+    icon="SiGooglegemini",
     icon_color="text-blue-500",
     config_fields=[
         ConfigField(

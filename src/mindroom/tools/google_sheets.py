@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.SPECIAL,
     auth_provider="google",  # Authentication provided by Google Services integration
-    icon="FaGoogle",
+    icon="SiGooglesheets",
     icon_color="text-green-600",
     config_fields=[
         ConfigField(

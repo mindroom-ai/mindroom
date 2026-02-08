@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     category=ToolCategory.COMMUNICATION,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
-    icon="FaWhatsapp",
+    icon="SiWhatsapp",
     icon_color="text-green-500",
     config_fields=[
         # Authentication/Connection parameters first

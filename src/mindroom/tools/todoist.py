@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
-    icon="FaTasks",
+    icon="SiTodoist",
     icon_color="text-red-500",
     config_fields=[
         ConfigField(
