@@ -67,12 +67,16 @@ dependencies = [
   "lumaai",                                            # for LumaLabs tool
   "lxml-html-clean",                                   # for Newspaper4K tools
   "markdown>=3.7",                                     # for HTML formatting in Matrix messages
+  "matplotlib",                                        # for Visualization tool
   "matrix-nio>=0.24",
   "mcp[cli]>=1.12.4",                                  # for MCP tool
   "mem0ai>=0.1.115",                                   # for Mem0 tool
   "moviepy",                                           # for MoviePy tool
+  "neo4j",                                             # for Neo4j tool
   "newspaper4k",                                       # for Newspaper4K tool
+  "notion-client",                                     # for Notion tool
   "openai",                                            # for OpenAI and DALL-E tools, Morph model
+  "openbb",                                            # for OpenBB tool
   "oxylabs",                                           # for Oxylabs tool
   "pandas>=2.2",                                       # for Pandas tool
   "playwright",                                        # for AgentQL and Browserbase tools
@@ -87,7 +91,9 @@ dependencies = [
   "python-dotenv>=1",
   "pytz",                                              # for Cal.com tool
   "pyyaml>=6",
+  "redshift-connector",                                # for Redshift tool
   "replicate>=1.0.7",                                  # for Replicate tool
+  "reportlab",                                         # for FileGeneration tool (PDF)
   "requests",                                          # for ClickUp, Cal.com, Zendesk, OpenWeather, ModelsLabs, API tools
   "resend",                                            # for Resend tool
   "rich",                                              # for CLI output
@@ -102,6 +108,7 @@ dependencies = [
   "tavily-python",                                     # for Tavily tool
   "tenacity>=9.1.2",
   "todoist-api-python",                                # for Todoist tool
+  "trafilatura",                                       # for Trafilatura tool
   "tweepy",                                            # for X/Twitter tool
   "twilio",                                            # for Twilio tool
   "typer>=0.16",

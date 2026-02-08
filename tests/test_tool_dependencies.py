@@ -92,6 +92,10 @@ def test_all_tool_dependencies_in_pyproject() -> None:  # noqa: C901, PLR0912, P
         extras_str = agno_line[agno_line.index("[") + 1 : agno_line.index("]")]
         agno_extras = {e.strip() for e in extras_str.split(",")}
 
+    # Dependencies with known version conflicts that can't be added to pyproject.toml
+    # brave-search requires tenacity<9.0.0 but we require tenacity>=9.1.2
+    known_conflicts = {"brave-search"}
+
     # Check each tool's dependencies
     missing_deps = {}
     agno_managed_deps = {}
@@ -151,7 +155,7 @@ def test_all_tool_dependencies_in_pyproject() -> None:  # noqa: C901, PLR0912, P
             if dep_lower in agno_dep_mappings and agno_dep_mappings[dep_lower] in agno_extras:
                 agno_managed = True
 
-            if not found and not agno_managed:
+            if not found and not agno_managed and dep_lower not in known_conflicts:
                 tool_missing.append(dep)
             elif agno_managed:
                 tool_agno_managed.append(dep)
