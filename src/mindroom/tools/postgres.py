@@ -23,7 +23,7 @@ if TYPE_CHECKING:
         ConfigField(
             name="host",
             label="Host",
-            type="text",
+            type="url",
             required=True,
             placeholder="localhost",
             description="PostgreSQL server hostname",
