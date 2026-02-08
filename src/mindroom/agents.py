@@ -67,13 +67,17 @@ RICH_PROMPTS = {
 }
 
 
+def is_learning_enabled(agent_config: AgentConfig) -> bool:
+    """Check if learning is enabled for an agent (defaults to True when omitted)."""
+    return agent_config.learning is not False
+
+
 def resolve_agent_learning(
     agent_config: AgentConfig,
     learning_storage: SqliteDb | None = None,
 ) -> bool | LearningMachine:
     """Resolve Agent.learning setting from MindRoom agent configuration."""
-    learning_enabled = agent_config.learning if agent_config.learning is not None else True
-    if not learning_enabled:
+    if not is_learning_enabled(agent_config):
         return False
 
     learning_mode = agent_config.learning_mode or "always"
@@ -149,7 +153,7 @@ def create_agent(agent_name: str, config: Config, *, storage_path: Path | None =
 
     storage = create_session_storage(agent_name, resolved_storage_path)
     learning_storage = (
-        create_learning_storage(agent_name, resolved_storage_path) if agent_config.learning is not False else None
+        create_learning_storage(agent_name, resolved_storage_path) if is_learning_enabled(agent_config) else None
     )
 
     # Get model config for identity context
