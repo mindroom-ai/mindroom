@@ -386,9 +386,7 @@ def get_knowledge_manager(base_id: str) -> KnowledgeManager | None:
 
 async def shutdown_knowledge_managers() -> None:
     """Shutdown and clear all process-wide knowledge managers."""
-    global _knowledge_managers
-
     for manager in list(_knowledge_managers.values()):
         await manager.stop_watcher()
 
-    _knowledge_managers = {}
+    _knowledge_managers.clear()

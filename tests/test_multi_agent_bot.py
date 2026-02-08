@@ -14,7 +14,7 @@ from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
-from mindroom.config import Config, ModelConfig
+from mindroom.config import AgentConfig, Config, KnowledgeBaseConfig, ModelConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 
@@ -98,6 +98,61 @@ class TestAgentBot:
         mock_config.domain = "localhost"
 
         return mock_config
+
+    @staticmethod
+    def create_config_with_knowledge_base(
+        *,
+        assigned_base: str | None,
+        knowledge_bases: dict[str, KnowledgeBaseConfig] | None = None,
+    ) -> Config:
+        """Create a real config with one calculator agent for knowledge assignment tests."""
+        return Config(
+            agents={
+                "calculator": AgentConfig(
+                    display_name="CalculatorAgent",
+                    rooms=["!test:localhost"],
+                    knowledge_base=assigned_base,
+                ),
+            },
+            knowledge_bases=knowledge_bases or {},
+        )
+
+    def test_knowledge_for_agent_returns_none_when_unassigned(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Unassigned agents should not receive knowledge access."""
+        config = self.create_config_with_knowledge_base(
+            assigned_base=None,
+            knowledge_bases={
+                "research": KnowledgeBaseConfig(path=str(tmp_path / "kb"), watch=False),
+            },
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot.orchestrator = MagicMock(knowledge_managers={"research": MagicMock()})
+
+        assert bot._knowledge_for_agent("calculator") is None
+
+    def test_knowledge_for_agent_uses_assigned_base_manager(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Agents should receive knowledge from their assigned knowledge base manager."""
+        config = self.create_config_with_knowledge_base(
+            assigned_base="research",
+            knowledge_bases={
+                "research": KnowledgeBaseConfig(path=str(tmp_path / "kb"), watch=False),
+            },
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        expected_knowledge = object()
+        manager = MagicMock()
+        manager.get_knowledge.return_value = expected_knowledge
+        bot.orchestrator = MagicMock(knowledge_managers={"research": manager})
+
+        assert bot._knowledge_for_agent("calculator") is expected_knowledge
 
     @pytest.mark.asyncio
     @patch("mindroom.config.Config.from_yaml")

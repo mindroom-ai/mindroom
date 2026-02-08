@@ -8,9 +8,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 from agno.agent import Agent
 from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
+from pydantic import ValidationError
 
 from mindroom.agents import create_agent
-from mindroom.config import Config
+from mindroom.config import AgentConfig, Config, KnowledgeBaseConfig
 
 
 @patch("mindroom.agents.SqliteDb")
@@ -140,3 +141,37 @@ def test_get_agent_uses_storage_path_for_sessions_and_learning(mock_storage: Mag
     db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
     assert tmp_path / "sessions" / "general.db" in db_files
     assert tmp_path / "learning" / "general.db" in db_files
+
+
+def test_config_rejects_unknown_agent_knowledge_base_assignment() -> None:
+    """Agents must not reference unknown knowledge bases."""
+    with pytest.raises(ValidationError, match="Agents reference unknown knowledge bases: calculator -> research"):
+        Config(
+            agents={
+                "calculator": AgentConfig(
+                    display_name="CalculatorAgent",
+                    knowledge_base="research",
+                ),
+            },
+            knowledge_bases={},
+        )
+
+
+def test_config_accepts_valid_agent_knowledge_base_assignment() -> None:
+    """Agent knowledge base assignment is valid when the base is configured."""
+    config = Config(
+        agents={
+            "calculator": AgentConfig(
+                display_name="CalculatorAgent",
+                knowledge_base="research",
+            ),
+        },
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(
+                path="./knowledge_docs/research",
+                watch=False,
+            ),
+        },
+    )
+
+    assert config.agents["calculator"].knowledge_base == "research"

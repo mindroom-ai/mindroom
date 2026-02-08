@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .constants import DEFAULT_AGENTS_CONFIG, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, safe_replace
 from .logging_config import get_logger
@@ -191,6 +191,23 @@ class Config(BaseModel):
         default_factory=AuthorizationConfig,
         description="Authorization configuration with fine-grained permissions",
     )
+
+    @model_validator(mode="after")
+    def validate_knowledge_base_assignments(self) -> Config:
+        """Ensure agents only reference configured knowledge base IDs."""
+        invalid_assignments = [
+            (agent_name, agent_config.knowledge_base)
+            for agent_name, agent_config in self.agents.items()
+            if agent_config.knowledge_base is not None and agent_config.knowledge_base not in self.knowledge_bases
+        ]
+        if invalid_assignments:
+            formatted = ", ".join(
+                f"{agent_name} -> {knowledge_base}"
+                for agent_name, knowledge_base in sorted(invalid_assignments, key=lambda item: item[0])
+            )
+            msg = f"Agents reference unknown knowledge bases: {formatted}"
+            raise ValueError(msg)
+        return self
 
     @cached_property
     def domain(self) -> str:

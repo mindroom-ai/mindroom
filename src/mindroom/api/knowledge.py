@@ -13,6 +13,7 @@ from mindroom.config import Config
 from mindroom.constants import STORAGE_PATH_OBJ
 from mindroom.knowledge import (
     KnowledgeManager,
+    get_knowledge_manager,
     initialize_knowledge_managers,
 )
 
@@ -27,10 +28,11 @@ def _ensure_base_exists(config: Config, base_id: str) -> None:
         raise HTTPException(status_code=404, detail=f"Knowledge base '{base_id}' not found")
 
 
-def _knowledge_root(config: Config, base_id: str) -> Path:
+def _knowledge_root(config: Config, base_id: str, *, create: bool = False) -> Path:
     _ensure_base_exists(config, base_id)
     root = Path(config.knowledge_bases[base_id].path).expanduser().resolve()
-    root.mkdir(parents=True, exist_ok=True)
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
     return root
 
 
@@ -50,6 +52,9 @@ def _resolve_within_root(root: Path, relative_path: str) -> Path:
 def _list_file_info(root: Path) -> tuple[list[dict[str, Any]], int]:
     files: list[dict[str, Any]] = []
     total_size = 0
+
+    if not root.is_dir():
+        return files, total_size
 
     for file_path in sorted(path for path in root.rglob("*") if path.is_file()):
         stat = file_path.stat()
@@ -78,7 +83,9 @@ async def _ensure_managers(config: Config) -> dict[str, KnowledgeManager]:
 
 
 async def _ensure_manager(config: Config, base_id: str) -> KnowledgeManager | None:
-    _ensure_base_exists(config, base_id)
+    existing = get_knowledge_manager(base_id)
+    if existing is not None and existing.matches(config, STORAGE_PATH_OBJ):
+        return existing
     managers = await _ensure_managers(config)
     return managers.get(base_id)
 
@@ -175,7 +182,7 @@ async def list_knowledge_files(base_id: str) -> dict[str, Any]:
 async def upload_knowledge_files(base_id: str, files: Annotated[list[UploadFile], File(...)]) -> dict[str, Any]:
     """Upload one or more files into a knowledge base folder."""
     config = Config.from_yaml()
-    root = _knowledge_root(config, base_id)
+    root = _knowledge_root(config, base_id, create=True)
 
     uploaded: list[str] = []
     uploaded_paths: list[Path] = []
@@ -268,8 +275,7 @@ async def reindex_knowledge(base_id: str) -> dict[str, Any]:
     config = Config.from_yaml()
     _ensure_base_exists(config, base_id)
 
-    manager_map = await _ensure_managers(config)
-    manager = manager_map.get(base_id)
+    manager = await _ensure_manager(config, base_id)
     if manager is None:
         raise HTTPException(status_code=500, detail="Knowledge manager is unavailable")
 
