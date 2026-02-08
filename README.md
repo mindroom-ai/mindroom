@@ -126,7 +126,7 @@ Email: I'll compile and send every Friday
 - Send general queries to cost-effective cloud models
 - You decide which AI sees what
 
-### 🔌 80+ Integrations
+### 🔌 100+ Integrations
 Gmail, GitHub, Spotify, Home Assistant, Google Drive, Reddit, weather services, news APIs, financial data, and many more. Your agents can interact with all your tools.
 
 ### 📅 Automation & Scheduling
@@ -275,7 +275,7 @@ Mix and match:
 ## Architecture
 
 ### Technical Stack
-- **Matrix**: Conduit server (only 20-30MB RAM!)
+- **Matrix**: Any homeserver (Synapse, Conduit, Dendrite, etc.)
 - **Agents**: Python with matrix-nio
 - **AI Models**: OpenAI, Anthropic, Ollama, or any provider
 - **Memory**: Mem0 + ChromaDB vector storage (persistent on disk)
@@ -294,7 +294,7 @@ We believe AI should be:
 ## Status
 
 - ✅ **Production ready** with 1000+ commits
-- ✅ **80+ integrations** working today
+- ✅ **100+ integrations** working today
 - ✅ **Multi-agent collaboration** with persistent memory
 - ✅ **Federation** across organizations and platforms
 - ✅ **Self-hosted & cloud** options available

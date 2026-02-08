@@ -73,7 +73,7 @@ defaults:
   num_history_runs: 5              # Default: 5
   markdown: true                   # Default: true
   add_history_to_messages: true    # Default: true
-  show_stop_button: false          # Default: false
+  show_stop_button: false          # Default: false (global only, cannot be overridden per-agent)
   learning: true                   # Default: true
   learning_mode: always            # Default: always (or agentic)
 
@@ -113,6 +113,8 @@ authorization:
   default_room_access: false       # Default: false
 
 # Room-specific model overrides (optional)
+# Keys are room aliases, values are model names from the models section
+# Example: room_models: {dev: sonnet, lobby: gpt4o}
 room_models: {}
 
 # Plugin paths (optional)

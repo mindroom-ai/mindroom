@@ -77,7 +77,7 @@ Read and understand the MindRoom project structure:
    - Asyncio for concurrent operations
    - Per-thread memory and conversation tracking
    - Dual memory system: agent memory + room memory
-   - 120+ tool integrations available in `src/mindroom/tools/`
+   - 100+ tool integrations available in `src/mindroom/tools/`
 
 5. **Key Files and Modules**
    - `src/mindroom/bot.py` - Main bot orchestration
@@ -87,7 +87,7 @@ Read and understand the MindRoom project structure:
    - `src/mindroom/scheduling.py` - Task scheduling
    - `src/mindroom/background_tasks.py` - Background task management
    - `src/mindroom/memory/` - Memory persistence system
-   - `src/mindroom/tools/` - 120+ tool integrations
+   - `src/mindroom/tools/` - 100+ tool integrations
    - `src/mindroom/custom_tools/` - Custom tool implementations
 
 6. **Testing with Matty CLI**

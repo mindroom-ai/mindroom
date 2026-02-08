@@ -53,7 +53,7 @@ MindRoom is a platform that frees AI agents from being trapped in single apps. K
 - AI agents with persistent memory that work across all platforms (Slack, Discord, Telegram, WhatsApp)
 - Agents collaborate naturally in threads and remember everything across sessions
 - Built on Matrix protocol for secure, federated communication
-- 80+ integrations with tools like Gmail, GitHub, Spotify, Home Assistant
+- 100+ integrations with tools like Gmail, GitHub, Spotify, Home Assistant
 - Self-hosted or cloud options with military-grade encryption
 
 Room details:
