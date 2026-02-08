@@ -287,14 +287,18 @@ function AppContent() {
 
         {/* Main Content */}
         <div className="flex-1 overflow-hidden">
-          <Tabs value={currentTab} onValueChange={handleTabChange} className="h-full flex flex-col">
+          <Tabs
+            value={currentTab}
+            onValueChange={handleTabChange}
+            className="h-full flex flex-col relative"
+          >
             {/* Desktop Tab Navigation */}
             <TabsList
               ref={tabsListRef}
               className={cn(
                 'hidden sm:flex px-3 sm:px-6 py-3 bg-white/70 dark:bg-stone-900/50 backdrop-blur-lg border-b border-gray-200/50 dark:border-white/10 flex-shrink-0 overflow-x-auto overflow-y-hidden',
                 desktopCompactNav &&
-                  'sm:h-0 sm:p-0 sm:border-0 sm:opacity-0 sm:pointer-events-none sm:overflow-hidden'
+                  'sm:absolute sm:inset-x-0 sm:top-0 sm:opacity-0 sm:pointer-events-none sm:overflow-hidden'
               )}
             >
               {NAV_ITEMS.map(item => {
