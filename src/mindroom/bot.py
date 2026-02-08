@@ -109,6 +109,8 @@ if TYPE_CHECKING:
     from agno.tools.function import Function
     from agno.tools.toolkit import Toolkit
 
+    from .tool_events import ToolTraceEntry
+
 logger = get_logger(__name__)
 
 
@@ -1409,7 +1411,7 @@ class AgentBot:
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
-                response_text = await ai_response(
+                ai_result = await ai_response(
                     agent_name=self.agent_name,
                     prompt=prompt,
                     session_id=session_id,
@@ -1431,11 +1433,23 @@ class AgentBot:
 
         if existing_event_id:
             # Edit the existing message
-            await self._edit_message(room_id, existing_event_id, response_text, thread_id)
+            await self._edit_message(
+                room_id,
+                existing_event_id,
+                ai_result.text,
+                thread_id,
+                tool_trace=ai_result.tool_trace or None,
+            )
             return existing_event_id
 
-        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
-        event_id = await self._send_response(room_id, reply_to_event_id, response.formatted_text, thread_id)
+        response = interactive.parse_and_format_interactive(ai_result.text, extract_mapping=True)
+        event_id = await self._send_response(
+            room_id,
+            reply_to_event_id,
+            response.formatted_text,
+            thread_id,
+            tool_trace=ai_result.tool_trace or None,
+        )
         if event_id and response.option_map and response.options_list:
             # For interactive questions, use the same thread root that _send_response uses:
             # - If already in a thread, use that thread_id
@@ -1473,7 +1487,7 @@ class AgentBot:
         session_id = create_session_id(room_id, thread_id)
 
         async with typing_indicator(self.client, room_id):
-            response_text = await ai_response(
+            ai_result = await ai_response(
                 agent_name=agent_name,
                 prompt=prompt,
                 session_id=session_id,
@@ -1483,7 +1497,7 @@ class AgentBot:
                 room_id=room_id,
             )
 
-        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+        response = interactive.parse_and_format_interactive(ai_result.text, extract_mapping=True)
         event_id = await self._send_response(
             room_id,
             reply_to_event_id,
@@ -1491,6 +1505,7 @@ class AgentBot:
             thread_id,
             reply_to_event=reply_to_event,
             skip_mentions=True,
+            tool_trace=ai_result.tool_trace or None,
         )
 
         if event_id and response.option_map and response.options_list:
@@ -1737,6 +1752,7 @@ class AgentBot:
         thread_id: str | None,
         reply_to_event: nio.RoomMessageText | None = None,
         skip_mentions: bool = False,
+        tool_trace: list[ToolTraceEntry] | None = None,
     ) -> str | None:
         """Send a response message to a room.
 
@@ -1747,6 +1763,7 @@ class AgentBot:
             thread_id: The thread ID if already in a thread
             reply_to_event: Optional event object for the message we're replying to (used to check for safe thread root)
             skip_mentions: If True, add metadata to indicate mentions should not trigger responses
+            tool_trace: Optional structured tool trace metadata for custom client rendering
 
         Returns:
             Event ID if message was sent successfully, None otherwise.
@@ -1775,6 +1792,7 @@ class AgentBot:
             thread_event_id=effective_thread_id,
             reply_to_event_id=reply_to_event_id,
             latest_thread_event_id=latest_thread_event_id,
+            tool_trace=tool_trace,
         )
 
         # Add metadata to indicate mentions should be ignored for responses
@@ -1789,7 +1807,14 @@ class AgentBot:
         self.logger.error("Failed to send response to room", room_id=room_id)
         return None
 
-    async def _edit_message(self, room_id: str, event_id: str, new_text: str, thread_id: str | None) -> bool:
+    async def _edit_message(
+        self,
+        room_id: str,
+        event_id: str,
+        new_text: str,
+        thread_id: str | None,
+        tool_trace: list[ToolTraceEntry] | None = None,
+    ) -> bool:
         """Edit an existing message.
 
         Returns:
@@ -1818,6 +1843,7 @@ class AgentBot:
             sender_domain=sender_domain,
             thread_event_id=thread_id,
             latest_thread_event_id=latest_thread_event_id,
+            tool_trace=tool_trace,
         )
 
         assert self.client is not None

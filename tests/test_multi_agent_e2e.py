@@ -10,6 +10,7 @@ import nio
 import pytest
 from aioresponses import aioresponses
 
+from mindroom.ai import AIResponse
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.config import AgentConfig, Config, ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
@@ -285,7 +286,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             ]
 
             # Mock non-streaming response
-            mock_ai.return_value = "20% of 300 is 60"
+            mock_ai.return_value = AIResponse(text="20% of 300 is 60", tool_trace=[])
 
             await bot._on_message(room, message_event)
 
@@ -402,7 +403,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             ]
 
             # Mock non-streaming response for mention case
-            mock_ai.return_value = "20% of 300 is 60"
+            mock_ai.return_value = AIResponse(text="20% of 300 is 60", tool_trace=[])
 
             await bot._on_message(room, message_event_with_mention)
 

@@ -15,6 +15,7 @@ import nio
 import pytest
 import pytest_asyncio
 
+from mindroom.ai import AIResponse
 from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
@@ -194,7 +195,7 @@ class TestThreadingBehavior:
         # Mock interactive.handle_text_response and make AI fast
         with (
             patch("mindroom.bot.interactive.handle_text_response", AsyncMock(return_value=None)),
-            patch("mindroom.bot.ai_response", AsyncMock(return_value="OK")),
+            patch("mindroom.bot.ai_response", AsyncMock(return_value=AIResponse(text="OK", tool_trace=[]))),
             patch("mindroom.bot.get_latest_thread_event_id_if_needed", AsyncMock(return_value="latest_thread_event")),
         ):
             # Process the message

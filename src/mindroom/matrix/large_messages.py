@@ -14,13 +14,14 @@ import nio
 from nio import crypto
 
 from mindroom.logging_config import get_logger
+from mindroom.tool_events import TOOL_TRACE_KEY
 
 logger = get_logger(__name__)
 
 # Conservative limits accounting for Matrix overhead
 NORMAL_MESSAGE_LIMIT = 55000  # ~55KB for regular messages
 EDIT_MESSAGE_LIMIT = 27000  # ~27KB for edits (they roughly double in size)
-PASSTHROUGH_CONTENT_KEYS = ("m.mentions", "com.mindroom.skip_mentions")
+PASSTHROUGH_CONTENT_KEYS = ("m.mentions", "com.mindroom.skip_mentions", TOOL_TRACE_KEY)
 
 
 def _calculate_event_size(content: dict[str, Any]) -> int:

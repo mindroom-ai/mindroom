@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+from mindroom.ai import AIResponse
 from mindroom.bot import AgentBot
 from mindroom.config import Config
 from mindroom.matrix.users import AgentMatrixUser
@@ -125,7 +126,7 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
         patch("mindroom.bot.interactive.add_reaction_buttons"),
     ):
         # Setup mocks
-        mock_ai_response.return_value = "Test interactive response"
+        mock_ai_response.return_value = AIResponse(text="Test interactive response", tool_trace=[])
 
         # Mock the parse_and_format_interactive to return an interactive response
         mock_response_with_interactive = MagicMock()

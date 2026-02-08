@@ -2,7 +2,7 @@
 
 from agno.models.response import ToolExecution
 
-from mindroom.matrix.client import markdown_to_html
+from mindroom.matrix.client import markdown_to_html, markdown_to_plain_text
 from mindroom.tool_events import (
     MAX_TOOL_TRACE_EVENTS,
     TOOL_TRACE_KEY,
@@ -310,3 +310,40 @@ def test_tool_lifecycle_produces_expected_html() -> None:
     # - Call and result separated by \n inside each <tool> block
     assert "save_file(file=a.py)\nok</tool>" in html
     assert "run_shell(cmd=pwd)\n/app</tool>" in html
+
+
+# --- markdown_to_plain_text ---
+
+
+def test_markdown_to_plain_text_headings() -> None:
+    """Headings should be stripped to plain text."""
+    assert markdown_to_plain_text("## Title") == "Title"
+
+
+def test_markdown_to_plain_text_bold_and_code() -> None:
+    """Inline formatting (bold, code) should be removed."""
+    assert markdown_to_plain_text("**Bold** and `code`") == "Bold and code"
+
+
+def test_markdown_to_plain_text_list() -> None:
+    """Markdown lists should become dash-prefixed plain lines."""
+    result = markdown_to_plain_text("- one\n- two")
+    assert "- one" in result
+    assert "- two" in result
+
+
+def test_markdown_to_plain_text_link() -> None:
+    """Link text should be preserved, URL stripped."""
+    result = markdown_to_plain_text("[click](https://example.com)")
+    assert "click" in result
+
+
+def test_markdown_to_plain_text_multiline() -> None:
+    """Combined heading + list should produce readable plain text."""
+    result = markdown_to_plain_text("## Title\n\n- **Bold** and `code`")
+    assert result == "Title\n\n- Bold and code"
+
+
+def test_markdown_to_plain_text_plain_passthrough() -> None:
+    """Plain text without markdown should pass through unchanged."""
+    assert markdown_to_plain_text("hello world") == "hello world"

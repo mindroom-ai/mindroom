@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.config import Config
 from mindroom.tool_events import build_tool_trace_content
 
-from .client import markdown_to_html
+from .client import markdown_to_html, markdown_to_plain_text
 from .identity import MatrixID
 from .message_builder import build_message_content
 
@@ -136,10 +136,11 @@ def format_message_with_mentions(
     # Convert markdown (with links) to HTML
     # The markdown converter will properly handle the [@DisplayName](url) format
     formatted_html = markdown_to_html(markdown_text)
+    fallback_body = markdown_to_plain_text(plain_text)
     extra_content = build_tool_trace_content(tool_trace)
 
     return build_message_content(
-        body=plain_text,
+        body=fallback_body,
         formatted_body=formatted_html,
         mentioned_user_ids=mentioned_user_ids,
         thread_event_id=thread_event_id,

@@ -7,6 +7,7 @@ import ssl as ssl_module
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from html import escape
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
@@ -564,6 +565,8 @@ async def get_latest_thread_event_id_if_needed(
 _CONSECUTIVE_TOOL_BLOCKS = re.compile(
     r"(<tool>[\s\S]*?</tool>)(\s*<tool>[\s\S]*?</tool>)+",
 )
+_WHITESPACE_BEFORE_NEWLINE = re.compile(r"[ \t]+\n")
+_EXTRA_NEWLINES = re.compile(r"\n{3,}")
 
 _HTML_TAG_PATTERN = re.compile(r"</?([A-Za-z][A-Za-z0-9-]*)(?:\s+[^<>]*)?\s*/?>")
 
@@ -622,6 +625,61 @@ _MINDROOM_FORMATTED_BODY_TAGS = frozenset(_MINDROOM_CUSTOM_TAGS)
 _ALLOWED_FORMATTED_BODY_TAGS = _GENERAL_FORMATTED_BODY_TAGS | _MINDROOM_FORMATTED_BODY_TAGS
 
 
+class _PlainTextExtractor(HTMLParser):
+    """Extract plain text from HTML while preserving useful line breaks."""
+
+    _BLOCK_TAGS = frozenset(
+        {
+            "p",
+            "div",
+            "pre",
+            "blockquote",
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "h5",
+            "h6",
+            "ul",
+            "ol",
+            "table",
+            "tr",
+        },
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.parts: list[str] = []
+
+    def _append_newline(self) -> None:
+        if self.parts and not self.parts[-1].endswith("\n"):
+            self.parts.append("\n")
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        del attrs  # Unused.
+        if tag == "br":
+            self._append_newline()
+        elif tag == "li":
+            self._append_newline()
+            self.parts.append("- ")
+        elif tag in self._BLOCK_TAGS:
+            self._append_newline()
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self._BLOCK_TAGS or tag == "li":
+            self._append_newline()
+
+    def handle_data(self, data: str) -> None:
+        self.parts.append(data)
+
+    def get_text(self) -> str:
+        text = "".join(self.parts)
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        text = _WHITESPACE_BEFORE_NEWLINE.sub("\n", text)
+        text = _EXTRA_NEWLINES.sub("\n\n", text)
+        return text.strip()
+
+
 def _escape_unsupported_html_tags(html_text: str) -> str:
     """Escape raw tags that Matrix clients commonly strip entirely.
 
@@ -676,6 +734,16 @@ def markdown_to_html(text: str) -> str:
     md.block_level_elements.extend(_MINDROOM_CUSTOM_TAGS)
     html_text: str = md.convert(text)
     return _escape_unsupported_html_tags(html_text)
+
+
+def markdown_to_plain_text(text: str) -> str:
+    """Convert markdown text to a plain fallback body for clients without HTML rendering."""
+    html_text = markdown_to_html(text)
+    parser = _PlainTextExtractor()
+    parser.feed(html_text)
+    parser.close()
+    plain_text = parser.get_text()
+    return plain_text if plain_text else text
 
 
 async def edit_message(

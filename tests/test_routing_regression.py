@@ -14,6 +14,7 @@ import nio
 import pytest
 from agno.models.ollama import Ollama
 
+from mindroom.ai import AIResponse
 from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
@@ -95,7 +96,7 @@ class TestRoutingRegression:
         news_bot = setup_test_bot(mock_news_agent, tmp_path, test_room_id)
 
         # Mock AI responses
-        mock_ai_response.return_value = "I can help with that research!"
+        mock_ai_response.return_value = AIResponse(text="I can help with that research!", tool_trace=[])
         mock_suggest_agent.return_value = "news"  # Router would pick news
 
         # Mock successful room_send
@@ -186,7 +187,7 @@ class TestRoutingRegression:
         news_bot = setup_test_bot(mock_news_agent, tmp_path, test_room_id, config=test_config)
 
         # Mock AI responses
-        mock_ai_response.return_value = "I can help with that!"
+        mock_ai_response.return_value = AIResponse(text="I can help with that!", tool_trace=[])
         mock_suggest_agent.return_value = "research"  # Router picks research
 
         # Mock successful room_send
@@ -290,7 +291,10 @@ class TestRoutingRegression:
         news_bot.orchestrator = mock_orchestrator
 
         # Mock AI responses and team response
-        mock_ai_response.side_effect = ["Research response!", "News response!"]
+        mock_ai_response.side_effect = [
+            AIResponse(text="Research response!", tool_trace=[]),
+            AIResponse(text="News response!", tool_trace=[]),
+        ]
         mock_team_arun.return_value = "Team response"
 
         # Mock successful room_send
@@ -363,7 +367,7 @@ class TestRoutingRegression:
         research_bot = setup_test_bot(mock_research_agent, tmp_path, test_room_id)
 
         # Mock AI response
-        mock_ai_response.return_value = "I can help with that research question!"
+        mock_ai_response.return_value = AIResponse(text="I can help with that research question!", tool_trace=[])
 
         # Mock successful room_send
         mock_send_response = MagicMock()
