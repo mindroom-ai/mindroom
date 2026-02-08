@@ -25,8 +25,6 @@ export function AgentList() {
       instructions: [],
       rooms: ['lobby'],
       num_history_runs: 5,
-      learning: true,
-      learning_mode: 'always',
     };
     createAgent(newAgent);
   };
