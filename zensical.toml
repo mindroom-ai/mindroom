@@ -5,7 +5,7 @@
 site_name = "MindRoom"
 site_description = "AI agents that live in Matrix and work everywhere via bridges"
 site_author = "MindRoom Team"
-site_url = "https://mindroom.nijho.lt/"
+site_url = "https://docs.mindroom.chat/"
 copyright = "Copyright &copy; 2025 MindRoom Team"
 
 repo_url = "https://github.com/mindroom-ai/mindroom"
@@ -41,6 +41,8 @@ nav = [
   ] },
   { "Deployment" = [
     { "Overview" = "deployment/index.md" },
+    { "Google Services OAuth (Admin)" = "deployment/google-services-oauth.md" },
+    { "Google Services OAuth (Individual)" = "deployment/google-services-user-oauth.md" },
     { "Docker" = "deployment/docker.md" },
     { "Kubernetes" = "deployment/kubernetes.md" },
   ] },

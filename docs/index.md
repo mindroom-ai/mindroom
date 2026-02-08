@@ -137,6 +137,7 @@ mindroom run
 - [Authorization](authorization.md) - User and room access control
 - [Architecture](architecture/index.md) - How it works under the hood
 - [Deployment](deployment/index.md) - Docker and Kubernetes deployment
+- [Google Services OAuth Setup](deployment/google-services-oauth.md) - Configure Gmail/Calendar/Drive/Sheets integration
 - [CLI Reference](cli.md) - Command-line interface
 
 ## License

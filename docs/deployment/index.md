@@ -15,6 +15,13 @@ MindRoom can be deployed in various ways depending on your needs.
 | [Kubernetes](kubernetes.md) | Multi-tenant SaaS, production |
 | Direct | Development, simple setups |
 
+## Google Services (Gmail/Calendar/Drive/Sheets)
+
+Use these guides if you want users to connect Google accounts in the MindRoom frontend:
+
+- [Google Services OAuth (Admin Setup)](google-services-oauth.md) - one-time setup for shared/team deployments
+- [Google Services OAuth (Individual Setup)](google-services-user-oauth.md) - single-user bring-your-own OAuth app setup
+
 ## Quick Start
 
 ### Full Stack (recommended)

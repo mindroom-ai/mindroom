@@ -12,6 +12,7 @@ interface GoogleStatus {
   email?: string;
   services: string[];
   error?: string;
+  has_credentials?: boolean;
 }
 
 const serviceIcons = {
@@ -24,8 +25,16 @@ interface GoogleIntegrationProps {
   onSuccess?: () => void;
 }
 
+const GOOGLE_ADMIN_SETUP_DOCS_URL = 'https://docs.mindroom.chat/deployment/google-services-oauth/';
+const GOOGLE_USER_SETUP_DOCS_URL =
+  'https://docs.mindroom.chat/deployment/google-services-user-oauth/';
+
 export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
-  const [status, setStatus] = useState<GoogleStatus>({ connected: false, services: [] });
+  const [status, setStatus] = useState<GoogleStatus>({
+    connected: false,
+    services: [],
+    has_credentials: false,
+  });
   const [loading, setLoading] = useState(false);
   const { toast } = useToast();
 
@@ -60,6 +69,8 @@ export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
         connected: data.connected,
         email: data.email,
         services: data.services || [],
+        error: data.error,
+        has_credentials: data.has_credentials ?? false,
       });
       return data.connected;
     } catch (error) {
@@ -82,8 +93,7 @@ export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
         if (response.status === 503) {
           toast({
             title: 'One-Time Admin Setup Required',
-            description:
-              'An administrator needs to complete a quick 5-minute setup for all users. See docs/google_oauth_setup_admin.md',
+            description: `An administrator must configure Google OAuth once. Setup guide: ${GOOGLE_ADMIN_SETUP_DOCS_URL}`,
             variant: 'destructive',
           });
           setLoading(false);
@@ -110,7 +120,7 @@ export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
       const authWindow = window.open(data.auth_url, '_blank', 'width=500,height=600');
 
       // Poll for connection status
-      let wasConnected = status.connected;
+      const wasConnected = status.connected;
       const pollInterval = setInterval(async () => {
         const currentStatus = await checkGoogleStatus();
         if (authWindow?.closed) {
@@ -141,7 +151,12 @@ export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
       });
 
       if (response.ok) {
-        setStatus({ connected: false, services: [] });
+        setStatus(prev => ({
+          ...prev,
+          connected: false,
+          email: undefined,
+          services: [],
+        }));
         toast({
           title: 'Disconnected',
           description: 'Your Google account has been disconnected.',
@@ -171,21 +186,54 @@ export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
           Google Services Integration
         </CardTitle>
         <CardDescription>
-          One-click connection to Gmail, Calendar, and Drive - no technical setup required!
+          One-time admin setup, then users connect in one click. If setup is missing, follow the
+          step-by-step guide below.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         {!status.connected ? (
           <>
-            <Alert>
-              <LogIn className="h-4 w-4" />
-              <AlertTitle>Zero Setup for Users!</AlertTitle>
-              <AlertDescription>
-                Just click "Login with Google" below. No API keys, no Google Cloud Console, no
-                developer account needed! If this button doesn't work, your admin needs to do a
-                quick 5-minute setup that will work for all users.
-              </AlertDescription>
-            </Alert>
+            {status.has_credentials ? (
+              <Alert>
+                <LogIn className="h-4 w-4" />
+                <AlertTitle>Ready to Connect</AlertTitle>
+                <AlertDescription>
+                  Admin setup is complete. Click Login with Google to connect your account.
+                </AlertDescription>
+              </Alert>
+            ) : (
+              <Alert variant="destructive">
+                <LogIn className="h-4 w-4" />
+                <AlertTitle>Admin Setup Required</AlertTitle>
+                <AlertDescription className="space-y-2">
+                  <p>
+                    An administrator must configure Google OAuth once for this MindRoom deployment
+                    before users can connect.
+                  </p>
+                  <ol className="list-decimal ml-5 space-y-1">
+                    <li>Open the Admin Setup guide.</li>
+                    <li>Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` on the backend.</li>
+                    <li>Restart the backend, then refresh this page.</li>
+                  </ol>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => window.open(GOOGLE_ADMIN_SETUP_DOCS_URL, '_blank')}
+                    >
+                      Admin Setup Steps
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => window.open(GOOGLE_USER_SETUP_DOCS_URL, '_blank')}
+                    >
+                      Individual Setup Steps
+                    </Button>
+                  </div>
+                </AlertDescription>
+              </Alert>
+            )}
 
             <div className="space-y-2">
               <p className="text-sm text-muted-foreground">This will grant MindRoom access to:</p>
@@ -202,7 +250,12 @@ export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
               </ul>
             </div>
 
-            <Button onClick={connectGoogle} disabled={loading} className="w-full" size="lg">
+            <Button
+              onClick={connectGoogle}
+              disabled={loading || !status.has_credentials}
+              className="w-full"
+              size="lg"
+            >
               {loading ? (
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -215,10 +268,15 @@ export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
                     alt="Google"
                     className="mr-2 h-4 w-4"
                   />
-                  Login with Google
+                  {status.has_credentials ? 'Login with Google' : 'Admin Setup Needed'}
                 </>
               )}
             </Button>
+            {!status.has_credentials && (
+              <p className="text-xs text-muted-foreground">
+                Login is disabled until backend Google OAuth credentials are configured.
+              </p>
+            )}
           </>
         ) : (
           <>
