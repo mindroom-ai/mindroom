@@ -21,9 +21,17 @@ if TYPE_CHECKING:
     icon_color="text-blue-500",
     config_fields=[
         ConfigField(
+            name="obb",
+            label="OpenBB Instance",
+            type="text",
+            required=False,
+            default=None,
+            description="Optional pre-configured OpenBB instance (advanced usage)",
+        ),
+        ConfigField(
             name="openbb_pat",
             label="Personal Access Token",
-            type="password",
+            type="text",
             required=False,
             default=None,
             description="OpenBB PAT for premium data providers (falls back to OPENBB_PAT env var). Optional - works without it using yfinance.",
@@ -31,18 +39,10 @@ if TYPE_CHECKING:
         ConfigField(
             name="provider",
             label="Data Provider",
-            type="select",
+            type="text",
             required=False,
             default="yfinance",
-            options=[
-                {"label": "Yahoo Finance", "value": "yfinance"},
-                {"label": "Benzinga", "value": "benzinga"},
-                {"label": "FMP", "value": "fmp"},
-                {"label": "Intrinio", "value": "intrinio"},
-                {"label": "Polygon", "value": "polygon"},
-                {"label": "Tiingo", "value": "tiingo"},
-                {"label": "TMX", "value": "tmx"},
-            ],
+            description="Data provider: yfinance, benzinga, fmp, intrinio, polygon, tiingo, or tmx",
         ),
         ConfigField(
             name="enable_get_stock_price",
