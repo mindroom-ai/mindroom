@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { BrowserRouter, useNavigate, useLocation } from 'react-router-dom';
 import {
@@ -44,6 +44,7 @@ import {
 import { Toaster } from '@/components/ui/toaster';
 import { ThemeProvider } from '@/contexts/ThemeContext';
 import { ThemeToggle } from '@/components/ThemeToggle/ThemeToggle';
+import { cn } from '@/lib/utils';
 
 const queryClient = new QueryClient();
 
@@ -79,6 +80,8 @@ function AppContent() {
   const navigate = useNavigate();
   const location = useLocation();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [desktopCompactNav, setDesktopCompactNav] = useState(false);
+  const tabsListRef = useRef<HTMLDivElement | null>(null);
 
   // Get the current tab from URL or default to 'dashboard'
   const currentTab = location.pathname.slice(1) || 'dashboard';
@@ -93,6 +96,36 @@ function AppContent() {
   useEffect(() => {
     setMobileMenuOpen(false);
   }, [currentTab]);
+
+  useEffect(() => {
+    const tabsList = tabsListRef.current;
+    if (!tabsList) return;
+
+    let frameId: number | null = null;
+    const updateDesktopNavMode = () => {
+      if (frameId !== null) {
+        cancelAnimationFrame(frameId);
+      }
+      frameId = requestAnimationFrame(() => {
+        const hasHorizontalOverflow = tabsList.scrollWidth > tabsList.clientWidth + 1;
+        setDesktopCompactNav(hasHorizontalOverflow);
+      });
+    };
+
+    updateDesktopNavMode();
+
+    const resizeObserver = new ResizeObserver(updateDesktopNavMode);
+    resizeObserver.observe(tabsList);
+    window.addEventListener('resize', updateDesktopNavMode);
+
+    return () => {
+      resizeObserver.disconnect();
+      window.removeEventListener('resize', updateDesktopNavMode);
+      if (frameId !== null) {
+        cancelAnimationFrame(frameId);
+      }
+    };
+  }, []);
 
   // Handle tab change - update the URL
   const handleTabChange = (value: string) => {
@@ -210,7 +243,10 @@ function AppContent() {
                 onClick={() => setMobileMenuOpen(true)}
                 aria-haspopup="dialog"
                 aria-expanded={mobileMenuOpen}
-                className="sm:hidden max-w-[8.5rem] rounded-lg border border-white/60 dark:border-white/10 bg-white/80 dark:bg-stone-900/70 backdrop-blur-xl px-2 py-1.5 flex items-center gap-1.5 min-w-0 text-left shadow-sm"
+                className={cn(
+                  'max-w-[8.5rem] sm:max-w-[11rem] rounded-lg border border-white/60 dark:border-white/10 bg-white/80 dark:bg-stone-900/70 backdrop-blur-xl px-2 py-1.5 items-center gap-1.5 min-w-0 text-left shadow-sm',
+                  desktopCompactNav ? 'flex' : 'flex sm:hidden'
+                )}
               >
                 <CurrentNavIcon className="h-4 w-4 shrink-0 text-gray-700 dark:text-gray-200" />
                 <span className="text-xs font-medium text-gray-900 dark:text-gray-100 truncate">
@@ -229,7 +265,14 @@ function AppContent() {
         <div className="flex-1 overflow-hidden">
           <Tabs value={currentTab} onValueChange={handleTabChange} className="h-full flex flex-col">
             {/* Desktop Tab Navigation */}
-            <TabsList className="hidden sm:flex px-3 sm:px-6 py-3 bg-white/70 dark:bg-stone-900/50 backdrop-blur-lg border-b border-gray-200/50 dark:border-white/10 flex-shrink-0 overflow-x-auto">
+            <TabsList
+              ref={tabsListRef}
+              className={cn(
+                'hidden sm:flex px-3 sm:px-6 py-3 bg-white/70 dark:bg-stone-900/50 backdrop-blur-lg border-b border-gray-200/50 dark:border-white/10 flex-shrink-0 overflow-x-auto overflow-y-hidden',
+                desktopCompactNav &&
+                  'sm:h-0 sm:p-0 sm:border-0 sm:opacity-0 sm:pointer-events-none sm:overflow-hidden'
+              )}
+            >
               {NAV_ITEMS.map(item => {
                 const ItemIcon = item.icon;
                 return (
