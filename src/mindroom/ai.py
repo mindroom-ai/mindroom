@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import functools
 import os
-from typing import TYPE_CHECKING, Any, cast
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Self, cast
 
 import diskcache
 from agno.models.anthropic import Claude
@@ -25,10 +26,9 @@ from .error_handling import get_user_friendly_error_message
 from .logging_config import get_logger
 from .memory import build_memory_enhanced_prompt
 from .tool_events import (
+    ToolTraceEntry,
     complete_pending_tool_block,
-    extract_tool_completed_info,
-    format_tool_combined,
-    format_tool_started_event,
+    format_tool_started,
 )
 
 if TYPE_CHECKING:
@@ -45,25 +45,42 @@ logger = get_logger(__name__)
 AIStreamChunk = str | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
 
 
-def _extract_response_content(response: RunOutput) -> str:
-    response_parts = []
+@dataclass(slots=True)
+class AIResponse:
+    """User-visible response text with structured tool trace metadata."""
 
-    # Add main content if present
-    if response.content:
-        response_parts.append(response.content)
+    text: str
+    tool_trace: list[ToolTraceEntry]
 
-    # Add formatted tool call sections when present.
+
+class AITextResponse(str):
+    """String response carrying optional tool trace metadata."""
+
+    __slots__ = ("tool_trace",)
+    tool_trace: list[ToolTraceEntry]
+
+    def __new__(cls, text: str, tool_trace: list[ToolTraceEntry] | None = None) -> Self:
+        """Create a text response carrying an optional tool trace payload."""
+        obj = super().__new__(cls, text)
+        obj.tool_trace = tool_trace if tool_trace is not None else []
+        return obj
+
+
+def _extract_response_content(response: RunOutput) -> AIResponse:
+    text = response.content or ""
+    tool_trace: list[ToolTraceEntry] = []
+
+    # Keep tool details in metadata only (no inline <tool> blocks in user-facing text).
     if response.tools:
-        tool_sections: list[str] = []
         for tool in response.tools:
             tool_name = tool.tool_name or "tool"
-            tool_args = tool.tool_args or {}
-            combined, _ = format_tool_combined(tool_name, tool_args, tool.result)
-            tool_sections.append(combined.strip())
-        if tool_sections:
-            response_parts.append("\n\n".join(tool_sections))
+            tool_args = {str(k): v for k, v in tool.tool_args.items()} if isinstance(tool.tool_args, dict) else {}
+            _, started_trace = format_tool_started(tool_name, tool_args)
+            tool_trace.append(started_trace)
+            _, completed_trace = complete_pending_tool_block("", tool_name, tool.result)
+            tool_trace.append(completed_trace)
 
-    return "\n".join(response_parts) if response_parts else ""
+    return AIResponse(text=text, tool_trace=tool_trace)
 
 
 @functools.cache
@@ -276,6 +293,28 @@ async def ai_response(
     thread_history: list[dict[str, Any]] | None = None,
     room_id: str | None = None,
 ) -> str:
+    """Backward-compatible wrapper that returns only response text."""
+    result = await ai_response_with_tool_trace(
+        agent_name=agent_name,
+        prompt=prompt,
+        session_id=session_id,
+        storage_path=storage_path,
+        config=config,
+        thread_history=thread_history,
+        room_id=room_id,
+    )
+    return AITextResponse(result.text, result.tool_trace)
+
+
+async def ai_response_with_tool_trace(
+    agent_name: str,
+    prompt: str,
+    session_id: str,
+    storage_path: Path,
+    config: Config,
+    thread_history: list[dict[str, Any]] | None = None,
+    room_id: str | None = None,
+) -> AIResponse:
     """Generates a response using the specified agno Agent with memory integration.
 
     Args:
@@ -288,7 +327,7 @@ async def ai_response(
         room_id: Optional room ID for room memory access
 
     Returns:
-        Agent response string
+        Agent response text plus tool trace metadata.
 
     """
     logger.info("AI request", agent=agent_name)
@@ -305,20 +344,20 @@ async def ai_response(
         )
     except Exception as e:
         logger.exception("Error preparing agent", agent=agent_name)
-        return get_user_friendly_error_message(e, agent_name)
+        return AIResponse(text=get_user_friendly_error_message(e, agent_name), tool_trace=[])
 
     # Execute the AI call - this can fail for network, rate limits, etc.
     try:
         response = await _cached_agent_run(agent, full_prompt, session_id, agent_name, storage_path)
     except Exception as e:
         logger.exception("Error generating AI response", agent=agent_name)
-        return get_user_friendly_error_message(e, agent_name)
+        return AIResponse(text=get_user_friendly_error_message(e, agent_name), tool_trace=[])
 
     # Extract response content - this shouldn't fail
     return _extract_response_content(response)
 
 
-async def stream_agent_response(  # noqa: C901, PLR0912
+async def stream_agent_response(
     agent_name: str,
     prompt: str,
     session_id: str,
@@ -397,17 +436,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912
                 chunk_text = str(event.content)
                 full_response += chunk_text
                 yield event
-            elif isinstance(event, ToolCallStartedEvent):
-                tool_msg, _ = format_tool_started_event(event.tool)
-                if tool_msg:
-                    full_response += tool_msg
-                    yield event
-            elif isinstance(event, ToolCallCompletedEvent):
-                info = extract_tool_completed_info(event.tool)
-                if info:
-                    tool_name, result = info
-                    full_response, _ = complete_pending_tool_block(full_response, tool_name, result)
-                    yield event
+            elif isinstance(event, (ToolCallStartedEvent, ToolCallCompletedEvent)):
+                yield event
             else:
                 logger.debug("Skipping stream event", event_type=type(event).__name__)
     except Exception as e:

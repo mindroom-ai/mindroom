@@ -151,6 +151,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
             response_event_id,
             "The answer is 6",
             None,  # thread_id
+            tool_trace=None,
         )
 
         # Verify that the response tracker still maps to the same response

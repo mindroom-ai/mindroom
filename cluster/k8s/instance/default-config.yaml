@@ -18,6 +18,7 @@ agents:
     - lobby
     - dev
     - help
+    skills: []
     tools:
     - config_manager
   analyst:
@@ -33,6 +34,7 @@ agents:
     rooms:
     - lobby
     - analysis
+    skills: []
     tools: []
   calculator:
     display_name: CalculatorAgent
@@ -48,6 +50,7 @@ agents:
     - lobby
     - science
     - analysis
+    skills: []
     tools:
     - calculator
   callagent:
@@ -66,6 +69,7 @@ agents:
     rooms:
     - lobby
     - communication
+    skills: []
     tools:
     - twilio
   code:
@@ -85,6 +89,7 @@ agents:
     - lobby
     - dev
     - automation
+    skills: []
     tools:
     - file
     - shell
@@ -106,6 +111,7 @@ agents:
     - science
     - finance
     - business
+    skills: []
     tools:
     - csv
     - calculator
@@ -129,6 +135,7 @@ agents:
     - lobby
     - communication
     - productivity
+    skills: []
     tools:
     - gmail
     - file
@@ -149,6 +156,7 @@ agents:
     - finance
     - analysis
     - business
+    skills: []
     tools:
     - yfinance
     - calculator
@@ -165,6 +173,7 @@ agents:
     rooms:
     - lobby
     - help
+    skills: []
     tools: []
   home:
     display_name: HomeAssistant
@@ -185,6 +194,7 @@ agents:
     - lobby
     - automation
     - home
+    skills: []
     tools:
     - homeassistant
   news:
@@ -204,6 +214,7 @@ agents:
     - news
     - research
     - business
+    skills: []
     tools:
     - duckduckgo
     - newspaper
@@ -224,6 +235,7 @@ agents:
     - research
     - science
     - news
+    skills: []
     tools:
     - duckduckgo
     - wikipedia
@@ -241,6 +253,7 @@ agents:
     rooms:
     - lobby
     - dev
+    skills: []
     tools: []
   shell:
     display_name: ShellAgent
@@ -259,6 +272,7 @@ agents:
     - dev
     - automation
     - ops
+    skills: []
     tools:
     - shell
   summary:
@@ -277,7 +291,13 @@ agents:
     - lobby
     - research
     - docs
+    skills: []
     tools: []
+authorization:
+  default_room_access: false
+  global_users:
+  - '@test:m-test-4.mindroom.chat'
+  room_permissions: {}
 defaults:
   add_history_to_messages: true
   markdown: true
@@ -328,6 +348,7 @@ models:
   gpt_oss_120b:
     provider: openrouter
     id: google/gemini-2.5-flash
+plugins: []
 room_models:
   research: haiku
 router:
@@ -338,6 +359,7 @@ teams:
     - shell
     display_name: Code Team
     mode: coordinate
+    model: default
     role: New team description
     rooms: []
   super_team:
@@ -356,14 +378,9 @@ teams:
 timezone: America/Los_Angeles
 voice:
   enabled: true
-  stt:
-    provider: openai
-    model: whisper-1
   intelligence:
-    model: sonnet
     confidence_threshold: 0.7
-authorization:
-  global_users:
-  - '@test:m-test-4.mindroom.chat'
-  room_permissions: {}
-  default_room_access: false
+    model: default
+  stt:
+    model: whisper-1
+    provider: custom

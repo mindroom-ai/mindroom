@@ -141,6 +141,19 @@ class TestMentionParsing:
         assert processed == text
         assert mentions == []
 
+    def test_format_message_with_mentions_plain_body_strips_markdown(self) -> None:
+        """Fallback body should be readable plain text for clients that ignore HTML."""
+        config = Config.from_yaml()
+
+        content = format_message_with_mentions(
+            config,
+            "## Title\n\n- **Bold** and `code`",
+            sender_domain="matrix.org",
+        )
+
+        assert content["body"] == "Title\n\n- Bold and code"
+        assert "<h2>Title</h2>" in content["formatted_body"]
+
     def test_mention_in_middle_of_word(self) -> None:
         """Test that mentions in middle of words are not parsed."""
         config = Config.from_yaml()

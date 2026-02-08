@@ -72,7 +72,7 @@ Events are processed in background tasks:
 
 Agents stream responses by progressively editing messages. Streaming is enabled only when the requesting user is online (checked via `should_use_streaming()`), saving API calls for offline users.
 
-Tool call telemetry is emitted as structured collapsible blocks (`<tool>...</tool>`, `<validation>...</validation>`) and mirrored in `io.mindroom.tool_trace` metadata on the same message content.
+Tool call telemetry is emitted as structured `io.mindroom.tool_trace` metadata on the message content. Clients that understand this metadata can render custom tool-trace UI without polluting user-visible message text.
 
 ## Presence
 

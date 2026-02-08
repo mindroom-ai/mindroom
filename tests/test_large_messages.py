@@ -186,8 +186,8 @@ async def test_prepare_edit_message() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prepare_large_message_drops_tool_trace_regular() -> None:
-    """Large-message conversion should drop tool trace metadata."""
+async def test_prepare_large_message_preserves_tool_trace_regular() -> None:
+    """Large-message conversion should preserve tool trace metadata."""
 
     class MockClient:
         rooms: dict = {}  # noqa: RUF012
@@ -204,12 +204,13 @@ async def test_prepare_large_message_drops_tool_trace_regular() -> None:
     }
 
     result = await prepare_large_message(client, "!room:server", content)
-    assert TOOL_TRACE_KEY not in result
+    assert TOOL_TRACE_KEY in result
+    assert result[TOOL_TRACE_KEY]["events"][0]["tool_name"] == "save_file"
 
 
 @pytest.mark.asyncio
-async def test_prepare_large_message_drops_tool_trace_edit() -> None:
-    """Edit large-message conversion should drop tool trace metadata."""
+async def test_prepare_large_message_preserves_tool_trace_edit() -> None:
+    """Edit large-message conversion should preserve tool trace metadata."""
 
     class MockClient:
         rooms: dict = {}  # noqa: RUF012
@@ -232,4 +233,5 @@ async def test_prepare_large_message_drops_tool_trace_edit() -> None:
 
     result = await prepare_large_message(client, "!room:server", edit_content)
     assert "m.new_content" in result
-    assert TOOL_TRACE_KEY not in result["m.new_content"]
+    assert TOOL_TRACE_KEY in result["m.new_content"]
+    assert result["m.new_content"][TOOL_TRACE_KEY]["events"][0]["tool_name"] == "save_file"
