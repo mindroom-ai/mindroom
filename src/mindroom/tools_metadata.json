@@ -694,6 +694,101 @@
       "config_fields": [
         {
           "default": null,
+          "description": "Bitbucket username (falls back to BITBUCKET_USERNAME env var)",
+          "label": "Username",
+          "name": "username",
+          "options": null,
+          "placeholder": "Bitbucket username",
+          "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "App password (falls back to BITBUCKET_PASSWORD env var). Use either this or token.",
+          "label": "App Password",
+          "name": "password",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Access token (falls back to BITBUCKET_TOKEN env var). Use either this or password.",
+          "label": "Token",
+          "name": "token",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": null,
+          "label": "Workspace",
+          "name": "workspace",
+          "options": null,
+          "placeholder": "my-workspace",
+          "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": null,
+          "label": "Repository Slug",
+          "name": "repo_slug",
+          "options": null,
+          "placeholder": "my-repo",
+          "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "api.bitbucket.org",
+          "description": null,
+          "label": "Server URL",
+          "name": "server_url",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "default": "2.0",
+          "description": null,
+          "label": "API Version",
+          "name": "api_version",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "requests"
+      ],
+      "description": "Manage Bitbucket repositories, pull requests, commits, and issues",
+      "display_name": "Bitbucket",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/bitbucket",
+      "helper_text": "Create an app password at [Bitbucket Settings](https://bitbucket.org/account/settings/app-passwords/)",
+      "icon": "FaBitbucket",
+      "icon_color": "text-blue-600",
+      "name": "bitbucket",
+      "setup_type": "special",
+      "status": "requires_config"
+    },
+    {
+      "auth_provider": null,
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
           "description": null,
           "label": "API Key",
           "name": "api_key",
@@ -1464,6 +1559,79 @@
     {
       "auth_provider": null,
       "category": "development",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "DesiVocal API key (falls back to DESI_VOCAL_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": null,
+          "required": true,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": "f27d74e5-ea71-4697-be3e-f04bbd80c1a8",
+          "description": "Default voice ID to use for speech synthesis",
+          "label": "Voice ID",
+          "name": "voice_id",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Get Voices",
+          "name": "enable_get_voices",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Text to Speech",
+          "name": "enable_text_to_speech",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "requests"
+      ],
+      "description": "Hindi and Indian language text-to-speech synthesis",
+      "display_name": "DesiVocal",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/desi_vocal",
+      "helper_text": "Get an API key from [DesiVocal](https://desivocal.com/)",
+      "icon": "FaMicrophone",
+      "icon_color": "text-orange-600",
+      "name": "desi_vocal",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "auth_provider": null,
+      "category": "development",
       "config_fields": [],
       "dependencies": [
         "docker"
@@ -1902,6 +2070,90 @@
         {
           "default": null,
           "description": null,
+          "label": "Output Directory",
+          "name": "output_directory",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable JSON Generation",
+          "name": "enable_json_generation",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable CSV Generation",
+          "name": "enable_csv_generation",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable PDF Generation",
+          "name": "enable_pdf_generation",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable TXT Generation",
+          "name": "enable_txt_generation",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "reportlab"
+      ],
+      "description": "Generate JSON, CSV, PDF, and text files from data",
+      "display_name": "File Generation",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/file_generation",
+      "helper_text": null,
+      "icon": "FaFileExport",
+      "icon_color": "text-green-600",
+      "name": "file_generation",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "auth_provider": null,
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
+          "description": null,
           "label": "API Key",
           "name": "api_key",
           "options": null,
@@ -2157,6 +2409,112 @@
       "name": "gitlab",
       "setup_type": "coming_soon",
       "status": "coming_soon"
+    },
+    {
+      "auth_provider": null,
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "BigQuery dataset name",
+          "label": "Dataset",
+          "name": "dataset",
+          "options": null,
+          "placeholder": "my_dataset",
+          "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Google Cloud project ID (falls back to GOOGLE_CLOUD_PROJECT env var)",
+          "label": "Project",
+          "name": "project",
+          "options": null,
+          "placeholder": "my-gcp-project",
+          "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "BigQuery location (falls back to GOOGLE_CLOUD_LOCATION env var)",
+          "label": "Location",
+          "name": "location",
+          "options": null,
+          "placeholder": "US",
+          "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Google Cloud credentials object (optional, uses Application Default Credentials if not set)",
+          "label": "Credentials",
+          "name": "credentials",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable List Tables",
+          "name": "enable_list_tables",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Describe Table",
+          "name": "enable_describe_table",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Run SQL Query",
+          "name": "enable_run_sql_query",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "google-cloud-bigquery"
+      ],
+      "description": "Query Google BigQuery - list tables, describe schemas, and run SQL queries",
+      "display_name": "Google BigQuery",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/google_bigquery",
+      "helper_text": "Requires Google Cloud credentials. Set up [Application Default Credentials](https://cloud.google.com/docs/authentication/provide-credentials-adc)",
+      "icon": "SiGooglebigquery",
+      "icon_color": "text-blue-600",
+      "name": "google_bigquery",
+      "setup_type": "special",
+      "status": "requires_config"
     },
     {
       "auth_provider": null,
@@ -2784,6 +3142,123 @@
       "config_fields": [
         {
           "default": null,
+          "description": "Neo4j connection URI (falls back to NEO4J_URI env var)",
+          "label": "URI",
+          "name": "uri",
+          "options": null,
+          "placeholder": "bolt://localhost:7687",
+          "required": false,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Neo4j username (falls back to NEO4J_USERNAME env var)",
+          "label": "Username",
+          "name": "user",
+          "options": null,
+          "placeholder": "neo4j",
+          "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Neo4j password (falls back to NEO4J_PASSWORD env var)",
+          "label": "Password",
+          "name": "password",
+          "options": null,
+          "placeholder": null,
+          "required": true,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": null,
+          "label": "Database",
+          "name": "database",
+          "options": null,
+          "placeholder": "neo4j",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable List Labels",
+          "name": "enable_list_labels",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable List Relationships",
+          "name": "enable_list_relationships",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Get Schema",
+          "name": "enable_get_schema",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Run Cypher",
+          "name": "enable_run_cypher",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "neo4j"
+      ],
+      "description": "Query Neo4j graph databases - list labels, relationships, get schema, and run Cypher queries",
+      "display_name": "Neo4j",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/neo4j",
+      "helper_text": null,
+      "icon": "FaProjectDiagram",
+      "icon_color": "text-blue-500",
+      "name": "neo4j",
+      "setup_type": "special",
+      "status": "requires_config"
+    },
+    {
+      "auth_provider": null,
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
           "description": null,
           "label": "API Key",
           "name": "api_key",
@@ -3040,6 +3515,90 @@
       "config_fields": [
         {
           "default": null,
+          "description": "PostgreSQL server hostname",
+          "label": "Host",
+          "name": "host",
+          "options": null,
+          "placeholder": "localhost",
+          "required": true,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "default": 5432,
+          "description": null,
+          "label": "Port",
+          "name": "port",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": null,
+          "label": "Database Name",
+          "name": "db_name",
+          "options": null,
+          "placeholder": "mydb",
+          "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": null,
+          "label": "Username",
+          "name": "user",
+          "options": null,
+          "placeholder": "postgres",
+          "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": null,
+          "label": "Password",
+          "name": "password",
+          "options": null,
+          "placeholder": null,
+          "required": true,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": "public",
+          "description": null,
+          "label": "Table Schema",
+          "name": "table_schema",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "psycopg-binary"
+      ],
+      "description": "Query PostgreSQL databases - list tables, describe schemas, run SQL queries, and export data",
+      "display_name": "PostgreSQL",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/postgres",
+      "helper_text": null,
+      "icon": "FaDatabase",
+      "icon_color": "text-blue-700",
+      "name": "postgres",
+      "setup_type": "special",
+      "status": "requires_config"
+    },
+    {
+      "auth_provider": null,
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
           "description": null,
           "label": "Base Dir",
           "name": "base_dir",
@@ -3095,6 +3654,282 @@
       "name": "python",
       "setup_type": "none",
       "status": "available"
+    },
+    {
+      "auth_provider": null,
+      "category": "development",
+      "config_fields": [
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Think",
+          "name": "enable_think",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Analyze",
+          "name": "enable_analyze",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Add Instructions",
+          "name": "add_instructions",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Add Few-Shot Examples",
+          "name": "add_few_shot",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Custom instructions to override the default reasoning instructions",
+          "label": "Instructions",
+          "name": "instructions",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Custom few-shot examples for the reasoning tools",
+          "label": "Few-Shot Examples",
+          "name": "few_shot_examples",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [],
+      "description": "Step-by-step reasoning scratchpad with think and analyze tools for structured problem solving",
+      "display_name": "Reasoning",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/reasoning",
+      "helper_text": null,
+      "icon": "FaBrain",
+      "icon_color": "text-purple-500",
+      "name": "reasoning",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "auth_provider": null,
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Redshift cluster endpoint (falls back to REDSHIFT_HOST env var)",
+          "label": "Host",
+          "name": "host",
+          "options": null,
+          "placeholder": "my-cluster.xxxx.region.redshift.amazonaws.com",
+          "required": true,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "default": 5439,
+          "description": null,
+          "label": "Port",
+          "name": "port",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Database name (falls back to REDSHIFT_DATABASE env var)",
+          "label": "Database",
+          "name": "database",
+          "options": null,
+          "placeholder": "dev",
+          "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": null,
+          "label": "Username",
+          "name": "user",
+          "options": null,
+          "placeholder": "admin",
+          "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": null,
+          "label": "Password",
+          "name": "password",
+          "options": null,
+          "placeholder": null,
+          "required": true,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Use IAM authentication instead of password",
+          "label": "Use IAM Authentication",
+          "name": "iam",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Redshift cluster identifier (required for IAM auth)",
+          "label": "Cluster Identifier",
+          "name": "cluster_identifier",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": null,
+          "label": "Region",
+          "name": "region",
+          "options": null,
+          "placeholder": "us-east-1",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Database user for IAM authentication",
+          "label": "DB User",
+          "name": "db_user",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": null,
+          "label": "Access Key ID",
+          "name": "access_key_id",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": null,
+          "label": "Secret Access Key",
+          "name": "secret_access_key",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": null,
+          "label": "Session Token",
+          "name": "session_token",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": null,
+          "label": "AWS Profile",
+          "name": "profile",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "SSL",
+          "name": "ssl",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": "public",
+          "description": null,
+          "label": "Table Schema",
+          "name": "table_schema",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "redshift-connector"
+      ],
+      "description": "Query Amazon Redshift data warehouse - list tables, run SQL, and export results",
+      "display_name": "Amazon Redshift",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/redshift",
+      "helper_text": null,
+      "icon": "FaDatabase",
+      "icon_color": "text-red-600",
+      "name": "redshift",
+      "setup_type": "special",
+      "status": "requires_config"
     },
     {
       "auth_provider": null,
@@ -3297,6 +4132,101 @@
       "name": "trello",
       "setup_type": "api_key",
       "status": "requires_config"
+    },
+    {
+      "auth_provider": null,
+      "category": "development",
+      "config_fields": [
+        {
+          "default": "charts",
+          "description": null,
+          "label": "Output Directory",
+          "name": "output_dir",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Bar Chart",
+          "name": "enable_create_bar_chart",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Line Chart",
+          "name": "enable_create_line_chart",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Pie Chart",
+          "name": "enable_create_pie_chart",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Scatter Plot",
+          "name": "enable_create_scatter_plot",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Histogram",
+          "name": "enable_create_histogram",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "matplotlib"
+      ],
+      "description": "Create bar charts, line charts, pie charts, scatter plots, and histograms using matplotlib",
+      "display_name": "Visualization",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/visualization",
+      "helper_text": null,
+      "icon": "FaChartBar",
+      "icon_color": "text-indigo-500",
+      "name": "visualization",
+      "setup_type": "none",
+      "status": "available"
     },
     {
       "auth_provider": null,
@@ -3840,17 +4770,53 @@
     {
       "auth_provider": null,
       "category": "entertainment",
-      "config_fields": null,
-      "dependencies": null,
-      "description": "Music streaming and playlist management",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "OAuth access token with required scopes (user-read-private, playlist-modify-public, playlist-modify-private)",
+          "label": "Access Token",
+          "name": "access_token",
+          "options": null,
+          "placeholder": "Spotify OAuth access token",
+          "required": true,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": "US",
+          "description": null,
+          "label": "Default Market",
+          "name": "default_market",
+          "options": null,
+          "placeholder": "e.g., US, GB, DE",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": 30,
+          "description": null,
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "httpx"
+      ],
+      "description": "Search tracks, manage playlists, get recommendations, and control playback on Spotify",
       "display_name": "Spotify",
-      "docs_url": null,
-      "helper_text": null,
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/spotify",
+      "helper_text": "Get an access token from the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)",
       "icon": "FaSpotify",
       "icon_color": "text-green-500",
       "name": "spotify",
-      "setup_type": "coming_soon",
-      "status": "coming_soon"
+      "setup_type": "api_key",
+      "status": "requires_config"
     },
     {
       "auth_provider": null,
@@ -4142,6 +5108,108 @@
       "icon": "FaConnectdevelop",
       "icon_color": "text-blue-600",
       "name": "composio",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "auth_provider": null,
+      "category": "integrations",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Your Shopify store name (e.g., 'my-store' from my-store.myshopify.com). Falls back to SHOPIFY_SHOP_NAME env var.",
+          "label": "Shop Name",
+          "name": "shop_name",
+          "options": null,
+          "placeholder": "my-store",
+          "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Shopify Admin API access token. Falls back to SHOPIFY_ACCESS_TOKEN env var.",
+          "label": "Access Token",
+          "name": "access_token",
+          "options": null,
+          "placeholder": null,
+          "required": true,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": "2025-10",
+          "description": null,
+          "label": "API Version",
+          "name": "api_version",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": 30,
+          "description": null,
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "httpx"
+      ],
+      "description": "Analyze sales data, products, orders, and customer insights from your Shopify store",
+      "display_name": "Shopify",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/shopify",
+      "helper_text": "Create a custom app in your [Shopify Admin](https://admin.shopify.com/) to get an access token",
+      "icon": "FaShoppingCart",
+      "icon_color": "text-green-600",
+      "name": "shopify",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "auth_provider": null,
+      "category": "productivity",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "API key from ClickUp (falls back to CLICKUP_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "ClickUp API key",
+          "required": true,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "ID of the master space to work with (falls back to MASTER_SPACE_ID env var)",
+          "label": "Master Space ID",
+          "name": "master_space_id",
+          "options": null,
+          "placeholder": "ClickUp space ID",
+          "required": true,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "requests"
+      ],
+      "description": "Manage tasks, spaces, and lists in ClickUp project management",
+      "display_name": "ClickUp",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/clickup",
+      "helper_text": "Get your API key from [ClickUp Settings > Apps](https://app.clickup.com/settings/apps)",
+      "icon": "FaTasks",
+      "icon_color": "text-purple-600",
+      "name": "clickup",
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -4529,6 +5597,207 @@
       "icon": "Brain",
       "icon_color": "text-violet-500",
       "name": "memory",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "auth_provider": null,
+      "category": "productivity",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Internal integration token (falls back to NOTION_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "Notion integration token",
+          "required": true,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "ID of the Notion database to work with (falls back to NOTION_DATABASE_ID env var)",
+          "label": "Database ID",
+          "name": "database_id",
+          "options": null,
+          "placeholder": "Notion database ID",
+          "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Create Page",
+          "name": "enable_create_page",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Update Page",
+          "name": "enable_update_page",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Search Pages",
+          "name": "enable_search_pages",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "notion-client"
+      ],
+      "description": "Create, update, and search pages in Notion databases",
+      "display_name": "Notion",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/notion",
+      "helper_text": "Create an integration at [Notion Developers](https://www.notion.so/my-integrations) and share the database with it",
+      "icon": "SiNotion",
+      "icon_color": "text-gray-800",
+      "name": "notion",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "auth_provider": null,
+      "category": "productivity",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Optional pre-configured OpenBB instance (advanced usage)",
+          "label": "OpenBB Instance",
+          "name": "obb",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "OpenBB PAT for premium data providers (falls back to OPENBB_PAT env var). Optional - works without it using yfinance.",
+          "label": "Personal Access Token",
+          "name": "openbb_pat",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "yfinance",
+          "description": "Data provider: yfinance, benzinga, fmp, intrinio, polygon, tiingo, or tmx",
+          "label": "Data Provider",
+          "name": "provider",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Get Stock Price",
+          "name": "enable_get_stock_price",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Enable Search Company Symbol",
+          "name": "enable_search_company_symbol",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Enable Get Company News",
+          "name": "enable_get_company_news",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Enable Get Company Profile",
+          "name": "enable_get_company_profile",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Enable Get Price Targets",
+          "name": "enable_get_price_targets",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "openbb"
+      ],
+      "description": "Get stock prices, company news, price targets, and company profiles from OpenBB financial platform",
+      "display_name": "OpenBB",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/openbb",
+      "helper_text": null,
+      "icon": "FaChartArea",
+      "icon_color": "text-blue-500",
+      "name": "openbb",
       "setup_type": "none",
       "status": "available"
     },
@@ -5173,6 +6442,174 @@
       "name": "baidusearch",
       "setup_type": "none",
       "status": "available"
+    },
+    {
+      "auth_provider": null,
+      "category": "research",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Brandfetch API key for Brand API (falls back to BRANDFETCH_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Brandfetch Client ID for Brand Search API (falls back to BRANDFETCH_CLIENT_ID env var)",
+          "label": "Client ID",
+          "name": "client_id",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Search by Identifier",
+          "name": "enable_search_by_identifier",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Enable Search by Brand",
+          "name": "enable_search_by_brand",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": "https://api.brandfetch.io/v2",
+          "description": null,
+          "label": "Base URL",
+          "name": "base_url",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "default": 20.0,
+          "description": null,
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Async Tools (Deprecated)",
+          "name": "async_tools",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "httpx"
+      ],
+      "description": "Retrieve brand data including logos, colors, and fonts by domain or name",
+      "display_name": "Brandfetch",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/brandfetch",
+      "helper_text": "Get API keys from [Brandfetch Developers](https://developers.brandfetch.com/)",
+      "icon": "FaPalette",
+      "icon_color": "text-blue-500",
+      "name": "brandfetch",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "auth_provider": null,
+      "category": "research",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "API key from Brave Search",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "Brave Search API key",
+          "required": true,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": null,
+          "label": "Fixed Max Results",
+          "name": "fixed_max_results",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": null,
+          "label": "Fixed Language",
+          "name": "fixed_language",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "brave-search"
+      ],
+      "description": "Search the web using Brave Search API",
+      "display_name": "Brave Search",
+      "docs_url": "https://docs.agno.com/tools/toolkits/search/bravesearch",
+      "helper_text": "Get a free API key from [Brave Search API](https://brave.com/search/api/)",
+      "icon": "FaSearch",
+      "icon_color": "text-orange-500",
+      "name": "bravesearch",
+      "setup_type": "api_key",
+      "status": "requires_config"
     },
     {
       "auth_provider": null,
@@ -7219,6 +8656,326 @@
       "icon": "FaSearch",
       "icon_color": "text-blue-600",
       "name": "tavily",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "auth_provider": null,
+      "category": "research",
+      "config_fields": [
+        {
+          "default": "txt",
+          "description": "Output format: txt, json, markdown, xml, csv, or html",
+          "label": "Output Format",
+          "name": "output_format",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Include Comments",
+          "name": "include_comments",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Include Tables",
+          "name": "include_tables",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Include Images",
+          "name": "include_images",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Include Formatting",
+          "name": "include_formatting",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Include Links",
+          "name": "include_links",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Include Metadata",
+          "name": "with_metadata",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Favor Precision",
+          "name": "favor_precision",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Favor Recall",
+          "name": "favor_recall",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": null,
+          "label": "Target Language",
+          "name": "target_language",
+          "options": null,
+          "placeholder": "e.g., en, de, fr (ISO 639-1)",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Deduplicate",
+          "name": "deduplicate",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": null,
+          "label": "Max Tree Size",
+          "name": "max_tree_size",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": 10,
+          "description": null,
+          "label": "Max Crawl URLs",
+          "name": "max_crawl_urls",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": 100000,
+          "description": null,
+          "label": "Max Known URLs",
+          "name": "max_known_urls",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Extract Text",
+          "name": "enable_extract_text",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Extract Metadata Only",
+          "name": "enable_extract_metadata_only",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable HTML to Text",
+          "name": "enable_html_to_text",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Extract Batch",
+          "name": "enable_extract_batch",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Crawl Website",
+          "name": "enable_crawl_website",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "trafilatura"
+      ],
+      "description": "Extract text and metadata from web pages, crawl websites, and convert HTML to text",
+      "display_name": "Trafilatura",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/trafilatura",
+      "helper_text": null,
+      "icon": "FaFileAlt",
+      "icon_color": "text-teal-500",
+      "name": "trafilatura",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "auth_provider": null,
+      "category": "research",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "API access key from Unsplash Developer account",
+          "label": "Access Key",
+          "name": "access_key",
+          "options": null,
+          "placeholder": "Unsplash API access key",
+          "required": true,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Search Photos",
+          "name": "enable_search_photos",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Get Photo",
+          "name": "enable_get_photo",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": null,
+          "label": "Enable Get Random Photo",
+          "name": "enable_get_random_photo",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "Enable Download Photo",
+          "name": "enable_download_photo",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": null,
+          "label": "All",
+          "name": "all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [],
+      "description": "Search and retrieve high-quality, royalty-free images from Unsplash",
+      "display_name": "Unsplash",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/unsplash",
+      "helper_text": "Get a free API key from [Unsplash Developers](https://unsplash.com/developers)",
+      "icon": "FaImage",
+      "icon_color": "text-gray-800",
+      "name": "unsplash",
       "setup_type": "api_key",
       "status": "requires_config"
     },
