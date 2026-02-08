@@ -60,6 +60,8 @@ describe('AgentEditor', () => {
     instructions: ['Test instruction'],
     rooms: ['test_room'],
     num_history_runs: 5,
+    learning: true,
+    learning_mode: 'always',
   };
 
   const mockConfig = {
@@ -344,7 +346,7 @@ describe('AgentEditor', () => {
     render(<AgentEditor />);
 
     // Open the select dropdown
-    const modelSelect = screen.getByRole('combobox');
+    const modelSelect = screen.getByLabelText('Model');
     fireEvent.click(modelSelect);
 
     // Select a different model
@@ -355,6 +357,66 @@ describe('AgentEditor', () => {
       'test_agent',
       expect.objectContaining({
         model: 'custom',
+      })
+    );
+  });
+
+  it('updates learning mode when selected', () => {
+    render(<AgentEditor />);
+
+    const modeSelect = screen.getByLabelText('Learning Mode');
+    fireEvent.click(modeSelect);
+
+    const agenticOption = screen.getByRole('option', { name: 'Agentic (tool-driven)' });
+    fireEvent.click(agenticOption);
+
+    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+      'test_agent',
+      expect.objectContaining({
+        learning_mode: 'agentic',
+      })
+    );
+  });
+
+  it('uses config defaults when agent learning fields are omitted', () => {
+    const agentWithoutLearning = {
+      ...mockAgent,
+      learning: undefined,
+      learning_mode: undefined,
+    };
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [agentWithoutLearning],
+      config: {
+        ...mockConfig,
+        defaults: {
+          ...mockConfig.defaults,
+          learning: false,
+          learning_mode: 'agentic',
+        },
+      },
+      rooms: mockStore.rooms,
+    });
+
+    render(<AgentEditor />);
+
+    const learningCheckbox = screen.getByRole('checkbox', { name: /enable learning/i });
+    expect(learningCheckbox).not.toBeChecked();
+    expect(screen.getByLabelText('Learning Mode')).toHaveTextContent('Agentic (tool-driven)');
+  });
+
+  it('updates learning when checkbox is toggled', () => {
+    render(<AgentEditor />);
+
+    const learningCheckbox = screen.getByRole('checkbox', { name: /enable learning/i });
+    expect(learningCheckbox).toBeChecked();
+
+    fireEvent.click(learningCheckbox);
+
+    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+      'test_agent',
+      expect.objectContaining({
+        learning: false,
       })
     );
   });

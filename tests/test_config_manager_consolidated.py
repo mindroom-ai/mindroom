@@ -148,6 +148,40 @@ class TestConsolidatedConfigManager:
         finally:
             config_path.unlink(missing_ok=True)
 
+    def test_manage_agent_learning_field(self) -> None:
+        """Test manage_agent supports learning and learning_mode create and update."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            config_path = Path(f.name)
+            Config(agents={}).save_to_yaml(config_path)
+
+        try:
+            cm = ConfigManagerTools(config_path)
+            create_result = cm.manage_agent(
+                operation="create",
+                agent_name="learning_agent",
+                display_name="Learning Agent",
+                role="Learns from chats",
+                learning=False,
+                learning_mode="always",
+            )
+            assert "Successfully created" in create_result
+
+            update_result = cm.manage_agent(
+                operation="update",
+                agent_name="learning_agent",
+                learning=True,
+                learning_mode="agentic",
+            )
+            assert "Successfully updated" in update_result
+            assert "Learning -> True" in update_result
+            assert "Learning Mode -> agentic" in update_result
+
+            config = Config.from_yaml(config_path)
+            assert config.agents["learning_agent"].learning is True
+            assert config.agents["learning_agent"].learning_mode == "agentic"
+        finally:
+            config_path.unlink(missing_ok=True)
+
     def test_manage_agent_validate(self) -> None:
         """Test manage_agent with validate operation."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:

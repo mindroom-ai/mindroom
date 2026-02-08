@@ -11,7 +11,7 @@ import yaml
 from agno.tools import Toolkit
 
 from mindroom.commands import get_command_help
-from mindroom.config import AgentConfig, Config, TeamConfig
+from mindroom.config import AgentConfig, AgentLearningMode, Config, TeamConfig
 from mindroom.constants import DEFAULT_AGENTS_CONFIG
 from mindroom.logging_config import get_logger
 from mindroom.tools_metadata import TOOL_METADATA, ToolCategory, ToolStatus
@@ -128,6 +128,8 @@ class ConfigManagerTools(Toolkit):
         num_history_runs: int | None = None,
         markdown: bool | None = None,
         add_history_to_messages: bool | None = None,
+        learning: bool | None = None,
+        learning_mode: AgentLearningMode | None = None,
     ) -> str:
         """Manage agent configurations - create, update, or validate agents.
 
@@ -143,6 +145,8 @@ class ConfigManagerTools(Toolkit):
             num_history_runs: Number of history runs to include
             markdown: Whether to use markdown formatting
             add_history_to_messages: Whether to add history to messages
+            learning: Whether to enable Agno Learning for this agent
+            learning_mode: Learning mode for Agno Learning ("always" or "agentic")
 
         Returns:
             Success message or error details
@@ -164,6 +168,8 @@ class ConfigManagerTools(Toolkit):
                 num_history_runs=num_history_runs,
                 markdown=markdown,
                 add_history_to_messages=add_history_to_messages,
+                learning=learning,
+                learning_mode=learning_mode,
             )
         if operation == "update":
             return self._update_agent_config(
@@ -177,6 +183,8 @@ class ConfigManagerTools(Toolkit):
                 num_history_runs=num_history_runs,
                 markdown=markdown,
                 add_history_to_messages=add_history_to_messages,
+                learning=learning,
+                learning_mode=learning_mode,
             )
         if operation == "validate":
             return self._validate_agent_config(agent_name)
@@ -451,6 +459,8 @@ class ConfigManagerTools(Toolkit):
         num_history_runs: int | None,
         markdown: bool | None,
         add_history_to_messages: bool | None,
+        learning: bool | None,
+        learning_mode: AgentLearningMode | None,
     ) -> str:
         """Create a new agent configuration."""
         # Validate agent name
@@ -479,6 +489,8 @@ class ConfigManagerTools(Toolkit):
                 num_history_runs=num_history_runs,
                 markdown=markdown,
                 add_history_to_messages=add_history_to_messages,
+                learning=learning,
+                learning_mode=learning_mode,
             )
 
             # Add to config
@@ -516,6 +528,8 @@ class ConfigManagerTools(Toolkit):
         num_history_runs: int | None,
         markdown: bool | None,
         add_history_to_messages: bool | None,
+        learning: bool | None,
+        learning_mode: AgentLearningMode | None,
     ) -> str:
         """Update an existing agent configuration."""
         try:
@@ -543,6 +557,8 @@ class ConfigManagerTools(Toolkit):
                 "num_history_runs": (num_history_runs, lambda v: str(v)),
                 "markdown": (markdown, lambda v: str(v)),
                 "add_history_to_messages": (add_history_to_messages, lambda v: str(v)),
+                "learning": (learning, lambda v: str(v)),
+                "learning_mode": (learning_mode, lambda v: str(v)),
             }
 
             # Apply updates and track changes

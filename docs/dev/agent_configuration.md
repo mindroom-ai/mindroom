@@ -141,6 +141,8 @@ agents:
       - lobby
       - dev
     num_history_runs: 5  # How many previous messages to remember
+    learning: true  # Optional: enable Agno Learning (defaults to true)
+    learning_mode: "always"  # Optional: "always" or "agentic"
     model: "anthropic"  # Optional: specific model for this agent (overrides default)
 ```
 
@@ -153,6 +155,8 @@ agents:
 - **instructions**: Specific guidelines for the agent's behavior
 - **rooms**: List of room aliases where this agent should be active
 - **num_history_runs**: Number of previous conversation turns to include for context (default: 5)
+- **learning**: Enable Agno Learning for this agent (default: true)
+- **learning_mode**: Learning mode (`always` or `agentic`, default: `always`)
 - **model**: (Optional) Specific model to use for this agent, overrides the default model
 
 ## Room Configuration

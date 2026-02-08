@@ -39,6 +39,8 @@ Configure AI agents:
 - **Tools** - Organized into configured tools (green badge) and default tools (no config needed)
 - **Instructions** - Custom behavior instructions
 - **Rooms** - Where the agent operates
+- **Learning** - Enable or disable Agno Learning per agent (enabled by default)
+- **Learning mode** - Choose `always` (automatic extraction) or `agentic` (tool-driven)
 - **History runs** - Conversation turns to include as context (1-20)
 
 ### Teams
