@@ -130,10 +130,57 @@ class KnowledgeManager:
         self._knowledge.vector_db.delete()
         self._knowledge.vector_db.create()
 
+    def _load_indexed_files_from_vector_db(self) -> set[str]:
+        """Load unique source paths currently present in the vector collection."""
+        vector_db = self._knowledge.vector_db
+        if not isinstance(vector_db, ChromaDb):
+            return set()
+        if not vector_db.exists():
+            return set()
+
+        collection = vector_db.client.get_collection(name=vector_db.collection_name)
+        total_count = collection.count()
+        if total_count == 0:
+            return set()
+
+        indexed_files: set[str] = set()
+        offset = 0
+        batch_size = 1_000
+
+        while offset < total_count:
+            result = collection.get(
+                limit=batch_size,
+                offset=offset,
+                include=["metadatas"],
+            )
+
+            metadatas = result.get("metadatas", []) or []
+            for metadata in metadatas:
+                if not isinstance(metadata, dict):
+                    continue
+                source_path = metadata.get("source_path")
+                if isinstance(source_path, str) and source_path:
+                    indexed_files.add(source_path)
+
+            ids = result.get("ids", []) or []
+            fetched_count = len(ids)
+            if fetched_count == 0:
+                break
+            offset += fetched_count
+
+        return indexed_files
+
     async def initialize(self) -> None:
         """Initialize and index all existing knowledge files."""
         indexed_count = await self.reindex_all()
         logger.info("Knowledge base initialized", indexed_count=indexed_count, path=str(self.knowledge_path))
+
+    async def load_indexed_files(self) -> int:
+        """Load in-memory indexed file state from the existing vector DB collection."""
+        indexed_files = await asyncio.to_thread(self._load_indexed_files_from_vector_db)
+        async with self._lock:
+            self._indexed_files = indexed_files
+        return len(indexed_files)
 
     async def start_watcher(self) -> None:
         """Start background file watching if enabled."""
@@ -282,7 +329,12 @@ async def initialize_knowledge_manager(
     if reindex_on_create:
         await _knowledge_manager.initialize()
     else:
-        logger.info("Knowledge manager initialized without full reindex", path=str(_knowledge_manager.knowledge_path))
+        indexed_count = await _knowledge_manager.load_indexed_files()
+        logger.info(
+            "Knowledge manager initialized without full reindex",
+            path=str(_knowledge_manager.knowledge_path),
+            indexed_count=indexed_count,
+        )
 
     if start_watcher:
         await _knowledge_manager.start_watcher()

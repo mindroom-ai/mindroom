@@ -10,10 +10,14 @@ import {
 import { type ColumnDef, flexRender, getCoreRowModel, useReactTable } from '@tanstack/react-table';
 import { API_ENDPOINTS } from '@/lib/api';
 import { cn } from '@/lib/utils';
+import { useConfigStore } from '@/store/configStore';
+import type { KnowledgeConfig as KnowledgeSettings } from '@/types/config';
 import { useToast } from '@/components/ui/use-toast';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Input } from '@/components/ui/input';
 import { RefreshCw, Trash2, Upload } from 'lucide-react';
 
 interface KnowledgeFile {
@@ -36,6 +40,12 @@ interface KnowledgeFilesResponse {
   total_size: number;
   file_count: number;
 }
+
+const DEFAULT_SETTINGS: KnowledgeSettings = {
+  enabled: false,
+  path: './knowledge_docs',
+  watch: true,
+};
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -67,14 +77,17 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
 }
 
 export function Knowledge() {
+  const { config, updateKnowledgeConfig, saveConfig, isDirty } = useConfigStore();
   const { toast } = useToast();
 
   const [files, setFiles] = useState<KnowledgeFile[]>([]);
   const [status, setStatus] = useState<KnowledgeStatus | null>(null);
+  const [settings, setSettings] = useState<KnowledgeSettings>(DEFAULT_SETTINGS);
   const [totalSize, setTotalSize] = useState(0);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [reindexing, setReindexing] = useState(false);
+  const [savingSettings, setSavingSettings] = useState(false);
   const [deletingPath, setDeletingPath] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -105,6 +118,53 @@ export function Knowledge() {
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  useEffect(() => {
+    const knowledgeConfig = config?.knowledge;
+    if (!knowledgeConfig) {
+      setSettings(DEFAULT_SETTINGS);
+      return;
+    }
+    setSettings({
+      enabled: knowledgeConfig.enabled,
+      path: knowledgeConfig.path,
+      watch: knowledgeConfig.watch,
+    });
+  }, [config]);
+
+  const updateSettings = useCallback(
+    (updates: Partial<KnowledgeSettings>) => {
+      setSettings(previous => {
+        const next = { ...previous, ...updates };
+        updateKnowledgeConfig(next);
+        return next;
+      });
+    },
+    [updateKnowledgeConfig]
+  );
+
+  const handleSaveSettings = useCallback(async () => {
+    setSavingSettings(true);
+    setError(null);
+    try {
+      await saveConfig();
+      await loadData();
+      toast({
+        title: 'Knowledge settings saved',
+        description: 'Configuration has been updated.',
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to save knowledge settings';
+      setError(message);
+      toast({
+        title: 'Save failed',
+        description: message,
+        variant: 'destructive',
+      });
+    } finally {
+      setSavingSettings(false);
+    }
+  }, [loadData, saveConfig, toast]);
 
   const uploadFiles = useCallback(
     async (selectedFiles: File[]) => {
@@ -302,6 +362,64 @@ export function Knowledge() {
             <p className="text-sm text-muted-foreground">
               Folder: <code>{status?.folder_path ?? '-'}</code>
             </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Knowledge Settings</CardTitle>
+            <CardDescription>
+              Configure whether knowledge is enabled, where files are stored, and watcher behavior.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex items-center justify-between rounded-md border p-3">
+              <div className="space-y-1">
+                <p className="text-sm font-medium">Enable Knowledge</p>
+                <p className="text-xs text-muted-foreground">
+                  Turn knowledge indexing and search on or off globally.
+                </p>
+              </div>
+              <Checkbox
+                checked={settings.enabled}
+                onCheckedChange={checked => updateSettings({ enabled: checked === true })}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium" htmlFor="knowledge-path">
+                Knowledge Folder Path
+              </label>
+              <Input
+                id="knowledge-path"
+                value={settings.path}
+                onChange={event => updateSettings({ path: event.target.value })}
+                placeholder="./knowledge_docs"
+              />
+            </div>
+
+            <div className="flex items-center justify-between rounded-md border p-3">
+              <div className="space-y-1">
+                <p className="text-sm font-medium">Watch Folder</p>
+                <p className="text-xs text-muted-foreground">
+                  Automatically index file additions and updates.
+                </p>
+              </div>
+              <Checkbox
+                checked={settings.watch}
+                onCheckedChange={checked => updateSettings({ watch: checked === true })}
+              />
+            </div>
+
+            <div className="flex justify-end">
+              <Button
+                variant="outline"
+                onClick={handleSaveSettings}
+                disabled={savingSettings || !isDirty}
+              >
+                {savingSettings ? 'Saving...' : 'Save Settings'}
+              </Button>
+            </div>
           </CardContent>
         </Card>
 

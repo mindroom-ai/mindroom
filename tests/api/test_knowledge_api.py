@@ -26,22 +26,31 @@ def _knowledge_config(path: Path, *, enabled: bool = True) -> Config:
     )
 
 
-def test_knowledge_status_does_not_initialize_manager(test_client: TestClient, tmp_path: Path) -> None:
-    """Status endpoint should not trigger expensive manager initialization."""
+def test_knowledge_status_initializes_manager_without_full_reindex(
+    test_client: TestClient,
+    tmp_path: Path,
+) -> None:
+    """Status should initialize manager only in incremental mode."""
     config = _knowledge_config(tmp_path, enabled=True)
+    manager = MagicMock()
+    manager.get_status.return_value = {"indexed_count": 3, "file_count": 4}
 
     with (
         patch("mindroom.api.knowledge.Config.from_yaml", return_value=config),
-        patch("mindroom.api.knowledge.get_knowledge_manager", return_value=None),
-        patch("mindroom.api.knowledge.initialize_knowledge_manager", new_callable=AsyncMock) as init_manager,
+        patch(
+            "mindroom.api.knowledge.initialize_knowledge_manager",
+            new=AsyncMock(return_value=manager),
+        ) as init_manager,
     ):
         response = test_client.get("/api/knowledge/status")
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["enabled"] is True
-    assert payload["indexed_count"] == 0
-    init_manager.assert_not_awaited()
+    assert payload["indexed_count"] == 3
+    assert payload["file_count"] == 4
+    init_manager.assert_awaited_once()
+    assert init_manager.await_args.kwargs["reindex_on_create"] is False
 
 
 def test_knowledge_upload_rolls_back_on_oversized_file(

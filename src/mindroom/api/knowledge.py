@@ -195,17 +195,18 @@ async def knowledge_status() -> dict[str, Any]:
     """Return current knowledge indexing status."""
     config = Config.from_yaml()
     root = _knowledge_root(config)
-    files, _ = _list_file_info(root)
-
+    manager = await _ensure_manager(config)
     indexed_count = 0
-    manager = get_knowledge_manager()
+    file_count = len(_list_file_info(root)[0])
     if manager is not None:
-        indexed_count = manager.get_status()["indexed_count"]
+        manager_status = manager.get_status()
+        indexed_count = int(manager_status["indexed_count"])
+        file_count = int(manager_status["file_count"])
 
     return {
         "enabled": config.knowledge.enabled,
         "folder_path": str(root),
-        "file_count": len(files),
+        "file_count": file_count,
         "indexed_count": indexed_count,
     }
 
