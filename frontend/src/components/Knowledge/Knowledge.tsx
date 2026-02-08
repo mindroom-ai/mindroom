@@ -487,7 +487,7 @@ export function Knowledge() {
   }
 
   return (
-    <div className="h-full overflow-hidden">
+    <div className="h-full overflow-y-auto overflow-x-hidden">
       <div className="h-full flex flex-col gap-4">
         <Card>
           <CardHeader className="pb-3">
@@ -626,104 +626,114 @@ export function Knowledge() {
           </Card>
         )}
 
-        <Card
-          className={cn(
-            'border-dashed transition-colors',
-            dragActive ? 'border-primary bg-primary/5' : 'border-border'
-          )}
-          onDragOver={event => {
-            event.preventDefault();
-            setDragActive(true);
-          }}
-          onDragLeave={event => {
-            event.preventDefault();
-            setDragActive(false);
-          }}
-          onDrop={onDrop}
-        >
-          <CardContent className="py-6">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-              <div>
-                <p className="font-medium">Drop files here or upload manually</p>
-                <p className="text-sm text-muted-foreground">
-                  Supported formats are auto-detected by agno readers.
-                </p>
-              </div>
-              <div className="flex gap-2">
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  className="hidden"
-                  multiple
-                  onChange={onFileInputChange}
-                />
-                <Button
-                  variant="outline"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={uploading || !selectedBase || isDirty}
-                >
-                  <Upload className="h-4 w-4 mr-2" />
-                  {uploading ? 'Uploading...' : 'Upload'}
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={handleReindex}
-                  disabled={reindexing || !selectedBase || isDirty}
-                >
-                  <RefreshCw className={cn('h-4 w-4 mr-2', reindexing && 'animate-spin')} />
-                  {reindexing ? 'Reindexing...' : 'Reindex'}
-                </Button>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+        {selectedBase ? (
+          <>
+            <Card
+              className={cn(
+                'border-dashed transition-colors',
+                dragActive ? 'border-primary bg-primary/5' : 'border-border'
+              )}
+              onDragOver={event => {
+                event.preventDefault();
+                setDragActive(true);
+              }}
+              onDragLeave={event => {
+                event.preventDefault();
+                setDragActive(false);
+              }}
+              onDrop={onDrop}
+            >
+              <CardContent className="py-6">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <div>
+                    <p className="font-medium">Drop files here or upload manually</p>
+                    <p className="text-sm text-muted-foreground">
+                      Supported formats are auto-detected by agno readers.
+                    </p>
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      className="hidden"
+                      multiple
+                      onChange={onFileInputChange}
+                    />
+                    <Button
+                      variant="outline"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={uploading || !selectedBase || isDirty}
+                    >
+                      <Upload className="h-4 w-4 mr-2" />
+                      {uploading ? 'Uploading...' : 'Upload'}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={handleReindex}
+                      disabled={reindexing || !selectedBase || isDirty}
+                    >
+                      <RefreshCw className={cn('h-4 w-4 mr-2', reindexing && 'animate-spin')} />
+                      {reindexing ? 'Reindexing...' : 'Reindex'}
+                    </Button>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
 
-        <Card className="flex-1 min-h-0">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base">Knowledge Files</CardTitle>
-          </CardHeader>
-          <CardContent className="h-[calc(100%-4.5rem)] min-h-0">
-            <div className="h-full overflow-auto rounded-md border">
-              <table className="w-full min-w-[760px] text-sm">
-                <thead>
-                  {table.getHeaderGroups().map(headerGroup => (
-                    <tr key={headerGroup.id} className="border-b bg-muted/50">
-                      {headerGroup.headers.map(header => (
-                        <th key={header.id} className="px-4 py-2.5 text-left align-middle">
-                          {header.isPlaceholder
-                            ? null
-                            : flexRender(header.column.columnDef.header, header.getContext())}
-                        </th>
+            <Card className="flex-1 min-h-0">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base">Knowledge Files</CardTitle>
+              </CardHeader>
+              <CardContent className="h-[calc(100%-4.5rem)] min-h-0">
+                <div className="h-full overflow-auto rounded-md border">
+                  <table className="w-full min-w-[760px] text-sm">
+                    <thead>
+                      {table.getHeaderGroups().map(headerGroup => (
+                        <tr key={headerGroup.id} className="border-b bg-muted/50">
+                          {headerGroup.headers.map(header => (
+                            <th key={header.id} className="px-4 py-2.5 text-left align-middle">
+                              {header.isPlaceholder
+                                ? null
+                                : flexRender(header.column.columnDef.header, header.getContext())}
+                            </th>
+                          ))}
+                        </tr>
                       ))}
-                    </tr>
-                  ))}
-                </thead>
-                <tbody>
-                  {table.getRowModel().rows.length === 0 ? (
-                    <tr>
-                      <td
-                        colSpan={columns.length}
-                        className="px-4 py-8 text-center text-muted-foreground"
-                      >
-                        No files uploaded yet.
-                      </td>
-                    </tr>
-                  ) : (
-                    table.getRowModel().rows.map(row => (
-                      <tr key={row.id} className="border-b last:border-b-0">
-                        {row.getVisibleCells().map(cell => (
-                          <td key={cell.id} className="px-4 py-2.5 align-middle">
-                            {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                    </thead>
+                    <tbody>
+                      {table.getRowModel().rows.length === 0 ? (
+                        <tr>
+                          <td
+                            colSpan={columns.length}
+                            className="px-4 py-8 text-center text-muted-foreground"
+                          >
+                            No files uploaded yet.
                           </td>
-                        ))}
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </CardContent>
-        </Card>
+                        </tr>
+                      ) : (
+                        table.getRowModel().rows.map(row => (
+                          <tr key={row.id} className="border-b last:border-b-0">
+                            {row.getVisibleCells().map(cell => (
+                              <td key={cell.id} className="px-4 py-2.5 align-middle">
+                                {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                              </td>
+                            ))}
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </CardContent>
+            </Card>
+          </>
+        ) : (
+          <Card>
+            <CardContent className="py-4 text-sm text-muted-foreground">
+              Select or create a knowledge base to view and manage files.
+            </CardContent>
+          </Card>
+        )}
       </div>
     </div>
   );
