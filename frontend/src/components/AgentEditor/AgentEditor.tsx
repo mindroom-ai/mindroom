@@ -45,6 +45,10 @@ export function AgentEditor() {
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
   const defaultLearning = config?.defaults.learning ?? true;
   const defaultLearningMode = config?.defaults.learning_mode ?? 'always';
+  const knowledgeBaseNames = useMemo(
+    () => Object.keys(config?.knowledge_bases || {}).sort(),
+    [config?.knowledge_bases]
+  );
 
   // Fetch tools and skills from backend
   const { tools: backendTools, loading: toolsLoading } = useTools();
@@ -88,6 +92,7 @@ export function AgentEditor() {
       skills: [],
       instructions: [],
       rooms: [],
+      knowledge_base: null,
       num_history_runs: 5,
       learning: defaultLearning,
       learning_mode: defaultLearningMode,
@@ -128,6 +133,7 @@ export function AgentEditor() {
     if (selectedAgent) {
       reset({
         ...selectedAgent,
+        knowledge_base: selectedAgent.knowledge_base ?? null,
         learning: selectedAgent.learning ?? defaultLearning,
         learning_mode: selectedAgent.learning_mode ?? defaultLearningMode,
       });
@@ -255,6 +261,40 @@ export function AgentEditor() {
                       {modelId}
                     </SelectItem>
                   ))}
+              </SelectContent>
+            </Select>
+          )}
+        />
+      </FieldGroup>
+
+      {/* Knowledge Base */}
+      <FieldGroup
+        label="Knowledge Base"
+        helperText="Assign this agent to one knowledge base, or leave unassigned"
+        htmlFor="knowledge_base"
+      >
+        <Controller
+          name="knowledge_base"
+          control={control}
+          render={({ field }) => (
+            <Select
+              value={field.value || '__none__'}
+              onValueChange={value => {
+                const selectedValue = value === '__none__' ? null : value;
+                field.onChange(selectedValue);
+                handleFieldChange('knowledge_base', selectedValue);
+              }}
+            >
+              <SelectTrigger id="knowledge_base">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">None</SelectItem>
+                {knowledgeBaseNames.map(baseName => (
+                  <SelectItem key={baseName} value={baseName}>
+                    {baseName}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
           )}

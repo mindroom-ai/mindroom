@@ -134,7 +134,7 @@ async def test_agent_processes_direct_mention(
                     config=config,
                     room_id=test_room_id,
                     knowledge=None,
-                    user_id=f"@alice:{config.domain}",
+                    user_id=test_user_id,
                 )
 
                 # Verify message was sent (thinking + streaming updates)

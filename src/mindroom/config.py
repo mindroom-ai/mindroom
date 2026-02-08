@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .constants import DEFAULT_AGENTS_CONFIG, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, safe_replace
 from .logging_config import get_logger
@@ -38,7 +38,10 @@ class AgentConfig(BaseModel):
         description="Learning mode for Agno Learning: always (automatic) or agentic (tool-driven)",
     )
     model: str = Field(default="default", description="Model name")
-    knowledge: bool = Field(default=False, description="Enable knowledge base access for this agent")
+    knowledge_base: str | None = Field(
+        default=None,
+        description="Knowledge base ID assigned to this agent",
+    )
 
 
 class DefaultsConfig(BaseModel):
@@ -84,10 +87,9 @@ class MemoryConfig(BaseModel):
     llm: MemoryLLMConfig | None = Field(default=None, description="LLM configuration for memory")
 
 
-class KnowledgeConfig(BaseModel):
+class KnowledgeBaseConfig(BaseModel):
     """Knowledge base configuration."""
 
-    enabled: bool = Field(default=False, description="Enable knowledge base")
     path: str = Field(default="./knowledge_docs", description="Path to knowledge documents folder")
     watch: bool = Field(default=True, description="Watch folder for changes")
 
@@ -174,7 +176,10 @@ class Config(BaseModel):
     plugins: list[str] = Field(default_factory=list, description="Plugin paths")
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig, description="Default values")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory configuration")
-    knowledge: KnowledgeConfig = Field(default_factory=KnowledgeConfig, description="Knowledge base configuration")
+    knowledge_bases: dict[str, KnowledgeBaseConfig] = Field(
+        default_factory=dict,
+        description="Knowledge base configurations keyed by base ID",
+    )
     models: dict[str, ModelConfig] = Field(default_factory=dict, description="Model configurations")
     router: RouterConfig = Field(default_factory=RouterConfig, description="Router configuration")
     voice: VoiceConfig = Field(default_factory=VoiceConfig, description="Voice configuration")
@@ -186,6 +191,23 @@ class Config(BaseModel):
         default_factory=AuthorizationConfig,
         description="Authorization configuration with fine-grained permissions",
     )
+
+    @model_validator(mode="after")
+    def validate_knowledge_base_assignments(self) -> Config:
+        """Ensure agents only reference configured knowledge base IDs."""
+        invalid_assignments = [
+            (agent_name, agent_config.knowledge_base)
+            for agent_name, agent_config in self.agents.items()
+            if agent_config.knowledge_base is not None and agent_config.knowledge_base not in self.knowledge_bases
+        ]
+        if invalid_assignments:
+            formatted = ", ".join(
+                f"{agent_name} -> {knowledge_base}"
+                for agent_name, knowledge_base in sorted(invalid_assignments, key=lambda item: item[0])
+            )
+            msg = f"Agents reference unknown knowledge bases: {formatted}"
+            raise ValueError(msg)
+        return self
 
     @cached_property
     def domain(self) -> str:
@@ -237,6 +259,8 @@ class Config(BaseModel):
             data["room_models"] = {}
         if data.get("plugins") is None:
             data["plugins"] = []
+        if data.get("knowledge_bases") is None:
+            data["knowledge_bases"] = {}
 
         config = cls(**data)
         logger.info(f"Loaded agent configuration from {path}")

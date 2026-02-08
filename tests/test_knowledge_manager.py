@@ -6,8 +6,13 @@ from typing import TYPE_CHECKING, ClassVar
 
 import pytest
 
-from mindroom.config import Config, KnowledgeConfig
-from mindroom.knowledge import KnowledgeManager
+from mindroom.config import Config, KnowledgeBaseConfig
+from mindroom.knowledge import (
+    KnowledgeManager,
+    get_knowledge_manager,
+    initialize_knowledge_managers,
+    shutdown_knowledge_managers,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -85,7 +90,9 @@ def _make_config(path: Path) -> Config:
     return Config(
         agents={},
         models={},
-        knowledge=KnowledgeConfig(enabled=True, path=str(path), watch=False),
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(path=str(path), watch=False),
+        },
     )
 
 
@@ -97,7 +104,7 @@ def dummy_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> KnowledgeM
     monkeypatch.setattr("mindroom.knowledge.Knowledge", _DummyKnowledge)
 
     config = _make_config(tmp_path / "knowledge")
-    return KnowledgeManager(config=config, storage_path=tmp_path / "storage")
+    return KnowledgeManager(base_id="research", config=config, storage_path=tmp_path / "storage")
 
 
 def test_resolve_file_path_rejects_traversal(dummy_manager: KnowledgeManager) -> None:
@@ -138,3 +145,41 @@ async def test_load_indexed_files_recovers_source_paths(dummy_manager: Knowledge
     assert indexed_count == 2
     status = dummy_manager.get_status()
     assert status["indexed_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_initialize_knowledge_managers_maintains_registry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Registry should track configured bases and remove stale managers."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.Knowledge", _DummyKnowledge)
+
+    config = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(path=str(tmp_path / "research"), watch=False),
+            "legal": KnowledgeBaseConfig(path=str(tmp_path / "legal"), watch=False),
+        },
+    )
+
+    managers = await initialize_knowledge_managers(config, tmp_path / "storage", reindex_on_create=False)
+    assert set(managers) == {"research", "legal"}
+    assert get_knowledge_manager("research") is managers["research"]
+
+    updated_config = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(path=str(tmp_path / "research"), watch=False),
+        },
+    )
+
+    managers = await initialize_knowledge_managers(updated_config, tmp_path / "storage", reindex_on_create=False)
+    assert set(managers) == {"research"}
+    assert get_knowledge_manager("legal") is None
+
+    await shutdown_knowledge_managers()

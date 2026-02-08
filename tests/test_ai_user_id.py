@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mindroom.ai import ai_response, stream_agent_response
 from mindroom.bot import AgentBot
 from mindroom.config import Config
 
@@ -94,8 +95,6 @@ class TestUserIdPassthrough:
     @pytest.mark.asyncio
     async def test_ai_response_passes_user_id_to_agent_arun(self, tmp_path: Path) -> None:
         """Test that ai_response passes user_id all the way to agent.arun()."""
-        from mindroom.ai import ai_response
-
         mock_agent = MagicMock()
         mock_agent.model = MagicMock()
         mock_agent.model.__class__.__name__ = "OpenAIChat"
@@ -127,8 +126,6 @@ class TestUserIdPassthrough:
     @pytest.mark.asyncio
     async def test_stream_agent_response_passes_user_id_to_agent_arun(self, tmp_path: Path) -> None:
         """Test that stream_agent_response passes user_id all the way to agent.arun()."""
-        from mindroom.ai import stream_agent_response
-
         mock_agent = MagicMock()
         mock_agent.model = MagicMock()
         mock_agent.model.__class__.__name__ = "OpenAIChat"
@@ -146,17 +143,18 @@ class TestUserIdPassthrough:
         ):
             mock_prepare.return_value = (mock_agent, "test prompt")
 
-            # Consume the async generator to trigger the agent.arun call
-            chunks = []
-            async for chunk in stream_agent_response(
-                agent_name="general",
-                prompt="test",
-                session_id="session1",
-                storage_path=tmp_path,
-                config=Config.from_yaml(),
-                user_id="@user:localhost",
-            ):
-                chunks.append(chunk)
+            # Consume the async generator to trigger the agent.arun call.
+            _chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    storage_path=tmp_path,
+                    config=Config.from_yaml(),
+                    user_id="@user:localhost",
+                )
+            ]
 
             mock_agent.arun.assert_called_once()
             assert mock_agent.arun.call_args.kwargs["user_id"] == "@user:localhost"
@@ -164,8 +162,6 @@ class TestUserIdPassthrough:
     @pytest.mark.asyncio
     async def test_user_id_none_when_not_provided(self, tmp_path: Path) -> None:
         """Test that user_id defaults to None when not provided (backward compatibility)."""
-        from mindroom.ai import ai_response
-
         mock_agent = MagicMock()
         mock_agent.model = MagicMock()
         mock_agent.model.__class__.__name__ = "OpenAIChat"
