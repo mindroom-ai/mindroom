@@ -29,6 +29,7 @@ from .config_commands import handle_config_command
 from .constants import ENABLE_STREAMING, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, VOICE_PREFIX
 from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
+from .knowledge import initialize_knowledge_manager, shutdown_knowledge_manager
 from .logging_config import emoji, get_logger, setup_logging
 from .matrix.client import (
     _latest_thread_event_id,
@@ -108,6 +109,8 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.tools.function import Function
     from agno.tools.toolkit import Toolkit
+
+    from .knowledge import KnowledgeManager
 
 logger = get_logger(__name__)
 
@@ -576,7 +579,13 @@ class AgentBot:
     @property  # Not cached_property because Team mutates it!
     def agent(self) -> Agent:
         """Get the Agno Agent instance for this bot."""
-        return create_agent(agent_name=self.agent_name, config=self.config, storage_path=self.storage_path)
+        knowledge = self.orchestrator.knowledge_manager.get_knowledge() if self.orchestrator.knowledge_manager else None
+        return create_agent(
+            agent_name=self.agent_name,
+            config=self.config,
+            storage_path=self.storage_path,
+            knowledge=knowledge,
+        )
 
     @cached_property
     def response_tracker(self) -> ResponseTracker:
@@ -2235,6 +2244,7 @@ class MultiAgentOrchestrator:
     running: bool = field(default=False, init=False)
     config: Config | None = field(default=None, init=False)
     _sync_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
+    knowledge_manager: KnowledgeManager | None = field(default=None, init=False)
 
     async def _ensure_user_account(self) -> None:
         """Ensure a user account exists, creating one if necessary.
@@ -2250,6 +2260,14 @@ class MultiAgentOrchestrator:
         )
         logger.info(f"User account ready: {user_account.user_id}")
 
+    async def _configure_knowledge(self, config: Config, *, start_watcher: bool) -> None:
+        """Initialize or reconfigure the knowledge manager for the current config."""
+        self.knowledge_manager = await initialize_knowledge_manager(
+            config=config,
+            storage_path=self.storage_path,
+            start_watcher=start_watcher,
+        )
+
     async def initialize(self) -> None:
         """Initialize all agent bots with self-management.
 
@@ -2263,6 +2281,7 @@ class MultiAgentOrchestrator:
         config = Config.from_yaml()
         load_plugins(config)
         self.config = config
+        await self._configure_knowledge(config, start_watcher=False)
 
         # Create bots for all configured entities
         # Make Router the first so that it can manage room invitations
@@ -2329,6 +2348,8 @@ class MultiAgentOrchestrator:
             logger.info("All agent bots started successfully")
 
         self.running = True
+        assert self.config is not None
+        await self._configure_knowledge(self.config, start_watcher=True)
 
         # Setup rooms and have all bots join them
         await self._setup_rooms_and_memberships(list(self.agent_bots.values()))
@@ -2357,6 +2378,7 @@ class MultiAgentOrchestrator:
 
         if not self.config:
             self.config = new_config
+            await self._configure_knowledge(new_config, start_watcher=self.running)
             return False
 
         # Identify what changed - we can keep using the existing helper functions
@@ -2369,6 +2391,7 @@ class MultiAgentOrchestrator:
 
         # Always update the orchestrator's config first
         self.config = new_config
+        await self._configure_knowledge(new_config, start_watcher=self.running)
 
         # Always update config for ALL existing bots (even those being restarted will get new config when recreated)
         logger.info(
@@ -2450,6 +2473,8 @@ class MultiAgentOrchestrator:
     async def stop(self) -> None:
         """Stop all agent bots."""
         self.running = False
+        await shutdown_knowledge_manager()
+        self.knowledge_manager = None
 
         # First cancel all sync tasks
         for entity_name in list(self._sync_tasks.keys()):

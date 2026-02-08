@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 from agno.agent import Agent
@@ -19,6 +19,8 @@ from .tools_metadata import get_tool_by_name
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from agno.knowledge.knowledge import Knowledge
 
     from .config import Config
 
@@ -66,7 +68,13 @@ RICH_PROMPTS = {
 }
 
 
-def create_agent(agent_name: str, config: Config, *, storage_path: Path | None = None) -> Agent:
+def create_agent(
+    agent_name: str,
+    config: Config,
+    *,
+    storage_path: Path | None = None,
+    knowledge: Knowledge | None = None,
+) -> Agent:
     """Create an agent instance from configuration.
 
     Args:
@@ -74,6 +82,7 @@ def create_agent(agent_name: str, config: Config, *, storage_path: Path | None =
         config: Application configuration
         storage_path: Runtime storage path. Falls back to the
             module-level ``STORAGE_PATH_OBJ`` when *None*.
+        knowledge: Optional shared knowledge base instance for RAG-enabled agents.
 
     Returns:
         Configured Agent instance
@@ -163,6 +172,11 @@ def create_agent(agent_name: str, config: Config, *, storage_path: Path | None =
 
     instructions.append(agent_prompts.INTERACTIVE_QUESTION_PROMPT)
 
+    agent_kwargs: dict[str, Any] = {}
+    if agent_config.knowledge and knowledge is not None:
+        agent_kwargs["knowledge"] = knowledge
+        agent_kwargs["search_knowledge"] = True
+
     agent = Agent(
         name=agent_config.display_name,
         role=role,
@@ -176,6 +190,7 @@ def create_agent(agent_name: str, config: Config, *, storage_path: Path | None =
         else defaults.add_history_to_messages,
         num_history_runs=agent_config.num_history_runs or defaults.num_history_runs,
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
+        **agent_kwargs,
     )
     logger.info(f"Created agent '{agent_name}' ({agent_config.display_name}) with {len(tools)} tools")
 

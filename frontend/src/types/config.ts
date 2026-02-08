@@ -19,6 +19,12 @@ export interface MemoryConfig {
   };
 }
 
+export interface KnowledgeConfig {
+  enabled: boolean;
+  path: string;
+  watch: boolean;
+}
+
 export interface Agent {
   id: string; // The key in the agents object
   display_name: string;
@@ -27,6 +33,7 @@ export interface Agent {
   skills: string[];
   instructions: string[];
   rooms: string[];
+  knowledge?: boolean;
   num_history_runs: number;
   model?: string; // Reference to a model in the models section
 }
@@ -68,6 +75,7 @@ export interface VoiceConfig {
 
 export interface Config {
   memory: MemoryConfig;
+  knowledge?: KnowledgeConfig;
   models: Record<string, ModelConfig>;
   agents: Record<string, Omit<Agent, 'id'>>;
   defaults: {

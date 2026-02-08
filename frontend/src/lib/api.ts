@@ -51,6 +51,15 @@ export const API_ENDPOINTS = {
     leaveRoomsBulk: `${API_BASE_URL}/api/matrix/rooms/leave-bulk`,
   },
 
+  // Knowledge base operations
+  knowledge: {
+    files: `${API_BASE_URL}/api/knowledge/files`,
+    upload: `${API_BASE_URL}/api/knowledge/upload`,
+    deleteFile: (path: string) => `${API_BASE_URL}/api/knowledge/files/${encodeURIComponent(path)}`,
+    status: `${API_BASE_URL}/api/knowledge/status`,
+    reindex: `${API_BASE_URL}/api/knowledge/reindex`,
+  },
+
   // Other endpoints
   tools: `${API_BASE_URL}/api/tools`,
   rooms: `${API_BASE_URL}/api/rooms`,
