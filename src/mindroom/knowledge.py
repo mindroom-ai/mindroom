@@ -188,6 +188,8 @@ class KnowledgeManager:
         async with self._lock:
             try:
                 if upsert:
+                    # Agno/Chroma upsert keys by content hash, so stale chunks from an older
+                    # version of the same file can remain unless we clear by source metadata first.
                     await asyncio.to_thread(self._knowledge.remove_vectors_by_metadata, metadata)
                 await asyncio.to_thread(
                     self._knowledge.insert,
