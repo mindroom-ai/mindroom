@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from agno.agent import Agent
@@ -216,10 +216,7 @@ def create_agent(
 
     instructions.append(agent_prompts.INTERACTIVE_QUESTION_PROMPT)
 
-    agent_kwargs: dict[str, Any] = {}
-    if agent_config.knowledge and knowledge is not None:
-        agent_kwargs["knowledge"] = knowledge
-        agent_kwargs["search_knowledge"] = True
+    knowledge_enabled = agent_config.knowledge and knowledge is not None
 
     agent = Agent(
         name=agent_config.display_name,
@@ -235,7 +232,8 @@ def create_agent(
         else defaults.add_history_to_messages,
         num_history_runs=agent_config.num_history_runs or defaults.num_history_runs,
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
-        **agent_kwargs,
+        knowledge=knowledge if knowledge_enabled else None,
+        search_knowledge=knowledge_enabled,
     )
     logger.info(f"Created agent '{agent_name}' ({agent_config.display_name}) with {len(tools)} tools")
 

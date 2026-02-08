@@ -1431,9 +1431,6 @@ class AgentBot:
 
         session_id = create_session_id(room_id, thread_id)
         knowledge = self._knowledge_for_agent(self.agent_name)
-        knowledge_kwargs: dict[str, Knowledge] = {}
-        if knowledge is not None:
-            knowledge_kwargs["knowledge"] = knowledge
 
         try:
             # Show typing indicator while generating response
@@ -1446,7 +1443,7 @@ class AgentBot:
                     config=self.config,
                     thread_history=thread_history,
                     room_id=room_id,
-                    **knowledge_kwargs,
+                    knowledge=knowledge,
                 )
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
@@ -1502,9 +1499,6 @@ class AgentBot:
 
         session_id = create_session_id(room_id, thread_id)
         knowledge = self._knowledge_for_agent(agent_name)
-        knowledge_kwargs: dict[str, Knowledge] = {}
-        if knowledge is not None:
-            knowledge_kwargs["knowledge"] = knowledge
 
         async with typing_indicator(self.client, room_id):
             response_text = await ai_response(
@@ -1515,7 +1509,7 @@ class AgentBot:
                 config=self.config,
                 thread_history=thread_history,
                 room_id=room_id,
-                **knowledge_kwargs,
+                knowledge=knowledge,
             )
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
@@ -1620,9 +1614,6 @@ class AgentBot:
 
         session_id = create_session_id(room_id, thread_id)
         knowledge = self._knowledge_for_agent(self.agent_name)
-        knowledge_kwargs: dict[str, Knowledge] = {}
-        if knowledge is not None:
-            knowledge_kwargs["knowledge"] = knowledge
 
         try:
             # Show typing indicator while generating response
@@ -1635,7 +1626,7 @@ class AgentBot:
                     config=self.config,
                     thread_history=thread_history,
                     room_id=room_id,
-                    **knowledge_kwargs,
+                    knowledge=knowledge,
                 )
 
                 event_id, accumulated = await send_streaming_response(
@@ -2379,8 +2370,11 @@ class MultiAgentOrchestrator:
             logger.info("All agent bots started successfully")
 
         self.running = True
-        assert self.config is not None
-        await self._configure_knowledge(self.config, start_watcher=True)
+        config = self.config
+        if config is None:
+            msg = "Configuration not loaded"
+            raise RuntimeError(msg)
+        await self._configure_knowledge(config, start_watcher=True)
 
         # Setup rooms and have all bots join them
         await self._setup_rooms_and_memberships(list(self.agent_bots.values()))
@@ -2534,10 +2528,13 @@ class MultiAgentOrchestrator:
         await self._ensure_rooms_exist()
 
         # After rooms exist, update each bot's room list to use room IDs instead of aliases
-        assert self.config is not None
+        config = self.config
+        if config is None:
+            msg = "Configuration not loaded"
+            raise RuntimeError(msg)
         for bot in bots:
             # Get the room aliases for this entity from config and resolve to IDs
-            room_aliases = get_rooms_for_entity(bot.agent_name, self.config)
+            room_aliases = get_rooms_for_entity(bot.agent_name, config)
             bot.rooms = resolve_room_aliases(room_aliases)
 
         # After rooms exist, ensure room invitations are up to date
@@ -2570,8 +2567,11 @@ class MultiAgentOrchestrator:
             return
 
         # Directly create rooms using the router's client
-        assert self.config is not None
-        room_ids = await ensure_all_rooms_exist(router_bot.client, self.config)
+        config = self.config
+        if config is None:
+            msg = "Configuration not loaded"
+            raise RuntimeError(msg)
+        room_ids = await ensure_all_rooms_exist(router_bot.client, config)
         logger.info(f"Ensured existence of {len(room_ids)} rooms")
 
     async def _ensure_room_invitations(self) -> None:  # noqa: C901, PLR0912

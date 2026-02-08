@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any, NoReturn
+from typing import Annotated, Any
 from urllib.parse import unquote
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
@@ -99,8 +99,18 @@ def _upload_limit_error(filename: str) -> HTTPException:
     )
 
 
-def _raise_upload_limit_error(filename: str) -> NoReturn:
-    raise _upload_limit_error(filename)
+def _ensure_within_upload_limit(bytes_written: int, filename: str) -> None:
+    if bytes_written > _MAX_UPLOAD_BYTES:
+        raise _upload_limit_error(filename)
+
+
+async def _stream_upload_to_destination(upload: UploadFile, destination: Path, filename: str) -> None:
+    bytes_written = 0
+    with destination.open("wb") as handle:
+        while chunk := await upload.read(_UPLOAD_CHUNK_BYTES):
+            bytes_written += len(chunk)
+            _ensure_within_upload_limit(bytes_written, filename)
+            handle.write(chunk)
 
 
 @router.get("/files")
@@ -132,17 +142,11 @@ async def upload_knowledge_files(files: Annotated[list[UploadFile], File(...)]) 
             continue
 
         destination = _resolve_within_root(root, filename)
-        bytes_written = 0
 
         try:
             _validate_upload_size_hint(upload, filename)
             destination.parent.mkdir(parents=True, exist_ok=True)
-            with destination.open("wb") as handle:
-                while chunk := await upload.read(_UPLOAD_CHUNK_BYTES):
-                    bytes_written += len(chunk)
-                    if bytes_written > _MAX_UPLOAD_BYTES:
-                        _raise_upload_limit_error(filename)
-                    handle.write(chunk)
+            await _stream_upload_to_destination(upload, destination, filename)
         except Exception:
             destination.unlink(missing_ok=True)
             _rollback_uploaded_files(uploaded_paths)

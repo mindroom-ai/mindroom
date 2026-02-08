@@ -210,6 +210,30 @@ class KnowledgeManager:
         """Shutdown all background work for this manager."""
         await self.stop_watcher()
 
+    async def _index_file_locked(self, resolved_path: Path, *, upsert: bool) -> bool:
+        """Index one file while holding the manager lock."""
+        relative_path = self._relative_path(resolved_path)
+        metadata = {"source_path": relative_path}
+
+        try:
+            if upsert:
+                # Agno/Chroma upsert keys by content hash, so stale chunks from an older
+                # version of the same file can remain unless we clear by source metadata first.
+                await asyncio.to_thread(self._knowledge.remove_vectors_by_metadata, metadata)
+            await asyncio.to_thread(
+                self._knowledge.insert,
+                path=str(resolved_path),
+                metadata=metadata,
+                upsert=upsert,
+            )
+        except Exception:
+            logger.exception("Failed to index knowledge file", path=str(resolved_path))
+            return False
+
+        self._indexed_files.add(relative_path)
+        logger.info("Indexed knowledge file", path=relative_path)
+        return True
+
     async def reindex_all(self) -> int:
         """Clear and rebuild the knowledge index from disk."""
         files = self.list_files()
@@ -217,11 +241,9 @@ class KnowledgeManager:
         async with self._lock:
             await asyncio.to_thread(self._reset_collection)
             self._indexed_files.clear()
-
-        for file_path in files:
-            await self.index_file(file_path, upsert=True)
-
-        return len(self._indexed_files)
+            for file_path in files:
+                await self._index_file_locked(file_path, upsert=True)
+            return len(self._indexed_files)
 
     async def index_file(self, file_path: Path | str, *, upsert: bool = True) -> bool:
         """Index or reindex a single file."""
@@ -229,28 +251,8 @@ class KnowledgeManager:
         if not resolved_path.exists() or not resolved_path.is_file():
             return False
 
-        relative_path = self._relative_path(resolved_path)
-        metadata = {"source_path": relative_path}
-
         async with self._lock:
-            try:
-                if upsert:
-                    # Agno/Chroma upsert keys by content hash, so stale chunks from an older
-                    # version of the same file can remain unless we clear by source metadata first.
-                    await asyncio.to_thread(self._knowledge.remove_vectors_by_metadata, metadata)
-                await asyncio.to_thread(
-                    self._knowledge.insert,
-                    path=str(resolved_path),
-                    metadata=metadata,
-                    upsert=upsert,
-                )
-            except Exception:
-                logger.exception("Failed to index knowledge file", path=str(resolved_path))
-                return False
-            self._indexed_files.add(relative_path)
-
-        logger.info("Indexed knowledge file", path=relative_path)
-        return True
+            return await self._index_file_locked(resolved_path, upsert=upsert)
 
     async def remove_file(self, file_path: Path | str) -> bool:
         """Remove a file from the vector database index."""
@@ -345,13 +347,6 @@ async def initialize_knowledge_manager(
 def get_knowledge_manager() -> KnowledgeManager | None:
     """Get the process-wide knowledge manager if initialized."""
     return _knowledge_manager
-
-
-def get_knowledge() -> Knowledge | None:
-    """Get the process-wide agno Knowledge instance if available."""
-    if _knowledge_manager is None:
-        return None
-    return _knowledge_manager.get_knowledge()
 
 
 async def shutdown_knowledge_manager() -> None:
