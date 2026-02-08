@@ -1428,6 +1428,7 @@ class AgentBot:
         thread_id: str | None,
         thread_history: list[dict],
         existing_event_id: str | None = None,
+        user_id: str | None = None,
     ) -> str | None:
         """Process a message and send a response (non-streaming)."""
         if not prompt.strip():
@@ -1448,6 +1449,7 @@ class AgentBot:
                     thread_history=thread_history,
                     room_id=room_id,
                     knowledge=knowledge,
+                    user_id=user_id,
                 )
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
@@ -1610,6 +1612,7 @@ class AgentBot:
         thread_id: str | None,
         thread_history: list[dict],
         existing_event_id: str | None = None,
+        user_id: str | None = None,
     ) -> str | None:
         """Process a message and send a response (streaming)."""
         assert self.client is not None
@@ -1631,6 +1634,7 @@ class AgentBot:
                     thread_history=thread_history,
                     room_id=room_id,
                     knowledge=knowledge,
+                    user_id=user_id,
                 )
 
                 event_id, accumulated = await send_streaming_response(
@@ -1716,6 +1720,7 @@ class AgentBot:
                     thread_id,
                     thread_history,
                     message_id,  # Edit the thinking message or existing
+                    user_id=user_id,
                 )
             else:
                 await self._process_and_respond(
@@ -1725,6 +1730,7 @@ class AgentBot:
                     thread_id,
                     thread_history,
                     message_id,  # Edit the thinking message or existing
+                    user_id=user_id,
                 )
 
         # Use unified handler for cancellation support
