@@ -1,4 +1,4 @@
-import { Brain } from 'lucide-react'
+import Image from 'next/image'
 
 interface MindRoomLogoProps {
   className?: string
@@ -7,6 +7,12 @@ interface MindRoomLogoProps {
 
 export function MindRoomLogo({ className = '', size = 32 }: MindRoomLogoProps) {
   return (
-    <Brain className={className} size={size} />
+    <Image
+      src="/brain-logo.svg"
+      alt="MindRoom logo"
+      width={size}
+      height={size}
+      className={className}
+    />
   )
 }

@@ -245,7 +245,11 @@ function AppContent() {
         <header className="bg-white/80 dark:bg-stone-900/50 backdrop-blur-xl border-b border-gray-200/50 dark:border-white/10 shadow-sm dark:shadow-2xl">
           <div className="px-3 sm:px-6 py-2 sm:py-4 flex items-center justify-between gap-2">
             <h1 className="flex items-center gap-2 sm:gap-3">
-              <span className="text-2xl sm:text-4xl">🧠</span>
+              <img
+                src="/brain-logo.svg"
+                alt="MindRoom logo"
+                className="h-8 w-8 sm:h-10 sm:w-10 shrink-0"
+              />
               <div className="flex flex-col">
                 <span className="text-base sm:text-3xl font-bold tracking-tight text-gray-900 dark:text-white">
                   MindRoom
