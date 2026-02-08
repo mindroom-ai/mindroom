@@ -26,7 +26,6 @@ nav = [
   { "Tools" = [
     { "Overview" = "tools/index.md" },
     { "Built-in Tools" = "tools/builtin.md" },
-    { "MCP Tools" = "tools/mcp.md" },
   ] },
   { "Skills" = "skills.md" },
   { "Plugins" = "plugins.md" },
