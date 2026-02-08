@@ -40,12 +40,12 @@ models:
 
   haiku:
     provider: anthropic
-    id: claude-haiku-3-5-latest
+    id: claude-haiku-4-5-latest
 
   # OpenAI
-  gpt4:
+  gpt:
     provider: openai
-    id: gpt-4o
+    id: gpt-5.2
 
   # Google Gemini (both 'google' and 'gemini' work as provider names)
   gemini:

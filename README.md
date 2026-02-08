@@ -122,7 +122,7 @@ Email: I'll compile and send every Friday
 
 ### 🔐 Intelligent Trust Boundaries
 - Route sensitive data to local Ollama models on your hardware
-- Use GPT-5 for complex reasoning
+- Use GPT-5.2 for complex reasoning
 - Send general queries to cost-effective cloud models
 - You decide which AI sees what
 

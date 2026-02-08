@@ -34,7 +34,7 @@ memory:
   llm:  # Optional: for memory extraction
     provider: openai  # or "ollama", "anthropic"
     config:
-      model: gpt-4o-mini
+      model: gpt-5.2-mini
       temperature: 0.1
       host: null  # For Ollama
 ```

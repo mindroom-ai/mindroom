@@ -427,7 +427,7 @@ models:
     id: devstral:24b
     provider: ollama
   opus:
-    id: claude-opus-4-latest
+    id: claude-opus-4-6-latest
     provider: anthropic
   sonnet:
     id: claude-sonnet-4-5-latest
