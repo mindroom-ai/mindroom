@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     category=ToolCategory.ENTERTAINMENT,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
-    icon="FaSpotify",
+    icon="SiSpotify",
     icon_color="text-green-500",
     config_fields=[
         ConfigField(

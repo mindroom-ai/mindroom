@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     category=ToolCategory.RESEARCH,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
-    icon="FaImage",
+    icon="SiUnsplash",
     icon_color="text-gray-800",
     config_fields=[
         ConfigField(

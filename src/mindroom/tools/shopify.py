@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     category=ToolCategory.INTEGRATIONS,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
-    icon="FaShoppingCart",
+    icon="SiShopify",
     icon_color="text-green-600",
     config_fields=[
         ConfigField(

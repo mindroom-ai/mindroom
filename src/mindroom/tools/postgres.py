@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.SPECIAL,
-    icon="FaDatabase",
+    icon="SiPostgresql",
     icon_color="text-blue-700",
     config_fields=[
         ConfigField(
