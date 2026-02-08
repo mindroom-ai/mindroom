@@ -1,6 +1,7 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { BrowserRouter, useNavigate, useLocation } from 'react-router-dom';
+import { Check, Menu } from 'lucide-react';
 import { useConfigStore } from '@/store/configStore';
 import { AgentList } from '@/components/AgentList/AgentList';
 import { AgentEditor } from '@/components/AgentEditor/AgentEditor';
@@ -18,25 +19,64 @@ import { SyncStatus } from '@/components/SyncStatus/SyncStatus';
 import { Dashboard } from '@/components/Dashboard/Dashboard';
 import { Skills } from '@/components/Skills/Skills';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { Toaster } from '@/components/ui/toaster';
 import { ThemeProvider } from '@/contexts/ThemeContext';
 import { ThemeToggle } from '@/components/ThemeToggle/ThemeToggle';
 
 const queryClient = new QueryClient();
 
+type NavItem = {
+  value: string;
+  label: string;
+  icon: string;
+  group: 'Workspace' | 'Configuration';
+};
+
+const NAV_ITEMS: NavItem[] = [
+  { value: 'dashboard', label: 'Dashboard', icon: '📊', group: 'Workspace' },
+  { value: 'agents', label: 'Agents', icon: '👥', group: 'Workspace' },
+  { value: 'teams', label: 'Teams', icon: '👫', group: 'Workspace' },
+  { value: 'rooms', label: 'Rooms', icon: '🏠', group: 'Workspace' },
+  { value: 'unconfigured-rooms', label: 'External', icon: '🚪', group: 'Workspace' },
+  { value: 'models', label: 'Models & API Keys', icon: '🔧', group: 'Configuration' },
+  { value: 'memory', label: 'Memory', icon: '🧠', group: 'Configuration' },
+  { value: 'knowledge', label: 'Knowledge', icon: '📚', group: 'Configuration' },
+  { value: 'voice', label: 'Voice', icon: '🎤', group: 'Configuration' },
+  { value: 'integrations', label: 'Integrations', icon: '🔌', group: 'Configuration' },
+  { value: 'skills', label: 'Skills', icon: '🧩', group: 'Configuration' },
+];
+
+const NAV_GROUPS: NavItem['group'][] = ['Workspace', 'Configuration'];
+
+const TAB_TRIGGER_CLASS =
+  'rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap';
+
 function AppContent() {
   const { loadConfig, syncStatus, error, selectedAgentId, selectedTeamId, selectedRoomId } =
     useConfigStore();
   const navigate = useNavigate();
   const location = useLocation();
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   // Get the current tab from URL or default to 'dashboard'
   const currentTab = location.pathname.slice(1) || 'dashboard';
+  const currentNavItem = NAV_ITEMS.find(item => item.value === currentTab) || NAV_ITEMS[0];
 
   useEffect(() => {
     // Load configuration on mount
     loadConfig();
   }, [loadConfig]);
+
+  useEffect(() => {
+    setMobileMenuOpen(false);
+  }, [currentTab]);
 
   // Handle tab change - update the URL
   const handleTabChange = (value: string) => {
@@ -76,7 +116,7 @@ function AppContent() {
               {isDifferentInstance ? (
                 <>
                   <p className="text-sm text-gray-500 dark:text-gray-400">
-                    You are logged in but don't have access to this instance. You may need to:
+                    You are logged in but do not have access to this instance. You may need to:
                   </p>
                   <ul className="text-sm text-gray-500 dark:text-gray-400 list-disc ml-5 space-y-1">
                     <li>Switch to an instance you have access to</li>
@@ -157,75 +197,84 @@ function AppContent() {
         {/* Main Content */}
         <div className="flex-1 overflow-hidden">
           <Tabs value={currentTab} onValueChange={handleTabChange} className="h-full flex flex-col">
-            {/* Tab Navigation */}
-            <TabsList className="px-3 sm:px-6 py-3 bg-white/70 dark:bg-stone-900/50 backdrop-blur-lg border-b border-gray-200/50 dark:border-white/10 flex-shrink-0 overflow-x-auto">
-              <TabsTrigger
-                value="dashboard"
-                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap"
+            {/* Mobile Navigation */}
+            <div className="sm:hidden px-3 py-2 bg-white/70 dark:bg-stone-900/50 backdrop-blur-lg border-b border-gray-200/50 dark:border-white/10 flex-shrink-0">
+              <button
+                type="button"
+                onClick={() => setMobileMenuOpen(true)}
+                aria-haspopup="dialog"
+                aria-expanded={mobileMenuOpen}
+                className="w-full rounded-xl border border-white/60 dark:border-white/10 bg-white/80 dark:bg-stone-900/70 backdrop-blur-xl px-3 py-2 flex items-center justify-between text-left shadow-sm"
               >
-                📊 Dashboard
-              </TabsTrigger>
-              <TabsTrigger
-                value="agents"
-                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap"
-              >
-                👥 Agents
-              </TabsTrigger>
-              <TabsTrigger
-                value="teams"
-                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap"
-              >
-                👫 Teams
-              </TabsTrigger>
-              <TabsTrigger
-                value="rooms"
-                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap"
-              >
-                🏠 Rooms
-              </TabsTrigger>
-              <TabsTrigger
-                value="unconfigured-rooms"
-                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap"
-              >
-                🚪 External
-              </TabsTrigger>
-              <TabsTrigger
-                value="models"
-                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap"
-              >
-                🔧 Models & API Keys
-              </TabsTrigger>
-              <TabsTrigger
-                value="memory"
-                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap"
-              >
-                🧠 Memory
-              </TabsTrigger>
-              <TabsTrigger
-                value="knowledge"
-                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap"
-              >
-                📚 Knowledge
-              </TabsTrigger>
-              <TabsTrigger
-                value="voice"
-                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap"
-              >
-                🎤 Voice
-              </TabsTrigger>
-              <TabsTrigger
-                value="integrations"
-                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap"
-              >
-                🔌 Integrations
-              </TabsTrigger>
-              <TabsTrigger
-                value="skills"
-                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap"
-              >
-                🧩 Skills
-              </TabsTrigger>
+                <span className="flex items-center gap-2 min-w-0">
+                  <span className="text-lg leading-none">{currentNavItem.icon}</span>
+                  <span className="min-w-0">
+                    <span className="block text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                      Section
+                    </span>
+                    <span className="block text-sm font-medium text-gray-900 dark:text-gray-100 truncate">
+                      {currentNavItem.label}
+                    </span>
+                  </span>
+                </span>
+                <Menu className="h-5 w-5 text-gray-600 dark:text-gray-300" />
+              </button>
+            </div>
+
+            {/* Desktop Tab Navigation */}
+            <TabsList className="hidden sm:flex px-3 sm:px-6 py-3 bg-white/70 dark:bg-stone-900/50 backdrop-blur-lg border-b border-gray-200/50 dark:border-white/10 flex-shrink-0 overflow-x-auto">
+              {NAV_ITEMS.map(item => (
+                <TabsTrigger key={item.value} value={item.value} className={TAB_TRIGGER_CLASS}>
+                  {item.icon} {item.label}
+                </TabsTrigger>
+              ))}
             </TabsList>
+
+            <Dialog open={mobileMenuOpen} onOpenChange={setMobileMenuOpen}>
+              <DialogContent className="w-[calc(100%-1.5rem)] max-w-sm p-0 border-white/60 dark:border-white/10 bg-white/95 dark:bg-stone-900/95 backdrop-blur-xl">
+                <DialogHeader className="px-4 pt-4 pb-2 text-left">
+                  <DialogTitle className="text-base text-gray-900 dark:text-gray-100">
+                    Navigate
+                  </DialogTitle>
+                  <DialogDescription className="text-xs text-gray-600 dark:text-gray-400">
+                    Choose a section
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="max-h-[70vh] overflow-y-auto px-2 pb-3">
+                  {NAV_GROUPS.map(group => (
+                    <div key={group} className="mb-3 last:mb-0">
+                      <p className="px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                        {group}
+                      </p>
+                      <div className="space-y-1">
+                        {NAV_ITEMS.filter(item => item.group === group).map(item => {
+                          const isActive = item.value === currentTab;
+                          return (
+                            <button
+                              key={item.value}
+                              type="button"
+                              onClick={() => handleTabChange(item.value)}
+                              aria-current={isActive ? 'page' : undefined}
+                              className={`w-full rounded-lg px-3 py-2 text-sm flex items-center justify-between transition-colors ${
+                                isActive
+                                  ? 'bg-primary/10 dark:bg-primary/20 text-primary'
+                                  : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100/80 dark:hover:bg-white/10'
+                              }`}
+                            >
+                              <span className="flex items-center gap-2">
+                                <span className="text-base leading-none">{item.icon}</span>
+                                <span>{item.label}</span>
+                              </span>
+                              {isActive ? <Check className="h-4 w-4" /> : null}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </DialogContent>
+            </Dialog>
 
             <TabsContent value="dashboard" className="flex-1 p-2 sm:p-4 overflow-auto min-h-0">
               <div className="min-h-full">
