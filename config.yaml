@@ -13,13 +13,11 @@ agents:
     - Help users understand how agents, teams, and tools work together
     model: sonnet
     num_history_runs: 5
-    role: Expert MindRoom agent builder that helps create and configure custom AI
-      agents with deep knowledge of the system
+    role: Expert MindRoom agent builder that helps create and configure custom AI agents with deep knowledge of the system
     rooms:
     - lobby
     - dev
     - help
-    skills: []
     tools:
     - config_manager
   analyst:
@@ -35,7 +33,6 @@ agents:
     rooms:
     - lobby
     - analysis
-    skills: []
     tools: []
   calculator:
     display_name: CalculatorAgent
@@ -51,7 +48,6 @@ agents:
     - lobby
     - science
     - analysis
-    skills: []
     tools:
     - calculator
   callagent:
@@ -70,7 +66,6 @@ agents:
     rooms:
     - lobby
     - communication
-    skills: []
     tools:
     - twilio
   code:
@@ -90,7 +85,6 @@ agents:
     - lobby
     - dev
     - automation
-    skills: []
     tools:
     - file
     - shell
@@ -112,7 +106,6 @@ agents:
     - science
     - finance
     - business
-    skills: []
     tools:
     - csv
     - calculator
@@ -131,13 +124,11 @@ agents:
     - For email drafts, maintain appropriate tone and formality based on context
     model: gpt5mini
     num_history_runs: 5
-    role: Manage and respond to emails efficiently using Gmail with Claude Sonnet's
-      intelligence
+    role: Manage and respond to emails efficiently using Gmail with Claude Sonnet's intelligence
     rooms:
     - lobby
     - communication
     - productivity
-    skills: []
     tools:
     - gmail
     - file
@@ -158,7 +149,6 @@ agents:
     - finance
     - analysis
     - business
-    skills: []
     tools:
     - yfinance
     - calculator
@@ -171,20 +161,18 @@ agents:
     - Ask clarifying questions when needed.
     model: sonnet
     num_history_runs: 5
-    role: A general-purpose assistant that provides helpful, conversational responses
-      to users.
+    role: A general-purpose assistant that provides helpful, conversational responses to users.
     rooms:
     - lobby
     - help
-    skills: []
     tools: []
   home:
     display_name: HomeAssistant
     instructions:
     - You are a helpful home automation assistant
     - You can control lights, switches, climate devices, and other smart home devices
-    - Always confirm with the user before making significant changes, but go ahead
-      with minor adjustments like turning lights on/off
+    - Always confirm with the user before making significant changes, but go ahead with minor adjustments like turning lights
+      on/off
     - Provide helpful suggestions for automations and energy savings
     - Be proactive in suggesting improvements to the home setup
     - List available devices when asked about what you can control
@@ -197,7 +185,6 @@ agents:
     - lobby
     - automation
     - home
-    skills: []
     tools:
     - homeassistant
   news:
@@ -217,7 +204,6 @@ agents:
     - news
     - research
     - business
-    skills: []
     tools:
     - duckduckgo
     - newspaper
@@ -238,7 +224,6 @@ agents:
     - research
     - science
     - news
-    skills: []
     tools:
     - duckduckgo
     - wikipedia
@@ -256,7 +241,6 @@ agents:
     rooms:
     - lobby
     - dev
-    skills: []
     tools: []
   shell:
     display_name: ShellAgent
@@ -275,7 +259,6 @@ agents:
     - dev
     - automation
     - ops
-    skills: []
     tools:
     - shell
   sleepy_paws:
@@ -283,36 +266,28 @@ agents:
     display_name: Sleepy Paws 🐾
     instructions:
     - Vertel altijd verhalen in het Nederlands
-    - Maak slaapverhaaltjes met Tom de Tijger (speels, nieuwsgierig, zacht) en Leo
-      de Leeuw (moedig, beschermend, zorgzaam)
+    - Maak slaapverhaaltjes met Tom de Tijger (speels, nieuwsgierig, zacht) en Leo de Leeuw (moedig, beschermend, zorgzaam)
     - Gebruik eenvoudige Nederlandse woorden geschikt voor 2-jarigen
-    - Voeg herhalende zinnen en patronen toe die peuters leuk vinden zoals 'Tom en
-      Leo liepen en liepen...'
+    - Voeg herhalende zinnen en patronen toe die peuters leuk vinden zoals 'Tom en Leo liepen en liepen...'
     - Houd verhalen 5-7 minuten lang voor optimale aandachtsspanne
     - Eindig verhalen altijd met de tweeling veilig thuis en klaar om te slapen
     - Voeg zachte dierengeluiden toe en eenvoudige interactieve elementen in het Nederlands
-    - 'Focus op positieve thema''s: vriendschap, vriendelijkheid, anderen helpen,
-      familieliefde'
+    - 'Focus op positieve thema''s: vriendschap, vriendelijkheid, anderen helpen, familieliefde'
     - Gebruik een steeds kalmere toon naarmate het verhaal naar het einde gaat
     - Vermijd enge, luide of overstimulerende inhoud
-    - 'Stel eenvoudige vragen om het kind te betrekken: ''Wat denk je dat Tom zag?''
-      of ''Moet Leo zijn vriend helpen?'''
-    - 'Voeg slaperige signalen toe tegen het einde: gapen, gezellige bedjes, sterrenlight,
-      zachte wiegenliedjes'
-    - Gebruik Nederlandse uitdrukkingen en culturele elementen die geschikt zijn voor
-      Nederlandse kinderen
+    - 'Stel eenvoudige vragen om het kind te betrekken: ''Wat denk je dat Tom zag?'' of ''Moet Leo zijn vriend helpen?'''
+    - 'Voeg slaperige signalen toe tegen het einde: gapen, gezellige bedjes, sterrenlight, zachte wiegenliedjes'
+    - Gebruik Nederlandse uitdrukkingen en culturele elementen die geschikt zijn voor Nederlandse kinderen
     - Maak de verhalen warm, gezellig en vertrouwd voor Nederlandse gezinnen
     markdown: true
     model: sonnet
     num_history_runs: 5
-    role: Je bent Sleepy Paws, een magische verhalenverteller die zachte dierenaventuren
-      creëert met de tweelingbroertjes Tom de Tijger en Leo de Leeuw. Je specialiseert
-      je in verhalen voor 2-jarigen met eenvoudige Nederlandse woordenschat, herhalende
-      patronen, rustgevende thema's en gezellige eindjes die kinderen helpen vredig
-      in slaap te vallen. Vertel altijd verhalen in het Nederlands.
+    role: Je bent Sleepy Paws, een magische verhalenverteller die zachte dierenaventuren creëert met de tweelingbroertjes
+      Tom de Tijger en Leo de Leeuw. Je specialiseert je in verhalen voor 2-jarigen met eenvoudige Nederlandse woordenschat,
+      herhalende patronen, rustgevende thema's en gezellige eindjes die kinderen helpen vredig in slaap te vallen. Vertel
+      altijd verhalen in het Nederlands.
     rooms:
     - lobby
-    skills: []
     tools: []
   summary:
     display_name: SummaryAgent
@@ -330,13 +305,7 @@ agents:
     - lobby
     - research
     - docs
-    skills: []
     tools: []
-authorization:
-  default_room_access: false
-  global_users:
-  - '@test:m-test-4.mindroom.chat'
-  room_permissions: {}
 defaults:
   add_history_to_messages: true
   markdown: true
@@ -355,20 +324,20 @@ memory:
       temperature: 0.1
     provider: openai
 models:
+  default:
+    id: gpt-oss-low:20b
+    provider: openai
+    extra_kwargs:
+      base_url: http://llama.local/v1
   deepseek:
     id: deepseek-ai/deepseek-chat:free
     provider: openrouter
-  default:
-    extra_kwargs:
-      base_url: http://llama.local/v1
-    id: gpt-oss-low:20b
-    provider: openai
+  gpt_oss_120b:
+    id: openai/gpt-oss-120b
+    provider: openrouter
   devstral:
     id: devstral:24b
     provider: ollama
-  gemini_flash:
-    id: gemini-2.5-flash
-    provider: google
   glm45:
     id: z-ai/glm-4.5-air:free
     provider: openrouter
@@ -381,23 +350,22 @@ models:
   gpt_oss:
     id: openai/gpt-oss-120b
     provider: openrouter
-  gpt_oss_120b:
-    id: openai/gpt-oss-120b
-    provider: openrouter
   haiku:
     id: claude-3-5-haiku-latest
     provider: anthropic
   ollama:
-    host: http://192.168.1.143:11434
     id: devstral:24b
     provider: ollama
+    host: http://192.168.1.143:11434
   opus:
     id: claude-opus-4-latest
     provider: anthropic
   sonnet:
     id: claude-sonnet-4-latest
     provider: anthropic
-plugins: []
+  gemini_flash:
+    id: gemini-2.5-flash
+    provider: google
 room_models:
   research: haiku
 router:
@@ -408,7 +376,6 @@ teams:
     - shell
     display_name: Code Team
     mode: coordinate
-    model: default
     role: New team description
     rooms: []
   super_team:
@@ -424,12 +391,34 @@ teams:
     rooms:
     - research
     - lobby
+
+# Timezone for displaying scheduled tasks (Seattle/Pacific Time)
 timezone: America/Los_Angeles
+
+# Voice message handling configuration
+# Configure to enable voice message transcription
 voice:
   enabled: true
-  intelligence:
-    confidence_threshold: 0.7
-    model: default
   stt:
+    provider: openai
     model: whisper-1
-    provider: custom
+    # api_key: your-api-key-here  # Optional, uses OPENAI_API_KEY env var by default
+    # host: http://localhost:8080  # For self-hosted STT services
+  intelligence:
+    model: sonnet  # Model for command recognition
+    confidence_threshold: 0.7
+
+# Authorization configuration with fine-grained permissions
+authorization:
+  # Users with access to all rooms
+  global_users:
+    - '@test:m-test-4.mindroom.chat'
+
+  # Room-specific permissions (example)
+  room_permissions: {}
+    # '!specific_room:example.com':
+    #   - '@user1:example.com'
+    #   - '@user2:example.com'
+
+  # Default permission for rooms not explicitly configured
+  default_room_access: false
