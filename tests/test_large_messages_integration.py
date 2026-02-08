@@ -450,8 +450,8 @@ async def test_structured_stream_chunk_does_not_drop_trace_on_stale_snapshot() -
 
 
 @pytest.mark.asyncio
-async def test_replacement_streaming_preserves_text_on_tool_completion() -> None:
-    """Tool events should update trace metadata without injecting tool text."""
+async def test_replacement_streaming_finalizes_tool_only_stream() -> None:
+    """Tool-only streams should still produce a final visible message update."""
     client = MockClient()
     config = MockConfig()
 
@@ -460,7 +460,6 @@ async def test_replacement_streaming_preserves_text_on_tool_completion() -> None
     async def stream() -> AsyncIterator[StreamInputChunk]:
         yield ToolCallStartedEvent(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
         yield ToolCallCompletedEvent(tool=tool, content="ok")
-        yield "Done."
 
     event_id, accumulated = await send_streaming_response(
         client=client,
@@ -474,9 +473,10 @@ async def test_replacement_streaming_preserves_text_on_tool_completion() -> None
     )
 
     assert event_id is not None
-    # Tool calls are metadata-only now, so accumulated text should contain only assistant text.
+    # Tool calls are metadata-only now, so the stream falls back to a short completion text.
     assert "save_file" not in accumulated
     assert accumulated == "Done."
+    assert "⋯" not in client.messages_sent[-1][2]["body"]
     target_content = client.messages_sent[-1][2].get("m.new_content", client.messages_sent[-1][2])
     assert TOOL_TRACE_KEY in target_content
     assert len(target_content[TOOL_TRACE_KEY]["events"]) == 2

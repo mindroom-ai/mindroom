@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 AIStreamChunk = str | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+TOOL_ONLY_STREAM_FALLBACK_TEXT = "Done."
 
 
 @dataclass(slots=True)
@@ -322,7 +323,7 @@ async def ai_response(
     return _extract_response_content(response)
 
 
-async def stream_agent_response(
+async def stream_agent_response(  # noqa: C901
     agent_name: str,
     prompt: str,
     session_id: str,
@@ -375,11 +376,12 @@ async def stream_agent_response(
         cached_result = cache.get(cache_key)
         if cached_result is not None:
             logger.info("Cache hit", agent=agent_name)
-            response_text = cached_result.content or ""
+            response_text = cached_result.content or TOOL_ONLY_STREAM_FALLBACK_TEXT
             yield response_text
             return
 
     full_response = ""
+    saw_tool_event = False
 
     # Execute the streaming AI call - this can fail for network, rate limits, etc.
     try:
@@ -402,6 +404,7 @@ async def stream_agent_response(
                 full_response += chunk_text
                 yield event
             elif isinstance(event, (ToolCallStartedEvent, ToolCallCompletedEvent)):
+                saw_tool_event = True
                 yield event
             else:
                 logger.debug("Skipping stream event", event_type=type(event).__name__)
@@ -409,6 +412,10 @@ async def stream_agent_response(
         logger.exception("Error during streaming AI response")
         yield get_user_friendly_error_message(e, agent_name)
         return
+
+    if saw_tool_event and not full_response:
+        full_response = TOOL_ONLY_STREAM_FALLBACK_TEXT
+        yield full_response
 
     if cache is not None and full_response:
         cached_response = RunOutput(content=full_response)

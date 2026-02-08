@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator  # noqa: TC003
+from collections.abc import AsyncIterator, Generator  # noqa: TC003
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agno.models.ollama import Ollama
+from agno.models.response import ToolExecution
+from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 
-from mindroom.ai import ai_response
+from mindroom.ai import ai_response, stream_agent_response
 from mindroom.config import Config
 
 if TYPE_CHECKING:
@@ -173,3 +175,54 @@ class TestMemoryIntegration:
 
             # Memory search should have been called
             mock_memory.search.assert_called_with("What is A?", user_id="agent_general", limit=3)
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_caches_tool_only_stream(self, tmp_path: Path, config: Config) -> None:
+        """Tool-only streaming runs should be cached and replay without rerunning tools."""
+        cache_data: dict[str, object] = {}
+        cache = MagicMock()
+        cache.get.side_effect = cache_data.get
+        cache.set.side_effect = lambda key, value: cache_data.__setitem__(key, value)
+
+        started_tool = ToolExecution(tool_name="save_file", tool_args={"file": "a.py"})
+        completed_tool = ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}, result="ok")
+
+        async def _tool_only_stream() -> AsyncIterator[ToolCallStartedEvent | ToolCallCompletedEvent]:
+            yield ToolCallStartedEvent(tool=started_tool)
+            yield ToolCallCompletedEvent(tool=completed_tool, content="ok")
+
+        model = MagicMock(provider="openai", id="test-model")
+        agent = MagicMock()
+        agent.model = model
+        agent.arun = MagicMock(side_effect=lambda *_args, **_kwargs: _tool_only_stream())
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=(agent, "prompt"))),
+            patch("mindroom.ai.get_cache", return_value=cache),
+        ):
+            first_chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="Run the tool",
+                    session_id="session-1",
+                    storage_path=tmp_path,
+                    config=config,
+                )
+            ]
+            second_chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="Run the tool",
+                    session_id="session-1",
+                    storage_path=tmp_path,
+                    config=config,
+                )
+            ]
+
+        assert any(isinstance(chunk, ToolCallStartedEvent) for chunk in first_chunks)
+        assert any(isinstance(chunk, ToolCallCompletedEvent) for chunk in first_chunks)
+        assert first_chunks[-1] == "Done."
+        assert second_chunks == ["Done."]
+        assert agent.arun.call_count == 1

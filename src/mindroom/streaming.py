@@ -33,6 +33,7 @@ logger = get_logger(__name__)
 
 # Global constant for the in-progress marker
 IN_PROGRESS_MARKER = " ⋯"
+TOOL_ONLY_STREAM_FALLBACK_TEXT = "Done."
 StreamInputChunk = str | StructuredStreamChunk | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
 
 
@@ -240,6 +241,8 @@ async def send_streaming_response(  # noqa: C901, PLR0912
     if header:
         await streaming.update_content(header, client)
 
+    trace_changed = False
+
     async for chunk in response_stream:
         # Handle different types of chunks from the stream
         if isinstance(chunk, str):
@@ -247,7 +250,10 @@ async def send_streaming_response(  # noqa: C901, PLR0912
         elif isinstance(chunk, StructuredStreamChunk):
             text_chunk = chunk.content
             if chunk.tool_trace is not None:
-                streaming.tool_trace = _merge_tool_trace(streaming.tool_trace, chunk.tool_trace)
+                merged_trace = _merge_tool_trace(streaming.tool_trace, chunk.tool_trace)
+                if merged_trace != streaming.tool_trace:
+                    trace_changed = True
+                streaming.tool_trace = merged_trace
         elif isinstance(chunk, RunContentEvent) and chunk.content:
             text_chunk = str(chunk.content)
         elif isinstance(chunk, ToolCallStartedEvent):
@@ -255,12 +261,14 @@ async def send_streaming_response(  # noqa: C901, PLR0912
             _, trace_entry = format_tool_started_event(chunk.tool)
             if trace_entry is not None:
                 streaming.tool_trace.append(trace_entry)
+                trace_changed = True
         elif isinstance(chunk, ToolCallCompletedEvent):
             info = extract_tool_completed_info(chunk.tool)
             if info:
                 tool_name, result = info
                 _, trace_entry = complete_pending_tool_block("", tool_name, result)
                 streaming.tool_trace.append(trace_entry)
+                trace_changed = True
                 await streaming._throttled_send(client)
                 continue
             text_chunk = ""
@@ -270,6 +278,10 @@ async def send_streaming_response(  # noqa: C901, PLR0912
 
         if text_chunk:
             await streaming.update_content(text_chunk, client)
+
+    # Tool-only streams still need a final visible completion update.
+    if not streaming.accumulated_text.strip() and trace_changed:
+        streaming.accumulated_text = TOOL_ONLY_STREAM_FALLBACK_TEXT
 
     await streaming.finalize(client)
 
