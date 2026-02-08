@@ -244,7 +244,7 @@ function AppContent() {
                 aria-haspopup="dialog"
                 aria-expanded={mobileMenuOpen}
                 className={cn(
-                  'max-w-[8.5rem] sm:max-w-[11rem] rounded-lg border border-white/60 dark:border-white/10 bg-white/80 dark:bg-stone-900/70 backdrop-blur-xl px-2 py-1.5 items-center gap-1.5 min-w-0 text-left shadow-sm',
+                  'h-[30px] max-w-[8.5rem] sm:max-w-[11rem] rounded-lg border border-white/60 dark:border-white/10 bg-white/80 dark:bg-stone-900/70 backdrop-blur-xl px-2 py-1.5 items-center gap-1.5 min-w-0 text-left shadow-sm',
                   desktopCompactNav ? 'flex' : 'flex sm:hidden'
                 )}
               >
@@ -254,7 +254,12 @@ function AppContent() {
                 </span>
                 <Menu className="h-4 w-4 shrink-0 text-gray-600 dark:text-gray-300" />
               </button>
-              <ThemeToggle className="h-[30px] w-[30px] sm:h-9 sm:w-9 rounded-lg border-white/60 dark:border-white/10 bg-white/80 dark:bg-stone-900/70 backdrop-blur-xl shadow-sm hover:bg-white/90 dark:hover:bg-stone-900/80" />
+              <ThemeToggle
+                className={cn(
+                  'h-[30px] w-[30px] rounded-lg border-white/60 dark:border-white/10 bg-white/80 dark:bg-stone-900/70 backdrop-blur-xl shadow-sm hover:bg-white/90 dark:hover:bg-stone-900/80',
+                  desktopCompactNav ? 'sm:h-[30px] sm:w-[30px]' : 'sm:h-9 sm:w-9'
+                )}
+              />
               <SyncStatus status={syncStatus} compact className="sm:hidden" />
               <SyncStatus status={syncStatus} className="hidden sm:flex" />
             </div>
