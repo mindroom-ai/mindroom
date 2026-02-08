@@ -208,6 +208,25 @@ describe('ModelConfig', () => {
     });
   });
 
+  it('keeps focus in model id input while typing', () => {
+    render(<ModelConfig />);
+
+    fireEvent.click(screen.getByText('anthropic'));
+
+    const row = screen.getByDisplayValue('anthropic').closest('tr');
+    if (!row) throw new Error('row not found');
+
+    const modelIdInput = within(row).getByDisplayValue('claude-3-5-haiku-latest');
+    modelIdInput.focus();
+    expect(modelIdInput).toHaveFocus();
+
+    fireEvent.change(modelIdInput, { target: { value: 'claude-3-5-haiku-latesta' } });
+
+    const updatedInput = within(row).getByDisplayValue('claude-3-5-haiku-latesta');
+    expect(updatedInput).toBe(modelIdInput);
+    expect(updatedInput).toHaveFocus();
+  });
+
   it('shows OpenAI endpoint details and allows editing base URL', async () => {
     render(<ModelConfig />);
 
