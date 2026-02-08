@@ -211,7 +211,7 @@ async def test_new_agent_not_started_twice() -> None:
         patch("mindroom.bot.Config.from_yaml") as mock_from_yaml,
         patch("mindroom.bot.create_bot_for_entity") as mock_create_bot,
         patch("mindroom.bot._sync_forever_with_restart"),
-        patch("mindroom.bot._stop_entities") as mock_stop_entities,
+        patch("mindroom.bot._stop_entities"),
         patch("mindroom.bot._create_temp_user") as mock_create_temp_user,
         patch.object(MultiAgentOrchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
     ):
@@ -262,7 +262,7 @@ async def test_new_agent_not_started_twice() -> None:
         # Mock bot creation — record every call
         created_bots: list[AsyncMock] = []
 
-        def make_bot(*args, **kwargs):  # noqa: ANN002, ANN003, ARG001, ANN201
+        def make_bot(*args, **kwargs) -> AsyncMock:  # noqa: ANN002, ANN003, ARG001
             bot = AsyncMock()
             bot.try_start = AsyncMock(return_value=True)
             bot.sync_forever = AsyncMock()
@@ -276,12 +276,9 @@ async def test_new_agent_not_started_twice() -> None:
         await orchestrator.update_config()
 
         # --- assert: create_bot_for_entity called exactly once for "coach" ---
-        coach_calls = [
-            c for c in mock_create_bot.call_args_list if c[0][0] == "coach"
-        ]
+        coach_calls = [c for c in mock_create_bot.call_args_list if c[0][0] == "coach"]
         assert len(coach_calls) == 1, (
-            f"Expected create_bot_for_entity to be called once for 'coach', "
-            f"but was called {len(coach_calls)} times"
+            f"Expected create_bot_for_entity to be called once for 'coach', but was called {len(coach_calls)} times"
         )
 
         # Also verify only one sync task is tracked for coach

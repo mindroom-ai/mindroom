@@ -79,17 +79,21 @@ defaults:
   markdown: true
 
 models:
+  default:
+    provider: anthropic
+    id: claude-sonnet-4-latest
   sonnet:
     provider: anthropic
     id: claude-sonnet-4-latest
 
 router:
-  model: ollama
+  model: default
 
 teams:
   super_team:
     display_name: Super Team
-    agents: [code, research, finance]
+    role: Collaborative engineering assistant
+    agents: [code]
     mode: collaborate
 
 timezone: America/Los_Angeles

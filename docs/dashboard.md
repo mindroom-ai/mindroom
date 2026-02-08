@@ -72,12 +72,12 @@ View and manage rooms that agents have joined but are not in the configuration:
 
 Configure AI model providers:
 
-- **Add/edit/delete models** with provider, model ID, host URL, and advanced settings
+- **Add/edit models** with provider, model ID, host URL, and advanced settings
 - **Provider filter** to show models by provider
 - **Test connection** to verify model accessibility
 - **Provider API keys** section for configuring credentials
 
-**Supported providers:** OpenAI, Anthropic, Google Gemini, Ollama, OpenRouter, Groq, DeepSeek, Together AI, Mistral, Perplexity, Cohere, xAI, Cerebras
+**Runtime-supported providers:** OpenAI, Anthropic, Google Gemini (`google`/`gemini`), Ollama, OpenRouter, Groq, DeepSeek, Cerebras
 
 ### Memory
 
@@ -87,13 +87,23 @@ Configure the embedder for agent memory:
 - **Model** - Provider-specific embedding models
 - **Host URL** - For Ollama provider
 
+### Knowledge
+
+Manage file-backed RAG knowledge bases:
+
+- **Create/edit/delete knowledge bases** with `path` and `watch` settings
+- **Upload and remove files** per knowledge base
+- **Reindex** a knowledge base on demand
+- **Track index status** (`file_count` and `indexed_count`)
+- **Assign agents** to a specific knowledge base from the Agents tab
+
 ### Voice
 
 Configure voice message handling:
 
 - **Enable/disable** voice message support
 - **Speech-to-Text** - OpenAI Whisper or self-hosted
-- **Command Intelligence** (advanced) - Model and confidence threshold for command recognition
+- **Command Intelligence** - Model selection for command recognition
 
 ### Integrations
 
@@ -153,6 +163,17 @@ The dashboard communicates with the backend API at `/api/`:
 | GET | `/api/credentials/{service}/api-key` | Get masked API key |
 | POST | `/api/credentials/{service}/test` | Test credentials validity |
 | DELETE | `/api/credentials/{service}` | Delete credentials |
+
+### Knowledge
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/knowledge/bases` | List configured knowledge bases |
+| GET | `/api/knowledge/bases/{base_id}/files` | List files in a knowledge base |
+| POST | `/api/knowledge/bases/{base_id}/upload` | Upload one or more files |
+| DELETE | `/api/knowledge/bases/{base_id}/files/{path}` | Delete a file from disk and index |
+| GET | `/api/knowledge/bases/{base_id}/status` | Get indexing status |
+| POST | `/api/knowledge/bases/{base_id}/reindex` | Rebuild the index for a base |
 
 ### Tools & Matrix
 
