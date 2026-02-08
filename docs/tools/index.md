@@ -85,5 +85,5 @@ agents:
 
 See the full list in:
 
-- [Built-in Tools](builtin.md) - Complete list of 85+ available tools with configuration details
-- [MCP Tools](mcp.md) - Model Context Protocol tools via plugin workaround
+- [Built-in Tools](builtin.md) - Complete list of available built-in tools with configuration details
+- [Plugins](../plugins.md) - Extend MindRoom with custom tools and skills (including MCP via plugin workaround)

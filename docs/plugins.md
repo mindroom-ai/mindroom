@@ -73,6 +73,55 @@ Rules:
 
 MindRoom resolves the package location and looks for `mindroom.plugin.json` in that directory.
 
+## MCP via plugins (advanced)
+
+MindRoom does not yet support direct MCP server configuration in `config.yaml`.
+If you need MCP today, wrap Agno `MCPTools` in a plugin tool factory:
+
+```python
+from agno.tools.mcp import MCPTools
+from mindroom.tools_metadata import (
+    SetupType,
+    ToolCategory,
+    ToolStatus,
+    register_tool_with_metadata,
+)
+
+
+class FilesystemMCPTools(MCPTools):
+    def __init__(self, **kwargs):
+        super().__init__(
+            command="npx -y @modelcontextprotocol/server-filesystem /path/to/dir",
+            **kwargs,
+        )
+
+
+@register_tool_with_metadata(
+    name="mcp_filesystem",
+    display_name="MCP Filesystem",
+    description="Tools from an MCP filesystem server",
+    category=ToolCategory.DEVELOPMENT,
+    status=ToolStatus.AVAILABLE,
+    setup_type=SetupType.NONE,
+)
+def mcp_filesystem_tools():
+    return FilesystemMCPTools
+```
+
+Reference the plugin and tool in `config.yaml`:
+
+```yaml
+plugins:
+  - ./plugins/mcp-filesystem
+
+agents:
+  assistant:
+    tools:
+      - mcp_filesystem
+```
+
+The factory function must return the toolkit class, not an instance. MCP toolkits are async; Agno's async agent runs (`arun`, `aprint_response`) handle MCP connect and disconnect automatically.
+
 ## Tools module example
 
 ```python
