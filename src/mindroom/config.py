@@ -38,6 +38,7 @@ class AgentConfig(BaseModel):
         description="Learning mode for Agno Learning: always (automatic) or agentic (tool-driven)",
     )
     model: str = Field(default="default", description="Model name")
+    knowledge: bool = Field(default=False, description="Enable knowledge base access for this agent")
 
 
 class DefaultsConfig(BaseModel):
@@ -81,6 +82,14 @@ class MemoryConfig(BaseModel):
         description="Embedder configuration for memory",
     )
     llm: MemoryLLMConfig | None = Field(default=None, description="LLM configuration for memory")
+
+
+class KnowledgeConfig(BaseModel):
+    """Knowledge base configuration."""
+
+    enabled: bool = Field(default=False, description="Enable knowledge base")
+    path: str = Field(default="./knowledge_docs", description="Path to knowledge documents folder")
+    watch: bool = Field(default=True, description="Watch folder for changes")
 
 
 class ModelConfig(BaseModel):
@@ -165,6 +174,7 @@ class Config(BaseModel):
     plugins: list[str] = Field(default_factory=list, description="Plugin paths")
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig, description="Default values")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory configuration")
+    knowledge: KnowledgeConfig = Field(default_factory=KnowledgeConfig, description="Knowledge base configuration")
     models: dict[str, ModelConfig] = Field(default_factory=dict, description="Model configurations")
     router: RouterConfig = Field(default_factory=RouterConfig, description="Router configuration")
     voice: VoiceConfig = Field(default_factory=VoiceConfig, description="Voice configuration")

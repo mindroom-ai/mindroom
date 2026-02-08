@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.agent import Agent
+    from agno.knowledge.knowledge import Knowledge
     from agno.models.base import Model
 
     from .config import Config, ModelConfig
@@ -224,11 +225,12 @@ async def _cached_agent_run(
     session_id: str,
     agent_name: str,
     storage_path: Path,
+    user_id: str | None = None,
 ) -> RunOutput:
     """Cached wrapper for agent.arun() calls."""
     cache = get_cache(storage_path)
     if cache is None:
-        return await agent.arun(full_prompt, session_id=session_id)
+        return await agent.arun(full_prompt, session_id=session_id, user_id=user_id)
 
     model = agent.model
     assert model is not None
@@ -238,7 +240,7 @@ async def _cached_agent_run(
         logger.info("Cache hit", agent=agent_name)
         return cast("RunOutput", cached_result)
 
-    response = await agent.arun(full_prompt, session_id=session_id)
+    response = await agent.arun(full_prompt, session_id=session_id, user_id=user_id)
 
     cache.set(cache_key, response)
     logger.info("Response cached", agent=agent_name)
@@ -253,6 +255,7 @@ async def _prepare_agent_and_prompt(
     room_id: str | None,
     config: Config,
     thread_history: list[dict[str, Any]] | None = None,
+    knowledge: Knowledge | None = None,
 ) -> tuple[Agent, str]:
     """Prepare agent and full prompt for AI processing.
 
@@ -263,7 +266,7 @@ async def _prepare_agent_and_prompt(
     enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, storage_path, config, room_id)
     full_prompt = _build_full_prompt(enhanced_prompt, thread_history)
     logger.info("Preparing agent and prompt", agent=agent_name, full_prompt=full_prompt)
-    agent = create_agent(agent_name, config, storage_path=storage_path)
+    agent = create_agent(agent_name, config, storage_path=storage_path, knowledge=knowledge)
     return agent, full_prompt
 
 
@@ -275,6 +278,8 @@ async def ai_response(
     config: Config,
     thread_history: list[dict[str, Any]] | None = None,
     room_id: str | None = None,
+    knowledge: Knowledge | None = None,
+    user_id: str | None = None,
 ) -> str:
     """Generates a response using the specified agno Agent with memory integration.
 
@@ -286,6 +291,8 @@ async def ai_response(
         config: Application configuration
         thread_history: Optional thread history
         room_id: Optional room ID for room memory access
+        knowledge: Optional shared knowledge base for RAG-enabled agents
+        user_id: Matrix user ID of the sender, used by Agno's LearningMachine
 
     Returns:
         Agent response string
@@ -302,6 +309,7 @@ async def ai_response(
             room_id,
             config,
             thread_history,
+            knowledge,
         )
     except Exception as e:
         logger.exception("Error preparing agent", agent=agent_name)
@@ -309,7 +317,7 @@ async def ai_response(
 
     # Execute the AI call - this can fail for network, rate limits, etc.
     try:
-        response = await _cached_agent_run(agent, full_prompt, session_id, agent_name, storage_path)
+        response = await _cached_agent_run(agent, full_prompt, session_id, agent_name, storage_path, user_id=user_id)
     except Exception as e:
         logger.exception("Error generating AI response", agent=agent_name)
         return get_user_friendly_error_message(e, agent_name)
@@ -326,6 +334,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912
     config: Config,
     thread_history: list[dict[str, Any]] | None = None,
     room_id: str | None = None,
+    knowledge: Knowledge | None = None,
+    user_id: str | None = None,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
 
@@ -340,6 +350,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912
         config: Application configuration
         thread_history: Optional thread history
         room_id: Optional room ID for room memory access
+        knowledge: Optional shared knowledge base for RAG-enabled agents
+        user_id: Matrix user ID of the sender, used by Agno's LearningMachine
 
     Yields:
         Streaming chunks/events as they become available
@@ -356,6 +368,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912
             room_id,
             config,
             thread_history,
+            knowledge,
         )
     except Exception as e:
         logger.exception("Error preparing agent for streaming", agent=agent_name)
@@ -382,6 +395,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912
         stream_generator = agent.arun(
             full_prompt,
             session_id=session_id,
+            user_id=user_id,
             stream=True,
             stream_events=True,
         )

@@ -21,6 +21,8 @@ from .tools_metadata import get_tool_by_name
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from agno.knowledge.knowledge import Knowledge
+
     from .config import AgentConfig, Config, DefaultsConfig
 
 logger = get_logger(__name__)
@@ -106,7 +108,13 @@ def create_learning_storage(agent_name: str, storage_path: Path) -> SqliteDb:
     return SqliteDb(session_table=f"{agent_name}_learning_sessions", db_file=str(learning_dir / f"{agent_name}.db"))
 
 
-def create_agent(agent_name: str, config: Config, *, storage_path: Path | None = None) -> Agent:
+def create_agent(
+    agent_name: str,
+    config: Config,
+    *,
+    storage_path: Path | None = None,
+    knowledge: Knowledge | None = None,
+) -> Agent:
     """Create an agent instance from configuration.
 
     Args:
@@ -114,6 +122,7 @@ def create_agent(agent_name: str, config: Config, *, storage_path: Path | None =
         config: Application configuration
         storage_path: Runtime storage path. Falls back to the
             module-level ``STORAGE_PATH_OBJ`` when *None*.
+        knowledge: Optional shared knowledge base instance for RAG-enabled agents.
 
     Returns:
         Configured Agent instance
@@ -207,6 +216,8 @@ def create_agent(agent_name: str, config: Config, *, storage_path: Path | None =
 
     instructions.append(agent_prompts.INTERACTIVE_QUESTION_PROMPT)
 
+    knowledge_enabled = agent_config.knowledge and knowledge is not None
+
     agent = Agent(
         name=agent_config.display_name,
         role=role,
@@ -221,6 +232,8 @@ def create_agent(agent_name: str, config: Config, *, storage_path: Path | None =
         else defaults.add_history_to_messages,
         num_history_runs=agent_config.num_history_runs or defaults.num_history_runs,
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
+        knowledge=knowledge if knowledge_enabled else None,
+        search_knowledge=knowledge_enabled,
     )
     logger.info(f"Created agent '{agent_name}' ({agent_config.display_name}) with {len(tools)} tools")
 

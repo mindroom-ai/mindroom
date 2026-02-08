@@ -245,3 +245,6 @@ backups/
 saas-platform/.env.backup
 wgcf-account.toml
 wgcf-profile.conf
+
+# Local AI-agent artifacts
+.claude/REPORT.md

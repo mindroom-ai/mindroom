@@ -107,6 +107,7 @@ dependencies = [
   "typer>=0.16",
   "uvicorn>=0.35",                                     # for running FastAPI server (widget API)
   "watchdog>=6",                                       # for file watching (widget API)
+  "watchfiles>=1",                                     # for knowledge folder watching
   "webexpythonsdk",                                    # for Webex tool
   "wikipedia",                                         # for Wikipedia tool
   "yfinance",                                          # for YFinance tool
