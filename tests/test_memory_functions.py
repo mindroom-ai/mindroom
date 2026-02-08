@@ -13,9 +13,12 @@ from mindroom.memory.functions import (
     add_agent_memory,
     add_room_memory,
     build_memory_enhanced_prompt,
+    delete_agent_memory,
     format_memories_as_context,
+    get_agent_memory,
     search_agent_memories,
     store_conversation_memory,
+    update_agent_memory,
 )
 
 if TYPE_CHECKING:
@@ -152,6 +155,91 @@ class TestMemoryFunctions:
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
             results = await search_agent_memories("query", "agent", storage_path, config)
             assert results == []  # Current implementation expects dict
+
+    @pytest.mark.asyncio
+    async def test_get_agent_memory_allows_agent_scope(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Test get by ID allows memories in the caller's agent scope."""
+        mock_memory.get.return_value = {"id": "mem-1", "memory": "Own memory", "user_id": "agent_test_agent"}
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+            result = await get_agent_memory("mem-1", "test_agent", storage_path, config)
+
+            assert result is not None
+            assert result["id"] == "mem-1"
+            mock_memory.get.assert_called_once_with("mem-1")
+
+    @pytest.mark.asyncio
+    async def test_get_agent_memory_rejects_other_agent_scope(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Test get by ID rejects memories outside caller scope."""
+        mock_memory.get.return_value = {"id": "mem-1", "memory": "Other memory", "user_id": "agent_other_agent"}
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+            result = await get_agent_memory("mem-1", "test_agent", storage_path, config)
+
+            assert result is None
+            mock_memory.get.assert_called_once_with("mem-1")
+
+    @pytest.mark.asyncio
+    async def test_get_agent_memory_allows_team_scope(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Test get by ID allows team memories for team members."""
+        config.teams = {
+            "test_team": MockTeamConfig(agents=["helper", "test_agent"]),
+        }
+        mock_memory.get.return_value = {"id": "mem-team", "memory": "Team memory", "user_id": "team_helper+test_agent"}
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+            result = await get_agent_memory("mem-team", "test_agent", storage_path, config)
+
+            assert result is not None
+            assert result["id"] == "mem-team"
+            mock_memory.get.assert_called_once_with("mem-team")
+
+    @pytest.mark.asyncio
+    async def test_update_agent_memory_rejects_other_agent_scope(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Test update by ID rejects memories outside caller scope."""
+        mock_memory.get.return_value = {"id": "mem-1", "memory": "Other memory", "user_id": "agent_other_agent"}
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+            with pytest.raises(ValueError, match="No memory found with id=mem-1"):
+                await update_agent_memory("mem-1", "Updated content", "test_agent", storage_path, config)
+
+            mock_memory.update.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_delete_agent_memory_rejects_other_agent_scope(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Test delete by ID rejects memories outside caller scope."""
+        mock_memory.get.return_value = {"id": "mem-1", "memory": "Other memory", "user_id": "agent_other_agent"}
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+            with pytest.raises(ValueError, match="No memory found with id=mem-1"):
+                await delete_agent_memory("mem-1", "test_agent", storage_path, config)
+
+            mock_memory.delete.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_add_room_memory(self, mock_memory: AsyncMock, storage_path: Path, config: Config) -> None:

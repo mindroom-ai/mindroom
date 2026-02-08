@@ -118,6 +118,7 @@ curl http://localhost:8765/api/health
 MindRoom stores data in the `mindroom_data` directory:
 
 - `sessions/` - Per-agent conversation history (SQLite)
+- `learning/` - Per-agent Agno Learning state (SQLite, persistent across restarts)
 - `memory/` - Vector store for agent/room memories
 - `tracking/` - Response tracking to avoid duplicates
 - `credentials/` - Synchronized secrets from `.env`

@@ -35,7 +35,6 @@ STORAGE_PATH_OBJ = Path(STORAGE_PATH)
 
 # Specific files and directories
 MATRIX_STATE_FILE = STORAGE_PATH_OBJ / "matrix_state.yaml"
-SESSIONS_DIR = STORAGE_PATH_OBJ / "sessions"
 TRACKING_DIR = STORAGE_PATH_OBJ / "tracking"
 MEMORY_DIR = STORAGE_PATH_OBJ / "memory"
 CREDENTIALS_DIR = STORAGE_PATH_OBJ / "credentials"

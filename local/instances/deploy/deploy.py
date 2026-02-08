@@ -486,6 +486,7 @@ def _create_instance_directories(instance: Instance) -> None:
         "config",
         "mindroom_data",
         "mindroom_data/sessions",
+        "mindroom_data/learning",
         "mindroom_data/tracking",
         "mindroom_data/memory",  # For mem0/chroma vector DB
         "mindroom_data/credentials",

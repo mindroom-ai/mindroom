@@ -30,6 +30,14 @@ jobs:
         run: |
           uv run pytest -m "not requires_matrix"
 
+      - name: Check for uncommitted changes
+        run: |
+          git diff --exit-code || {
+            echo "::error::Tests produced uncommitted file changes. Run tests locally and commit the updated files."
+            git diff --stat
+            exit 1
+          }
+
       # - name: Upload coverage reports to Codecov
       #   uses: codecov/codecov-action@v5
       #   with:
