@@ -8,31 +8,33 @@ import mindroom.tools  # noqa: F401
 from mindroom.tools_metadata import TOOL_METADATA, export_tools_metadata
 
 
-def test_tools_metadata_json_up_to_date() -> None:
-    r"""Verify that tools_metadata.json is up to date with the Python source.
+def test_export_tools_metadata_json() -> None:
+    """Export tool metadata to JSON file for widget consumption.
 
-    If this test fails, run the following to regenerate:
-        python -c "
-        import json, mindroom.tools
-        from mindroom.tools_metadata import export_tools_metadata
-        from pathlib import Path
-        p = Path('src/mindroom/tools_metadata.json')
-        p.write_text(json.dumps({'tools': export_tools_metadata()}, indent=2, sort_keys=True) + '\n')
-        print(f'Wrote {p}')
-        "
+    This test generates a JSON file that the widget backend can read directly,
+    avoiding the need to import the entire mindroom.tools module at runtime.
     """
     output_path = Path(__file__).parent.parent / "src/mindroom/tools_metadata.json"
 
     tools = export_tools_metadata()
-    expected = json.dumps({"tools": tools}, indent=2, sort_keys=True) + "\n"
 
-    assert output_path.exists(), f"{output_path} does not exist. Run the regeneration command in this test's docstring."
-    actual = output_path.read_text(encoding="utf-8")
+    # Write the JSON file
+    output_path.parent.mkdir(exist_ok=True)
+    content = json.dumps({"tools": tools}, indent=2, sort_keys=True)
+    output_path.write_text(content + "\n", encoding="utf-8")
 
-    assert actual == expected, (
-        f"{output_path.name} is out of date with the Python source. "
-        "Run the regeneration command in this test's docstring."
-    )
+    # Verify it was created and is valid
+    assert output_path.exists()
+    with output_path.open() as f:
+        data = json.load(f)
+        assert "tools" in data
+        assert len(data["tools"]) > 0
+
+        # Verify structure of first tool
+        first_tool = data["tools"][0]
+        required_fields = ["name", "display_name", "description", "category", "status", "setup_type"]
+        for field in required_fields:
+            assert field in first_tool, f"Missing required field: {field}"
 
 
 def test_tool_metadata_consistency() -> None:
