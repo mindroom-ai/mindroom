@@ -99,9 +99,30 @@ Expected:
 3. Sign in and approve requested scopes.
 4. You should see **Connected** and your available services.
 
-## Use With Tools
+## Step 8: Enable Google Tools in `config.yaml`
 
-After connecting, tools that depend on Google auth (for example `gmail`, `google_calendar`, `google_sheets`) can use the shared Google token.
+After OAuth is connected, add Google tools to your agent config:
+
+```yaml
+agents:
+  email_assistant:
+    display_name: Email Assistant
+    role: Help manage and respond to emails
+    tools:
+      - gmail
+      - google_calendar
+      - google_sheets
+    instructions:
+      - Search important unread emails first.
+      - Draft replies and ask for confirmation before sending.
+```
+
+Gmail tool capabilities include:
+- `gmail_search`: Search emails with Gmail query syntax (for example `is:unread` or `from:boss@company.com`)
+- `gmail_latest`: Read latest inbox emails
+- `gmail_unread`: Read unread emails only
+
+After editing `config.yaml`, restart MindRoom backend to reload configuration.
 
 ## Disconnect Later (Optional)
 
