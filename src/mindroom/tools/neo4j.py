@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.SPECIAL,
-    icon="SiNeo4j",
+    icon="SiNeo4J",
     icon_color="text-blue-500",
     config_fields=[
         ConfigField(

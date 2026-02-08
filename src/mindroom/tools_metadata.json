@@ -3247,7 +3247,7 @@
       "display_name": "Neo4j",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/neo4j",
       "helper_text": null,
-      "icon": "SiNeo4j",
+      "icon": "SiNeo4J",
       "icon_color": "text-blue-500",
       "name": "neo4j",
       "setup_type": "special",
