@@ -61,7 +61,7 @@ const NAV_ITEMS: NavItem[] = [
   { value: 'teams', label: 'Teams', icon: Users, group: 'Workspace' },
   { value: 'rooms', label: 'Rooms', icon: Home, group: 'Workspace' },
   { value: 'unconfigured-rooms', label: 'External', icon: DoorOpen, group: 'Workspace' },
-  { value: 'models', label: 'Models & API Keys', icon: Settings2, group: 'Configuration' },
+  { value: 'models', label: 'Models', icon: Settings2, group: 'Configuration' },
   { value: 'memory', label: 'Memory', icon: Brain, group: 'Configuration' },
   { value: 'knowledge', label: 'Knowledge', icon: BookOpen, group: 'Configuration' },
   { value: 'voice', label: 'Voice', icon: Mic, group: 'Configuration' },
