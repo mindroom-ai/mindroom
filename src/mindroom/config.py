@@ -47,6 +47,8 @@ class DefaultsConfig(BaseModel):
     markdown: bool = Field(default=True, description="Default markdown setting")
     add_history_to_messages: bool = Field(default=True, description="Default history setting")
     show_stop_button: bool = Field(default=False, description="Whether to automatically show stop button on messages")
+    learning: bool = Field(default=True, description="Default Agno Learning setting")
+    learning_mode: AgentLearningMode = Field(default="always", description="Default Agno Learning mode")
 
 
 class EmbedderConfig(BaseModel):

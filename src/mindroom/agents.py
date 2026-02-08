@@ -21,7 +21,7 @@ from .tools_metadata import get_tool_by_name
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from .config import AgentConfig, Config
+    from .config import AgentConfig, Config, DefaultsConfig
 
 logger = get_logger(__name__)
 
@@ -67,20 +67,22 @@ RICH_PROMPTS = {
 }
 
 
-def is_learning_enabled(agent_config: AgentConfig) -> bool:
-    """Check if learning is enabled for an agent (defaults to True when omitted)."""
-    return agent_config.learning is not False
+def is_learning_enabled(agent_config: AgentConfig, defaults: DefaultsConfig) -> bool:
+    """Check if learning is enabled for an agent, falling back to defaults."""
+    learning = agent_config.learning if agent_config.learning is not None else defaults.learning
+    return learning is not False
 
 
 def resolve_agent_learning(
     agent_config: AgentConfig,
+    defaults: DefaultsConfig,
     learning_storage: SqliteDb | None = None,
 ) -> bool | LearningMachine:
     """Resolve Agent.learning setting from MindRoom agent configuration."""
-    if not is_learning_enabled(agent_config):
+    if not is_learning_enabled(agent_config, defaults):
         return False
 
-    learning_mode = agent_config.learning_mode or "always"
+    learning_mode = agent_config.learning_mode or defaults.learning_mode
     learning_mode_value = LearningMode.AGENTIC if learning_mode == "agentic" else LearningMode.ALWAYS
 
     return LearningMachine(
@@ -153,7 +155,9 @@ def create_agent(agent_name: str, config: Config, *, storage_path: Path | None =
 
     storage = create_session_storage(agent_name, resolved_storage_path)
     learning_storage = (
-        create_learning_storage(agent_name, resolved_storage_path) if is_learning_enabled(agent_config) else None
+        create_learning_storage(agent_name, resolved_storage_path)
+        if is_learning_enabled(agent_config, defaults)
+        else None
     )
 
     # Get model config for identity context
@@ -211,7 +215,7 @@ def create_agent(agent_name: str, config: Config, *, storage_path: Path | None =
         skills=skills,
         instructions=instructions,
         db=storage,
-        learning=resolve_agent_learning(agent_config, learning_storage),
+        learning=resolve_agent_learning(agent_config, defaults, learning_storage),
         add_history_to_context=agent_config.add_history_to_messages
         if agent_config.add_history_to_messages is not None
         else defaults.add_history_to_messages,

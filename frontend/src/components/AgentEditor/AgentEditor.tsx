@@ -20,7 +20,7 @@ import {
   CheckboxListField,
   CheckboxListItem,
 } from '@/components/shared';
-import { useForm, Controller } from 'react-hook-form';
+import { useForm, useWatch, Controller } from 'react-hook-form';
 import { Agent } from '@/types/config';
 import { ToolConfigDialog } from '@/components/ToolConfig/ToolConfigDialog';
 import { TOOL_SCHEMAS } from '@/types/toolConfig';
@@ -77,7 +77,7 @@ export function AgentEditor() {
     enabled: !!selectedAgentId && window.innerWidth < 1024, // Only on mobile when agent is selected
   });
 
-  const { control, reset, setValue, getValues, watch } = useForm<Agent>({
+  const { control, reset, setValue, getValues } = useForm<Agent>({
     defaultValues: selectedAgent || {
       id: '',
       display_name: '',
@@ -91,7 +91,7 @@ export function AgentEditor() {
       learning_mode: 'always',
     },
   });
-  const learningEnabled = watch('learning');
+  const learningEnabled = useWatch({ name: 'learning', control });
 
   // Prepare checkbox items for skills (includes orphaned selected skills)
   const skillItems: CheckboxListItem[] = useMemo(() => {

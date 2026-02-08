@@ -11,7 +11,7 @@ import yaml
 from agno.tools import Toolkit
 
 from mindroom.commands import get_command_help
-from mindroom.config import AgentConfig, Config, TeamConfig
+from mindroom.config import AgentConfig, AgentLearningMode, Config, TeamConfig
 from mindroom.constants import DEFAULT_AGENTS_CONFIG
 from mindroom.logging_config import get_logger
 from mindroom.tools_metadata import TOOL_METADATA, ToolCategory, ToolStatus
@@ -129,7 +129,7 @@ class ConfigManagerTools(Toolkit):
         markdown: bool | None = None,
         add_history_to_messages: bool | None = None,
         learning: bool | None = None,
-        learning_mode: Literal["always", "agentic"] | None = None,
+        learning_mode: AgentLearningMode | None = None,
     ) -> str:
         """Manage agent configurations - create, update, or validate agents.
 
@@ -460,7 +460,7 @@ class ConfigManagerTools(Toolkit):
         markdown: bool | None,
         add_history_to_messages: bool | None,
         learning: bool | None,
-        learning_mode: Literal["always", "agentic"] | None,
+        learning_mode: AgentLearningMode | None,
     ) -> str:
         """Create a new agent configuration."""
         # Validate agent name
@@ -529,7 +529,7 @@ class ConfigManagerTools(Toolkit):
         markdown: bool | None,
         add_history_to_messages: bool | None,
         learning: bool | None,
-        learning_mode: Literal["always", "agentic"] | None,
+        learning_mode: AgentLearningMode | None,
     ) -> str:
         """Update an existing agent configuration."""
         try:
