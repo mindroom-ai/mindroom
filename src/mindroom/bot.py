@@ -123,7 +123,13 @@ SYNC_TIMEOUT_MS = 30000
 
 @dataclass
 class MultiKnowledgeVectorDb:
-    """Thin vector DB wrapper that queries multiple vector DBs sequentially."""
+    """Thin vector DB wrapper that queries multiple vector DBs and merges results.
+
+    Duck-types the vector_db interface expected by agno's ``Knowledge.__post_init__``.
+    ``exists()`` returns True and ``create()`` is a no-op so that Knowledge skips its
+    own initialization — the underlying knowledge managers already own the DB lifecycle.
+    If agno changes the ``__post_init__`` protocol, this adapter will need updating.
+    """
 
     vector_dbs: list[Any]
 
@@ -142,12 +148,12 @@ class MultiKnowledgeVectorDb:
         limit: int,
         filters: dict[str, Any] | list[Any] | None = None,
     ) -> list[Document]:
-        """Search each assigned vector database and return a merged result list."""
-        documents: list[Document] = []
+        """Search each assigned vector database and interleave merged results."""
+        results_by_db: list[list[Document]] = []
         for vector_db in self.vector_dbs:
             results = vector_db.search(query=query, limit=limit, filters=filters)
-            documents.extend(results)
-        return documents[:limit]
+            results_by_db.append(results)
+        return _interleave_documents(results_by_db, limit)
 
     async def async_search(
         self,
@@ -156,12 +162,37 @@ class MultiKnowledgeVectorDb:
         limit: int,
         filters: dict[str, Any] | list[Any] | None = None,
     ) -> list[Document]:
-        """Async variant of ``search`` that uses async DB search when available."""
-        documents: list[Document] = []
+        """Async variant of ``search`` that interleaves merged results."""
+        results_by_db: list[list[Document]] = []
         for vector_db in self.vector_dbs:
-            results = await vector_db.async_search(query=query, limit=limit, filters=filters)
-            documents.extend(results)
-        return documents[:limit]
+            async_search = getattr(vector_db, "async_search", None)
+            if callable(async_search):
+                results = await async_search(query=query, limit=limit, filters=filters)
+            else:
+                results = vector_db.search(query=query, limit=limit, filters=filters)
+            results_by_db.append(results)
+        return _interleave_documents(results_by_db, limit)
+
+
+def _interleave_documents(results_by_db: list[list[Document]], limit: int) -> list[Document]:
+    """Interleave per-db results so one knowledge base cannot dominate top-k."""
+    if limit <= 0 or not results_by_db:
+        return []
+
+    merged: list[Document] = []
+    index = 0
+    while len(merged) < limit:
+        added = False
+        for results in results_by_db:
+            if index < len(results):
+                merged.append(results[index])
+                added = True
+                if len(merged) >= limit:
+                    return merged
+        if not added:
+            break
+        index += 1
+    return merged
 
 
 def _create_task_wrapper(callback: object) -> object:
