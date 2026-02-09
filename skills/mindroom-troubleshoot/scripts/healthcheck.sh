@@ -16,10 +16,15 @@ warn() { WARN=$((WARN + 1)); echo "  [WARN] $1"; }
 section() { echo ""; echo "=== $1 ==="; }
 
 # Helper: get HTTP status code from curl, always returns exactly 3 digits
+# Respects MATRIX_SSL_VERIFY=false by passing -k when SSL verification is disabled
 http_status() {
     local url="$1"
+    local curl_args=(-s -o /dev/null -w "%{http_code}" --max-time 5)
+    if [ "${MATRIX_SSL_VERIFY:-true}" = "false" ]; then
+        curl_args+=(-k)
+    fi
     local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$url" 2>/dev/null) || true
+    code=$(curl "${curl_args[@]}" "$url" 2>/dev/null) || true
     # Ensure we only have the last 3 characters (the HTTP code)
     echo "${code: -3}"
 }

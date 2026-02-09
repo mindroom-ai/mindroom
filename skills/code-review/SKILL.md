@@ -104,6 +104,7 @@ Report each finding using this format:
 
 **File**: `path/to/file.py:42`
 **Category**: Security | Performance | Error Handling | Testing | Readability | Architecture | Dependencies
+**Evidence**: [concrete code reference, spec mismatch, test failure, or metric that proves the issue]
 
 Description of the issue and why it matters.
 
