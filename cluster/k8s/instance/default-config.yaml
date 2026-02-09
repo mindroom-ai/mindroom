@@ -19,7 +19,10 @@ agents:
     - lobby
     - dev
     - help
-    skills: []
+    skills:
+    - mindroom-setup-wizard
+    - mindroom-config-review
+    - mindroom-docs
     tools:
     - config_manager
   analyst:
@@ -94,7 +97,8 @@ agents:
     - lobby
     - dev
     - automation
-    skills: []
+    skills:
+    - code-review
     tools:
     - file
     - shell
@@ -182,7 +186,9 @@ agents:
     rooms:
     - lobby
     - help
-    skills: []
+    skills:
+    - mindroom-troubleshoot
+    - mindroom-self-debug
     tools: []
   home:
     display_name: HomeAssistant
@@ -247,7 +253,8 @@ agents:
     - research
     - science
     - news
-    skills: []
+    skills:
+    - deep-dive
     tools:
     - duckduckgo
     - wikipedia
