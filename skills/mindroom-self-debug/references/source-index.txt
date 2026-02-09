@@ -11,7 +11,6 @@ from importlib.metadata import version
 
 __version__ = version("mindroom")
 
-
 ================================================================================
 # FILE: src/mindroom/agent_prompts.py
 ================================================================================
@@ -987,7 +986,6 @@ Agent: I'll analyze the customer satisfaction data to identify trends and patter
 
 You are now ready to provide thorough, accurate data analysis with clear insights and recommendations."""
 
-
 ================================================================================
 # FILE: src/mindroom/agents.py
 ================================================================================
@@ -1321,7 +1319,6 @@ def get_rooms_for_entity(entity_name: str, config: Config) -> list[str]:
         return config.agents[entity_name].rooms
 
     return []
-
 
 ================================================================================
 # FILE: src/mindroom/ai.py
@@ -1763,13 +1760,11 @@ async def stream_agent_response(  # noqa: C901, PLR0912
         cache.set(cache_key, cached_response)
         logger.info("Response cached", agent=agent_name)
 
-
 ================================================================================
 # FILE: src/mindroom/api/__init__.py
 ================================================================================
 
 """Backend initialization for the widget module."""
-
 
 ================================================================================
 # FILE: src/mindroom/api/credentials.py
@@ -1948,7 +1943,6 @@ async def test_credentials(service: str) -> dict[str, Any]:
         "status": "success",
         "message": "Credentials exist (validation not implemented)",
     }
-
 
 ================================================================================
 # FILE: src/mindroom/api/google_integration.py
@@ -2310,7 +2304,6 @@ async def reset() -> dict[str, Any]:
     else:
         return {"success": True, "message": "Google integration reset successfully"}
 
-
 ================================================================================
 # FILE: src/mindroom/api/google_tools_helper.py
 ================================================================================
@@ -2355,7 +2348,6 @@ def check_google_tool_configured(tool_name: str, google_creds: dict[str, Any]) -
 
     # Check if any of the required scopes are present
     return any(scope in configured_scopes for scope in required_scopes)
-
 
 ================================================================================
 # FILE: src/mindroom/api/homeassistant_integration.py
@@ -2783,7 +2775,6 @@ async def call_service(
     except httpx.RequestError as e:
         raise HTTPException(status_code=503, detail=f"Failed to call service: {e!s}") from e
 
-
 ================================================================================
 # FILE: src/mindroom/api/integrations.py
 ================================================================================
@@ -2968,7 +2959,6 @@ async def disconnect_service(service: str) -> dict[str, str]:
     creds_manager.delete_credentials(service)
 
     return {"status": "disconnected"}
-
 
 ================================================================================
 # FILE: src/mindroom/api/knowledge.py
@@ -3261,7 +3251,6 @@ async def reindex_knowledge(base_id: str) -> dict[str, Any]:
         "base_id": base_id,
         "indexed_count": indexed_count,
     }
-
 
 ================================================================================
 # FILE: src/mindroom/api/main.py
@@ -3783,7 +3772,6 @@ if __name__ == "__main__":
 
     uvicorn.run(app, host="0.0.0.0", port=8765)  # noqa: S104
 
-
 ================================================================================
 # FILE: src/mindroom/api/matrix_operations.py
 ================================================================================
@@ -4008,7 +3996,6 @@ async def leave_rooms_bulk(requests: list[RoomLeaveRequest]) -> dict[str, Any]:
 
     return {"results": results, "success": all(r["success"] for r in results)}
 
-
 ================================================================================
 # FILE: src/mindroom/api/skills.py
 ================================================================================
@@ -4168,7 +4155,6 @@ async def delete_skill(skill_name: str) -> dict[str, bool]:
 
     return {"success": True}
 
-
 ================================================================================
 # FILE: src/mindroom/api/tools.py
 ================================================================================
@@ -4256,7 +4242,6 @@ async def get_registered_tools() -> ToolsResponse:
                 tool["status"] = "available"
 
     return ToolsResponse(tools=tools)
-
 
 ================================================================================
 # FILE: src/mindroom/background_tasks.py
@@ -4349,7 +4334,6 @@ async def wait_for_background_tasks(timeout: float | None = None) -> None:  # no
 def get_background_task_count() -> int:
     """Get the number of currently running background tasks."""
     return len(_background_tasks)
-
 
 ================================================================================
 # FILE: src/mindroom/bot.py
@@ -7299,7 +7283,6 @@ async def main(log_level: str, storage_path: Path) -> None:
         if orchestrator is not None:
             await orchestrator.stop()
 
-
 ================================================================================
 # FILE: src/mindroom/cli.py
 ================================================================================
@@ -7430,7 +7413,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
 
 ================================================================================
 # FILE: src/mindroom/commands.py
@@ -7853,7 +7835,6 @@ async def handle_widget_command(
 # Global parser instance
 command_parser = CommandParser()
 
-
 ================================================================================
 # FILE: src/mindroom/config.py
 ================================================================================
@@ -8244,7 +8225,6 @@ class Config(BaseModel):
         safe_replace(tmp_path, path_obj)
         logger.info(f"Saved configuration to {path}")
 
-
 ================================================================================
 # FILE: src/mindroom/config_commands.py
 ================================================================================
@@ -8573,7 +8553,6 @@ async def apply_config_change(
     except Exception as e:
         logger.exception("Failed to apply config change")
         return f"❌ Failed to apply configuration change: {e}"
-
 
 ================================================================================
 # FILE: src/mindroom/config_confirmation.py
@@ -8991,7 +8970,6 @@ async def handle_confirmation_reaction(
         skip_mentions=True,
     )
 
-
 ================================================================================
 # FILE: src/mindroom/constants.py
 ================================================================================
@@ -9062,7 +9040,6 @@ def safe_replace(tmp_path: Path, target_path: Path) -> None:
     except OSError:
         shutil.copy2(tmp_path, target_path)
         tmp_path.unlink(missing_ok=True)
-
 
 ================================================================================
 # FILE: src/mindroom/credentials.py
@@ -9215,7 +9192,6 @@ def get_credentials_manager() -> CredentialsManager:
         _credentials_manager = CredentialsManager()
     return _credentials_manager
 
-
 ================================================================================
 # FILE: src/mindroom/credentials_sync.py
 ================================================================================
@@ -9364,7 +9340,6 @@ def get_ollama_host() -> str | None:
         return ollama_creds.get("host")
     return None
 
-
 ================================================================================
 # FILE: src/mindroom/custom_tools/__init__.py
 ================================================================================
@@ -9377,7 +9352,6 @@ from .google_sheets import GoogleSheetsTools
 from .homeassistant import HomeAssistantTools
 
 __all__ = ["GmailTools", "GoogleCalendarTools", "GoogleSheetsTools", "HomeAssistantTools"]
-
 
 ================================================================================
 # FILE: src/mindroom/custom_tools/config_manager.py
@@ -10149,7 +10123,6 @@ manage_agent(
 )
 ```"""
 
-
 ================================================================================
 # FILE: src/mindroom/custom_tools/gmail.py
 ================================================================================
@@ -10246,7 +10219,6 @@ class GmailTools(AgnoGmailTools):
             # This will prompt for OAuth flow
             logger.warning("No stored credentials found, initiating OAuth flow")
             self._original_auth()
-
 
 ================================================================================
 # FILE: src/mindroom/custom_tools/google_calendar.py
@@ -10345,7 +10317,6 @@ class GoogleCalendarTools(AgnoGoogleCalendarTools):
             logger.warning("No stored credentials found, initiating OAuth flow")
             self._original_auth()
 
-
 ================================================================================
 # FILE: src/mindroom/custom_tools/google_sheets.py
 ================================================================================
@@ -10442,7 +10413,6 @@ class GoogleSheetsTools(AgnoGoogleSheetsTools):
             # This will prompt for OAuth flow
             logger.warning("No stored credentials found, initiating OAuth flow")
             self._original_auth()
-
 
 ================================================================================
 # FILE: src/mindroom/custom_tools/homeassistant.py
@@ -10790,7 +10760,6 @@ class HomeAssistantTools(Toolkit):
         )
         return json.dumps(result)
 
-
 ================================================================================
 # FILE: src/mindroom/custom_tools/memory.py
 ================================================================================
@@ -11010,7 +10979,6 @@ class MemoryTools(Toolkit):
         else:
             return f"Deleted memory [id={memory_id}]"
 
-
 ================================================================================
 # FILE: src/mindroom/error_handling.py
 ================================================================================
@@ -11063,7 +11031,6 @@ def get_user_friendly_error_message(error: Exception, agent_name: str | None = N
         return f"{agent_prefix}⏰ Request timed out. Please try again."
     # Generic error with the actual error message for transparency
     return f"{agent_prefix}⚠️ Error: {error!s}"
-
 
 ================================================================================
 # FILE: src/mindroom/file_watcher.py
@@ -11118,7 +11085,6 @@ async def watch_file(
             # Don't let callback errors stop the watcher
             # The callback should handle its own errors
             logger.exception("Exception during file watcher callback - continuing to watch")
-
 
 ================================================================================
 # FILE: src/mindroom/interactive.py
@@ -11437,7 +11403,6 @@ async def add_reaction_buttons(
 def cleanup() -> None:
     """Clean up when shutting down."""
     _active_questions.clear()
-
 
 ================================================================================
 # FILE: src/mindroom/knowledge.py
@@ -11836,7 +11801,6 @@ async def shutdown_knowledge_managers() -> None:
 
     _knowledge_managers.clear()
 
-
 ================================================================================
 # FILE: src/mindroom/logging_config.py
 ================================================================================
@@ -12049,13 +12013,11 @@ def get_logger(name: str = __name__) -> structlog.stdlib.BoundLogger:
     """
     return structlog.get_logger(name)  # type: ignore[no-any-return]
 
-
 ================================================================================
 # FILE: src/mindroom/matrix/__init__.py
 ================================================================================
 
 """Matrix operations module for mindroom."""
-
 
 ================================================================================
 # FILE: src/mindroom/matrix/client.py
@@ -12934,7 +12896,6 @@ async def set_room_avatar_from_file(
     logger.error(f"Failed to set avatar for room {room_id}: {response}")
     return False
 
-
 ================================================================================
 # FILE: src/mindroom/matrix/event_info.py
 ================================================================================
@@ -13113,7 +13074,6 @@ def _analyze_event_relations(event_source: dict | None) -> EventInfo:
         relates_to_event_id=relates_to_event_id,
     )
 
-
 ================================================================================
 # FILE: src/mindroom/matrix/identity.py
 ================================================================================
@@ -13267,7 +13227,6 @@ def extract_server_name_from_homeserver(homeserver: str) -> str:
     if ":" in server_part:
         return server_part.split(":", 1)[0]
     return server_part
-
 
 ================================================================================
 # FILE: src/mindroom/matrix/large_messages.py
@@ -13533,7 +13492,6 @@ async def prepare_large_message(
 
     return modified_content
 
-
 ================================================================================
 # FILE: src/mindroom/matrix/mentions.py
 ================================================================================
@@ -13688,7 +13646,6 @@ def format_message_with_mentions(
         extra_content=extra_content,
     )
 
-
 ================================================================================
 # FILE: src/mindroom/matrix/message_builder.py
 ================================================================================
@@ -13792,7 +13749,6 @@ def build_message_content(
         content.update(extra_content)
 
     return content
-
 
 ================================================================================
 # FILE: src/mindroom/matrix/message_content.py
@@ -14008,7 +13964,6 @@ def clear_mxc_cache() -> None:
     """Clear the entire MXC cache. Useful for testing."""
     _mxc_cache.clear()
 
-
 ================================================================================
 # FILE: src/mindroom/matrix/presence.py
 ================================================================================
@@ -14191,7 +14146,6 @@ async def should_use_streaming(
     )
 
     return is_online
-
 
 ================================================================================
 # FILE: src/mindroom/matrix/rooms.py
@@ -14604,7 +14558,6 @@ async def leave_non_dm_rooms(
         else:
             logger.error(f"Failed to leave room {room_id}")
 
-
 ================================================================================
 # FILE: src/mindroom/matrix/state.py
 ================================================================================
@@ -14686,7 +14639,6 @@ class MatrixState(BaseModel):
     def get_room_aliases(self) -> dict[str, str]:
         """Get mapping of room aliases to room IDs."""
         return {key: room.room_id for key, room in self.rooms.items()}
-
 
 ================================================================================
 # FILE: src/mindroom/matrix/typing.py
@@ -14783,7 +14735,6 @@ async def typing_indicator(
 
         # Stop typing
         await set_typing(client, room_id, False)
-
 
 ================================================================================
 # FILE: src/mindroom/matrix/users.py
@@ -15007,7 +14958,6 @@ async def ensure_all_agent_users(homeserver: str, config: Config) -> dict[str, A
 
     return agent_users
 
-
 ================================================================================
 # FILE: src/mindroom/memory/__init__.py
 ================================================================================
@@ -15035,7 +14985,6 @@ __all__ = [
     "search_room_memories",
     "store_conversation_memory",
 ]
-
 
 ================================================================================
 # FILE: src/mindroom/memory/config.py
@@ -15181,7 +15130,6 @@ async def create_memory_instance(storage_path: Path, config: Config) -> AsyncMem
 
     logger.info(f"Created memory instance with ChromaDB at {storage_path}")
     return memory
-
 
 ================================================================================
 # FILE: src/mindroom/memory/functions.py
@@ -15729,7 +15677,6 @@ async def store_conversation_memory(
         except Exception as e:
             logger.exception("Failed to add room memory", room_id=room_id, error=str(e))
 
-
 ================================================================================
 # FILE: src/mindroom/plugins.py
 ================================================================================
@@ -16018,7 +15965,6 @@ def _module_name(plugin_name: str, module_path: Path) -> str:
     digest = abs(hash(str(module_path)))
     return f"mindroom_plugin_{slug}_{digest}"
 
-
 ================================================================================
 # FILE: src/mindroom/response_tracker.py
 ================================================================================
@@ -16151,7 +16097,6 @@ class ResponseTracker:
 
         self._save_responses()
         logger.info(f"Cleaned up old events for {self.agent_name}, keeping {len(self._responses)} events")
-
 
 ================================================================================
 # FILE: src/mindroom/room_cleanup.py
@@ -16297,7 +16242,6 @@ async def cleanup_all_orphaned_bots(
 
     return kicked_bots
 
-
 ================================================================================
 # FILE: src/mindroom/routing.py
 ================================================================================
@@ -16409,7 +16353,6 @@ Choose the most appropriate agent based on their role, tools, and instructions."
         return None
     else:
         return suggestion.agent_name
-
 
 ================================================================================
 # FILE: src/mindroom/scheduling.py
@@ -17174,7 +17117,6 @@ async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str, config:
 
     return restored_count
 
-
 ================================================================================
 # FILE: src/mindroom/skills.py
 ================================================================================
@@ -17807,7 +17749,6 @@ def _root_origin(root: Path, bundled_root: Path, user_root: Path, plugin_roots: 
         return "plugin"
     return "custom"
 
-
 ================================================================================
 # FILE: src/mindroom/stop.py
 ================================================================================
@@ -18019,7 +17960,6 @@ class StopManager:
                 )
         else:
             logger.debug("Message not tracked, cannot remove stop button", message_id=message_id)
-
 
 ================================================================================
 # FILE: src/mindroom/streaming.py
@@ -18304,7 +18244,6 @@ async def send_streaming_response(  # noqa: C901, PLR0912
     await streaming.finalize(client)
 
     return streaming.event_id, streaming.accumulated_text
-
 
 ================================================================================
 # FILE: src/mindroom/teams.py
@@ -19060,7 +18999,6 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             full_text = "\n\n".join(parts)
             yield StructuredStreamChunk(content=header + full_text, tool_trace=tool_trace.copy())
 
-
 ================================================================================
 # FILE: src/mindroom/thread_utils.py
 ================================================================================
@@ -19384,7 +19322,6 @@ def should_agent_respond(
     available_agents = get_available_agents_in_room(room, config)
     return len(available_agents) == 1
 
-
 ================================================================================
 # FILE: src/mindroom/tool_events.py
 ================================================================================
@@ -19638,7 +19575,6 @@ def build_tool_trace_content(tool_trace: Sequence[ToolTraceEntry] | None) -> dic
         payload["content_truncated"] = True
 
     return {TOOL_TRACE_KEY: payload}
-
 
 ================================================================================
 # FILE: src/mindroom/tools/__init__.py
@@ -20185,7 +20121,6 @@ def imdb_tools() -> type[Toolkit]:
     msg = "IMDb integration is coming soon"
     raise NotImplementedError(msg)
 
-
 ================================================================================
 # FILE: src/mindroom/tools/agentql.py
 ================================================================================
@@ -20263,7 +20198,6 @@ def agentql_tools() -> type[AgentQLTools]:
 
     return AgentQLTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/airflow.py
 ================================================================================
@@ -20328,7 +20262,6 @@ def airflow_tools() -> type[AirflowTools]:
 
     return AirflowTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/apify.py
 ================================================================================
@@ -20382,7 +20315,6 @@ def apify_tools() -> type[ApifyTools]:
     from agno.tools.apify import ApifyTools
 
     return ApifyTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/arxiv.py
@@ -20454,7 +20386,6 @@ def arxiv_tools() -> type[ArxivTools]:
 
     return ArxivTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/aws_lambda.py
 ================================================================================
@@ -20518,7 +20449,6 @@ def aws_lambda_tools() -> type[AWSLambdaTools]:
     from agno.tools.aws_lambda import AWSLambdaTools
 
     return AWSLambdaTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/aws_ses.py
@@ -20590,7 +20520,6 @@ def aws_ses_tools() -> type[AWSSESTool]:
     from agno.tools.aws_ses import AWSSESTool
 
     return AWSSESTool
-
 
 ================================================================================
 # FILE: src/mindroom/tools/baidusearch.py
@@ -20690,7 +20619,6 @@ def baidusearch_tools() -> type[BaiduSearchTools]:
 
     return BaiduSearchTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/bitbucket.py
 ================================================================================
@@ -20777,7 +20705,6 @@ def bitbucket_tools() -> type[BitbucketTools]:
     from agno.tools.bitbucket import BitbucketTools
 
     return BitbucketTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/brandfetch.py
@@ -20872,7 +20799,6 @@ def brandfetch_tools() -> type[BrandfetchTools]:
 
     return BrandfetchTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/bravesearch.py
 ================================================================================
@@ -20938,7 +20864,6 @@ def bravesearch_tools() -> type[BraveSearchTools]:
     from agno.tools.bravesearch import BraveSearchTools
 
     return BraveSearchTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/brightdata.py
@@ -21052,7 +20977,6 @@ def brightdata_tools() -> type[BrightDataTools]:
 
     return BrightDataTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/browserbase.py
 ================================================================================
@@ -21165,7 +21089,6 @@ def browserbase_tools() -> type[BrowserbaseTools]:
 
     return BrowserbaseTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/cal_com.py
 ================================================================================
@@ -21265,7 +21188,6 @@ def cal_com_tools() -> type[CalComTools]:
 
     return CalComTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/calculator.py
 ================================================================================
@@ -21305,7 +21227,6 @@ def calculator_tools() -> type[CalculatorTools]:
     from agno.tools.calculator import CalculatorTools
 
     return CalculatorTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/cartesia.py
@@ -21392,7 +21313,6 @@ def cartesia_tools() -> type[CartesiaTools]:
 
     return CartesiaTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/clickup.py
 ================================================================================
@@ -21445,7 +21365,6 @@ def clickup_tools() -> type[ClickUpTools]:
     from agno.tools.clickup import ClickUpTools
 
     return ClickUpTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/composio.py
@@ -21618,7 +21537,6 @@ def composio_tools() -> type[ComposioToolSet]:
 
     return ComposioToolSet  # type: ignore[no-any-return]
 
-
 ================================================================================
 # FILE: src/mindroom/tools/config_manager.py
 ================================================================================
@@ -21667,7 +21585,6 @@ def config_manager_tools() -> type[ConfigManagerTools]:
     from mindroom.custom_tools.config_manager import ConfigManagerTools
 
     return ConfigManagerTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/confluence.py
@@ -21746,7 +21663,6 @@ def confluence_tools() -> type[ConfluenceTools]:
     from agno.tools.confluence import ConfluenceTools
 
     return ConfluenceTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/crawl4ai.py
@@ -21860,7 +21776,6 @@ def crawl4ai_tools() -> type[Crawl4aiTools]:
 
     return Crawl4aiTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/csv.py
 ================================================================================
@@ -21966,7 +21881,6 @@ def csv_tools() -> type[CsvTools]:
 
     return CsvTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/custom_api.py
 ================================================================================
@@ -22066,7 +21980,6 @@ def custom_api_tools() -> type[CustomApiTools]:
 
     return CustomApiTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/dalle.py
 ================================================================================
@@ -22158,7 +22071,6 @@ def dalle_tools() -> type[DalleTools]:
     from agno.tools.dalle import DalleTools
 
     return DalleTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/daytona.py
@@ -22345,7 +22257,6 @@ def daytona_tools() -> type[DaytonaTools]:
 
     return DaytonaTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/desi_vocal.py
 ================================================================================
@@ -22418,7 +22329,6 @@ def desi_vocal_tools() -> type[DesiVocalTools]:
     from agno.tools.desi_vocal import DesiVocalTools
 
     return DesiVocalTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/discord.py
@@ -22511,7 +22421,6 @@ def discord_tools() -> type[DiscordTools]:
 
     return DiscordTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/docker.py
 ================================================================================
@@ -22551,7 +22460,6 @@ def docker_tools() -> type[DockerTools]:
     from agno.tools.docker import DockerTools
 
     return DockerTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/duckdb.py
@@ -22629,7 +22537,6 @@ def duckdb_tools() -> type[DuckDbTools]:
     from agno.tools.duckdb import DuckDbTools
 
     return DuckDbTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/duckduckgo.py
@@ -22722,7 +22629,6 @@ def duckduckgo_tools() -> type[DuckDuckGoTools]:
 
     return DuckDuckGoTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/e2b.py
 ================================================================================
@@ -22779,7 +22685,6 @@ def e2b_tools() -> type[E2BTools]:
     from agno.tools.e2b import E2BTools
 
     return E2BTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/eleven_labs.py
@@ -22880,7 +22785,6 @@ def eleven_labs_tools() -> type[ElevenLabsTools]:
 
     return ElevenLabsTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/email.py
 ================================================================================
@@ -22964,7 +22868,6 @@ def email_tools() -> type[EmailTools]:
     from agno.tools.email import EmailTools
 
     return EmailTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/exa.py
@@ -23176,7 +23079,6 @@ def exa_tools() -> type[ExaTools]:
 
     return ExaTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/fal.py
 ================================================================================
@@ -23247,7 +23149,6 @@ def fal_tools() -> type[FalTools]:
     from agno.tools.fal import FalTools
 
     return FalTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/file.py
@@ -23382,7 +23283,6 @@ def file_tools() -> type[FileTools]:
 
     return FileTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/file_generation.py
 ================================================================================
@@ -23461,7 +23361,6 @@ def file_generation_tools() -> type[FileGenerationTools]:
 
     return FileGenerationTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/financial_datasets_api.py
 ================================================================================
@@ -23504,7 +23403,6 @@ def financial_datasets_api_tools() -> type[FinancialDatasetsTools]:
     from agno.tools.financial_datasets import FinancialDatasetsTools
 
     return FinancialDatasetsTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/firecrawl.py
@@ -23625,7 +23523,6 @@ def firecrawl_tools() -> type[FirecrawlTools]:
 
     return FirecrawlTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/gemini.py
 ================================================================================
@@ -23725,7 +23622,6 @@ def gemini_tools() -> type[GeminiTools]:
 
     return GeminiTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/giphy.py
 ================================================================================
@@ -23790,7 +23686,6 @@ def giphy_tools() -> type[GiphyTools]:
 
     return GiphyTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/github.py
 ================================================================================
@@ -23850,7 +23745,6 @@ def github_tools() -> type[GithubTools]:
     from agno.tools.github import GithubTools
 
     return GithubTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/gmail.py
@@ -23959,7 +23853,6 @@ def gmail_tools() -> type[GmailTools]:
 
     return GmailTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/google_bigquery.py
 ================================================================================
@@ -24057,7 +23950,6 @@ def google_bigquery_tools() -> type[GoogleBigQueryTools]:
 
     return GoogleBigQueryTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/google_calendar.py
 ================================================================================
@@ -24118,7 +24010,6 @@ def google_calendar_tools() -> type[GoogleCalendarTools]:
 
     return GoogleCalendarTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/google_maps.py
 ================================================================================
@@ -24161,7 +24052,6 @@ def google_maps_tools() -> type[GoogleMapTools]:
     from agno.tools.google_maps import GoogleMapTools
 
     return GoogleMapTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/google_sheets.py
@@ -24253,7 +24143,6 @@ def google_sheets_tools() -> type[GoogleSheetsTools]:
     from mindroom.custom_tools.google_sheets import GoogleSheetsTools
 
     return GoogleSheetsTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/googlesearch.py
@@ -24368,7 +24257,6 @@ def googlesearch_tools() -> type[GoogleSearchTools]:
     """Return Google Search tools for web search."""
     return GoogleSearchTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/groq.py
 ================================================================================
@@ -24468,7 +24356,6 @@ def groq_tools() -> type[GroqTools]:
 
     return GroqTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/hackernews.py
 ================================================================================
@@ -24531,7 +24418,6 @@ def hackernews_tools() -> type[HackerNewsTools]:
     from agno.tools.hackernews import HackerNewsTools
 
     return HackerNewsTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/jina.py
@@ -24637,7 +24523,6 @@ def jina_tools() -> type[JinaReaderTools]:
     from agno.tools.jina import JinaReaderTools
 
     return JinaReaderTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/jira.py
@@ -24751,7 +24636,6 @@ def jira_tools() -> type[JiraTools]:
 
     return JiraTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/linear.py
 ================================================================================
@@ -24800,7 +24684,6 @@ def linear_tools() -> type[LinearTools]:
     from agno.tools.linear import LinearTools
 
     return LinearTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/linkup.py
@@ -24878,7 +24761,6 @@ def linkup_tools() -> type[LinkupTools]:
     from agno.tools.linkup import LinkupTools
 
     return LinkupTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/lumalabs.py
@@ -24970,7 +24852,6 @@ def lumalabs_tools() -> type[LumaLabTools]:
     from agno.tools.lumalab import LumaLabTools
 
     return LumaLabTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/mem0.py
@@ -25085,7 +24966,6 @@ def mem0_tools() -> type[Mem0Tools]:
 
     return Mem0Tools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/memory.py
 ================================================================================
@@ -25118,7 +24998,6 @@ TOOL_METADATA["memory"] = ToolMetadata(
     config_fields=[],
     dependencies=[],
 )
-
 
 ================================================================================
 # FILE: src/mindroom/tools/modelslabs.py
@@ -25210,7 +25089,6 @@ def modelslabs_tools() -> type[ModelsLabTools]:
 
     return ModelsLabTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/moviepy_video_tools.py
 ================================================================================
@@ -25280,7 +25158,6 @@ def moviepy_video_tools() -> type[MoviePyVideoTools]:
     from agno.tools.moviepy_video import MoviePyVideoTools
 
     return MoviePyVideoTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/neo4j.py
@@ -25385,7 +25262,6 @@ def neo4j_tools() -> type[Neo4jTools]:
 
     return Neo4jTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/newspaper4k.py
 ================================================================================
@@ -25455,7 +25331,6 @@ def newspaper4k_tools() -> type[Newspaper4kTools]:
     from agno.tools.newspaper4k import Newspaper4kTools
 
     return Newspaper4kTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/notion.py
@@ -25537,7 +25412,6 @@ def notion_tools() -> type[NotionTools]:
     from agno.tools.notion import NotionTools
 
     return NotionTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/openai.py
@@ -25672,7 +25546,6 @@ def openai_tools() -> type[OpenAITools]:
 
     return OpenAITools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/openbb.py
 ================================================================================
@@ -25775,7 +25648,6 @@ def openbb_tools() -> type[OpenBBTools]:
 
     return OpenBBTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/openweather.py
 ================================================================================
@@ -25867,7 +25739,6 @@ def openweather_tools() -> type[OpenWeatherTools]:
 
     return OpenWeatherTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/oxylabs.py
 ================================================================================
@@ -25926,7 +25797,6 @@ def oxylabs_tools() -> type[OxylabsTools]:
     from agno.tools.oxylabs import OxylabsTools
 
     return OxylabsTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/pandas.py
@@ -25990,7 +25860,6 @@ def pandas_tools() -> type[PandasTools]:
     from agno.tools.pandas import PandasTools
 
     return PandasTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/postgres.py
@@ -26070,7 +25939,6 @@ def postgres_tools() -> type[PostgresTools]:
 
     return PostgresTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/pubmed.py
 ================================================================================
@@ -26148,7 +26016,6 @@ def pubmed_tools() -> type[PubmedTools]:
 
     return PubmedTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/python.py
 ================================================================================
@@ -26218,7 +26085,6 @@ def python_tools() -> type[PythonTools]:
     from agno.tools.python import PythonTools
 
     return PythonTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/reasoning.py
@@ -26307,7 +26173,6 @@ def reasoning_tools() -> type[ReasoningTools]:
 
     return ReasoningTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/reddit.py
 ================================================================================
@@ -26391,7 +26256,6 @@ def reddit_tools() -> type[RedditTools]:
     from agno.tools.reddit import RedditTools
 
     return RedditTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/redshift.py
@@ -26539,7 +26403,6 @@ def redshift_tools() -> type[RedshiftTools]:
 
     return RedshiftTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/replicate.py
 ================================================================================
@@ -26610,7 +26473,6 @@ def replicate_tools() -> type[ReplicateTools]:
 
     return ReplicateTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/resend.py
 ================================================================================
@@ -26680,7 +26542,6 @@ def resend_tools() -> type[ResendTools]:
     from agno.tools.resend import ResendTools
 
     return ResendTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/scrapegraph.py
@@ -26787,7 +26648,6 @@ def scrapegraph_tools() -> type[ScrapeGraphTools]:
 
     return ScrapeGraphTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/searxng.py
 ================================================================================
@@ -26848,7 +26708,6 @@ def searxng_tools() -> type[Searxng]:
     from agno.tools.searxng import Searxng
 
     return Searxng
-
 
 ================================================================================
 # FILE: src/mindroom/tools/serpapi.py
@@ -26919,7 +26778,6 @@ def serpapi_tools() -> type[SerpApiTools]:
     from agno.tools.serpapi import SerpApiTools
 
     return SerpApiTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/serper.py
@@ -27033,7 +26891,6 @@ def serper_tools() -> type[SerperTools]:
 
     return SerperTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/shell.py
 ================================================================================
@@ -27096,7 +26953,6 @@ def shell_tools() -> type[ShellTools]:
     from agno.tools.shell import ShellTools
 
     return ShellTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/shopify.py
@@ -27163,7 +27019,6 @@ def shopify_tools() -> type[ShopifyTools]:
     from agno.tools.shopify import ShopifyTools
 
     return ShopifyTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/slack.py
@@ -27256,7 +27111,6 @@ def slack_tools() -> type[SlackTools]:
 
     return SlackTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/sleep.py
 ================================================================================
@@ -27312,7 +27166,6 @@ def sleep_tools() -> type[SleepTools]:
     from agno.tools.sleep import SleepTools
 
     return SleepTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/spider.py
@@ -27406,7 +27259,6 @@ def spider_tools() -> type[SpiderTools]:
 
     return SpiderTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/spotify.py
 ================================================================================
@@ -27466,7 +27318,6 @@ def spotify_tools() -> type[SpotifyTools]:
     from agno.tools.spotify import SpotifyTools
 
     return SpotifyTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/sql.py
@@ -27600,7 +27451,6 @@ def sql_tools() -> type[SQLTools]:
     from agno.tools.sql import SQLTools
 
     return SQLTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/tavily.py
@@ -27749,7 +27599,6 @@ def tavily_tools() -> type[TavilyTools]:
 
     return TavilyTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/telegram.py
 ================================================================================
@@ -27819,7 +27668,6 @@ def telegram_tools() -> type[TelegramTools]:
 
     return TelegramTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/todoist.py
 ================================================================================
@@ -27868,7 +27716,6 @@ def todoist_tools() -> type[TodoistTools]:
     from agno.tools.todoist import TodoistTools
 
     return TodoistTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/trafilatura.py
@@ -28048,7 +27895,6 @@ def trafilatura_tools() -> type[TrafilaturaTools]:
 
     return TrafilaturaTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/trello.py
 ================================================================================
@@ -28111,7 +27957,6 @@ def trello_tools() -> type[TrelloTools]:
     from agno.tools.trello import TrelloTools
 
     return TrelloTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/twilio.py
@@ -28232,7 +28077,6 @@ def twilio_tools() -> type[TwilioTools]:
 
     return TwilioTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/unsplash.py
 ================================================================================
@@ -28312,7 +28156,6 @@ def unsplash_tools() -> type[UnsplashTools]:
     from agno.tools.unsplash import UnsplashTools
 
     return UnsplashTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/visualization.py
@@ -28399,7 +28242,6 @@ def visualization_tools() -> type[VisualizationTools]:
 
     return VisualizationTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/web_browser_tools.py
 ================================================================================
@@ -28455,7 +28297,6 @@ def web_browser_tools() -> type[WebBrowserTools]:
     from agno.tools.webbrowser import WebBrowserTools
 
     return WebBrowserTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/webex.py
@@ -28527,7 +28368,6 @@ def webex_tools() -> type[WebexTools]:
 
     return WebexTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/website.py
 ================================================================================
@@ -28576,7 +28416,6 @@ def website_tools() -> type[WebsiteTools]:
     from agno.tools.website import WebsiteTools
 
     return WebsiteTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/whatsapp.py
@@ -28664,7 +28503,6 @@ def whatsapp_tools() -> type[WhatsAppTools]:
 
     return WhatsAppTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/wikipedia.py
 ================================================================================
@@ -28720,7 +28558,6 @@ def wikipedia_tools() -> type[WikipediaTools]:
     from agno.tools.wikipedia import WikipediaTools
 
     return WikipediaTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/x.py
@@ -28824,7 +28661,6 @@ def x_tools() -> type[XTools]:
 
     return XTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/yfinance.py
 ================================================================================
@@ -28873,7 +28709,6 @@ def yfinance_tools() -> type[YFinanceTools]:
     from agno.tools.yfinance import YFinanceTools
 
     return YFinanceTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/youtube.py
@@ -28959,7 +28794,6 @@ def youtube_tools() -> type[YouTubeTools]:
 
     return YouTubeTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/zendesk.py
 ================================================================================
@@ -29036,7 +28870,6 @@ def zendesk_tools() -> type[ZendeskTools]:
     from agno.tools.zendesk import ZendeskTools
 
     return ZendeskTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools/zep.py
@@ -29144,7 +28977,6 @@ def zep_tools() -> type[ZepTools]:
 
     return ZepTools
 
-
 ================================================================================
 # FILE: src/mindroom/tools/zoom.py
 ================================================================================
@@ -29211,7 +29043,6 @@ def zoom_tools() -> type[ZoomTools]:
     from agno.tools.zoom import ZoomTools
 
     return ZoomTools
-
 
 ================================================================================
 # FILE: src/mindroom/tools_metadata.py
@@ -29471,7 +29302,6 @@ def export_tools_metadata() -> list[dict[str, Any]]:
     tools.sort(key=lambda tool: (tool["category"], tool["name"]))
     return tools
 
-
 ================================================================================
 # FILE: src/mindroom/topic_generator.py
 ================================================================================
@@ -29629,7 +29459,6 @@ async def ensure_room_has_topic(
 
     logger.warning(f"Failed to set topic for room {room_key}: {response}")
     return False
-
 
 ================================================================================
 # FILE: src/mindroom/voice_handler.py

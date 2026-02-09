@@ -473,837 +473,6 @@ The dashboard communicates with the backend API at `/api/`:
 | POST | `/api/matrix/rooms/leave-bulk` | Leave multiple rooms |
 | POST | `/api/test/model` | Test model connection |
 
-### [Skills](https://docs.mindroom.chat/skills/)
-
-# Skills
-
-MindRoom uses Agno's skills system with OpenClaw-compatible metadata. Skills are instruction packs (a `SKILL.md` file) with optional scripts and references that guide agents without adding new code capabilities.
-
-## Skill directory structure
-
-A skill is a directory containing:
-
-```
-my-skill/
-├── SKILL.md         # Required: frontmatter + instructions
-├── scripts/         # Optional: executable scripts
-│   └── audit.sh
-└── references/      # Optional: reference documents
-    └── examples.md
-```
-
-Agents access skills via `get_skill_instructions()`, scripts via `get_skill_script()`, and references via `get_skill_reference()`.
-
-## SKILL.md format (OpenClaw compatible)
-
-```markdown
----
-name: repo-quick-audit
-description: Quick repository audit checklist
-metadata: '{openclaw:{requires:{bins:["git"], env:["GITHUB_TOKEN"]}}}'
-user-invocable: true
-disable-model-invocation: false
-command-dispatch: tool
-command-tool: repo_audit.run
-command-arg-mode: raw
----
-
-# Repo Quick Audit
-
-1. Check CI status
-2. Review open issues
-```
-
-Notes:
-
-- `metadata` can be a JSON5 string (shown above) or a YAML mapping.
-- `user-invocable`, `disable-model-invocation`, and `command-*` also accept snake_case names.
-
-## Frontmatter fields
-
-| Field | Type | Description |
-| --- | --- | --- |
-| `name` | string | Unique skill identifier |
-| `description` | string | Brief summary shown to users/models |
-| `metadata` | mapping or JSON5 string | OpenClaw metadata and custom fields |
-| `user-invocable` | bool | Allow `!skill` (default: true) |
-| `disable-model-invocation` | bool | Prevent model invocation (default: false) |
-| `command-dispatch` | `"tool"` | Set to `tool` to run a tool directly |
-| `command-tool` | string | Function to call: `function_name`, `toolkit.function_name`, or `toolkit` (if the toolkit exposes exactly one function) |
-| `command-arg-mode` | `"raw"` | Argument passing mode; only `raw` is currently supported |
-| `license` | string | Optional license information |
-| `compatibility` | string | Optional compatibility requirements |
-| `allowed-tools` | list | Optional list of tools this skill is allowed to use |
-
-## Eligibility gating (OpenClaw metadata)
-
-If `metadata.openclaw` is present, MindRoom filters skills using these rules:
-
-- `always: true` bypasses all checks
-- `os: ["linux", "darwin", "windows"]`
-- `requires.env`: env var set or credential key exists
-- `requires.config`: config path is truthy (e.g., `agents.code.tools`)
-- `requires.bins`: all binaries must exist in PATH
-- `requires.anyBins`: at least one binary must exist in PATH
-
-Skills without `metadata.openclaw` are always eligible.
-
-## Skill locations and precedence
-
-MindRoom loads skills from these locations, in this order:
-
-1. Bundled skills: `skills/` at the repository root (if present)
-2. Plugin-provided skill directories (see [Plugins](plugins.md))
-3. User skills: `~/.mindroom/skills/`
-
-If multiple skills share the same name, the last one wins (user > plugin > bundled).
-
-## Configuring skills
-
-Add skills to an agent allowlist in `config.yaml`:
-
-```yaml
-agents:
-  developer:
-    display_name: Developer
-    role: A coding assistant
-    model: sonnet
-    skills:
-      - repo-quick-audit
-      - code-review
-```
-
-If `skills` is empty or unset, the agent gets no skills.
-
-## Using skills at runtime
-
-Agents see available skills in the system prompt and can load details using these tools:
-
-- `get_skill_instructions(skill_name)` - Load the full instructions for a skill
-- `get_skill_reference(skill_name, reference_path)` - Access reference documentation
-- `get_skill_script(skill_name, script_path, execute=False, args=None, timeout=30)` - Read or execute scripts
-
-## Skill command dispatch (`!skill`)
-
-Users can run a skill by name:
-
-```
-!skill repo-quick-audit --recent
-```
-
-Agent resolution:
-
-- If you mention an agent (e.g., `@mindroom_code !skill build`), that agent handles the skill.
-- If only one agent in the room has the skill enabled, it handles the request.
-- If multiple agents have the skill, you must mention one to disambiguate.
-
-Rules:
-
-- The skill must be in the agent allowlist and `user-invocable` must be `true`.
-- If `command-dispatch: tool` is set, MindRoom runs the tool directly.
-- If `disable-model-invocation: true` and no tool dispatch is configured, the command fails.
-
-## Skill vs tool
-
-| Aspect | Skills | Tools |
-| --- | --- | --- |
-| Definition | Markdown + YAML | Python code |
-| Location | File system | Code/plugins |
-| Filtering | Automatic by requirements | Always available |
-| Instructions | Rich markdown | Docstrings |
-| Invocation | User or model | Model only |
-
-## Hot reloading
-
-MindRoom polls skill directories every second. When a `SKILL.md` file is added, removed, or modified, the skill cache is automatically cleared so agents pick up the new instructions on their next request.
-
-## Best practices
-
-1. Keep skills focused - one skill per capability
-2. Declare dependencies with `metadata.openclaw.requires`
-3. Use descriptive names like `code-review`
-
-### [Plugins](https://docs.mindroom.chat/plugins/)
-
-# Plugins
-
-MindRoom plugins add tools and can optionally ship skills. Plugins are loaded from paths listed in `config.yaml`.
-
-## Plugin structure
-
-A plugin is a directory containing `mindroom.plugin.json`:
-
-```
-my-plugin/
-├── mindroom.plugin.json
-├── tools.py
-└── skills/
-    └── my-skill/
-        └── SKILL.md
-```
-
-## Manifest format
-
-```json
-{
-  "name": "my-plugin",
-  "tools_module": "tools.py",
-  "skills": ["skills"]
-}
-```
-
-| Field | Type | Description |
-| --- | --- | --- |
-| `name` | string | Plugin identifier (required) |
-| `tools_module` | string | Path to the tools module (optional) |
-| `skills` | list of strings | Relative directories containing skills (optional) |
-
-Unknown fields are ignored.
-
-## Configure plugins
-
-Add plugin paths to `config.yaml`:
-
-```yaml
-plugins:
-  - ./plugins/my-plugin
-  - python:my_skill_pack
-```
-
-Paths may be:
-
-- Absolute paths
-- Paths relative to `config.yaml`
-- Python package specs (see below)
-
-## Python package plugins
-
-MindRoom can resolve plugins from installed Python packages:
-
-```yaml
-plugins:
-  - my_skill_pack
-  - python:my_skill_pack
-  - pkg:my_skill_pack:plugins/demo
-  - module:my_skill_pack:plugins/demo
-```
-
-Rules:
-
-- A bare package name is allowed if it contains no slashes.
-- `python:`, `pkg:`, and `module:` are explicit prefixes.
-- `:sub/path` points to a subdirectory inside the package.
-
-MindRoom resolves the package location and looks for `mindroom.plugin.json` in that directory.
-
-## MCP via plugins (advanced)
-
-MindRoom does not yet support direct MCP server configuration in `config.yaml`.
-If you need MCP today, wrap Agno `MCPTools` in a plugin tool factory:
-
-```python
-from agno.tools.mcp import MCPTools
-from mindroom.tools_metadata import (
-    SetupType,
-    ToolCategory,
-    ToolStatus,
-    register_tool_with_metadata,
-)
-
-
-class FilesystemMCPTools(MCPTools):
-    def __init__(self, **kwargs):
-        super().__init__(
-            command="npx -y @modelcontextprotocol/server-filesystem /path/to/dir",
-            **kwargs,
-        )
-
-
-@register_tool_with_metadata(
-    name="mcp_filesystem",
-    display_name="MCP Filesystem",
-    description="Tools from an MCP filesystem server",
-    category=ToolCategory.DEVELOPMENT,
-    status=ToolStatus.AVAILABLE,
-    setup_type=SetupType.NONE,
-)
-def mcp_filesystem_tools():
-    return FilesystemMCPTools
-```
-
-Reference the plugin and tool in `config.yaml`:
-
-```yaml
-plugins:
-  - ./plugins/mcp-filesystem
-
-agents:
-  assistant:
-    tools:
-      - mcp_filesystem
-```
-
-The factory function must return the toolkit class, not an instance. MCP toolkits are async; Agno's async agent runs (`arun`, `aprint_response`) handle MCP connect and disconnect automatically.
-
-## Tools module example
-
-```python
-from __future__ import annotations
-
-from typing import TYPE_CHECKING
-
-from mindroom.tools_metadata import (
-    SetupType,
-    ToolCategory,
-    ToolStatus,
-    register_tool_with_metadata,
-)
-
-if TYPE_CHECKING:
-    from agno.tools import Toolkit
-
-
-@register_tool_with_metadata(
-    name="greeter",
-    display_name="Greeter",
-    description="A simple greeting tool",
-    category=ToolCategory.DEVELOPMENT,
-    status=ToolStatus.AVAILABLE,
-    setup_type=SetupType.NONE,
-)
-def greeter_tools() -> type[Toolkit]:
-    from agno.tools import Toolkit
-
-    class GreeterTools(Toolkit):
-        """A simple greeting toolkit."""
-
-        def __init__(self) -> None:
-            super().__init__(name="greeter", tools=[self.greet])
-
-        def greet(self, name: str) -> str:
-            """Greet someone by name."""
-            return f"Hello, {name}!"
-
-    return GreeterTools
-```
-
-The factory function (decorated with `@register_tool_with_metadata`) must return the **class**, not an instance. MindRoom instantiates the class when building agents.
-
-All decorator arguments are keyword-only. Required fields:
-
-- `name`: Tool identifier
-- `display_name`: Human-readable name
-- `description`: Brief description
-- `category`: A `ToolCategory` enum value
-
-Common optional fields:
-
-- `status`: `ToolStatus.AVAILABLE` (default), `COMING_SOON`, or `REQUIRES_CONFIG`
-- `setup_type`: `SetupType.NONE` (default), `API_KEY`, `OAUTH`, or `SPECIAL`
-- `config_fields`: List of `ConfigField` objects for configuration
-- `dependencies`: List of required pip packages
-- `docs_url`: Link to documentation
-
-## Plugin skills
-
-List skill directories in the manifest `skills` array. Those directories are added to the skill search roots.
-
-## Reloading plugins
-
-Plugin manifests and tools modules are cached by mtime. Changes are picked up the next time MindRoom reloads the tool registry (for example, on startup or config reload).
-
-## Security notes
-
-Plugins execute code in-process. Only install plugins you trust.
-
-### [Memory System](https://docs.mindroom.chat/memory/)
-
-# Memory System
-
-MindRoom uses Mem0 for persistent memory across conversations. Memory is automatically enabled for all agents and uses ChromaDB for semantic search.
-
-## Memory Scopes
-
-| Scope | User ID Format | Description |
-|-------|----------------|-------------|
-| Agent | `agent_<name>` | User preferences, past conversations, learned context |
-| Room | `room_<safe_room_id>` | Project context, technical decisions, shared knowledge |
-| Team | `team_<agent1>+<agent2>+...` | Shared team conversations and findings |
-
-**Notes:**
-- Room IDs are sanitized (`:` → `_`, `!` removed) for storage compatibility
-- Team IDs use sorted agent names joined with `+`
-- When searching agent memories, team memories are automatically included and deduplicated
-
-## Configuration
-
-Configure memory in your `config.yaml`:
-
-```yaml
-memory:
-  embedder:
-    provider: openai  # or "ollama"
-    config:
-      model: text-embedding-3-small
-      host: null  # Optional: for self-hosted models
-
-  llm:  # Optional: for memory extraction
-    provider: openai  # or "ollama", "anthropic"
-    config:
-      model: gpt-5-mini
-      temperature: 0.1
-      host: null  # For Ollama
-```
-
-The `host` field is converted internally to `openai_base_url` or `ollama_base_url` depending on the provider.
-
-## How Memory Works
-
-1. **Semantic Retrieval**: Before responding, agents search for relevant memories (limit: 3 per scope)
-2. **Context Enhancement**: Retrieved memories are prepended to the prompt with a note that they may not be relevant
-3. **Automatic Storage**: After each conversation, Mem0 extracts and stores relevant information
-
-## Storage
-
-Memories are stored in ChromaDB at `<storage_path>/chroma/` with collection name `mindroom_memories`.
-
-## Mem0 Tool (Optional)
-
-For explicit memory control, add the `mem0` tool to an agent:
-
-```yaml
-agents:
-  assistant:
-    tools: [mem0]
-```
-
-This provides functions: `add_memory`, `search_memory`, `get_all_memories`, `delete_all_memories`.
-
-### [Voice Messages](https://docs.mindroom.chat/voice/)
-
-# Voice Messages
-
-MindRoom can process voice messages sent to Matrix rooms, transcribing them and responding appropriately.
-
-## Overview
-
-When voice message handling is enabled:
-
-1. Voice messages are detected in Matrix rooms
-2. Audio is downloaded and decrypted (if E2E encrypted)
-3. Audio is sent to an OpenAI-compatible speech-to-text (STT) service
-4. Transcription is processed by an AI to recognize agent mentions and commands
-5. The formatted message is sent to the room (prefixed with a microphone emoji)
-6. The appropriate agent responds
-
-## Configuration
-
-Enable voice in `config.yaml`:
-
-```yaml
-voice:
-  enabled: true
-  stt:
-    provider: openai
-    model: whisper-1
-    # Optional: custom endpoint (without /v1 suffix)
-    # host: http://localhost:8080
-  intelligence:
-    model: default  # Model used for command recognition
-```
-
-Or use the dashboard's Voice tab.
-
-## STT Providers
-
-MindRoom uses the OpenAI-compatible transcription API. Any service that implements the `/v1/audio/transcriptions` endpoint will work.
-
-### OpenAI Whisper (Cloud)
-
-```yaml
-voice:
-  enabled: true
-  stt:
-    provider: openai
-    model: whisper-1
-```
-
-Requires `OPENAI_API_KEY` environment variable.
-
-### Self-Hosted Whisper
-
-```yaml
-voice:
-  enabled: true
-  stt:
-    provider: openai
-    model: whisper-1
-    host: http://localhost:8080
-```
-
-Note: Do not include `/v1` in the host URL - MindRoom appends `/v1/audio/transcriptions` automatically.
-
-Use with [faster-whisper-server](https://github.com/fedirz/faster-whisper-server) or similar OpenAI-compatible STT servers.
-
-### Custom API Key
-
-For self-hosted solutions that require authentication:
-
-```yaml
-voice:
-  enabled: true
-  stt:
-    provider: openai
-    model: whisper-1
-    host: http://localhost:8080
-    api_key: your-custom-api-key
-```
-
-If `api_key` is not set, MindRoom falls back to the `OPENAI_API_KEY` environment variable.
-
-## Command Recognition
-
-The intelligence component uses an AI model to analyze transcriptions and format them properly:
-
-1. **Agent mentions** - Converts spoken agent names to `@agent` format
-2. **Command patterns** - Identifies and formats `!command` syntax
-3. **Smart formatting** - Handles speech recognition errors and natural language variations
-
-### Intelligence Model
-
-The intelligence model processes raw transcriptions to recognize commands and agent names:
-
-```yaml
-voice:
-  intelligence:
-    model: default  # Uses the default model from your models config
-```
-
-You can specify a different model for faster or more accurate command recognition.
-
-## How It Works
-
-```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│ Voice Msg   │────▶│ Download &  │────▶│ Transcribe  │────▶│ Format with │
-│ (Audio)     │     │ Decrypt     │     │ (STT)       │     │ AI (LLM)    │
-└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
-                                                                  │
-                                                                  ▼
-                                                            ┌─────────────┐
-                                                            │ 🎤 Message  │
-                                                            │ to Room     │
-                                                            └─────────────┘
-                                                                  │
-                                                                  ▼
-                                                            ┌─────────────┐
-                                                            │ Agent       │
-                                                            │ Responds    │
-                                                            └─────────────┘
-```
-
-## Matrix Integration
-
-Voice messages in Matrix are:
-
-- Detected as `RoomMessageAudio` or `RoomEncryptedAudio` events
-- Downloaded from the Matrix media server
-- Decrypted if end-to-end encrypted (using the encryption key from the event)
-- Saved temporarily as `.ogg` files for processing
-- Sent to the STT service via the OpenAI-compatible API
-
-The router agent handles all voice message processing to avoid duplicate transcriptions.
-
-## Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `OPENAI_API_KEY` | For OpenAI Whisper API (used as fallback if no `api_key` configured) |
-
-## Text-to-Speech Tools
-
-MindRoom also supports text-to-speech (TTS) through agent tools. These are separate from voice message transcription and allow agents to generate audio responses:
-
-- **OpenAI** - Speech synthesis via `openai` tool
-- **ElevenLabs** - High-quality AI voices and sound effects via `eleven_labs` tool
-- **Cartesia** - Voice AI with optional voice localization via `cartesia` tool
-- **Groq** - Fast speech generation via `groq` tool
-
-See the [Tools documentation](/tools) for configuration details.
-
-## Limitations
-
-- Only OpenAI-compatible STT APIs are supported
-- Audio quality and background noise affect transcription accuracy
-
-## Tips
-
-- **Say the agent name first** - "Hey @assistant, what's the weather?"
-- **Use display names** - The AI converts spoken names like "HomeAssistant" to the correct `@home` mention
-
-### [Scheduling](https://docs.mindroom.chat/scheduling/)
-
-# Scheduling
-
-Schedule agents to perform tasks at specific times or intervals using natural language. Tasks run in the thread where they were created.
-
-## Commands
-
-### Schedule a Task
-
-```
-!schedule <natural-language-request>
-```
-
-**One-Time Tasks:**
-
-```
-!schedule in 5 minutes Check the deployment
-!schedule tomorrow at 3pm Send the weekly report
-```
-
-**Recurring Tasks:**
-
-```
-!schedule Every hour, @shell check server status
-!schedule Daily at 9am, @finance market report
-!schedule Weekly on Friday, @analyst prepare weekly summary
-```
-
-**Event-Driven Workflows:**
-
-Conditional requests are converted to polling schedules:
-
-```
-!schedule If I get an email about "urgent", @phone_agent call me
-!schedule When Bitcoin drops below $40k, @crypto_agent notify me
-```
-
-### List and Cancel Schedules
-
-```
-!list_schedules                  # Show pending tasks
-!cancel_schedule <task-id>       # Cancel specific task
-!cancel_schedule all             # Cancel all tasks in room
-```
-
-Aliases: `!listschedules`, `!list-schedules`, `!cancelschedule`, `!cancel-schedule`
-
-## Agent Mentions
-
-Include `@agent_name` in your schedule to have specific agents respond. The scheduler validates that mentioned agents are available in the room before creating the task.
-
-## Timezone
-
-Schedules use the timezone from `config.yaml` (defaults to UTC):
-
-```yaml
-timezone: America/Los_Angeles
-```
-
-## Persistence
-
-Schedules are stored in Matrix room state and persist across restarts. Past one-time tasks are automatically skipped during restoration.
-
-### [Authorization](https://docs.mindroom.chat/authorization/)
-
-# Authorization
-
-MindRoom controls which Matrix users can interact with agents.
-
-## Configuration
-
-Configure authorization in `config.yaml`:
-
-```yaml
-authorization:
-  # Users with access to all rooms
-  global_users:
-    - "@admin:example.com"
-    - "@developer:example.com"
-
-  # Room-specific permissions (must use Matrix room IDs, not aliases)
-  room_permissions:
-    "!abc123:example.com":
-      - "@user1:example.com"
-      - "@user2:example.com"
-
-  # Default for rooms not in room_permissions
-  default_room_access: false
-```
-
-**Defaults** (when `authorization` block is omitted):
-
-- `global_users: []`
-- `room_permissions: {}`
-- `default_room_access: false`
-
-This means only MindRoom system users (agents, teams, router, and `@mindroom_user`) can interact with agents by default.
-
-## Matrix ID Format
-
-User IDs follow the Matrix format: `@localpart:homeserver.domain`
-
-Examples: `@alice:matrix.org`, `@bob:example.com`, `@admin:company.internal`
-
-## Authorization Flow
-
-Authorization checks are performed in order:
-
-1. **Internal system user** - `@mindroom_user:{domain}` is always authorized. Note: `@mindroom_user` from a different domain is NOT authorized.
-2. **MindRoom agents/teams/router** - Configured agents, teams, and the router are authorized
-3. **Global users** - Users in `global_users` have access to all rooms
-4. **Room permissions** - If room is in `room_permissions`, user must be in that room's list (does NOT fall through to `default_room_access`)
-5. **Default access** - Rooms not in `room_permissions` use `default_room_access`
-
-> [!TIP]
-> Set `default_room_access: false` and explicitly grant access via `global_users` or `room_permissions` for better security.
-
-### [CLI Reference](https://docs.mindroom.chat/cli/)
-
-# CLI Reference
-
-MindRoom provides a command-line interface for managing agents.
-
-## Basic Usage
-
-```bash
-mindroom [OPTIONS] COMMAND [ARGS]...
-```
-
-## Commands
-
-<!-- CODE:START -->
-<!-- from mindroom.cli import app -->
-<!-- from typer.testing import CliRunner -->
-<!-- runner = CliRunner() -->
-<!-- result = runner.invoke(app, ["--help"]) -->
-<!-- print("```") -->
-<!-- print(result.output) -->
-<!-- print("```") -->
-<!-- CODE:END -->
-<!-- OUTPUT:START -->
-<!-- ⚠️ This content is auto-generated by `markdown-code-runner`. -->
-```
-
- Usage: root [OPTIONS] COMMAND [ARGS]...
-
- Mindroom: Multi-agent Matrix bot system
-
-
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --install-completion          Install completion for the current shell.                │
-│ --show-completion             Show completion for the current shell, to copy it or     │
-│                               customize the installation.                              │
-│ --help                        Show this message and exit.                              │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ version    Show the current version of Mindroom.                                       │
-│ validate   Validate the configuration file.                                            │
-│ run        Run the mindroom multi-agent system.                                        │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
-
-
-```
-
-<!-- OUTPUT:END -->
-
-## version
-
-Show the current MindRoom version.
-
-<!-- CODE:START -->
-<!-- from mindroom.cli import app -->
-<!-- from typer.testing import CliRunner -->
-<!-- runner = CliRunner() -->
-<!-- result = runner.invoke(app, ["version", "--help"]) -->
-<!-- print("```") -->
-<!-- print(result.output) -->
-<!-- print("```") -->
-<!-- CODE:END -->
-<!-- OUTPUT:START -->
-<!-- ⚠️ This content is auto-generated by `markdown-code-runner`. -->
-```
-
- Usage: root version [OPTIONS]
-
- Show the current version of Mindroom.
-
-
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --help          Show this message and exit.                                            │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
-
-
-```
-
-<!-- OUTPUT:END -->
-
-## run
-
-Start MindRoom with your configuration.
-
-<!-- CODE:START -->
-<!-- from mindroom.cli import app -->
-<!-- from typer.testing import CliRunner -->
-<!-- runner = CliRunner() -->
-<!-- result = runner.invoke(app, ["run", "--help"]) -->
-<!-- print("```") -->
-<!-- print(result.output) -->
-<!-- print("```") -->
-<!-- CODE:END -->
-<!-- OUTPUT:START -->
-<!-- ⚠️ This content is auto-generated by `markdown-code-runner`. -->
-```
-
- Usage: root run [OPTIONS]
-
- Run the mindroom multi-agent system.
-
- This command starts the multi-agent bot system which automatically: - Creates all
- necessary user and agent accounts - Creates all rooms defined in config.yaml - Manages
- agent room memberships
-
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --log-level     -l      TEXT  Set the logging level (DEBUG, INFO, WARNING, ERROR)      │
-│                               [default: INFO]                                          │
-│ --storage-path  -s      PATH  Base directory for persistent MindRoom data (state,      │
-│                               sessions, tracking)                                      │
-│                               [default: mindroom_data]                                 │
-│ --help                        Show this message and exit.                              │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
-
-
-```
-
-<!-- OUTPUT:END -->
-
-## Examples
-
-### Basic run
-
-```bash
-mindroom run
-```
-
-### Debug logging
-
-```bash
-mindroom run --log-level DEBUG
-```
-
-### Custom storage path
-
-```bash
-mindroom run --storage-path /data/mindroom
-```
-
-### Show version
-
-```bash
-mindroom version
-```
-
 ## Configuration
 
 ### [Overview](https://docs.mindroom.chat/configuration/)
@@ -2198,6 +1367,692 @@ REPLICATE_API_TOKEN=r8_...
 ```
 
 MindRoom automatically loads `.env` files from the working directory.
+
+### [Skills](https://docs.mindroom.chat/skills/)
+
+# Skills
+
+MindRoom uses Agno's skills system with OpenClaw-compatible metadata. Skills are instruction packs (a `SKILL.md` file) with optional scripts and references that guide agents without adding new code capabilities.
+
+## Skill directory structure
+
+A skill is a directory containing:
+
+```
+my-skill/
+├── SKILL.md         # Required: frontmatter + instructions
+├── scripts/         # Optional: executable scripts
+│   └── audit.sh
+└── references/      # Optional: reference documents
+    └── examples.md
+```
+
+Agents access skills via `get_skill_instructions()`, scripts via `get_skill_script()`, and references via `get_skill_reference()`.
+
+## SKILL.md format (OpenClaw compatible)
+
+```markdown
+---
+name: repo-quick-audit
+description: Quick repository audit checklist
+metadata: '{openclaw:{requires:{bins:["git"], env:["GITHUB_TOKEN"]}}}'
+user-invocable: true
+disable-model-invocation: false
+command-dispatch: tool
+command-tool: repo_audit.run
+command-arg-mode: raw
+---
+
+# Repo Quick Audit
+
+1. Check CI status
+2. Review open issues
+```
+
+Notes:
+
+- `metadata` can be a JSON5 string (shown above) or a YAML mapping.
+- `user-invocable`, `disable-model-invocation`, and `command-*` also accept snake_case names.
+
+## Frontmatter fields
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | string | Unique skill identifier |
+| `description` | string | Brief summary shown to users/models |
+| `metadata` | mapping or JSON5 string | OpenClaw metadata and custom fields |
+| `user-invocable` | bool | Allow `!skill` (default: true) |
+| `disable-model-invocation` | bool | Prevent model invocation (default: false) |
+| `command-dispatch` | `"tool"` | Set to `tool` to run a tool directly |
+| `command-tool` | string | Function to call: `function_name`, `toolkit.function_name`, or `toolkit` (if the toolkit exposes exactly one function) |
+| `command-arg-mode` | `"raw"` | Argument passing mode; only `raw` is currently supported |
+| `license` | string | Optional license information |
+| `compatibility` | string | Optional compatibility requirements |
+| `allowed-tools` | list | Optional list of tools this skill is allowed to use |
+
+## Eligibility gating (OpenClaw metadata)
+
+If `metadata.openclaw` is present, MindRoom filters skills using these rules:
+
+- `always: true` bypasses all checks
+- `os: ["linux", "darwin", "windows"]`
+- `requires.env`: env var set or credential key exists
+- `requires.config`: config path is truthy (e.g., `agents.code.tools`)
+- `requires.bins`: all binaries must exist in PATH
+- `requires.anyBins`: at least one binary must exist in PATH
+
+Skills without `metadata.openclaw` are always eligible.
+
+## Skill locations and precedence
+
+MindRoom loads skills from these locations, in this order:
+
+1. Bundled skills: `skills/` at the repository root (if present)
+2. Plugin-provided skill directories (see [Plugins](plugins.md))
+3. User skills: `~/.mindroom/skills/`
+
+If multiple skills share the same name, the last one wins (user > plugin > bundled).
+
+## Configuring skills
+
+Add skills to an agent allowlist in `config.yaml`:
+
+```yaml
+agents:
+  developer:
+    display_name: Developer
+    role: A coding assistant
+    model: sonnet
+    skills:
+      - repo-quick-audit
+      - code-review
+```
+
+If `skills` is empty or unset, the agent gets no skills.
+
+## Using skills at runtime
+
+Agents see available skills in the system prompt and can load details using these tools:
+
+- `get_skill_instructions(skill_name)` - Load the full instructions for a skill
+- `get_skill_reference(skill_name, reference_path)` - Access reference documentation
+- `get_skill_script(skill_name, script_path, execute=False, args=None, timeout=30)` - Read or execute scripts
+
+## Skill command dispatch (`!skill`)
+
+Users can run a skill by name:
+
+```
+!skill repo-quick-audit --recent
+```
+
+Agent resolution:
+
+- If you mention an agent (e.g., `@mindroom_code !skill build`), that agent handles the skill.
+- If only one agent in the room has the skill enabled, it handles the request.
+- If multiple agents have the skill, you must mention one to disambiguate.
+
+Rules:
+
+- The skill must be in the agent allowlist and `user-invocable` must be `true`.
+- If `command-dispatch: tool` is set, MindRoom runs the tool directly.
+- If `disable-model-invocation: true` and no tool dispatch is configured, the command fails.
+
+## Skill vs tool
+
+| Aspect | Skills | Tools |
+| --- | --- | --- |
+| Definition | Markdown + YAML | Python code |
+| Location | File system | Code/plugins |
+| Filtering | Automatic by requirements | Always available |
+| Instructions | Rich markdown | Docstrings |
+| Invocation | User or model | Model only |
+
+## Hot reloading
+
+MindRoom polls skill directories every second. When a `SKILL.md` file is added, removed, or modified, the skill cache is automatically cleared so agents pick up the new instructions on their next request.
+
+## Best practices
+
+1. Keep skills focused - one skill per capability
+2. Declare dependencies with `metadata.openclaw.requires`
+3. Use descriptive names like `code-review`
+
+### [Plugins](https://docs.mindroom.chat/plugins/)
+
+# Plugins
+
+MindRoom plugins add tools and can optionally ship skills. Plugins are loaded from paths listed in `config.yaml`.
+
+## Plugin structure
+
+A plugin is a directory containing `mindroom.plugin.json`:
+
+```
+my-plugin/
+├── mindroom.plugin.json
+├── tools.py
+└── skills/
+    └── my-skill/
+        └── SKILL.md
+```
+
+## Manifest format
+
+```json
+{
+  "name": "my-plugin",
+  "tools_module": "tools.py",
+  "skills": ["skills"]
+}
+```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | string | Plugin identifier (required) |
+| `tools_module` | string | Path to the tools module (optional) |
+| `skills` | list of strings | Relative directories containing skills (optional) |
+
+Unknown fields are ignored.
+
+## Configure plugins
+
+Add plugin paths to `config.yaml`:
+
+```yaml
+plugins:
+  - ./plugins/my-plugin
+  - python:my_skill_pack
+```
+
+Paths may be:
+
+- Absolute paths
+- Paths relative to `config.yaml`
+- Python package specs (see below)
+
+## Python package plugins
+
+MindRoom can resolve plugins from installed Python packages:
+
+```yaml
+plugins:
+  - my_skill_pack
+  - python:my_skill_pack
+  - pkg:my_skill_pack:plugins/demo
+  - module:my_skill_pack:plugins/demo
+```
+
+Rules:
+
+- A bare package name is allowed if it contains no slashes.
+- `python:`, `pkg:`, and `module:` are explicit prefixes.
+- `:sub/path` points to a subdirectory inside the package.
+
+MindRoom resolves the package location and looks for `mindroom.plugin.json` in that directory.
+
+## MCP via plugins (advanced)
+
+MindRoom does not yet support direct MCP server configuration in `config.yaml`.
+If you need MCP today, wrap Agno `MCPTools` in a plugin tool factory:
+
+```python
+from agno.tools.mcp import MCPTools
+from mindroom.tools_metadata import (
+    SetupType,
+    ToolCategory,
+    ToolStatus,
+    register_tool_with_metadata,
+)
+
+
+class FilesystemMCPTools(MCPTools):
+    def __init__(self, **kwargs):
+        super().__init__(
+            command="npx -y @modelcontextprotocol/server-filesystem /path/to/dir",
+            **kwargs,
+        )
+
+
+@register_tool_with_metadata(
+    name="mcp_filesystem",
+    display_name="MCP Filesystem",
+    description="Tools from an MCP filesystem server",
+    category=ToolCategory.DEVELOPMENT,
+    status=ToolStatus.AVAILABLE,
+    setup_type=SetupType.NONE,
+)
+def mcp_filesystem_tools():
+    return FilesystemMCPTools
+```
+
+Reference the plugin and tool in `config.yaml`:
+
+```yaml
+plugins:
+  - ./plugins/mcp-filesystem
+
+agents:
+  assistant:
+    tools:
+      - mcp_filesystem
+```
+
+The factory function must return the toolkit class, not an instance. MCP toolkits are async; Agno's async agent runs (`arun`, `aprint_response`) handle MCP connect and disconnect automatically.
+
+## Tools module example
+
+```python
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from mindroom.tools_metadata import (
+    SetupType,
+    ToolCategory,
+    ToolStatus,
+    register_tool_with_metadata,
+)
+
+if TYPE_CHECKING:
+    from agno.tools import Toolkit
+
+
+@register_tool_with_metadata(
+    name="greeter",
+    display_name="Greeter",
+    description="A simple greeting tool",
+    category=ToolCategory.DEVELOPMENT,
+    status=ToolStatus.AVAILABLE,
+    setup_type=SetupType.NONE,
+)
+def greeter_tools() -> type[Toolkit]:
+    from agno.tools import Toolkit
+
+    class GreeterTools(Toolkit):
+        """A simple greeting toolkit."""
+
+        def __init__(self) -> None:
+            super().__init__(name="greeter", tools=[self.greet])
+
+        def greet(self, name: str) -> str:
+            """Greet someone by name."""
+            return f"Hello, {name}!"
+
+    return GreeterTools
+```
+
+The factory function (decorated with `@register_tool_with_metadata`) must return the **class**, not an instance. MindRoom instantiates the class when building agents.
+
+All decorator arguments are keyword-only. Required fields:
+
+- `name`: Tool identifier
+- `display_name`: Human-readable name
+- `description`: Brief description
+- `category`: A `ToolCategory` enum value
+
+Common optional fields:
+
+- `status`: `ToolStatus.AVAILABLE` (default), `COMING_SOON`, or `REQUIRES_CONFIG`
+- `setup_type`: `SetupType.NONE` (default), `API_KEY`, `OAUTH`, or `SPECIAL`
+- `config_fields`: List of `ConfigField` objects for configuration
+- `dependencies`: List of required pip packages
+- `docs_url`: Link to documentation
+
+## Plugin skills
+
+List skill directories in the manifest `skills` array. Those directories are added to the skill search roots.
+
+## Reloading plugins
+
+Plugin manifests and tools modules are cached by mtime. Changes are picked up the next time MindRoom reloads the tool registry (for example, on startup or config reload).
+
+## Security notes
+
+Plugins execute code in-process. Only install plugins you trust.
+
+### [Memory System](https://docs.mindroom.chat/memory/)
+
+# Memory System
+
+MindRoom uses Mem0 for persistent memory across conversations. Memory is automatically enabled for all agents and uses ChromaDB for semantic search.
+
+## Memory Scopes
+
+| Scope | User ID Format | Description |
+|-------|----------------|-------------|
+| Agent | `agent_<name>` | User preferences, past conversations, learned context |
+| Room | `room_<safe_room_id>` | Project context, technical decisions, shared knowledge |
+| Team | `team_<agent1>+<agent2>+...` | Shared team conversations and findings |
+
+**Notes:**
+- Room IDs are sanitized (`:` → `_`, `!` removed) for storage compatibility
+- Team IDs use sorted agent names joined with `+`
+- When searching agent memories, team memories are automatically included and deduplicated
+
+## Configuration
+
+Configure memory in your `config.yaml`:
+
+```yaml
+memory:
+  embedder:
+    provider: openai  # or "ollama"
+    config:
+      model: text-embedding-3-small
+      host: null  # Optional: for self-hosted models
+
+  llm:  # Optional: for memory extraction
+    provider: openai  # or "ollama", "anthropic"
+    config:
+      model: gpt-5-mini
+      temperature: 0.1
+      host: null  # For Ollama
+```
+
+The `host` field is converted internally to `openai_base_url` or `ollama_base_url` depending on the provider.
+
+## How Memory Works
+
+1. **Semantic Retrieval**: Before responding, agents search for relevant memories (limit: 3 per scope)
+2. **Context Enhancement**: Retrieved memories are prepended to the prompt with a note that they may not be relevant
+3. **Automatic Storage**: After each conversation, Mem0 extracts and stores relevant information
+
+## Storage
+
+Memories are stored in ChromaDB at `<storage_path>/chroma/` with collection name `mindroom_memories`.
+
+## Mem0 Tool (Optional)
+
+For explicit memory control, add the `mem0` tool to an agent:
+
+```yaml
+agents:
+  assistant:
+    tools: [mem0]
+```
+
+This provides functions: `add_memory`, `search_memory`, `get_all_memories`, `delete_all_memories`.
+
+### [Voice Messages](https://docs.mindroom.chat/voice/)
+
+# Voice Messages
+
+MindRoom can process voice messages sent to Matrix rooms, transcribing them and responding appropriately.
+
+## Overview
+
+When voice message handling is enabled:
+
+1. Voice messages are detected in Matrix rooms
+2. Audio is downloaded and decrypted (if E2E encrypted)
+3. Audio is sent to an OpenAI-compatible speech-to-text (STT) service
+4. Transcription is processed by an AI to recognize agent mentions and commands
+5. The formatted message is sent to the room (prefixed with a microphone emoji)
+6. The appropriate agent responds
+
+## Configuration
+
+Enable voice in `config.yaml`:
+
+```yaml
+voice:
+  enabled: true
+  stt:
+    provider: openai
+    model: whisper-1
+    # Optional: custom endpoint (without /v1 suffix)
+    # host: http://localhost:8080
+  intelligence:
+    model: default  # Model used for command recognition
+```
+
+Or use the dashboard's Voice tab.
+
+## STT Providers
+
+MindRoom uses the OpenAI-compatible transcription API. Any service that implements the `/v1/audio/transcriptions` endpoint will work.
+
+### OpenAI Whisper (Cloud)
+
+```yaml
+voice:
+  enabled: true
+  stt:
+    provider: openai
+    model: whisper-1
+```
+
+Requires `OPENAI_API_KEY` environment variable.
+
+### Self-Hosted Whisper
+
+```yaml
+voice:
+  enabled: true
+  stt:
+    provider: openai
+    model: whisper-1
+    host: http://localhost:8080
+```
+
+Note: Do not include `/v1` in the host URL - MindRoom appends `/v1/audio/transcriptions` automatically.
+
+Use with [faster-whisper-server](https://github.com/fedirz/faster-whisper-server) or similar OpenAI-compatible STT servers.
+
+### Custom API Key
+
+For self-hosted solutions that require authentication:
+
+```yaml
+voice:
+  enabled: true
+  stt:
+    provider: openai
+    model: whisper-1
+    host: http://localhost:8080
+    api_key: your-custom-api-key
+```
+
+If `api_key` is not set, MindRoom falls back to the `OPENAI_API_KEY` environment variable.
+
+## Command Recognition
+
+The intelligence component uses an AI model to analyze transcriptions and format them properly:
+
+1. **Agent mentions** - Converts spoken agent names to `@agent` format
+2. **Command patterns** - Identifies and formats `!command` syntax
+3. **Smart formatting** - Handles speech recognition errors and natural language variations
+
+### Intelligence Model
+
+The intelligence model processes raw transcriptions to recognize commands and agent names:
+
+```yaml
+voice:
+  intelligence:
+    model: default  # Uses the default model from your models config
+```
+
+You can specify a different model for faster or more accurate command recognition.
+
+## How It Works
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│ Voice Msg   │────▶│ Download &  │────▶│ Transcribe  │────▶│ Format with │
+│ (Audio)     │     │ Decrypt     │     │ (STT)       │     │ AI (LLM)    │
+└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+                                                                  │
+                                                                  ▼
+                                                            ┌─────────────┐
+                                                            │ 🎤 Message  │
+                                                            │ to Room     │
+                                                            └─────────────┘
+                                                                  │
+                                                                  ▼
+                                                            ┌─────────────┐
+                                                            │ Agent       │
+                                                            │ Responds    │
+                                                            └─────────────┘
+```
+
+## Matrix Integration
+
+Voice messages in Matrix are:
+
+- Detected as `RoomMessageAudio` or `RoomEncryptedAudio` events
+- Downloaded from the Matrix media server
+- Decrypted if end-to-end encrypted (using the encryption key from the event)
+- Saved temporarily as `.ogg` files for processing
+- Sent to the STT service via the OpenAI-compatible API
+
+The router agent handles all voice message processing to avoid duplicate transcriptions.
+
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `OPENAI_API_KEY` | For OpenAI Whisper API (used as fallback if no `api_key` configured) |
+
+## Text-to-Speech Tools
+
+MindRoom also supports text-to-speech (TTS) through agent tools. These are separate from voice message transcription and allow agents to generate audio responses:
+
+- **OpenAI** - Speech synthesis via `openai` tool
+- **ElevenLabs** - High-quality AI voices and sound effects via `eleven_labs` tool
+- **Cartesia** - Voice AI with optional voice localization via `cartesia` tool
+- **Groq** - Fast speech generation via `groq` tool
+
+See the [Tools documentation](/tools) for configuration details.
+
+## Limitations
+
+- Only OpenAI-compatible STT APIs are supported
+- Audio quality and background noise affect transcription accuracy
+
+## Tips
+
+- **Say the agent name first** - "Hey @assistant, what's the weather?"
+- **Use display names** - The AI converts spoken names like "HomeAssistant" to the correct `@home` mention
+
+### [Scheduling](https://docs.mindroom.chat/scheduling/)
+
+# Scheduling
+
+Schedule agents to perform tasks at specific times or intervals using natural language. Tasks run in the thread where they were created.
+
+## Commands
+
+### Schedule a Task
+
+```
+!schedule <natural-language-request>
+```
+
+**One-Time Tasks:**
+
+```
+!schedule in 5 minutes Check the deployment
+!schedule tomorrow at 3pm Send the weekly report
+```
+
+**Recurring Tasks:**
+
+```
+!schedule Every hour, @shell check server status
+!schedule Daily at 9am, @finance market report
+!schedule Weekly on Friday, @analyst prepare weekly summary
+```
+
+**Event-Driven Workflows:**
+
+Conditional requests are converted to polling schedules:
+
+```
+!schedule If I get an email about "urgent", @phone_agent call me
+!schedule When Bitcoin drops below $40k, @crypto_agent notify me
+```
+
+### List and Cancel Schedules
+
+```
+!list_schedules                  # Show pending tasks
+!cancel_schedule <task-id>       # Cancel specific task
+!cancel_schedule all             # Cancel all tasks in room
+```
+
+Aliases: `!listschedules`, `!list-schedules`, `!cancelschedule`, `!cancel-schedule`
+
+## Agent Mentions
+
+Include `@agent_name` in your schedule to have specific agents respond. The scheduler validates that mentioned agents are available in the room before creating the task.
+
+## Timezone
+
+Schedules use the timezone from `config.yaml` (defaults to UTC):
+
+```yaml
+timezone: America/Los_Angeles
+```
+
+## Persistence
+
+Schedules are stored in Matrix room state and persist across restarts. Past one-time tasks are automatically skipped during restoration.
+
+### [Authorization](https://docs.mindroom.chat/authorization/)
+
+# Authorization
+
+MindRoom controls which Matrix users can interact with agents.
+
+## Configuration
+
+Configure authorization in `config.yaml`:
+
+```yaml
+authorization:
+  # Users with access to all rooms
+  global_users:
+    - "@admin:example.com"
+    - "@developer:example.com"
+
+  # Room-specific permissions (must use Matrix room IDs, not aliases)
+  room_permissions:
+    "!abc123:example.com":
+      - "@user1:example.com"
+      - "@user2:example.com"
+
+  # Default for rooms not in room_permissions
+  default_room_access: false
+```
+
+**Defaults** (when `authorization` block is omitted):
+
+- `global_users: []`
+- `room_permissions: {}`
+- `default_room_access: false`
+
+This means only MindRoom system users (agents, teams, router, and `@mindroom_user`) can interact with agents by default.
+
+## Matrix ID Format
+
+User IDs follow the Matrix format: `@localpart:homeserver.domain`
+
+Examples: `@alice:matrix.org`, `@bob:example.com`, `@admin:company.internal`
+
+## Authorization Flow
+
+Authorization checks are performed in order:
+
+1. **Internal system user** - `@mindroom_user:{domain}` is always authorized. Note: `@mindroom_user` from a different domain is NOT authorized.
+2. **MindRoom agents/teams/router** - Configured agents, teams, and the router are authorized
+3. **Global users** - Users in `global_users` have access to all rooms
+4. **Room permissions** - If room is in `room_permissions`, user must be in that room's list (does NOT fall through to `default_room_access`)
+5. **Default access** - Rooms not in `room_permissions` use `default_room_access`
+
+> [!TIP]
+> Set `default_room_access: false` and explicitly grant access via `global_users` or `room_permissions` for better security.
 
 ## Architecture
 
@@ -3192,3 +3047,148 @@ Each customer instance gets:
 - Dedicated ingress routes
 
 Platform services run in `mindroom-{environment}` namespace.
+
+### [CLI Reference](https://docs.mindroom.chat/cli/)
+
+# CLI Reference
+
+MindRoom provides a command-line interface for managing agents.
+
+## Basic Usage
+
+```bash
+mindroom [OPTIONS] COMMAND [ARGS]...
+```
+
+## Commands
+
+<!-- CODE:START -->
+<!-- from mindroom.cli import app -->
+<!-- from typer.testing import CliRunner -->
+<!-- runner = CliRunner() -->
+<!-- result = runner.invoke(app, ["--help"]) -->
+<!-- print("```") -->
+<!-- print(result.output) -->
+<!-- print("```") -->
+<!-- CODE:END -->
+<!-- OUTPUT:START -->
+<!-- ⚠️ This content is auto-generated by `markdown-code-runner`. -->
+```
+
+ Usage: root [OPTIONS] COMMAND [ARGS]...
+
+ Mindroom: Multi-agent Matrix bot system
+
+
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --install-completion          Install completion for the current shell.                │
+│ --show-completion             Show completion for the current shell, to copy it or     │
+│                               customize the installation.                              │
+│ --help                        Show this message and exit.                              │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
+│ version    Show the current version of Mindroom.                                       │
+│ validate   Validate the configuration file.                                            │
+│ run        Run the mindroom multi-agent system.                                        │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+```
+
+<!-- OUTPUT:END -->
+
+## version
+
+Show the current MindRoom version.
+
+<!-- CODE:START -->
+<!-- from mindroom.cli import app -->
+<!-- from typer.testing import CliRunner -->
+<!-- runner = CliRunner() -->
+<!-- result = runner.invoke(app, ["version", "--help"]) -->
+<!-- print("```") -->
+<!-- print(result.output) -->
+<!-- print("```") -->
+<!-- CODE:END -->
+<!-- OUTPUT:START -->
+<!-- ⚠️ This content is auto-generated by `markdown-code-runner`. -->
+```
+
+ Usage: root version [OPTIONS]
+
+ Show the current version of Mindroom.
+
+
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --help          Show this message and exit.                                            │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+```
+
+<!-- OUTPUT:END -->
+
+## run
+
+Start MindRoom with your configuration.
+
+<!-- CODE:START -->
+<!-- from mindroom.cli import app -->
+<!-- from typer.testing import CliRunner -->
+<!-- runner = CliRunner() -->
+<!-- result = runner.invoke(app, ["run", "--help"]) -->
+<!-- print("```") -->
+<!-- print(result.output) -->
+<!-- print("```") -->
+<!-- CODE:END -->
+<!-- OUTPUT:START -->
+<!-- ⚠️ This content is auto-generated by `markdown-code-runner`. -->
+```
+
+ Usage: root run [OPTIONS]
+
+ Run the mindroom multi-agent system.
+
+ This command starts the multi-agent bot system which automatically: - Creates all
+ necessary user and agent accounts - Creates all rooms defined in config.yaml - Manages
+ agent room memberships
+
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --log-level     -l      TEXT  Set the logging level (DEBUG, INFO, WARNING, ERROR)      │
+│                               [default: INFO]                                          │
+│ --storage-path  -s      PATH  Base directory for persistent MindRoom data (state,      │
+│                               sessions, tracking)                                      │
+│                               [default: mindroom_data]                                 │
+│ --help                        Show this message and exit.                              │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+```
+
+<!-- OUTPUT:END -->
+
+## Examples
+
+### Basic run
+
+```bash
+mindroom run
+```
+
+### Debug logging
+
+```bash
+mindroom run --log-level DEBUG
+```
+
+### Custom storage path
+
+```bash
+mindroom run --storage-path /data/mindroom
+```
+
+### Show version
+
+```bash
+mindroom version
+```

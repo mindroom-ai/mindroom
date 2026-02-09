@@ -5,13 +5,6 @@
 - [Home](https://docs.mindroom.chat/): AI agents that live in Matrix and work everywhere via bridges.
 - [Getting Started](https://docs.mindroom.chat/getting-started/): This guide will help you set up MindRoom and create your first AI agent.
 - [Dashboard](https://docs.mindroom.chat/dashboard/): MindRoom includes a web dashboard for configuring agents, teams, rooms, and integrations without editing YAML files. Changes are synchronized to `config.yaml` in real-time.
-- [Skills](https://docs.mindroom.chat/skills/): MindRoom uses Agno's skills system with OpenClaw-compatible metadata. Skills are instruction packs (a `SKILL.md` file) with optional scripts and references that guide agents without adding new code capabilities.
-- [Plugins](https://docs.mindroom.chat/plugins/): MindRoom plugins add tools and can optionally ship skills. Plugins are loaded from paths listed in `config.yaml`.
-- [Memory System](https://docs.mindroom.chat/memory/): MindRoom uses Mem0 for persistent memory across conversations. Memory is automatically enabled for all agents and uses ChromaDB for semantic search.
-- [Voice Messages](https://docs.mindroom.chat/voice/): MindRoom can process voice messages sent to Matrix rooms, transcribing them and responding appropriately.
-- [Scheduling](https://docs.mindroom.chat/scheduling/): Schedule agents to perform tasks at specific times or intervals using natural language. Tasks run in the thread where they were created.
-- [Authorization](https://docs.mindroom.chat/authorization/): MindRoom controls which Matrix users can interact with agents.
-- [CLI Reference](https://docs.mindroom.chat/cli/): MindRoom provides a command-line interface for managing agents.
 
 ## Configuration
 
@@ -26,6 +19,13 @@
 - [Overview](https://docs.mindroom.chat/tools/): MindRoom includes 100+ tool integrations that agents can use to interact with external services.
 - [Built-in Tools](https://docs.mindroom.chat/tools/builtin/): MindRoom includes 100+ built-in tool integrations organized by category.
 
+- [Skills](https://docs.mindroom.chat/skills/): MindRoom uses Agno's skills system with OpenClaw-compatible metadata. Skills are instruction packs (a `SKILL.md` file) with optional scripts and references that guide agents without adding new code capabilities.
+- [Plugins](https://docs.mindroom.chat/plugins/): MindRoom plugins add tools and can optionally ship skills. Plugins are loaded from paths listed in `config.yaml`.
+- [Memory System](https://docs.mindroom.chat/memory/): MindRoom uses Mem0 for persistent memory across conversations. Memory is automatically enabled for all agents and uses ChromaDB for semantic search.
+- [Voice Messages](https://docs.mindroom.chat/voice/): MindRoom can process voice messages sent to Matrix rooms, transcribing them and responding appropriately.
+- [Scheduling](https://docs.mindroom.chat/scheduling/): Schedule agents to perform tasks at specific times or intervals using natural language. Tasks run in the thread where they were created.
+- [Authorization](https://docs.mindroom.chat/authorization/): MindRoom controls which Matrix users can interact with agents.
+
 ## Architecture
 
 - [Overview](https://docs.mindroom.chat/architecture/): MindRoom's architecture consists of several key components working together.
@@ -39,3 +39,5 @@
 - [Google Services OAuth (Individual)](https://docs.mindroom.chat/deployment/google-services-user-oauth/): This guide is for one person running MindRoom and creating their own Google OAuth app.
 - [Docker](https://docs.mindroom.chat/deployment/docker/): Deploy MindRoom using Docker for simple, containerized deployments.
 - [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/): Deploy MindRoom on Kubernetes for production multi-tenant deployments.
+
+- [CLI Reference](https://docs.mindroom.chat/cli/): MindRoom provides a command-line interface for managing agents.

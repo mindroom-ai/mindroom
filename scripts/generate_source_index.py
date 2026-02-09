@@ -49,20 +49,24 @@ def generate_source_index(files: list[Path]) -> str:
     parts.append(f"# Generated from src/mindroom/ ({len(files)} files)")
     parts.append("")
 
-    for path in files:
+    for index, path in enumerate(files):
         relative = path.relative_to(REPO_ROOT)
         parts.append("=" * 80)
         parts.append(f"# FILE: {relative}")
         parts.append("=" * 80)
         parts.append("")
         try:
-            content = path.read_text(encoding="utf-8")
+            # Normalize file boundaries so generated output always ends with one newline.
+            content = path.read_text(encoding="utf-8").rstrip("\n")
             parts.append(content)
         except (OSError, UnicodeDecodeError) as exc:
             parts.append(f"# ERROR reading file: {exc}")
-        parts.append("")
 
-    return "\n".join(parts)
+        # Separate files with one blank line, but avoid an extra trailing blank line.
+        if index < len(files) - 1:
+            parts.append("")
+
+    return "\n".join(parts) + "\n"
 
 
 def generate_source_map(files: list[Path]) -> str:

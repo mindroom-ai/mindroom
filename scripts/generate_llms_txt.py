@@ -74,14 +74,14 @@ def _collect_entries(items: list[NavItem]) -> list[tuple[str, str]]:
 def _walk_nav(
     nav: list[NavItem],
 ) -> list[tuple[str, str, list[tuple[str, str]]]]:
-    """Walk the nav structure and return sections.
-
-    Returns a list of (section_title, section entries) where each entry
-    is (title, md_path). Top-level single entries go into an implicit
-    first section. Handles arbitrarily nested nav structures.
-    """
-    sections: list[tuple[str, str, list[tuple[str, str]]]] = []
+    """Walk nav and return blocks in the same order as zensical.toml."""
+    blocks: list[tuple[str, str, list[tuple[str, str]]]] = []
     top_entries: list[tuple[str, str]] = []
+
+    def flush_top_entries() -> None:
+        if top_entries:
+            blocks.append(("", "", [*top_entries]))
+            top_entries.clear()
 
     for item in nav:
         for title, value in item.items():
@@ -90,11 +90,13 @@ def _walk_nav(
                     continue
                 top_entries.append((title, value))
             elif isinstance(value, list):
+                flush_top_entries()
                 entries = _collect_entries(value)
                 if entries:
-                    sections.append((title, "", entries))
+                    blocks.append((title, "", entries))
 
-    return [("", "", top_entries), *sections] if top_entries else sections
+    flush_top_entries()
+    return blocks
 
 
 def generate_llms_txt(nav: list[NavItem]) -> str:
