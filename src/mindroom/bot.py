@@ -159,11 +159,7 @@ class MultiKnowledgeVectorDb:
         """Async variant of ``search`` that uses async DB search when available."""
         documents: list[Document] = []
         for vector_db in self.vector_dbs:
-            async_search = getattr(vector_db, "async_search", None)
-            if callable(async_search):
-                results = await async_search(query=query, limit=limit, filters=filters)
-            else:
-                results = vector_db.search(query=query, limit=limit, filters=filters)
+            results = await vector_db.async_search(query=query, limit=limit, filters=filters)
             documents.extend(results)
         return documents[:limit]
 
@@ -666,18 +662,9 @@ class AgentBot:
         if len(knowledges) == 1:
             return knowledges[0]
 
-        vector_dbs = [knowledge.vector_db for knowledge in knowledges if knowledge.vector_db is not None]
-        if not vector_dbs:
-            self.logger.warning(
-                "Knowledge bases are configured but vector databases are unavailable",
-                agent_name=agent_name,
-                knowledge_bases=agent_config.knowledge_bases,
-            )
-            return None
-
         return Knowledge(
             name=f"{agent_name}_multi_knowledge",
-            vector_db=MultiKnowledgeVectorDb(vector_dbs=vector_dbs),
+            vector_db=MultiKnowledgeVectorDb(vector_dbs=[k.vector_db for k in knowledges]),
             max_results=max(knowledge.max_results for knowledge in knowledges),
         )
 
