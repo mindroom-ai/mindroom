@@ -186,7 +186,6 @@ agents:
     - help
     skills:
     - mindroom-troubleshoot
-    - mindroom-self-debug
     tools: []
   home:
     display_name: HomeAssistant
