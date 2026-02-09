@@ -11,18 +11,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_DIR = REPO_ROOT / "src" / "mindroom"
 OUTPUT_DIR = REPO_ROOT / "skills" / "mindroom-self-debug" / "references"
 
-# Directories and patterns to skip
+# Directories to skip
 SKIP_DIRS = {"__pycache__"}
-SKIP_SUFFIXES = {".pyc", ".pyo"}
 
 
 def _collect_python_files(root: Path) -> list[Path]:
-    """Collect all .py files under root, skipping __pycache__ and compiled files."""
+    """Collect all .py files under root, skipping __pycache__."""
     files: list[Path] = []
     for path in sorted(root.rglob("*.py")):
         if any(part in SKIP_DIRS for part in path.parts):
-            continue
-        if path.suffix in SKIP_SUFFIXES:
             continue
         files.append(path)
     return files
