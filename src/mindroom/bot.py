@@ -174,11 +174,15 @@ class MultiKnowledgeVectorDb:
 
         async def _search_one(vdb: Any) -> list[Document]:  # noqa: ANN401
             results: list[Document]
+            async_search = getattr(vdb, "async_search", None)
             try:
-                try:
-                    results = await vdb.async_search(query=query, limit=limit, filters=filters)
-                except (AttributeError, NotImplementedError):
+                if async_search is None:
                     results = vdb.search(query=query, limit=limit, filters=filters)
+                else:
+                    try:
+                        results = await async_search(query=query, limit=limit, filters=filters)
+                    except NotImplementedError:
+                        results = vdb.search(query=query, limit=limit, filters=filters)
             except Exception:
                 logger.warning(
                     "Knowledge vector database async search failed",
