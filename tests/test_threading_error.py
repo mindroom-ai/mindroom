@@ -62,6 +62,7 @@ class TestThreadingBehavior:
 
         # Create a mock client
         bot.client = AsyncMock(spec=nio.AsyncClient)
+        bot.client.rooms = {}
         bot.client.user_id = "@mindroom_general:localhost"
         bot.client.homeserver = "http://localhost:8008"
 
@@ -245,6 +246,7 @@ class TestThreadingBehavior:
 
         # Create a mock client
         bot.client = AsyncMock(spec=nio.AsyncClient)
+        bot.client.rooms = {}
         bot.client.user_id = "@mindroom_router:localhost"
         bot.client.homeserver = "http://localhost:8008"
 
@@ -343,6 +345,7 @@ class TestThreadingBehavior:
 
         # Create a mock client
         bot.client = AsyncMock(spec=nio.AsyncClient)
+        bot.client.rooms = {}
         bot.client.user_id = "@mindroom_router:localhost"
         bot.client.homeserver = "http://localhost:8008"
 

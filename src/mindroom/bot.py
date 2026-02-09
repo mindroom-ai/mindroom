@@ -71,10 +71,12 @@ from .routing import suggest_agent_for_message
 from .scheduling import (
     cancel_all_scheduled_tasks,
     cancel_scheduled_task,
+    edit_scheduled_task,
     list_scheduled_tasks,
     restore_scheduled_tasks,
     schedule_task,
 )
+from .scheduling_context import SchedulingToolContext, scheduling_tool_context
 from .skills import clear_skill_cache, get_skill_snapshot, resolve_skill_command_spec
 from .stop import StopManager
 from .streaming import (
@@ -1324,6 +1326,32 @@ class AgentBot:
             mentioned_agents=mentioned_agents,
         )
 
+    def _build_scheduling_tool_context(
+        self,
+        room_id: str,
+        thread_id: str | None,
+        reply_to_event_id: str,
+        user_id: str | None,
+    ) -> SchedulingToolContext | None:
+        """Build runtime context for scheduler tool calls during response generation."""
+        assert self.client is not None
+        room = self.client.rooms.get(room_id)
+        if room is None:
+            self.logger.warning(
+                "Skipping scheduler tool context because room is not cached",
+                room_id=room_id,
+            )
+            return None
+
+        return SchedulingToolContext(
+            client=self.client,
+            room=room,
+            room_id=room_id,
+            thread_id=thread_id or reply_to_event_id,
+            requester_id=user_id or self.matrix_id.full_id,
+            config=self.config,
+        )
+
     async def _generate_team_response_helper(
         self,
         room_id: str,
@@ -1357,6 +1385,12 @@ class AgentBot:
 
         # Convert MatrixID list to agent names for non-streaming APIs
         agent_names = [mid.agent_name(self.config) or mid.username for mid in team_agents]
+        scheduler_context = self._build_scheduling_tool_context(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+            user_id=requester_user_id,
+        )
         orchestrator = self.orchestrator
         if orchestrator is None:
             msg = "Orchestrator is not set"
@@ -1367,27 +1401,28 @@ class AgentBot:
             if use_streaming and not existing_event_id:
                 # Show typing indicator while team generates streaming response
                 async with typing_indicator(self.client, room_id):
-                    response_stream = team_response_stream(
-                        agent_ids=team_agents,
-                        message=message,
-                        orchestrator=orchestrator,
-                        mode=mode,
-                        thread_history=thread_history,
-                        model_name=model_name,
-                    )
+                    with scheduling_tool_context(scheduler_context):
+                        response_stream = team_response_stream(
+                            agent_ids=team_agents,
+                            message=message,
+                            orchestrator=orchestrator,
+                            mode=mode,
+                            thread_history=thread_history,
+                            model_name=model_name,
+                        )
 
-                    event_id, accumulated = await send_streaming_response(
-                        self.client,
-                        room_id,
-                        reply_to_event_id,
-                        thread_id,
-                        self.matrix_id.domain,
-                        self.config,
-                        response_stream,
-                        streaming_cls=ReplacementStreamingResponse,
-                        header=None,
-                        existing_event_id=message_id,
-                    )
+                        event_id, accumulated = await send_streaming_response(
+                            self.client,
+                            room_id,
+                            reply_to_event_id,
+                            thread_id,
+                            self.matrix_id.domain,
+                            self.config,
+                            response_stream,
+                            streaming_cls=ReplacementStreamingResponse,
+                            header=None,
+                            existing_event_id=message_id,
+                        )
 
                 # Handle interactive questions in team responses
                 await self._handle_interactive_question(
@@ -1401,14 +1436,15 @@ class AgentBot:
             else:
                 # Show typing indicator while team generates non-streaming response
                 async with typing_indicator(self.client, room_id):
-                    response_text = await team_response(
-                        agent_names=agent_names,
-                        mode=mode,
-                        message=message,
-                        orchestrator=orchestrator,
-                        thread_history=thread_history,
-                        model_name=model_name,
-                    )
+                    with scheduling_tool_context(scheduler_context):
+                        response_text = await team_response(
+                            agent_names=agent_names,
+                            mode=mode,
+                            message=message,
+                            orchestrator=orchestrator,
+                            thread_history=thread_history,
+                            model_name=model_name,
+                        )
 
                 # Either edit the thinking message or send new
                 if message_id:
@@ -1565,21 +1601,28 @@ class AgentBot:
 
         session_id = create_session_id(room_id, thread_id)
         knowledge = self._knowledge_for_agent(self.agent_name)
+        scheduler_context = self._build_scheduling_tool_context(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+            user_id=user_id,
+        )
 
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
-                response_text = await ai_response(
-                    agent_name=self.agent_name,
-                    prompt=prompt,
-                    session_id=session_id,
-                    storage_path=self.storage_path,
-                    config=self.config,
-                    thread_history=thread_history,
-                    room_id=room_id,
-                    knowledge=knowledge,
-                    user_id=user_id,
-                )
+                with scheduling_tool_context(scheduler_context):
+                    response_text = await ai_response(
+                        agent_name=self.agent_name,
+                        prompt=prompt,
+                        session_id=session_id,
+                        storage_path=self.storage_path,
+                        config=self.config,
+                        thread_history=thread_history,
+                        room_id=room_id,
+                        knowledge=knowledge,
+                        user_id=user_id,
+                    )
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
             self.logger.info("Non-streaming response cancelled by user", message_id=existing_event_id)
@@ -1634,18 +1677,25 @@ class AgentBot:
 
         session_id = create_session_id(room_id, thread_id)
         knowledge = self._knowledge_for_agent(agent_name)
+        scheduler_context = self._build_scheduling_tool_context(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+            user_id=user_id,
+        )
 
         async with typing_indicator(self.client, room_id):
-            response_text = await ai_response(
-                agent_name=agent_name,
-                prompt=prompt,
-                session_id=session_id,
-                storage_path=self.storage_path,
-                config=self.config,
-                thread_history=thread_history,
-                room_id=room_id,
-                knowledge=knowledge,
-            )
+            with scheduling_tool_context(scheduler_context):
+                response_text = await ai_response(
+                    agent_name=agent_name,
+                    prompt=prompt,
+                    session_id=session_id,
+                    storage_path=self.storage_path,
+                    config=self.config,
+                    thread_history=thread_history,
+                    room_id=room_id,
+                    knowledge=knowledge,
+                )
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
         event_id = await self._send_response(
@@ -1750,33 +1800,40 @@ class AgentBot:
 
         session_id = create_session_id(room_id, thread_id)
         knowledge = self._knowledge_for_agent(self.agent_name)
+        scheduler_context = self._build_scheduling_tool_context(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+            user_id=user_id,
+        )
 
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
-                response_stream = stream_agent_response(
-                    agent_name=self.agent_name,
-                    prompt=prompt,
-                    session_id=session_id,
-                    storage_path=self.storage_path,
-                    config=self.config,
-                    thread_history=thread_history,
-                    room_id=room_id,
-                    knowledge=knowledge,
-                    user_id=user_id,
-                )
+                with scheduling_tool_context(scheduler_context):
+                    response_stream = stream_agent_response(
+                        agent_name=self.agent_name,
+                        prompt=prompt,
+                        session_id=session_id,
+                        storage_path=self.storage_path,
+                        config=self.config,
+                        thread_history=thread_history,
+                        room_id=room_id,
+                        knowledge=knowledge,
+                        user_id=user_id,
+                    )
 
-                event_id, accumulated = await send_streaming_response(
-                    self.client,
-                    room_id,
-                    reply_to_event_id,
-                    thread_id,
-                    self.matrix_id.domain,
-                    self.config,
-                    response_stream,
-                    streaming_cls=StreamingResponse,
-                    existing_event_id=existing_event_id,
-                )
+                    event_id, accumulated = await send_streaming_response(
+                        self.client,
+                        room_id,
+                        reply_to_event_id,
+                        thread_id,
+                        self.matrix_id.domain,
+                        self.config,
+                        response_stream,
+                        streaming_cls=StreamingResponse,
+                        existing_event_id=existing_event_id,
+                    )
 
             # Handle interactive questions if present
             await self._handle_interactive_question(
@@ -2176,7 +2233,7 @@ class AgentBot:
             mentioned_agents, _ = check_agent_mentioned(event.source, None, self.config)
 
             assert self.client is not None
-            task_id, response_text = await schedule_task(
+            _, response_text = await schedule_task(
                 client=self.client,
                 room_id=room.room_id,
                 thread_id=effective_thread_id,
@@ -2214,6 +2271,21 @@ class AgentBot:
                     room_id=room.room_id,
                     task_id=task_id,
                 )
+
+        elif command.type == CommandType.EDIT_SCHEDULE:
+            assert self.client is not None
+            task_id = command.args["task_id"]
+            full_text = command.args["full_text"]
+            response_text = await edit_scheduled_task(
+                client=self.client,
+                room_id=room.room_id,
+                task_id=task_id,
+                full_text=full_text,
+                scheduled_by=event.sender,
+                config=self.config,
+                room=room,
+                thread_id=effective_thread_id,
+            )
 
         elif command.type == CommandType.CONFIG:
             # Handle config command

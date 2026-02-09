@@ -29,6 +29,7 @@ logger = get_logger(__name__)
 
 # Maximum length for instruction descriptions to include in agent summary
 MAX_INSTRUCTION_LENGTH = 100
+DEFAULT_AGENT_TOOL_NAMES = ["scheduler"]
 
 
 def get_datetime_context(timezone_str: str) -> str:
@@ -142,6 +143,9 @@ def create_agent(
     load_plugins(config)
 
     tool_names = list(agent_config.tools)
+    for default_tool_name in DEFAULT_AGENT_TOOL_NAMES:
+        if default_tool_name not in tool_names:
+            tool_names.append(default_tool_name)
 
     # Create tools
     tools: list = []  # Use list type to satisfy Agent's parameter type

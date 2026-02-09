@@ -39,6 +39,18 @@ def test_get_agent_general(mock_storage: MagicMock) -> None:  # noqa: ARG001
 
 
 @patch("mindroom.agents.SqliteDb")
+def test_scheduler_tool_enabled_by_default(mock_storage: MagicMock) -> None:  # noqa: ARG001
+    """All agents should get the scheduler tool even when not explicitly configured."""
+    config = Config.from_yaml()
+    config.agents["summary"].tools = []
+
+    agent = create_agent("summary", config=config)
+    tool_names = [tool.name for tool in agent.tools]
+
+    assert "scheduler" in tool_names
+
+
+@patch("mindroom.agents.SqliteDb")
 def test_get_agent_code(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the code agent is created correctly."""
     config = Config.from_yaml()

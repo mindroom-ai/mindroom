@@ -231,6 +231,7 @@ class TestBotIntegration:
             bot = create_bot_for_entity("test_agent", agent_user, config, tmp_path)
             assert isinstance(bot, AgentBot)
             bot.client = AsyncMock(spec=nio.AsyncClient)
+            bot.client.rooms = {}
             bot.client.user_id = "@mindroom_test_agent:localhost"
             bot.client.room_send = AsyncMock()
             bot.client.room_put_state = AsyncMock()
@@ -293,6 +294,7 @@ class TestBotIntegration:
             bot = create_bot_for_entity("test_agent", agent_user, config, tmp_path)
             assert isinstance(bot, AgentBot)
             bot.client = AsyncMock(spec=nio.AsyncClient)
+            bot.client.rooms = {}
             bot.client.user_id = "@mindroom_test_agent:localhost"
             bot.client.room_send = AsyncMock()
             bot.client.room_put_state = AsyncMock()

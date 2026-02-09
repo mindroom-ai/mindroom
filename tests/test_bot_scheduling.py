@@ -71,7 +71,7 @@ class TestBotScheduleCommands:
             raw_text=event.body,
         )
 
-        # Mock the schedule_task function
+        # Mock the shared schedule entrypoint
         with patch("mindroom.bot.schedule_task") as mock_schedule:
             mock_schedule.return_value = ("task123", "✅ Scheduled: 5 minutes from now")
 
@@ -203,6 +203,46 @@ class TestBotScheduleCommands:
         mock_agent_bot._send_response.assert_called_once()  # type: ignore[attr-defined]
         call_args = mock_agent_bot._send_response.call_args  # type: ignore[attr-defined]
         assert "✅ Cancelled 3 scheduled task(s)" in call_args[0][2]
+
+    @pytest.mark.asyncio
+    async def test_handle_edit_schedule_command(self, mock_agent_bot: AgentBot) -> None:
+        """Test bot handles edit schedule command."""
+        mock_agent_bot.response_tracker = MagicMock()
+        mock_agent_bot.response_tracker.has_responded.return_value = False
+        room = MagicMock()
+        room.room_id = "!test:server"
+
+        event = MagicMock()
+        event.event_id = "$event123"
+        event.sender = "@user:server"
+        event.body = "!edit_schedule task123 in 30 minutes Check deployment"
+        event.source = {"content": {"m.relates_to": {"event_id": "$thread123", "rel_type": "m.thread"}}}
+
+        command = Command(
+            type=CommandType.EDIT_SCHEDULE,
+            args={"task_id": "task123", "full_text": "in 30 minutes Check deployment"},
+            raw_text=event.body,
+        )
+
+        with patch("mindroom.bot.edit_scheduled_task") as mock_edit:
+            mock_edit.return_value = "✅ Updated task `task123`."
+
+            await mock_agent_bot._handle_command(room, event, command)
+
+            mock_edit.assert_called_once_with(
+                client=mock_agent_bot.client,
+                room_id="!test:server",
+                task_id="task123",
+                full_text="in 30 minutes Check deployment",
+                scheduled_by="@user:server",
+                config=mock_agent_bot.config,
+                room=room,
+                thread_id="$thread123",
+            )
+
+        mock_agent_bot._send_response.assert_called_once()  # type: ignore[attr-defined]
+        call_args = mock_agent_bot._send_response.call_args  # type: ignore[attr-defined]
+        assert "✅ Updated task `task123`." in call_args[0][2]
 
     @pytest.mark.asyncio
     async def test_schedule_command_auto_creates_thread(self, mock_agent_bot: AgentBot) -> None:

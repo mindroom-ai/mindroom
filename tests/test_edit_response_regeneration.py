@@ -40,6 +40,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
 
     # Mock the client
     bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
     bot.client.user_id = "@test_agent:example.com"
 
     # Create real ResponseTracker with the test path
@@ -183,6 +184,7 @@ async def test_bot_ignores_edit_without_previous_response(tmp_path: Path) -> Non
 
     # Mock the client
     bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
     bot.client.user_id = "@test_agent:example.com"
 
     # Create real ResponseTracker with the test path
@@ -275,6 +277,7 @@ async def test_bot_ignores_agent_edits(tmp_path: Path) -> None:
 
     # Mock the client
     bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
     bot.client.user_id = "@test_agent:example.com"
 
     # Create real ResponseTracker with the test path
@@ -439,6 +442,7 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
 
     # Mock the client
     bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
     bot.client.user_id = "@test_agent:example.com"
 
     # Create real ResponseTracker with the test path
@@ -534,6 +538,7 @@ async def test_on_voice_message_tracks_response_event_id(tmp_path: Path) -> None
 
     # Mock the client
     bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
     bot.client.user_id = "@test_agent:example.com"
 
     # Create real ResponseTracker with the test path
@@ -632,6 +637,7 @@ async def test_on_voice_message_no_transcription_still_marks_responded(tmp_path:
 
     # Mock the client
     bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
     bot.client.user_id = "@test_agent:example.com"
 
     # Create real ResponseTracker with the test path
@@ -732,6 +738,7 @@ async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
 
     # Mock the client
     bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
     bot.client.user_id = "@test_agent:example.com"
 
     # Create real ResponseTracker with the test path
@@ -809,6 +816,7 @@ async def test_on_voice_message_unauthorized_sender_marks_responded(tmp_path: Pa
 
     # Mock the client
     bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
     bot.client.user_id = "@test_agent:example.com"
 
     # Create real ResponseTracker with the test path
