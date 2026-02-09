@@ -9,11 +9,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from agno.knowledge.document import Document
+from agno.knowledge.knowledge import Knowledge
 from agno.models.ollama import Ollama
 from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
 
-from mindroom.bot import AgentBot, MultiAgentOrchestrator
+from mindroom.bot import AgentBot, MultiAgentOrchestrator, MultiKnowledgeVectorDb
 from mindroom.config import AgentConfig, Config, KnowledgeBaseConfig, ModelConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
@@ -70,6 +72,59 @@ def mock_agent_users() -> dict[str, AgentMatrixUser]:
     }
 
 
+@dataclass
+class _SyncStubVectorDb:
+    documents: list[Document]
+
+    def search(
+        self,
+        *,
+        query: str,
+        limit: int,
+        filters: dict[str, Any] | list[Any] | None = None,
+    ) -> list[Document]:
+        _ = (query, filters)
+        return self.documents[:limit]
+
+
+@dataclass
+class _AsyncStubVectorDb(_SyncStubVectorDb):
+    async def async_search(
+        self,
+        *,
+        query: str,
+        limit: int,
+        filters: dict[str, Any] | list[Any] | None = None,
+    ) -> list[Document]:
+        _ = (query, filters)
+        return self.documents[:limit]
+
+
+@dataclass
+class _FailingStubVectorDb:
+    error_message: str = "search failed"
+
+    def search(
+        self,
+        *,
+        query: str,
+        limit: int,
+        filters: dict[str, Any] | list[Any] | None = None,
+    ) -> list[Document]:
+        _ = (query, limit, filters)
+        raise RuntimeError(self.error_message)
+
+    async def async_search(
+        self,
+        *,
+        query: str,
+        limit: int,
+        filters: dict[str, Any] | list[Any] | None = None,
+    ) -> list[Document]:
+        _ = (query, limit, filters)
+        raise RuntimeError(self.error_message)
+
+
 class TestAgentBot:
     """Test cases for AgentBot class."""
 
@@ -100,9 +155,9 @@ class TestAgentBot:
         return mock_config
 
     @staticmethod
-    def create_config_with_knowledge_base(
+    def create_config_with_knowledge_bases(
         *,
-        assigned_base: str | None,
+        assigned_bases: list[str] | None,
         knowledge_bases: dict[str, KnowledgeBaseConfig] | None = None,
     ) -> Config:
         """Create a real config with one calculator agent for knowledge assignment tests."""
@@ -111,7 +166,7 @@ class TestAgentBot:
                 "calculator": AgentConfig(
                     display_name="CalculatorAgent",
                     rooms=["!test:localhost"],
-                    knowledge_base=assigned_base,
+                    knowledge_bases=assigned_bases or [],
                 ),
             },
             knowledge_bases=knowledge_bases or {},
@@ -123,8 +178,8 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Unassigned agents should not receive knowledge access."""
-        config = self.create_config_with_knowledge_base(
-            assigned_base=None,
+        config = self.create_config_with_knowledge_bases(
+            assigned_bases=[],
             knowledge_bases={
                 "research": KnowledgeBaseConfig(path=str(tmp_path / "kb"), watch=False),
             },
@@ -140,8 +195,8 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Agents should receive knowledge from their assigned knowledge base manager."""
-        config = self.create_config_with_knowledge_base(
-            assigned_base="research",
+        config = self.create_config_with_knowledge_bases(
+            assigned_bases=["research"],
             knowledge_bases={
                 "research": KnowledgeBaseConfig(path=str(tmp_path / "kb"), watch=False),
             },
@@ -153,6 +208,147 @@ class TestAgentBot:
         bot.orchestrator = MagicMock(knowledge_managers={"research": manager})
 
         assert bot._knowledge_for_agent("calculator") is expected_knowledge
+
+    def test_knowledge_for_agent_merges_multiple_assigned_bases(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Agents assigned to multiple bases should search across all assigned bases."""
+        config = self.create_config_with_knowledge_bases(
+            assigned_bases=["research", "legal"],
+            knowledge_bases={
+                "research": KnowledgeBaseConfig(path=str(tmp_path / "kb_research"), watch=False),
+                "legal": KnowledgeBaseConfig(path=str(tmp_path / "kb_legal"), watch=False),
+            },
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+
+        research_vector_db = MagicMock()
+        research_vector_db.search.return_value = [
+            Document(content="research content 1"),
+            Document(content="research content 2"),
+            Document(content="research content 3"),
+        ]
+        research_knowledge = Knowledge(vector_db=research_vector_db)
+
+        legal_vector_db = MagicMock()
+        legal_vector_db.search.return_value = [
+            Document(content="legal content 1"),
+            Document(content="legal content 2"),
+            Document(content="legal content 3"),
+        ]
+        legal_knowledge = Knowledge(vector_db=legal_vector_db)
+
+        research_manager = MagicMock()
+        research_manager.get_knowledge.return_value = research_knowledge
+        legal_manager = MagicMock()
+        legal_manager.get_knowledge.return_value = legal_knowledge
+
+        bot.orchestrator = MagicMock(knowledge_managers={"research": research_manager, "legal": legal_manager})
+
+        combined_knowledge = bot._knowledge_for_agent("calculator")
+        assert combined_knowledge is not None
+
+        docs = combined_knowledge.search("knowledge query", max_results=4)
+        assert [doc.content for doc in docs] == [
+            "research content 1",
+            "legal content 1",
+            "research content 2",
+            "legal content 2",
+        ]
+        research_vector_db.search.assert_called_once_with(query="knowledge query", limit=4, filters=None)
+        legal_vector_db.search.assert_called_once_with(query="knowledge query", limit=4, filters=None)
+
+    def test_multi_knowledge_vector_db_interleaves_sync_results(self) -> None:
+        """Round-robin merge should include top results from each knowledge base."""
+        vector_db = MultiKnowledgeVectorDb(
+            vector_dbs=[
+                _SyncStubVectorDb(
+                    documents=[
+                        Document(content="research 1"),
+                        Document(content="research 2"),
+                        Document(content="research 3"),
+                    ],
+                ),
+                _SyncStubVectorDb(
+                    documents=[
+                        Document(content="legal 1"),
+                        Document(content="legal 2"),
+                        Document(content="legal 3"),
+                    ],
+                ),
+            ],
+        )
+
+        docs = vector_db.search(query="knowledge query", limit=4)
+        assert [doc.content for doc in docs] == ["research 1", "legal 1", "research 2", "legal 2"]
+
+    def test_multi_knowledge_vector_db_sync_ignores_failing_source(self) -> None:
+        """A failing knowledge source should not suppress healthy source results."""
+        vector_db = MultiKnowledgeVectorDb(
+            vector_dbs=[
+                _SyncStubVectorDb(
+                    documents=[
+                        Document(content="research 1"),
+                        Document(content="research 2"),
+                    ],
+                ),
+                _FailingStubVectorDb(error_message="boom"),
+            ],
+        )
+
+        docs = vector_db.search(query="knowledge query", limit=3)
+        assert [doc.content for doc in docs] == ["research 1", "research 2"]
+
+    @pytest.mark.asyncio
+    async def test_multi_knowledge_vector_db_interleaves_async_results(self) -> None:
+        """Async merge should interleave and support sync-only vector DBs."""
+        vector_db = MultiKnowledgeVectorDb(
+            vector_dbs=[
+                _AsyncStubVectorDb(
+                    documents=[
+                        Document(content="research 1"),
+                        Document(content="research 2"),
+                        Document(content="research 3"),
+                    ],
+                ),
+                _SyncStubVectorDb(
+                    documents=[
+                        Document(content="legal 1"),
+                        Document(content="legal 2"),
+                        Document(content="legal 3"),
+                    ],
+                ),
+            ],
+        )
+
+        docs = await vector_db.async_search(query="knowledge query", limit=5)
+        assert [doc.content for doc in docs] == [
+            "research 1",
+            "legal 1",
+            "research 2",
+            "legal 2",
+            "research 3",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_multi_knowledge_vector_db_async_ignores_failing_source(self) -> None:
+        """Async search should continue returning healthy source results on failures."""
+        vector_db = MultiKnowledgeVectorDb(
+            vector_dbs=[
+                _AsyncStubVectorDb(
+                    documents=[
+                        Document(content="research 1"),
+                        Document(content="research 2"),
+                    ],
+                ),
+                _FailingStubVectorDb(error_message="boom"),
+            ],
+        )
+
+        docs = await vector_db.async_search(query="knowledge query", limit=3)
+        assert [doc.content for doc in docs] == ["research 1", "research 2"]
 
     @pytest.mark.asyncio
     @patch("mindroom.config.Config.from_yaml")

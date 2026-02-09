@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -150,10 +151,51 @@ def test_config_rejects_unknown_agent_knowledge_base_assignment() -> None:
             agents={
                 "calculator": AgentConfig(
                     display_name="CalculatorAgent",
-                    knowledge_base="research",
+                    knowledge_bases=["research"],
                 ),
             },
             knowledge_bases={},
+        )
+
+
+def test_config_rejects_legacy_agent_knowledge_base_field() -> None:
+    """Legacy singular knowledge_base field must fail fast to avoid silent drops."""
+    with pytest.raises(
+        ValidationError,
+        match=re.escape("Agent field 'knowledge_base' was removed. Use 'knowledge_bases' (list) instead."),
+    ):
+        Config(
+            agents={
+                "calculator": {
+                    "display_name": "CalculatorAgent",
+                    "knowledge_base": "research",
+                },
+            },
+            knowledge_bases={
+                "research": KnowledgeBaseConfig(
+                    path="./knowledge_docs/research",
+                    watch=False,
+                ),
+            },
+        )
+
+
+def test_config_rejects_duplicate_agent_knowledge_base_assignment() -> None:
+    """Each agent knowledge base assignment should be unique."""
+    with pytest.raises(ValidationError, match="Duplicate knowledge bases are not allowed: research"):
+        Config(
+            agents={
+                "calculator": AgentConfig(
+                    display_name="CalculatorAgent",
+                    knowledge_bases=["research", "research"],
+                ),
+            },
+            knowledge_bases={
+                "research": KnowledgeBaseConfig(
+                    path="./knowledge_docs/research",
+                    watch=False,
+                ),
+            },
         )
 
 
@@ -163,7 +205,7 @@ def test_config_accepts_valid_agent_knowledge_base_assignment() -> None:
         agents={
             "calculator": AgentConfig(
                 display_name="CalculatorAgent",
-                knowledge_base="research",
+                knowledge_bases=["research"],
             ),
         },
         knowledge_bases={
@@ -174,4 +216,4 @@ def test_config_accepts_valid_agent_knowledge_base_assignment() -> None:
         },
     )
 
-    assert config.agents["calculator"].knowledge_base == "research"
+    assert config.agents["calculator"].knowledge_bases == ["research"]

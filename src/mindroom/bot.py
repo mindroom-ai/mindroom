@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import nio
+from agno.knowledge.knowledge import Knowledge
 from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
 
 from . import config_confirmation, interactive, voice_handler
@@ -107,7 +108,7 @@ if TYPE_CHECKING:
 
     import structlog
     from agno.agent import Agent
-    from agno.knowledge.knowledge import Knowledge
+    from agno.knowledge.document import Document
     from agno.tools.function import Function
     from agno.tools.toolkit import Toolkit
 
@@ -118,6 +119,102 @@ logger = get_logger(__name__)
 
 # Constants
 SYNC_TIMEOUT_MS = 30000
+
+
+@dataclass
+class MultiKnowledgeVectorDb:
+    """Thin vector DB wrapper that queries multiple vector DBs and merges results.
+
+    Duck-types the vector_db interface expected by agno's ``Knowledge.__post_init__``.
+    ``exists()`` returns True and ``create()`` is a no-op so that Knowledge skips its
+    own initialization — the underlying knowledge managers already own the DB lifecycle.
+    If agno changes the ``__post_init__`` protocol, this adapter will need updating.
+    """
+
+    vector_dbs: list[Any]
+
+    def exists(self) -> bool:
+        """Present as already-initialized to satisfy Knowledge.__post_init__."""
+        return True
+
+    def create(self) -> None:
+        """No-op because underlying knowledge managers own DB lifecycle."""
+        return
+
+    def search(
+        self,
+        *,
+        query: str,
+        limit: int,
+        filters: dict[str, Any] | list[Any] | None = None,
+    ) -> list[Document]:
+        """Search each assigned vector database and interleave merged results."""
+        results_by_db: list[list[Document]] = []
+        for vector_db in self.vector_dbs:
+            try:
+                results = vector_db.search(query=query, limit=limit, filters=filters)
+            except Exception:
+                logger.warning(
+                    "Knowledge vector database search failed",
+                    vector_db_type=type(vector_db).__name__,
+                    exc_info=True,
+                )
+                continue
+            results_by_db.append(results)
+        return _interleave_documents(results_by_db, limit)
+
+    async def async_search(
+        self,
+        *,
+        query: str,
+        limit: int,
+        filters: dict[str, Any] | list[Any] | None = None,
+    ) -> list[Document]:
+        """Async variant of ``search`` that searches DBs concurrently."""
+
+        async def _search_one(vdb: Any) -> list[Document]:  # noqa: ANN401
+            results: list[Document]
+            async_search = getattr(vdb, "async_search", None)
+            try:
+                if async_search is None:
+                    results = vdb.search(query=query, limit=limit, filters=filters)
+                else:
+                    try:
+                        results = await async_search(query=query, limit=limit, filters=filters)
+                    except NotImplementedError:
+                        results = vdb.search(query=query, limit=limit, filters=filters)
+            except Exception:
+                logger.warning(
+                    "Knowledge vector database async search failed",
+                    vector_db_type=type(vdb).__name__,
+                    exc_info=True,
+                )
+                return []
+            return results
+
+        results_by_db = await asyncio.gather(*[_search_one(vdb) for vdb in self.vector_dbs])
+        return _interleave_documents(list(results_by_db), limit)
+
+
+def _interleave_documents(results_by_db: list[list[Document]], limit: int) -> list[Document]:
+    """Interleave per-db results so one knowledge base cannot dominate top-k."""
+    if limit <= 0 or not results_by_db:
+        return []
+
+    merged: list[Document] = []
+    index = 0
+    while len(merged) < limit:
+        added = False
+        for results in results_by_db:
+            if index < len(results):
+                merged.append(results[index])
+                added = True
+                if len(merged) >= limit:
+                    return merged
+        if not added:
+            break
+        index += 1
+    return merged
 
 
 def _create_task_wrapper(callback: object) -> object:
@@ -588,20 +685,41 @@ class AgentBot:
         return manager.get_knowledge()
 
     def _knowledge_for_agent(self, agent_name: str) -> Knowledge | None:
-        """Return shared knowledge for agents assigned to a knowledge base."""
+        """Return shared knowledge for agents assigned to one or more knowledge bases."""
         agent_config = self.config.agents.get(agent_name)
-        if agent_config is None or agent_config.knowledge_base is None:
+        if agent_config is None:
             return None
 
-        knowledge = self._get_shared_knowledge(agent_config.knowledge_base)
-        if knowledge is None:
-            self.logger.warning(
-                "Knowledge base not available for agent",
-                agent_name=agent_name,
-                knowledge_base=agent_config.knowledge_base,
-            )
+        if not agent_config.knowledge_bases:
             return None
-        return knowledge
+
+        missing_base_ids: list[str] = []
+        knowledges: list[Knowledge] = []
+        for base_id in agent_config.knowledge_bases:
+            knowledge = self._get_shared_knowledge(base_id)
+            if knowledge is None:
+                missing_base_ids.append(base_id)
+                continue
+            knowledges.append(knowledge)
+
+        if missing_base_ids:
+            self.logger.warning(
+                "Knowledge bases not available for agent",
+                agent_name=agent_name,
+                knowledge_bases=missing_base_ids,
+            )
+
+        if not knowledges:
+            return None
+
+        if len(knowledges) == 1:
+            return knowledges[0]
+
+        return Knowledge(
+            name=f"{agent_name}_multi_knowledge",
+            vector_db=MultiKnowledgeVectorDb(vector_dbs=[k.vector_db for k in knowledges]),
+            max_results=max(knowledge.max_results for knowledge in knowledges),
+        )
 
     @property  # Not cached_property because Team mutates it!
     def agent(self) -> Agent:
