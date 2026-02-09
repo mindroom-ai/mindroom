@@ -5859,7 +5859,7 @@
       "dependencies": [
         "agno"
       ],
-      "description": "Schedule tasks and reminders using the same backend as !schedule",
+      "description": "Schedule, edit, list, and cancel tasks and reminders",
       "display_name": "Scheduler",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
       "helper_text": null,

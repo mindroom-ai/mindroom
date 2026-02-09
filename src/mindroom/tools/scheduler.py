@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="scheduler",
     display_name="Scheduler",
-    description="Schedule tasks and reminders using the same backend as !schedule",
+    description="Schedule, edit, list, and cancel tasks and reminders",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
