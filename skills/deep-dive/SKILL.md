@@ -88,7 +88,12 @@ Cross-reference claims to establish confidence levels.
 
 **Verification steps**:
 1. For each key claim, check if at least 2 independent sources agree
-2. Flag any contradictions between sources — resolve using this priority: primary sources > recency > corroboration. If unresolvable, consider hands-on validation
+2. Flag any contradictions between sources — resolve using this priority:
+   1. **Primary sources** (official docs, source code, RFCs) override secondary sources
+   2. **More recent** sources override older sources for the same claim
+   3. **Corroborated** claims (2+ independent sources) override single-source claims
+   4. If still unresolved: attempt hands-on validation (run code, test the claim)
+   5. If validation is impractical: report the conflict explicitly with both sides cited, mark confidence as Low, and recommend what test would resolve it
 3. Note when information may be version-dependent or time-sensitive
 4. Distinguish between facts, interpretations, and opinions
 
@@ -205,6 +210,7 @@ Sources: [citation]
 - Always include URLs for web sources
 - Note the date accessed or publication date
 - Indicate source type (official docs, blog, forum, paper, etc.)
+- **Claim-level traceability**: Each finding in the report should cite which specific source(s) support it. Use inline references (e.g., "[1]", "[2]") or name the source directly so readers can verify each claim independently
 - When paraphrasing, attribute clearly: "According to [source], ..."
 - When quoting, use quotation marks and attribute
 - If a source is your own AI knowledge, say so explicitly and mark confidence accordingly

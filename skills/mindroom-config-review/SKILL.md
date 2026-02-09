@@ -76,7 +76,7 @@ Each entry under `agents:` is an `AgentConfig` with fields:
 - **Runtime Error**: `model` references a name not defined in `models` (Pydantic does not cross-validate this; it will fail when the agent tries to use the model).
 - **Schema Error**: `knowledge_base` references an ID not defined in `knowledge_bases` (validated by Pydantic `validate_knowledge_base_assignments` validator).
 - **Warning**: `display_name` is empty — agents will appear with a blank name in Matrix.
-- **Warning**: `learning_mode` is set to a value other than `"always"` or `"agentic"` (this is a plain `str` field — Pydantic accepts any value, but runtime behavior may be unexpected).
+- **Schema Error**: `learning_mode` is set to a value other than `"always"` or `"agentic"` (this is a `Literal["always", "agentic"]` type — Pydantic will reject invalid values at load time).
 - **Warning**: `role` is empty -- the agent has no description, which hurts routing quality. The router uses agent roles to decide which agent should handle a message.
 - **Warning**: `rooms` is empty -- the agent will not appear in any room and will be unreachable.
 - **Warning**: `tools` contains a name not recognized in the tool registry. To verify valid tool names, check `src/mindroom/tools/` for the registered `name=` values in each tool's `@register_tool_with_metadata` decorator, or query `TOOL_REGISTRY` from `src/mindroom/tools_metadata.py` at runtime.
@@ -147,7 +147,7 @@ The `DefaultsConfig` has:
 
 ### Checks
 
-- **Warning**: `learning_mode` is not `"always"` or `"agentic"` (plain `str` — Pydantic accepts any value, but runtime behavior may be unexpected).
+- **Schema Error**: `learning_mode` is not `"always"` or `"agentic"` (this is a `Literal["always", "agentic"]` type — Pydantic will reject invalid values at load time).
 - **Suggestion**: If most agents should not use markdown (e.g., for voice-only or plain-text bridges), set `markdown: false` in defaults rather than per-agent.
 
 ---
@@ -248,11 +248,11 @@ Cross-cutting security checks:
 
 ## 14. Plugins Validation (`plugins`)
 
-- `plugins` (list of strings, default `[]`) -- plugin module specs in one of these formats: `path:./my_plugin.py`, `python:my_package.module`, `pkg:my_package`, or `module:my_module`
+- `plugins` (list of strings, default `[]`) -- plugin module specs in one of these formats: `python:my_package.module`, `pkg:my_package`, `module:my_module`, or a plain filesystem path (e.g., `./my_plugin` or `/abs/path/to/plugin`)
 
 ### Checks
 
-- **Warning**: A plugin spec does not follow one of the recognized formats (`path:`, `python:`, `pkg:`, `module:` prefix, or a plain path).
+- **Warning**: A plugin spec does not follow one of the recognized formats (`python:`, `pkg:`, `module:` prefix, or a plain filesystem path). Specs containing `/` or starting with `.` are treated as filesystem paths; all others are tried as Python module imports.
 - **Warning**: Agent `skills` list references a skill name that does not exist in the bundled skills, user skills (`~/.mindroom/skills/`), or plugin-provided skills.
 - **Suggestion**: Plugins extend agent capabilities. Ensure plugin code is from a trusted source.
 

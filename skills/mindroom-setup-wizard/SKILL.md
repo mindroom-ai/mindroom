@@ -84,7 +84,7 @@ Ask the user which AI provider(s) they want to use. MindRoom supports these prov
 | Anthropic | `anthropic` | `claude-sonnet-4-5-latest` | `ANTHROPIC_API_KEY` |
 | OpenAI | `openai` | `gpt-4o` | `OPENAI_API_KEY` |
 | Google Gemini | `google` or `gemini` | `gemini-2.0-flash` | `GOOGLE_API_KEY` |
-| Ollama (local) | `ollama` | `llama3.2` | None (needs `host`) |
+| Ollama (local) | `ollama` | `llama3.2` | None (local, `host` optional) |
 | Groq | `groq` | `llama-3.1-70b-versatile` | `GROQ_API_KEY` |
 | OpenRouter | `openrouter` | `anthropic/claude-3-opus` | `OPENROUTER_API_KEY` |
 | Cerebras | `cerebras` | `llama3.1-8b` | `CEREBRAS_API_KEY` |
