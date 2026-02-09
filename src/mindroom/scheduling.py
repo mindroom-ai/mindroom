@@ -303,7 +303,6 @@ async def run_once_task(
 async def _validate_agent_mentions(
     message: str,
     room: nio.MatrixRoom,
-    thread_id: str | None,
     config: Config,
 ) -> _AgentValidationResult:
     """Validate that all mentioned agents are accessible.
@@ -311,7 +310,6 @@ async def _validate_agent_mentions(
     Args:
         message: The message that may contain @agent mentions
         room: The Matrix room object
-        thread_id: The thread ID where the schedule will execute (if in a thread)
         config: Application configuration
 
     Returns:
@@ -325,28 +323,15 @@ async def _validate_agent_mentions(
     valid_agents: list[MatrixID] = []
     invalid_agents: list[MatrixID] = []
 
-    if thread_id:
-        # For threads, check if agents are in the room
-        room_agents = get_available_agents_in_room(room, config)
+    room_agents = get_available_agents_in_room(room, config)
+    for mid in mentioned_agents:
+        if mid in room_agents:
+            valid_agents.append(mid)
+        else:
+            invalid_agents.append(mid)
 
-        # Agents can now respond in any room they're in
-        for mid in mentioned_agents:
-            if mid in room_agents:
-                valid_agents.append(mid)
-            else:
-                invalid_agents.append(mid)
-    else:
-        # For room messages, check if agents are configured for the room
-        room_agents = get_available_agents_in_room(room, config)
-        for mid in mentioned_agents:
-            if mid in room_agents:
-                valid_agents.append(mid)
-            else:
-                invalid_agents.append(mid)
-
-    all_valid = len(invalid_agents) == 0
     return _AgentValidationResult(
-        all_valid=all_valid,
+        all_valid=len(invalid_agents) == 0,
         valid_agents=valid_agents,
         invalid_agents=invalid_agents,
     )
@@ -442,7 +427,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         return (None, "❌ Failed to schedule: Recurring task missing cron schedule")
 
     # Validate that all mentioned agents are accessible
-    validation_result = await _validate_agent_mentions(workflow_result.message, room, thread_id, config)
+    validation_result = await _validate_agent_mentions(workflow_result.message, room, config)
 
     if not validation_result.all_valid:
         error_msg = "❌ Failed to schedule: The following agents are not available in this "
