@@ -174,7 +174,7 @@ def _resolve_schedule_fields(
     if request.cron_expression is not None:
         try:
             cron_schedule = _cron_schedule_from_expression(request.cron_expression)
-        except ValueError as e:
+        except (ValueError, CroniterError) as e:
             raise HTTPException(status_code=400, detail=f"Invalid cron expression: {e!s}") from e
     if cron_schedule is None:
         raise HTTPException(status_code=400, detail="cron_expression is required for cron schedules")

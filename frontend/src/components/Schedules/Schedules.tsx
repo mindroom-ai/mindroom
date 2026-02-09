@@ -664,12 +664,19 @@ export function Schedules() {
                 </div>
               </FieldGroup>
 
-              <div className="rounded-lg border border-amber-200/60 dark:border-amber-800/60 bg-amber-50/60 dark:bg-amber-900/15 p-3 text-sm text-amber-900 dark:text-amber-200">
+              <div className="rounded-lg border border-amber-200/60 dark:border-amber-800/60 bg-amber-50/60 dark:bg-amber-900/15 p-3 text-sm text-amber-900 dark:text-amber-200 space-y-2">
                 <div className="flex items-start gap-2">
                   <MessageSquare className="h-4 w-4 mt-0.5 shrink-0" />
                   <p>
-                    Deleting here cancels the scheduled task. To create new schedules, continue
-                    using Matrix commands like
+                    Changes made here update the stored schedule but take effect after the bot
+                    restarts. To cancel a running task immediately, use
+                    <span className="font-mono"> !cancel_schedule {'<id>'}</span> in Matrix.
+                  </p>
+                </div>
+                <div className="flex items-start gap-2">
+                  <CalendarClock className="h-4 w-4 mt-0.5 shrink-0" />
+                  <p>
+                    To create new schedules, use Matrix commands like
                     <span className="font-mono"> !schedule daily at 9am ...</span>.
                   </p>
                 </div>
