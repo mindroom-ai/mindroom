@@ -392,6 +392,49 @@ def _format_scheduled_time(dt: datetime, timezone_str: str) -> str:
     return f"{time_str} ({relative_str})"
 
 
+def _extract_mentioned_agents_from_text(full_text: str, config: Config) -> list[MatrixID]:
+    """Extract valid agent mentions from scheduling text."""
+    _, mentioned_user_ids, _ = parse_mentions_in_text(full_text, config.domain, config)
+    mentioned_agents: list[MatrixID] = []
+
+    for user_id in mentioned_user_ids:
+        matrix_id = MatrixID.parse(user_id)
+        if matrix_id.agent_name(config) and matrix_id not in mentioned_agents:
+            mentioned_agents.append(matrix_id)
+
+    return mentioned_agents
+
+
+async def schedule_task_from_text(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str | None,
+    scheduled_by: str,
+    full_text: str,
+    config: Config,
+    room: nio.MatrixRoom,
+    mentioned_agents: list[MatrixID] | None = None,
+) -> tuple[str | None, str]:
+    """Schedule a task from free-form text.
+
+    This is the shared entrypoint used by both `!schedule` and tool-based scheduling.
+    """
+    resolved_mentions = mentioned_agents
+    if resolved_mentions is None:
+        resolved_mentions = _extract_mentioned_agents_from_text(full_text, config)
+
+    return await schedule_task(
+        client=client,
+        room_id=room_id,
+        thread_id=thread_id,
+        scheduled_by=scheduled_by,
+        full_text=full_text,
+        config=config,
+        room=room,
+        mentioned_agents=resolved_mentions,
+    )
+
+
 async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     client: nio.AsyncClient,
     room_id: str,
