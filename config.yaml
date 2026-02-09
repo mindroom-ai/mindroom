@@ -14,7 +14,6 @@ agents:
     learning: true
     learning_mode: always
     model: sonnet
-
     role: Expert MindRoom agent builder that helps create and configure custom AI
       agents with deep knowledge of the system
     rooms:
@@ -34,7 +33,6 @@ agents:
     learning: true
     learning_mode: always
     model: sonnet
-
     role: Provide analytical insights and recommendations.
     rooms:
     - lobby
@@ -51,7 +49,6 @@ agents:
     learning: true
     learning_mode: always
     model: sonnet
-
     role: Solve mathematical problems.
     rooms:
     - lobby
@@ -73,7 +70,6 @@ agents:
     learning: true
     learning_mode: always
     model: sonnet
-
     role: Manage phone calls and SMS messages through Twilio integration.
     rooms:
     - lobby
@@ -94,7 +90,6 @@ agents:
     learning: true
     learning_mode: always
     model: opus
-
     role: Generate code, manage files, and execute shell commands.
     rooms:
     - lobby
@@ -116,7 +111,6 @@ agents:
     learning: true
     learning_mode: always
     model: sonnet
-
     role: Analyze data, create visualizations, and provide insights.
     rooms:
     - lobby
@@ -144,7 +138,6 @@ agents:
     learning: true
     learning_mode: always
     model: gpt5mini
-
     role: Manage and respond to emails efficiently using Gmail with Claude Sonnet's
       intelligence
     rooms:
@@ -167,7 +160,6 @@ agents:
     learning: true
     learning_mode: always
     model: sonnet
-
     role: Analyze financial data, stock information, and perform calculations.
     rooms:
     - lobby
@@ -188,7 +180,6 @@ agents:
     learning: true
     learning_mode: always
     model: sonnet
-
     role: A general-purpose assistant that provides helpful, conversational responses
       to users.
     rooms:
@@ -211,7 +202,6 @@ agents:
     learning: true
     learning_mode: always
     model: sonnet
-
     role: Control and monitor smart home devices through Home Assistant
     rooms:
     - lobby
@@ -232,7 +222,6 @@ agents:
     learning: true
     learning_mode: always
     model: gpt_oss_120b
-
     role: Gather and summarize news and current events.
     rooms:
     - lobby
@@ -255,7 +244,6 @@ agents:
     learning: true
     learning_mode: always
     model: gpt5mini
-
     role: Conduct research using web sources, Wikipedia, and academic papers.
     rooms:
     - lobby
@@ -277,7 +265,6 @@ agents:
     learning: true
     learning_mode: always
     model: sonnet
-
     role: Analyze security aspects and provide recommendations.
     rooms:
     - lobby
@@ -296,7 +283,6 @@ agents:
     learning: true
     learning_mode: always
     model: sonnet
-
     role: Execute shell commands and manage system operations.
     rooms:
     - lobby
@@ -307,7 +293,6 @@ agents:
     tools:
     - shell
   sleepy_paws:
-
     display_name: Sleepy Paws 🐾
     instructions:
     - Vertel altijd verhalen in het Nederlands
@@ -334,7 +319,6 @@ agents:
     learning_mode: always
     markdown: true
     model: sonnet
-
     role: Je bent Sleepy Paws, een magische verhalenverteller die zachte dierenaventuren
       creëert met de tweelingbroertjes Tom de Tijger en Leo de Leeuw. Je specialiseert
       je in verhalen voor 2-jarigen met eenvoudige Nederlandse woordenschat, herhalende
@@ -356,7 +340,6 @@ agents:
     learning: true
     learning_mode: always
     model: sonnet
-
     role: Summarize long texts and extract key information.
     rooms:
     - lobby
