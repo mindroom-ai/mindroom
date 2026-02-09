@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from agno.knowledge.document import Document
+from agno.knowledge.knowledge import Knowledge
 from agno.models.ollama import Ollama
 from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
@@ -100,9 +102,9 @@ class TestAgentBot:
         return mock_config
 
     @staticmethod
-    def create_config_with_knowledge_base(
+    def create_config_with_knowledge_bases(
         *,
-        assigned_base: str | None,
+        assigned_bases: list[str] | None,
         knowledge_bases: dict[str, KnowledgeBaseConfig] | None = None,
     ) -> Config:
         """Create a real config with one calculator agent for knowledge assignment tests."""
@@ -111,7 +113,7 @@ class TestAgentBot:
                 "calculator": AgentConfig(
                     display_name="CalculatorAgent",
                     rooms=["!test:localhost"],
-                    knowledge_base=assigned_base,
+                    knowledge_bases=assigned_bases or [],
                 ),
             },
             knowledge_bases=knowledge_bases or {},
@@ -123,8 +125,8 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Unassigned agents should not receive knowledge access."""
-        config = self.create_config_with_knowledge_base(
-            assigned_base=None,
+        config = self.create_config_with_knowledge_bases(
+            assigned_bases=[],
             knowledge_bases={
                 "research": KnowledgeBaseConfig(path=str(tmp_path / "kb"), watch=False),
             },
@@ -140,8 +142,8 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Agents should receive knowledge from their assigned knowledge base manager."""
-        config = self.create_config_with_knowledge_base(
-            assigned_base="research",
+        config = self.create_config_with_knowledge_bases(
+            assigned_bases=["research"],
             knowledge_bases={
                 "research": KnowledgeBaseConfig(path=str(tmp_path / "kb"), watch=False),
             },
@@ -153,6 +155,42 @@ class TestAgentBot:
         bot.orchestrator = MagicMock(knowledge_managers={"research": manager})
 
         assert bot._knowledge_for_agent("calculator") is expected_knowledge
+
+    def test_knowledge_for_agent_merges_multiple_assigned_bases(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Agents assigned to multiple bases should search across all assigned bases."""
+        config = self.create_config_with_knowledge_bases(
+            assigned_bases=["research", "legal"],
+            knowledge_bases={
+                "research": KnowledgeBaseConfig(path=str(tmp_path / "kb_research"), watch=False),
+                "legal": KnowledgeBaseConfig(path=str(tmp_path / "kb_legal"), watch=False),
+            },
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+
+        research_vector_db = MagicMock()
+        research_vector_db.search.return_value = [Document(content="research content")]
+        research_knowledge = Knowledge(vector_db=research_vector_db)
+
+        legal_vector_db = MagicMock()
+        legal_vector_db.search.return_value = [Document(content="legal content")]
+        legal_knowledge = Knowledge(vector_db=legal_vector_db)
+
+        research_manager = MagicMock()
+        research_manager.get_knowledge.return_value = research_knowledge
+        legal_manager = MagicMock()
+        legal_manager.get_knowledge.return_value = legal_knowledge
+
+        bot.orchestrator = MagicMock(knowledge_managers={"research": research_manager, "legal": legal_manager})
+
+        combined_knowledge = bot._knowledge_for_agent("calculator")
+        assert combined_knowledge is not None
+
+        docs = combined_knowledge.search("knowledge query")
+        assert [doc.content for doc in docs] == ["research content", "legal content"]
 
     @pytest.mark.asyncio
     @patch("mindroom.config.Config.from_yaml")

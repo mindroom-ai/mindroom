@@ -21,7 +21,7 @@ from .tools_metadata import get_tool_by_name
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agno.knowledge.knowledge import Knowledge
+    from agno.knowledge.protocol import KnowledgeProtocol
 
     from .config import AgentConfig, Config, DefaultsConfig
 
@@ -113,7 +113,7 @@ def create_agent(
     config: Config,
     *,
     storage_path: Path | None = None,
-    knowledge: Knowledge | None = None,
+    knowledge: KnowledgeProtocol | None = None,
 ) -> Agent:
     """Create an agent instance from configuration.
 
@@ -216,7 +216,7 @@ def create_agent(
 
     instructions.append(agent_prompts.INTERACTIVE_QUESTION_PROMPT)
 
-    knowledge_enabled = agent_config.knowledge_base is not None and knowledge is not None
+    knowledge_enabled = bool(agent_config.knowledge_bases) and knowledge is not None
 
     agent = Agent(
         name=agent_config.display_name,

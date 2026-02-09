@@ -34,7 +34,7 @@ export interface Agent {
   skills: string[];
   instructions: string[];
   rooms: string[];
-  knowledge_base?: string | null;
+  knowledge_bases?: string[];
   learning?: boolean; // Defaults to true when omitted
   learning_mode?: LearningMode; // Defaults to always when omitted
   model?: string; // Reference to a model in the models section

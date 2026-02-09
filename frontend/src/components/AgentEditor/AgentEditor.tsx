@@ -92,7 +92,7 @@ export function AgentEditor() {
       skills: [],
       instructions: [],
       rooms: [],
-      knowledge_base: null,
+      knowledge_bases: [],
       learning: defaultLearning,
       learning_mode: defaultLearningMode,
     },
@@ -126,13 +126,21 @@ export function AgentEditor() {
       })),
     [rooms]
   );
+  const knowledgeBaseItems: CheckboxListItem[] = useMemo(
+    () =>
+      knowledgeBaseNames.map(baseName => ({
+        value: baseName,
+        label: baseName,
+      })),
+    [knowledgeBaseNames]
+  );
 
   // Reset form when selected agent changes
   useEffect(() => {
     if (selectedAgent) {
       reset({
         ...selectedAgent,
-        knowledge_base: selectedAgent.knowledge_base ?? null,
+        knowledge_bases: selectedAgent.knowledge_bases ?? [],
         learning: selectedAgent.learning ?? defaultLearning,
         learning_mode: selectedAgent.learning_mode ?? defaultLearningMode,
       });
@@ -266,37 +274,20 @@ export function AgentEditor() {
         />
       </FieldGroup>
 
-      {/* Knowledge Base */}
+      {/* Knowledge Bases */}
       <FieldGroup
-        label="Knowledge Base"
-        helperText="Assign this agent to one knowledge base, or leave unassigned"
-        htmlFor="knowledge_base"
+        label="Knowledge Bases"
+        helperText="Assign one or more knowledge bases for this agent to search"
       >
-        <Controller
-          name="knowledge_base"
+        <CheckboxListField
+          name="knowledge_bases"
           control={control}
-          render={({ field }) => (
-            <Select
-              value={field.value || '__none__'}
-              onValueChange={value => {
-                const selectedValue = value === '__none__' ? null : value;
-                field.onChange(selectedValue);
-                handleFieldChange('knowledge_base', selectedValue);
-              }}
-            >
-              <SelectTrigger id="knowledge_base">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__none__">None</SelectItem>
-                {knowledgeBaseNames.map(baseName => (
-                  <SelectItem key={baseName} value={baseName}>
-                    {baseName}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          )}
+          items={knowledgeBaseItems}
+          fieldName="knowledge_bases"
+          onFieldChange={handleFieldChange}
+          idPrefix="knowledge-base"
+          emptyMessage="No knowledge bases available. Add one in the Knowledge tab."
+          className="space-y-2 max-h-48 overflow-y-auto border rounded-lg p-2"
         />
       </FieldGroup>
 

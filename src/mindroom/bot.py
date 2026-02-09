@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import nio
+from agno.knowledge.knowledge import Knowledge
 from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
 
 from . import config_confirmation, interactive, voice_handler
@@ -107,7 +108,7 @@ if TYPE_CHECKING:
 
     import structlog
     from agno.agent import Agent
-    from agno.knowledge.knowledge import Knowledge
+    from agno.knowledge.document import Document
     from agno.tools.function import Function
     from agno.tools.toolkit import Toolkit
 
@@ -118,6 +119,53 @@ logger = get_logger(__name__)
 
 # Constants
 SYNC_TIMEOUT_MS = 30000
+
+
+@dataclass
+class MultiKnowledgeVectorDb:
+    """Thin vector DB wrapper that queries multiple vector DBs sequentially."""
+
+    vector_dbs: list[Any]
+
+    def exists(self) -> bool:
+        """Present as already-initialized to satisfy Knowledge.__post_init__."""
+        return True
+
+    def create(self) -> None:
+        """No-op because underlying knowledge managers own DB lifecycle."""
+        return
+
+    def search(
+        self,
+        *,
+        query: str,
+        limit: int,
+        filters: dict[str, Any] | list[Any] | None = None,
+    ) -> list[Document]:
+        """Search each assigned vector database and return a merged result list."""
+        documents: list[Document] = []
+        for vector_db in self.vector_dbs:
+            results = vector_db.search(query=query, limit=limit, filters=filters)
+            documents.extend(results)
+        return documents[:limit]
+
+    async def async_search(
+        self,
+        *,
+        query: str,
+        limit: int,
+        filters: dict[str, Any] | list[Any] | None = None,
+    ) -> list[Document]:
+        """Async variant of ``search`` that uses async DB search when available."""
+        documents: list[Document] = []
+        for vector_db in self.vector_dbs:
+            async_search = getattr(vector_db, "async_search", None)
+            if callable(async_search):
+                results = await async_search(query=query, limit=limit, filters=filters)
+            else:
+                results = vector_db.search(query=query, limit=limit, filters=filters)
+            documents.extend(results)
+        return documents[:limit]
 
 
 def _create_task_wrapper(callback: object) -> object:
@@ -588,20 +636,51 @@ class AgentBot:
         return manager.get_knowledge()
 
     def _knowledge_for_agent(self, agent_name: str) -> Knowledge | None:
-        """Return shared knowledge for agents assigned to a knowledge base."""
+        """Return shared knowledge for agents assigned to one or more knowledge bases."""
         agent_config = self.config.agents.get(agent_name)
-        if agent_config is None or agent_config.knowledge_base is None:
+        if agent_config is None:
             return None
 
-        knowledge = self._get_shared_knowledge(agent_config.knowledge_base)
-        if knowledge is None:
+        base_ids = getattr(agent_config, "knowledge_bases", [])
+        if not isinstance(base_ids, list) or not base_ids:
+            return None
+
+        missing_base_ids: list[str] = []
+        knowledges: list[Knowledge] = []
+        for base_id in base_ids:
+            knowledge = self._get_shared_knowledge(base_id)
+            if knowledge is None:
+                missing_base_ids.append(base_id)
+                continue
+            knowledges.append(knowledge)
+
+        if missing_base_ids:
             self.logger.warning(
-                "Knowledge base not available for agent",
+                "Knowledge bases not available for agent",
                 agent_name=agent_name,
-                knowledge_base=agent_config.knowledge_base,
+                knowledge_bases=missing_base_ids,
+            )
+
+        if not knowledges:
+            return None
+
+        if len(knowledges) == 1:
+            return knowledges[0]
+
+        vector_dbs = [knowledge.vector_db for knowledge in knowledges if knowledge.vector_db is not None]
+        if not vector_dbs:
+            self.logger.warning(
+                "Knowledge bases are configured but vector databases are unavailable",
+                agent_name=agent_name,
+                knowledge_bases=base_ids,
             )
             return None
-        return knowledge
+
+        return Knowledge(
+            name=f"{agent_name}_multi_knowledge",
+            vector_db=MultiKnowledgeVectorDb(vector_dbs=vector_dbs),
+            max_results=max(knowledge.max_results for knowledge in knowledges),
+        )
 
     @property  # Not cached_property because Team mutates it!
     def agent(self) -> Agent:

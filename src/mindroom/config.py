@@ -36,9 +36,9 @@ class AgentConfig(BaseModel):
         description="Learning mode for Agno Learning: always (automatic) or agentic (tool-driven)",
     )
     model: str = Field(default="default", description="Model name")
-    knowledge_base: str | None = Field(
-        default=None,
-        description="Knowledge base ID assigned to this agent",
+    knowledge_bases: list[str] = Field(
+        default_factory=list,
+        description="Knowledge base IDs assigned to this agent",
     )
 
 
@@ -192,14 +192,15 @@ class Config(BaseModel):
     def validate_knowledge_base_assignments(self) -> Config:
         """Ensure agents only reference configured knowledge base IDs."""
         invalid_assignments = [
-            (agent_name, agent_config.knowledge_base)
+            (agent_name, base_id)
             for agent_name, agent_config in self.agents.items()
-            if agent_config.knowledge_base is not None and agent_config.knowledge_base not in self.knowledge_bases
+            for base_id in agent_config.knowledge_bases
+            if base_id not in self.knowledge_bases
         ]
         if invalid_assignments:
             formatted = ", ".join(
-                f"{agent_name} -> {knowledge_base}"
-                for agent_name, knowledge_base in sorted(invalid_assignments, key=lambda item: item[0])
+                f"{agent_name} -> {base_id}"
+                for agent_name, base_id in sorted(invalid_assignments, key=lambda item: (item[0], item[1]))
             )
             msg = f"Agents reference unknown knowledge bases: {formatted}"
             raise ValueError(msg)

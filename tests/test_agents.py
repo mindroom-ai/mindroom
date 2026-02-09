@@ -150,7 +150,7 @@ def test_config_rejects_unknown_agent_knowledge_base_assignment() -> None:
             agents={
                 "calculator": AgentConfig(
                     display_name="CalculatorAgent",
-                    knowledge_base="research",
+                    knowledge_bases=["research"],
                 ),
             },
             knowledge_bases={},
@@ -163,7 +163,7 @@ def test_config_accepts_valid_agent_knowledge_base_assignment() -> None:
         agents={
             "calculator": AgentConfig(
                 display_name="CalculatorAgent",
-                knowledge_base="research",
+                knowledge_bases=["research"],
             ),
         },
         knowledge_bases={
@@ -174,4 +174,4 @@ def test_config_accepts_valid_agent_knowledge_base_assignment() -> None:
         },
     )
 
-    assert config.agents["calculator"].knowledge_base == "research"
+    assert config.agents["calculator"].knowledge_bases == ["research"]
