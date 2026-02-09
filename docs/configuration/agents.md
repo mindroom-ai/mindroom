@@ -61,8 +61,8 @@ agents:
     # Learning mode: always (automatic) or agentic (tool-driven)
     learning_mode: always
 
-    # Assign agent to a configured knowledge base (optional)
-    knowledge_base: docs
+    # Assign agent to one or more configured knowledge bases (optional)
+    knowledge_bases: [docs]
 ```
 
 ## Configuration Options
@@ -79,9 +79,9 @@ agents:
 | `markdown` | bool | `true` | When enabled, the agent is instructed to format responses as Markdown |
 | `learning` | bool | `true` | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time |
 | `learning_mode` | string | `"always"` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call |
-| `knowledge_base` | string or null | `null` | Knowledge base ID from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents |
+| `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents |
 
-If `knowledge_base` is set, it must match a key under `knowledge_bases` in `config.yaml`.
+Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
 
 All per-agent settings above that show a default value inherit from the `defaults` section. Per-agent values override them.
 

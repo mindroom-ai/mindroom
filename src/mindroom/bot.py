@@ -641,13 +641,12 @@ class AgentBot:
         if agent_config is None:
             return None
 
-        base_ids = getattr(agent_config, "knowledge_bases", [])
-        if not isinstance(base_ids, list) or not base_ids:
+        if not agent_config.knowledge_bases:
             return None
 
         missing_base_ids: list[str] = []
         knowledges: list[Knowledge] = []
-        for base_id in base_ids:
+        for base_id in agent_config.knowledge_bases:
             knowledge = self._get_shared_knowledge(base_id)
             if knowledge is None:
                 missing_base_ids.append(base_id)
@@ -672,7 +671,7 @@ class AgentBot:
             self.logger.warning(
                 "Knowledge bases are configured but vector databases are unavailable",
                 agent_name=agent_name,
-                knowledge_bases=base_ids,
+                knowledge_bases=agent_config.knowledge_bases,
             )
             return None
 

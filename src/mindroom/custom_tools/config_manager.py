@@ -125,6 +125,7 @@ class ConfigManagerTools(Toolkit):
         instructions: list[str] | None = None,
         model: str | None = None,
         rooms: list[str] | None = None,
+        knowledge_bases: list[str] | None = None,
         markdown: bool | None = None,
         learning: bool | None = None,
         learning_mode: AgentLearningMode | None = None,
@@ -140,6 +141,7 @@ class ConfigManagerTools(Toolkit):
             instructions: List of instructions for the agent
             model: Model to use (default: "default")
             rooms: List of room IDs or names to auto-join
+            knowledge_bases: List of knowledge base IDs to assign to this agent
             markdown: Whether to use markdown formatting
             learning: Whether to enable Agno Learning for this agent
             learning_mode: Learning mode for Agno Learning ("always" or "agentic")
@@ -161,6 +163,7 @@ class ConfigManagerTools(Toolkit):
                 instructions=instructions or [],
                 model=model or "default",
                 rooms=rooms or [],
+                knowledge_bases=knowledge_bases or [],
                 markdown=markdown,
                 learning=learning,
                 learning_mode=learning_mode,
@@ -174,6 +177,7 @@ class ConfigManagerTools(Toolkit):
                 instructions=instructions,
                 model=model,
                 rooms=rooms,
+                knowledge_bases=knowledge_bases,
                 markdown=markdown,
                 learning=learning,
                 learning_mode=learning_mode,
@@ -448,6 +452,7 @@ class ConfigManagerTools(Toolkit):
         instructions: list[str],
         model: str,
         rooms: list[str],
+        knowledge_bases: list[str],
         markdown: bool | None,
         learning: bool | None,
         learning_mode: AgentLearningMode | None,
@@ -476,6 +481,7 @@ class ConfigManagerTools(Toolkit):
                 instructions=instructions,
                 model=model,
                 rooms=rooms,
+                knowledge_bases=knowledge_bases,
                 markdown=markdown,
                 learning=learning,
                 learning_mode=learning_mode,
@@ -513,6 +519,7 @@ class ConfigManagerTools(Toolkit):
         instructions: list[str] | None,
         model: str | None,
         rooms: list[str] | None,
+        knowledge_bases: list[str] | None,
         markdown: bool | None,
         learning: bool | None,
         learning_mode: AgentLearningMode | None,
@@ -540,6 +547,7 @@ class ConfigManagerTools(Toolkit):
                 "instructions": (instructions, lambda v: f"{len(v)} instructions" if v else "(empty)"),
                 "model": (model, lambda v: v),
                 "rooms": (rooms, lambda v: ", ".join(v) if v else "(empty)"),
+                "knowledge_bases": (knowledge_bases, lambda v: ", ".join(v) if v else "(empty)"),
                 "markdown": (markdown, lambda v: str(v)),
                 "learning": (learning, lambda v: str(v)),
                 "learning_mode": (learning_mode, lambda v: str(v)),
