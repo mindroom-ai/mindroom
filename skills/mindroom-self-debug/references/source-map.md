@@ -36,6 +36,7 @@ Table of contents for all Python source files in `src/mindroom/`.
 | `src/mindroom/custom_tools/google_sheets.py` | Custom Google Sheets Tools wrapper for MindRoom. |
 | `src/mindroom/custom_tools/homeassistant.py` | Home Assistant tools for MindRoom agents. |
 | `src/mindroom/custom_tools/memory.py` | Explicit memory tools for MindRoom agents. |
+| `src/mindroom/custom_tools/scheduler.py` | Scheduler tool that reuses the same backend as `!schedule`. |
 | `src/mindroom/error_handling.py` | Simple error handling for MindRoom agents. |
 | `src/mindroom/file_watcher.py` | Simple file watcher utility without external dependencies. |
 | `src/mindroom/interactive.py` | Interactive Q&A system using Matrix reactions as clickable buttons. |
@@ -62,6 +63,7 @@ Table of contents for all Python source files in `src/mindroom/`.
 | `src/mindroom/room_cleanup.py` | Room cleanup utilities for removing stale bot memberships from Matrix rooms. |
 | `src/mindroom/routing.py` | Simple AI routing for multi-agent threads. |
 | `src/mindroom/scheduling.py` | Scheduled task management with AI-powered workflow scheduling. |
+| `src/mindroom/scheduling_context.py` | Runtime context for the scheduler tool. |
 | `src/mindroom/skills.py` | Skill integration built on Agno skills with OpenClaw-compatible metadata. |
 | `src/mindroom/stop.py` | Minimal stop button functionality for the bot. |
 | `src/mindroom/streaming.py` | Streaming response implementation for real-time message updates. |
@@ -143,6 +145,7 @@ Table of contents for all Python source files in `src/mindroom/`.
 | `src/mindroom/tools/redshift.py` | Amazon Redshift tool configuration. |
 | `src/mindroom/tools/replicate.py` | Replicate tool configuration. |
 | `src/mindroom/tools/resend.py` | Resend email tool configuration. |
+| `src/mindroom/tools/scheduler.py` | Scheduler tool configuration. |
 | `src/mindroom/tools/scrapegraph.py` | ScrapeGraph tool configuration. |
 | `src/mindroom/tools/searxng.py` | Searxng tool configuration. |
 | `src/mindroom/tools/serpapi.py` | SerpApi tool configuration. |
@@ -177,4 +180,4 @@ Table of contents for all Python source files in `src/mindroom/`.
 | `src/mindroom/topic_generator.py` | Generate contextual topics for Matrix rooms using AI. |
 | `src/mindroom/voice_handler.py` | Voice message handler with speech-to-text and intelligent command recognition. |
 
-**Total: 172 files**
+**Total: 175 files**
