@@ -668,9 +668,10 @@ export function Schedules() {
                 <div className="flex items-start gap-2">
                   <MessageSquare className="h-4 w-4 mt-0.5 shrink-0" />
                   <p>
-                    Changes made here update the stored schedule but take effect after the bot
-                    restarts. To cancel a running task immediately, use
-                    <span className="font-mono"> !cancel_schedule {'<id>'}</span> in Matrix.
+                    Editing or cancelling here updates running schedules automatically (usually
+                    within 30 seconds). You can also manage schedules in Matrix with
+                    <span className="font-mono"> !list_schedules</span> and
+                    <span className="font-mono"> !cancel_schedule {'<id>'}</span>.
                   </p>
                 </div>
                 <div className="flex items-start gap-2">

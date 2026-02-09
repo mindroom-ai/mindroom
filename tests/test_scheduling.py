@@ -3,17 +3,37 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
 
 from mindroom.scheduling import (
+    CronSchedule,
+    ScheduledTaskRecord,
     ScheduledWorkflow,
     cancel_all_scheduled_tasks,
     get_scheduled_tasks_for_room,
     list_scheduled_tasks,
+    run_cron_task,
+    run_once_task,
 )
+
+
+def _record(
+    task_id: str,
+    workflow: ScheduledWorkflow,
+    *,
+    status: str = "pending",
+    room_id: str = "!test:server",
+) -> ScheduledTaskRecord:
+    return ScheduledTaskRecord(
+        task_id=task_id,
+        room_id=room_id,
+        status=status,
+        created_at=datetime.now(UTC),
+        workflow=workflow,
+    )
 
 
 @pytest.mark.asyncio
@@ -265,6 +285,144 @@ async def test_list_scheduled_tasks_invalid_task_data() -> None:
     assert "Valid task" in result
     assert "task1" not in result  # Missing execute_at
     assert "task2" not in result  # Invalid date format
+
+
+@pytest.mark.asyncio
+async def test_run_once_task_stops_when_cancelled_via_matrix_state() -> None:
+    """One-time tasks should stop without executing once state is cancelled."""
+    client = AsyncMock()
+    config = AsyncMock()
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=10),
+        message="Original message",
+        description="Original description",
+        room_id="!test:server",
+        thread_id="$thread123",
+    )
+
+    pending_record = _record("task_once_cancelled", workflow, status="pending")
+    cancelled_record = _record("task_once_cancelled", workflow, status="cancelled")
+    fetch_count = 0
+
+    async def _fetch_task(*_args: object, **_kwargs: object) -> ScheduledTaskRecord:
+        nonlocal fetch_count
+        fetch_count += 1
+        return pending_record if fetch_count == 1 else cancelled_record
+
+    with (
+        patch("mindroom.scheduling.get_scheduled_task", side_effect=_fetch_task),
+        patch("mindroom.scheduling.execute_scheduled_workflow", new=AsyncMock()) as execute_mock,
+        patch("mindroom.scheduling.asyncio.sleep", new=AsyncMock()),
+    ):
+        await run_once_task(client, "task_once_cancelled", workflow, config)
+
+    execute_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_once_task_executes_latest_state_workflow() -> None:
+    """One-time tasks should execute using the latest persisted workflow data."""
+    client = AsyncMock()
+    config = AsyncMock()
+    initial_workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) - timedelta(seconds=1),
+        message="Old message",
+        description="Old description",
+        room_id="!test:server",
+        thread_id="$thread123",
+    )
+    updated_workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) - timedelta(seconds=1),
+        message="Updated message",
+        description="Updated description",
+        room_id="!test:server",
+        thread_id="$thread123",
+    )
+
+    async def _fetch_task(*_args: object, **_kwargs: object) -> ScheduledTaskRecord:
+        return _record("task_once_updated", updated_workflow, status="pending")
+
+    with (
+        patch("mindroom.scheduling.get_scheduled_task", side_effect=_fetch_task),
+        patch("mindroom.scheduling.execute_scheduled_workflow", new=AsyncMock()) as execute_mock,
+    ):
+        await run_once_task(client, "task_once_updated", initial_workflow, config)
+
+    execute_mock.assert_awaited_once()
+    executed_workflow = execute_mock.await_args.args[1]
+    assert executed_workflow.message == "Updated message"
+    assert executed_workflow.description == "Updated description"
+
+
+@pytest.mark.asyncio
+async def test_run_cron_task_executes_latest_state_workflow() -> None:
+    """Recurring tasks should execute using the latest persisted workflow data."""
+    client = AsyncMock()
+    config = AsyncMock()
+    initial_workflow = ScheduledWorkflow(
+        schedule_type="cron",
+        cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
+        message="Old recurring message",
+        description="Old recurring description",
+        room_id="!test:server",
+        thread_id="$thread123",
+    )
+    updated_workflow = ScheduledWorkflow(
+        schedule_type="cron",
+        cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
+        message="Updated recurring message",
+        description="Updated recurring description",
+        room_id="!test:server",
+        thread_id="$thread123",
+    )
+
+    class _ImmediateCron:
+        def get_next(self, _type: object) -> datetime:
+            return datetime.now(UTC) - timedelta(seconds=1)
+
+    async def _fetch_task(*_args: object, **_kwargs: object) -> ScheduledTaskRecord:
+        return _record("task_cron_updated", updated_workflow, status="pending")
+
+    with (
+        patch("mindroom.scheduling.get_scheduled_task", side_effect=_fetch_task),
+        patch("mindroom.scheduling.execute_scheduled_workflow", new=AsyncMock()) as execute_mock,
+        patch("mindroom.scheduling.croniter", return_value=_ImmediateCron()),
+    ):
+        await run_cron_task(client, "task_cron_updated", initial_workflow, {}, config)
+
+    execute_mock.assert_awaited_once()
+    executed_workflow = execute_mock.await_args.args[1]
+    assert executed_workflow.message == "Updated recurring message"
+    assert executed_workflow.description == "Updated recurring description"
+
+
+@pytest.mark.asyncio
+async def test_run_cron_task_stops_when_cancelled_via_matrix_state() -> None:
+    """Recurring tasks should stop without executing once state is cancelled."""
+    client = AsyncMock()
+    config = AsyncMock()
+    workflow = ScheduledWorkflow(
+        schedule_type="cron",
+        cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
+        message="Recurring message",
+        description="Recurring description",
+        room_id="!test:server",
+        thread_id="$thread123",
+    )
+
+    async def _fetch_task(*_args: object, **_kwargs: object) -> ScheduledTaskRecord:
+        return _record("task_cron_cancelled", workflow, status="cancelled")
+
+    with (
+        patch("mindroom.scheduling.get_scheduled_task", side_effect=_fetch_task),
+        patch("mindroom.scheduling.execute_scheduled_workflow", new=AsyncMock()) as execute_mock,
+    ):
+        await run_cron_task(client, "task_cron_cancelled", workflow, {}, config)
+
+    execute_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio

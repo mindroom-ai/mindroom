@@ -40,6 +40,9 @@ SCHEDULED_TASK_EVENT_TYPE = "com.mindroom.scheduled.task"
 # Maximum length for message preview in task listings
 MESSAGE_PREVIEW_LENGTH = 50
 
+# How often running tasks should re-check persisted Matrix state for edits/cancellations.
+TASK_STATE_POLL_INTERVAL_SECONDS = 30
+
 # Global task storage for running asyncio tasks
 _running_tasks: dict[str, asyncio.Task] = {}
 
@@ -217,6 +220,31 @@ def cancel_running_task(task_id: str) -> None:
         del _running_tasks[task_id]
 
 
+def _workflows_differ(left: ScheduledWorkflow, right: ScheduledWorkflow) -> bool:
+    """Return whether two workflows differ in persisted state."""
+    return left.model_dump(mode="json") != right.model_dump(mode="json")
+
+
+def _restart_task_runner_if_current(
+    client: nio.AsyncClient,
+    task_id: str,
+    workflow: ScheduledWorkflow,
+    config: Config,
+    running_tasks: dict[str, asyncio.Task],
+) -> None:
+    """Restart a task runner only when this coroutine still owns the task slot."""
+    current_task = asyncio.current_task()
+    if current_task and running_tasks.get(task_id) is current_task:
+        _start_scheduled_task(client, task_id, workflow, config)
+
+
+def _cleanup_task_if_current(task_id: str, running_tasks: dict[str, asyncio.Task]) -> None:
+    """Remove task tracking if this coroutine still owns the task slot."""
+    current_task = asyncio.current_task()
+    if current_task and running_tasks.get(task_id) is current_task:
+        del running_tasks[task_id]
+
+
 def _parse_task_records_from_state(
     room_id: str,
     state_response: nio.RoomGetStateResponse,
@@ -273,6 +301,21 @@ async def get_scheduled_task(
     if not isinstance(response.content, dict):
         return None
     return parse_scheduled_task_record(room_id, task_id, response.content)
+
+
+async def _get_pending_task_record(
+    client: nio.AsyncClient,
+    room_id: str | None,
+    task_id: str,
+) -> ScheduledTaskRecord | None:
+    """Return the latest pending task state for a task id, if it still exists."""
+    if not room_id:
+        return None
+
+    task_record = await get_scheduled_task(client=client, room_id=room_id, task_id=task_id)
+    if not task_record or task_record.status != "pending":
+        return None
+    return task_record
 
 
 async def save_scheduled_task(
@@ -436,7 +479,7 @@ async def execute_scheduled_workflow(
             await send_message(client, workflow.room_id, error_content)
 
 
-async def run_cron_task(
+async def run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     client: nio.AsyncClient,
     task_id: str,
     workflow: ScheduledWorkflow,
@@ -444,28 +487,94 @@ async def run_cron_task(
     config: Config,
 ) -> None:
     """Run a recurring task based on cron schedule."""
-    if not workflow.cron_schedule:
-        logger.error("No cron schedule provided for recurring task")
+    if not workflow.room_id:
+        logger.error("No room_id provided for recurring task", task_id=task_id)
         return
 
-    cron_string = workflow.cron_schedule.to_cron_string()
-
     try:
-        cron = croniter(cron_string, datetime.now(UTC))
         while True:
-            next_run = cron.get_next(datetime)
-            delay = (next_run - datetime.now(UTC)).total_seconds()
-            if delay > 0:
-                logger.info(
-                    f"Waiting {delay:.0f} seconds until next execution",
+            latest_task = await _get_pending_task_record(client=client, room_id=workflow.room_id, task_id=task_id)
+            if not latest_task:
+                logger.info("Recurring task is no longer pending, stopping", task_id=task_id)
+                return
+
+            latest_workflow = latest_task.workflow
+            if latest_workflow.schedule_type == "once":
+                logger.info("Recurring task switched to one-time schedule, restarting", task_id=task_id)
+                _restart_task_runner_if_current(client, task_id, latest_workflow, config, running_tasks)
+                return
+
+            if not latest_workflow.cron_schedule:
+                logger.error("No cron schedule provided for recurring task", task_id=task_id)
+                return
+
+            workflow = latest_workflow
+            cron_schedule = workflow.cron_schedule
+            if not cron_schedule:
+                logger.error("No cron schedule provided for recurring task", task_id=task_id)
+                return
+            cron_string = cron_schedule.to_cron_string()
+            next_run = croniter(cron_string, datetime.now(UTC)).get_next(datetime)
+            workflow_changed = False
+
+            while True:
+                delay = (next_run - datetime.now(UTC)).total_seconds()
+                if delay <= 0:
+                    break
+                await asyncio.sleep(min(delay, TASK_STATE_POLL_INTERVAL_SECONDS))
+
+                refreshed_task = await _get_pending_task_record(
+                    client=client,
+                    room_id=workflow.room_id,
                     task_id=task_id,
-                    next_run=next_run.isoformat(),
                 )
-                await asyncio.sleep(delay)
+                if not refreshed_task:
+                    logger.info("Recurring task cancelled while waiting, stopping", task_id=task_id)
+                    return
+
+                refreshed_workflow = refreshed_task.workflow
+                if refreshed_workflow.schedule_type == "once":
+                    logger.info("Recurring task switched to one-time schedule, restarting", task_id=task_id)
+                    _restart_task_runner_if_current(client, task_id, refreshed_workflow, config, running_tasks)
+                    return
+
+                if not refreshed_workflow.cron_schedule:
+                    logger.error("No cron schedule provided for recurring task", task_id=task_id)
+                    return
+
+                if _workflows_differ(workflow, refreshed_workflow):
+                    workflow = refreshed_workflow
+                    workflow_changed = True
+                    break
+
+            if workflow_changed:
+                continue
+
+            latest_before_execute = await _get_pending_task_record(
+                client=client,
+                room_id=workflow.room_id,
+                task_id=task_id,
+            )
+            if not latest_before_execute:
+                logger.info("Recurring task cancelled before execution, stopping", task_id=task_id)
+                return
+
+            latest_workflow = latest_before_execute.workflow
+            if latest_workflow.schedule_type == "once":
+                logger.info("Recurring task switched to one-time schedule, restarting", task_id=task_id)
+                _restart_task_runner_if_current(client, task_id, latest_workflow, config, running_tasks)
+                return
+            if not latest_workflow.cron_schedule:
+                logger.error("No cron schedule provided for recurring task", task_id=task_id)
+                return
+            if _workflows_differ(workflow, latest_workflow):
+                workflow = latest_workflow
+                continue
+
             await execute_scheduled_workflow(client, workflow, config)
             if task_id not in running_tasks:
                 logger.info(f"Task {task_id} no longer in running tasks, stopping")
-                break
+                return
     except asyncio.CancelledError:
         logger.info(f"Cron task {task_id} was cancelled")
         raise
@@ -479,29 +588,67 @@ async def run_cron_task(
                 latest_thread_event_id=workflow.thread_id,
             )
             await send_message(client, workflow.room_id, error_content)
+    finally:
+        _cleanup_task_if_current(task_id, running_tasks)
 
 
-async def run_once_task(
+async def run_once_task(  # noqa: C901, PLR0911, PLR0912
     client: nio.AsyncClient,
     task_id: str,
     workflow: ScheduledWorkflow,
     config: Config,
 ) -> None:
     """Run a one-time scheduled task."""
-    if not workflow.execute_at:
-        logger.error("No execution time provided for one-time task")
+    if not workflow.room_id:
+        logger.error("No room_id provided for one-time task", task_id=task_id)
         return
 
     try:
-        delay = (workflow.execute_at - datetime.now(UTC)).total_seconds()
-        if delay > 0:
-            logger.info(
-                f"Waiting {delay:.0f} seconds until execution",
-                task_id=task_id,
-                execute_at=workflow.execute_at.isoformat(),
-            )
-            await asyncio.sleep(delay)
-        await execute_scheduled_workflow(client, workflow, config)
+        while True:
+            latest_task = await _get_pending_task_record(client=client, room_id=workflow.room_id, task_id=task_id)
+            if not latest_task:
+                logger.info("One-time task is no longer pending, stopping", task_id=task_id)
+                return
+
+            latest_workflow = latest_task.workflow
+            if latest_workflow.schedule_type == "cron":
+                logger.info("One-time task switched to recurring schedule, restarting", task_id=task_id)
+                _restart_task_runner_if_current(client, task_id, latest_workflow, config, _running_tasks)
+                return
+
+            if not latest_workflow.execute_at:
+                logger.error("No execution time provided for one-time task", task_id=task_id)
+                return
+
+            workflow = latest_workflow
+            execute_at = workflow.execute_at
+            if not execute_at:
+                logger.error("No execution time provided for one-time task", task_id=task_id)
+                return
+            delay = (execute_at - datetime.now(UTC)).total_seconds()
+            if delay <= 0:
+                break
+            await asyncio.sleep(min(delay, TASK_STATE_POLL_INTERVAL_SECONDS))
+
+        latest_before_execute = await _get_pending_task_record(
+            client=client,
+            room_id=workflow.room_id,
+            task_id=task_id,
+        )
+        if not latest_before_execute:
+            logger.info("One-time task was cancelled before execution, stopping", task_id=task_id)
+            return
+
+        latest_workflow = latest_before_execute.workflow
+        if latest_workflow.schedule_type == "cron":
+            logger.info("One-time task switched to recurring schedule, restarting", task_id=task_id)
+            _restart_task_runner_if_current(client, task_id, latest_workflow, config, _running_tasks)
+            return
+        if not latest_workflow.execute_at:
+            logger.error("No execution time provided for one-time task", task_id=task_id)
+            return
+
+        await execute_scheduled_workflow(client, latest_workflow, config)
     except asyncio.CancelledError:
         logger.info(f"One-time task {task_id} was cancelled")
         raise
@@ -515,6 +662,8 @@ async def run_once_task(
                 latest_thread_event_id=workflow.thread_id,
             )
             await send_message(client, workflow.room_id, error_content)
+    finally:
+        _cleanup_task_if_current(task_id, _running_tasks)
 
 
 async def _validate_agent_mentions(
