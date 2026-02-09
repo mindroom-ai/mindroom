@@ -379,6 +379,106 @@ When the user describes a problem, match it to the closest category below and wa
 
 ---
 
+## 10. Routing Not Selecting the Right Agent
+
+### Symptoms
+- Messages are handled by the wrong agent
+- Router always picks the same agent regardless of topic
+- Agent is available but never gets selected
+
+### Likely Causes
+
+**A. Vague or empty agent role**
+- The router uses `routing.py:suggest_agent_for_message()` which sends agent descriptions to the router model. Agent descriptions are built from: agent name, role, tools list, and first instruction.
+- Check: Look at the agent's `role` in `config.yaml` — if it is empty or generic, the router cannot distinguish it from other agents.
+- Fix: Give the agent a specific, descriptive role that clearly states its expertise.
+
+**B. Router model too weak**
+- A very small model may not route accurately.
+- Check: Look at `router.model` in `config.yaml` and the corresponding model definition.
+- Fix: Use a capable but fast model (e.g., a small Claude or GPT model). The router only decides which agent answers — it does not generate full responses.
+
+**C. Thread context overriding routing**
+- In threads, the router includes the last 3 messages as context. If the conversation topic shifted, the router may still pick the original agent.
+- Check: This is expected behavior — threads tend to stick with the agent that started them.
+- Fix: Start a new thread for a different topic, or explicitly @-mention the desired agent.
+
+### Diagnostic Steps
+1. Check the agent's `role` — is it specific enough to differentiate from other agents?
+2. Check `router.model` — is the model capable of nuanced routing?
+3. In single-agent rooms, routing is skipped entirely. Verify the room has multiple agents if routing is expected.
+
+---
+
+## 11. Team Responses Not Working
+
+### Symptoms
+- Multiple agents mentioned but only one responds
+- Team mode not activating
+- Team response is incomplete or missing agent contributions
+
+### Likely Causes
+
+**A. Team not configured**
+- Teams must be defined under `teams:` in `config.yaml` with `display_name`, `role`, `agents` list, and `mode`.
+- Check: Verify a team entry exists and lists the correct agent names.
+- Fix: Add a team configuration, or @-mention agents individually.
+
+**B. Team member not found**
+- An agent listed in `teams.<name>.agents` does not exist in `agents:`.
+- Check: Cross-reference the team's `agents` list with the top-level `agents:` keys.
+- Fix: Correct the agent name or add the missing agent.
+
+**C. Team model invalid**
+- The team's `model` references a name not defined in `models:`.
+- Check: Look at the team's `model` field.
+- Fix: Set it to a valid model name.
+
+**D. Team formation not triggering**
+- Team formation (`teams.py:decide_team_formation()`) triggers when: multiple agents are @-mentioned, multiple agents participated in thread history, or a DM room has multiple agents.
+- Check: Verify the conditions for team activation are met.
+- Fix: Explicitly @-mention multiple agents, or ensure the team is assigned to the room.
+
+### Diagnostic Steps
+1. Check `teams:` section in `config.yaml` for the team definition.
+2. Verify all team member names exist in `agents:`.
+3. Check team `model` references a valid model.
+4. Look for team-related errors in logs.
+
+---
+
+## 12. Streaming Issues
+
+### Symptoms
+- Messages appear incomplete or stuck with ` ⋯` (midline ellipsis)
+- Response never finishes
+- Partial response appears then stops
+
+### Likely Causes
+
+**A. Model does not support streaming**
+- Some model providers or specific models may not support streaming.
+- Check: Look for streaming-related errors in logs.
+- Fix: Try disabling streaming with `MINDROOM_ENABLE_STREAMING=false` env var, or switch to a model that supports streaming.
+
+**B. Response cancelled by stop manager**
+- The stop manager (`stop.py`) can cancel in-flight responses if a user sends a new message or clicks the stop button.
+- Check: Look for stop/cancel events in logs around the time the response froze.
+- Fix: This is expected behavior. Wait for the response to complete before sending follow-up messages.
+
+**C. Network interruption**
+- Connection to the model API dropped mid-stream.
+- Check: Look for connection errors or timeouts in logs during the streaming period.
+- Fix: Check network stability. For local models, ensure the inference server is not overloaded.
+
+### Diagnostic Steps
+1. Check if streaming is enabled: `MINDROOM_ENABLE_STREAMING` env var (default: `true`).
+2. Look for streaming errors in logs around the time of the issue.
+3. Try reproducing with a different model to isolate whether it's model-specific.
+4. Check if the ` ⋯` marker persists — if so, the stream likely errored before completion.
+
+---
+
 ## Quick Reference: Environment Variables
 
 | Variable | Purpose | Default |

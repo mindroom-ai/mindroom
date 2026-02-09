@@ -21,8 +21,6 @@ agents:
     - dev
     - help
     skills:
-    - mindroom-setup-wizard
-    - mindroom-config-review
     - mindroom-docs
     tools:
     - config_manager
@@ -191,7 +189,6 @@ agents:
     - help
     skills:
     - mindroom-troubleshoot
-    - mindroom-self-debug
     tools: []
   home:
     display_name: HomeAssistant

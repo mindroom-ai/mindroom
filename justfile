@@ -271,7 +271,6 @@ doc-serve:
 doc-update:
     uv run python docs/run_markdown_code_runner.py
 
-# Regenerate skill reference files (docs refs + source-map)
+# Regenerate skill reference files (mindroom-docs)
 generate-skill-refs:
     uv run python .github/scripts/generate_skill_references.py
-    uv run python scripts/generate_source_index.py
