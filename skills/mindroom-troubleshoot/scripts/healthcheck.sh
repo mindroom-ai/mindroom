@@ -180,6 +180,17 @@ if command -v curl >/dev/null 2>&1; then
     fi
 fi
 
+# Check OPENAI_BASE_URL (local OpenAI-compatible servers like vLLM, llama.cpp)
+if [ -n "${OPENAI_BASE_URL:-}" ] && command -v curl >/dev/null 2>&1; then
+    LOCAL_CODE=$(http_status "${OPENAI_BASE_URL}/models")
+    if [ "$LOCAL_CODE" = "200" ]; then
+        pass "OpenAI-compatible server reachable at $OPENAI_BASE_URL"
+        HAS_PROVIDER=true
+    else
+        warn "OpenAI-compatible server not reachable at $OPENAI_BASE_URL (HTTP $LOCAL_CODE)"
+    fi
+fi
+
 if [ "$HAS_PROVIDER" = false ]; then
     fail "No provider API keys or local model servers found (set at least one: OPENAI_API_KEY, ANTHROPIC_API_KEY, etc., or run Ollama)"
 fi
@@ -202,7 +213,7 @@ if [ -n "$PYTHON_CMD" ]; then
     PY_MAJOR=$(echo "$PY_VERSION" | cut -d. -f1)
     PY_MINOR=$(echo "$PY_VERSION" | cut -d. -f2)
 
-    if [ "$PY_MAJOR" -ge 3 ] && [ "$PY_MINOR" -ge 12 ]; then
+    if [ "$PY_MAJOR" -gt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -ge 12 ]; }; then
         pass "Python $PY_VERSION (>= 3.12 required)"
     else
         fail "Python $PY_VERSION found but >= 3.12 is required"
