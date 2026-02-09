@@ -377,7 +377,7 @@ curl -s http://localhost:8765/api/health
 ```
 
 ### Check rooms were created
-If using Matty CLI (available as a dev dependency via `uv sync --all-extras`, or `pip install mindroom[dev]`):
+If using Matty CLI (available as a dev dependency via `uv sync --group dev`, or install directly with `pip install matty`):
 ```bash
 matty rooms
 ```
