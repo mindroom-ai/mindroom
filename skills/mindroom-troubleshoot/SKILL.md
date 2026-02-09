@@ -70,7 +70,7 @@ When the user describes a problem, match it to the closest category below and wa
 
 **A. Homeserver unreachable**
 - The homeserver URL in `MATRIX_HOMESERVER` env var is wrong or the server is down.
-- Check: `curl -s $MATRIX_HOMESERVER/_matrix/client/versions` -- should return JSON with supported versions.
+- Check: `curl -s $MATRIX_HOMESERVER/_matrix/client/versions` -- should return JSON with supported versions. If `MATRIX_SSL_VERIFY=false`, add `-k`: `curl -sk $MATRIX_HOMESERVER/_matrix/client/versions`.
 - Fix: Correct the URL. For local dev: `http://localhost:8008`. For production: use the actual homeserver URL.
 
 **B. SSL verification failure**
@@ -94,7 +94,7 @@ When the user describes a problem, match it to the closest category below and wa
 - Fix: `rm -f mindroom_data/matrix_state.yaml` and restart.
 
 ### Diagnostic Steps
-1. Test homeserver: `curl -s $MATRIX_HOMESERVER/_matrix/client/versions`
+1. Test homeserver: `curl -s $MATRIX_HOMESERVER/_matrix/client/versions` (add `-k` if `MATRIX_SSL_VERIFY=false`)
 2. Check env vars: `echo $MATRIX_HOMESERVER` -- should be set correctly.
 3. Test login manually: use `matty rooms` to see if the client can authenticate.
 4. Check `mindroom_data/matrix_state.yaml` for stale entries.
@@ -367,7 +367,7 @@ When the user describes a problem, match it to the closest category below and wa
 
 **F. Network isolation**
 - Container cannot reach the Matrix homeserver or model API.
-- Check: From inside the container: `curl -s $MATRIX_HOMESERVER/_matrix/client/versions`.
+- Check: From inside the container: `curl -s $MATRIX_HOMESERVER/_matrix/client/versions` (add `-k` if `MATRIX_SSL_VERIFY=false`).
 - Fix: Ensure proper Docker networking. Use `host.docker.internal` for host services on Docker Desktop, or use Docker network aliases.
 
 ### Diagnostic Steps
@@ -403,7 +403,7 @@ When the user describes a problem, match it to the closest category below and wa
 | Path | Purpose |
 |---|---|
 | `config.yaml` | Main configuration file (agents, models, rooms, teams) |
-| `mindroom_data/matrix_state.yaml` | Agent accounts (username/password) and room metadata (ID, alias, name) |
+| `mindroom_data/matrix_state.yaml` | Agent accounts (username/password) and room metadata (ID, alias, name, created_at) |
 | `mindroom_data/tracking/` | Per-agent response tracking (prevents duplicate replies) |
 | `mindroom_data/memory/` | Mem0 vector store for agent/room/team memories |
 | `mindroom_data/credentials/` | API keys set via dashboard |

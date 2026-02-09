@@ -66,7 +66,7 @@ Each entry under `agents:` is an `AgentConfig` with fields:
 - `rooms` (list of strings, default `[]`) -- room names/IDs the agent auto-joins
 - `markdown` (bool or null, default `null`) -- overrides `defaults.markdown`
 - `learning` (bool or null, default `null`) -- overrides `defaults.learning`
-- `learning_mode` (string or null, default `null`) -- must be `"always"` or `"agentic"` if set
+- `learning_mode` (`Literal["always", "agentic"]` or null, default `null`) -- Pydantic enforces valid values
 - `model` (string, default `"default"`) -- must reference a key in `models`
 - `knowledge_base` (string or null, default `null`) -- must reference a key in `knowledge_bases`
 
@@ -79,7 +79,7 @@ Each entry under `agents:` is an `AgentConfig` with fields:
 - **Schema Error**: `learning_mode` is set to a value other than `"always"` or `"agentic"` (this is a `Literal["always", "agentic"]` type — Pydantic will reject invalid values at load time).
 - **Warning**: `role` is empty -- the agent has no description, which hurts routing quality. The router uses agent roles to decide which agent should handle a message.
 - **Warning**: `rooms` is empty -- the agent will not appear in any room and will be unreachable.
-- **Warning**: `tools` contains a name not recognized in the tool registry. To verify valid tool names, check `src/mindroom/tools/` for the registered `name=` values in each tool's `@register_tool_with_metadata` decorator, or query `TOOL_REGISTRY` from `src/mindroom/tools_metadata.py` at runtime.
+- **Warning**: `tools` contains a name not recognized in the tool registry. To verify valid tool names, check `src/mindroom/tools/` for the registered `name=` values in each tool's `@register_tool_with_metadata` decorator, or call `ensure_tool_registry_loaded()` and then query `TOOL_REGISTRY` from `src/mindroom/tools_metadata.py` at runtime (note: plugin tools are loaded lazily via `load_plugins()`).
 - **Warning**: Agent name contains uppercase or special characters. Agent names become Matrix usernames (`mindroom_<name>`) and should be lowercase alphanumeric with underscores.
 - **Suggestion**: An agent with many tools (>10) may produce slower responses and higher token usage. Consider splitting into specialized agents.
 - **Suggestion**: If `instructions` is empty and the agent name is not one of the built-in rich-prompt agents (`code`, `research`, `calculator`, `general`, `shell`, `summary`, `finance`, `news`, `data_analyst`), consider adding instructions to guide the agent's behavior.
@@ -104,7 +104,7 @@ Each entry under `teams:` is a `TeamConfig` with fields:
 - **Schema Error**: `agents` is missing (required field).
 - **Warning**: `display_name` or `role` is empty — the team will have a blank display name or purpose.
 - **Warning**: `agents` is empty or contains only one agent — a team with fewer than 2 members has no benefit (not enforced by Pydantic, but ineffective at runtime).
-- **Runtime Error**: `agents` list references an agent name not defined under `agents:`.
+- **Warning**: `agents` list references an agent name not defined under `agents:` (runtime currently skips missing agents, but team functionality will be degraded).
 - **Warning**: `mode` is not `"coordinate"` or `"collaborate"` (this is a plain `str` field — Pydantic accepts any value, but runtime behavior may be unexpected).
 - **Runtime Error**: `model` references a name not defined in `models` (when not null).
 - **Warning**: `rooms` is empty -- the team will not appear in any room.
@@ -143,11 +143,11 @@ The `DefaultsConfig` has:
 - `markdown` (bool, default `true`)
 - `show_stop_button` (bool, default `false`)
 - `learning` (bool, default `true`)
-- `learning_mode` (string, default `"always"`) -- must be `"always"` or `"agentic"`
+- `learning_mode` (`Literal["always", "agentic"]`, default `"always"`) -- Pydantic enforces valid values
 
 ### Checks
 
-- **Schema Error**: `learning_mode` is not `"always"` or `"agentic"` (this is a `Literal["always", "agentic"]` type — Pydantic will reject invalid values at load time).
+- **Schema Error**: `learning_mode` is not `"always"` or `"agentic"` (`Literal["always", "agentic"]` type — Pydantic will reject invalid values at load time).
 - **Suggestion**: If most agents should not use markdown (e.g., for voice-only or plain-text bridges), set `markdown: false` in defaults rather than per-agent.
 
 ---
@@ -213,7 +213,7 @@ The `VoiceConfig` has:
 
 ### Checks
 
-- **Warning**: `timezone` is not a valid IANA timezone identifier (plain `str` — Pydantic accepts any value, but scheduling features will malfunction).
+- **Runtime Error**: `timezone` is not a valid IANA timezone identifier (plain `str` — Pydantic accepts any value, but `ZoneInfo(timezone)` will raise at runtime in agent creation and scheduling).
 - **Suggestion**: Set the timezone to match your primary user base for accurate scheduling and datetime context in agent prompts.
 
 ---

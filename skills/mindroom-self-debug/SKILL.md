@@ -66,7 +66,7 @@ All runtime state is stored under `STORAGE_PATH` (default: `mindroom_data/`, ove
 | `mindroom_data/tracking/` | Response tracking to avoid duplicate replies | JSON/tracking files |
 | `mindroom_data/credentials/` | API keys and secrets (synced from .env) | JSON |
 | `mindroom_data/encryption_keys/` | E2E encryption keys | Key files |
-| `mindroom_data/matrix_state.yaml` | Agent accounts (username/password) and room metadata (ID, alias, name) | YAML |
+| `mindroom_data/matrix_state.yaml` | Agent accounts (username/password) and room metadata (ID, alias, name, created_at) | YAML |
 | `mindroom_data/.ai_cache/` | Cached AI responses (diskcache) | diskcache DB |
 | `config.yaml` | Agent/model/team/router configuration | YAML |
 | `.env` | Environment variables and API keys | Dotenv |
@@ -185,7 +185,7 @@ Room management:
 1. Rooms are created by `matrix/rooms.py:ensure_all_rooms_exist()`
 2. Room aliases follow the pattern `#<room_name>:<domain>`
 3. Agent membership is managed by `ensure_user_in_rooms()`
-4. Room metadata (IDs, aliases, names) and agent accounts are stored in `matrix_state.yaml`
+4. Room metadata (IDs, aliases, names, created_at) and agent accounts are stored in `matrix_state.yaml`
 
 If an agent is missing from a room:
 1. Check that the room is listed in the agent's `rooms:` config
