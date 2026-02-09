@@ -17,6 +17,7 @@ Table of contents for all Python source files in `src/mindroom/`.
 | `src/mindroom/api/knowledge.py` | Knowledge base management API. |
 | `src/mindroom/api/main.py` | - |
 | `src/mindroom/api/matrix_operations.py` | API endpoints for Matrix operations. |
+| `src/mindroom/api/schedules.py` | API endpoints for scheduled task management. |
 | `src/mindroom/api/skills.py` | API endpoints for skill inspection and editing. |
 | `src/mindroom/api/tools.py` | API endpoints for tools information. |
 | `src/mindroom/background_tasks.py` | Background task management for non-blocking operations. |
@@ -180,4 +181,4 @@ Table of contents for all Python source files in `src/mindroom/`.
 | `src/mindroom/topic_generator.py` | Generate contextual topics for Matrix rooms using AI. |
 | `src/mindroom/voice_handler.py` | Voice message handler with speech-to-text and intelligent command recognition. |
 
-**Total: 175 files**
+**Total: 176 files**
