@@ -39,8 +39,11 @@ def get_scheduling_tool_context() -> SchedulingToolContext | None:
 
 
 @contextmanager
-def scheduling_tool_context(context: SchedulingToolContext) -> Iterator[None]:
+def scheduling_tool_context(context: SchedulingToolContext | None) -> Iterator[None]:
     """Set scheduling tool context for the current async execution scope."""
+    if context is None:
+        yield
+        return
     token = _SCHEDULING_TOOL_CONTEXT.set(context)
     try:
         yield

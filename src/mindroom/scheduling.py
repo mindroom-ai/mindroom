@@ -318,24 +318,8 @@ async def _validate_agent_mentions(
         _AgentValidationResult with validation status and agent lists
 
     """
-    # Parse mentions - this handles all the agent name resolution properly
-    _, mentioned_user_ids, _ = parse_mentions_in_text(message, config.domain, config)
-
-    if not mentioned_user_ids:
-        # No agents mentioned, validation passes
-        return _AgentValidationResult(all_valid=True, valid_agents=[], invalid_agents=[])
-
-    # Extract agent names from the mentioned user IDs
-
-    mentioned_agents: list[MatrixID] = []
-    for user_id in mentioned_user_ids:
-        mid = MatrixID.parse(user_id)
-        agent_name = mid.agent_name(config)
-        if agent_name and mid not in mentioned_agents:
-            mentioned_agents.append(mid)
-
+    mentioned_agents = _extract_mentioned_agents_from_text(message, config)
     if not mentioned_agents:
-        # No valid agents mentioned
         return _AgentValidationResult(all_valid=True, valid_agents=[], invalid_agents=[])
 
     valid_agents: list[MatrixID] = []
@@ -405,36 +389,6 @@ def _extract_mentioned_agents_from_text(full_text: str, config: Config) -> list[
     return mentioned_agents
 
 
-async def schedule_task_from_text(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str | None,
-    scheduled_by: str,
-    full_text: str,
-    config: Config,
-    room: nio.MatrixRoom,
-    mentioned_agents: list[MatrixID] | None = None,
-) -> tuple[str | None, str]:
-    """Schedule a task from free-form text.
-
-    This is the shared entrypoint used by both `!schedule` and tool-based scheduling.
-    """
-    resolved_mentions = mentioned_agents
-    if resolved_mentions is None:
-        resolved_mentions = _extract_mentioned_agents_from_text(full_text, config)
-
-    return await schedule_task(
-        client=client,
-        room_id=room_id,
-        thread_id=thread_id,
-        scheduled_by=scheduled_by,
-        full_text=full_text,
-        config=config,
-        room=room,
-        mentioned_agents=resolved_mentions,
-    )
-
-
 async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     client: nio.AsyncClient,
     room_id: str,
@@ -451,6 +405,9 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         Tuple of (task_id, response_message)
 
     """
+    if mentioned_agents is None:
+        mentioned_agents = _extract_mentioned_agents_from_text(full_text, config)
+
     # Get agents that are available in the thread
     available_agents: list[MatrixID] = []
     if thread_id:
