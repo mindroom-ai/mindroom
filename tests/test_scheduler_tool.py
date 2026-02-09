@@ -68,6 +68,129 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_edit_schedule_tool_requires_context() -> None:
+    """Edit tool should fail clearly when called outside Matrix response context."""
+    tools = SchedulerTools()
+    result = await tools.edit_schedule("task123", "tomorrow at 9am check logs")
+    assert "unavailable" in result
+
+
+@pytest.mark.asyncio
+async def test_edit_schedule_tool_calls_backend() -> None:
+    """Edit tool should call edit_scheduled_task with correct arguments."""
+    tools = SchedulerTools()
+    config = Config(agents={"general": AgentConfig(display_name="General Agent")})
+    context = SchedulingToolContext(
+        client=AsyncMock(),
+        room=MagicMock(),
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        config=config,
+    )
+
+    with (
+        patch(
+            "mindroom.custom_tools.scheduler.edit_scheduled_task",
+            new=AsyncMock(return_value="✅ Updated task `task123`."),
+        ) as mock_edit,
+        scheduling_tool_context(context),
+    ):
+        result = await tools.edit_schedule("task123", "tomorrow at 9am check deployment")
+
+    assert "Updated" in result
+    mock_edit.assert_awaited_once_with(
+        client=context.client,
+        room_id=context.room_id,
+        task_id="task123",
+        full_text="tomorrow at 9am check deployment",
+        scheduled_by=context.requester_id,
+        config=context.config,
+        room=context.room,
+        thread_id=context.thread_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_schedules_tool_requires_context() -> None:
+    """List tool should fail clearly when called outside Matrix response context."""
+    tools = SchedulerTools()
+    result = await tools.list_schedules()
+    assert "unavailable" in result
+
+
+@pytest.mark.asyncio
+async def test_list_schedules_tool_calls_backend() -> None:
+    """List tool should call list_scheduled_tasks with correct arguments."""
+    tools = SchedulerTools()
+    config = Config(agents={"general": AgentConfig(display_name="General Agent")})
+    context = SchedulingToolContext(
+        client=AsyncMock(),
+        room=MagicMock(),
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        config=config,
+    )
+
+    with (
+        patch(
+            "mindroom.custom_tools.scheduler.list_scheduled_tasks",
+            new=AsyncMock(return_value="**Scheduled Tasks:**\n• `abc` - in 5 minutes"),
+        ) as mock_list,
+        scheduling_tool_context(context),
+    ):
+        result = await tools.list_schedules()
+
+    assert "Scheduled Tasks" in result
+    mock_list.assert_awaited_once_with(
+        client=context.client,
+        room_id=context.room_id,
+        thread_id=context.thread_id,
+        config=context.config,
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancel_schedule_tool_requires_context() -> None:
+    """Cancel tool should fail clearly when called outside Matrix response context."""
+    tools = SchedulerTools()
+    result = await tools.cancel_schedule("task123")
+    assert "unavailable" in result
+
+
+@pytest.mark.asyncio
+async def test_cancel_schedule_tool_calls_backend() -> None:
+    """Cancel tool should call cancel_scheduled_task with correct arguments."""
+    tools = SchedulerTools()
+    config = Config(agents={"general": AgentConfig(display_name="General Agent")})
+    context = SchedulingToolContext(
+        client=AsyncMock(),
+        room=MagicMock(),
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        config=config,
+    )
+
+    with (
+        patch(
+            "mindroom.custom_tools.scheduler.cancel_scheduled_task",
+            new=AsyncMock(return_value="✅ Cancelled task `task123`"),
+        ) as mock_cancel,
+        scheduling_tool_context(context),
+    ):
+        result = await tools.cancel_schedule("task123")
+
+    assert "Cancelled" in result
+    mock_cancel.assert_awaited_once_with(
+        client=context.client,
+        room_id=context.room_id,
+        task_id="task123",
+    )
+
+
 def test_scheduler_tool_registered_in_metadata() -> None:
     """Scheduler tool should be visible in tool metadata."""
     assert "scheduler" in TOOL_METADATA

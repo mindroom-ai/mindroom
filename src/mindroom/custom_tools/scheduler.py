@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from agno.tools import Toolkit
 
-from mindroom.scheduling import schedule_task
+from mindroom.scheduling import (
+    cancel_scheduled_task,
+    edit_scheduled_task,
+    list_scheduled_tasks,
+    schedule_task,
+)
 from mindroom.scheduling_context import get_scheduling_tool_context
 
 
@@ -14,7 +19,7 @@ class SchedulerTools(Toolkit):
     def __init__(self) -> None:
         super().__init__(
             name="scheduler",
-            tools=[self.schedule],
+            tools=[self.schedule, self.edit_schedule, self.list_schedules, self.cancel_schedule],
         )
 
     async def schedule(self, request: str) -> str:
@@ -43,3 +48,67 @@ class SchedulerTools(Toolkit):
             room=context.room,
         )
         return response_text
+
+    async def edit_schedule(self, task_id: str, request: str) -> str:
+        """Edit an existing scheduled task by replacing its timing and content.
+
+        Args:
+            task_id: The ID of the task to edit (from list_schedules).
+            request: The new scheduling request, e.g. "tomorrow at 9am check deployment"
+
+        Returns:
+            The edit result message.
+
+        """
+        context = get_scheduling_tool_context()
+        if context is None:
+            return "❌ Scheduler tool is unavailable in this context."
+
+        return await edit_scheduled_task(
+            client=context.client,
+            room_id=context.room_id,
+            task_id=task_id,
+            full_text=request,
+            scheduled_by=context.requester_id,
+            config=context.config,
+            room=context.room,
+            thread_id=context.thread_id,
+        )
+
+    async def list_schedules(self) -> str:
+        """List all pending scheduled tasks in the current room/thread.
+
+        Returns:
+            A formatted list of scheduled tasks with their IDs.
+
+        """
+        context = get_scheduling_tool_context()
+        if context is None:
+            return "❌ Scheduler tool is unavailable in this context."
+
+        return await list_scheduled_tasks(
+            client=context.client,
+            room_id=context.room_id,
+            thread_id=context.thread_id,
+            config=context.config,
+        )
+
+    async def cancel_schedule(self, task_id: str) -> str:
+        """Cancel a scheduled task.
+
+        Args:
+            task_id: The ID of the task to cancel (from list_schedules).
+
+        Returns:
+            The cancellation result message.
+
+        """
+        context = get_scheduling_tool_context()
+        if context is None:
+            return "❌ Scheduler tool is unavailable in this context."
+
+        return await cancel_scheduled_task(
+            client=context.client,
+            room_id=context.room_id,
+            task_id=task_id,
+        )
