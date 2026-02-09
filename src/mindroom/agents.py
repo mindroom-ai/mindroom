@@ -227,10 +227,6 @@ def create_agent(
         instructions=instructions,
         db=storage,
         learning=resolve_agent_learning(agent_config, defaults, learning_storage),
-        add_history_to_context=agent_config.add_history_to_messages
-        if agent_config.add_history_to_messages is not None
-        else defaults.add_history_to_messages,
-        num_history_runs=agent_config.num_history_runs or defaults.num_history_runs,
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         knowledge=knowledge if knowledge_enabled else None,
         search_knowledge=knowledge_enabled,

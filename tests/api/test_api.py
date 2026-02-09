@@ -159,10 +159,9 @@ def test_save_config(test_client: TestClient, temp_config_file: Path) -> None:
                 "tools": [],
                 "instructions": [],
                 "rooms": ["new_room"],
-                "num_history_runs": 10,
             },
         },
-        "defaults": {"num_history_runs": 10},
+        "defaults": {},
         "router": {"model": "ollama"},
     }
 
@@ -175,7 +174,12 @@ def test_save_config(test_client: TestClient, temp_config_file: Path) -> None:
 
     assert saved_config["models"]["default"]["id"] == "test-model-2"
     assert "new_agent" in saved_config["agents"]
-    assert saved_config["defaults"]["num_history_runs"] == 10
+    assert saved_config["defaults"] == {
+        "markdown": True,
+        "show_stop_button": False,
+        "learning": True,
+        "learning_mode": "always",
+    }
 
 
 def test_test_model(test_client: TestClient) -> None:

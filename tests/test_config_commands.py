@@ -324,16 +324,16 @@ class TestConfigCommandHandling:
         """Test handling config set with invalid value."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_data = {
-                "defaults": {"num_history_runs": 5},
+                "defaults": {"markdown": True},
                 "models": {"default": {"provider": "openai", "id": "gpt-4"}},
             }
             yaml.dump(config_data, f)
             config_path = Path(f.name)
 
         try:
-            # Try to set a number field to a string value
+            # Try to set a bool field to a non-boolean string value
             response, change_info = await handle_config_command(
-                "set defaults.num_history_runs not_a_number",
+                "set defaults.markdown not_a_bool",
                 config_path,
             )
             assert change_info is None  # Invalid config should not return change info

@@ -22,9 +22,7 @@ describe('ModelConfig - Add Row Behavior', () => {
       },
       agents: {},
       defaults: {
-        num_history_runs: 5,
         markdown: true,
-        add_history_to_messages: true,
       },
       router: { model: 'existing' },
     },

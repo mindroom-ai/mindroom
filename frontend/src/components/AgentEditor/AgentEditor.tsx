@@ -93,7 +93,6 @@ export function AgentEditor() {
       instructions: [],
       rooms: [],
       knowledge_base: null,
-      num_history_runs: 5,
       learning: defaultLearning,
       learning_mode: defaultLearningMode,
     },
@@ -581,32 +580,6 @@ export function AgentEditor() {
                 <SelectItem value="agentic">Agentic (tool-driven)</SelectItem>
               </SelectContent>
             </Select>
-          )}
-        />
-      </FieldGroup>
-
-      {/* History Runs */}
-      <FieldGroup
-        label="History Runs"
-        helperText="Number of previous conversation turns to include as context"
-        htmlFor="num_history_runs"
-      >
-        <Controller
-          name="num_history_runs"
-          control={control}
-          render={({ field }) => (
-            <Input
-              {...field}
-              id="num_history_runs"
-              type="number"
-              min={1}
-              max={20}
-              onChange={e => {
-                const value = parseInt(e.target.value) || 5;
-                field.onChange(value);
-                handleFieldChange('num_history_runs', value);
-              }}
-            />
           )}
         />
       </FieldGroup>

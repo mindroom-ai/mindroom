@@ -29,9 +29,7 @@ class AgentConfig(BaseModel):
     skills: list[str] = Field(default_factory=list, description="List of skill names")
     instructions: list[str] = Field(default_factory=list, description="Agent instructions")
     rooms: list[str] = Field(default_factory=list, description="List of room IDs or names to auto-join")
-    num_history_runs: int | None = Field(default=None, description="Number of history runs to include")
     markdown: bool | None = Field(default=None, description="Whether to use markdown formatting")
-    add_history_to_messages: bool | None = Field(default=None, description="Whether to add history to messages")
     learning: bool | None = Field(default=None, description="Enable Agno Learning (defaults to true when omitted)")
     learning_mode: AgentLearningMode | None = Field(
         default=None,
@@ -47,9 +45,7 @@ class AgentConfig(BaseModel):
 class DefaultsConfig(BaseModel):
     """Default configuration values for agents."""
 
-    num_history_runs: int = Field(default=5, description="Default number of history runs")
     markdown: bool = Field(default=True, description="Default markdown setting")
-    add_history_to_messages: bool = Field(default=True, description="Default history setting")
     show_stop_button: bool = Field(default=False, description="Whether to automatically show stop button on messages")
     learning: bool = Field(default=True, description="Default Agno Learning setting")
     learning_mode: AgentLearningMode = Field(default="always", description="Default Agno Learning mode")

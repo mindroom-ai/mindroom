@@ -31,7 +31,6 @@ describe('configStore', () => {
             skills: [],
             instructions: ['Test instruction'],
             rooms: ['lobby'],
-            num_history_runs: 5,
           },
         },
         models: {
@@ -51,7 +50,7 @@ describe('configStore', () => {
       await loadConfig();
 
       const state = useConfigStore.getState();
-      expect(state.config).toEqual(mockConfig);
+      expect(state.config).toEqual({ ...mockConfig, knowledge_bases: {} });
       expect(state.agents).toHaveLength(1);
       expect(state.agents[0].id).toBe('test');
       expect(state.agents[0].display_name).toBe('Test Agent');
@@ -70,7 +69,6 @@ describe('configStore', () => {
             skills: [],
             instructions: [],
             rooms: [],
-            num_history_runs: 5,
           },
         },
         defaults: {
@@ -108,7 +106,6 @@ describe('configStore', () => {
             skills: [],
             instructions: [],
             rooms: [],
-            num_history_runs: 5,
             learning: false,
           },
         },
@@ -143,7 +140,6 @@ describe('configStore', () => {
             skills: [],
             instructions: [],
             rooms: [],
-            num_history_runs: 5,
             learning: true,
             learning_mode: 'agentic',
           },
@@ -191,7 +187,6 @@ describe('configStore', () => {
             skills: [],
             instructions: [],
             rooms: [],
-            num_history_runs: 5,
           },
         },
         models: {},
@@ -204,9 +199,7 @@ describe('configStore', () => {
           },
         },
         defaults: {
-          num_history_runs: 5,
           markdown: true,
-          add_history_to_messages: false,
         },
         router: {
           model: 'default',
@@ -221,7 +214,6 @@ describe('configStore', () => {
           skills: [],
           instructions: [],
           rooms: [],
-          num_history_runs: 5,
         },
       ];
       useConfigStore.setState({
@@ -268,7 +260,6 @@ describe('configStore', () => {
           skills: [],
           instructions: [],
           rooms: [],
-          num_history_runs: 5,
         },
         {
           id: 'agent2',
@@ -278,7 +269,6 @@ describe('configStore', () => {
           skills: [],
           instructions: ['Test'],
           rooms: ['lobby'],
-          num_history_runs: 5,
         },
       ];
       useConfigStore.setState({ agents });
@@ -310,7 +300,6 @@ describe('configStore', () => {
         skills: [],
         instructions: [],
         rooms: [],
-        num_history_runs: 5,
       };
 
       const { createAgent } = useConfigStore.getState();
@@ -334,7 +323,6 @@ describe('configStore', () => {
         skills: [],
         instructions: [],
         rooms: [],
-        num_history_runs: 5,
       };
       useConfigStore.setState({
         config: {
@@ -347,9 +335,7 @@ describe('configStore', () => {
           models: {},
           agents: {},
           defaults: {
-            num_history_runs: 5,
             markdown: true,
-            add_history_to_messages: true,
             learning: false,
             learning_mode: 'agentic',
           },
@@ -474,9 +460,7 @@ describe('configStore', () => {
           models: {},
           agents: {},
           defaults: {
-            num_history_runs: 5,
             markdown: true,
-            add_history_to_messages: true,
           },
           router: { model: 'default' },
         },
@@ -511,9 +495,7 @@ describe('configStore', () => {
           models: {},
           agents: {},
           defaults: {
-            num_history_runs: 5,
             markdown: true,
-            add_history_to_messages: true,
           },
           router: { model: 'default' },
         },
@@ -549,9 +531,7 @@ describe('configStore', () => {
           models: {},
           agents: {},
           defaults: {
-            num_history_runs: 5,
             markdown: true,
-            add_history_to_messages: true,
           },
           router: { model: 'default' },
         },
@@ -599,7 +579,6 @@ describe('configStore', () => {
           skills: [],
           instructions: [],
           rooms: ['lobby'],
-          num_history_runs: 5,
         },
         {
           id: 'agent2',
@@ -609,7 +588,6 @@ describe('configStore', () => {
           skills: [],
           instructions: [],
           rooms: ['dev'],
-          num_history_runs: 5,
         },
       ];
 
@@ -724,7 +702,6 @@ describe('configStore', () => {
             skills: [],
             instructions: [],
             rooms: [],
-            num_history_runs: 5,
           },
         },
         teams: {
@@ -755,9 +732,7 @@ describe('configStore', () => {
           },
         },
         defaults: {
-          num_history_runs: 5,
           markdown: true,
-          add_history_to_messages: true,
         },
         router: {
           model: 'default',
@@ -775,7 +750,6 @@ describe('configStore', () => {
             skills: [],
             instructions: [],
             rooms: [],
-            num_history_runs: 5,
           },
         ],
         teams: [
