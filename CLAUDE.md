@@ -79,7 +79,6 @@ agents:
     rooms: [lobby, dev]
 
 defaults:
-  num_history_runs: 5
   markdown: true
 
 models:

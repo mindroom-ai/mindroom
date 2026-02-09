@@ -140,7 +140,6 @@ agents:
     rooms:
       - lobby
       - dev
-    num_history_runs: 5  # How many previous messages to remember
     learning: true  # Optional: enable Agno Learning (defaults to true)
     learning_mode: "always"  # Optional: "always" or "agentic"
     model: "anthropic"  # Optional: specific model for this agent (overrides default)
@@ -154,7 +153,6 @@ agents:
 - **tools**: List of tools the agent can use (see Available Tools below)
 - **instructions**: Specific guidelines for the agent's behavior
 - **rooms**: List of room aliases where this agent should be active
-- **num_history_runs**: Number of previous conversation turns to include for context (default: 5)
 - **learning**: Enable Agno Learning for this agent (default: true)
 - **learning_mode**: Learning mode (`always` or `agentic`, default: `always`)
 - **model**: (Optional) Specific model to use for this agent, overrides the default model
@@ -252,7 +250,6 @@ agents:
       - "Always be positive and encouraging"
       - "Offer specific, actionable advice"
       - "Ask clarifying questions when needed"
-    num_history_runs: 3
 ```
 
 ### Example 2: Project Manager Agent
@@ -271,7 +268,6 @@ agents:
       - "Generate status reports"
       - "Help with version control"
       - "Create and update documentation"
-    num_history_runs: 10
 ```
 
 ### Example 3: Data Science Agent
@@ -291,7 +287,6 @@ agents:
       - "Create data visualizations"
       - "Clean and preprocess data"
       - "Explain findings clearly"
-    num_history_runs: 5
 ```
 
 ### Example 4: Research Assistant
@@ -312,7 +307,6 @@ agents:
       - "Cross-reference information"
       - "Create research summaries"
       - "Track sources and citations"
-    num_history_runs: 8
 ```
 
 ## Using Agents in the Multi-Agent System
@@ -352,8 +346,7 @@ Some tools need additional setup:
 1. **Clear Agent Roles**: Give each agent a specific, well-defined purpose
 2. **Appropriate Tools**: Only include tools the agent actually needs
 3. **Detailed Instructions**: Provide clear behavioral guidelines
-4. **Context Management**: Set `num_history_runs` based on how much context is needed
-5. **Test Your Agents**: Try different scenarios to ensure they behave as expected
+4. **Test Your Agents**: Try different scenarios to ensure they behave as expected
 
 ## Tips for Writing Instructions
 
@@ -409,13 +402,10 @@ agents:
       - "Use advanced reasoning capabilities"
     rooms:
       - lobby
-    num_history_runs: 10
 
 # Defaults
 defaults:
-  num_history_runs: 5
   markdown: true
-  add_history_to_messages: true
 
 # Router
 router:

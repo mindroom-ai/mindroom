@@ -44,7 +44,7 @@ describe('ModelConfig', () => {
         },
       },
       agents: {},
-      defaults: { num_history_runs: 5, markdown: true, add_history_to_messages: true },
+      defaults: { markdown: true },
       router: { model: 'default' },
     },
     updateModel: vi.fn(),

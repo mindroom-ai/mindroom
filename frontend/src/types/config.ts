@@ -35,7 +35,6 @@ export interface Agent {
   instructions: string[];
   rooms: string[];
   knowledge_base?: string | null;
-  num_history_runs: number;
   learning?: boolean; // Defaults to true when omitted
   learning_mode?: LearningMode; // Defaults to always when omitted
   model?: string; // Reference to a model in the models section
@@ -82,9 +81,7 @@ export interface Config {
   models: Record<string, ModelConfig>;
   agents: Record<string, Omit<Agent, 'id'>>;
   defaults: {
-    num_history_runs: number;
     markdown: boolean;
-    add_history_to_messages: boolean;
     learning?: boolean;
     learning_mode?: LearningMode;
   };

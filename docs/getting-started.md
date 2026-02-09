@@ -91,7 +91,6 @@ models:
     id: claude-sonnet-4-5-latest
 
 defaults:
-  num_history_runs: 5
   markdown: true
 
 timezone: America/Los_Angeles

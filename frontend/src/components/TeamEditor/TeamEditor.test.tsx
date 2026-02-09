@@ -27,7 +27,6 @@ describe('TeamEditor', () => {
       skills: [],
       instructions: [],
       rooms: ['dev'],
-      num_history_runs: 5,
     },
     {
       id: 'shell',
@@ -37,7 +36,6 @@ describe('TeamEditor', () => {
       skills: [],
       instructions: [],
       rooms: ['dev'],
-      num_history_runs: 5,
     },
     {
       id: 'research',
@@ -47,7 +45,6 @@ describe('TeamEditor', () => {
       skills: [],
       instructions: [],
       rooms: ['research'],
-      num_history_runs: 5,
     },
   ];
 

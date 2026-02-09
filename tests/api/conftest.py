@@ -24,10 +24,9 @@ def temp_config_file() -> Generator[Path, None, None]:
                     "tools": ["calculator"],
                     "instructions": ["Test instruction"],
                     "rooms": ["test_room"],
-                    "num_history_runs": 5,
                 },
             },
-            "defaults": {"num_history_runs": 5, "markdown": True},
+            "defaults": {"markdown": True},
         }
         yaml.dump(config_data, f)
         temp_path = Path(f.name)
@@ -62,5 +61,4 @@ def sample_agent_data() -> dict[str, Any]:
         "tools": ["file", "shell"],
         "instructions": ["Do something", "Do something else"],
         "rooms": ["lobby", "dev"],
-        "num_history_runs": 3,
     }
