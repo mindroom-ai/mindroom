@@ -92,6 +92,33 @@ def test_list_schedules_success(test_client: TestClient) -> None:
     assert tasks_by_id["cron1234"]["cron_expression"] == "0 9 * * *"
 
 
+def test_list_schedules_invalid_cron_does_not_fail(test_client: TestClient) -> None:
+    """Invalid stored cron values should not crash schedule listing."""
+    mock_client = _mock_matrix_client()
+    tasks = [
+        _task(
+            "badcron1",
+            schedule_type="cron",
+            cron_fields={"minute": "70", "hour": "*", "day": "*", "month": "*", "weekday": "*"},
+            execute_at=None,
+            description="Invalid cron task",
+        ),
+    ]
+
+    with (
+        patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
+        patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
+        patch("mindroom.api.schedules.get_scheduled_tasks_for_room", return_value=tasks),
+    ):
+        response = test_client.get("/api/schedules")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["tasks"]) == 1
+    assert data["tasks"][0]["task_id"] == "badcron1"
+    assert data["tasks"][0]["next_run_at"] is None
+
+
 def test_update_schedule_once_success(test_client: TestClient) -> None:
     """Update endpoint should persist prompt and once schedule changes."""
     mock_client = _mock_matrix_client()
@@ -128,6 +155,7 @@ def test_update_schedule_once_success(test_client: TestClient) -> None:
     assert data["description"] == "Updated description"
     assert data["execute_at"] == "2026-03-01T10:00:00Z"
     save_mock.assert_awaited_once()
+    assert save_mock.await_args.kwargs["restart_task"] is False
 
 
 def test_update_schedule_invalid_cron_expression(test_client: TestClient) -> None:
@@ -163,16 +191,18 @@ def test_cancel_schedule_success(test_client: TestClient) -> None:
     """Cancel endpoint should return success wrapper."""
     mock_client = _mock_matrix_client()
     existing_task = _task("abc12345", execute_at=datetime(2026, 2, 10, 9, 0, tzinfo=UTC))
+    cancel_mock = AsyncMock(return_value="✅ Cancelled task `abc12345`")
     with (
         patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
         patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
         patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
-        patch("mindroom.api.schedules.cancel_scheduled_task", return_value="✅ Cancelled task `abc12345`"),
+        patch("mindroom.api.schedules.cancel_scheduled_task", cancel_mock),
     ):
         response = test_client.delete("/api/schedules/abc12345?room_id=test_room")
 
     assert response.status_code == 200
     assert response.json()["success"] is True
+    assert cancel_mock.await_args.kwargs["cancel_in_memory"] is False
 
 
 def test_cancel_schedule_not_found(test_client: TestClient) -> None:
@@ -218,6 +248,7 @@ def test_update_schedule_once_to_cron(test_client: TestClient) -> None:
     assert data["cron_expression"] == "30 8 * * 1-5"
     assert data["execute_at"] is None
     save_mock.assert_awaited_once()
+    assert save_mock.await_args.kwargs["restart_task"] is False
 
 
 def test_update_schedule_cron_to_once(test_client: TestClient) -> None:
@@ -252,6 +283,7 @@ def test_update_schedule_cron_to_once(test_client: TestClient) -> None:
     assert data["execute_at"] == "2026-04-01T12:00:00Z"
     assert data["cron_expression"] is None
     save_mock.assert_awaited_once()
+    assert save_mock.await_args.kwargs["restart_task"] is False
 
 
 def test_update_schedule_conflicting_fields(test_client: TestClient) -> None:

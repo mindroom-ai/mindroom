@@ -5,11 +5,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Literal
 
-from croniter import croniter  # type: ignore[import-untyped]
+from croniter import CroniterError, croniter  # type: ignore[import-untyped]
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from mindroom.constants import MATRIX_HOMESERVER, ROUTER_AGENT_NAME
+from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id, resolve_room_aliases
 from mindroom.matrix.users import create_agent_user, login_agent_user
 from mindroom.scheduling import (
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
     from mindroom.config import Config
 
 router = APIRouter(prefix="/api/schedules", tags=["schedules"])
+logger = get_logger(__name__)
 
 
 class ScheduledTaskResponse(BaseModel):
@@ -117,7 +119,14 @@ def _to_response_task(task: ScheduledTaskRecord) -> ScheduledTaskResponse:
     if workflow.schedule_type == "once":
         next_run_at = workflow.execute_at
     elif cron_expression:
-        next_run_at = croniter(cron_expression, datetime.now(UTC)).get_next(datetime)
+        try:
+            next_run_at = croniter(cron_expression, datetime.now(UTC)).get_next(datetime)
+        except CroniterError:
+            logger.warning(
+                "Failed to compute next run time for scheduled task",
+                task_id=task.task_id,
+                cron_expression=cron_expression,
+            )
 
     return ScheduledTaskResponse(
         task_id=task.task_id,
@@ -277,6 +286,7 @@ async def update_schedule(
             config=runtime_config,
             status="pending",
             created_at=existing_task.created_at,
+            restart_task=False,
         )
 
         updated_task = ScheduledTaskRecord(
@@ -309,6 +319,7 @@ async def cancel_schedule(
             client=client,
             room_id=resolved_room_id,
             task_id=task_id,
+            cancel_in_memory=False,
         )
     finally:
         await client.close()

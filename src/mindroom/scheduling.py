@@ -283,9 +283,11 @@ async def save_scheduled_task(
     config: Config,
     status: str = "pending",
     created_at: datetime | str | None = None,
+    restart_task: bool = True,
 ) -> None:
-    """Persist scheduled task state and restart its in-memory task runner."""
-    cancel_running_task(task_id)
+    """Persist scheduled task state and optionally restart its in-memory task runner."""
+    if restart_task:
+        cancel_running_task(task_id)
 
     if isinstance(created_at, datetime):
         created_at_value = created_at.isoformat()
@@ -307,7 +309,7 @@ async def save_scheduled_task(
         state_key=task_id,
     )
 
-    if status == "pending":
+    if restart_task and status == "pending":
         _start_scheduled_task(client, task_id, workflow, config)
 
 
@@ -789,10 +791,12 @@ async def cancel_scheduled_task(
     client: nio.AsyncClient,
     room_id: str,
     task_id: str,
+    cancel_in_memory: bool = True,
 ) -> str:
     """Cancel a scheduled task."""
     # Cancel the asyncio task if running
-    cancel_running_task(task_id)
+    if cancel_in_memory:
+        cancel_running_task(task_id)
 
     # First check if task exists
     response = await client.room_get_state_event(
