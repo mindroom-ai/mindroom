@@ -162,16 +162,18 @@ class MultiKnowledgeVectorDb:
         limit: int,
         filters: dict[str, Any] | list[Any] | None = None,
     ) -> list[Document]:
-        """Async variant of ``search`` that interleaves merged results."""
-        results_by_db: list[list[Document]] = []
-        for vector_db in self.vector_dbs:
-            async_search = getattr(vector_db, "async_search", None)
-            if callable(async_search):
-                results = await async_search(query=query, limit=limit, filters=filters)
+        """Async variant of ``search`` that searches DBs concurrently."""
+
+        async def _search_one(vdb: Any) -> list[Document]:  # noqa: ANN401
+            async_fn = getattr(vdb, "async_search", None)
+            if callable(async_fn):
+                results: list[Document] = await async_fn(query=query, limit=limit, filters=filters)
             else:
-                results = vector_db.search(query=query, limit=limit, filters=filters)
-            results_by_db.append(results)
-        return _interleave_documents(results_by_db, limit)
+                results = vdb.search(query=query, limit=limit, filters=filters)
+            return results
+
+        results_by_db = await asyncio.gather(*[_search_one(vdb) for vdb in self.vector_dbs])
+        return _interleave_documents(list(results_by_db), limit)
 
 
 def _interleave_documents(results_by_db: list[list[Document]], limit: int) -> list[Document]:
