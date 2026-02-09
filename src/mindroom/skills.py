@@ -37,8 +37,9 @@ _OS_ALIASES = {
 _PLUGIN_SKILL_ROOTS: list[Path] = []
 SkillSnapshot = tuple[tuple[str, int, int], ...]
 _SKILL_CACHE: dict[Path, tuple[SkillSnapshot, list[Skill]]] = {}
-_BUNDLED_SKILLS_DEV_DIR = Path(__file__).resolve().parents[2] / "skills"
-_BUNDLED_SKILLS_PACKAGE_DIR = Path(__file__).resolve().parent / "_bundled_skills"
+_THIS_DIR = Path(__file__).resolve().parent
+_BUNDLED_SKILLS_DEV_DIR = _THIS_DIR.parents[1] / "skills"
+_BUNDLED_SKILLS_PACKAGE_DIR = _THIS_DIR / "_bundled_skills"
 
 
 @dataclass
