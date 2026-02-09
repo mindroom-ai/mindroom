@@ -158,7 +158,13 @@ def _resolve_schedule_fields(
     existing_workflow: ScheduledWorkflow,
 ) -> tuple[Literal["once", "cron"], datetime | None, CronSchedule | None]:
     """Resolve and validate schedule-related updates for a task edit."""
-    schedule_type = request.schedule_type or existing_workflow.schedule_type
+    if request.schedule_type and request.schedule_type != existing_workflow.schedule_type:
+        raise HTTPException(
+            status_code=400,
+            detail="Changing schedule_type is not supported; cancel and recreate the schedule",
+        )
+
+    schedule_type = existing_workflow.schedule_type
     if schedule_type == "once":
         if request.cron_expression is not None:
             raise HTTPException(status_code=400, detail="cron_expression is only valid for cron schedules")

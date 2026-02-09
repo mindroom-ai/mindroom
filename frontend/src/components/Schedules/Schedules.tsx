@@ -185,11 +185,6 @@ function toUtcIso(localDateTime: string, timezone: string): string | null {
   return new Date(utcTimestamp).toISOString();
 }
 
-function defaultOneTimeInput(timezone: string): string {
-  const date = new Date(Date.now() + 60 * 60 * 1000);
-  return toTimezoneDateTimeInput(date.toISOString(), timezone);
-}
-
 function formatDateTime(isoDate: string | null, timezone: string): string {
   if (!isoDate) return 'Not set';
   const date = new Date(isoDate);
@@ -310,19 +305,6 @@ export function Schedules() {
   const handleDraftChange = <K extends keyof ScheduleDraft>(field: K, value: ScheduleDraft[K]) => {
     if (!draft) return;
     setDraft({ ...draft, [field]: value });
-    setIsDirty(true);
-  };
-
-  const handleScheduleTypeChange = (nextType: ScheduleType) => {
-    if (!draft) return;
-    setDraft({
-      ...draft,
-      schedule_type: nextType,
-      execute_at_input:
-        nextType === 'once'
-          ? draft.execute_at_input || defaultOneTimeInput(timezone)
-          : draft.execute_at_input,
-    });
     setIsDirty(true);
   };
 
@@ -599,20 +581,9 @@ export function Schedules() {
 
               <FieldGroup
                 label="Schedule Type"
-                helperText="Choose one-time execution or recurring cron"
+                helperText="Schedule type is immutable. Cancel and recreate to change it."
               >
-                <Select
-                  value={draft.schedule_type}
-                  onValueChange={value => handleScheduleTypeChange(value as ScheduleType)}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="once">One-time</SelectItem>
-                    <SelectItem value="cron">Cron</SelectItem>
-                  </SelectContent>
-                </Select>
+                <Input value={draft.schedule_type === 'once' ? 'One-time' : 'Cron'} readOnly />
               </FieldGroup>
 
               {draft.schedule_type === 'once' ? (
@@ -672,6 +643,13 @@ export function Schedules() {
                     within 30 seconds). You can also manage schedules in Matrix with
                     <span className="font-mono"> !list_schedules</span> and
                     <span className="font-mono"> !cancel_schedule {'<id>'}</span>.
+                  </p>
+                </div>
+                <div className="flex items-start gap-2">
+                  <Repeat className="h-4 w-4 mt-0.5 shrink-0" />
+                  <p>
+                    Changing schedule type is not supported in-place. Cancel this task and create a
+                    new one with the desired type.
                   </p>
                 </div>
                 <div className="flex items-start gap-2">

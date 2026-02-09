@@ -221,7 +221,7 @@ def test_cancel_schedule_not_found(test_client: TestClient) -> None:
 
 
 def test_update_schedule_once_to_cron(test_client: TestClient) -> None:
-    """Switching from once to cron requires a cron_expression."""
+    """Switching from once to cron is rejected by the API."""
     mock_client = _mock_matrix_client()
     existing_task = _task(
         "switch01",
@@ -244,18 +244,13 @@ def test_update_schedule_once_to_cron(test_client: TestClient) -> None:
             },
         )
 
-    assert response.status_code == 200
-    data = response.json()
-    assert data["schedule_type"] == "cron"
-    assert data["cron_expression"] == "30 8 * * 1-5"
-    assert data["execute_at"] is None
-    save_mock.assert_awaited_once()
-    assert save_mock.await_args.kwargs["task_id"] == "switch01"
-    assert save_mock.await_args.kwargs["room_id"] == "test_room"
+    assert response.status_code == 400
+    assert "Changing schedule_type is not supported" in response.json()["detail"]
+    save_mock.assert_not_awaited()
 
 
 def test_update_schedule_cron_to_once(test_client: TestClient) -> None:
-    """Switching from cron to once requires execute_at."""
+    """Switching from cron to once is rejected by the API."""
     mock_client = _mock_matrix_client()
     existing_task = _task(
         "switch02",
@@ -280,14 +275,9 @@ def test_update_schedule_cron_to_once(test_client: TestClient) -> None:
             },
         )
 
-    assert response.status_code == 200
-    data = response.json()
-    assert data["schedule_type"] == "once"
-    assert data["execute_at"] == "2026-04-01T12:00:00Z"
-    assert data["cron_expression"] is None
-    save_mock.assert_awaited_once()
-    assert save_mock.await_args.kwargs["task_id"] == "switch02"
-    assert save_mock.await_args.kwargs["room_id"] == "test_room"
+    assert response.status_code == 400
+    assert "Changing schedule_type is not supported" in response.json()["detail"]
+    save_mock.assert_not_awaited()
 
 
 def test_update_schedule_conflicting_fields(test_client: TestClient) -> None:

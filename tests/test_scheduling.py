@@ -358,6 +358,40 @@ async def test_run_once_task_executes_latest_state_workflow() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_once_task_stops_when_switched_to_cron() -> None:
+    """One-time runners should stop if persisted state switches to cron."""
+    client = AsyncMock()
+    config = AsyncMock()
+    initial_workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=10),
+        message="Old message",
+        description="Old description",
+        room_id="!test:server",
+        thread_id="$thread123",
+    )
+    switched_workflow = ScheduledWorkflow(
+        schedule_type="cron",
+        cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
+        message="Switched message",
+        description="Switched description",
+        room_id="!test:server",
+        thread_id="$thread123",
+    )
+
+    async def _fetch_task(*_args: object, **_kwargs: object) -> ScheduledTaskRecord:
+        return _record("task_once_switched", switched_workflow, status="pending")
+
+    with (
+        patch("mindroom.scheduling.get_scheduled_task", side_effect=_fetch_task),
+        patch("mindroom.scheduling.execute_scheduled_workflow", new=AsyncMock()) as execute_mock,
+    ):
+        await run_once_task(client, "task_once_switched", initial_workflow, config)
+
+    execute_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_run_cron_task_executes_latest_state_workflow() -> None:
     """Recurring tasks should execute using the latest persisted workflow data."""
     client = AsyncMock()
@@ -397,6 +431,40 @@ async def test_run_cron_task_executes_latest_state_workflow() -> None:
     executed_workflow = execute_mock.await_args.args[1]
     assert executed_workflow.message == "Updated recurring message"
     assert executed_workflow.description == "Updated recurring description"
+
+
+@pytest.mark.asyncio
+async def test_run_cron_task_stops_when_switched_to_once() -> None:
+    """Recurring runners should stop if persisted state switches to once."""
+    client = AsyncMock()
+    config = AsyncMock()
+    initial_workflow = ScheduledWorkflow(
+        schedule_type="cron",
+        cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
+        message="Recurring message",
+        description="Recurring description",
+        room_id="!test:server",
+        thread_id="$thread123",
+    )
+    switched_workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=10),
+        message="One-time message",
+        description="One-time description",
+        room_id="!test:server",
+        thread_id="$thread123",
+    )
+
+    async def _fetch_task(*_args: object, **_kwargs: object) -> ScheduledTaskRecord:
+        return _record("task_cron_switched", switched_workflow, status="pending")
+
+    with (
+        patch("mindroom.scheduling.get_scheduled_task", side_effect=_fetch_task),
+        patch("mindroom.scheduling.execute_scheduled_workflow", new=AsyncMock()) as execute_mock,
+    ):
+        await run_cron_task(client, "task_cron_switched", initial_workflow, {}, config)
+
+    execute_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio
