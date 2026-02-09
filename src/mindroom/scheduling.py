@@ -486,9 +486,6 @@ async def run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 return
 
             latest_workflow = latest_task.workflow
-            if latest_workflow.schedule_type == "once":
-                logger.info("Recurring task switched to one-time schedule, stopping", task_id=task_id)
-                return
 
             cron_schedule = latest_workflow.cron_schedule
             if not cron_schedule:
@@ -516,10 +513,6 @@ async def run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     return
 
                 refreshed_workflow = refreshed_task.workflow
-                if refreshed_workflow.schedule_type == "once":
-                    logger.info("Recurring task switched to one-time schedule, stopping", task_id=task_id)
-                    return
-
                 if not refreshed_workflow.cron_schedule:
                     logger.error("No cron schedule provided for recurring task", task_id=task_id)
                     return
@@ -542,9 +535,6 @@ async def run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 return
 
             latest_workflow = latest_before_execute.workflow
-            if latest_workflow.schedule_type == "once":
-                logger.info("Recurring task switched to one-time schedule, stopping", task_id=task_id)
-                return
             if not latest_workflow.cron_schedule:
                 logger.error("No cron schedule provided for recurring task", task_id=task_id)
                 return
@@ -573,7 +563,7 @@ async def run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
         _cleanup_task_if_current(task_id, running_tasks)
 
 
-async def run_once_task(  # noqa: C901, PLR0911, PLR0912
+async def run_once_task(  # noqa: C901
     client: nio.AsyncClient,
     task_id: str,
     workflow: ScheduledWorkflow,
@@ -592,9 +582,6 @@ async def run_once_task(  # noqa: C901, PLR0911, PLR0912
                 return
 
             latest_workflow = latest_task.workflow
-            if latest_workflow.schedule_type == "cron":
-                logger.info("One-time task switched to recurring schedule, stopping", task_id=task_id)
-                return
 
             execute_at = latest_workflow.execute_at
             if not execute_at:
@@ -617,9 +604,6 @@ async def run_once_task(  # noqa: C901, PLR0911, PLR0912
             return
 
         latest_workflow = latest_before_execute.workflow
-        if latest_workflow.schedule_type == "cron":
-            logger.info("One-time task switched to recurring schedule, stopping", task_id=task_id)
-            return
         if not latest_workflow.execute_at:
             logger.error("No execution time provided for one-time task", task_id=task_id)
             return
