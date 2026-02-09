@@ -346,31 +346,21 @@ async def save_scheduled_task(
         _start_scheduled_task(client, task_id, workflow, config)
 
 
-def _require_pending_task_for_edit(task_id: str, task_record: ScheduledTaskRecord | None) -> ScheduledTaskRecord:
-    """Validate that a task exists and is editable."""
-    if task_record is None:
-        msg = f"Task `{task_id}` not found."
-        raise ValueError(msg)
-    if task_record.status != "pending":
-        msg = f"Task `{task_id}` cannot be edited because it is `{task_record.status}`."
-        raise ValueError(msg)
-    return task_record
-
-
 async def save_edited_scheduled_task(
     client: nio.AsyncClient,
     room_id: str,
     task_id: str,
     workflow: ScheduledWorkflow,
     config: Config,
-    existing_task: ScheduledTaskRecord | None = None,
+    existing_task: ScheduledTaskRecord,
     restart_task: bool = False,
 ) -> ScheduledTaskRecord:
     """Persist edits to an existing task using shared validation semantics."""
-    task_record = existing_task or await get_scheduled_task(client=client, room_id=room_id, task_id=task_id)
-    task_record = _require_pending_task_for_edit(task_id, task_record)
+    if existing_task.status != "pending":
+        msg = f"Task `{task_id}` cannot be edited because it is `{existing_task.status}`."
+        raise ValueError(msg)
 
-    if workflow.schedule_type != task_record.workflow.schedule_type:
+    if workflow.schedule_type != existing_task.workflow.schedule_type:
         raise ValueError(SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR)
 
     await save_scheduled_task(
@@ -380,7 +370,7 @@ async def save_edited_scheduled_task(
         workflow=workflow,
         config=config,
         status="pending",
-        created_at=task_record.created_at,
+        created_at=existing_task.created_at,
         restart_task=restart_task,
     )
 
@@ -388,7 +378,7 @@ async def save_edited_scheduled_task(
         task_id=task_id,
         room_id=room_id,
         status="pending",
-        created_at=task_record.created_at,
+        created_at=existing_task.created_at,
         workflow=workflow,
     )
 
