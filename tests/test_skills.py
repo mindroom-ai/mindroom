@@ -73,6 +73,20 @@ def test_bundled_mindroom_docs_skill_is_discoverable() -> None:
     assert (listing.path.parent / "references" / "reference-index.md").exists()
 
 
+def test_get_bundled_skills_dir_uses_package_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolve bundled skills from package data when repo checkout path is unavailable."""
+    package_dir = tmp_path / "mindroom" / "_bundled_skills"
+    package_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(skills_module, "_BUNDLED_SKILLS_DEV_DIR", tmp_path / "missing-repo-skills")
+    monkeypatch.setattr(skills_module, "_BUNDLED_SKILLS_PACKAGE_DIR", package_dir)
+
+    assert skills_module.get_bundled_skills_dir() == package_dir
+
+
 def test_parse_skill_with_json5_metadata(tmp_path: Path) -> None:
     """Parse JSON5 metadata from SKILL.md frontmatter."""
     metadata = "{openclaw:{always:true,},}"
