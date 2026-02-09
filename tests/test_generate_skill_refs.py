@@ -19,7 +19,6 @@ from scripts.generate_llms_txt import (
 from scripts.generate_source_index import (
     _collect_python_files,
     _extract_module_docstring,
-    generate_source_index,
     generate_source_map,
 )
 
@@ -234,30 +233,6 @@ class TestExtractModuleDocstring:
         assert _extract_module_docstring(f) == "First line."
 
 
-class TestGenerateSourceIndex:
-    """Test source index generation."""
-
-    def test_output_format(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Source index has header and FILE markers with content."""
-        monkeypatch.setattr("scripts.generate_source_index.REPO_ROOT", tmp_path)
-        f = tmp_path / "example.py"
-        f.write_text('"""Example."""\n\nx = 1\n')
-        output = generate_source_index([f])
-        assert "# MindRoom Source Code Index" in output
-        assert "# FILE: example.py" in output
-        assert "x = 1" in output
-
-    def test_multiple_files_separated(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Each file gets its own FILE marker."""
-        monkeypatch.setattr("scripts.generate_source_index.REPO_ROOT", tmp_path)
-        f1 = tmp_path / "a.py"
-        f2 = tmp_path / "b.py"
-        f1.write_text("a = 1\n")
-        f2.write_text("b = 2\n")
-        output = generate_source_index([f1, f2])
-        assert output.count("# FILE:") == 2
-
-
 class TestGenerateSourceMap:
     """Test source map markdown table generation."""
 
@@ -307,17 +282,6 @@ class TestIntegration:
         output = generate_llms_txt(nav)
         assert len(output) > 100
         assert "# MindRoom" in output
-
-    def test_source_index_generator_runs(self) -> None:
-        """generate_source_index produces non-empty output from real src/mindroom/."""
-        src_dir = Path(__file__).resolve().parent.parent / "src" / "mindroom"
-        if not src_dir.exists():
-            pytest.skip("src/mindroom/ not found")
-        files = _collect_python_files(src_dir)
-        assert len(files) > 10
-        output = generate_source_index(files)
-        assert "# MindRoom Source Code Index" in output
-        assert len(output) > 1000
 
     def test_checked_in_llms_refs_are_fresh(self) -> None:
         """Checked-in llms references match current generator output."""

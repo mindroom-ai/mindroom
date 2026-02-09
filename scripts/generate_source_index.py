@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate source-index.txt and source-map.md from MindRoom Python source files."""
+"""Generate source-map.md from MindRoom Python source files."""
 
 from __future__ import annotations
 
@@ -39,33 +39,6 @@ def _extract_module_docstring(path: Path) -> str:
     return ""
 
 
-def generate_source_index(files: list[Path]) -> str:
-    """Generate source-index.txt: full concatenation of all source files with headers."""
-    parts: list[str] = []
-    parts.append("# MindRoom Source Code Index")
-    parts.append(f"# Generated from src/mindroom/ ({len(files)} files)")
-    parts.append("")
-
-    for index, path in enumerate(files):
-        relative = path.relative_to(REPO_ROOT)
-        parts.append("=" * 80)
-        parts.append(f"# FILE: {relative}")
-        parts.append("=" * 80)
-        parts.append("")
-        try:
-            # Normalize file boundaries so generated output always ends with one newline.
-            content = path.read_text(encoding="utf-8").rstrip("\n")
-            parts.append(content)
-        except (OSError, UnicodeDecodeError) as exc:
-            parts.append(f"# ERROR reading file: {exc}")
-
-        # Separate files with one blank line, but avoid an extra trailing blank line.
-        if index < len(files) - 1:
-            parts.append("")
-
-    return "\n".join(parts) + "\n"
-
-
 def generate_source_map(files: list[Path]) -> str:
     """Generate source-map.md: table of contents with one-line descriptions."""
     lines: list[str] = []
@@ -92,7 +65,7 @@ def generate_source_map(files: list[Path]) -> str:
 
 
 def main() -> None:
-    """Generate source-index.txt and source-map.md from MindRoom source files."""
+    """Generate source-map.md from MindRoom source files."""
     if not SRC_DIR.exists():
         print(f"Error: source directory not found: {SRC_DIR}", file=sys.stderr)
         sys.exit(1)
@@ -103,11 +76,6 @@ def main() -> None:
         sys.exit(1)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    source_index = generate_source_index(files)
-    index_path = OUTPUT_DIR / "source-index.txt"
-    index_path.write_text(source_index, encoding="utf-8")
-    print(f"Generated {index_path} ({len(source_index):,} bytes, {len(files)} files)")
 
     source_map = generate_source_map(files)
     map_path = OUTPUT_DIR / "source-map.md"
