@@ -52,14 +52,8 @@ agents:
       - lobby
       - dev
 
-    # Number of previous messages to include for context
-    num_history_runs: 10
-
     # Enable markdown formatting
     markdown: true
-
-    # Whether to add history to messages (for context)
-    add_history_to_messages: true
 
     # Enable Agno Learning for this agent
     learning: true
@@ -82,9 +76,7 @@ agents:
 | `skills` | list | `[]` | Skill names the agent can use (see [Skills](../skills.md)) |
 | `instructions` | list | `[]` | Extra lines appended to the system prompt after the role |
 | `rooms` | list | `[]` | Room aliases to auto-join; rooms are created if they don't exist |
-| `num_history_runs` | int | `5` | How many previous conversation turns are loaded into context when the agent responds. Higher values give more context but use more tokens |
 | `markdown` | bool | `true` | When enabled, the agent is instructed to format responses as Markdown |
-| `add_history_to_messages` | bool | `true` | Whether previous turns are injected into the message list sent to the model. When `false`, only the current message is sent (useful for stateless tasks) |
 | `learning` | bool | `true` | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time |
 | `learning_mode` | string | `"always"` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call |
 | `knowledge_base` | string or null | `null` | Knowledge base ID from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents |
@@ -109,9 +101,7 @@ The `defaults` section sets fallback values for all agents. Any agent that omits
 
 ```yaml
 defaults:
-  num_history_runs: 5        # Conversation turns loaded into context
   markdown: true             # Format responses as Markdown
-  add_history_to_messages: true  # Inject previous turns into model messages
   learning: true             # Enable Agno Learning
   learning_mode: always      # "always" or "agentic"
   show_stop_button: false    # Show a stop button while agent is responding (global-only, cannot be overridden per-agent)

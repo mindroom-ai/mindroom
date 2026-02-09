@@ -24,7 +24,6 @@ def test_file_watcher_detects_changes(test_client: TestClient, temp_config_file:
         "tools": [],
         "instructions": [],
         "rooms": ["external"],
-        "num_history_runs": 5,
     }
 
     with temp_config_file.open("w") as f:
@@ -61,7 +60,7 @@ def test_config_format_validation(test_client: TestClient, temp_config_file: Pat
     valid_config = {
         "models": {"default": {"provider": "test", "id": "test"}},
         "agents": {},
-        "defaults": {"num_history_runs": 5},
+        "defaults": {},
     }
 
     with temp_config_file.open("w") as f:

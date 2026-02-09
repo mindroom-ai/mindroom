@@ -52,9 +52,7 @@ def test_config_yaml_with_extra_kwargs() -> None:
             },
         },
         "defaults": {
-            "num_history_runs": 5,
             "markdown": True,
-            "add_history_to_messages": True,
         },
         "router": {
             "model": "test_model",
@@ -115,9 +113,7 @@ def test_get_model_instance_with_extra_kwargs() -> None:
             },
         },
         "defaults": {
-            "num_history_runs": 5,
             "markdown": True,
-            "add_history_to_messages": True,
         },
         "router": {
             "model": "test_model",
@@ -176,9 +172,7 @@ def test_different_providers_with_extra_kwargs() -> None:
             },
         },
         "defaults": {
-            "num_history_runs": 5,
             "markdown": True,
-            "add_history_to_messages": True,
         },
         "router": {
             "model": "openai_model",
@@ -221,9 +215,7 @@ def test_model_without_extra_kwargs() -> None:
             },
         },
         "defaults": {
-            "num_history_runs": 5,
             "markdown": True,
-            "add_history_to_messages": True,
         },
         "router": {
             "model": "simple_model",

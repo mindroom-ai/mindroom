@@ -59,7 +59,6 @@ describe('AgentEditor', () => {
     skills: ['debugging'],
     instructions: ['Test instruction'],
     rooms: ['test_room'],
-    num_history_runs: 5,
     learning: true,
     learning_mode: 'always',
   };
@@ -70,7 +69,7 @@ describe('AgentEditor', () => {
       custom: { provider: 'custom', id: 'custom-model' },
     },
     agents: { test_agent: mockAgent },
-    defaults: { num_history_runs: 5 },
+    defaults: {},
   };
 
   const mockStore = {

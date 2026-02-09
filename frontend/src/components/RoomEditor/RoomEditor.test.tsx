@@ -25,7 +25,6 @@ describe('RoomEditor', () => {
       skills: [],
       instructions: [],
       rooms: ['lobby'],
-      num_history_runs: 5,
     },
     {
       id: 'agent2',
@@ -35,7 +34,6 @@ describe('RoomEditor', () => {
       skills: [],
       instructions: [],
       rooms: [],
-      num_history_runs: 5,
     },
   ];
 

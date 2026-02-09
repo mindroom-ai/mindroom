@@ -17,7 +17,6 @@ describe('AgentList', () => {
       tools: ['calculator', 'file'],
       instructions: ['instruction1'],
       rooms: ['lobby', 'dev'],
-      num_history_runs: 5,
     },
     {
       id: 'agent2',
@@ -26,7 +25,6 @@ describe('AgentList', () => {
       tools: [],
       instructions: [],
       rooms: ['lobby'],
-      num_history_runs: 3,
     },
   ];
 

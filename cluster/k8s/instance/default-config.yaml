@@ -14,7 +14,6 @@ agents:
     learning: true
     learning_mode: always
     model: sonnet
-    num_history_runs: 5
     role: Expert MindRoom agent builder that helps create and configure custom AI agents with deep knowledge of the system
     rooms:
     - lobby
@@ -33,7 +32,6 @@ agents:
     learning: true
     learning_mode: always
     model: sonnet
-    num_history_runs: 5
     role: Provide analytical insights and recommendations.
     rooms:
     - lobby
@@ -50,7 +48,6 @@ agents:
     learning: true
     learning_mode: always
     model: sonnet
-    num_history_runs: 5
     role: Solve mathematical problems.
     rooms:
     - lobby
@@ -72,7 +69,6 @@ agents:
     learning: true
     learning_mode: always
     model: sonnet
-    num_history_runs: 5
     role: Manage phone calls and SMS messages through Twilio integration.
     rooms:
     - lobby
@@ -93,7 +89,6 @@ agents:
     learning: true
     learning_mode: always
     model: opus
-    num_history_runs: 5
     role: Generate code, manage files, and execute shell commands.
     rooms:
     - lobby
@@ -115,7 +110,6 @@ agents:
     learning: true
     learning_mode: always
     model: sonnet
-    num_history_runs: 5
     role: Analyze data, create visualizations, and provide insights.
     rooms:
     - lobby
@@ -143,7 +137,6 @@ agents:
     learning: true
     learning_mode: always
     model: gpt5mini
-    num_history_runs: 5
     role: Manage and respond to emails efficiently using Gmail with Claude Sonnet's intelligence
     rooms:
     - lobby
@@ -165,7 +158,6 @@ agents:
     learning: true
     learning_mode: always
     model: sonnet
-    num_history_runs: 5
     role: Analyze financial data, stock information, and perform calculations.
     rooms:
     - lobby
@@ -186,7 +178,6 @@ agents:
     learning: true
     learning_mode: always
     model: sonnet
-    num_history_runs: 5
     role: A general-purpose assistant that provides helpful, conversational responses to users.
     rooms:
     - lobby
@@ -208,7 +199,6 @@ agents:
     learning: true
     learning_mode: always
     model: sonnet
-    num_history_runs: 5
     role: Control and monitor smart home devices through Home Assistant
     rooms:
     - lobby
@@ -229,7 +219,6 @@ agents:
     learning: true
     learning_mode: always
     model: gpt_oss_120b
-    num_history_runs: 5
     role: Gather and summarize news and current events.
     rooms:
     - lobby
@@ -252,7 +241,6 @@ agents:
     learning: true
     learning_mode: always
     model: gpt5mini
-    num_history_runs: 5
     role: Conduct research using web sources, Wikipedia, and academic papers.
     rooms:
     - lobby
@@ -274,7 +262,6 @@ agents:
     learning: true
     learning_mode: always
     model: sonnet
-    num_history_runs: 5
     role: Analyze security aspects and provide recommendations.
     rooms:
     - lobby
@@ -293,7 +280,6 @@ agents:
     learning: true
     learning_mode: always
     model: sonnet
-    num_history_runs: 5
     role: Execute shell commands and manage system operations.
     rooms:
     - lobby
@@ -315,7 +301,6 @@ agents:
     learning: true
     learning_mode: always
     model: sonnet
-    num_history_runs: 5
     role: Summarize long texts and extract key information.
     rooms:
     - lobby
@@ -329,11 +314,9 @@ authorization:
   - '@test:m-test-4.mindroom.chat'
   room_permissions: {}
 defaults:
-  add_history_to_messages: true
   learning: true
   learning_mode: always
   markdown: true
-  num_history_runs: 5
   show_stop_button: true
 knowledge_bases: {}
 memory:

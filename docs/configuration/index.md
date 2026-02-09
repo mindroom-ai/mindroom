@@ -35,9 +35,7 @@ agents:
     skills: []                     # Optional: List of skill names
     instructions: []               # Optional: Custom instructions
     rooms: [lobby]                 # Optional: Rooms to auto-join
-    num_history_runs: 5            # Optional: Override default (inherits from defaults section)
     markdown: true                 # Optional: Override default (inherits from defaults section)
-    add_history_to_messages: true  # Optional: Override default (inherits from defaults section)
     learning: true                 # Optional: Override default (inherits from defaults section)
     learning_mode: always          # Optional: Override default (inherits from defaults section)
     knowledge_base: docs           # Optional: Assign this agent to a configured knowledge base
@@ -70,9 +68,7 @@ router:
 
 # Default settings for all agents (optional)
 defaults:
-  num_history_runs: 5              # Default: 5
   markdown: true                   # Default: true
-  add_history_to_messages: true    # Default: true
   show_stop_button: false          # Default: false (global only, cannot be overridden per-agent)
   learning: true                   # Default: true
   learning_mode: always            # Default: always (or agentic)

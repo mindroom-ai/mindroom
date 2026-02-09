@@ -42,7 +42,7 @@ class TestTeamRoomUpdates:
                     "mode": "coordinate",
                 },
             },
-            "defaults": {"num_history_runs": 5, "markdown": True, "add_history_to_messages": True},
+            "defaults": {"markdown": True},
             "models": {"default": {"provider": "ollama", "id": "test-model", "host": None, "api_key": None}},
             "router": {"model": "default"},
         }
@@ -110,7 +110,7 @@ class TestTeamRoomUpdates:
         initial_config_data: dict[str, Any] = {
             "agents": {},
             "teams": {},
-            "defaults": {"num_history_runs": 5, "markdown": True, "add_history_to_messages": True},
+            "defaults": {"markdown": True},
             "models": {"default": {"provider": "ollama", "id": "test-model", "host": None, "api_key": None}},
             "router": {"model": "default"},
         }
@@ -191,7 +191,7 @@ class TestTeamRoomUpdates:
                     "mode": "coordinate",
                 },
             },
-            "defaults": {"num_history_runs": 5, "markdown": True, "add_history_to_messages": True},
+            "defaults": {"markdown": True},
             "models": {"default": {"provider": "ollama", "id": "test-model", "host": None, "api_key": None}},
             "router": {"model": "default"},
         }
