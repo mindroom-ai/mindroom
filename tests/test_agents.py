@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -161,7 +162,7 @@ def test_config_rejects_legacy_agent_knowledge_base_field() -> None:
     """Legacy singular knowledge_base field must fail fast to avoid silent drops."""
     with pytest.raises(
         ValidationError,
-        match="Agent field 'knowledge_base' was removed. Use 'knowledge_bases' \\(list\\) instead.",
+        match=re.escape("Agent field 'knowledge_base' was removed. Use 'knowledge_bases' (list) instead."),
     ):
         Config(
             agents={
