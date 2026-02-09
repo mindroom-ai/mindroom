@@ -205,6 +205,7 @@ Agents ONLY respond in threads (not main room). Within threads:
 - `!schedule <task>` - Schedule a task
 - `!list_schedules` - List scheduled tasks
 - `!cancel_schedule <id>` - Cancel a scheduled task
+- `!edit_schedule <id> <task>` - Edit an existing scheduled task
 - `!widget [url]` - Add configuration widget
 - `!config <operation>` - Manage configuration
 - `!hi` - Show welcome message

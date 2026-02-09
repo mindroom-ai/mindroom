@@ -96,6 +96,12 @@ def test_list_schedules_command() -> None:
         "!list_schedule",  # singular with underscore
         "!listschedule",  # singular without separator
         "!list-schedule",  # singular with dash
+        "!inspect_schedules",
+        "!inspectschedules",
+        "!inspect-schedules",
+        "!inspect_schedule",
+        "!inspectschedule",
+        "!inspect-schedule",
         "!LIST_SCHEDULES",  # case insensitive
     ]
 
@@ -180,6 +186,26 @@ def test_cancel_schedule_command() -> None:
     assert command.args["cancel_all"] is True
 
 
+def test_edit_schedule_command() -> None:
+    """Test edit schedule command parsing."""
+    command = command_parser.parse("!edit_schedule abc123 in 10 minutes check deployment")
+    assert command is not None
+    assert command.type == CommandType.EDIT_SCHEDULE
+    assert command.args["task_id"] == "abc123"
+    assert command.args["full_text"] == "in 10 minutes check deployment"
+
+    command = command_parser.parse("!edit-schedule task42 tomorrow at 9am @finance market update")
+    assert command is not None
+    assert command.type == CommandType.EDIT_SCHEDULE
+    assert command.args["task_id"] == "task42"
+    assert command.args["full_text"] == "tomorrow at 9am @finance market update"
+
+    command = command_parser.parse("!EDIT_SCHEDULE id999 every weekday at 8am check alerts")
+    assert command is not None
+    assert command.type == CommandType.EDIT_SCHEDULE
+    assert command.args["task_id"] == "id999"
+
+
 def test_get_command_help() -> None:
     """Test help text generation."""
     # General help
@@ -191,6 +217,7 @@ def test_get_command_help() -> None:
     assert "!schedule" in help_text
     assert "!list_schedules" in help_text
     assert "!cancel_schedule" in help_text
+    assert "!edit_schedule" in help_text
 
     # Specific command help
     schedule_help = get_command_help("schedule")
@@ -214,3 +241,7 @@ def test_get_command_help() -> None:
     cancel_help = get_command_help("cancel_schedule")
     assert "Cancel Schedule Command" in cancel_help
     assert "cancel_schedule" in cancel_help
+
+    edit_help = get_command_help("edit_schedule")
+    assert "Edit Schedule Command" in edit_help
+    assert "edit_schedule" in edit_help

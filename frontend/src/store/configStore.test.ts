@@ -552,6 +552,80 @@ describe('configStore', () => {
     });
   });
 
+  describe('knowledge bases', () => {
+    it('should remove deleted knowledge base from all agent assignments', () => {
+      useConfigStore.setState({
+        config: {
+          memory: { embedder: { provider: 'openai', config: { model: 'test' } } },
+          knowledge_bases: {
+            legal: { path: './legal', watch: true },
+            research: { path: './research', watch: true },
+          },
+          models: {},
+          agents: {
+            agent1: {
+              display_name: 'Agent 1',
+              role: 'Test agent',
+              tools: [],
+              skills: [],
+              instructions: [],
+              rooms: [],
+              knowledge_bases: ['research', 'legal'],
+            },
+            agent2: {
+              display_name: 'Agent 2',
+              role: 'Test agent 2',
+              tools: [],
+              skills: [],
+              instructions: [],
+              rooms: [],
+              knowledge_bases: ['research'],
+            },
+          },
+          defaults: {
+            markdown: true,
+          },
+          router: { model: 'default' },
+        },
+        agents: [
+          {
+            id: 'agent1',
+            display_name: 'Agent 1',
+            role: 'Test agent',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+            knowledge_bases: ['research', 'legal'],
+          },
+          {
+            id: 'agent2',
+            display_name: 'Agent 2',
+            role: 'Test agent 2',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+            knowledge_bases: ['research'],
+          },
+        ],
+      });
+
+      const { deleteKnowledgeBase } = useConfigStore.getState();
+      deleteKnowledgeBase('research');
+
+      const state = useConfigStore.getState();
+      expect(state.config?.knowledge_bases).toEqual({
+        legal: { path: './legal', watch: true },
+      });
+      expect(state.agents.find(agent => agent.id === 'agent1')?.knowledge_bases).toEqual(['legal']);
+      expect(state.agents.find(agent => agent.id === 'agent2')?.knowledge_bases).toEqual([]);
+      expect(state.config?.agents.agent1.knowledge_bases).toEqual(['legal']);
+      expect(state.config?.agents.agent2.knowledge_bases).toEqual([]);
+      expect(state.isDirty).toBe(true);
+    });
+  });
+
   describe('rooms', () => {
     beforeEach(() => {
       const mockRooms = [
