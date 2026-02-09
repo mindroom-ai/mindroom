@@ -117,10 +117,7 @@ def _to_response_task(task: ScheduledTaskRecord) -> ScheduledTaskResponse:
     if workflow.schedule_type == "once":
         next_run_at = workflow.execute_at
     elif cron_expression:
-        try:
-            next_run_at = croniter(cron_expression, datetime.now(UTC)).get_next(datetime)
-        except Exception:
-            next_run_at = None
+        next_run_at = croniter(cron_expression, datetime.now(UTC)).get_next(datetime)
 
     return ScheduledTaskResponse(
         task_id=task.task_id,
@@ -304,7 +301,11 @@ async def cancel_schedule(
 
     client = await _get_router_client()
     try:
-        response_text = await cancel_scheduled_task(
+        existing = await get_scheduled_task(client=client, room_id=resolved_room_id, task_id=task_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail=f"Task `{task_id}` not found")
+
+        await cancel_scheduled_task(
             client=client,
             room_id=resolved_room_id,
             task_id=task_id,
@@ -312,9 +313,4 @@ async def cancel_schedule(
     finally:
         await client.close()
 
-    if response_text.startswith("❌"):
-        if "not found" in response_text.lower():
-            raise HTTPException(status_code=404, detail=response_text)
-        raise HTTPException(status_code=400, detail=response_text)
-
-    return CancelScheduleResponse(success=True, message=response_text)
+    return CancelScheduleResponse(success=True, message=f"Cancelled task `{task_id}`")

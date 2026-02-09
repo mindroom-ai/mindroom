@@ -162,13 +162,12 @@ def test_update_schedule_invalid_cron_expression(test_client: TestClient) -> Non
 def test_cancel_schedule_success(test_client: TestClient) -> None:
     """Cancel endpoint should return success wrapper."""
     mock_client = _mock_matrix_client()
+    existing_task = _task("abc12345", execute_at=datetime(2026, 2, 10, 9, 0, tzinfo=UTC))
     with (
         patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
         patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
-        patch(
-            "mindroom.api.schedules.cancel_scheduled_task",
-            return_value="✅ Cancelled task `abc12345`",
-        ),
+        patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
+        patch("mindroom.api.schedules.cancel_scheduled_task", return_value="✅ Cancelled task `abc12345`"),
     ):
         response = test_client.delete("/api/schedules/abc12345?room_id=test_room")
 
@@ -177,16 +176,132 @@ def test_cancel_schedule_success(test_client: TestClient) -> None:
 
 
 def test_cancel_schedule_not_found(test_client: TestClient) -> None:
-    """Cancel endpoint should map not-found task responses to 404."""
+    """Cancel endpoint should return 404 when task does not exist."""
     mock_client = _mock_matrix_client()
     with (
         patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
         patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
-        patch(
-            "mindroom.api.schedules.cancel_scheduled_task",
-            return_value="❌ Task `missing` not found.",
-        ),
+        patch("mindroom.api.schedules.get_scheduled_task", return_value=None),
     ):
         response = test_client.delete("/api/schedules/missing?room_id=test_room")
 
     assert response.status_code == 404
+
+
+def test_update_schedule_once_to_cron(test_client: TestClient) -> None:
+    """Switching from once to cron requires a cron_expression."""
+    mock_client = _mock_matrix_client()
+    existing_task = _task(
+        "switch01",
+        execute_at=datetime(2026, 2, 10, 9, 0, tzinfo=UTC),
+    )
+    save_mock = AsyncMock()
+
+    with (
+        patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
+        patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
+        patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
+        patch("mindroom.api.schedules.save_scheduled_task", save_mock),
+    ):
+        response = test_client.put(
+            "/api/schedules/switch01",
+            json={
+                "room_id": "test_room",
+                "schedule_type": "cron",
+                "cron_expression": "30 8 * * 1-5",
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["schedule_type"] == "cron"
+    assert data["cron_expression"] == "30 8 * * 1-5"
+    assert data["execute_at"] is None
+    save_mock.assert_awaited_once()
+
+
+def test_update_schedule_cron_to_once(test_client: TestClient) -> None:
+    """Switching from cron to once requires execute_at."""
+    mock_client = _mock_matrix_client()
+    existing_task = _task(
+        "switch02",
+        schedule_type="cron",
+        cron_fields={"minute": "0", "hour": "9", "day": "*", "month": "*", "weekday": "*"},
+        execute_at=None,
+    )
+    save_mock = AsyncMock()
+
+    with (
+        patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
+        patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
+        patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
+        patch("mindroom.api.schedules.save_scheduled_task", save_mock),
+    ):
+        response = test_client.put(
+            "/api/schedules/switch02",
+            json={
+                "room_id": "test_room",
+                "schedule_type": "once",
+                "execute_at": "2026-04-01T12:00:00Z",
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["schedule_type"] == "once"
+    assert data["execute_at"] == "2026-04-01T12:00:00Z"
+    assert data["cron_expression"] is None
+    save_mock.assert_awaited_once()
+
+
+def test_update_schedule_conflicting_fields(test_client: TestClient) -> None:
+    """Sending execute_at with cron schedule_type should return 400."""
+    mock_client = _mock_matrix_client()
+    existing_task = _task(
+        "conflict1",
+        schedule_type="cron",
+        cron_fields={"minute": "0", "hour": "9", "day": "*", "month": "*", "weekday": "*"},
+        execute_at=None,
+    )
+
+    with (
+        patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
+        patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
+        patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
+    ):
+        response = test_client.put(
+            "/api/schedules/conflict1",
+            json={
+                "room_id": "test_room",
+                "schedule_type": "cron",
+                "execute_at": "2026-04-01T12:00:00Z",
+            },
+        )
+
+    assert response.status_code == 400
+    assert "execute_at" in response.json()["detail"]
+
+
+def test_update_schedule_empty_message(test_client: TestClient) -> None:
+    """Updating with an empty message should return 400."""
+    mock_client = _mock_matrix_client()
+    existing_task = _task(
+        "empty_msg",
+        execute_at=datetime(2026, 2, 10, 9, 0, tzinfo=UTC),
+    )
+
+    with (
+        patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
+        patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
+        patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
+    ):
+        response = test_client.put(
+            "/api/schedules/empty_msg",
+            json={
+                "room_id": "test_room",
+                "message": "   ",
+            },
+        )
+
+    assert response.status_code == 400
+    assert "message" in response.json()["detail"]

@@ -7,7 +7,7 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Literal, NamedTuple, TypedDict
+from typing import TYPE_CHECKING, Literal, NamedTuple
 from zoneinfo import ZoneInfo
 
 import humanize
@@ -50,17 +50,6 @@ class _AgentValidationResult(NamedTuple):
     all_valid: bool
     valid_agents: list[MatrixID]
     invalid_agents: list[MatrixID]
-
-
-class _TaskDisplay(TypedDict):
-    """Task payload used for schedule list rendering."""
-
-    id: str
-    time: datetime | None
-    schedule_type: str
-    description: str
-    message: str
-    thread_id: str | None
 
 
 # ---- Workflow scheduling primitives ----
@@ -228,19 +217,14 @@ def cancel_running_task(task_id: str) -> None:
         del _running_tasks[task_id]
 
 
-async def get_scheduled_tasks_for_room(
-    client: nio.AsyncClient,
+def _parse_task_records_from_state(
     room_id: str,
+    state_response: nio.RoomGetStateResponse,
     include_non_pending: bool = False,
 ) -> list[ScheduledTaskRecord]:
-    """Fetch and parse scheduled tasks for a room."""
-    response = await client.room_get_state(room_id)
-    if not isinstance(response, nio.RoomGetStateResponse):
-        logger.error("Failed to get room state", response=str(response), room_id=room_id)
-        return []
-
+    """Parse scheduled task records from a room state response."""
     tasks: list[ScheduledTaskRecord] = []
-    for event in response.events:
+    for event in state_response.events:
         if event.get("type") != SCHEDULED_TASK_EVENT_TYPE:
             continue
 
@@ -257,6 +241,20 @@ async def get_scheduled_tasks_for_room(
         tasks.append(task)
 
     return tasks
+
+
+async def get_scheduled_tasks_for_room(
+    client: nio.AsyncClient,
+    room_id: str,
+    include_non_pending: bool = False,
+) -> list[ScheduledTaskRecord]:
+    """Fetch and parse scheduled tasks for a room."""
+    response = await client.room_get_state(room_id)
+    if not isinstance(response, nio.RoomGetStateResponse):
+        logger.error("Failed to get room state", response=str(response), room_id=room_id)
+        return []
+
+    return _parse_task_records_from_state(room_id, response, include_non_pending)
 
 
 async def get_scheduled_task(
@@ -733,61 +731,29 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     return (task_id, success_msg)
 
 
-async def list_scheduled_tasks(  # noqa: C901, PLR0912
+async def list_scheduled_tasks(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str | None = None,
     config: Config | None = None,
 ) -> str:
     """List scheduled tasks in human-readable format."""
-    response = await client.room_get_state(room_id)
-    if not isinstance(response, nio.RoomGetStateResponse):
-        logger.error("Failed to get room state", response=str(response), room_id=room_id, thread_id=thread_id)
+    # Pre-check: surface Matrix errors as user-facing messages
+    state_response = await client.room_get_state(room_id)
+    if not isinstance(state_response, nio.RoomGetStateResponse):
+        logger.error("Failed to get room state", response=str(state_response), room_id=room_id, thread_id=thread_id)
         return "Unable to retrieve scheduled tasks."
 
-    task_records: list[ScheduledTaskRecord] = []
-    for event in response.events:
-        if event.get("type") != SCHEDULED_TASK_EVENT_TYPE:
-            continue
-        state_key = event.get("state_key")
-        content = event.get("content")
-        if not isinstance(state_key, str) or not isinstance(content, dict):
-            continue
-        task_record = parse_scheduled_task_record(room_id, state_key, content)
-        if not task_record:
-            continue
-        if task_record.status != "pending":
-            continue
-        task_records.append(task_record)
+    task_records = _parse_task_records_from_state(room_id, state_response, include_non_pending=False)
 
-    tasks: list[_TaskDisplay] = []
-    tasks_in_other_threads: list[_TaskDisplay] = []
+    tasks: list[ScheduledTaskRecord] = []
+    tasks_in_other_threads: list[ScheduledTaskRecord] = []
 
-    for task_record in task_records:
-        workflow = task_record.workflow
-        # Determine display time
-        if workflow.schedule_type == "once" and workflow.execute_at:
-            display_time = workflow.execute_at
-            schedule_type = "once"
+    for record in task_records:
+        if thread_id and record.workflow.thread_id and record.workflow.thread_id != thread_id:
+            tasks_in_other_threads.append(record)
         else:
-            # For cron, show the natural language description
-            display_time = None
-            schedule_type = workflow.cron_schedule.to_natural_language() if workflow.cron_schedule else "recurring"
-
-        task_info: _TaskDisplay = {
-            "id": task_record.task_id,
-            "time": display_time,
-            "schedule_type": schedule_type,
-            "description": workflow.description,
-            "message": workflow.message,
-            "thread_id": workflow.thread_id,
-        }
-
-        # Separate tasks by thread
-        if thread_id and workflow.thread_id and workflow.thread_id != thread_id:
-            tasks_in_other_threads.append(task_info)
-        else:
-            tasks.append(task_info)
+            tasks.append(record)
 
     if not tasks and not tasks_in_other_threads:
         return "No scheduled tasks found."
@@ -796,22 +762,25 @@ async def list_scheduled_tasks(  # noqa: C901, PLR0912
         return f"No scheduled tasks in this thread.\n\n📌 {len(tasks_in_other_threads)} task(s) scheduled in other threads. Use !list_schedules in those threads to see details."
 
     # Sort by execution time (one-time tasks) or put recurring tasks at the end
-    tasks.sort(key=lambda t: (t["time"] is None, t["time"] or datetime.max.replace(tzinfo=UTC)))
+    def _sort_key(r: ScheduledTaskRecord) -> tuple[bool, datetime]:
+        t = r.workflow.execute_at if r.workflow.schedule_type == "once" else None
+        return (t is None, t or datetime.max.replace(tzinfo=UTC))
+
+    tasks.sort(key=_sort_key)
 
     lines = ["**Scheduled Tasks:**"]
-    for task in tasks:
-        if task["schedule_type"] == "once" and task["time"]:
-            # Get timezone from config or use UTC as fallback
+    for record in tasks:
+        workflow = record.workflow
+        if workflow.schedule_type == "once" and workflow.execute_at:
             timezone = config.timezone if config else "UTC"
-            time_str = _format_scheduled_time(task["time"], timezone)
+            time_str = _format_scheduled_time(workflow.execute_at, timezone)
         else:
-            # For recurring tasks, schedule_type now contains the natural language description
-            time_str = task["schedule_type"]
+            time_str = workflow.cron_schedule.to_natural_language() if workflow.cron_schedule else "recurring"
 
-        msg_preview = task["message"][:MESSAGE_PREVIEW_LENGTH] + (
-            "..." if len(task["message"]) > MESSAGE_PREVIEW_LENGTH else ""
+        msg_preview = workflow.message[:MESSAGE_PREVIEW_LENGTH] + (
+            "..." if len(workflow.message) > MESSAGE_PREVIEW_LENGTH else ""
         )
-        lines.append(f'• `{task["id"]}` - {time_str}\n  {task["description"]}\n  Message: "{msg_preview}"')
+        lines.append(f'• `{record.task_id}` - {time_str}\n  {workflow.description}\n  Message: "{msg_preview}"')
 
     return "\n".join(lines)
 
