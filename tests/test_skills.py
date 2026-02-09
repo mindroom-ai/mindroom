@@ -62,6 +62,17 @@ def _skill_names(skills: Skills | None) -> list[str]:
     return skills.get_skill_names() if skills is not None else []
 
 
+def test_bundled_mindroom_docs_skill_is_discoverable() -> None:
+    """Ensure the bundled mindroom-docs skill is discoverable."""
+    listing = skills_module.resolve_skill_listing(
+        "mindroom-docs",
+        roots=[skills_module.get_bundled_skills_dir()],
+    )
+    assert listing is not None
+    assert listing.origin == "bundled"
+    assert (listing.path.parent / "references" / "reference-index.md").exists()
+
+
 def test_parse_skill_with_json5_metadata(tmp_path: Path) -> None:
     """Parse JSON5 metadata from SKILL.md frontmatter."""
     metadata = "{openclaw:{always:true,},}"
