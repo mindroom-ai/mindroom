@@ -41,26 +41,19 @@ def _source_to_built_path(source_path: str) -> str:
 
 def _collect_nav_pages(items: list[Any], pages: list[NavPage]) -> None:
     for item in items:
-        if isinstance(item, dict):
-            for title, value in item.items():
-                if isinstance(value, str):
-                    pages.append(
-                        NavPage(
-                            title=str(title),
-                            source_path=value,
-                            built_path=_source_to_built_path(value),
-                        ),
-                    )
-                elif isinstance(value, list):
-                    _collect_nav_pages(value, pages)
-        elif isinstance(item, str):
-            pages.append(
-                NavPage(
-                    title=Path(item).stem.replace("-", " ").replace("_", " ").title(),
-                    source_path=item,
-                    built_path=_source_to_built_path(item),
-                ),
-            )
+        assert isinstance(item, dict), "Expected each project.nav entry to be a table in zensical.toml"
+        for title, value in item.items():
+            if isinstance(value, str):
+                pages.append(
+                    NavPage(
+                        title=str(title),
+                        source_path=value,
+                        built_path=_source_to_built_path(value),
+                    ),
+                )
+                continue
+            assert isinstance(value, list), f"Expected nested nav list for {title!r} in zensical.toml"
+            _collect_nav_pages(value, pages)
 
 
 def _load_project_and_nav() -> tuple[dict[str, Any], list[NavPage]]:
@@ -169,29 +162,11 @@ def _write_reference_index(nav_pages: list[NavPage], built_to_reference: dict[st
         "| --- | --- | --- | --- |",
     ]
 
-    added_paths: set[str] = set()
     for page in nav_pages:
         reference_name = built_to_reference.get(page.built_path)
-        if not reference_name:
-            continue
+        assert reference_name is not None, f"Missing built page for nav source {page.source_path!r}"
         lines.append(
             f"| {page.title} | `{page.source_path}` | `{page.built_path}` | `{reference_name}` |",
-        )
-        added_paths.add(page.built_path)
-
-    remaining = sorted(path for path in built_to_reference if path not in added_paths)
-    if remaining:
-        lines.extend(
-            [
-                "",
-                "## Additional generated pages",
-                "",
-                "| Built markdown | Reference file |",
-                "| --- | --- |",
-            ],
-        )
-        lines.extend(
-            [f"| `{built_path}` | `{built_to_reference[built_path]}` |" for built_path in remaining],
         )
 
     (REFERENCES_DIR / "reference-index.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
