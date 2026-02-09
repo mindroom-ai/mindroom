@@ -63,22 +63,16 @@ def _collect_nav_pages(items: list[Any], pages: list[NavPage]) -> None:
             )
 
 
-def _load_nav_pages() -> list[NavPage]:
+def _load_project_and_nav() -> tuple[dict[str, Any], list[NavPage]]:
     parsed = tomllib.loads(ZENSICAL_CONFIG.read_text(encoding="utf-8"))
     project = parsed.get("project", {})
+    assert isinstance(project, dict), "Expected [project] table in zensical.toml"
     nav = project.get("nav", [])
     assert isinstance(nav, list), "Expected project.nav to be a list in zensical.toml"
 
     pages: list[NavPage] = []
     _collect_nav_pages(nav, pages)
-    return pages
-
-
-def _load_project_settings() -> dict[str, Any]:
-    parsed = tomllib.loads(ZENSICAL_CONFIG.read_text(encoding="utf-8"))
-    project = parsed.get("project", {})
-    assert isinstance(project, dict), "Expected [project] table in zensical.toml"
-    return project
+    return project, pages
 
 
 def _mkdocs_config(project: dict[str, Any], nav_pages: list[NavPage], site_dir: Path) -> dict[str, Any]:
@@ -152,8 +146,6 @@ def _flatten_page_references(site_dir: Path) -> dict[str, str]:
     built_to_reference: dict[str, str] = {}
     for source in sorted(site_dir.rglob("*.md")):
         relative = source.relative_to(site_dir).as_posix()
-        if relative in {"llms.txt", "llms-full.txt"}:
-            continue
         reference_name = f"page__{relative.replace('/', '__')}"
         shutil.copyfile(source, REFERENCES_DIR / reference_name)
         built_to_reference[relative] = reference_name
@@ -207,10 +199,8 @@ def _write_reference_index(nav_pages: list[NavPage], built_to_reference: dict[st
 
 def main() -> None:
     """Build and sync generated docs references into the mindroom-docs skill."""
-    nav_pages = _load_nav_pages()
+    project, nav_pages = _load_project_and_nav()
     assert nav_pages, "No docs pages found in zensical.toml navigation"
-
-    project = _load_project_settings()
     with tempfile.TemporaryDirectory(prefix="mindroom-docs-skill-") as tmp:
         tmp_dir = Path(tmp)
         site_dir = tmp_dir / "site"
