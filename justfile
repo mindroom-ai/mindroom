@@ -271,7 +271,7 @@ doc-serve:
 doc-update:
     uv run python docs/run_markdown_code_runner.py
 
-# Regenerate skill reference files (llms.txt, source-index, source-map)
+# Regenerate skill reference files (llms.txt, source-map)
 generate-skill-refs:
     uv run python scripts/generate_llms_txt.py
     uv run python scripts/generate_source_index.py
