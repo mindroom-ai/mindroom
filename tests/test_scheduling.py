@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 
 from mindroom.scheduling import (
+    SCHEDULED_TASK_EVENT_TYPE,
     CronSchedule,
     ScheduledTaskRecord,
     ScheduledWorkflow,
     cancel_all_scheduled_tasks,
+    edit_scheduled_task,
     get_scheduled_tasks_for_room,
     list_scheduled_tasks,
     run_cron_task,
@@ -577,3 +579,80 @@ async def test_cancel_all_scheduled_tasks_no_tasks() -> None:
 
     # Verify room_put_state was never called
     client.room_put_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edit_scheduled_task_reuses_existing_thread() -> None:
+    """Editing should keep the task ID and original thread context."""
+    client = AsyncMock()
+    room = MagicMock()
+    config = MagicMock()
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=5),
+        message="Initial message",
+        description="Initial task",
+        thread_id="$original_thread",
+        room_id="!test:server",
+    )
+    state_response = nio.RoomGetStateEventResponse(
+        content={"status": "pending", "workflow": workflow.model_dump_json()},
+        event_type=SCHEDULED_TASK_EVENT_TYPE,
+        state_key="task123",
+        room_id="!test:server",
+    )
+    client.room_get_state_event = AsyncMock(return_value=state_response)
+
+    with patch(
+        "mindroom.scheduling.schedule_task",
+        new=AsyncMock(return_value=("task123", "✅ Scheduled")),
+    ) as mock_schedule:
+        result = await edit_scheduled_task(
+            client=client,
+            room_id="!test:server",
+            task_id="task123",
+            full_text="tomorrow at 9am updated task",
+            scheduled_by="@user:server",
+            config=config,
+            room=room,
+            thread_id="$fallback_thread",
+        )
+
+    assert "✅ Updated task `task123`." in result
+    mock_schedule.assert_awaited_once_with(
+        client=client,
+        room_id="!test:server",
+        thread_id="$original_thread",
+        scheduled_by="@user:server",
+        full_text="tomorrow at 9am updated task",
+        config=config,
+        room=room,
+        task_id="task123",
+    )
+
+
+@pytest.mark.asyncio
+async def test_edit_scheduled_task_rejects_non_pending() -> None:
+    """Editing should fail for cancelled/completed tasks."""
+    client = AsyncMock()
+    room = MagicMock()
+    state_response = nio.RoomGetStateEventResponse(
+        content={"status": "cancelled"},
+        event_type=SCHEDULED_TASK_EVENT_TYPE,
+        state_key="task123",
+        room_id="!test:server",
+    )
+    client.room_get_state_event = AsyncMock(return_value=state_response)
+
+    result = await edit_scheduled_task(
+        client=client,
+        room_id="!test:server",
+        task_id="task123",
+        full_text="tomorrow at 9am updated task",
+        scheduled_by="@user:server",
+        config=MagicMock(),
+        room=room,
+        thread_id="$thread123",
+    )
+
+    assert "cannot be edited" in result

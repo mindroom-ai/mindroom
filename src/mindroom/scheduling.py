@@ -629,7 +629,6 @@ async def run_once_task(  # noqa: C901
 async def _validate_agent_mentions(
     message: str,
     room: nio.MatrixRoom,
-    thread_id: str | None,
     config: Config,
 ) -> _AgentValidationResult:
     """Validate that all mentioned agents are accessible.
@@ -637,58 +636,28 @@ async def _validate_agent_mentions(
     Args:
         message: The message that may contain @agent mentions
         room: The Matrix room object
-        thread_id: The thread ID where the schedule will execute (if in a thread)
         config: Application configuration
 
     Returns:
         _AgentValidationResult with validation status and agent lists
 
     """
-    # Parse mentions - this handles all the agent name resolution properly
-    _, mentioned_user_ids, _ = parse_mentions_in_text(message, config.domain, config)
-
-    if not mentioned_user_ids:
-        # No agents mentioned, validation passes
-        return _AgentValidationResult(all_valid=True, valid_agents=[], invalid_agents=[])
-
-    # Extract agent names from the mentioned user IDs
-
-    mentioned_agents: list[MatrixID] = []
-    for user_id in mentioned_user_ids:
-        mid = MatrixID.parse(user_id)
-        agent_name = mid.agent_name(config)
-        if agent_name and mid not in mentioned_agents:
-            mentioned_agents.append(mid)
-
+    mentioned_agents = _extract_mentioned_agents_from_text(message, config)
     if not mentioned_agents:
-        # No valid agents mentioned
         return _AgentValidationResult(all_valid=True, valid_agents=[], invalid_agents=[])
 
     valid_agents: list[MatrixID] = []
     invalid_agents: list[MatrixID] = []
 
-    if thread_id:
-        # For threads, check if agents are in the room
-        room_agents = get_available_agents_in_room(room, config)
+    room_agents = get_available_agents_in_room(room, config)
+    for mid in mentioned_agents:
+        if mid in room_agents:
+            valid_agents.append(mid)
+        else:
+            invalid_agents.append(mid)
 
-        # Agents can now respond in any room they're in
-        for mid in mentioned_agents:
-            if mid in room_agents:
-                valid_agents.append(mid)
-            else:
-                invalid_agents.append(mid)
-    else:
-        # For room messages, check if agents are configured for the room
-        room_agents = get_available_agents_in_room(room, config)
-        for mid in mentioned_agents:
-            if mid in room_agents:
-                valid_agents.append(mid)
-            else:
-                invalid_agents.append(mid)
-
-    all_valid = len(invalid_agents) == 0
     return _AgentValidationResult(
-        all_valid=all_valid,
+        all_valid=len(invalid_agents) == 0,
         valid_agents=valid_agents,
         invalid_agents=invalid_agents,
     )
@@ -718,6 +687,19 @@ def _format_scheduled_time(dt: datetime, timezone_str: str) -> str:
     return f"{time_str} ({relative_str})"
 
 
+def _extract_mentioned_agents_from_text(full_text: str, config: Config) -> list[MatrixID]:
+    """Extract valid agent mentions from scheduling text."""
+    _, mentioned_user_ids, _ = parse_mentions_in_text(full_text, config.domain, config)
+    mentioned_agents: list[MatrixID] = []
+
+    for user_id in mentioned_user_ids:
+        matrix_id = MatrixID.parse(user_id)
+        if matrix_id.agent_name(config) and matrix_id not in mentioned_agents:
+            mentioned_agents.append(matrix_id)
+
+    return mentioned_agents
+
+
 async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     client: nio.AsyncClient,
     room_id: str,
@@ -727,6 +709,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     config: Config,
     room: nio.MatrixRoom,
     mentioned_agents: list[MatrixID] | None = None,
+    task_id: str | None = None,
 ) -> tuple[str | None, str]:
     """Schedule a workflow from natural language request.
 
@@ -734,6 +717,9 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         Tuple of (task_id, response_message)
 
     """
+    if mentioned_agents is None:
+        mentioned_agents = _extract_mentioned_agents_from_text(full_text, config)
+
     # Get agents that are available in the thread
     available_agents: list[MatrixID] = []
     if thread_id:
@@ -768,7 +754,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         return (None, "❌ Failed to schedule: Recurring task missing cron schedule")
 
     # Validate that all mentioned agents are accessible
-    validation_result = await _validate_agent_mentions(workflow_result.message, room, thread_id, config)
+    validation_result = await _validate_agent_mentions(workflow_result.message, room, config)
 
     if not validation_result.all_valid:
         error_msg = "❌ Failed to schedule: The following agents are not available in this "
@@ -798,8 +784,8 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     workflow_result.thread_id = thread_id
     workflow_result.room_id = room_id
 
-    # Create task ID
-    task_id = str(uuid.uuid4())[:8]
+    # Create task ID for new tasks (or reuse existing ID when editing)
+    task_id = task_id or str(uuid.uuid4())[:8]
 
     created_at = datetime.now(UTC).isoformat()
 
@@ -840,6 +826,59 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     success_msg += f"\n**Task ID:** `{task_id}`"
 
     return (task_id, success_msg)
+
+
+async def edit_scheduled_task(
+    client: nio.AsyncClient,
+    room_id: str,
+    task_id: str,
+    full_text: str,
+    scheduled_by: str,
+    config: Config,
+    room: nio.MatrixRoom,
+    thread_id: str | None = None,
+) -> str:
+    """Edit an existing scheduled task by replacing its workflow details."""
+    response = await client.room_get_state_event(
+        room_id=room_id,
+        event_type=SCHEDULED_TASK_EVENT_TYPE,
+        state_key=task_id,
+    )
+
+    if not isinstance(response, nio.RoomGetStateEventResponse):
+        return f"❌ Task `{task_id}` not found."
+
+    content = response.content
+    status = content.get("status")
+    if status != "pending":
+        return f"❌ Task `{task_id}` cannot be edited because it is `{status}`."
+
+    # Keep the task in its original thread when possible.
+    target_thread_id = thread_id
+    workflow_data = content.get("workflow")
+    if isinstance(workflow_data, str):
+        try:
+            existing_workflow = ScheduledWorkflow(**json.loads(workflow_data))
+            if existing_workflow.thread_id:
+                target_thread_id = existing_workflow.thread_id
+        except (TypeError, ValueError):
+            logger.exception("Failed to parse existing workflow for task edit", task_id=task_id)
+
+    edited_task_id, response_text = await schedule_task(
+        client=client,
+        room_id=room_id,
+        thread_id=target_thread_id,
+        scheduled_by=scheduled_by,
+        full_text=full_text,
+        config=config,
+        room=room,
+        task_id=task_id,
+    )
+
+    if edited_task_id is None:
+        return f"❌ Failed to edit task `{task_id}`.\n\n{response_text}"
+
+    return f"✅ Updated task `{task_id}`.\n\n{response_text}"
 
 
 async def list_scheduled_tasks(

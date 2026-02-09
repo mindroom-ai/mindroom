@@ -51,6 +51,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     bot.orchestrator = mock_orchestrator
 
     bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
     bot.client.user_id = "@mindroom_test:localhost"
 
     # Mock room send to return a response event ID

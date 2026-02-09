@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import nio
+from agno.knowledge.knowledge import Knowledge
 from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
 
 from . import config_confirmation, interactive, voice_handler
@@ -70,10 +71,12 @@ from .routing import suggest_agent_for_message
 from .scheduling import (
     cancel_all_scheduled_tasks,
     cancel_scheduled_task,
+    edit_scheduled_task,
     list_scheduled_tasks,
     restore_scheduled_tasks,
     schedule_task,
 )
+from .scheduling_context import SchedulingToolContext, scheduling_tool_context
 from .skills import clear_skill_cache, get_skill_snapshot, resolve_skill_command_spec
 from .stop import StopManager
 from .streaming import (
@@ -107,7 +110,7 @@ if TYPE_CHECKING:
 
     import structlog
     from agno.agent import Agent
-    from agno.knowledge.knowledge import Knowledge
+    from agno.knowledge.document import Document
     from agno.tools.function import Function
     from agno.tools.toolkit import Toolkit
 
@@ -118,6 +121,102 @@ logger = get_logger(__name__)
 
 # Constants
 SYNC_TIMEOUT_MS = 30000
+
+
+@dataclass
+class MultiKnowledgeVectorDb:
+    """Thin vector DB wrapper that queries multiple vector DBs and merges results.
+
+    Duck-types the vector_db interface expected by agno's ``Knowledge.__post_init__``.
+    ``exists()`` returns True and ``create()`` is a no-op so that Knowledge skips its
+    own initialization — the underlying knowledge managers already own the DB lifecycle.
+    If agno changes the ``__post_init__`` protocol, this adapter will need updating.
+    """
+
+    vector_dbs: list[Any]
+
+    def exists(self) -> bool:
+        """Present as already-initialized to satisfy Knowledge.__post_init__."""
+        return True
+
+    def create(self) -> None:
+        """No-op because underlying knowledge managers own DB lifecycle."""
+        return
+
+    def search(
+        self,
+        *,
+        query: str,
+        limit: int,
+        filters: dict[str, Any] | list[Any] | None = None,
+    ) -> list[Document]:
+        """Search each assigned vector database and interleave merged results."""
+        results_by_db: list[list[Document]] = []
+        for vector_db in self.vector_dbs:
+            try:
+                results = vector_db.search(query=query, limit=limit, filters=filters)
+            except Exception:
+                logger.warning(
+                    "Knowledge vector database search failed",
+                    vector_db_type=type(vector_db).__name__,
+                    exc_info=True,
+                )
+                continue
+            results_by_db.append(results)
+        return _interleave_documents(results_by_db, limit)
+
+    async def async_search(
+        self,
+        *,
+        query: str,
+        limit: int,
+        filters: dict[str, Any] | list[Any] | None = None,
+    ) -> list[Document]:
+        """Async variant of ``search`` that searches DBs concurrently."""
+
+        async def _search_one(vdb: Any) -> list[Document]:  # noqa: ANN401
+            results: list[Document]
+            async_search = getattr(vdb, "async_search", None)
+            try:
+                if async_search is None:
+                    results = vdb.search(query=query, limit=limit, filters=filters)
+                else:
+                    try:
+                        results = await async_search(query=query, limit=limit, filters=filters)
+                    except NotImplementedError:
+                        results = vdb.search(query=query, limit=limit, filters=filters)
+            except Exception:
+                logger.warning(
+                    "Knowledge vector database async search failed",
+                    vector_db_type=type(vdb).__name__,
+                    exc_info=True,
+                )
+                return []
+            return results
+
+        results_by_db = await asyncio.gather(*[_search_one(vdb) for vdb in self.vector_dbs])
+        return _interleave_documents(list(results_by_db), limit)
+
+
+def _interleave_documents(results_by_db: list[list[Document]], limit: int) -> list[Document]:
+    """Interleave per-db results so one knowledge base cannot dominate top-k."""
+    if limit <= 0 or not results_by_db:
+        return []
+
+    merged: list[Document] = []
+    index = 0
+    while len(merged) < limit:
+        added = False
+        for results in results_by_db:
+            if index < len(results):
+                merged.append(results[index])
+                added = True
+                if len(merged) >= limit:
+                    return merged
+        if not added:
+            break
+        index += 1
+    return merged
 
 
 def _create_task_wrapper(callback: object) -> object:
@@ -588,20 +687,41 @@ class AgentBot:
         return manager.get_knowledge()
 
     def _knowledge_for_agent(self, agent_name: str) -> Knowledge | None:
-        """Return shared knowledge for agents assigned to a knowledge base."""
+        """Return shared knowledge for agents assigned to one or more knowledge bases."""
         agent_config = self.config.agents.get(agent_name)
-        if agent_config is None or agent_config.knowledge_base is None:
+        if agent_config is None:
             return None
 
-        knowledge = self._get_shared_knowledge(agent_config.knowledge_base)
-        if knowledge is None:
-            self.logger.warning(
-                "Knowledge base not available for agent",
-                agent_name=agent_name,
-                knowledge_base=agent_config.knowledge_base,
-            )
+        if not agent_config.knowledge_bases:
             return None
-        return knowledge
+
+        missing_base_ids: list[str] = []
+        knowledges: list[Knowledge] = []
+        for base_id in agent_config.knowledge_bases:
+            knowledge = self._get_shared_knowledge(base_id)
+            if knowledge is None:
+                missing_base_ids.append(base_id)
+                continue
+            knowledges.append(knowledge)
+
+        if missing_base_ids:
+            self.logger.warning(
+                "Knowledge bases not available for agent",
+                agent_name=agent_name,
+                knowledge_bases=missing_base_ids,
+            )
+
+        if not knowledges:
+            return None
+
+        if len(knowledges) == 1:
+            return knowledges[0]
+
+        return Knowledge(
+            name=f"{agent_name}_multi_knowledge",
+            vector_db=MultiKnowledgeVectorDb(vector_dbs=[k.vector_db for k in knowledges]),
+            max_results=max(knowledge.max_results for knowledge in knowledges),
+        )
 
     @property  # Not cached_property because Team mutates it!
     def agent(self) -> Agent:
@@ -1206,6 +1326,32 @@ class AgentBot:
             mentioned_agents=mentioned_agents,
         )
 
+    def _build_scheduling_tool_context(
+        self,
+        room_id: str,
+        thread_id: str | None,
+        reply_to_event_id: str,
+        user_id: str | None,
+    ) -> SchedulingToolContext | None:
+        """Build runtime context for scheduler tool calls during response generation."""
+        assert self.client is not None
+        room = self.client.rooms.get(room_id)
+        if room is None:
+            self.logger.warning(
+                "Skipping scheduler tool context because room is not cached",
+                room_id=room_id,
+            )
+            return None
+
+        return SchedulingToolContext(
+            client=self.client,
+            room=room,
+            room_id=room_id,
+            thread_id=thread_id or reply_to_event_id,
+            requester_id=user_id or self.matrix_id.full_id,
+            config=self.config,
+        )
+
     async def _generate_team_response_helper(
         self,
         room_id: str,
@@ -1239,6 +1385,12 @@ class AgentBot:
 
         # Convert MatrixID list to agent names for non-streaming APIs
         agent_names = [mid.agent_name(self.config) or mid.username for mid in team_agents]
+        scheduler_context = self._build_scheduling_tool_context(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+            user_id=requester_user_id,
+        )
         orchestrator = self.orchestrator
         if orchestrator is None:
             msg = "Orchestrator is not set"
@@ -1249,27 +1401,28 @@ class AgentBot:
             if use_streaming and not existing_event_id:
                 # Show typing indicator while team generates streaming response
                 async with typing_indicator(self.client, room_id):
-                    response_stream = team_response_stream(
-                        agent_ids=team_agents,
-                        message=message,
-                        orchestrator=orchestrator,
-                        mode=mode,
-                        thread_history=thread_history,
-                        model_name=model_name,
-                    )
+                    with scheduling_tool_context(scheduler_context):
+                        response_stream = team_response_stream(
+                            agent_ids=team_agents,
+                            message=message,
+                            orchestrator=orchestrator,
+                            mode=mode,
+                            thread_history=thread_history,
+                            model_name=model_name,
+                        )
 
-                    event_id, accumulated = await send_streaming_response(
-                        self.client,
-                        room_id,
-                        reply_to_event_id,
-                        thread_id,
-                        self.matrix_id.domain,
-                        self.config,
-                        response_stream,
-                        streaming_cls=ReplacementStreamingResponse,
-                        header=None,
-                        existing_event_id=message_id,
-                    )
+                        event_id, accumulated = await send_streaming_response(
+                            self.client,
+                            room_id,
+                            reply_to_event_id,
+                            thread_id,
+                            self.matrix_id.domain,
+                            self.config,
+                            response_stream,
+                            streaming_cls=ReplacementStreamingResponse,
+                            header=None,
+                            existing_event_id=message_id,
+                        )
 
                 # Handle interactive questions in team responses
                 await self._handle_interactive_question(
@@ -1283,14 +1436,15 @@ class AgentBot:
             else:
                 # Show typing indicator while team generates non-streaming response
                 async with typing_indicator(self.client, room_id):
-                    response_text = await team_response(
-                        agent_names=agent_names,
-                        mode=mode,
-                        message=message,
-                        orchestrator=orchestrator,
-                        thread_history=thread_history,
-                        model_name=model_name,
-                    )
+                    with scheduling_tool_context(scheduler_context):
+                        response_text = await team_response(
+                            agent_names=agent_names,
+                            mode=mode,
+                            message=message,
+                            orchestrator=orchestrator,
+                            thread_history=thread_history,
+                            model_name=model_name,
+                        )
 
                 # Either edit the thinking message or send new
                 if message_id:
@@ -1447,21 +1601,28 @@ class AgentBot:
 
         session_id = create_session_id(room_id, thread_id)
         knowledge = self._knowledge_for_agent(self.agent_name)
+        scheduler_context = self._build_scheduling_tool_context(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+            user_id=user_id,
+        )
 
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
-                response_text = await ai_response(
-                    agent_name=self.agent_name,
-                    prompt=prompt,
-                    session_id=session_id,
-                    storage_path=self.storage_path,
-                    config=self.config,
-                    thread_history=thread_history,
-                    room_id=room_id,
-                    knowledge=knowledge,
-                    user_id=user_id,
-                )
+                with scheduling_tool_context(scheduler_context):
+                    response_text = await ai_response(
+                        agent_name=self.agent_name,
+                        prompt=prompt,
+                        session_id=session_id,
+                        storage_path=self.storage_path,
+                        config=self.config,
+                        thread_history=thread_history,
+                        room_id=room_id,
+                        knowledge=knowledge,
+                        user_id=user_id,
+                    )
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
             self.logger.info("Non-streaming response cancelled by user", message_id=existing_event_id)
@@ -1516,18 +1677,25 @@ class AgentBot:
 
         session_id = create_session_id(room_id, thread_id)
         knowledge = self._knowledge_for_agent(agent_name)
+        scheduler_context = self._build_scheduling_tool_context(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+            user_id=user_id,
+        )
 
         async with typing_indicator(self.client, room_id):
-            response_text = await ai_response(
-                agent_name=agent_name,
-                prompt=prompt,
-                session_id=session_id,
-                storage_path=self.storage_path,
-                config=self.config,
-                thread_history=thread_history,
-                room_id=room_id,
-                knowledge=knowledge,
-            )
+            with scheduling_tool_context(scheduler_context):
+                response_text = await ai_response(
+                    agent_name=agent_name,
+                    prompt=prompt,
+                    session_id=session_id,
+                    storage_path=self.storage_path,
+                    config=self.config,
+                    thread_history=thread_history,
+                    room_id=room_id,
+                    knowledge=knowledge,
+                )
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
         event_id = await self._send_response(
@@ -1632,33 +1800,40 @@ class AgentBot:
 
         session_id = create_session_id(room_id, thread_id)
         knowledge = self._knowledge_for_agent(self.agent_name)
+        scheduler_context = self._build_scheduling_tool_context(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+            user_id=user_id,
+        )
 
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
-                response_stream = stream_agent_response(
-                    agent_name=self.agent_name,
-                    prompt=prompt,
-                    session_id=session_id,
-                    storage_path=self.storage_path,
-                    config=self.config,
-                    thread_history=thread_history,
-                    room_id=room_id,
-                    knowledge=knowledge,
-                    user_id=user_id,
-                )
+                with scheduling_tool_context(scheduler_context):
+                    response_stream = stream_agent_response(
+                        agent_name=self.agent_name,
+                        prompt=prompt,
+                        session_id=session_id,
+                        storage_path=self.storage_path,
+                        config=self.config,
+                        thread_history=thread_history,
+                        room_id=room_id,
+                        knowledge=knowledge,
+                        user_id=user_id,
+                    )
 
-                event_id, accumulated = await send_streaming_response(
-                    self.client,
-                    room_id,
-                    reply_to_event_id,
-                    thread_id,
-                    self.matrix_id.domain,
-                    self.config,
-                    response_stream,
-                    streaming_cls=StreamingResponse,
-                    existing_event_id=existing_event_id,
-                )
+                    event_id, accumulated = await send_streaming_response(
+                        self.client,
+                        room_id,
+                        reply_to_event_id,
+                        thread_id,
+                        self.matrix_id.domain,
+                        self.config,
+                        response_stream,
+                        streaming_cls=StreamingResponse,
+                        existing_event_id=existing_event_id,
+                    )
 
             # Handle interactive questions if present
             await self._handle_interactive_question(
@@ -2058,7 +2233,7 @@ class AgentBot:
             mentioned_agents, _ = check_agent_mentioned(event.source, None, self.config)
 
             assert self.client is not None
-            task_id, response_text = await schedule_task(
+            _, response_text = await schedule_task(
                 client=self.client,
                 room_id=room.room_id,
                 thread_id=effective_thread_id,
@@ -2096,6 +2271,21 @@ class AgentBot:
                     room_id=room.room_id,
                     task_id=task_id,
                 )
+
+        elif command.type == CommandType.EDIT_SCHEDULE:
+            assert self.client is not None
+            task_id = command.args["task_id"]
+            full_text = command.args["full_text"]
+            response_text = await edit_scheduled_task(
+                client=self.client,
+                room_id=room.room_id,
+                task_id=task_id,
+                full_text=full_text,
+                scheduled_by=event.sender,
+                config=self.config,
+                room=room,
+                thread_id=effective_thread_id,
+            )
 
         elif command.type == CommandType.CONFIG:
             # Handle config command

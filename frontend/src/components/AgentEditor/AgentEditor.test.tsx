@@ -59,6 +59,7 @@ describe('AgentEditor', () => {
     skills: ['debugging'],
     instructions: ['Test instruction'],
     rooms: ['test_room'],
+    knowledge_bases: ['research'],
     learning: true,
     learning_mode: 'always',
   };
@@ -69,6 +70,10 @@ describe('AgentEditor', () => {
       custom: { provider: 'custom', id: 'custom-model' },
     },
     agents: { test_agent: mockAgent },
+    knowledge_bases: {
+      legal: { path: './legal', watch: true },
+      research: { path: './research', watch: true },
+    },
     defaults: {},
   };
 
@@ -258,6 +263,30 @@ describe('AgentEditor', () => {
       'test_agent',
       expect.objectContaining({
         rooms: ['other_room'],
+      })
+    );
+  });
+
+  it('updates knowledge bases when checkboxes are toggled', () => {
+    render(<AgentEditor />);
+
+    const researchCheckbox = screen.getByRole('checkbox', { name: /research/i });
+    expect(researchCheckbox).toBeChecked();
+
+    const legalCheckbox = screen.getByRole('checkbox', { name: /legal/i });
+    fireEvent.click(legalCheckbox);
+    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+      'test_agent',
+      expect.objectContaining({
+        knowledge_bases: ['research', 'legal'],
+      })
+    );
+
+    fireEvent.click(researchCheckbox);
+    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+      'test_agent',
+      expect.objectContaining({
+        knowledge_bases: ['legal'],
       })
     );
   });

@@ -9,7 +9,7 @@ export interface CheckboxListItem {
 }
 
 export interface CheckboxListFieldProps {
-  name: 'skills' | 'rooms' | 'tools';
+  name: 'skills' | 'rooms' | 'tools' | 'knowledge_bases';
   control: Control<Agent>;
   items: CheckboxListItem[];
   fieldName: keyof Agent;
