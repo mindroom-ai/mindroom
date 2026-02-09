@@ -496,42 +496,44 @@ export function Knowledge() {
             </div>
 
             <div className="space-y-3">
-              <p className="text-sm text-muted-foreground">
-                Select a base to manage. Settings and files below always belong to the active base.
-              </p>
-
               {baseNames.length > 0 ? (
-                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">
-                  {baseNames.map(baseName => {
-                    const baseConfig = knowledgeBases[baseName];
-                    const isActive = baseName === selectedBase;
-                    return (
-                      <button
-                        key={baseName}
-                        type="button"
-                        onClick={() => setSelectedBase(baseName)}
-                        className={cn(
-                          'rounded-md border p-3 text-left transition-colors',
-                          isActive
-                            ? 'border-primary bg-primary/5'
-                            : 'border-border hover:border-primary/40 hover:bg-muted/40'
-                        )}
-                        aria-pressed={isActive}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="font-medium">{baseName}</span>
-                          {isActive && <Badge variant="default">Active</Badge>}
-                        </div>
-                        <p className="mt-1 truncate text-xs font-mono text-muted-foreground">
-                          {baseConfig?.path ?? defaultPathForBase(baseName)}
-                        </p>
-                        <p className="mt-1 text-xs text-muted-foreground">
-                          {baseConfig?.watch ? 'Watching for changes' : 'Manual reindex only'}
-                        </p>
-                      </button>
-                    );
-                  })}
-                </div>
+                <>
+                  <p className="text-sm text-muted-foreground">
+                    Select a base to manage. Settings and files below always belong to the active
+                    base.
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">
+                    {baseNames.map(baseName => {
+                      const baseConfig = knowledgeBases[baseName];
+                      const isActive = baseName === selectedBase;
+                      return (
+                        <button
+                          key={baseName}
+                          type="button"
+                          onClick={() => setSelectedBase(baseName)}
+                          className={cn(
+                            'rounded-md border p-3 text-left transition-colors',
+                            isActive
+                              ? 'border-primary bg-primary/5'
+                              : 'border-border hover:border-primary/40 hover:bg-muted/40'
+                          )}
+                          aria-pressed={isActive}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-medium">{baseName}</span>
+                            {isActive && <Badge variant="default">Active</Badge>}
+                          </div>
+                          <p className="mt-1 truncate text-xs font-mono text-muted-foreground">
+                            {baseConfig?.path ?? defaultPathForBase(baseName)}
+                          </p>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            {baseConfig?.watch ? 'Watching for changes' : 'Manual reindex only'}
+                          </p>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </>
               ) : (
                 <p className="text-sm text-muted-foreground">
                   No knowledge bases configured yet. Add one below to start.
@@ -627,12 +629,6 @@ export function Knowledge() {
               </CardContent>
             </Card>
           </>
-        ) : baseNames.length === 0 ? (
-          <Card>
-            <CardContent className="py-4 text-sm text-muted-foreground">
-              No knowledge bases configured yet. Add one above to start uploading files.
-            </CardContent>
-          </Card>
         ) : null}
 
         {isDirty && (
