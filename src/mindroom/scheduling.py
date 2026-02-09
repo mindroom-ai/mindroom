@@ -383,6 +383,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     config: Config,
     room: nio.MatrixRoom,
     mentioned_agents: list[MatrixID] | None = None,
+    task_id: str | None = None,
 ) -> tuple[str | None, str]:
     """Schedule a workflow from natural language request.
 
@@ -457,8 +458,8 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     workflow_result.thread_id = thread_id
     workflow_result.room_id = room_id
 
-    # Create task ID
-    task_id = str(uuid.uuid4())[:8]
+    # Create task ID for new tasks (or reuse existing ID when editing)
+    task_id = task_id or str(uuid.uuid4())[:8]
 
     # Store workflow in Matrix state
     task_data = {
@@ -482,6 +483,11 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         content=task_data,
         state_key=task_id,
     )
+
+    # Replace any currently running task with the same ID (edit flow)
+    if task_id in _running_tasks:
+        _running_tasks[task_id].cancel()
+        del _running_tasks[task_id]
 
     # Start the appropriate async task
     if workflow_result.schedule_type == "once":
@@ -514,6 +520,59 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     success_msg += f"\n**Task ID:** `{task_id}`"
 
     return (task_id, success_msg)
+
+
+async def edit_scheduled_task(
+    client: nio.AsyncClient,
+    room_id: str,
+    task_id: str,
+    full_text: str,
+    scheduled_by: str,
+    config: Config,
+    room: nio.MatrixRoom,
+    thread_id: str | None = None,
+) -> str:
+    """Edit an existing scheduled task by replacing its workflow details."""
+    response = await client.room_get_state_event(
+        room_id=room_id,
+        event_type=SCHEDULED_TASK_EVENT_TYPE,
+        state_key=task_id,
+    )
+
+    if not isinstance(response, nio.RoomGetStateEventResponse):
+        return f"❌ Task `{task_id}` not found."
+
+    content = response.content
+    status = content.get("status")
+    if status != "pending":
+        return f"❌ Task `{task_id}` cannot be edited because it is `{status}`."
+
+    # Keep the task in its original thread when possible.
+    target_thread_id = thread_id
+    workflow_data = content.get("workflow")
+    if isinstance(workflow_data, str):
+        try:
+            existing_workflow = ScheduledWorkflow(**json.loads(workflow_data))
+            if existing_workflow.thread_id:
+                target_thread_id = existing_workflow.thread_id
+        except (TypeError, ValueError):
+            logger.exception("Failed to parse existing workflow for task edit", task_id=task_id)
+
+    edited_task_id, response_text = await schedule_task(
+        client=client,
+        room_id=room_id,
+        thread_id=target_thread_id,
+        scheduled_by=scheduled_by,
+        full_text=full_text,
+        config=config,
+        room=room,
+        task_id=task_id,
+    )
+
+    if edited_task_id is None:
+        return f"❌ Failed to edit task `{task_id}`.\n\n{response_text}"
+
+    return f"✅ Updated task `{task_id}`.\n\n{response_text}"
 
 
 async def list_scheduled_tasks(  # noqa: C901, PLR0912

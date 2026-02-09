@@ -22,6 +22,7 @@ class CommandType(Enum):
     SCHEDULE = "schedule"
     LIST_SCHEDULES = "list_schedules"
     CANCEL_SCHEDULE = "cancel_schedule"
+    EDIT_SCHEDULE = "edit_schedule"
     WIDGET = "widget"
     CONFIG = "config"  # Configuration command
     HI = "hi"  # Welcome message command
@@ -34,6 +35,7 @@ COMMAND_DOCS = {
     CommandType.SCHEDULE: ("!schedule <task>", "Schedule a task"),
     CommandType.LIST_SCHEDULES: ("!list_schedules", "List scheduled tasks"),
     CommandType.CANCEL_SCHEDULE: ("!cancel_schedule <id>", "Cancel a scheduled task"),
+    CommandType.EDIT_SCHEDULE: ("!edit_schedule <id> <task>", "Edit an existing scheduled task"),
     CommandType.HELP: ("!help [topic]", "Get help"),
     CommandType.WIDGET: ("!widget [url]", "Add configuration widget"),
     CommandType.CONFIG: ("!config <operation>", "Manage configuration"),
@@ -89,8 +91,9 @@ class CommandParser:
     # Command patterns
     HELP_PATTERN = re.compile(r"^!help(?:\s+(.+))?$", re.IGNORECASE)
     SCHEDULE_PATTERN = re.compile(r"^!schedule\s+(.+)$", re.IGNORECASE | re.DOTALL)
-    LIST_SCHEDULES_PATTERN = re.compile(r"^!list[_-]?schedules?$", re.IGNORECASE)
+    LIST_SCHEDULES_PATTERN = re.compile(r"^!(?:list|inspect)[_-]?schedules?$", re.IGNORECASE)
     CANCEL_SCHEDULE_PATTERN = re.compile(r"^!cancel[_-]?schedule\s+(.+)$", re.IGNORECASE)
+    EDIT_SCHEDULE_PATTERN = re.compile(r"^!edit[_-]?schedule\s+(\S+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
     WIDGET_PATTERN = re.compile(r"^!widget(?:\s+(.+))?$", re.IGNORECASE)
     CONFIG_PATTERN = re.compile(r"^!config(?:\s+(.+))?$", re.IGNORECASE)
     HI_PATTERN = re.compile(r"^!hi$", re.IGNORECASE)
@@ -161,6 +164,17 @@ class CommandParser:
             return Command(
                 type=CommandType.CANCEL_SCHEDULE,
                 args={"task_id": task_id, "cancel_all": cancel_all},
+                raw_text=message,
+            )
+
+        # !edit_schedule command
+        match = self.EDIT_SCHEDULE_PATTERN.match(message)
+        if match:
+            task_id = match.group(1).strip()
+            full_text = match.group(2).strip()
+            return Command(
+                type=CommandType.EDIT_SCHEDULE,
+                args={"task_id": task_id, "full_text": full_text},
                 raw_text=message,
             )
 
@@ -271,12 +285,12 @@ Notes:
 - Skills must be enabled on the target agent and marked `user-invocable: true`.
 - When a skill uses `command-dispatch: tool`, the tool runs directly with raw args."""
 
-    if topic == "list_schedules":
+    if topic in {"list_schedules", "inspect_schedules"}:
         return """**List Schedules Command**
 
 Usage: `!list_schedules`
 
-Alternative syntax: `!listschedules`, `!list-schedules`, `!list_schedule`, `!listschedule`, `!list-schedule`
+Alternative syntax: `!listschedules`, `!list-schedules`, `!list_schedule`, `!listschedule`, `!list-schedule`, `!inspect_schedules`
 
 Shows pending scheduled tasks. When used in a thread, shows tasks for that thread. When used in the main room, shows all tasks in the room."""
 
@@ -293,6 +307,19 @@ Examples:
 - `!cancel_schedule all` - Cancel all scheduled tasks
 
 Use `!list_schedules` to see task IDs."""
+
+    if topic in {"edit", "edit_schedule"}:
+        return """**Edit Schedule Command**
+
+Usage: `!edit_schedule <id> <new task>` - Replace an existing scheduled task with new timing/content
+
+Alternative syntax: `!editschedule`, `!edit-schedule`
+
+Examples:
+- `!edit_schedule abc123 tomorrow at 9am @finance send market update`
+- `!edit_schedule task42 every weekday at 8am check build status`
+
+Use `!list_schedules` to find task IDs before editing."""
 
     if topic == "config":
         return """**Config Command**

@@ -70,6 +70,7 @@ from .routing import suggest_agent_for_message
 from .scheduling import (
     cancel_all_scheduled_tasks,
     cancel_scheduled_task,
+    edit_scheduled_task,
     list_scheduled_tasks,
     restore_scheduled_tasks,
     schedule_task,
@@ -2152,6 +2153,21 @@ class AgentBot:
                     room_id=room.room_id,
                     task_id=task_id,
                 )
+
+        elif command.type == CommandType.EDIT_SCHEDULE:
+            assert self.client is not None
+            task_id = command.args["task_id"]
+            full_text = command.args["full_text"]
+            response_text = await edit_scheduled_task(
+                client=self.client,
+                room_id=room.room_id,
+                task_id=task_id,
+                full_text=full_text,
+                scheduled_by=event.sender,
+                config=self.config,
+                room=room,
+                thread_id=effective_thread_id,
+            )
 
         elif command.type == CommandType.CONFIG:
             # Handle config command
