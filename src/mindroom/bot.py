@@ -173,15 +173,11 @@ class MultiKnowledgeVectorDb:
         """Async variant of ``search`` that searches DBs concurrently."""
 
         async def _search_one(vdb: Any) -> list[Document]:  # noqa: ANN401
+            results: list[Document]
             try:
-                async_fn = getattr(vdb, "async_search", None)
-                if callable(async_fn):
-                    maybe_results = async_fn(query=query, limit=limit, filters=filters)
-                    if inspect.isawaitable(maybe_results):
-                        results: list[Document] = await maybe_results
-                    else:
-                        results = maybe_results
-                else:
+                try:
+                    results = await vdb.async_search(query=query, limit=limit, filters=filters)
+                except (AttributeError, NotImplementedError):
                     results = vdb.search(query=query, limit=limit, filters=filters)
             except Exception:
                 logger.warning(
