@@ -443,6 +443,24 @@ class ConfigManagerTools(Toolkit):
 
         return "\n".join(output)
 
+    def _validate_knowledge_bases(
+        self,
+        knowledge_bases: list[str],
+        configured_knowledge_bases: set[str],
+    ) -> str | None:
+        """Validate that all requested knowledge base IDs exist in config."""
+        invalid_knowledge_bases = sorted(
+            {base_id for base_id in knowledge_bases if base_id not in configured_knowledge_bases},
+        )
+        if not invalid_knowledge_bases:
+            return None
+
+        invalid = ", ".join(invalid_knowledge_bases)
+        available = ", ".join(sorted(configured_knowledge_bases))
+        if not available:
+            return f"Error: Unknown knowledge bases: {invalid}. No knowledge bases are configured."
+        return f"Error: Unknown knowledge bases: {invalid}. Available knowledge bases: {available}."
+
     def _create_agent_config(
         self,
         agent_name: str,
@@ -472,6 +490,10 @@ class ConfigManagerTools(Toolkit):
 
             if agent_name in config.agents:
                 return f"Error: Agent '{agent_name}' already exists. Use manage_agent with operation='update' to modify it."
+
+            knowledge_base_error = self._validate_knowledge_bases(knowledge_bases, set(config.knowledge_bases))
+            if knowledge_base_error:
+                return knowledge_base_error
 
             # Create new agent config
             new_agent = AgentConfig(
@@ -510,7 +532,7 @@ class ConfigManagerTools(Toolkit):
             logger.exception("Failed to create agent")
             return f"Error creating agent: {e}"
 
-    def _update_agent_config(
+    def _update_agent_config(  # noqa: C901
         self,
         agent_name: str,
         display_name: str | None,
@@ -538,6 +560,11 @@ class ConfigManagerTools(Toolkit):
                 invalid_tools = [t for t in tools if t not in TOOL_METADATA]
                 if invalid_tools:
                     return f"Error: Unknown tools: {', '.join(invalid_tools)}"
+
+            if knowledge_bases is not None:
+                knowledge_base_error = self._validate_knowledge_bases(knowledge_bases, set(config.knowledge_bases))
+                if knowledge_base_error:
+                    return knowledge_base_error
 
             # Map of field names to (new_value, display_formatter)
             updates = {
