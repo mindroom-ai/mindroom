@@ -48,6 +48,7 @@ COPY config.yaml /app/
 COPY run-backend.sh /app/
 COPY scripts /app/scripts/
 COPY tools /app/tools/
+COPY skills /app/skills/
 COPY avatars /app/avatars/
 
 # Make startup script executable
