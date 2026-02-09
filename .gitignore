@@ -248,3 +248,6 @@ wgcf-profile.conf
 
 # Local AI-agent artifacts
 .claude/REPORT.md
+
+# Generated skill reference files (regenerate with: just generate-skill-refs)
+skills/mindroom-self-debug/references/source-index.txt
