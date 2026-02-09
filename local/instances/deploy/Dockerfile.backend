@@ -17,6 +17,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Copy source code
 COPY src /app/src
+COPY skills /app/skills
 
 # Install the project itself
 # Set pretend version for setuptools-scm (no .git in container)

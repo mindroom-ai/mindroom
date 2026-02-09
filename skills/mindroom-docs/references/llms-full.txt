@@ -1,8 +1,8 @@
 # MindRoom
 
-> AI agents that live in Matrix and work everywhere via bridges.
+> AI agents that live in Matrix and work everywhere via bridges
 
-### [Home](https://docs.mindroom.chat/)
+# MindRoom Docs
 
 # MindRoom
 
@@ -21,8 +21,7 @@ MindRoom is an AI agent orchestration system with Matrix integration. It provide
 - **Voice messages** - Speech-to-text transcription with intelligent command recognition
 - **Authorization** - Fine-grained access control for users and rooms
 
-> [!TIP]
-> **Matrix is the backbone** - MindRoom agents communicate through the Matrix protocol, which means they can be bridged to Discord, Slack, Telegram, and other platforms.
+> [!TIP] **Matrix is the backbone** - MindRoom agents communicate through the Matrix protocol, which means they can be bridged to Discord, Slack, Telegram, and other platforms.
 
 ## Quick Start
 
@@ -30,7 +29,7 @@ MindRoom is an AI agent orchestration system with Matrix integration. It provide
 
 **Prereqs:** Docker + Docker Compose.
 
-```bash
+```
 git clone https://github.com/mindroom-ai/mindroom-stack
 cd mindroom-stack
 cp .env.example .env
@@ -49,7 +48,7 @@ Open:
 
 Use this if you already have a Matrix homeserver and want to run MindRoom directly.
 
-```bash
+```
 # Using uv
 uv tool install mindroom
 
@@ -61,7 +60,7 @@ pip install mindroom
 
 1. Create a `config.yaml`:
 
-```yaml
+```
 agents:
   assistant:
     display_name: Assistant
@@ -78,9 +77,9 @@ defaults:
   markdown: true
 ```
 
-2. Set up your environment in `.env`:
+1. Set up your environment in `.env`:
 
-```bash
+```
 # Matrix homeserver (must allow open registration)
 MATRIX_HOMESERVER=https://matrix.example.com
 
@@ -88,27 +87,27 @@ MATRIX_HOMESERVER=https://matrix.example.com
 ANTHROPIC_API_KEY=your_api_key
 ```
 
-3. Run MindRoom:
+1. Run MindRoom:
 
-```bash
+```
 mindroom run
 ```
 
 ## Features
 
-| Feature | Description |
-|---------|-------------|
-| **Agents** | Single-specialty actors with specific tools and instructions |
-| **Teams** | Collaborative bundles of agents (coordinate or collaborate modes) |
-| **Router** | Built-in traffic director that routes messages to the right agent |
-| **Memory** | Mem0-inspired memory system with agent, room, and team scopes |
-| **Knowledge Bases** | File-backed RAG indexing with per-agent base assignment |
-| **Tools** | 100+ integrations for external services |
-| **Skills** | OpenClaw-compatible skills system for extended agent capabilities |
-| **Scheduling** | Schedule tasks with cron expressions or natural language |
-| **Voice** | Speech-to-text transcription for voice messages |
-| **Authorization** | Fine-grained user and room access control |
-| **Hot Reload** | Config changes are detected and agents restart automatically |
+| Feature             | Description                                                       |
+| ------------------- | ----------------------------------------------------------------- |
+| **Agents**          | Single-specialty actors with specific tools and instructions      |
+| **Teams**           | Collaborative bundles of agents (coordinate or collaborate modes) |
+| **Router**          | Built-in traffic director that routes messages to the right agent |
+| **Memory**          | Mem0-inspired memory system with agent, room, and team scopes     |
+| **Knowledge Bases** | File-backed RAG indexing with per-agent base assignment           |
+| **Tools**           | 100+ integrations for external services                           |
+| **Skills**          | OpenClaw-compatible skills system for extended agent capabilities |
+| **Scheduling**      | Schedule tasks with cron expressions or natural language          |
+| **Voice**           | Speech-to-text transcription for voice messages                   |
+| **Authorization**   | Fine-grained user and room access control                         |
+| **Hot Reload**      | Config changes are detected and agents restart automatically      |
 
 ## Architecture
 
@@ -127,28 +126,26 @@ mindroom run
 
 ## Documentation
 
-- [Getting Started](getting-started.md) - Installation and first steps
-- [Configuration](configuration/index.md) - All configuration options
-- [Dashboard](dashboard.md) - Web UI for configuration
-- [Knowledge Bases](dashboard.md#knowledge) - Manage file-backed RAG bases and indexing
-- [Tools](tools/index.md) - Available tool integrations
-- [Skills](skills.md) - OpenClaw-compatible skills system
-- [Plugins](plugins.md) - Extend with custom tools and skills
-- [Memory System](memory.md) - How agent memory works
-- [Scheduling](scheduling.md) - Schedule tasks with cron or natural language
-- [Voice Messages](voice.md) - Voice message transcription
-- [Authorization](authorization.md) - User and room access control
-- [Architecture](architecture/index.md) - How it works under the hood
-- [Deployment](deployment/index.md) - Docker and Kubernetes deployment
-- [Google Services OAuth Setup](deployment/google-services-oauth.md) - Configure Gmail/Calendar/Drive/Sheets integration
-- [CLI Reference](cli.md) - Command-line interface
+- [Getting Started](https://docs.mindroom.chat/getting-started/index.md) - Installation and first steps
+- [Configuration](https://docs.mindroom.chat/configuration/index.md) - All configuration options
+- [Dashboard](https://docs.mindroom.chat/dashboard/index.md) - Web UI for configuration
+- [Knowledge Bases](https://docs.mindroom.chat/dashboard/#knowledge) - Manage file-backed RAG bases and indexing
+- [Tools](https://docs.mindroom.chat/tools/index.md) - Available tool integrations
+- [Skills](https://docs.mindroom.chat/skills/index.md) - OpenClaw-compatible skills system
+- [Plugins](https://docs.mindroom.chat/plugins/index.md) - Extend with custom tools and skills
+- [Memory System](https://docs.mindroom.chat/memory/index.md) - How agent memory works
+- [Scheduling](https://docs.mindroom.chat/scheduling/index.md) - Schedule tasks with cron or natural language
+- [Voice Messages](https://docs.mindroom.chat/voice/index.md) - Voice message transcription
+- [Authorization](https://docs.mindroom.chat/authorization/index.md) - User and room access control
+- [Architecture](https://docs.mindroom.chat/architecture/index.md) - How it works under the hood
+- [Deployment](https://docs.mindroom.chat/deployment/index.md) - Docker and Kubernetes deployment
+- [Google Services OAuth Setup](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) - Configure Gmail/Calendar/Drive/Sheets integration
+- [CLI Reference](https://docs.mindroom.chat/cli/index.md) - Command-line interface
 
 ## License
 
 - **Repository (except `saas-platform/`)**: Apache License 2.0
 - **SaaS Platform** (`saas-platform/`): Business Source License 1.1 (converts to Apache 2.0 on 2030-02-06)
-
-### [Getting Started](https://docs.mindroom.chat/getting-started/)
 
 # Getting Started
 
@@ -162,21 +159,21 @@ MindRoom depends on a Matrix homeserver plus supporting services. The easiest on
 
 ### 1. Clone the full stack repo
 
-```bash
+```
 git clone https://github.com/mindroom-ai/mindroom-stack
 cd mindroom-stack
 ```
 
 ### 2. Add your API keys
 
-```bash
+```
 cp .env.example .env
 $EDITOR .env  # add at least one AI provider key
 ```
 
 ### 3. Start everything
 
-```bash
+```
 docker compose up -d
 ```
 
@@ -200,24 +197,35 @@ Use this if you already have a Matrix homeserver and want to run MindRoom direct
 
 === "uv (recommended)"
 
-    ```bash
-    uv tool install mindroom
-    ```
+````
+```bash
+uv tool install mindroom
+````
+
+```
 
 === "pip"
 
-    ```bash
-    pip install mindroom
-    ```
+```
+
+```bash
+pip install mindroom
+```
+
+```
 
 === "From source"
 
-    ```bash
-    git clone https://github.com/mindroom-ai/mindroom
-    cd mindroom
-    uv sync
-    source .venv/bin/activate
-    ```
+```
+
+```bash
+git clone https://github.com/mindroom-ai/mindroom
+cd mindroom
+uv sync
+source .venv/bin/activate
+```
+
+```
 
 ### Configuration
 
@@ -225,43 +233,44 @@ Use this if you already have a Matrix homeserver and want to run MindRoom direct
 
 Create a `config.yaml` in your working directory:
 
-```yaml
-agents:
-  assistant:
-    display_name: Assistant
-    role: A helpful AI assistant that can answer questions
-    model: default
-    rooms: [lobby]
+```
 
-models:
-  default:
-    provider: anthropic
-    id: claude-sonnet-4-5-latest
+agents: assistant: display_name: Assistant role: A helpful AI assistant that can answer questions model: default rooms: [lobby]
 
-defaults:
-  markdown: true
+models: default: provider: anthropic id: claude-sonnet-4-5-latest
+
+defaults: markdown: true
 
 timezone: America/Los_Angeles
+
 ```
 
 #### 2. Set up environment variables
 
 Create a `.env` file with your credentials:
 
-```bash
+```
+
 # Matrix homeserver (must allow open registration for agent accounts)
+
 MATRIX_HOMESERVER=https://matrix.example.com
 
 # Optional: For self-signed certificates (development)
+
 # MATRIX_SSL_VERIFY=false
 
 # Optional: For federation setups where server_name differs from homeserver hostname
+
 # MATRIX_SERVER_NAME=example.com
 
 # AI provider API keys
+
 ANTHROPIC_API_KEY=your_anthropic_key
+
 # OPENAI_API_KEY=your_openai_key
+
 # GOOGLE_API_KEY=your_google_key
+
 ```
 
 > [!NOTE]
@@ -269,9 +278,11 @@ ANTHROPIC_API_KEY=your_anthropic_key
 
 #### 3. Run MindRoom
 
-```bash
-mindroom run
 ```
+
+mindroom run
+
+````
 
 MindRoom will:
 
@@ -282,11 +293,10 @@ MindRoom will:
 
 ## Next Steps
 
-- Learn about [agent configuration](configuration/agents.md)
-- Explore [available tools](tools/index.md)
-- Set up [teams for multi-agent collaboration](configuration/teams.md)
-
-### [Dashboard](https://docs.mindroom.chat/dashboard/)
+- Learn about [agent configuration](https://docs.mindroom.chat/configuration/agents/index.md)
+- Explore [available tools](https://docs.mindroom.chat/tools/index.md)
+- Set up [teams for multi-agent collaboration](https://docs.mindroom.chat/configuration/teams/index.md)```
+````
 
 # Web Dashboard
 
@@ -296,7 +306,7 @@ MindRoom includes a web dashboard for configuring agents, teams, rooms, and inte
 
 **Standalone Mode:**
 
-```bash
+```
 mindroom run              # Start the backend
 cd frontend && bun run dev  # Start the frontend (in another terminal)
 ```
@@ -420,62 +430,58 @@ The dashboard communicates with the backend API at `/api/`:
 
 ### Configuration
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/config/load` | Fetch current configuration |
-| PUT | `/api/config/save` | Save full configuration |
-| GET | `/api/config/agents` | List all agents |
-| POST | `/api/config/agents` | Create new agent |
-| PUT | `/api/config/agents/{id}` | Update agent |
-| DELETE | `/api/config/agents/{id}` | Delete agent |
-| GET | `/api/config/teams` | List all teams |
-| POST | `/api/config/teams` | Create new team |
-| PUT | `/api/config/teams/{id}` | Update team |
-| DELETE | `/api/config/teams/{id}` | Delete team |
-| GET | `/api/config/models` | List model configurations |
-| PUT | `/api/config/models/{id}` | Update model configuration |
-| GET | `/api/config/room-models` | Get room model overrides |
-| PUT | `/api/config/room-models` | Update room model overrides |
+| Method | Endpoint                  | Description                 |
+| ------ | ------------------------- | --------------------------- |
+| POST   | `/api/config/load`        | Fetch current configuration |
+| PUT    | `/api/config/save`        | Save full configuration     |
+| GET    | `/api/config/agents`      | List all agents             |
+| POST   | `/api/config/agents`      | Create new agent            |
+| PUT    | `/api/config/agents/{id}` | Update agent                |
+| DELETE | `/api/config/agents/{id}` | Delete agent                |
+| GET    | `/api/config/teams`       | List all teams              |
+| POST   | `/api/config/teams`       | Create new team             |
+| PUT    | `/api/config/teams/{id}`  | Update team                 |
+| DELETE | `/api/config/teams/{id}`  | Delete team                 |
+| GET    | `/api/config/models`      | List model configurations   |
+| PUT    | `/api/config/models/{id}` | Update model configuration  |
+| GET    | `/api/config/room-models` | Get room model overrides    |
+| PUT    | `/api/config/room-models` | Update room model overrides |
 
 ### Credentials
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/credentials/list` | List services with credentials |
-| GET | `/api/credentials/{service}/status` | Get credential status |
-| GET | `/api/credentials/{service}` | Get credentials for editing |
-| POST | `/api/credentials/{service}` | Set credentials |
-| POST | `/api/credentials/{service}/api-key` | Set API key |
-| GET | `/api/credentials/{service}/api-key` | Get masked API key |
-| POST | `/api/credentials/{service}/test` | Test credentials validity |
-| DELETE | `/api/credentials/{service}` | Delete credentials |
+| Method | Endpoint                             | Description                    |
+| ------ | ------------------------------------ | ------------------------------ |
+| GET    | `/api/credentials/list`              | List services with credentials |
+| GET    | `/api/credentials/{service}/status`  | Get credential status          |
+| GET    | `/api/credentials/{service}`         | Get credentials for editing    |
+| POST   | `/api/credentials/{service}`         | Set credentials                |
+| POST   | `/api/credentials/{service}/api-key` | Set API key                    |
+| GET    | `/api/credentials/{service}/api-key` | Get masked API key             |
+| POST   | `/api/credentials/{service}/test`    | Test credentials validity      |
+| DELETE | `/api/credentials/{service}`         | Delete credentials             |
 
 ### Knowledge
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/knowledge/bases` | List configured knowledge bases |
-| GET | `/api/knowledge/bases/{base_id}/files` | List files in a knowledge base |
-| POST | `/api/knowledge/bases/{base_id}/upload` | Upload one or more files |
+| Method | Endpoint                                      | Description                       |
+| ------ | --------------------------------------------- | --------------------------------- |
+| GET    | `/api/knowledge/bases`                        | List configured knowledge bases   |
+| GET    | `/api/knowledge/bases/{base_id}/files`        | List files in a knowledge base    |
+| POST   | `/api/knowledge/bases/{base_id}/upload`       | Upload one or more files          |
 | DELETE | `/api/knowledge/bases/{base_id}/files/{path}` | Delete a file from disk and index |
-| GET | `/api/knowledge/bases/{base_id}/status` | Get indexing status |
-| POST | `/api/knowledge/bases/{base_id}/reindex` | Rebuild the index for a base |
+| GET    | `/api/knowledge/bases/{base_id}/status`       | Get indexing status               |
+| POST   | `/api/knowledge/bases/{base_id}/reindex`      | Rebuild the index for a base      |
 
 ### Tools & Matrix
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/tools` | List available tools |
-| GET | `/api/rooms` | List configured rooms |
-| GET | `/api/matrix/agents/rooms` | Get all agents' room memberships |
-| GET | `/api/matrix/agents/{id}/rooms` | Get specific agent's rooms |
-| POST | `/api/matrix/rooms/leave` | Leave a single room |
-| POST | `/api/matrix/rooms/leave-bulk` | Leave multiple rooms |
-| POST | `/api/test/model` | Test model connection |
-
-## Configuration
-
-### [Overview](https://docs.mindroom.chat/configuration/)
+| Method | Endpoint                        | Description                      |
+| ------ | ------------------------------- | -------------------------------- |
+| GET    | `/api/tools`                    | List available tools             |
+| GET    | `/api/rooms`                    | List configured rooms            |
+| GET    | `/api/matrix/agents/rooms`      | Get all agents' room memberships |
+| GET    | `/api/matrix/agents/{id}/rooms` | Get specific agent's rooms       |
+| POST   | `/api/matrix/rooms/leave`       | Leave a single room              |
+| POST   | `/api/matrix/rooms/leave-bulk`  | Leave multiple rooms             |
+| POST   | `/api/test/model`               | Test model connection            |
 
 # Configuration
 
@@ -485,7 +491,7 @@ MindRoom is configured through a `config.yaml` file. This section covers all con
 
 The configuration file defaults to `./config.yaml`. To use a different path:
 
-```bash
+```
 MINDROOM_CONFIG_PATH=/path/to/config.yaml mindroom run
 ```
 
@@ -493,13 +499,13 @@ MINDROOM_CONFIG_PATH=/path/to/config.yaml mindroom run
 
 You can also validate a specific file directly:
 
-```bash
+```
 mindroom validate --config /path/to/config.yaml
 ```
 
 ## Basic Structure
 
-```yaml
+```
 # Agent definitions (at least one recommended)
 agents:
   assistant:
@@ -597,16 +603,16 @@ timezone: America/Los_Angeles      # Default: UTC
 
 ## Sections
 
-- [Agents](agents.md) - Configure individual AI agents
-- [Models](models.md) - Configure AI model providers
-- [Teams](teams.md) - Configure multi-agent collaboration
-- [Router](router.md) - Configure message routing
-- [Memory](../memory.md) - Configure memory providers and behavior
-- [Knowledge](../dashboard.md#knowledge) - Configure file-backed knowledge bases
-- [Voice](../voice.md) - Configure speech-to-text voice processing
-- [Authorization](../authorization.md) - Configure user and room access control
-- [Skills](../skills.md) - Skill format, gating, and allowlists
-- [Plugins](../plugins.md) - Plugin manifest and tool/skill loading
+- [Agents](https://docs.mindroom.chat/configuration/agents/index.md) - Configure individual AI agents
+- [Models](https://docs.mindroom.chat/configuration/models/index.md) - Configure AI model providers
+- [Teams](https://docs.mindroom.chat/configuration/teams/index.md) - Configure multi-agent collaboration
+- [Router](https://docs.mindroom.chat/configuration/router/index.md) - Configure message routing
+- [Memory](https://docs.mindroom.chat/memory/index.md) - Configure memory providers and behavior
+- [Knowledge](https://docs.mindroom.chat/dashboard/#knowledge) - Configure file-backed knowledge bases
+- [Voice](https://docs.mindroom.chat/voice/index.md) - Configure speech-to-text voice processing
+- [Authorization](https://docs.mindroom.chat/authorization/index.md) - Configure user and room access control
+- [Skills](https://docs.mindroom.chat/skills/index.md) - Skill format, gating, and allowlists
+- [Plugins](https://docs.mindroom.chat/plugins/index.md) - Plugin manifest and tool/skill loading
 
 ## Notes
 
@@ -616,15 +622,13 @@ timezone: America/Los_Angeles      # Default: UTC
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
 - The `memory` system works out of the box with OpenAI; use `memory.llm` for memory summarization with a different provider
 
-### [Agents](https://docs.mindroom.chat/configuration/agents/)
-
 # Agent Configuration
 
 Agents are the core building blocks of MindRoom. Each agent is a specialized AI actor with specific capabilities.
 
 ## Basic Agent
 
-```yaml
+```
 agents:
   assistant:
     display_name: Assistant
@@ -635,7 +639,7 @@ agents:
 
 ## Full Configuration
 
-```yaml
+```
 agents:
   developer:
     # Display name shown in Matrix
@@ -683,25 +687,21 @@ agents:
 
 ## Configuration Options
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `display_name` | string | *required* | Human-readable name shown in Matrix as the bot's display name |
-| `role` | string | `""` | System prompt describing the agent's purpose — guides its behavior and expertise |
-| `model` | string | `"default"` | Model name (must match a key in the `models` section) |
-| `tools` | list | `[]` | Tool names the agent can use (see [Tools](../tools/index.md) for available options) |
-| `skills` | list | `[]` | Skill names the agent can use (see [Skills](../skills.md)) |
-| `instructions` | list | `[]` | Extra lines appended to the system prompt after the role |
-| `rooms` | list | `[]` | Room aliases to auto-join; rooms are created if they don't exist |
-| `markdown` | bool | `true` | When enabled, the agent is instructed to format responses as Markdown |
-| `learning` | bool | `true` | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time |
-| `learning_mode` | string | `"always"` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call |
-| `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents |
-
-Skills are opt-in: a skill is only loaded when its name appears in an agent's `skills` list. `metadata.openclaw.always: true` bypasses eligibility requirements, but it does not auto-attach the skill to agents.
+| Option            | Type   | Default     | Description                                                                                                                                    |
+| ----------------- | ------ | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `display_name`    | string | *required*  | Human-readable name shown in Matrix as the bot's display name                                                                                  |
+| `role`            | string | `""`        | System prompt describing the agent's purpose — guides its behavior and expertise                                                               |
+| `model`           | string | `"default"` | Model name (must match a key in the `models` section)                                                                                          |
+| `tools`           | list   | `[]`        | Tool names the agent can use (see [Tools](https://docs.mindroom.chat/tools/index.md) for available options)                                    |
+| `skills`          | list   | `[]`        | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/index.md))                                                       |
+| `instructions`    | list   | `[]`        | Extra lines appended to the system prompt after the role                                                                                       |
+| `rooms`           | list   | `[]`        | Room aliases to auto-join; rooms are created if they don't exist                                                                               |
+| `markdown`        | bool   | `true`      | When enabled, the agent is instructed to format responses as Markdown                                                                          |
+| `learning`        | bool   | `true`      | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time |
+| `learning_mode`   | string | `"always"`  | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call                            |
+| `knowledge_bases` | list   | `[]`        | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                      |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
-
-All per-agent settings above that show a default value inherit from the `defaults` section. Per-agent values override them.
 
 All per-agent settings above that show a default value inherit from the `defaults` section. Per-agent values override them.
 
@@ -719,15 +719,13 @@ When using these names, the built-in prompt replaces the `role` field and any cu
 
 The `defaults` section sets fallback values for all agents. Any agent that omits a setting inherits the value from here.
 
-```yaml
+```
 defaults:
   markdown: true             # Format responses as Markdown
   learning: true             # Enable Agno Learning
   learning_mode: always      # "always" or "agentic"
   show_stop_button: false    # Show a stop button while agent is responding (global-only, cannot be overridden per-agent)
 ```
-
-### [Models](https://docs.mindroom.chat/configuration/models/)
 
 # Model Configuration
 
@@ -748,17 +746,17 @@ Models define the AI providers and model IDs used by agents.
 
 Each model configuration supports the following fields:
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `provider` | Yes | The AI provider (see supported providers above) |
-| `id` | Yes | Model ID specific to the provider |
-| `host` | No | Host URL for self-hosted models (e.g., Ollama) |
-| `api_key` | No | API key (usually read from environment variables) |
-| `extra_kwargs` | No | Additional provider-specific parameters |
+| Field          | Required | Description                                       |
+| -------------- | -------- | ------------------------------------------------- |
+| `provider`     | Yes      | The AI provider (see supported providers above)   |
+| `id`           | Yes      | Model ID specific to the provider                 |
+| `host`         | No       | Host URL for self-hosted models (e.g., Ollama)    |
+| `api_key`      | No       | API key (usually read from environment variables) |
+| `extra_kwargs` | No       | Additional provider-specific parameters           |
 
 ## Configuration Examples
 
-```yaml
+```
 models:
   # Anthropic Claude
   sonnet:
@@ -825,7 +823,7 @@ The `extra_kwargs` field passes additional parameters directly to the underlying
 
 API keys are read from environment variables:
 
-```bash
+```
 ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_API_KEY=sk-...
 GOOGLE_API_KEY=...
@@ -837,7 +835,7 @@ DEEPSEEK_API_KEY=...
 
 For Ollama, you can also set:
 
-```bash
+```
 OLLAMA_HOST=http://localhost:11434
 ```
 
@@ -845,7 +843,7 @@ OLLAMA_HOST=http://localhost:11434
 
 For container environments (Kubernetes, Docker Swarm), you can also use file-based secrets by appending `_FILE` to any environment variable name:
 
-```bash
+```
 # Instead of setting the key directly:
 ANTHROPIC_API_KEY=sk-ant-...
 
@@ -854,8 +852,6 @@ ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key
 ```
 
 This works for all API key environment variables (e.g., `OPENAI_API_KEY_FILE`, `GOOGLE_API_KEY_FILE`, etc.).
-
-### [Teams](https://docs.mindroom.chat/configuration/teams/)
 
 # Team Configuration
 
@@ -867,7 +863,7 @@ Teams allow multiple agents to collaborate on tasks. MindRoom supports two colla
 
 The team coordinator analyzes the task and delegates different subtasks to specific team members:
 
-```yaml
+```
 teams:
   dev_team:
     display_name: Dev Team
@@ -882,7 +878,7 @@ In coordinate mode, the coordinator analyzes the task and selects which agents s
 
 All agents work on the same task simultaneously and their outputs are synthesized:
 
-```yaml
+```
 teams:
   research_team:
     display_name: Research Team
@@ -895,7 +891,7 @@ In collaborate mode, the task is delegated to all team members simultaneously. E
 
 ## Full Configuration
 
-```yaml
+```
 teams:
   super_team:
     # Display name shown in Matrix
@@ -923,20 +919,20 @@ teams:
 
 ## Configuration Fields
 
-| Field | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `display_name` | Yes | - | Human-readable name shown in Matrix |
-| `role` | Yes | - | Description of the team's purpose |
-| `agents` | Yes | - | List of agent names that compose this team |
-| `mode` | No | `coordinate` | Collaboration mode: `coordinate` or `collaborate` |
-| `rooms` | No | `[]` | List of room names the team responds in |
-| `model` | No | `default` | Model used for team coordination and synthesis |
+| Field          | Required | Default      | Description                                       |
+| -------------- | -------- | ------------ | ------------------------------------------------- |
+| `display_name` | Yes      | -            | Human-readable name shown in Matrix               |
+| `role`         | Yes      | -            | Description of the team's purpose                 |
+| `agents`       | Yes      | -            | List of agent names that compose this team        |
+| `mode`         | No       | `coordinate` | Collaboration mode: `coordinate` or `collaborate` |
+| `rooms`        | No       | `[]`         | List of room names the team responds in           |
+| `model`        | No       | `default`    | Model used for team coordination and synthesis    |
 
 ## When to Use Each Mode
 
-| Mode | Use Case | Example |
-|------|----------|---------|
-| `coordinate` | Agents need to do different subtasks | "Get weather and news" - coordinator assigns weather to one agent, news to another |
+| Mode          | Use Case                                      | Example                                                                                   |
+| ------------- | --------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `coordinate`  | Agents need to do different subtasks          | "Get weather and news" - coordinator assigns weather to one agent, news to another        |
 | `collaborate` | Want diverse perspectives on the same problem | "What do you think about X?" - all agents analyze the same question and share their views |
 
 ## Dynamic Team Formation
@@ -944,9 +940,9 @@ teams:
 When multiple agents are mentioned in a message (e.g., `@code @research analyze this`), MindRoom automatically forms an ad-hoc team. Dynamic teams form in these scenarios:
 
 1. **Multiple agents explicitly tagged** - e.g., `@code @research analyze this`
-2. **Thread with previously mentioned agents** - Follow-up messages in a thread where multiple agents were mentioned earlier
-3. **Thread with multiple agent participants** - Continuing a conversation where multiple agents have responded
-4. **DM room with multiple agents** - Messages in a DM room containing multiple agents (main timeline only)
+1. **Thread with previously mentioned agents** - Follow-up messages in a thread where multiple agents were mentioned earlier
+1. **Thread with multiple agent participants** - Continuing a conversation where multiple agents have responded
+1. **DM room with multiple agents** - Messages in a DM room containing multiple agents (main timeline only)
 
 ### Mode Selection
 
@@ -956,10 +952,9 @@ For dynamic teams, the collaboration mode is selected by AI based on the task:
 - Tasks asking for opinions or brainstorming use **collaborate** mode
 
 When AI mode selection is unavailable or fails, MindRoom falls back to:
+
 - **coordinate** when multiple agents are explicitly tagged in the message (they likely have different roles to fulfill)
 - **collaborate** for all other cases, such as agents from thread history or DM rooms (likely discussing the same topic)
-
-### [Router](https://docs.mindroom.chat/configuration/router/)
 
 # Router Configuration
 
@@ -967,7 +962,7 @@ The router is a built-in system component that handles intelligent message routi
 
 ## Configuration
 
-```yaml
+```
 router:
   # Model for routing decisions (defaults to "default")
   model: haiku
@@ -975,8 +970,8 @@ router:
 
 The router only has one configuration option:
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
+| Option  | Type   | Default     | Description                        |
+| ------- | ------ | ----------- | ---------------------------------- |
 | `model` | string | `"default"` | Model to use for routing decisions |
 
 ## How Routing Works
@@ -984,10 +979,10 @@ The router only has one configuration option:
 When a message arrives in a room without a specific agent mention:
 
 1. The router checks if there are configured agents in that room
-2. It analyzes the message content and any recent thread context (up to 3 previous messages)
-3. Based on the available agents' roles, tools, and instructions, it selects the best match
-4. The router posts a message mentioning the selected agent (e.g., "@agent could you help with this?")
-5. The mentioned agent sees the mention and responds in the thread
+1. It analyzes the message content and any recent thread context (up to 3 previous messages)
+1. Based on the available agents' roles, tools, and instructions, it selects the best match
+1. The router posts a message mentioning the selected agent (e.g., "@agent could you help with this?")
+1. The mentioned agent sees the mention and responds in the thread
 
 The router uses a structured output schema to ensure consistent routing decisions, including the agent name and reasoning for the selection.
 
@@ -1058,10 +1053,6 @@ Users can always mention agents directly with `@agent_name` to bypass routing.
 
 The router is always present and cannot be disabled. It automatically joins any room with configured agents. If no `router` section is configured, it uses the default model.
 
-## Tools
-
-### [Overview](https://docs.mindroom.chat/tools/)
-
 # Tools
 
 MindRoom includes 100+ tool integrations that agents can use to interact with external services.
@@ -1070,7 +1061,7 @@ MindRoom includes 100+ tool integrations that agents can use to interact with ex
 
 Tools are enabled per-agent in the configuration:
 
-```yaml
+```
 agents:
   assistant:
     display_name: Assistant
@@ -1101,7 +1092,7 @@ Tools are organized by category:
 
 ### Research Agent
 
-```yaml
+```
 agents:
   researcher:
     display_name: Researcher
@@ -1116,7 +1107,7 @@ agents:
 
 ### DevOps Agent
 
-```yaml
+```
 agents:
   devops:
     display_name: DevOps
@@ -1131,7 +1122,7 @@ agents:
 
 ### Communication Agent
 
-```yaml
+```
 agents:
   notifier:
     display_name: Notifier
@@ -1145,10 +1136,8 @@ agents:
 
 See the full list in:
 
-- [Built-in Tools](builtin.md) - Complete list of available built-in tools with configuration details
-- [Plugins](../plugins.md) - Extend MindRoom with custom tools and skills (including MCP via plugin workaround)
-
-### [Built-in Tools](https://docs.mindroom.chat/tools/builtin/)
+- [Built-in Tools](https://docs.mindroom.chat/tools/builtin/index.md) - Complete list of available built-in tools with configuration details
+- [Plugins](https://docs.mindroom.chat/plugins/index.md) - Extend MindRoom with custom tools and skills (including MCP via plugin workaround)
 
 # Built-in Tools
 
@@ -1156,188 +1145,188 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 
 ## File & System
 
-| Icon | Tool | Description | Config Required |
-|------|------|-------------|-----------------|
-| :lucide-folder-cog: | `file` | Read, write, list, search, and manage local files | - |
-| :lucide-folder-cog: | `shell` | Execute shell commands | - |
-| :lucide-folder-cog: | `docker` | Manage Docker containers and images | - |
-| :lucide-folder-cog: | `python` | Execute Python code | - |
-| :lucide-folder-cog: | `sql` | Database query and management for SQL databases | `db_url` or connection params |
-| :lucide-folder-cog: | `postgres` | Query PostgreSQL databases - list tables, describe schemas, run SQL | Connection params |
-| :lucide-folder-cog: | `redshift` | Query Amazon Redshift data warehouse | Connection params |
-| :lucide-folder-cog: | `neo4j` | Query Neo4j graph databases with Cypher | `uri`, `user`, `password` |
-| :lucide-folder-cog: | `duckdb` | Query data with DuckDB | - |
-| :lucide-folder-cog: | `pandas` | Data manipulation with Pandas | - |
-| :lucide-folder-cog: | `csv` | Read and write CSV files | - |
-| :lucide-folder-cog: | `calculator` | Mathematical calculations | - |
-| :lucide-folder-cog: | `reasoning` | Step-by-step reasoning scratchpad for structured problem solving | - |
-| :lucide-folder-cog: | `file_generation` | Generate JSON, CSV, PDF, and text files from data | - |
-| :lucide-folder-cog: | `visualization` | Create bar, line, pie charts, scatter plots, and histograms | - |
-| :lucide-folder-cog: | `sleep` | Pause execution | - |
+| Icon                | Tool              | Description                                                         | Config Required               |
+| ------------------- | ----------------- | ------------------------------------------------------------------- | ----------------------------- |
+| :lucide-folder-cog: | `file`            | Read, write, list, search, and manage local files                   | -                             |
+| :lucide-folder-cog: | `shell`           | Execute shell commands                                              | -                             |
+| :lucide-folder-cog: | `docker`          | Manage Docker containers and images                                 | -                             |
+| :lucide-folder-cog: | `python`          | Execute Python code                                                 | -                             |
+| :lucide-folder-cog: | `sql`             | Database query and management for SQL databases                     | `db_url` or connection params |
+| :lucide-folder-cog: | `postgres`        | Query PostgreSQL databases - list tables, describe schemas, run SQL | Connection params             |
+| :lucide-folder-cog: | `redshift`        | Query Amazon Redshift data warehouse                                | Connection params             |
+| :lucide-folder-cog: | `neo4j`           | Query Neo4j graph databases with Cypher                             | `uri`, `user`, `password`     |
+| :lucide-folder-cog: | `duckdb`          | Query data with DuckDB                                              | -                             |
+| :lucide-folder-cog: | `pandas`          | Data manipulation with Pandas                                       | -                             |
+| :lucide-folder-cog: | `csv`             | Read and write CSV files                                            | -                             |
+| :lucide-folder-cog: | `calculator`      | Mathematical calculations                                           | -                             |
+| :lucide-folder-cog: | `reasoning`       | Step-by-step reasoning scratchpad for structured problem solving    | -                             |
+| :lucide-folder-cog: | `file_generation` | Generate JSON, CSV, PDF, and text files from data                   | -                             |
+| :lucide-folder-cog: | `visualization`   | Create bar, line, pie charts, scatter plots, and histograms         | -                             |
+| :lucide-folder-cog: | `sleep`           | Pause execution                                                     | -                             |
 
 ## Web Search & Research
 
-| Icon | Tool | Description | Config Required |
-|------|------|-------------|-----------------|
-| :lucide-search: | `duckduckgo` | DuckDuckGo web search | - |
-| :lucide-search: | `googlesearch` | Google search via WebSearch backend | - |
-| :lucide-search: | `baidusearch` | Baidu search | - |
-| :lucide-search: | `bravesearch` | Brave Search web search API | `api_key` |
-| :lucide-search: | `tavily` | Real-time web search API | `api_key` |
-| :lucide-search: | `exa` | AI-powered web search and research | `api_key` |
-| :lucide-search: | `serpapi` | Search API aggregator | `api_key` |
-| :lucide-search: | `serper` | Google search API | `api_key` |
-| :lucide-search: | `searxng` | Self-hosted metasearch | `host` |
-| :lucide-search: | `linkup` | Link discovery | `api_key` |
+| Icon            | Tool           | Description                         | Config Required |
+| --------------- | -------------- | ----------------------------------- | --------------- |
+| :lucide-search: | `duckduckgo`   | DuckDuckGo web search               | -               |
+| :lucide-search: | `googlesearch` | Google search via WebSearch backend | -               |
+| :lucide-search: | `baidusearch`  | Baidu search                        | -               |
+| :lucide-search: | `bravesearch`  | Brave Search web search API         | `api_key`       |
+| :lucide-search: | `tavily`       | Real-time web search API            | `api_key`       |
+| :lucide-search: | `exa`          | AI-powered web search and research  | `api_key`       |
+| :lucide-search: | `serpapi`      | Search API aggregator               | `api_key`       |
+| :lucide-search: | `serper`       | Google search API                   | `api_key`       |
+| :lucide-search: | `searxng`      | Self-hosted metasearch              | `host`          |
+| :lucide-search: | `linkup`       | Link discovery                      | `api_key`       |
 
 ## Web Scraping & Crawling
 
-| Icon | Tool | Description | Config Required |
-|------|------|-------------|-----------------|
-| :lucide-globe: | `firecrawl` | Web scraping and crawling | `api_key` |
-| :lucide-globe: | `crawl4ai` | AI-powered web crawling | - |
-| :lucide-globe: | `browserbase` | Cloud browser automation | `api_key` |
-| :lucide-globe: | `agentql` | Structured web scraping | `api_key` |
-| :lucide-globe: | `spider` | Web spider/crawler | `api_key` |
-| :lucide-globe: | `scrapegraph` | Graph-based scraping | `api_key` |
-| :lucide-globe: | `apify` | Web scraping platform | `api_key` |
-| :lucide-globe: | `brightdata` | Proxy and scraping | `api_key` |
-| :lucide-globe: | `oxylabs` | Web scraping proxy | `api_key` |
-| :lucide-globe: | `jina` | Web content reading and search | `api_key` (optional) |
-| :lucide-globe: | `website` | Simple web fetching | - |
-| :lucide-globe: | `trafilatura` | Web content and metadata extraction | - |
-| :lucide-globe: | `newspaper4k` | Article extraction | - |
-| :lucide-globe: | `web_browser_tools` | Browser automation | - |
+| Icon           | Tool                | Description                         | Config Required      |
+| -------------- | ------------------- | ----------------------------------- | -------------------- |
+| :lucide-globe: | `firecrawl`         | Web scraping and crawling           | `api_key`            |
+| :lucide-globe: | `crawl4ai`          | AI-powered web crawling             | -                    |
+| :lucide-globe: | `browserbase`       | Cloud browser automation            | `api_key`            |
+| :lucide-globe: | `agentql`           | Structured web scraping             | `api_key`            |
+| :lucide-globe: | `spider`            | Web spider/crawler                  | `api_key`            |
+| :lucide-globe: | `scrapegraph`       | Graph-based scraping                | `api_key`            |
+| :lucide-globe: | `apify`             | Web scraping platform               | `api_key`            |
+| :lucide-globe: | `brightdata`        | Proxy and scraping                  | `api_key`            |
+| :lucide-globe: | `oxylabs`           | Web scraping proxy                  | `api_key`            |
+| :lucide-globe: | `jina`              | Web content reading and search      | `api_key` (optional) |
+| :lucide-globe: | `website`           | Simple web fetching                 | -                    |
+| :lucide-globe: | `trafilatura`       | Web content and metadata extraction | -                    |
+| :lucide-globe: | `newspaper4k`       | Article extraction                  | -                    |
+| :lucide-globe: | `web_browser_tools` | Browser automation                  | -                    |
 
 ## AI & ML APIs
 
-| Icon | Tool | Description | Config Required |
-|------|------|-------------|-----------------|
-| :lucide-sparkles: | `openai` | Transcription, image generation, and speech synthesis | `api_key` |
-| :lucide-sparkles: | `gemini` | Google AI for image and video generation | `api_key` |
-| :lucide-sparkles: | `groq` | Fast AI inference for audio transcription, translation, and text-to-speech | `api_key` |
-| :lucide-sparkles: | `replicate` | Generate images and videos using AI models | `api_key` |
-| :lucide-sparkles: | `fal` | AI media generation (images and videos) | `api_key` |
-| :lucide-sparkles: | `dalle` | DALL-E image generation | `api_key` |
-| :lucide-sparkles: | `cartesia` | Text-to-speech and voice localization | `api_key` |
-| :lucide-sparkles: | `eleven_labs` | Text-to-speech and sound effects | `api_key` |
-| :lucide-sparkles: | `desi_vocal` | Hindi and Indian language text-to-speech | `api_key` |
-| :lucide-sparkles: | `lumalabs` | 3D content creation and video generation | `api_key` |
-| :lucide-sparkles: | `modelslabs` | Generate videos, audio, and GIFs from text | `api_key` |
+| Icon              | Tool          | Description                                                                | Config Required |
+| ----------------- | ------------- | -------------------------------------------------------------------------- | --------------- |
+| :lucide-sparkles: | `openai`      | Transcription, image generation, and speech synthesis                      | `api_key`       |
+| :lucide-sparkles: | `gemini`      | Google AI for image and video generation                                   | `api_key`       |
+| :lucide-sparkles: | `groq`        | Fast AI inference for audio transcription, translation, and text-to-speech | `api_key`       |
+| :lucide-sparkles: | `replicate`   | Generate images and videos using AI models                                 | `api_key`       |
+| :lucide-sparkles: | `fal`         | AI media generation (images and videos)                                    | `api_key`       |
+| :lucide-sparkles: | `dalle`       | DALL-E image generation                                                    | `api_key`       |
+| :lucide-sparkles: | `cartesia`    | Text-to-speech and voice localization                                      | `api_key`       |
+| :lucide-sparkles: | `eleven_labs` | Text-to-speech and sound effects                                           | `api_key`       |
+| :lucide-sparkles: | `desi_vocal`  | Hindi and Indian language text-to-speech                                   | `api_key`       |
+| :lucide-sparkles: | `lumalabs`    | 3D content creation and video generation                                   | `api_key`       |
+| :lucide-sparkles: | `modelslabs`  | Generate videos, audio, and GIFs from text                                 | `api_key`       |
 
 ## Knowledge & Research
 
-| Icon | Tool | Description | Config Required |
-|------|------|-------------|-----------------|
-| :lucide-book-open: | `arxiv` | Search and read academic papers from ArXiv | - |
-| :lucide-book-open: | `wikipedia` | Search and retrieve information from Wikipedia | - |
-| :lucide-book-open: | `pubmed` | Search and retrieve medical and life science literature | - |
-| :lucide-book-open: | `hackernews` | Get top stories and user details from Hacker News | - |
+| Icon               | Tool         | Description                                             | Config Required |
+| ------------------ | ------------ | ------------------------------------------------------- | --------------- |
+| :lucide-book-open: | `arxiv`      | Search and read academic papers from ArXiv              | -               |
+| :lucide-book-open: | `wikipedia`  | Search and retrieve information from Wikipedia          | -               |
+| :lucide-book-open: | `pubmed`     | Search and retrieve medical and life science literature | -               |
+| :lucide-book-open: | `hackernews` | Get top stories and user details from Hacker News       | -               |
 
 ## Communication & Social
 
-| Icon | Tool | Description | Config Required |
-|------|------|-------------|-----------------|
-| :lucide-message-square: | `gmail` | Read, search, and manage Gmail emails | Google OAuth |
-| :lucide-message-square: | `slack` | Send messages and manage channels | `token` |
-| :lucide-message-square: | `discord` | Interact with Discord channels and servers | `bot_token` |
-| :lucide-message-square: | `telegram` | Send messages via Telegram bot | `token`, `chat_id` |
-| :lucide-message-square: | `whatsapp` | WhatsApp Business API messaging | `access_token`, `phone_number_id` |
-| :lucide-message-square: | `twilio` | SMS and voice | `account_sid`, `auth_token` |
-| :lucide-message-square: | `webex` | Webex Teams messaging | `access_token` |
-| :lucide-message-square: | `resend` | Transactional email | `api_key` |
-| :lucide-message-square: | `email` | Generic SMTP email | SMTP config |
-| :lucide-message-square: | `x` | Post tweets, send DMs, and search X/Twitter | `bearer_token` or OAuth credentials |
-| :lucide-message-square: | `reddit` | Reddit browsing and interaction | `client_id`, `client_secret` |
-| :lucide-message-square: | `zoom` | Video conferencing and meetings | `account_id`, `client_id`, `client_secret` |
+| Icon                    | Tool       | Description                                 | Config Required                            |
+| ----------------------- | ---------- | ------------------------------------------- | ------------------------------------------ |
+| :lucide-message-square: | `gmail`    | Read, search, and manage Gmail emails       | Google OAuth                               |
+| :lucide-message-square: | `slack`    | Send messages and manage channels           | `token`                                    |
+| :lucide-message-square: | `discord`  | Interact with Discord channels and servers  | `bot_token`                                |
+| :lucide-message-square: | `telegram` | Send messages via Telegram bot              | `token`, `chat_id`                         |
+| :lucide-message-square: | `whatsapp` | WhatsApp Business API messaging             | `access_token`, `phone_number_id`          |
+| :lucide-message-square: | `twilio`   | SMS and voice                               | `account_sid`, `auth_token`                |
+| :lucide-message-square: | `webex`    | Webex Teams messaging                       | `access_token`                             |
+| :lucide-message-square: | `resend`   | Transactional email                         | `api_key`                                  |
+| :lucide-message-square: | `email`    | Generic SMTP email                          | SMTP config                                |
+| :lucide-message-square: | `x`        | Post tweets, send DMs, and search X/Twitter | `bearer_token` or OAuth credentials        |
+| :lucide-message-square: | `reddit`   | Reddit browsing and interaction             | `client_id`, `client_secret`               |
+| :lucide-message-square: | `zoom`     | Video conferencing and meetings             | `account_id`, `client_id`, `client_secret` |
 
 ## Project Management
 
-| Icon | Tool | Description | Config Required |
-|------|------|-------------|-----------------|
-| :lucide-kanban: | `github` | Repository and issue management | `access_token` |
-| :lucide-kanban: | `bitbucket` | Bitbucket repository, PR, and issue management | `username`, `password` or `token` |
-| :lucide-kanban: | `jira` | Issue tracking and project management | `server_url`, `username`, `password` or `token` |
-| :lucide-kanban: | `linear` | Issue tracking and project management | `api_key` |
-| :lucide-kanban: | `clickup` | ClickUp task, space, and list management | `api_key`, `master_space_id` |
-| :lucide-kanban: | `confluence` | Retrieve, create, and update wiki pages | `url`, `username`, `password` or `api_key` |
-| :lucide-kanban: | `notion` | Create, update, and search pages in Notion databases | `api_key`, `database_id` |
-| :lucide-kanban: | `trello` | Trello boards | `api_key`, `token` |
-| :lucide-kanban: | `todoist` | Todoist task management | `api_token` |
-| :lucide-kanban: | `zendesk` | Search help center articles | `username`, `password`, `company_name` |
+| Icon            | Tool         | Description                                          | Config Required                                 |
+| --------------- | ------------ | ---------------------------------------------------- | ----------------------------------------------- |
+| :lucide-kanban: | `github`     | Repository and issue management                      | `access_token`                                  |
+| :lucide-kanban: | `bitbucket`  | Bitbucket repository, PR, and issue management       | `username`, `password` or `token`               |
+| :lucide-kanban: | `jira`       | Issue tracking and project management                | `server_url`, `username`, `password` or `token` |
+| :lucide-kanban: | `linear`     | Issue tracking and project management                | `api_key`                                       |
+| :lucide-kanban: | `clickup`    | ClickUp task, space, and list management             | `api_key`, `master_space_id`                    |
+| :lucide-kanban: | `confluence` | Retrieve, create, and update wiki pages              | `url`, `username`, `password` or `api_key`      |
+| :lucide-kanban: | `notion`     | Create, update, and search pages in Notion databases | `api_key`, `database_id`                        |
+| :lucide-kanban: | `trello`     | Trello boards                                        | `api_key`, `token`                              |
+| :lucide-kanban: | `todoist`    | Todoist task management                              | `api_token`                                     |
+| :lucide-kanban: | `zendesk`    | Search help center articles                          | `username`, `password`, `company_name`          |
 
 ## Calendar & Scheduling
 
-| Icon | Tool | Description | Config Required |
-|------|------|-------------|-----------------|
-| :lucide-calendar: | `google_calendar` | View and schedule meetings | Google OAuth |
-| :lucide-calendar: | `cal_com` | Cal.com scheduling | `api_key` |
+| Icon              | Tool              | Description                | Config Required |
+| ----------------- | ----------------- | -------------------------- | --------------- |
+| :lucide-calendar: | `google_calendar` | View and schedule meetings | Google OAuth    |
+| :lucide-calendar: | `cal_com`         | Cal.com scheduling         | `api_key`       |
 
 ## Data & Business
 
-| Icon | Tool | Description | Config Required |
-|------|------|-------------|-----------------|
-| :lucide-chart-column: | `google_sheets` | Read, create, update spreadsheets | Google OAuth |
-| :lucide-chart-column: | `yfinance` | Financial data | - |
-| :lucide-chart-column: | `openbb` | Stock prices, company news, price targets via OpenBB | `openbb_pat` (optional) |
-| :lucide-chart-column: | `shopify` | Shopify store sales data, products, orders | `shop_name`, `access_token` |
-| :lucide-chart-column: | `financial_datasets_api` | Financial datasets | `api_key` |
+| Icon                  | Tool                     | Description                                          | Config Required             |
+| --------------------- | ------------------------ | ---------------------------------------------------- | --------------------------- |
+| :lucide-chart-column: | `google_sheets`          | Read, create, update spreadsheets                    | Google OAuth                |
+| :lucide-chart-column: | `yfinance`               | Financial data                                       | -                           |
+| :lucide-chart-column: | `openbb`                 | Stock prices, company news, price targets via OpenBB | `openbb_pat` (optional)     |
+| :lucide-chart-column: | `shopify`                | Shopify store sales data, products, orders           | `shop_name`, `access_token` |
+| :lucide-chart-column: | `financial_datasets_api` | Financial datasets                                   | `api_key`                   |
 
 ## Location & Maps
 
-| Icon | Tool | Description | Config Required |
-|------|------|-------------|-----------------|
-| :lucide-map-pinned: | `google_maps` | Maps and places | `api_key` |
-| :lucide-map-pinned: | `openweather` | Weather data | `api_key` |
+| Icon                | Tool          | Description     | Config Required |
+| ------------------- | ------------- | --------------- | --------------- |
+| :lucide-map-pinned: | `google_maps` | Maps and places | `api_key`       |
+| :lucide-map-pinned: | `openweather` | Weather data    | `api_key`       |
 
 ## DevOps & Infrastructure
 
-| Icon | Tool | Description | Config Required |
-|------|------|-------------|-----------------|
-| :lucide-server: | `aws_lambda` | AWS Lambda functions | AWS credentials |
-| :lucide-server: | `aws_ses` | AWS email service | AWS credentials |
-| :lucide-server: | `airflow` | Apache Airflow DAG file management | - |
-| :lucide-server: | `e2b` | Code execution sandbox | `api_key` |
-| :lucide-server: | `daytona` | Development environments | `api_key` |
-| :lucide-server: | `composio` | API composition | `api_key` |
+| Icon            | Tool              | Description                                           | Config Required                  |
+| --------------- | ----------------- | ----------------------------------------------------- | -------------------------------- |
+| :lucide-server: | `aws_lambda`      | AWS Lambda functions                                  | AWS credentials                  |
+| :lucide-server: | `aws_ses`         | AWS email service                                     | AWS credentials                  |
+| :lucide-server: | `airflow`         | Apache Airflow DAG file management                    | -                                |
+| :lucide-server: | `e2b`             | Code execution sandbox                                | `api_key`                        |
+| :lucide-server: | `daytona`         | Development environments                              | `api_key`                        |
+| :lucide-server: | `composio`        | API composition                                       | `api_key`                        |
 | :lucide-server: | `google_bigquery` | Query Google BigQuery - list tables, schemas, run SQL | `dataset`, `project`, `location` |
 
 ## Smart Home
 
-| Icon | Tool | Description | Config Required |
-|------|------|-------------|-----------------|
+| Icon           | Tool            | Description                            | Config Required                            |
+| -------------- | --------------- | -------------------------------------- | ------------------------------------------ |
 | :lucide-house: | `homeassistant` | Control and monitor smart home devices | `HOMEASSISTANT_URL`, `HOMEASSISTANT_TOKEN` |
 
 ## Media & Entertainment
 
-| Icon | Tool | Description | Config Required |
-|------|------|-------------|-----------------|
-| :lucide-clapperboard: | `youtube` | Extract video data, captions, and timestamps | - |
-| :lucide-clapperboard: | `spotify` | Search tracks, manage playlists, get recommendations | `access_token` |
-| :lucide-clapperboard: | `giphy` | GIF search | `api_key` |
-| :lucide-clapperboard: | `moviepy_video_tools` | Video processing | - |
-| :lucide-clapperboard: | `unsplash` | Search and retrieve royalty-free images | `access_key` |
-| :lucide-clapperboard: | `brandfetch` | Retrieve brand logos, colors, and fonts by domain | `api_key` |
+| Icon                  | Tool                  | Description                                          | Config Required |
+| --------------------- | --------------------- | ---------------------------------------------------- | --------------- |
+| :lucide-clapperboard: | `youtube`             | Extract video data, captions, and timestamps         | -               |
+| :lucide-clapperboard: | `spotify`             | Search tracks, manage playlists, get recommendations | `access_token`  |
+| :lucide-clapperboard: | `giphy`               | GIF search                                           | `api_key`       |
+| :lucide-clapperboard: | `moviepy_video_tools` | Video processing                                     | -               |
+| :lucide-clapperboard: | `unsplash`            | Search and retrieve royalty-free images              | `access_key`    |
+| :lucide-clapperboard: | `brandfetch`          | Retrieve brand logos, colors, and fonts by domain    | `api_key`       |
 
 ## Memory & Storage
 
-| Icon | Tool | Description | Config Required |
-|------|------|-------------|-----------------|
+| Icon              | Tool   | Description              | Config Required                |
+| ----------------- | ------ | ------------------------ | ------------------------------ |
 | :lucide-database: | `mem0` | Persistent memory system | `api_key` (optional for cloud) |
-| :lucide-database: | `zep` | Conversation memory | `api_key` |
+| :lucide-database: | `zep`  | Conversation memory      | `api_key`                      |
 
 ## Custom & Config
 
-| Icon | Tool | Description | Config Required |
-|------|------|-------------|-----------------|
-| :lucide-sliders-horizontal: | `custom_api` | Custom API calls | Varies |
-| :lucide-sliders-horizontal: | `config_manager` | MindRoom configuration management | - |
+| Icon                        | Tool             | Description                       | Config Required |
+| --------------------------- | ---------------- | --------------------------------- | --------------- |
+| :lucide-sliders-horizontal: | `custom_api`     | Custom API calls                  | Varies          |
+| :lucide-sliders-horizontal: | `config_manager` | MindRoom configuration management | -               |
 
 ## Enabling Tools
 
 Add tools to agents in `config.yaml`:
 
-```yaml
+```
 agents:
   assistant:
     display_name: Assistant
@@ -1356,7 +1345,7 @@ Or use the Dashboard's Agents tab to enable tools visually.
 
 Most tools require API keys or credentials. Set them in your `.env` file:
 
-```bash
+```
 # Search
 TAVILY_API_KEY=tvly-...
 EXA_API_KEY=...
@@ -1371,8 +1360,6 @@ REPLICATE_API_TOKEN=r8_...
 ```
 
 MindRoom automatically loads `.env` files from the working directory.
-
-### [Skills](https://docs.mindroom.chat/skills/)
 
 # Skills
 
@@ -1395,7 +1382,7 @@ Agents access skills via `get_skill_instructions()`, scripts via `get_skill_scri
 
 ## SKILL.md format (OpenClaw compatible)
 
-```markdown
+```
 ---
 name: repo-quick-audit
 description: Quick repository audit checklist
@@ -1420,19 +1407,19 @@ Notes:
 
 ## Frontmatter fields
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `name` | string | Unique skill identifier |
-| `description` | string | Brief summary shown to users/models |
-| `metadata` | mapping or JSON5 string | OpenClaw metadata and custom fields |
-| `user-invocable` | bool | Allow `!skill` (default: true) |
-| `disable-model-invocation` | bool | Prevent model invocation (default: false) |
-| `command-dispatch` | `"tool"` | Set to `tool` to run a tool directly |
-| `command-tool` | string | Function to call: `function_name`, `toolkit.function_name`, or `toolkit` (if the toolkit exposes exactly one function) |
-| `command-arg-mode` | `"raw"` | Argument passing mode; only `raw` is currently supported |
-| `license` | string | Optional license information |
-| `compatibility` | string | Optional compatibility requirements |
-| `allowed-tools` | list | Optional list of tools this skill is allowed to use |
+| Field                      | Type                    | Description                                                                                                            |
+| -------------------------- | ----------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `name`                     | string                  | Unique skill identifier                                                                                                |
+| `description`              | string                  | Brief summary shown to users/models                                                                                    |
+| `metadata`                 | mapping or JSON5 string | OpenClaw metadata and custom fields                                                                                    |
+| `user-invocable`           | bool                    | Allow `!skill` (default: true)                                                                                         |
+| `disable-model-invocation` | bool                    | Prevent model invocation (default: false)                                                                              |
+| `command-dispatch`         | `"tool"`                | Set to `tool` to run a tool directly                                                                                   |
+| `command-tool`             | string                  | Function to call: `function_name`, `toolkit.function_name`, or `toolkit` (if the toolkit exposes exactly one function) |
+| `command-arg-mode`         | `"raw"`                 | Argument passing mode; only `raw` is currently supported                                                               |
+| `license`                  | string                  | Optional license information                                                                                           |
+| `compatibility`            | string                  | Optional compatibility requirements                                                                                    |
+| `allowed-tools`            | list                    | Optional list of tools this skill is allowed to use                                                                    |
 
 ## Eligibility gating (OpenClaw metadata)
 
@@ -1452,8 +1439,8 @@ Skills without `metadata.openclaw` are always eligible.
 MindRoom loads skills from these locations, in this order:
 
 1. Bundled skills: `skills/` at the repository root (if present)
-2. Plugin-provided skill directories (see [Plugins](plugins.md))
-3. User skills: `~/.mindroom/skills/`
+1. Plugin-provided skill directories (see [Plugins](https://docs.mindroom.chat/plugins/index.md))
+1. User skills: `~/.mindroom/skills/`
 
 If multiple skills share the same name, the last one wins (user > plugin > bundled).
 
@@ -1461,7 +1448,7 @@ If multiple skills share the same name, the last one wins (user > plugin > bundl
 
 Add skills to an agent allowlist in `config.yaml`:
 
-```yaml
+```
 agents:
   developer:
     display_name: Developer
@@ -1504,13 +1491,13 @@ Rules:
 
 ## Skill vs tool
 
-| Aspect | Skills | Tools |
-| --- | --- | --- |
-| Definition | Markdown + YAML | Python code |
-| Location | File system | Code/plugins |
-| Filtering | Automatic by requirements | Always available |
-| Instructions | Rich markdown | Docstrings |
-| Invocation | User or model | Model only |
+| Aspect       | Skills                    | Tools            |
+| ------------ | ------------------------- | ---------------- |
+| Definition   | Markdown + YAML           | Python code      |
+| Location     | File system               | Code/plugins     |
+| Filtering    | Automatic by requirements | Always available |
+| Instructions | Rich markdown             | Docstrings       |
+| Invocation   | User or model             | Model only       |
 
 ## Hot reloading
 
@@ -1519,10 +1506,8 @@ MindRoom polls skill directories every second. When a `SKILL.md` file is added, 
 ## Best practices
 
 1. Keep skills focused - one skill per capability
-2. Declare dependencies with `metadata.openclaw.requires`
-3. Use descriptive names like `code-review`
-
-### [Plugins](https://docs.mindroom.chat/plugins/)
+1. Declare dependencies with `metadata.openclaw.requires`
+1. Use descriptive names like `code-review`
 
 # Plugins
 
@@ -1543,7 +1528,7 @@ my-plugin/
 
 ## Manifest format
 
-```json
+```
 {
   "name": "my-plugin",
   "tools_module": "tools.py",
@@ -1551,11 +1536,11 @@ my-plugin/
 }
 ```
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `name` | string | Plugin identifier (required) |
-| `tools_module` | string | Path to the tools module (optional) |
-| `skills` | list of strings | Relative directories containing skills (optional) |
+| Field          | Type            | Description                                       |
+| -------------- | --------------- | ------------------------------------------------- |
+| `name`         | string          | Plugin identifier (required)                      |
+| `tools_module` | string          | Path to the tools module (optional)               |
+| `skills`       | list of strings | Relative directories containing skills (optional) |
 
 Unknown fields are ignored.
 
@@ -1563,7 +1548,7 @@ Unknown fields are ignored.
 
 Add plugin paths to `config.yaml`:
 
-```yaml
+```
 plugins:
   - ./plugins/my-plugin
   - python:my_skill_pack
@@ -1579,7 +1564,7 @@ Paths may be:
 
 MindRoom can resolve plugins from installed Python packages:
 
-```yaml
+```
 plugins:
   - my_skill_pack
   - python:my_skill_pack
@@ -1597,10 +1582,9 @@ MindRoom resolves the package location and looks for `mindroom.plugin.json` in t
 
 ## MCP via plugins (advanced)
 
-MindRoom does not yet support direct MCP server configuration in `config.yaml`.
-If you need MCP today, wrap Agno `MCPTools` in a plugin tool factory:
+MindRoom does not yet support direct MCP server configuration in `config.yaml`. If you need MCP today, wrap Agno `MCPTools` in a plugin tool factory:
 
-```python
+```
 from agno.tools.mcp import MCPTools
 from mindroom.tools_metadata import (
     SetupType,
@@ -1632,7 +1616,7 @@ def mcp_filesystem_tools():
 
 Reference the plugin and tool in `config.yaml`:
 
-```yaml
+```
 plugins:
   - ./plugins/mcp-filesystem
 
@@ -1646,7 +1630,7 @@ The factory function must return the toolkit class, not an instance. MCP toolkit
 
 ## Tools module example
 
-```python
+```
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -1715,21 +1699,20 @@ Plugin manifests and tools modules are cached by mtime. Changes are picked up th
 
 Plugins execute code in-process. Only install plugins you trust.
 
-### [Memory System](https://docs.mindroom.chat/memory/)
-
 # Memory System
 
 MindRoom uses Mem0 for persistent memory across conversations. Memory is automatically enabled for all agents and uses ChromaDB for semantic search.
 
 ## Memory Scopes
 
-| Scope | User ID Format | Description |
-|-------|----------------|-------------|
-| Agent | `agent_<name>` | User preferences, past conversations, learned context |
-| Room | `room_<safe_room_id>` | Project context, technical decisions, shared knowledge |
-| Team | `team_<agent1>+<agent2>+...` | Shared team conversations and findings |
+| Scope | User ID Format               | Description                                            |
+| ----- | ---------------------------- | ------------------------------------------------------ |
+| Agent | `agent_<name>`               | User preferences, past conversations, learned context  |
+| Room  | `room_<safe_room_id>`        | Project context, technical decisions, shared knowledge |
+| Team  | `team_<agent1>+<agent2>+...` | Shared team conversations and findings                 |
 
 **Notes:**
+
 - Room IDs are sanitized (`:` → `_`, `!` removed) for storage compatibility
 - Team IDs use sorted agent names joined with `+`
 - When searching agent memories, team memories are automatically included and deduplicated
@@ -1738,7 +1721,7 @@ MindRoom uses Mem0 for persistent memory across conversations. Memory is automat
 
 Configure memory in your `config.yaml`:
 
-```yaml
+```
 memory:
   embedder:
     provider: openai  # or "ollama"
@@ -1759,8 +1742,8 @@ The `host` field is converted internally to `openai_base_url` or `ollama_base_ur
 ## How Memory Works
 
 1. **Semantic Retrieval**: Before responding, agents search for relevant memories (limit: 3 per scope)
-2. **Context Enhancement**: Retrieved memories are prepended to the prompt with a note that they may not be relevant
-3. **Automatic Storage**: After each conversation, Mem0 extracts and stores relevant information
+1. **Context Enhancement**: Retrieved memories are prepended to the prompt with a note that they may not be relevant
+1. **Automatic Storage**: After each conversation, Mem0 extracts and stores relevant information
 
 ## Storage
 
@@ -1770,15 +1753,13 @@ Memories are stored in ChromaDB at `<storage_path>/chroma/` with collection name
 
 For explicit memory control, add the `mem0` tool to an agent:
 
-```yaml
+```
 agents:
   assistant:
     tools: [mem0]
 ```
 
 This provides functions: `add_memory`, `search_memory`, `get_all_memories`, `delete_all_memories`.
-
-### [Voice Messages](https://docs.mindroom.chat/voice/)
 
 # Voice Messages
 
@@ -1789,17 +1770,17 @@ MindRoom can process voice messages sent to Matrix rooms, transcribing them and 
 When voice message handling is enabled:
 
 1. Voice messages are detected in Matrix rooms
-2. Audio is downloaded and decrypted (if E2E encrypted)
-3. Audio is sent to an OpenAI-compatible speech-to-text (STT) service
-4. Transcription is processed by an AI to recognize agent mentions and commands
-5. The formatted message is sent to the room (prefixed with a microphone emoji)
-6. The appropriate agent responds
+1. Audio is downloaded and decrypted (if E2E encrypted)
+1. Audio is sent to an OpenAI-compatible speech-to-text (STT) service
+1. Transcription is processed by an AI to recognize agent mentions and commands
+1. The formatted message is sent to the room (prefixed with a microphone emoji)
+1. The appropriate agent responds
 
 ## Configuration
 
 Enable voice in `config.yaml`:
 
-```yaml
+```
 voice:
   enabled: true
   stt:
@@ -1819,7 +1800,7 @@ MindRoom uses the OpenAI-compatible transcription API. Any service that implemen
 
 ### OpenAI Whisper (Cloud)
 
-```yaml
+```
 voice:
   enabled: true
   stt:
@@ -1831,7 +1812,7 @@ Requires `OPENAI_API_KEY` environment variable.
 
 ### Self-Hosted Whisper
 
-```yaml
+```
 voice:
   enabled: true
   stt:
@@ -1848,7 +1829,7 @@ Use with [faster-whisper-server](https://github.com/fedirz/faster-whisper-server
 
 For self-hosted solutions that require authentication:
 
-```yaml
+```
 voice:
   enabled: true
   stt:
@@ -1865,14 +1846,14 @@ If `api_key` is not set, MindRoom falls back to the `OPENAI_API_KEY` environment
 The intelligence component uses an AI model to analyze transcriptions and format them properly:
 
 1. **Agent mentions** - Converts spoken agent names to `@agent` format
-2. **Command patterns** - Identifies and formats `!command` syntax
-3. **Smart formatting** - Handles speech recognition errors and natural language variations
+1. **Command patterns** - Identifies and formats `!command` syntax
+1. **Smart formatting** - Handles speech recognition errors and natural language variations
 
 ### Intelligence Model
 
 The intelligence model processes raw transcriptions to recognize commands and agent names:
 
-```yaml
+```
 voice:
   intelligence:
     model: default  # Uses the default model from your models config
@@ -1915,8 +1896,8 @@ The router agent handles all voice message processing to avoid duplicate transcr
 
 ## Environment Variables
 
-| Variable | Description |
-|----------|-------------|
+| Variable         | Description                                                          |
+| ---------------- | -------------------------------------------------------------------- |
 | `OPENAI_API_KEY` | For OpenAI Whisper API (used as fallback if no `api_key` configured) |
 
 ## Text-to-Speech Tools
@@ -1939,8 +1920,6 @@ See the [Tools documentation](/tools) for configuration details.
 
 - **Say the agent name first** - "Hey @assistant, what's the weather?"
 - **Use display names** - The AI converts spoken names like "HomeAssistant" to the correct `@home` mention
-
-### [Scheduling](https://docs.mindroom.chat/scheduling/)
 
 # Scheduling
 
@@ -1996,15 +1975,13 @@ Include `@agent_name` in your schedule to have specific agents respond. The sche
 
 Schedules use the timezone from `config.yaml` (defaults to UTC):
 
-```yaml
+```
 timezone: America/Los_Angeles
 ```
 
 ## Persistence
 
 Schedules are stored in Matrix room state and persist across restarts. Past one-time tasks are automatically skipped during restoration.
-
-### [Authorization](https://docs.mindroom.chat/authorization/)
 
 # Authorization
 
@@ -2014,7 +1991,7 @@ MindRoom controls which Matrix users can interact with agents.
 
 Configure authorization in `config.yaml`:
 
-```yaml
+```
 authorization:
   # Users with access to all rooms
   global_users:
@@ -2050,17 +2027,12 @@ Examples: `@alice:matrix.org`, `@bob:example.com`, `@admin:company.internal`
 Authorization checks are performed in order:
 
 1. **Internal system user** - `@mindroom_user:{domain}` is always authorized. Note: `@mindroom_user` from a different domain is NOT authorized.
-2. **MindRoom agents/teams/router** - Configured agents, teams, and the router are authorized
-3. **Global users** - Users in `global_users` have access to all rooms
-4. **Room permissions** - If room is in `room_permissions`, user must be in that room's list (does NOT fall through to `default_room_access`)
-5. **Default access** - Rooms not in `room_permissions` use `default_room_access`
+1. **MindRoom agents/teams/router** - Configured agents, teams, and the router are authorized
+1. **Global users** - Users in `global_users` have access to all rooms
+1. **Room permissions** - If room is in `room_permissions`, user must be in that room's list (does NOT fall through to `default_room_access`)
+1. **Default access** - Rooms not in `room_permissions` use `default_room_access`
 
-> [!TIP]
-> Set `default_room_access: false` and explicitly grant access via `global_users` or `room_permissions` for better security.
-
-## Architecture
-
-### [Overview](https://docs.mindroom.chat/architecture/)
+> [!TIP] Set `default_room_access: false` and explicitly grant access via `global_users` or `room_permissions` for better security.
 
 # Architecture
 
@@ -2099,19 +2071,17 @@ MindRoom's architecture consists of several key components working together.
 
 ## Components
 
-- [Matrix Integration](matrix.md) - How MindRoom connects to Matrix
-- [Agent Orchestration](orchestration.md) - How agents are managed
+- [Matrix Integration](https://docs.mindroom.chat/architecture/matrix/index.md) - How MindRoom connects to Matrix
+- [Agent Orchestration](https://docs.mindroom.chat/architecture/orchestration/index.md) - How agents are managed
 
 ## Data Flow
 
 1. **Message arrives** from Matrix homeserver
-2. **Router decides** which agent should handle it (if no explicit mention)
-3. **Agent processes** the message using the Agno runtime
-4. **Tools execute** as needed (file operations, API calls, etc.)
-5. **Response sent** back to Matrix room
-6. **Memory updates** asynchronously in background
-
-### [Matrix Integration](https://docs.mindroom.chat/architecture/matrix/)
+1. **Router decides** which agent should handle it (if no explicit mention)
+1. **Agent processes** the message using the Agno runtime
+1. **Tools execute** as needed (file operations, API calls, etc.)
+1. **Response sent** back to Matrix room
+1. **Memory updates** asynchronously in background
 
 # Matrix Integration
 
@@ -2130,12 +2100,12 @@ MindRoom uses `matrix-nio` for Matrix communication with SSL context handling an
 
 ### Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MATRIX_HOMESERVER` | `http://localhost:8008` | Matrix homeserver URL |
-| `MATRIX_SERVER_NAME` | (from homeserver) | Federation server name |
-| `MATRIX_SSL_VERIFY` | `true` | Set to `false` for dev/self-signed certs |
-| `MINDROOM_ENABLE_STREAMING` | `true` | Enable message streaming via edits |
+| Variable                    | Default                 | Description                              |
+| --------------------------- | ----------------------- | ---------------------------------------- |
+| `MATRIX_HOMESERVER`         | `http://localhost:8008` | Matrix homeserver URL                    |
+| `MATRIX_SERVER_NAME`        | (from homeserver)       | Federation server name                   |
+| `MATRIX_SSL_VERIFY`         | `true`                  | Set to `false` for dev/self-signed certs |
+| `MINDROOM_ENABLE_STREAMING` | `true`                  | Enable message streaming via edits       |
 
 ## Agent Users
 
@@ -2174,10 +2144,11 @@ Use `build_message_content()` from `message_builder.py` to construct thread-awar
 Each agent bot runs its own sync loop with 30-second long-polling timeout. Sync loops are wrapped with `_sync_forever_with_restart()` for automatic restart on connection failures.
 
 Events are processed in background tasks:
+
 1. Sync receives event via long-polling
-2. Event callback triggered (`_on_message`, `_on_invite`, etc.)
-3. Background task created for async processing
-4. Agent responds in thread
+1. Event callback triggered (`_on_message`, `_on_invite`, etc.)
+1. Background task created for async processing
+1. Agent responds in thread
 
 ### Streaming Responses
 
@@ -2190,6 +2161,7 @@ Tool call telemetry is emitted as structured collapsible blocks (`<tool>...</too
 Agents set their Matrix presence with status messages containing model and role information (e.g., "🤖 Model: anthropic/claude-sonnet-4-5-latest | 💼 Code assistant | 🔧 5 tools available").
 
 **Presence States:**
+
 - **online** - Agent running and ready
 - **unavailable** - Agent idle but connected (treated as online for streaming)
 - **offline** - Agent stopped or disconnected
@@ -2201,6 +2173,7 @@ Agents show typing indicators while processing via `typing_indicator()` context 
 ## Mentions
 
 Mentions are parsed via `format_message_with_mentions()` which handles multiple formats:
+
 - `@calculator` - Short agent name
 - `@mindroom_calculator` - Full username
 - `@mindroom_calculator:localhost` - Full Matrix ID
@@ -2222,7 +2195,7 @@ Messages exceeding the 64KB Matrix event limit are automatically handled by `pre
 
 The `MatrixID` class handles Matrix user ID parsing and agent identification:
 
-```python
+```
 mid = MatrixID.parse("@mindroom_assistant:example.com")
 mid.username  # "mindroom_assistant"
 mid.domain    # "example.com"
@@ -2239,7 +2212,7 @@ agent_name = extract_agent_name("@mindroom_code:localhost", config)
 
 Matrix settings are derived from `config.yaml`:
 
-```yaml
+```
 agents:
   assistant:
     rooms: [lobby, dev]  # Room aliases (auto-created if needed)
@@ -2252,8 +2225,6 @@ teams:
 Room aliases are resolved to room IDs automatically. Full room IDs (starting with `!`) are also supported.
 
 When a room doesn't exist, it's created with an AI-generated topic, power users are invited, and avatars are set from `avatars/rooms/{room_key}.png` if available.
-
-### [Agent Orchestration](https://docs.mindroom.chat/architecture/orchestration/)
 
 # Agent Orchestration
 
@@ -2316,10 +2287,10 @@ main() entry
 Config changes are detected via polling (`watch_file()` checks `st_mtime` every second):
 
 1. On change, `update_config()` is called
-2. `_identify_entities_to_restart()` computes diff using `model_dump(exclude_none=True)`
-3. Affected entities are stopped, recreated, and restarted
-4. Removed entities run `cleanup()` (leave rooms, stop bot)
-5. New/restarted bots go through room setup
+1. `_identify_entities_to_restart()` computes diff using `model_dump(exclude_none=True)`
+1. Affected entities are stopped, recreated, and restarted
+1. Removed entities run `cleanup()` (leave rooms, stop bot)
+1. New/restarted bots go through room setup
 
 Skills are watched separately via `_watch_skills_task()` with cache invalidation.
 
@@ -2330,14 +2301,14 @@ Event callbacks are wrapped in `_create_task_wrapper()` to run as background tas
 **`_on_message` flow:**
 
 1. Skip own messages (except voice transcriptions from router)
-2. Check sender authorization and handle edits
-3. Check if already responded (`ResponseTracker`)
-4. Router handles commands exclusively
-5. Extract message context (mentions, thread history)
-6. Skip messages from other agents (unless mentioned)
-7. Router performs AI routing when no agent mentioned
-8. Check for team formation or individual response
-9. Generate response and store memory
+1. Check sender authorization and handle edits
+1. Check if already responded (`ResponseTracker`)
+1. Router handles commands exclusively
+1. Extract message context (mentions, thread history)
+1. Skip messages from other agents (unless mentioned)
+1. Router performs AI routing when no agent mentioned
+1. Check for team formation or individual response
+1. Generate response and store memory
 
 **Routing** (when no agent mentioned): Router uses `suggest_agent_for_message()` to pick the best agent based on room configuration and message content. Only routes when multiple agents are available.
 
@@ -2354,12 +2325,8 @@ Event callbacks are wrapped in `_create_task_wrapper()` to run as background tas
 On `orchestrator.stop()`:
 
 1. Cancel all sync tasks
-2. Signal all bots to stop (`bot.running = False`)
-3. Call `bot.stop()` for each bot (waits 5s for background tasks, closes Matrix client)
-
-## Deployment
-
-### [Overview](https://docs.mindroom.chat/deployment/)
+1. Signal all bots to stop (`bot.running = False`)
+1. Call `bot.stop()` for each bot (waits 5s for background tasks, closes Matrix client)
 
 # Deployment
 
@@ -2367,25 +2334,25 @@ MindRoom can be deployed in various ways depending on your needs.
 
 ## Deployment Options
 
-| Method | Best For |
-|--------|----------|
-| Full Stack (Docker Compose) | All-in-one: backend + frontend + Matrix (Synapse) + Element |
-| [Docker (single container)](docker.md) | Backend-only or when you already have Matrix |
-| [Kubernetes](kubernetes.md) | Multi-tenant SaaS, production |
-| Direct | Development, simple setups |
+| Method                                                                             | Best For                                                    |
+| ---------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| Full Stack (Docker Compose)                                                        | All-in-one: backend + frontend + Matrix (Synapse) + Element |
+| [Docker (single container)](https://docs.mindroom.chat/deployment/docker/index.md) | Backend-only or when you already have Matrix                |
+| [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/index.md)            | Multi-tenant SaaS, production                               |
+| Direct                                                                             | Development, simple setups                                  |
 
 ## Google Services (Gmail/Calendar/Drive/Sheets)
 
 Use these guides if you want users to connect Google accounts in the MindRoom frontend:
 
-- [Google Services OAuth (Admin Setup)](google-services-oauth.md) - one-time setup for shared/team deployments
-- [Google Services OAuth (Individual Setup)](google-services-user-oauth.md) - single-user bring-your-own OAuth app setup
+- [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) - one-time setup for shared/team deployments
+- [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) - single-user bring-your-own OAuth app setup
 
 ## Quick Start
 
 ### Full Stack (recommended)
 
-```bash
+```
 git clone https://github.com/mindroom-ai/mindroom-stack
 cd mindroom-stack
 cp .env.example .env
@@ -2396,7 +2363,7 @@ docker compose up -d
 
 ### Direct (Development)
 
-```bash
+```
 mindroom run --storage-path ./mindroom_data
 ```
 
@@ -2404,7 +2371,7 @@ The config file path is set via `MINDROOM_CONFIG_PATH` (defaults to `./config.ya
 
 ### Docker (single container)
 
-```bash
+```
 docker run -d \
   --name mindroom-backend \
   -p 8765:8765 \
@@ -2414,17 +2381,17 @@ docker run -d \
   ghcr.io/basnijholt/mindroom-backend:latest
 ```
 
-See the [Docker deployment guide](docker.md) for full setup including the frontend.
+See the [Docker deployment guide](https://docs.mindroom.chat/deployment/docker/index.md) for full setup including the frontend.
 
 ### Kubernetes
 
-See the [Kubernetes deployment guide](kubernetes.md) for Helm chart configuration.
+See the [Kubernetes deployment guide](https://docs.mindroom.chat/deployment/kubernetes/index.md) for Helm chart configuration.
 
 ## Required Configuration
 
 Full stack:
 
-```bash
+```
 # .env in the full stack repo
 ANTHROPIC_API_KEY=sk-ant-...
 # Add other providers as needed
@@ -2433,23 +2400,20 @@ ANTHROPIC_API_KEY=sk-ant-...
 Direct and single-container deployments:
 
 1. **Matrix homeserver** - Set `MATRIX_HOMESERVER` (must allow open registration for agent accounts)
-2. **AI provider keys** - At least one of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.
-3. **Persistent storage** - Mount `mindroom_data/` to persist agent state (including `sessions/`, `learning/`, and memory data)
+1. **AI provider keys** - At least one of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.
+1. **Persistent storage** - Mount `mindroom_data/` to persist agent state (including `sessions/`, `learning/`, and memory data)
 
-See the [Docker guide](docker.md#environment-variables) for the complete environment variable reference.
-
-### [Google Services OAuth (Admin)](https://docs.mindroom.chat/deployment/google-services-oauth/)
+See the [Docker guide](https://docs.mindroom.chat/deployment/docker/#environment-variables) for the complete environment variable reference.
 
 # Google Services OAuth (Admin Setup)
 
-This is the one-time setup for a shared Google OAuth app in MindRoom.
-After you finish these steps, users only click **Login with Google** in the frontend.
+This is the one-time setup for a shared Google OAuth app in MindRoom. After you finish these steps, users only click **Login with Google** in the frontend.
 
 ## Who This Is For
 
 Use this guide if you are running MindRoom for a team, organization, or hosted deployment.
 
-If you are a single local user and want to bring your own Google OAuth app, see [Google Services OAuth (Individual Setup)](google-services-user-oauth.md).
+If you are a single local user and want to bring your own Google OAuth app, see [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md).
 
 ## What You Need Before Starting
 
@@ -2459,64 +2423,65 @@ If you are a single local user and want to bring your own Google OAuth app, see 
 
 The MindRoom callback path is always:
 
-```text
+```
 /api/google/callback
 ```
 
 Your full callback URL is:
 
-```text
+```
 <your-backend-origin>/api/google/callback
 ```
 
 ## Step 1: Create a Google Cloud Project
 
 1. Open [Google Cloud Console](https://console.cloud.google.com/).
-2. Create a new project (or select an existing one).
-3. Save the project ID. You will use it as `GOOGLE_PROJECT_ID`.
+1. Create a new project (or select an existing one).
+1. Save the project ID. You will use it as `GOOGLE_PROJECT_ID`.
 
 ## Step 2: Enable APIs
 
 1. In Google Cloud Console, go to **APIs & Services → Library**.
-2. Enable:
-   - Gmail API
-   - Google Calendar API
-   - Google Drive API
-   - Google Sheets API
+1. Enable:
+1. Gmail API
+1. Google Calendar API
+1. Google Drive API
+1. Google Sheets API
+
 ## Step 3: Configure OAuth Consent Screen
 
 1. Go to **APIs & Services → OAuth consent screen**.
-2. User type:
-   - `External` for public or mixed users
-   - `Internal` for Google Workspace-only
-3. Fill required app info and save.
-4. Add test users if app is still in testing mode.
-5. Add scopes:
-   - `https://www.googleapis.com/auth/gmail.readonly`
-   - `https://www.googleapis.com/auth/gmail.modify`
-   - `https://www.googleapis.com/auth/gmail.compose`
-   - `https://www.googleapis.com/auth/calendar`
-   - `https://www.googleapis.com/auth/spreadsheets`
-   - `https://www.googleapis.com/auth/drive.file`
-   - `openid`
-   - `https://www.googleapis.com/auth/userinfo.email`
-   - `https://www.googleapis.com/auth/userinfo.profile`
+1. User type:
+1. `External` for public or mixed users
+1. `Internal` for Google Workspace-only
+1. Fill required app info and save.
+1. Add test users if app is still in testing mode.
+1. Add scopes:
+1. `https://www.googleapis.com/auth/gmail.readonly`
+1. `https://www.googleapis.com/auth/gmail.modify`
+1. `https://www.googleapis.com/auth/gmail.compose`
+1. `https://www.googleapis.com/auth/calendar`
+1. `https://www.googleapis.com/auth/spreadsheets`
+1. `https://www.googleapis.com/auth/drive.file`
+1. `openid`
+1. `https://www.googleapis.com/auth/userinfo.email`
+1. `https://www.googleapis.com/auth/userinfo.profile`
 
 ## Step 4: Create OAuth Client ID
 
 1. Go to **APIs & Services → Credentials**.
-2. Click **Create Credentials → OAuth client ID**.
-3. Choose **Web application**.
-4. Under **Authorized redirect URIs**, add:
-   - Local: `http://localhost:8765/api/google/callback`
-   - Production: `https://<your-domain>/api/google/callback`
-5. Copy the generated client ID and client secret.
+1. Click **Create Credentials → OAuth client ID**.
+1. Choose **Web application**.
+1. Under **Authorized redirect URIs**, add:
+1. Local: `http://localhost:8765/api/google/callback`
+1. Production: `https://<your-domain>/api/google/callback`
+1. Copy the generated client ID and client secret.
 
 ## Step 5: Configure MindRoom Backend Environment
 
 Set these env vars in your backend deployment (`.env`, Kubernetes secret, or hosting config):
 
-```bash
+```
 GOOGLE_CLIENT_ID=your-app-client-id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your-app-client-secret
 GOOGLE_PROJECT_ID=your-project-id
@@ -2524,6 +2489,7 @@ GOOGLE_REDIRECT_URI=http://localhost:8765/api/google/callback
 ```
 
 Notes:
+
 - `GOOGLE_REDIRECT_URI` must match one of your Google Console redirect URIs exactly.
 - If omitted, MindRoom defaults to `http://localhost:8765/api/google/callback`.
 
@@ -2533,11 +2499,12 @@ Restart the MindRoom backend after setting env vars.
 
 Run:
 
-```bash
+```
 curl -s http://localhost:8765/api/google/status
 ```
 
 Expected result includes:
+
 - `"has_credentials": true`
 
 If `connected` is false at this point, that is normal until a user authorizes.
@@ -2545,16 +2512,17 @@ If `connected` is false at this point, that is normal until a user authorizes.
 ## Step 7: Verify Frontend User Flow
 
 1. Open **Integrations → Google Services**.
-2. If setup is correct, the card shows **Ready to Connect**.
-3. Users can now click **Login with Google** and authorize access.
+1. If setup is correct, the card shows **Ready to Connect**.
+1. Users can now click **Login with Google** and authorize access.
 
 ## End User Steps (After Admin Setup)
 
 Each user does only this:
+
 1. Open **Integrations → Google Services**.
-2. Click **Login with Google**.
-3. Approve scopes.
-4. Confirm status shows **Connected**.
+1. Click **Login with Google**.
+1. Approve scopes.
+1. Confirm status shows **Connected**.
 
 ## Production Notes
 
@@ -2565,7 +2533,7 @@ Each user does only this:
 ## Security Notes
 
 - OAuth access/refresh tokens are stored in MindRoom credentials storage, typically:
-  - `mindroom_data/credentials/google_credentials.json`
+- `mindroom_data/credentials/google_credentials.json`
 - Restrict filesystem access to your MindRoom data directory.
 - Revoke app access from Google account settings if needed.
 
@@ -2578,6 +2546,7 @@ Each user does only this:
 ### "Redirect URI mismatch"
 
 Ensure all three are identical:
+
 - `GOOGLE_REDIRECT_URI` in backend env
 - Redirect URI in Google Console
 - Actual backend callback URL
@@ -2586,13 +2555,11 @@ Ensure all three are identical:
 
 Add those users to OAuth consent screen test users.
 
-### [Google Services OAuth (Individual)](https://docs.mindroom.chat/deployment/google-services-user-oauth/)
-
 # Google Services OAuth (Individual Setup)
 
 This guide is for one person running MindRoom and creating their own Google OAuth app.
 
-For team/shared deployments, use [Google Services OAuth (Admin Setup)](google-services-oauth.md).
+For team/shared deployments, use [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md).
 
 ## What You Need Before Starting
 
@@ -2602,62 +2569,62 @@ For team/shared deployments, use [Google Services OAuth (Admin Setup)](google-se
 
 The callback path is always:
 
-```text
+```
 /api/google/callback
 ```
 
 So the default full callback URL is:
 
-```text
+```
 http://localhost:8765/api/google/callback
 ```
 
 ## Step 1: Create Google Cloud Project
 
 1. Open [Google Cloud Console](https://console.cloud.google.com/).
-2. Create or select a project.
-3. Save the project ID for `GOOGLE_PROJECT_ID`.
+1. Create or select a project.
+1. Save the project ID for `GOOGLE_PROJECT_ID`.
 
 ## Step 2: Enable APIs
 
 1. Go to **APIs & Services → Library**.
-2. Enable:
-   - Gmail API
-   - Google Calendar API
-   - Google Drive API
-   - Google Sheets API
+1. Enable:
+1. Gmail API
+1. Google Calendar API
+1. Google Drive API
+1. Google Sheets API
 
 ## Step 3: Configure OAuth Consent Screen
 
 1. Go to **APIs & Services → OAuth consent screen**.
-2. Choose `External`.
-3. Fill required fields and save.
-4. Add your own email as a test user.
-5. Add scopes:
-   - `https://www.googleapis.com/auth/gmail.readonly`
-   - `https://www.googleapis.com/auth/gmail.modify`
-   - `https://www.googleapis.com/auth/gmail.compose`
-   - `https://www.googleapis.com/auth/calendar`
-   - `https://www.googleapis.com/auth/spreadsheets`
-   - `https://www.googleapis.com/auth/drive.file`
-   - `openid`
-   - `https://www.googleapis.com/auth/userinfo.email`
-   - `https://www.googleapis.com/auth/userinfo.profile`
+1. Choose `External`.
+1. Fill required fields and save.
+1. Add your own email as a test user.
+1. Add scopes:
+1. `https://www.googleapis.com/auth/gmail.readonly`
+1. `https://www.googleapis.com/auth/gmail.modify`
+1. `https://www.googleapis.com/auth/gmail.compose`
+1. `https://www.googleapis.com/auth/calendar`
+1. `https://www.googleapis.com/auth/spreadsheets`
+1. `https://www.googleapis.com/auth/drive.file`
+1. `openid`
+1. `https://www.googleapis.com/auth/userinfo.email`
+1. `https://www.googleapis.com/auth/userinfo.profile`
 
 ## Step 4: Create OAuth Client ID
 
 1. Go to **APIs & Services → Credentials**.
-2. Click **Create Credentials → OAuth client ID**.
-3. Choose **Web application**.
-4. Add redirect URI:
-   - `http://localhost:8765/api/google/callback`
-5. Copy client ID and client secret.
+1. Click **Create Credentials → OAuth client ID**.
+1. Choose **Web application**.
+1. Add redirect URI:
+1. `http://localhost:8765/api/google/callback`
+1. Copy client ID and client secret.
 
 ## Step 5: Configure MindRoom Backend
 
 Add this to `.env` (or export in your shell):
 
-```bash
+```
 BACKEND_PORT=8765
 GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your-client-secret
@@ -2671,25 +2638,26 @@ Restart the MindRoom backend.
 
 Run:
 
-```bash
+```
 curl -s http://localhost:8765/api/google/status
 ```
 
 Expected:
+
 - `"has_credentials": true`
 
 ## Step 7: Connect in Frontend
 
 1. Open **Integrations → Google Services**.
-2. Click **Login with Google**.
-3. Sign in and approve requested scopes.
-4. You should see **Connected** and your available services.
+1. Click **Login with Google**.
+1. Sign in and approve requested scopes.
+1. You should see **Connected** and your available services.
 
 ## Step 8: Enable Google Tools in `config.yaml`
 
 After OAuth is connected, add Google tools to your agent config:
 
-```yaml
+```
 agents:
   email_assistant:
     display_name: Email Assistant
@@ -2704,6 +2672,7 @@ agents:
 ```
 
 Gmail tool capabilities include:
+
 - `gmail_search`: Search emails with Gmail query syntax (for example `is:unread` or `from:boss@company.com`)
 - `gmail_latest`: Read latest inbox emails
 - `gmail_unread`: Read unread emails only
@@ -2713,7 +2682,7 @@ After editing `config.yaml`, restart MindRoom backend to reload configuration.
 ## Disconnect Later (Optional)
 
 1. In MindRoom frontend, click **Disconnect Google Account**.
-2. Optional: also revoke app access in [Google Account Permissions](https://myaccount.google.com/permissions).
+1. Optional: also revoke app access in [Google Account Permissions](https://myaccount.google.com/permissions).
 
 ## Troubleshooting
 
@@ -2729,8 +2698,6 @@ Check redirect URI exact match between Google Cloud Console and MindRoom backend
 
 If your app is in testing mode, ensure your account is listed as a test user.
 
-### [Docker](https://docs.mindroom.chat/deployment/docker/)
-
 # Docker Deployment
 
 Deploy MindRoom using Docker for simple, containerized deployments.
@@ -2744,7 +2711,7 @@ MindRoom consists of two containers:
 
 For a minimal setup with just the backend:
 
-```bash
+```
 docker run -d \
   --name mindroom-backend \
   -p 8765:8765 \
@@ -2758,7 +2725,7 @@ docker run -d \
 
 Create a `docker-compose.yml`:
 
-```yaml
+```
 services:
   mindroom:
     image: ghcr.io/basnijholt/mindroom-backend:latest
@@ -2783,7 +2750,7 @@ services:
 
 Run with:
 
-```bash
+```
 docker compose up -d
 ```
 
@@ -2791,23 +2758,23 @@ docker compose up -d
 
 Key environment variables (set in `.env` or pass directly):
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `MATRIX_HOMESERVER` | Matrix server URL | `http://localhost:8008` |
-| `MATRIX_SSL_VERIFY` | Verify SSL certificates | `true` |
-| `MATRIX_SERVER_NAME` | Server name for federation (optional) | - |
-| `STORAGE_PATH` | Data storage directory | `mindroom_data` |
-| `LOG_LEVEL` | Logging level | `INFO` |
-| `MINDROOM_CONFIG_PATH` | Path to config.yaml (alternative: `CONFIG_PATH`) | Package default |
-| `MINDROOM_ENABLE_STREAMING` | Enable streaming responses | `true` |
-| `ANTHROPIC_API_KEY` | Anthropic API key (if using Claude models) | - |
-| `OPENAI_API_KEY` | OpenAI API key (if using OpenAI models) | - |
+| Variable                    | Description                                      | Default                 |
+| --------------------------- | ------------------------------------------------ | ----------------------- |
+| `MATRIX_HOMESERVER`         | Matrix server URL                                | `http://localhost:8008` |
+| `MATRIX_SSL_VERIFY`         | Verify SSL certificates                          | `true`                  |
+| `MATRIX_SERVER_NAME`        | Server name for federation (optional)            | -                       |
+| `STORAGE_PATH`              | Data storage directory                           | `mindroom_data`         |
+| `LOG_LEVEL`                 | Logging level                                    | `INFO`                  |
+| `MINDROOM_CONFIG_PATH`      | Path to config.yaml (alternative: `CONFIG_PATH`) | Package default         |
+| `MINDROOM_ENABLE_STREAMING` | Enable streaming responses                       | `true`                  |
+| `ANTHROPIC_API_KEY`         | Anthropic API key (if using Claude models)       | -                       |
+| `OPENAI_API_KEY`            | OpenAI API key (if using OpenAI models)          | -                       |
 
 ## Building from Source
 
 Build from the repository root:
 
-```bash
+```
 docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.backend .
 ```
 
@@ -2817,7 +2784,7 @@ The Dockerfile uses a multi-stage build with `uv` for dependency management and 
 
 For development, run MindRoom alongside a local Matrix server:
 
-```bash
+```
 # Start Matrix (Synapse + Postgres + Redis)
 cd local/matrix && docker compose up -d
 
@@ -2838,7 +2805,7 @@ The local Matrix stack includes:
 
 The container exposes a health endpoint on port 8765:
 
-```bash
+```
 curl http://localhost:8765/api/health
 ```
 
@@ -2859,7 +2826,7 @@ MindRoom stores data in the `mindroom_data` directory:
 
 For a complete deployment including the dashboard:
 
-```yaml
+```
 services:
   backend:
     image: ghcr.io/basnijholt/mindroom-backend:latest
@@ -2885,13 +2852,9 @@ services:
       - backend
 ```
 
-> [!NOTE]
-> The frontend image is built with `VITE_API_URL=""` (empty), meaning it uses relative URLs and expects `/api/*` requests to be proxied to the backend. For standalone deployments without a reverse proxy, rebuild the frontend image with `VITE_API_URL=http://localhost:8765`.
-
-> [!TIP]
-> For production, use a reverse proxy (Traefik, Nginx) to serve both services under the same domain. See `local/instances/deploy/docker-compose.yml` for an example with Traefik labels.
-
-### [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/)
+> [!NOTE] The frontend image is built with `VITE_API_URL=""` (empty), meaning it uses relative URLs and expects `/api/*` requests to be proxied to the backend. For standalone deployments without a reverse proxy, rebuild the frontend image with `VITE_API_URL=http://localhost:8765`.
+>
+> [!TIP] For production, use a reverse proxy (Traefik, Nginx) to serve both services under the same domain. See `local/instances/deploy/docker-compose.yml` for an example with Traefik labels.
 
 # Kubernetes Deployment
 
@@ -2915,7 +2878,7 @@ MindRoom uses two Helm charts:
 
 ### Via Provisioner API (Recommended)
 
-```bash
+```
 export KUBECONFIG=./cluster/terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml
 
 # Provision, check status, view logs
@@ -2928,7 +2891,7 @@ export KUBECONFIG=./cluster/terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml
 
 For debugging only:
 
-```bash
+```
 helm upgrade --install instance-1 ./cluster/k8s/instance \
   --namespace mindroom-instances \
   --create-namespace \
@@ -2946,7 +2909,7 @@ helm upgrade --install instance-1 ./cluster/k8s/instance \
 
 API keys are mounted as files at `/etc/secrets/` (not environment variables). The backend reads paths from `*_API_KEY_FILE` environment variables:
 
-```yaml
+```
 env:
   - name: ANTHROPIC_API_KEY_FILE
     value: "/etc/secrets/anthropic_key"
@@ -2964,7 +2927,7 @@ Each instance gets three hosts:
 
 ## Platform Deployment
 
-```bash
+```
 # Create values file from example
 cp cluster/k8s/platform/values-staging.example.yaml cluster/k8s/platform/values-staging.yaml
 # Edit with your configuration
@@ -2984,7 +2947,7 @@ Platform ingress hosts:
 
 ## Local Development with Kind
 
-```bash
+```
 just cluster-kind-fresh              # Start cluster with everything
 just cluster-kind-port-frontend      # http://localhost:3000
 just cluster-kind-port-backend       # http://localhost:8000
@@ -2995,7 +2958,7 @@ See `cluster/k8s/kind/README.md` for details.
 
 ## CLI Helper
 
-```bash
+```
 ./cluster/scripts/mindroom-cli.sh list              # List instances
 ./cluster/scripts/mindroom-cli.sh status            # Overall status
 ./cluster/scripts/mindroom-cli.sh logs <id>         # View logs
@@ -3010,18 +2973,18 @@ Reads configuration from `saas-platform/.env`.
 
 All endpoints require bearer token (`PROVISIONER_API_KEY`).
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/system/provision` | POST | Create or re-provision an instance |
-| `/system/instances/{id}/start` | POST | Start a stopped instance |
-| `/system/instances/{id}/stop` | POST | Stop a running instance |
-| `/system/instances/{id}/restart` | POST | Restart an instance |
-| `/system/instances/{id}/uninstall` | DELETE | Remove an instance |
-| `/system/sync-instances` | POST | Sync states between DB and K8s |
+| Endpoint                           | Method | Description                        |
+| ---------------------------------- | ------ | ---------------------------------- |
+| `/system/provision`                | POST   | Create or re-provision an instance |
+| `/system/instances/{id}/start`     | POST   | Start a stopped instance           |
+| `/system/instances/{id}/stop`      | POST   | Stop a running instance            |
+| `/system/instances/{id}/restart`   | POST   | Restart an instance                |
+| `/system/instances/{id}/uninstall` | DELETE | Remove an instance                 |
+| `/system/sync-instances`           | POST   | Sync states between DB and K8s     |
 
 Example provision request:
 
-```bash
+```
 curl -X POST "https://api.mindroom.chat/system/provision" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $PROVISIONER_API_KEY" \
@@ -3032,7 +2995,7 @@ The provisioner creates the namespace, generates URLs, deploys via Helm, and upd
 
 ## Deployment Scripts
 
-```bash
+```
 cd saas-platform
 ./deploy.sh platform-frontend          # Deploy platform frontend
 ./deploy.sh platform-backend           # Deploy platform backend
@@ -3052,33 +3015,19 @@ Each customer instance gets:
 
 Platform services run in `mindroom-{environment}` namespace.
 
-### [CLI Reference](https://docs.mindroom.chat/cli/)
-
 # CLI Reference
 
 MindRoom provides a command-line interface for managing agents.
 
 ## Basic Usage
 
-```bash
+```
 mindroom [OPTIONS] COMMAND [ARGS]...
 ```
 
 ## Commands
 
-<!-- CODE:START -->
-<!-- from mindroom.cli import app -->
-<!-- from typer.testing import CliRunner -->
-<!-- runner = CliRunner() -->
-<!-- result = runner.invoke(app, ["--help"]) -->
-<!-- print("```") -->
-<!-- print(result.output) -->
-<!-- print("```") -->
-<!-- CODE:END -->
-<!-- OUTPUT:START -->
-<!-- ⚠️ This content is auto-generated by `markdown-code-runner`. -->
 ```
-
  Usage: root [OPTIONS] COMMAND [ARGS]...
 
  Mindroom: Multi-agent Matrix bot system
@@ -3095,29 +3044,13 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │ validate   Validate the configuration file.                                            │
 │ run        Run the mindroom multi-agent system.                                        │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
-
-
 ```
-
-<!-- OUTPUT:END -->
 
 ## version
 
 Show the current MindRoom version.
 
-<!-- CODE:START -->
-<!-- from mindroom.cli import app -->
-<!-- from typer.testing import CliRunner -->
-<!-- runner = CliRunner() -->
-<!-- result = runner.invoke(app, ["version", "--help"]) -->
-<!-- print("```") -->
-<!-- print(result.output) -->
-<!-- print("```") -->
-<!-- CODE:END -->
-<!-- OUTPUT:START -->
-<!-- ⚠️ This content is auto-generated by `markdown-code-runner`. -->
 ```
-
  Usage: root version [OPTIONS]
 
  Show the current version of Mindroom.
@@ -3126,29 +3059,13 @@ Show the current MindRoom version.
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --help          Show this message and exit.                                            │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
-
-
 ```
-
-<!-- OUTPUT:END -->
 
 ## run
 
 Start MindRoom with your configuration.
 
-<!-- CODE:START -->
-<!-- from mindroom.cli import app -->
-<!-- from typer.testing import CliRunner -->
-<!-- runner = CliRunner() -->
-<!-- result = runner.invoke(app, ["run", "--help"]) -->
-<!-- print("```") -->
-<!-- print(result.output) -->
-<!-- print("```") -->
-<!-- CODE:END -->
-<!-- OUTPUT:START -->
-<!-- ⚠️ This content is auto-generated by `markdown-code-runner`. -->
 ```
-
  Usage: root run [OPTIONS]
 
  Run the mindroom multi-agent system.
@@ -3165,34 +3082,30 @@ Start MindRoom with your configuration.
 │                               [default: mindroom_data]                                 │
 │ --help                        Show this message and exit.                              │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
-
-
 ```
-
-<!-- OUTPUT:END -->
 
 ## Examples
 
 ### Basic run
 
-```bash
+```
 mindroom run
 ```
 
 ### Debug logging
 
-```bash
+```
 mindroom run --log-level DEBUG
 ```
 
 ### Custom storage path
 
-```bash
+```
 mindroom run --storage-path /data/mindroom
 ```
 
 ### Show version
 
-```bash
+```
 mindroom version
 ```

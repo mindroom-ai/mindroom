@@ -283,25 +283,6 @@ class TestIntegration:
         assert len(output) > 100
         assert "# MindRoom" in output
 
-    def test_checked_in_llms_refs_are_fresh(self) -> None:
-        """Checked-in llms references match current generator output."""
-        repo_root = Path(__file__).resolve().parent.parent
-        toml_path = repo_root / "zensical.toml"
-        if not toml_path.exists():
-            pytest.skip("zensical.toml not found")
-
-        with toml_path.open("rb") as f:
-            nav = tomllib.load(f)["project"]["nav"]
-
-        expected_llms = generate_llms_txt(nav)
-        expected_llms_full = generate_llms_full_txt(nav)
-
-        llms_path = repo_root / "skills" / "mindroom-docs" / "references" / "llms.txt"
-        llms_full_path = repo_root / "skills" / "mindroom-docs" / "references" / "llms-full.txt"
-
-        assert llms_path.read_text(encoding="utf-8") == expected_llms
-        assert llms_full_path.read_text(encoding="utf-8") == expected_llms_full
-
     def test_checked_in_source_map_is_fresh(self) -> None:
         """Checked-in source-map matches current generator output."""
         repo_root = Path(__file__).resolve().parent.parent

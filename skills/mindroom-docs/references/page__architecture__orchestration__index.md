@@ -1,0 +1,101 @@
+# Agent Orchestration
+
+The `MultiAgentOrchestrator` (in `src/mindroom/bot.py`) manages the lifecycle of all agents, teams, and the router.
+
+## Boot Sequence
+
+```
+main() entry
+       │
+       ▼
+┌──────────────────┐
+│ Sync Credentials │
+│ (.env → vault)   │
+└────────┬─────────┘
+         │
+         ▼
+┌──────────────────┐
+│  Initialize()    │
+│ ─────────────────│
+│ 1. Create "user" │
+│    Matrix account│
+│ 2. Parse config  │
+│    (Pydantic)    │
+│ 3. Load plugins  │
+│ 4. Create bots   │
+│    for entities  │
+└────────┬─────────┘
+         │
+         ▼
+┌──────────────────┐
+│    Start()       │
+│ ─────────────────│
+│ 1. try_start()   │
+│    each bot      │
+│ 2. Setup rooms   │
+│    & memberships │
+│ 3. Create sync   │
+│    tasks         │
+└────────┬─────────┘
+         │
+         ▼
+┌──────────────────────────────────────┐
+│  Concurrent Tasks (asyncio.wait)     │
+│ ─────────────────────────────────────│
+│ • orchestrator_task (sync loops)     │
+│ • watcher_task (config file polling) │
+│ • skills_watcher_task (skill cache)  │
+└──────────────────────────────────────┘
+```
+
+**Key details:**
+
+- **Entity order**: Router first, then agents, then teams
+- **Room setup** (`_setup_rooms_and_memberships`): Router creates rooms, invites agents/users, bots join
+- **Sync loops**: Each bot runs `_sync_forever_with_restart()` with automatic retry
+
+## Hot Reload
+
+Config changes are detected via polling (`watch_file()` checks `st_mtime` every second):
+
+1. On change, `update_config()` is called
+1. `_identify_entities_to_restart()` computes diff using `model_dump(exclude_none=True)`
+1. Affected entities are stopped, recreated, and restarted
+1. Removed entities run `cleanup()` (leave rooms, stop bot)
+1. New/restarted bots go through room setup
+
+Skills are watched separately via `_watch_skills_task()` with cache invalidation.
+
+## Message Handling
+
+Event callbacks are wrapped in `_create_task_wrapper()` to run as background tasks, ensuring the sync loop is never blocked.
+
+**`_on_message` flow:**
+
+1. Skip own messages (except voice transcriptions from router)
+1. Check sender authorization and handle edits
+1. Check if already responded (`ResponseTracker`)
+1. Router handles commands exclusively
+1. Extract message context (mentions, thread history)
+1. Skip messages from other agents (unless mentioned)
+1. Router performs AI routing when no agent mentioned
+1. Check for team formation or individual response
+1. Generate response and store memory
+
+**Routing** (when no agent mentioned): Router uses `suggest_agent_for_message()` to pick the best agent based on room configuration and message content. Only routes when multiple agents are available.
+
+## Concurrency
+
+- Each bot runs its own sync loop via `_sync_forever_with_restart()`
+- Sync loop failures trigger automatic restart with exponential backoff (5s, 10s, ... up to 60s max)
+- Event callbacks run as background tasks (never block the sync loop)
+- `ResponseTracker` prevents duplicate replies
+- `StopManager` handles cancellation of in-progress responses
+
+### Graceful Shutdown
+
+On `orchestrator.stop()`:
+
+1. Cancel all sync tasks
+1. Signal all bots to stop (`bot.running = False`)
+1. Call `bot.stop()` for each bot (waits 5s for background tasks, closes Matrix client)
