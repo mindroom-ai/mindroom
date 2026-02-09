@@ -18,13 +18,6 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
 import { Plus, RefreshCw, Trash2, Upload } from 'lucide-react';
 
 interface KnowledgeFile {
@@ -133,7 +126,7 @@ export function Knowledge() {
     }
 
     if (!selectedBase || !baseNames.includes(selectedBase)) {
-      setSelectedBase(baseNames[0]);
+      setSelectedBase(baseNames.length === 1 ? baseNames[0] : '');
     }
   }, [baseNames, selectedBase]);
 
@@ -502,27 +495,57 @@ export function Knowledge() {
               {selectedBase && <Badge variant="default">Active: {selectedBase}</Badge>}
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-3">
-              <Select value={selectedBase || undefined} onValueChange={setSelectedBase}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select a knowledge base" />
-                </SelectTrigger>
-                <SelectContent>
-                  {baseNames.map(baseName => (
-                    <SelectItem key={baseName} value={baseName}>
-                      {baseName}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+            <div className="space-y-3">
+              <p className="text-sm text-muted-foreground">
+                Select a base to manage. Settings and files below always belong to the active base.
+              </p>
+
+              {baseNames.length > 0 ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">
+                  {baseNames.map(baseName => {
+                    const baseConfig = knowledgeBases[baseName];
+                    const isActive = baseName === selectedBase;
+                    return (
+                      <button
+                        key={baseName}
+                        type="button"
+                        onClick={() => setSelectedBase(baseName)}
+                        className={cn(
+                          'rounded-md border p-3 text-left transition-colors',
+                          isActive
+                            ? 'border-primary bg-primary/5'
+                            : 'border-border hover:border-primary/40 hover:bg-muted/40'
+                        )}
+                        aria-pressed={isActive}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium">{baseName}</span>
+                          {isActive && <Badge variant="default">Active</Badge>}
+                        </div>
+                        <p className="mt-1 truncate text-xs font-mono text-muted-foreground">
+                          {baseConfig?.path ?? defaultPathForBase(baseName)}
+                        </p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {baseConfig?.watch ? 'Watching for changes' : 'Manual reindex only'}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  No knowledge bases configured yet. Add one below to start.
+                </p>
+              )}
 
               <Button
                 variant="outline"
                 onClick={handleDeleteBase}
                 disabled={!selectedBase || deletingBase || isDirty}
+                className="w-full sm:w-auto"
               >
                 <Trash2 className="h-4 w-4 mr-2" />
-                {deletingBase ? 'Deleting...' : 'Delete Base'}
+                {deletingBase ? 'Deleting...' : 'Delete Active Base'}
               </Button>
             </div>
 
