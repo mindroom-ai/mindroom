@@ -680,12 +680,12 @@ export function Knowledge() {
               </CardContent>
             </Card>
 
-            <Card className="flex-1 min-h-0">
+            <Card>
               <CardHeader className="pb-3">
                 <CardTitle className="text-base">Knowledge Files</CardTitle>
               </CardHeader>
-              <CardContent className="h-[calc(100%-4.5rem)] min-h-0">
-                <div className="h-full overflow-auto rounded-md border">
+              <CardContent>
+                <div className="max-h-[55vh] overflow-auto rounded-md border">
                   <table className="w-full min-w-[760px] text-sm">
                     <thead>
                       {table.getHeaderGroups().map(headerGroup => (
