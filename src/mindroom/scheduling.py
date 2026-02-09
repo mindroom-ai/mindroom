@@ -40,6 +40,9 @@ SCHEDULED_TASK_EVENT_TYPE = "com.mindroom.scheduled.task"
 # Maximum length for message preview in task listings
 MESSAGE_PREVIEW_LENGTH = 50
 
+# Shared validation message for edit attempts that change task type.
+SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR = "Changing schedule_type is not supported; cancel and recreate the schedule"
+
 # How often running tasks should re-check persisted Matrix state for edits/cancellations.
 TASK_STATE_POLL_INTERVAL_SECONDS = 30
 
@@ -341,6 +344,53 @@ async def save_scheduled_task(
 
     if restart_task and status == "pending":
         _start_scheduled_task(client, task_id, workflow, config)
+
+
+def _require_pending_task_for_edit(task_id: str, task_record: ScheduledTaskRecord | None) -> ScheduledTaskRecord:
+    """Validate that a task exists and is editable."""
+    if task_record is None:
+        msg = f"Task `{task_id}` not found."
+        raise ValueError(msg)
+    if task_record.status != "pending":
+        msg = f"Task `{task_id}` cannot be edited because it is `{task_record.status}`."
+        raise ValueError(msg)
+    return task_record
+
+
+async def save_edited_scheduled_task(
+    client: nio.AsyncClient,
+    room_id: str,
+    task_id: str,
+    workflow: ScheduledWorkflow,
+    config: Config,
+    existing_task: ScheduledTaskRecord | None = None,
+    restart_task: bool = False,
+) -> ScheduledTaskRecord:
+    """Persist edits to an existing task using shared validation semantics."""
+    task_record = existing_task or await get_scheduled_task(client=client, room_id=room_id, task_id=task_id)
+    task_record = _require_pending_task_for_edit(task_id, task_record)
+
+    if workflow.schedule_type != task_record.workflow.schedule_type:
+        raise ValueError(SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR)
+
+    await save_scheduled_task(
+        client=client,
+        room_id=room_id,
+        task_id=task_id,
+        workflow=workflow,
+        config=config,
+        status="pending",
+        created_at=task_record.created_at,
+        restart_task=restart_task,
+    )
+
+    return ScheduledTaskRecord(
+        task_id=task_id,
+        room_id=room_id,
+        status="pending",
+        created_at=task_record.created_at,
+        workflow=workflow,
+    )
 
 
 async def parse_workflow_schedule(
@@ -710,6 +760,8 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     room: nio.MatrixRoom,
     mentioned_agents: list[MatrixID] | None = None,
     task_id: str | None = None,
+    existing_task: ScheduledTaskRecord | None = None,
+    restart_task: bool = True,
 ) -> tuple[str | None, str]:
     """Schedule a workflow from natural language request.
 
@@ -785,9 +837,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     workflow_result.room_id = room_id
 
     # Create task ID for new tasks (or reuse existing ID when editing)
-    task_id = task_id or str(uuid.uuid4())[:8]
-
-    created_at = datetime.now(UTC).isoformat()
+    task_id = task_id or (existing_task.task_id if existing_task else str(uuid.uuid4())[:8])
 
     logger.info(
         "Storing workflow task in Matrix state",
@@ -797,15 +847,30 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         schedule_type=workflow_result.schedule_type,
     )
 
-    await save_scheduled_task(
-        client=client,
-        room_id=room_id,
-        task_id=task_id,
-        workflow=workflow_result,
-        config=config,
-        status="pending",
-        created_at=created_at,
-    )
+    try:
+        if existing_task:
+            await save_edited_scheduled_task(
+                client=client,
+                room_id=room_id,
+                task_id=task_id,
+                workflow=workflow_result,
+                config=config,
+                existing_task=existing_task,
+                restart_task=restart_task,
+            )
+        else:
+            await save_scheduled_task(
+                client=client,
+                room_id=room_id,
+                task_id=task_id,
+                workflow=workflow_result,
+                config=config,
+                status="pending",
+                created_at=datetime.now(UTC).isoformat(),
+                restart_task=restart_task,
+            )
+    except ValueError as e:
+        return (None, f"❌ Failed to schedule: {e!s}")
 
     # Build success message
     if workflow_result.schedule_type == "once" and workflow_result.execute_at:
@@ -839,30 +904,14 @@ async def edit_scheduled_task(
     thread_id: str | None = None,
 ) -> str:
     """Edit an existing scheduled task by replacing its workflow details."""
-    response = await client.room_get_state_event(
-        room_id=room_id,
-        event_type=SCHEDULED_TASK_EVENT_TYPE,
-        state_key=task_id,
-    )
-
-    if not isinstance(response, nio.RoomGetStateEventResponse):
+    existing_task = await get_scheduled_task(client=client, room_id=room_id, task_id=task_id)
+    if not existing_task:
         return f"❌ Task `{task_id}` not found."
-
-    content = response.content
-    status = content.get("status")
-    if status != "pending":
-        return f"❌ Task `{task_id}` cannot be edited because it is `{status}`."
+    if existing_task.status != "pending":
+        return f"❌ Task `{task_id}` cannot be edited because it is `{existing_task.status}`."
 
     # Keep the task in its original thread when possible.
-    target_thread_id = thread_id
-    workflow_data = content.get("workflow")
-    if isinstance(workflow_data, str):
-        try:
-            existing_workflow = ScheduledWorkflow(**json.loads(workflow_data))
-            if existing_workflow.thread_id:
-                target_thread_id = existing_workflow.thread_id
-        except (TypeError, ValueError):
-            logger.exception("Failed to parse existing workflow for task edit", task_id=task_id)
+    target_thread_id = existing_task.workflow.thread_id or thread_id
 
     edited_task_id, response_text = await schedule_task(
         client=client,
@@ -873,6 +922,8 @@ async def edit_scheduled_task(
         config=config,
         room=room,
         task_id=task_id,
+        existing_task=existing_task,
+        restart_task=False,
     )
 
     if edited_task_id is None:

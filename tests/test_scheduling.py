@@ -19,6 +19,7 @@ from mindroom.scheduling import (
     list_scheduled_tasks,
     run_cron_task,
     run_once_task,
+    save_edited_scheduled_task,
 )
 
 
@@ -619,16 +620,19 @@ async def test_edit_scheduled_task_reuses_existing_thread() -> None:
         )
 
     assert "✅ Updated task `task123`." in result
-    mock_schedule.assert_awaited_once_with(
-        client=client,
-        room_id="!test:server",
-        thread_id="$original_thread",
-        scheduled_by="@user:server",
-        full_text="tomorrow at 9am updated task",
-        config=config,
-        room=room,
-        task_id="task123",
-    )
+    mock_schedule.assert_awaited_once()
+    call_kwargs = mock_schedule.await_args.kwargs
+    assert call_kwargs["client"] is client
+    assert call_kwargs["room_id"] == "!test:server"
+    assert call_kwargs["thread_id"] == "$original_thread"
+    assert call_kwargs["scheduled_by"] == "@user:server"
+    assert call_kwargs["full_text"] == "tomorrow at 9am updated task"
+    assert call_kwargs["config"] is config
+    assert call_kwargs["room"] is room
+    assert call_kwargs["task_id"] == "task123"
+    assert call_kwargs["restart_task"] is False
+    assert call_kwargs["existing_task"].task_id == "task123"
+    assert call_kwargs["existing_task"].workflow.thread_id == "$original_thread"
 
 
 @pytest.mark.asyncio
@@ -656,3 +660,89 @@ async def test_edit_scheduled_task_rejects_non_pending() -> None:
     )
 
     assert "cannot be edited" in result
+
+
+@pytest.mark.asyncio
+async def test_save_edited_scheduled_task_preserves_created_at() -> None:
+    """Editing should keep created_at metadata from the original task."""
+    client = AsyncMock()
+    created_at = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    existing_workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime(2026, 2, 1, 10, 0, tzinfo=UTC),
+        message="original message",
+        description="original description",
+        thread_id="$thread1",
+        room_id="!test:server",
+    )
+    updated_workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime(2026, 2, 1, 11, 0, tzinfo=UTC),
+        message="updated message",
+        description="updated description",
+        thread_id="$thread1",
+        room_id="!test:server",
+    )
+    existing_task = ScheduledTaskRecord(
+        task_id="task123",
+        room_id="!test:server",
+        status="pending",
+        created_at=created_at,
+        workflow=existing_workflow,
+    )
+
+    updated_task = await save_edited_scheduled_task(
+        client=client,
+        room_id="!test:server",
+        task_id="task123",
+        workflow=updated_workflow,
+        config=MagicMock(),
+        existing_task=existing_task,
+        restart_task=False,
+    )
+
+    assert updated_task.created_at == created_at
+    assert updated_task.workflow == updated_workflow
+    client.room_put_state.assert_awaited_once()
+    assert client.room_put_state.await_args.kwargs["content"]["created_at"] == created_at.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_save_edited_scheduled_task_rejects_schedule_type_change() -> None:
+    """Editing should reject switching between once and cron schedule types."""
+    client = AsyncMock()
+    existing_task = ScheduledTaskRecord(
+        task_id="task123",
+        room_id="!test:server",
+        status="pending",
+        created_at=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+        workflow=ScheduledWorkflow(
+            schedule_type="once",
+            execute_at=datetime(2026, 2, 1, 10, 0, tzinfo=UTC),
+            message="original message",
+            description="original description",
+            thread_id="$thread1",
+            room_id="!test:server",
+        ),
+    )
+    updated_workflow = ScheduledWorkflow(
+        schedule_type="cron",
+        cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
+        message="updated message",
+        description="updated description",
+        thread_id="$thread1",
+        room_id="!test:server",
+    )
+
+    with pytest.raises(ValueError, match="Changing schedule_type is not supported"):
+        await save_edited_scheduled_task(
+            client=client,
+            room_id="!test:server",
+            task_id="task123",
+            workflow=updated_workflow,
+            config=MagicMock(),
+            existing_task=existing_task,
+            restart_task=False,
+        )
+
+    client.room_put_state.assert_not_called()

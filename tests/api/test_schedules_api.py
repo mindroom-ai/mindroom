@@ -128,13 +128,29 @@ def test_update_schedule_once_success(test_client: TestClient) -> None:
         description="Original description",
         message="@mindroom_test_agent original",
     )
-    save_mock = AsyncMock()
+    updated_workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime(2026, 3, 1, 10, 0, tzinfo=UTC),
+        message="@mindroom_test_agent updated",
+        description="Updated description",
+        thread_id=existing_task.workflow.thread_id,
+        room_id="test_room",
+        created_by=existing_task.workflow.created_by,
+    )
+    updated_task = ScheduledTaskRecord(
+        task_id="abc12345",
+        room_id="test_room",
+        status="pending",
+        created_at=existing_task.created_at,
+        workflow=updated_workflow,
+    )
+    save_mock = AsyncMock(return_value=updated_task)
 
     with (
         patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
         patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
         patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
-        patch("mindroom.api.schedules.save_scheduled_task", save_mock),
+        patch("mindroom.api.schedules.save_edited_scheduled_task", save_mock),
     ):
         response = test_client.put(
             "/api/schedules/abc12345",
@@ -157,6 +173,7 @@ def test_update_schedule_once_success(test_client: TestClient) -> None:
     save_mock.assert_awaited_once()
     assert save_mock.await_args.kwargs["task_id"] == "abc12345"
     assert save_mock.await_args.kwargs["room_id"] == "test_room"
+    assert save_mock.await_args.kwargs["restart_task"] is False
 
 
 def test_update_schedule_invalid_cron_expression(test_client: TestClient) -> None:
@@ -233,7 +250,7 @@ def test_update_schedule_once_to_cron(test_client: TestClient) -> None:
         patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
         patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
         patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
-        patch("mindroom.api.schedules.save_scheduled_task", save_mock),
+        patch("mindroom.api.schedules.save_edited_scheduled_task", save_mock),
     ):
         response = test_client.put(
             "/api/schedules/switch01",
@@ -264,7 +281,7 @@ def test_update_schedule_cron_to_once(test_client: TestClient) -> None:
         patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
         patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
         patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
-        patch("mindroom.api.schedules.save_scheduled_task", save_mock),
+        patch("mindroom.api.schedules.save_edited_scheduled_task", save_mock),
     ):
         response = test_client.put(
             "/api/schedules/switch02",

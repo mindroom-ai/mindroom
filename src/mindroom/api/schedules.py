@@ -14,13 +14,14 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id, resolve_room_aliases
 from mindroom.matrix.users import create_agent_user, login_agent_user
 from mindroom.scheduling import (
+    SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR,
     CronSchedule,
     ScheduledTaskRecord,
     ScheduledWorkflow,
     cancel_scheduled_task,
     get_scheduled_task,
     get_scheduled_tasks_for_room,
-    save_scheduled_task,
+    save_edited_scheduled_task,
 )
 
 if TYPE_CHECKING:
@@ -161,7 +162,7 @@ def _resolve_schedule_fields(
     if request.schedule_type and request.schedule_type != existing_workflow.schedule_type:
         raise HTTPException(
             status_code=400,
-            detail="Changing schedule_type is not supported; cancel and recreate the schedule",
+            detail=SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR,
         )
 
     schedule_type = existing_workflow.schedule_type
@@ -279,29 +280,21 @@ async def update_schedule(
         existing_task = await get_scheduled_task(client=client, room_id=resolved_room_id, task_id=task_id)
         if not existing_task:
             raise HTTPException(status_code=404, detail=f"Task `{task_id}` not found")
-        if existing_task.status != "pending":
-            raise HTTPException(status_code=400, detail="Only pending tasks can be edited")
 
         updated_workflow = _build_updated_workflow(request, existing_task.workflow, resolved_room_id)
+        try:
+            updated_task = await save_edited_scheduled_task(
+                client=client,
+                room_id=resolved_room_id,
+                task_id=task_id,
+                workflow=updated_workflow,
+                config=runtime_config,
+                existing_task=existing_task,
+                restart_task=False,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"{e!s}") from e
 
-        await save_scheduled_task(
-            client=client,
-            room_id=resolved_room_id,
-            task_id=task_id,
-            workflow=updated_workflow,
-            config=runtime_config,
-            status="pending",
-            created_at=existing_task.created_at,
-            restart_task=False,
-        )
-
-        updated_task = ScheduledTaskRecord(
-            task_id=task_id,
-            room_id=resolved_room_id,
-            status="pending",
-            created_at=existing_task.created_at,
-            workflow=updated_workflow,
-        )
         return _to_response_task(updated_task)
     finally:
         await client.close()
