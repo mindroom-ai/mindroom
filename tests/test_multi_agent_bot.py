@@ -100,6 +100,31 @@ class _AsyncStubVectorDb(_SyncStubVectorDb):
         return self.documents[:limit]
 
 
+@dataclass
+class _FailingStubVectorDb:
+    error_message: str = "search failed"
+
+    def search(
+        self,
+        *,
+        query: str,
+        limit: int,
+        filters: dict[str, Any] | list[Any] | None = None,
+    ) -> list[Document]:
+        _ = (query, limit, filters)
+        raise RuntimeError(self.error_message)
+
+    async def async_search(
+        self,
+        *,
+        query: str,
+        limit: int,
+        filters: dict[str, Any] | list[Any] | None = None,
+    ) -> list[Document]:
+        _ = (query, limit, filters)
+        raise RuntimeError(self.error_message)
+
+
 class TestAgentBot:
     """Test cases for AgentBot class."""
 
@@ -259,6 +284,23 @@ class TestAgentBot:
         docs = vector_db.search(query="knowledge query", limit=4)
         assert [doc.content for doc in docs] == ["research 1", "legal 1", "research 2", "legal 2"]
 
+    def test_multi_knowledge_vector_db_sync_ignores_failing_source(self) -> None:
+        """A failing knowledge source should not suppress healthy source results."""
+        vector_db = MultiKnowledgeVectorDb(
+            vector_dbs=[
+                _SyncStubVectorDb(
+                    documents=[
+                        Document(content="research 1"),
+                        Document(content="research 2"),
+                    ],
+                ),
+                _FailingStubVectorDb(error_message="boom"),
+            ],
+        )
+
+        docs = vector_db.search(query="knowledge query", limit=3)
+        assert [doc.content for doc in docs] == ["research 1", "research 2"]
+
     @pytest.mark.asyncio
     async def test_multi_knowledge_vector_db_interleaves_async_results(self) -> None:
         """Async merge should interleave and support sync-only vector DBs."""
@@ -289,6 +331,24 @@ class TestAgentBot:
             "legal 2",
             "research 3",
         ]
+
+    @pytest.mark.asyncio
+    async def test_multi_knowledge_vector_db_async_ignores_failing_source(self) -> None:
+        """Async search should continue returning healthy source results on failures."""
+        vector_db = MultiKnowledgeVectorDb(
+            vector_dbs=[
+                _AsyncStubVectorDb(
+                    documents=[
+                        Document(content="research 1"),
+                        Document(content="research 2"),
+                    ],
+                ),
+                _FailingStubVectorDb(error_message="boom"),
+            ],
+        )
+
+        docs = await vector_db.async_search(query="knowledge query", limit=3)
+        assert [doc.content for doc in docs] == ["research 1", "research 2"]
 
     @pytest.mark.asyncio
     @patch("mindroom.config.Config.from_yaml")

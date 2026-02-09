@@ -148,6 +148,34 @@ class TestConsolidatedConfigManager:
         finally:
             config_path.unlink(missing_ok=True)
 
+    def test_manage_agent_create_rejects_duplicate_knowledge_bases(self) -> None:
+        """Create must fail when duplicate knowledge base IDs are provided."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            config_path = Path(f.name)
+            config = Config(
+                agents={},
+                knowledge_bases={
+                    "docs": KnowledgeBaseConfig(path="./docs"),
+                },
+            )
+            config.save_to_yaml(config_path)
+
+        try:
+            cm = ConfigManagerTools(config_path)
+            result = cm.manage_agent(
+                operation="create",
+                agent_name="test_agent",
+                display_name="Test Agent",
+                role="Test role",
+                knowledge_bases=["docs", "docs"],
+            )
+            assert result == "Error: Duplicate knowledge bases are not allowed: docs."
+
+            config = Config.from_yaml(config_path)
+            assert "test_agent" not in config.agents
+        finally:
+            config_path.unlink(missing_ok=True)
+
     def test_manage_agent_update(self) -> None:
         """Test manage_agent with update operation."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -201,6 +229,37 @@ class TestConsolidatedConfigManager:
                 knowledge_bases=["missing_docs"],
             )
             assert result == "Error: Unknown knowledge bases: missing_docs. Available knowledge bases: docs."
+
+            config = Config.from_yaml(config_path)
+            assert config.agents["test_agent"].knowledge_bases == ["docs"]
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_manage_agent_update_rejects_duplicate_knowledge_bases(self) -> None:
+        """Update must fail when duplicate knowledge base IDs are provided."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            config_path = Path(f.name)
+            config = Config(
+                agents={},
+                knowledge_bases={
+                    "docs": KnowledgeBaseConfig(path="./docs"),
+                },
+            )
+            config.agents["test_agent"] = AgentConfig(
+                display_name="Test Agent",
+                role="Test role",
+                knowledge_bases=["docs"],
+            )
+            config.save_to_yaml(config_path)
+
+        try:
+            cm = ConfigManagerTools(config_path)
+            result = cm.manage_agent(
+                operation="update",
+                agent_name="test_agent",
+                knowledge_bases=["docs", "docs"],
+            )
+            assert result == "Error: Duplicate knowledge bases are not allowed: docs."
 
             config = Config.from_yaml(config_path)
             assert config.agents["test_agent"].knowledge_bases == ["docs"]

@@ -151,7 +151,15 @@ class MultiKnowledgeVectorDb:
         """Search each assigned vector database and interleave merged results."""
         results_by_db: list[list[Document]] = []
         for vector_db in self.vector_dbs:
-            results = vector_db.search(query=query, limit=limit, filters=filters)
+            try:
+                results = vector_db.search(query=query, limit=limit, filters=filters)
+            except Exception:
+                logger.warning(
+                    "Knowledge vector database search failed",
+                    vector_db_type=type(vector_db).__name__,
+                    exc_info=True,
+                )
+                continue
             results_by_db.append(results)
         return _interleave_documents(results_by_db, limit)
 
@@ -165,11 +173,23 @@ class MultiKnowledgeVectorDb:
         """Async variant of ``search`` that searches DBs concurrently."""
 
         async def _search_one(vdb: Any) -> list[Document]:  # noqa: ANN401
-            async_fn = getattr(vdb, "async_search", None)
-            if callable(async_fn):
-                results: list[Document] = await async_fn(query=query, limit=limit, filters=filters)
-            else:
-                results = vdb.search(query=query, limit=limit, filters=filters)
+            try:
+                async_fn = getattr(vdb, "async_search", None)
+                if callable(async_fn):
+                    maybe_results = async_fn(query=query, limit=limit, filters=filters)
+                    if inspect.isawaitable(maybe_results):
+                        results: list[Document] = await maybe_results
+                    else:
+                        results = maybe_results
+                else:
+                    results = vdb.search(query=query, limit=limit, filters=filters)
+            except Exception:
+                logger.warning(
+                    "Knowledge vector database async search failed",
+                    vector_db_type=type(vdb).__name__,
+                    exc_info=True,
+                )
+                return []
             return results
 
         results_by_db = await asyncio.gather(*[_search_one(vdb) for vdb in self.vector_dbs])

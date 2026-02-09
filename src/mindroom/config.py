@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .constants import DEFAULT_AGENTS_CONFIG, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, safe_replace
 from .logging_config import get_logger
@@ -40,6 +40,31 @@ class AgentConfig(BaseModel):
         default_factory=list,
         description="Knowledge base IDs assigned to this agent",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_legacy_knowledge_base_field(cls, data: object) -> object:
+        """Reject legacy single knowledge_base field to prevent silent misconfiguration."""
+        if isinstance(data, dict) and "knowledge_base" in data:
+            msg = "Agent field 'knowledge_base' was removed. Use 'knowledge_bases' (list) instead."
+            raise ValueError(msg)
+        return data
+
+    @field_validator("knowledge_bases")
+    @classmethod
+    def validate_unique_knowledge_bases(cls, knowledge_bases: list[str]) -> list[str]:
+        """Ensure each knowledge base assignment appears at most once per agent."""
+        seen: set[str] = set()
+        duplicates: list[str] = []
+        for base_id in knowledge_bases:
+            if base_id in seen and base_id not in duplicates:
+                duplicates.append(base_id)
+            seen.add(base_id)
+
+        if duplicates:
+            msg = f"Duplicate knowledge bases are not allowed: {', '.join(duplicates)}"
+            raise ValueError(msg)
+        return knowledge_bases
 
 
 class DefaultsConfig(BaseModel):

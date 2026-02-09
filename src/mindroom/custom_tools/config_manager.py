@@ -449,6 +449,15 @@ class ConfigManagerTools(Toolkit):
         configured_knowledge_bases: set[str],
     ) -> str | None:
         """Validate that all requested knowledge base IDs exist in config."""
+        seen: set[str] = set()
+        duplicates: list[str] = []
+        for base_id in knowledge_bases:
+            if base_id in seen and base_id not in duplicates:
+                duplicates.append(base_id)
+            seen.add(base_id)
+        if duplicates:
+            return f"Error: Duplicate knowledge bases are not allowed: {', '.join(duplicates)}."
+
         invalid_knowledge_bases = sorted(
             {base_id for base_id in knowledge_bases if base_id not in configured_knowledge_bases},
         )
