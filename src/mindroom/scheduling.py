@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Literal, NamedTuple
+from typing import TYPE_CHECKING, Literal, NamedTuple, TypedDict
 from zoneinfo import ZoneInfo
 
 import humanize
@@ -49,6 +50,17 @@ class _AgentValidationResult(NamedTuple):
     all_valid: bool
     valid_agents: list[MatrixID]
     invalid_agents: list[MatrixID]
+
+
+class _TaskDisplay(TypedDict):
+    """Task payload used for schedule list rendering."""
+
+    id: str
+    time: datetime | None
+    schedule_type: str
+    description: str
+    message: str
+    thread_id: str | None
 
 
 # ---- Workflow scheduling primitives ----
@@ -94,6 +106,211 @@ class WorkflowParseError(BaseModel):
 
     error: str
     suggestion: str | None = None
+
+
+@dataclass
+class ScheduledTaskRecord:
+    """Parsed scheduled task state from Matrix."""
+
+    task_id: str
+    room_id: str
+    status: str
+    created_at: datetime | None
+    workflow: ScheduledWorkflow
+
+
+def _parse_datetime(value: object) -> datetime | None:
+    """Parse an ISO datetime string into a datetime object."""
+    if not isinstance(value, str) or not value:
+        return None
+
+    normalized = value.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+
+
+def parse_scheduled_task_record(
+    room_id: str,
+    task_id: str,
+    content: dict[str, object],
+) -> ScheduledTaskRecord | None:
+    """Parse a Matrix state event content payload into a scheduled task record."""
+    status = str(content.get("status", "pending"))
+    workflow_data_raw = content.get("workflow")
+    if isinstance(workflow_data_raw, str):
+        try:
+            workflow = ScheduledWorkflow(**json.loads(workflow_data_raw))
+        except (ValueError, json.JSONDecodeError):
+            logger.exception("Failed to parse scheduled task workflow", room_id=room_id, task_id=task_id)
+            return None
+    elif status != "pending":
+        # Backward compatibility: older cancellation paths wrote only {"status": "cancelled"}.
+        description_value = content.get("description")
+        description = (
+            description_value if isinstance(description_value, str) and description_value else "Cancelled task"
+        )
+        message_value = content.get("message")
+        message = message_value if isinstance(message_value, str) else ""
+        thread_id_value = content.get("thread_id")
+        thread_id = thread_id_value if isinstance(thread_id_value, str) else None
+        created_by_value = content.get("created_by")
+        created_by = created_by_value if isinstance(created_by_value, str) else None
+        workflow = ScheduledWorkflow(
+            schedule_type="once",
+            execute_at=None,
+            message=message,
+            description=description,
+            created_by=created_by,
+            thread_id=thread_id,
+            room_id=room_id,
+        )
+    else:
+        return None
+
+    created_at = _parse_datetime(content.get("created_at"))
+    return ScheduledTaskRecord(
+        task_id=task_id,
+        room_id=room_id,
+        status=status,
+        created_at=created_at,
+        workflow=workflow,
+    )
+
+
+def _cancelled_task_content(
+    task_id: str,
+    existing_content: dict[str, object] | None,
+) -> dict[str, object]:
+    """Build cancelled task state while preserving existing metadata where possible."""
+    cancelled_content: dict[str, object] = {"status": "cancelled", "task_id": task_id}
+
+    if existing_content:
+        workflow = existing_content.get("workflow")
+        if isinstance(workflow, str):
+            cancelled_content["workflow"] = workflow
+
+        created_at = existing_content.get("created_at")
+        if isinstance(created_at, str) and created_at:
+            cancelled_content["created_at"] = created_at
+
+        original_task_id = existing_content.get("task_id")
+        if isinstance(original_task_id, str) and original_task_id:
+            cancelled_content["task_id"] = original_task_id
+
+    cancelled_content["updated_at"] = datetime.now(UTC).isoformat()
+    return cancelled_content
+
+
+def _start_scheduled_task(
+    client: nio.AsyncClient,
+    task_id: str,
+    workflow: ScheduledWorkflow,
+    config: Config,
+) -> None:
+    """Start the asyncio task for a scheduled workflow and track it globally."""
+    if workflow.schedule_type == "once":
+        task = asyncio.create_task(
+            run_once_task(client, task_id, workflow, config),
+        )
+    else:
+        task = asyncio.create_task(
+            run_cron_task(client, task_id, workflow, _running_tasks, config),
+        )
+    _running_tasks[task_id] = task
+
+
+def cancel_running_task(task_id: str) -> None:
+    """Cancel a running scheduled task if it exists."""
+    if task_id in _running_tasks:
+        _running_tasks[task_id].cancel()
+        del _running_tasks[task_id]
+
+
+async def get_scheduled_tasks_for_room(
+    client: nio.AsyncClient,
+    room_id: str,
+    include_non_pending: bool = False,
+) -> list[ScheduledTaskRecord]:
+    """Fetch and parse scheduled tasks for a room."""
+    response = await client.room_get_state(room_id)
+    if not isinstance(response, nio.RoomGetStateResponse):
+        logger.error("Failed to get room state", response=str(response), room_id=room_id)
+        return []
+
+    tasks: list[ScheduledTaskRecord] = []
+    for event in response.events:
+        if event.get("type") != SCHEDULED_TASK_EVENT_TYPE:
+            continue
+
+        state_key = event.get("state_key")
+        content = event.get("content")
+        if not isinstance(state_key, str) or not isinstance(content, dict):
+            continue
+
+        task = parse_scheduled_task_record(room_id, state_key, content)
+        if not task:
+            continue
+        if not include_non_pending and task.status != "pending":
+            continue
+        tasks.append(task)
+
+    return tasks
+
+
+async def get_scheduled_task(
+    client: nio.AsyncClient,
+    room_id: str,
+    task_id: str,
+) -> ScheduledTaskRecord | None:
+    """Fetch and parse a single scheduled task from Matrix state."""
+    response = await client.room_get_state_event(
+        room_id=room_id,
+        event_type=SCHEDULED_TASK_EVENT_TYPE,
+        state_key=task_id,
+    )
+    if not isinstance(response, nio.RoomGetStateEventResponse):
+        return None
+    if not isinstance(response.content, dict):
+        return None
+    return parse_scheduled_task_record(room_id, task_id, response.content)
+
+
+async def save_scheduled_task(
+    client: nio.AsyncClient,
+    room_id: str,
+    task_id: str,
+    workflow: ScheduledWorkflow,
+    config: Config,
+    status: str = "pending",
+    created_at: datetime | str | None = None,
+) -> None:
+    """Persist scheduled task state and restart its in-memory task runner."""
+    cancel_running_task(task_id)
+
+    if isinstance(created_at, datetime):
+        created_at_value = created_at.isoformat()
+    elif isinstance(created_at, str) and created_at:
+        created_at_value = created_at
+    else:
+        created_at_value = datetime.now(UTC).isoformat()
+
+    await client.room_put_state(
+        room_id=room_id,
+        event_type=SCHEDULED_TASK_EVENT_TYPE,
+        content={
+            "task_id": task_id,
+            "workflow": workflow.model_dump_json(),
+            "status": status,
+            "created_at": created_at_value,
+            "updated_at": datetime.now(UTC).isoformat(),
+        },
+        state_key=task_id,
+    )
+
+    if status == "pending":
+        _start_scheduled_task(client, task_id, workflow, config)
 
 
 async def parse_workflow_schedule(
@@ -475,13 +692,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     # Create task ID
     task_id = str(uuid.uuid4())[:8]
 
-    # Store workflow in Matrix state
-    task_data = {
-        "task_id": task_id,
-        "workflow": workflow_result.model_dump_json(),
-        "status": "pending",
-        "created_at": datetime.now(UTC).isoformat(),
-    }
+    created_at = datetime.now(UTC).isoformat()
 
     logger.info(
         "Storing workflow task in Matrix state",
@@ -491,24 +702,15 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         schedule_type=workflow_result.schedule_type,
     )
 
-    await client.room_put_state(
+    await save_scheduled_task(
+        client=client,
         room_id=room_id,
-        event_type=SCHEDULED_TASK_EVENT_TYPE,
-        content=task_data,
-        state_key=task_id,
+        task_id=task_id,
+        workflow=workflow_result,
+        config=config,
+        status="pending",
+        created_at=created_at,
     )
-
-    # Start the appropriate async task
-    if workflow_result.schedule_type == "once":
-        task = asyncio.create_task(
-            run_once_task(client, task_id, workflow_result, config),
-        )
-    else:  # cron
-        task = asyncio.create_task(
-            run_cron_task(client, task_id, workflow_result, _running_tasks, config),
-        )
-
-    _running_tasks[task_id] = task
 
     # Build success message
     if workflow_result.schedule_type == "once" and workflow_result.execute_at:
@@ -539,52 +741,53 @@ async def list_scheduled_tasks(  # noqa: C901, PLR0912
 ) -> str:
     """List scheduled tasks in human-readable format."""
     response = await client.room_get_state(room_id)
-
     if not isinstance(response, nio.RoomGetStateResponse):
         logger.error("Failed to get room state", response=str(response), room_id=room_id, thread_id=thread_id)
         return "Unable to retrieve scheduled tasks."
 
-    tasks = []
-    tasks_in_other_threads = []
-
+    task_records: list[ScheduledTaskRecord] = []
     for event in response.events:
-        if event["type"] == SCHEDULED_TASK_EVENT_TYPE:
-            content = event["content"]
-            if content.get("status") == "pending":
-                try:
-                    # Parse the workflow
-                    workflow_data = json.loads(content["workflow"])
-                    workflow = ScheduledWorkflow(**workflow_data)
+        if event.get("type") != SCHEDULED_TASK_EVENT_TYPE:
+            continue
+        state_key = event.get("state_key")
+        content = event.get("content")
+        if not isinstance(state_key, str) or not isinstance(content, dict):
+            continue
+        task_record = parse_scheduled_task_record(room_id, state_key, content)
+        if not task_record:
+            continue
+        if task_record.status != "pending":
+            continue
+        task_records.append(task_record)
 
-                    # Determine display time
-                    if workflow.schedule_type == "once" and workflow.execute_at:
-                        display_time = workflow.execute_at
-                        schedule_type = "once"
-                    else:
-                        # For cron, show the natural language description
-                        display_time = None
-                        if workflow.cron_schedule:
-                            schedule_type = workflow.cron_schedule.to_natural_language()
-                        else:
-                            schedule_type = "recurring"
+    tasks: list[_TaskDisplay] = []
+    tasks_in_other_threads: list[_TaskDisplay] = []
 
-                    task_info = {
-                        "id": event["state_key"],
-                        "time": display_time,
-                        "schedule_type": schedule_type,
-                        "description": workflow.description,
-                        "message": workflow.message,
-                        "thread_id": workflow.thread_id,
-                    }
+    for task_record in task_records:
+        workflow = task_record.workflow
+        # Determine display time
+        if workflow.schedule_type == "once" and workflow.execute_at:
+            display_time = workflow.execute_at
+            schedule_type = "once"
+        else:
+            # For cron, show the natural language description
+            display_time = None
+            schedule_type = workflow.cron_schedule.to_natural_language() if workflow.cron_schedule else "recurring"
 
-                    # Separate tasks by thread
-                    if thread_id and workflow.thread_id and workflow.thread_id != thread_id:
-                        tasks_in_other_threads.append(task_info)
-                    else:
-                        tasks.append(task_info)
-                except (KeyError, ValueError, json.JSONDecodeError):
-                    logger.exception("Failed to parse task")
-                    continue
+        task_info: _TaskDisplay = {
+            "id": task_record.task_id,
+            "time": display_time,
+            "schedule_type": schedule_type,
+            "description": workflow.description,
+            "message": workflow.message,
+            "thread_id": workflow.thread_id,
+        }
+
+        # Separate tasks by thread
+        if thread_id and workflow.thread_id and workflow.thread_id != thread_id:
+            tasks_in_other_threads.append(task_info)
+        else:
+            tasks.append(task_info)
 
     if not tasks and not tasks_in_other_threads:
         return "No scheduled tasks found."
@@ -620,9 +823,7 @@ async def cancel_scheduled_task(
 ) -> str:
     """Cancel a scheduled task."""
     # Cancel the asyncio task if running
-    if task_id in _running_tasks:
-        _running_tasks[task_id].cancel()
-        del _running_tasks[task_id]
+    cancel_running_task(task_id)
 
     # First check if task exists
     response = await client.room_get_state_event(
@@ -635,10 +836,11 @@ async def cancel_scheduled_task(
         return f"❌ Task `{task_id}` not found."
 
     # Update to cancelled
+    existing_content = response.content if isinstance(response.content, dict) else None
     await client.room_put_state(
         room_id=room_id,
         event_type=SCHEDULED_TASK_EVENT_TYPE,
-        content={"status": "cancelled"},
+        content=_cancelled_task_content(task_id, existing_content),
         state_key=task_id,
     )
 
@@ -667,16 +869,15 @@ async def cancel_all_scheduled_tasks(
                 task_id = event["state_key"]
 
                 # Cancel the asyncio task if running
-                if task_id in _running_tasks:
-                    _running_tasks[task_id].cancel()
-                    del _running_tasks[task_id]
+                cancel_running_task(task_id)
 
                 # Update to cancelled in Matrix state
                 try:
+                    existing_content = content if isinstance(content, dict) else None
                     await client.room_put_state(
                         room_id=room_id,
                         event_type=SCHEDULED_TASK_EVENT_TYPE,
-                        content={"status": "cancelled"},
+                        content=_cancelled_task_content(task_id, existing_content),
                         state_key=task_id,
                     )
                     cancelled_count += 1
@@ -695,7 +896,7 @@ async def cancel_all_scheduled_tasks(
     return result
 
 
-async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str, config: Config) -> int:  # noqa: C901, PLR0912
+async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str, config: Config) -> int:  # noqa: C901
     """Restore scheduled tasks from Matrix state after bot restart.
 
     Returns:
@@ -740,12 +941,7 @@ async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str, config:
                 continue
 
             # Start the appropriate task
-            if workflow.schedule_type == "once":
-                task = asyncio.create_task(run_once_task(client, task_id, workflow, config))
-            else:
-                task = asyncio.create_task(run_cron_task(client, task_id, workflow, _running_tasks, config))
-
-            _running_tasks[task_id] = task
+            _start_scheduled_task(client, task_id, workflow, config)
             restored_count += 1
 
         except (KeyError, ValueError, json.JSONDecodeError):

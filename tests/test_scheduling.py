@@ -8,7 +8,12 @@ from unittest.mock import AsyncMock
 import nio
 import pytest
 
-from mindroom.scheduling import ScheduledWorkflow, cancel_all_scheduled_tasks, list_scheduled_tasks
+from mindroom.scheduling import (
+    ScheduledWorkflow,
+    cancel_all_scheduled_tasks,
+    get_scheduled_tasks_for_room,
+    list_scheduled_tasks,
+)
 
 
 @pytest.mark.asyncio
@@ -348,11 +353,49 @@ async def test_cancel_all_scheduled_tasks() -> None:
 
     # Verify the calls were made with correct parameters
     calls = client.room_put_state.call_args_list
+    expected_workflows = {
+        "task1": workflow1.model_dump_json(),
+        "task2": workflow2.model_dump_json(),
+    }
     for call in calls:
+        state_key = call[1]["state_key"]
         assert call[1]["room_id"] == "!test:server"
         assert call[1]["event_type"] == "com.mindroom.scheduled.task"
-        assert call[1]["content"] == {"status": "cancelled"}
-        assert call[1]["state_key"] in ["task1", "task2"]
+        assert state_key in ["task1", "task2"]
+        assert call[1]["content"]["status"] == "cancelled"
+        assert call[1]["content"]["task_id"] == state_key
+        assert call[1]["content"]["workflow"] == expected_workflows[state_key]
+        assert "created_at" in call[1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_get_scheduled_tasks_for_room_includes_cancelled_without_workflow() -> None:
+    """Cancelled tasks without workflow payload are still returned for non-pending listings."""
+    client = AsyncMock()
+    mock_response = nio.RoomGetStateResponse.from_dict(
+        [
+            {
+                "type": "com.mindroom.scheduled.task",
+                "state_key": "old_cancelled",
+                "content": {
+                    "status": "cancelled",
+                },
+                "event_id": "$state_cancelled",
+                "sender": "@system:server",
+                "origin_server_ts": 1234567890,
+            },
+        ],
+        room_id="!test:server",
+    )
+
+    client.room_get_state = AsyncMock(return_value=mock_response)
+
+    tasks = await get_scheduled_tasks_for_room(client=client, room_id="!test:server", include_non_pending=True)
+
+    assert len(tasks) == 1
+    assert tasks[0].task_id == "old_cancelled"
+    assert tasks[0].status == "cancelled"
+    assert tasks[0].workflow.description == "Cancelled task"
 
 
 @pytest.mark.asyncio

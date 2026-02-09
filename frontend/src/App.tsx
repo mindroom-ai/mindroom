@@ -5,6 +5,7 @@ import {
   BookOpen,
   Bot,
   Brain,
+  CalendarClock,
   Check,
   DoorOpen,
   Home,
@@ -33,6 +34,7 @@ import { UnconfiguredRooms } from '@/components/UnconfiguredRooms/UnconfiguredRo
 import { SyncStatus } from '@/components/SyncStatus/SyncStatus';
 import { Dashboard } from '@/components/Dashboard/Dashboard';
 import { Skills } from '@/components/Skills/Skills';
+import { Schedules } from '@/components/Schedules/Schedules';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   Dialog,
@@ -60,6 +62,7 @@ const NAV_ITEMS: NavItem[] = [
   { value: 'agents', label: 'Agents', icon: Bot, group: 'Workspace' },
   { value: 'teams', label: 'Teams', icon: Users, group: 'Workspace' },
   { value: 'rooms', label: 'Rooms', icon: Home, group: 'Workspace' },
+  { value: 'schedules', label: 'Schedules', icon: CalendarClock, group: 'Workspace' },
   { value: 'unconfigured-rooms', label: 'External', icon: DoorOpen, group: 'Workspace' },
   { value: 'models', label: 'Models', icon: Settings2, group: 'Configuration' },
   { value: 'memory', label: 'Memory', icon: Brain, group: 'Configuration' },
@@ -423,6 +426,12 @@ function AppContent() {
                 >
                   <RoomEditor />
                 </div>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="schedules" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
+              <div className="h-full overflow-hidden">
+                <Schedules />
               </div>
             </TabsContent>
 
