@@ -519,7 +519,7 @@ agents:
     markdown: true                 # Optional: Override default (inherits from defaults section)
     learning: true                 # Optional: Override default (inherits from defaults section)
     learning_mode: always          # Optional: Override default (inherits from defaults section)
-    knowledge_base: docs           # Optional: Assign this agent to a configured knowledge base
+    knowledge_bases: [docs]         # Optional: Assign one or more configured knowledge bases
 
 # Model configurations (at least a "default" model is recommended)
 models:
@@ -618,7 +618,7 @@ timezone: America/Los_Angeles      # Default: UTC
 
 - All top-level sections are optional with sensible defaults, but you need at least one agent
 - A model named `default` is required unless all agents/teams specify explicit models
-- Agents can set `knowledge_base`, but the value must exist in `knowledge_bases`
+- Agents can set `knowledge_bases`, but each entry must exist in the top-level `knowledge_bases` section
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
 - The `memory` system works out of the box with OpenAI; use `memory.llm` for memory summarization with a different provider
 
@@ -681,27 +681,27 @@ agents:
     # Learning mode: always (automatic) or agentic (tool-driven)
     learning_mode: always
 
-    # Assign agent to a configured knowledge base (optional)
-    knowledge_base: docs
+    # Assign agent to one or more configured knowledge bases (optional)
+    knowledge_bases: [docs]
 ```
 
 ## Configuration Options
 
-| Option           | Type           | Default     | Description                                                                                                                                    |
-| ---------------- | -------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `display_name`   | string         | *required*  | Human-readable name shown in Matrix as the bot's display name                                                                                  |
-| `role`           | string         | `""`        | System prompt describing the agent's purpose — guides its behavior and expertise                                                               |
-| `model`          | string         | `"default"` | Model name (must match a key in the `models` section)                                                                                          |
-| `tools`          | list           | `[]`        | Tool names the agent can use (see [Tools](https://docs.mindroom.chat/tools/index.md) for available options)                                    |
-| `skills`         | list           | `[]`        | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/index.md))                                                       |
-| `instructions`   | list           | `[]`        | Extra lines appended to the system prompt after the role                                                                                       |
-| `rooms`          | list           | `[]`        | Room aliases to auto-join; rooms are created if they don't exist                                                                               |
-| `markdown`       | bool           | `true`      | When enabled, the agent is instructed to format responses as Markdown                                                                          |
-| `learning`       | bool           | `true`      | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time |
-| `learning_mode`  | string         | `"always"`  | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call                            |
-| `knowledge_base` | string or null | `null`      | Knowledge base ID from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                       |
+| Option            | Type   | Default     | Description                                                                                                                                    |
+| ----------------- | ------ | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `display_name`    | string | *required*  | Human-readable name shown in Matrix as the bot's display name                                                                                  |
+| `role`            | string | `""`        | System prompt describing the agent's purpose — guides its behavior and expertise                                                               |
+| `model`           | string | `"default"` | Model name (must match a key in the `models` section)                                                                                          |
+| `tools`           | list   | `[]`        | Tool names the agent can use (see [Tools](https://docs.mindroom.chat/tools/index.md) for available options)                                    |
+| `skills`          | list   | `[]`        | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/index.md))                                                       |
+| `instructions`    | list   | `[]`        | Extra lines appended to the system prompt after the role                                                                                       |
+| `rooms`           | list   | `[]`        | Room aliases to auto-join; rooms are created if they don't exist                                                                               |
+| `markdown`        | bool   | `true`      | When enabled, the agent is instructed to format responses as Markdown                                                                          |
+| `learning`        | bool   | `true`      | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time |
+| `learning_mode`   | string | `"always"`  | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call                            |
+| `knowledge_bases` | list   | `[]`        | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                      |
 
-If `knowledge_base` is set, it must match a key under `knowledge_bases` in `config.yaml`.
+Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
 
 All per-agent settings above that show a default value inherit from the `defaults` section. Per-agent values override them.
 

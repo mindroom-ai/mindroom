@@ -34,7 +34,7 @@ agents:
     markdown: true                 # Optional: Override default (inherits from defaults section)
     learning: true                 # Optional: Override default (inherits from defaults section)
     learning_mode: always          # Optional: Override default (inherits from defaults section)
-    knowledge_base: docs           # Optional: Assign this agent to a configured knowledge base
+    knowledge_bases: [docs]         # Optional: Assign one or more configured knowledge bases
 
 # Model configurations (at least a "default" model is recommended)
 models:
@@ -133,6 +133,6 @@ timezone: America/Los_Angeles      # Default: UTC
 
 - All top-level sections are optional with sensible defaults, but you need at least one agent
 - A model named `default` is required unless all agents/teams specify explicit models
-- Agents can set `knowledge_base`, but the value must exist in `knowledge_bases`
+- Agents can set `knowledge_bases`, but each entry must exist in the top-level `knowledge_bases` section
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
 - The `memory` system works out of the box with OpenAI; use `memory.llm` for memory summarization with a different provider

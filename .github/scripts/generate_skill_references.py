@@ -13,7 +13,7 @@ from typing import Any
 
 import yaml
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 DOCS_DIR = REPO_ROOT / "docs"
 ZENSICAL_CONFIG = REPO_ROOT / "zensical.toml"
 SKILL_DIR = REPO_ROOT / "skills" / "mindroom-docs"
@@ -149,7 +149,7 @@ def _write_reference_index(nav_pages: list[NavPage], built_to_reference: dict[st
     lines = [
         "# MindRoom Docs Reference Index",
         "",
-        "Generated from `docs/` via `skills/mindroom-docs/scripts/generate_references.py`.",
+        "Generated from `docs/` via `.github/scripts/generate_skill_references.py`.",
         "",
         "## Primary references",
         "",

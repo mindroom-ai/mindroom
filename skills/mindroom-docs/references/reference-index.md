@@ -1,6 +1,6 @@
 # MindRoom Docs Reference Index
 
-Generated from `docs/` via `skills/mindroom-docs/scripts/generate_references.py`.
+Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 
 ## Primary references
 

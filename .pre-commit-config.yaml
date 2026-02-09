@@ -4,6 +4,7 @@ repos:
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
+        exclude: ^skills/mindroom-docs/references/
       - id: check-docstring-first
       - id: check-yaml
         exclude: (cluster/k8s/.*/templates/.*\.yaml$|cluster/k8s/.*\.yaml$|cluster/k8s/.*/templates/.*\.yaml$|cluster/k8s/.*\.yaml$)
@@ -44,6 +45,13 @@ repos:
         language: system
         pass_filenames: false
         files: ^(config\.yaml|saas-platform/default-config\.yaml)$
+
+      - id: generate-skill-references
+        name: Regenerate mindroom-docs skill references
+        entry: python .github/scripts/generate_skill_references.py
+        language: system
+        pass_filenames: false
+        files: ^(docs/.*\.md|zensical\.toml)$
 
   - repo: https://github.com/tox-dev/pyproject-fmt
     rev: "v2.6.0"

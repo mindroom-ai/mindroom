@@ -29,3 +29,4 @@
 - [Docker](https://docs.mindroom.chat/deployment/docker/index.md)
 - [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/index.md)
 - [CLI Reference](https://docs.mindroom.chat/cli/index.md)
+
