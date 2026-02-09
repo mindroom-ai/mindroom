@@ -37,6 +37,9 @@ _OS_ALIASES = {
 _PLUGIN_SKILL_ROOTS: list[Path] = []
 SkillSnapshot = tuple[tuple[str, int, int], ...]
 _SKILL_CACHE: dict[Path, tuple[SkillSnapshot, list[Skill]]] = {}
+_THIS_DIR = Path(__file__).resolve().parent
+_BUNDLED_SKILLS_DEV_DIR = _THIS_DIR.parents[1] / "skills"
+_BUNDLED_SKILLS_PACKAGE_DIR = _THIS_DIR / "_bundled_skills"
 
 
 @dataclass
@@ -234,8 +237,12 @@ def get_user_skills_dir() -> Path:
 
 
 def get_bundled_skills_dir() -> Path:
-    """Return the bundled skills directory from the repo root."""
-    return Path(__file__).resolve().parents[2] / "skills"
+    """Return the bundled skills directory from repo checkout or installed package."""
+    if _BUNDLED_SKILLS_DEV_DIR.exists():
+        return _BUNDLED_SKILLS_DEV_DIR
+    if _BUNDLED_SKILLS_PACKAGE_DIR.exists():
+        return _BUNDLED_SKILLS_PACKAGE_DIR
+    return _BUNDLED_SKILLS_DEV_DIR
 
 
 def get_default_skill_roots() -> list[Path]:

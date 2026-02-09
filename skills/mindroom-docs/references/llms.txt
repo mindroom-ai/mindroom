@@ -1,0 +1,32 @@
+# MindRoom
+
+> AI agents that live in Matrix and work everywhere via bridges
+
+## MindRoom Docs
+
+- [Home](https://docs.mindroom.chat/index.md)
+- [Getting Started](https://docs.mindroom.chat/getting-started/index.md)
+- [Dashboard](https://docs.mindroom.chat/dashboard/index.md)
+- [Overview](https://docs.mindroom.chat/configuration/index.md)
+- [Agents](https://docs.mindroom.chat/configuration/agents/index.md)
+- [Models](https://docs.mindroom.chat/configuration/models/index.md)
+- [Teams](https://docs.mindroom.chat/configuration/teams/index.md)
+- [Router](https://docs.mindroom.chat/configuration/router/index.md)
+- [Overview](https://docs.mindroom.chat/tools/index.md)
+- [Built-in Tools](https://docs.mindroom.chat/tools/builtin/index.md)
+- [Skills](https://docs.mindroom.chat/skills/index.md)
+- [Plugins](https://docs.mindroom.chat/plugins/index.md)
+- [Memory System](https://docs.mindroom.chat/memory/index.md)
+- [Voice Messages](https://docs.mindroom.chat/voice/index.md)
+- [Scheduling](https://docs.mindroom.chat/scheduling/index.md)
+- [Authorization](https://docs.mindroom.chat/authorization/index.md)
+- [Overview](https://docs.mindroom.chat/architecture/index.md)
+- [Matrix Integration](https://docs.mindroom.chat/architecture/matrix/index.md)
+- [Agent Orchestration](https://docs.mindroom.chat/architecture/orchestration/index.md)
+- [Overview](https://docs.mindroom.chat/deployment/index.md)
+- [Google Services OAuth (Admin)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md)
+- [Google Services OAuth (Individual)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md)
+- [Docker](https://docs.mindroom.chat/deployment/docker/index.md)
+- [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/index.md)
+- [CLI Reference](https://docs.mindroom.chat/cli/index.md)
+

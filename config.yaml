@@ -20,7 +20,8 @@ agents:
     - lobby
     - dev
     - help
-    skills: []
+    skills:
+    - mindroom-docs
     tools:
     - config_manager
   analyst:
