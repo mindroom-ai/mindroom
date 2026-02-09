@@ -73,7 +73,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         id,
         ...agent,
         skills: agent.skills ?? [],
-        knowledge_base: agent.knowledge_base ?? null,
+        knowledge_bases: agent.knowledge_bases || [],
         learning: agent.learning ?? defaultLearning,
         learning_mode: agent.learning_mode ?? defaultLearningMode,
       }));
@@ -198,7 +198,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     const newAgent: Agent = {
       id,
       ...agentData,
-      knowledge_base: agentData.knowledge_base ?? null,
+      knowledge_bases: agentData.knowledge_bases ?? [],
       learning: agentData.learning ?? defaultLearning,
       learning_mode: agentData.learning_mode ?? defaultLearningMode,
     };
@@ -500,15 +500,17 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const knowledgeBases = { ...(state.config.knowledge_bases || {}) };
       delete knowledgeBases[baseName];
 
-      const agents = state.agents.map(agent =>
-        agent.knowledge_base === baseName ? { ...agent, knowledge_base: null } : agent
-      );
+      const agents = state.agents.map(agent => ({
+        ...agent,
+        knowledge_bases: (agent.knowledge_bases || []).filter(base => base !== baseName),
+      }));
       const configAgents = Object.fromEntries(
         Object.entries(state.config.agents).map(([agentId, agentConfig]) => [
           agentId,
-          agentConfig.knowledge_base === baseName
-            ? { ...agentConfig, knowledge_base: null }
-            : agentConfig,
+          {
+            ...agentConfig,
+            knowledge_bases: (agentConfig.knowledge_bases || []).filter(base => base !== baseName),
+          },
         ])
       );
 

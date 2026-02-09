@@ -125,6 +125,7 @@ class ConfigManagerTools(Toolkit):
         instructions: list[str] | None = None,
         model: str | None = None,
         rooms: list[str] | None = None,
+        knowledge_bases: list[str] | None = None,
         markdown: bool | None = None,
         learning: bool | None = None,
         learning_mode: AgentLearningMode | None = None,
@@ -140,6 +141,7 @@ class ConfigManagerTools(Toolkit):
             instructions: List of instructions for the agent
             model: Model to use (default: "default")
             rooms: List of room IDs or names to auto-join
+            knowledge_bases: List of knowledge base IDs to assign to this agent
             markdown: Whether to use markdown formatting
             learning: Whether to enable Agno Learning for this agent
             learning_mode: Learning mode for Agno Learning ("always" or "agentic")
@@ -161,6 +163,7 @@ class ConfigManagerTools(Toolkit):
                 instructions=instructions or [],
                 model=model or "default",
                 rooms=rooms or [],
+                knowledge_bases=knowledge_bases or [],
                 markdown=markdown,
                 learning=learning,
                 learning_mode=learning_mode,
@@ -174,6 +177,7 @@ class ConfigManagerTools(Toolkit):
                 instructions=instructions,
                 model=model,
                 rooms=rooms,
+                knowledge_bases=knowledge_bases,
                 markdown=markdown,
                 learning=learning,
                 learning_mode=learning_mode,
@@ -439,6 +443,33 @@ class ConfigManagerTools(Toolkit):
 
         return "\n".join(output)
 
+    def _validate_knowledge_bases(
+        self,
+        knowledge_bases: list[str],
+        configured_knowledge_bases: set[str],
+    ) -> str | None:
+        """Validate that all requested knowledge base IDs exist in config."""
+        seen: set[str] = set()
+        duplicates: list[str] = []
+        for base_id in knowledge_bases:
+            if base_id in seen and base_id not in duplicates:
+                duplicates.append(base_id)
+            seen.add(base_id)
+        if duplicates:
+            return f"Error: Duplicate knowledge bases are not allowed: {', '.join(duplicates)}."
+
+        invalid_knowledge_bases = sorted(
+            {base_id for base_id in knowledge_bases if base_id not in configured_knowledge_bases},
+        )
+        if not invalid_knowledge_bases:
+            return None
+
+        invalid = ", ".join(invalid_knowledge_bases)
+        available = ", ".join(sorted(configured_knowledge_bases))
+        if not available:
+            return f"Error: Unknown knowledge bases: {invalid}. No knowledge bases are configured."
+        return f"Error: Unknown knowledge bases: {invalid}. Available knowledge bases: {available}."
+
     def _create_agent_config(
         self,
         agent_name: str,
@@ -448,6 +479,7 @@ class ConfigManagerTools(Toolkit):
         instructions: list[str],
         model: str,
         rooms: list[str],
+        knowledge_bases: list[str],
         markdown: bool | None,
         learning: bool | None,
         learning_mode: AgentLearningMode | None,
@@ -468,6 +500,10 @@ class ConfigManagerTools(Toolkit):
             if agent_name in config.agents:
                 return f"Error: Agent '{agent_name}' already exists. Use manage_agent with operation='update' to modify it."
 
+            knowledge_base_error = self._validate_knowledge_bases(knowledge_bases, set(config.knowledge_bases))
+            if knowledge_base_error:
+                return knowledge_base_error
+
             # Create new agent config
             new_agent = AgentConfig(
                 display_name=display_name,
@@ -476,6 +512,7 @@ class ConfigManagerTools(Toolkit):
                 instructions=instructions,
                 model=model,
                 rooms=rooms,
+                knowledge_bases=knowledge_bases,
                 markdown=markdown,
                 learning=learning,
                 learning_mode=learning_mode,
@@ -504,7 +541,7 @@ class ConfigManagerTools(Toolkit):
             logger.exception("Failed to create agent")
             return f"Error creating agent: {e}"
 
-    def _update_agent_config(
+    def _update_agent_config(  # noqa: C901
         self,
         agent_name: str,
         display_name: str | None,
@@ -513,6 +550,7 @@ class ConfigManagerTools(Toolkit):
         instructions: list[str] | None,
         model: str | None,
         rooms: list[str] | None,
+        knowledge_bases: list[str] | None,
         markdown: bool | None,
         learning: bool | None,
         learning_mode: AgentLearningMode | None,
@@ -532,6 +570,11 @@ class ConfigManagerTools(Toolkit):
                 if invalid_tools:
                     return f"Error: Unknown tools: {', '.join(invalid_tools)}"
 
+            if knowledge_bases is not None:
+                knowledge_base_error = self._validate_knowledge_bases(knowledge_bases, set(config.knowledge_bases))
+                if knowledge_base_error:
+                    return knowledge_base_error
+
             # Map of field names to (new_value, display_formatter)
             updates = {
                 "display_name": (display_name, lambda v: v),
@@ -540,6 +583,7 @@ class ConfigManagerTools(Toolkit):
                 "instructions": (instructions, lambda v: f"{len(v)} instructions" if v else "(empty)"),
                 "model": (model, lambda v: v),
                 "rooms": (rooms, lambda v: ", ".join(v) if v else "(empty)"),
+                "knowledge_bases": (knowledge_bases, lambda v: ", ".join(v) if v else "(empty)"),
                 "markdown": (markdown, lambda v: str(v)),
                 "learning": (learning, lambda v: str(v)),
                 "learning_mode": (learning_mode, lambda v: str(v)),

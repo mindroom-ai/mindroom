@@ -21,7 +21,7 @@ from .tools_metadata import get_tool_by_name
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agno.knowledge.knowledge import Knowledge
+    from agno.knowledge.protocol import KnowledgeProtocol
 
     from .config import AgentConfig, Config, DefaultsConfig
 
@@ -29,6 +29,7 @@ logger = get_logger(__name__)
 
 # Maximum length for instruction descriptions to include in agent summary
 MAX_INSTRUCTION_LENGTH = 100
+DEFAULT_AGENT_TOOL_NAMES = ["scheduler"]
 
 
 def get_datetime_context(timezone_str: str) -> str:
@@ -113,7 +114,7 @@ def create_agent(
     config: Config,
     *,
     storage_path: Path | None = None,
-    knowledge: Knowledge | None = None,
+    knowledge: KnowledgeProtocol | None = None,
 ) -> Agent:
     """Create an agent instance from configuration.
 
@@ -142,6 +143,9 @@ def create_agent(
     load_plugins(config)
 
     tool_names = list(agent_config.tools)
+    for default_tool_name in DEFAULT_AGENT_TOOL_NAMES:
+        if default_tool_name not in tool_names:
+            tool_names.append(default_tool_name)
 
     # Create tools
     tools: list = []  # Use list type to satisfy Agent's parameter type
@@ -216,7 +220,7 @@ def create_agent(
 
     instructions.append(agent_prompts.INTERACTIVE_QUESTION_PROMPT)
 
-    knowledge_enabled = agent_config.knowledge_base is not None and knowledge is not None
+    knowledge_enabled = bool(agent_config.knowledge_bases) and knowledge is not None
 
     agent = Agent(
         name=agent_config.display_name,

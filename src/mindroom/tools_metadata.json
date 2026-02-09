@@ -5855,6 +5855,23 @@
     {
       "auth_provider": null,
       "category": "productivity",
+      "config_fields": null,
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Schedule, edit, list, and cancel tasks and reminders",
+      "display_name": "Scheduler",
+      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "helper_text": null,
+      "icon": "Calendar",
+      "icon_color": "text-emerald-500",
+      "name": "scheduler",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "auth_provider": null,
+      "category": "productivity",
       "config_fields": [
         {
           "default": null,
