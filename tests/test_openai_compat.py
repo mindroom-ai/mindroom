@@ -2045,7 +2045,7 @@ class TestLibreChatStreamingIntegration:
     """Integration tests for LibreChat structured tool events in streaming."""
 
     def test_librechat_header_triggers_structured_events(self, app_client: TestClient) -> None:
-        """X-LibreChat-Conversation-Id header triggers structured tool events."""
+        """X-Tool-Event-Format: librechat header triggers structured tool events."""
         from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent  # noqa: PLC0415
 
         mock_tool_started = MagicMock()
@@ -2073,7 +2073,7 @@ class TestLibreChatStreamingIntegration:
                     "messages": [{"role": "user", "content": "Run pwd"}],
                     "stream": True,
                 },
-                headers={"X-LibreChat-Conversation-Id": "conv-123"},
+                headers={"X-Tool-Event-Format": "librechat"},
             )
 
         assert response.status_code == 200
@@ -2115,8 +2115,8 @@ class TestLibreChatStreamingIntegration:
         assert not any("<tool>" in c for c in content_chunks)
         assert not any("Result:" in c for c in content_chunks)
 
-    def test_no_librechat_header_uses_inline_text(self, app_client: TestClient) -> None:
-        """Without LibreChat header, tool events remain inline text."""
+    def test_no_tool_event_format_header_uses_inline_text(self, app_client: TestClient) -> None:
+        """Without X-Tool-Event-Format header, tool events remain inline text."""
         from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent  # noqa: PLC0415
 
         mock_tool_started = MagicMock()
@@ -2196,7 +2196,7 @@ class TestLibreChatStreamingIntegration:
                     "messages": [{"role": "user", "content": "Search"}],
                     "stream": True,
                 },
-                headers={"X-LibreChat-Conversation-Id": "conv-456"},
+                headers={"X-Tool-Event-Format": "librechat"},
             )
 
         structured = []

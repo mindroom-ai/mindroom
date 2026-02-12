@@ -601,7 +601,7 @@ async def chat_completions(  # noqa: PLR0911
 
     # Derive a namespaced session ID from request headers or fallback UUID.
     session_id = _derive_session_id(agent_name, request)
-    librechat = request.headers.get("x-librechat-conversation-id") is not None
+    tool_event_format = request.headers.get("x-tool-event-format")
     logger.info(
         "Chat completion request",
         model=agent_name,
@@ -628,7 +628,7 @@ async def chat_completions(  # noqa: PLR0911
                 config,
                 thread_history,
                 req.user,
-                librechat=librechat,
+                tool_event_format=tool_event_format,
             )
         return await _non_stream_team_completion(
             team_name,
@@ -656,7 +656,7 @@ async def chat_completions(  # noqa: PLR0911
             thread_history,
             req.user,
             knowledge,
-            librechat=librechat,
+            tool_event_format=tool_event_format,
         )
     return await _non_stream_completion(agent_name, prompt, session_id, config, thread_history, req.user, knowledge)
 
@@ -907,7 +907,7 @@ async def _stream_completion(
     user: str | None,
     knowledge: Knowledge | None = None,
     *,
-    librechat: bool = False,
+    tool_event_format: str | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming chat completion via SSE."""
     stream: AsyncIterator[AIStreamChunk] = stream_agent_response(
@@ -934,7 +934,7 @@ async def _stream_completion(
 
     completion_id = f"chatcmpl-{uuid4().hex[:12]}"
     created = int(time.time())
-    tracker = _LibreChatToolTracker(completion_id) if librechat else None
+    tracker = _LibreChatToolTracker(completion_id) if tool_event_format == "librechat" else None
 
     async def event_generator() -> AsyncIterator[str]:
         # 1. Initial role announcement
@@ -1079,7 +1079,7 @@ async def _stream_team_completion(
     thread_history: list[dict[str, Any]] | None,
     user: str | None = None,
     *,
-    librechat: bool = False,
+    tool_event_format: str | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
     agents, team, mode = _build_team(team_name, config)
@@ -1114,7 +1114,7 @@ async def _stream_team_completion(
             created=created,
             model_id=model_id,
             team_name=team_name,
-            librechat=librechat,
+            tool_event_format=tool_event_format,
         ),
         media_type="text/event-stream",
     )
@@ -1166,10 +1166,10 @@ async def _team_stream_event_generator(
     created: int,
     model_id: str,
     team_name: str,
-    librechat: bool = False,
+    tool_event_format: str | None = None,
 ) -> AsyncIterator[str]:
     """Yield SSE chunks for team streaming responses."""
-    tracker = _LibreChatToolTracker(completion_id) if librechat else None
+    tracker = _LibreChatToolTracker(completion_id) if tool_event_format == "librechat" else None
 
     # 1. Role announcement
     yield f"data: {_chunk_json(completion_id, created, model_id, delta={'role': 'assistant'})}\n\n"

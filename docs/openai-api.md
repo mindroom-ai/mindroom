@@ -94,6 +94,7 @@ endpoints:
       titleModel: "general"
       dropParams: ["stop", "frequency_penalty", "presence_penalty", "top_p"]
       headers:
+        X-Tool-Event-Format: "librechat"
         X-LibreChat-Conversation-Id: "{{LIBRECHAT_BODY_CONVERSATIONID}}"
 ```
 
@@ -126,7 +127,7 @@ Teams are exposed as `team/<team_name>` models. Selecting `team/super_team` runs
 
 `stream: true` returns Server-Sent Events in the standard OpenAI format: role chunk, content chunks, finish chunk, `[DONE]`.
 
-Tool calls appear inline as text in the stream by default. When LibreChat is detected (via `X-LibreChat-Conversation-Id` header), tool calls are emitted as structured `on_run_step` / `on_run_step_completed` SSE events that render as collapsible tool call sections with formatted arguments and results.
+Tool calls appear inline as text in the stream by default. When `X-Tool-Event-Format: librechat` header is set, tool calls are emitted as structured `on_run_step` / `on_run_step_completed` SSE events that render as collapsible tool call sections with formatted arguments and results.
 
 ### Session continuity
 
