@@ -860,6 +860,8 @@ class TestErrorDetection:
         [
             "Error code: 404 - {'type': 'error', 'error': {'type': 'not_found_error', 'message': 'model: foo'}}",
             "Error code: 500 - Internal Server Error",
+            "openai.NotFoundError: Error code: 404 - {'error': {'message': 'model not found'}}",
+            '{"error": {"message": "model not found", "type": "not_found_error"}}',
         ],
     )
     def test_detects_raw_provider_errors(self, text: str) -> None:
@@ -1264,6 +1266,80 @@ class TestTeamCompletion:
                 if "content" in delta:
                     content_parts.append(delta["content"])
         assert "".join(content_parts) == "Team response!"
+
+    def test_team_streaming_first_event_error_returns_500(self, team_app_client: TestClient) -> None:
+        """Team stream returns HTTP 500 when first event is an explicit run error."""
+        from agno.run.team import RunErrorEvent as TeamRunErrorEvent  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        mock_team = MagicMock()
+        mock_agents = [MagicMock(name="GeneralAgent")]
+
+        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
+            yield TeamRunErrorEvent(content="Error code: 404 - {'error': {'message': 'model not found'}}")
+
+        mock_team.arun = mock_stream_events
+
+        with patch(
+            "mindroom.api.openai_compat._build_team",
+            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+        ):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Build it"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 500
+        assert response.json()["error"]["type"] == "server_error"
+        assert response.json()["error"]["message"] == "Team execution failed"
+
+    def test_team_streaming_midstream_error_emits_failure_chunk(self, team_app_client: TestClient) -> None:
+        """When stream error occurs after start, emit a failure chunk and finish stream."""
+        from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
+        from agno.run.team import RunErrorEvent as TeamRunErrorEvent  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        mock_team = MagicMock()
+        mock_agents = [MagicMock(name="GeneralAgent")]
+
+        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
+            yield TeamContentEvent(content="Team started. ")
+            yield TeamRunErrorEvent(content="Error code: 500 - Internal Server Error")
+
+        mock_team.arun = mock_stream_events
+
+        with patch(
+            "mindroom.api.openai_compat._build_team",
+            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+        ):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Build it"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        lines = response.text.strip().split("\n\n")
+        contents: list[str] = []
+        for line in lines:
+            if line.startswith("data: ") and line != "data: [DONE]":
+                chunk = json.loads(line.removeprefix("data: "))
+                delta = chunk["choices"][0]["delta"]
+                if "content" in delta:
+                    contents.append(delta["content"])
+
+        assert "Team started. " in contents
+        assert "Team execution failed." in contents
+        assert lines[-1] == "data: [DONE]"
 
     def test_team_no_valid_agents_500(self, team_app_client: TestClient) -> None:
         """Team with no valid agents returns 500."""

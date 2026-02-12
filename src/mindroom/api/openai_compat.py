@@ -9,12 +9,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import uuid4
 
-from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
+from agno.run.agent import RunContentEvent, RunErrorEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 from agno.run.team import RunContentEvent as TeamContentEvent
+from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
 from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
 from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
@@ -260,19 +262,47 @@ def _is_error_response(text: str) -> bool:
     - Emoji-prefixed errors from get_user_friendly_error_message()
     - [agent_name] bracket prefix followed by error emoji
     - Raw provider error strings (e.g. "Error code: 404 - ...")
+    - Raw provider JSON error payloads
     """
     error_prefixes = ("❌", "⏱️", "⏰", "⚠️")
     stripped = text.lstrip()
+    if not stripped:
+        return False
+
     # Check for [agent_name] prefix followed by error emoji
     if stripped.startswith("["):
         bracket_end = stripped.find("]")
         if bracket_end != -1:
             after_bracket = stripped[bracket_end + 1 :].lstrip()
             return any(after_bracket.startswith(p) for p in error_prefixes)
+
     if any(stripped.startswith(p) for p in error_prefixes):
         return True
+
     # Raw provider errors (agno may surface these as response content)
-    return stripped.startswith("Error code: ")
+    return _looks_like_raw_provider_error(stripped)
+
+
+_RAW_PROVIDER_ERROR_PREFIX_RE = re.compile(
+    r"^(?:[\w.]+(?:error|exception):\s*)?error\s*code:\s*",
+    re.IGNORECASE,
+)
+_RAW_PROVIDER_JSON_PREFIXES = (
+    '{"error":',
+    "{'error':",
+    '{"type":"error"',
+    '{"type": "error"',
+    "{'type': 'error'",
+)
+
+
+def _looks_like_raw_provider_error(text: str) -> bool:
+    """Detect raw provider error payloads surfaced as text."""
+    lowered = text.casefold()
+    if _RAW_PROVIDER_ERROR_PREFIX_RE.search(text):
+        return True
+    # Some providers return error payloads directly as serialized JSON-ish text.
+    return lowered.startswith(_RAW_PROVIDER_JSON_PREFIXES)
 
 
 def _extract_content_text(content: str | list[dict] | None) -> str:
@@ -900,40 +930,25 @@ async def _stream_team_completion(
         logger.exception("Team execution failed", team=team_name)
         return _error_response(500, "Team execution failed", error_type="server_error")
 
-    if first_event is None:
-        return _error_response(500, "Team returned empty response", error_type="server_error")
-    if isinstance(first_event, str) and _is_error_response(first_event):
-        logger.warning("Team streaming returned error", team=team_name, error=first_event)
-        return _error_response(500, "Team execution failed", error_type="server_error")
+    preflight_error = _team_stream_preflight_error(first_event, team_name)
+    if preflight_error is not None:
+        return preflight_error
+
+    assert first_event is not None
 
     completion_id = f"chatcmpl-{uuid4().hex[:12]}"
     created = int(time.time())
-
-    async def event_generator() -> AsyncIterator[str]:
-        # 1. Role announcement
-        yield f"data: {_chunk_json(completion_id, created, model_id, delta={'role': 'assistant'})}\n\n"
-
-        # 2. First event
-        text = _extract_team_stream_text(first_event)
-        if text:
-            yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': text})}\n\n"
-
-        # 3. Remaining events
-        try:
-            async for event in stream:
-                text = _extract_team_stream_text(event)
-                if text:
-                    yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': text})}\n\n"
-        except Exception:
-            logger.exception("Team stream failed during iteration", team=team_name)
-            yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': 'Team execution failed.'})}\n\n"
-
-        # 4. Finish
-        logger.info("Team completion sent", team=team_name, stream=True)
-        yield f"data: {_chunk_json(completion_id, created, model_id, delta={}, finish_reason='stop')}\n\n"
-        yield "data: [DONE]\n\n"
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        _team_stream_event_generator(
+            stream=stream,
+            first_event=first_event,
+            completion_id=completion_id,
+            created=created,
+            model_id=model_id,
+            team_name=team_name,
+        ),
+        media_type="text/event-stream",
+    )
 
 
 def _extract_team_stream_text(event: RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str) -> str | None:
@@ -947,3 +962,68 @@ def _extract_team_stream_text(event: RunOutputEvent | TeamRunOutputEvent | TeamR
     if isinstance(event, str):
         return event
     return _format_stream_tool_event(event)
+
+
+def _extract_team_stream_error(event: RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str) -> str | None:
+    """Extract explicit error text from a team stream event."""
+    if isinstance(event, (RunErrorEvent, TeamRunErrorEvent)):
+        return str(event.content or "Unknown team error")
+    if isinstance(event, str) and _is_error_response(event):
+        return event
+    return None
+
+
+def _team_stream_preflight_error(
+    first_event: RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str | None,
+    team_name: str,
+) -> JSONResponse | None:
+    """Validate first team stream event before SSE response begins."""
+    if first_event is None:
+        return _error_response(500, "Team returned empty response", error_type="server_error")
+
+    first_error = _extract_team_stream_error(first_event)
+    if first_error is None:
+        return None
+
+    logger.warning("Team streaming returned error", team=team_name, error=first_error)
+    return _error_response(500, "Team execution failed", error_type="server_error")
+
+
+async def _team_stream_event_generator(
+    *,
+    stream: AsyncIterator[RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str],
+    first_event: RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str,
+    completion_id: str,
+    created: int,
+    model_id: str,
+    team_name: str,
+) -> AsyncIterator[str]:
+    """Yield SSE chunks for team streaming responses."""
+    # 1. Role announcement
+    yield f"data: {_chunk_json(completion_id, created, model_id, delta={'role': 'assistant'})}\n\n"
+
+    # 2. First event
+    first_text = _extract_team_stream_text(first_event)
+    if first_text:
+        yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': first_text})}\n\n"
+
+    # 3. Remaining events
+    try:
+        async for event in stream:
+            error_text = _extract_team_stream_error(event)
+            if error_text is not None:
+                logger.warning("Team stream emitted error event", team=team_name, error=error_text)
+                yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': 'Team execution failed.'})}\n\n"
+                break
+
+            text = _extract_team_stream_text(event)
+            if text:
+                yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': text})}\n\n"
+    except Exception:
+        logger.exception("Team stream failed during iteration", team=team_name)
+        yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': 'Team execution failed.'})}\n\n"
+
+    # 4. Finish
+    logger.info("Team completion sent", team=team_name, stream=True)
+    yield f"data: {_chunk_json(completion_id, created, model_id, delta={}, finish_reason='stop')}\n\n"
+    yield "data: [DONE]\n\n"
