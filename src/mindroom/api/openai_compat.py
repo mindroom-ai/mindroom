@@ -16,6 +16,8 @@ from uuid import uuid4
 from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 from agno.run.team import RunContentEvent as TeamContentEvent
 from agno.run.team import TeamRunOutput
+from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
+from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
 from agno.team import Team
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -48,7 +50,8 @@ if TYPE_CHECKING:
 
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
-    from agno.run.agent import RunOutput
+    from agno.run.agent import RunOutput, RunOutputEvent
+    from agno.run.team import TeamRunOutputEvent
 
 logger = get_logger(__name__)
 
@@ -682,12 +685,12 @@ def _chunk_json(
     return chunk.model_dump_json()
 
 
-def _format_stream_tool_event(event: object) -> str | None:
+def _format_stream_tool_event(event: RunOutputEvent | TeamRunOutputEvent) -> str | None:
     """Format a tool event as inline text for the SSE stream."""
-    if isinstance(event, ToolCallStartedEvent):
+    if isinstance(event, (ToolCallStartedEvent, TeamToolCallStartedEvent)):
         tool_msg, _ = format_tool_started_event(event.tool)
         return tool_msg or None
-    if isinstance(event, ToolCallCompletedEvent):
+    if isinstance(event, (ToolCallCompletedEvent, TeamToolCallCompletedEvent)):
         info = extract_tool_completed_info(event.tool)
         if info:
             _tool_name, result = info
@@ -927,7 +930,7 @@ async def _stream_team_completion(
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
-def _extract_team_stream_text(event: object) -> str | None:
+def _extract_team_stream_text(event: RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str) -> str | None:
     """Extract text content from a team stream event."""
     if isinstance(event, TeamContentEvent) and event.content:
         return str(event.content)
@@ -937,4 +940,4 @@ def _extract_team_stream_text(event: object) -> str | None:
         return _format_team_output(event)
     if isinstance(event, str):
         return event
-    return None
+    return _format_stream_tool_event(event)
