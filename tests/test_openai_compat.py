@@ -2519,3 +2519,165 @@ class TestStrictOpenAIToolCalling:
         assert "sess-expired" not in openai_compat_module._openai_state.pending_runs
         assert "sess-fresh" in openai_compat_module._openai_state.pending_runs
         assert "sess-orphan" not in openai_compat_module._openai_state.session_locks
+
+    def test_openai_mode_auto_model_continues_with_pending_agent(self, app_client: TestClient) -> None:
+        """model=auto on continuation uses the pending run's agent instead of re-routing."""
+        requirement = self._external_requirement(tool_call_id="call_auto")
+        paused_run = RunOutput(run_id="run-auto", status=RunStatus.paused, requirements=[requirement])
+        completed_run = RunOutput(run_id="run-auto", status=RunStatus.completed, content="Done")
+
+        first_agent = MagicMock()
+        first_agent.arun = AsyncMock(return_value=paused_run)
+        second_agent = MagicMock()
+        second_agent.acontinue_run = AsyncMock(return_value=completed_run)
+
+        with (
+            patch("mindroom.api.openai_compat.create_agent", side_effect=[first_agent, second_agent]),
+            patch(
+                "mindroom.api.openai_compat.build_memory_enhanced_prompt",
+                new_callable=AsyncMock,
+                return_value="Hello",
+            ),
+            patch("mindroom.api.openai_compat.suggest_agent", new_callable=AsyncMock, return_value="general"),
+        ):
+            # First request with model=auto resolves to "general"
+            first_response = app_client.post(
+                "/v1/chat/completions",
+                json={"model": "auto", "messages": [{"role": "user", "content": "Hello"}]},
+                headers={"X-Tool-Event-Format": "openai", "X-Session-Id": "sess-auto"},
+            )
+            assert first_response.status_code == 200
+            assert first_response.json()["choices"][0]["finish_reason"] == "tool_calls"
+
+            # Continuation with model=auto (could resolve differently) should still use "general"
+            second_response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "auto",
+                    "messages": [
+                        {"role": "user", "content": "Hello"},
+                        {"role": "tool", "tool_call_id": "call_auto", "content": "result"},
+                    ],
+                },
+                headers={"X-Tool-Event-Format": "openai", "X-Session-Id": "sess-auto"},
+            )
+
+        assert second_response.status_code == 200
+        assert second_response.json()["choices"][0]["message"]["content"] == "Done"
+
+    def test_openai_mode_rejects_unknown_tool_call_ids(self, app_client: TestClient) -> None:
+        """Extra tool_call_id results not in pending requirements return 400."""
+        requirement = self._external_requirement(tool_call_id="call_expected")
+        paused_run = RunOutput(run_id="run-extra", status=RunStatus.paused, requirements=[requirement])
+        first_agent = MagicMock()
+        first_agent.arun = AsyncMock(return_value=paused_run)
+
+        with (
+            patch("mindroom.api.openai_compat.create_agent", return_value=first_agent),
+            patch(
+                "mindroom.api.openai_compat.build_memory_enhanced_prompt",
+                new_callable=AsyncMock,
+                return_value="Hello",
+            ),
+        ):
+            first_response = app_client.post(
+                "/v1/chat/completions",
+                json={"model": "general", "messages": [{"role": "user", "content": "Hello"}]},
+                headers={"X-Tool-Event-Format": "openai", "X-Session-Id": "sess-extra"},
+            )
+            assert first_response.status_code == 200
+
+            second_response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [
+                        {"role": "user", "content": "Hello"},
+                        {"role": "tool", "tool_call_id": "call_expected", "content": "ok"},
+                        {"role": "tool", "tool_call_id": "call_bogus", "content": "extra"},
+                    ],
+                },
+                headers={"X-Tool-Event-Format": "openai", "X-Session-Id": "sess-extra"},
+            )
+
+        assert second_response.status_code == 400
+        assert "Unknown tool_call_id" in second_response.json()["error"]["message"]
+        assert "call_bogus" in second_response.json()["error"]["message"]
+
+    def test_openai_mode_accepts_empty_string_tool_result(self, app_client: TestClient) -> None:
+        """Empty-string tool result content is accepted (not treated as missing)."""
+        requirement = self._external_requirement(tool_call_id="call_empty")
+        paused_run = RunOutput(run_id="run-empty", status=RunStatus.paused, requirements=[requirement])
+        completed_run = RunOutput(run_id="run-empty", status=RunStatus.completed, content="Done")
+
+        first_agent = MagicMock()
+        first_agent.arun = AsyncMock(return_value=paused_run)
+        second_agent = MagicMock()
+        second_agent.acontinue_run = AsyncMock(return_value=completed_run)
+
+        with (
+            patch("mindroom.api.openai_compat.create_agent", side_effect=[first_agent, second_agent]),
+            patch(
+                "mindroom.api.openai_compat.build_memory_enhanced_prompt",
+                new_callable=AsyncMock,
+                return_value="Hello",
+            ),
+        ):
+            first_response = app_client.post(
+                "/v1/chat/completions",
+                json={"model": "general", "messages": [{"role": "user", "content": "Hello"}]},
+                headers={"X-Tool-Event-Format": "openai", "X-Session-Id": "sess-empty"},
+            )
+            assert first_response.status_code == 200
+
+            second_response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [
+                        {"role": "user", "content": "Hello"},
+                        {"role": "tool", "tool_call_id": "call_empty", "content": ""},
+                    ],
+                },
+                headers={"X-Tool-Event-Format": "openai", "X-Session-Id": "sess-empty"},
+            )
+
+        assert second_response.status_code == 200
+        assert second_response.json()["choices"][0]["message"]["content"] == "Done"
+        requirements = second_agent.acontinue_run.call_args.kwargs["requirements"]
+        assert requirements[0].external_execution_result == ""
+
+    def test_openai_mode_streaming_unsupported_pause_returns_400(self, app_client: TestClient) -> None:
+        """Streaming: non-tool pause as first event returns HTTP 400, not SSE error chunk."""
+        non_tool_pause = RunPausedEvent(
+            run_id="run-nontool",
+            requirements=[],
+        )
+
+        agent = MagicMock()
+
+        async def _fake_stream() -> AsyncIterator[RunPausedEvent]:
+            yield non_tool_pause
+
+        agent.arun = MagicMock(return_value=_fake_stream())
+
+        with (
+            patch("mindroom.api.openai_compat.create_agent", return_value=agent),
+            patch(
+                "mindroom.api.openai_compat.build_memory_enhanced_prompt",
+                new_callable=AsyncMock,
+                return_value="Hello",
+            ),
+        ):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "stream": True,
+                },
+                headers={"X-Tool-Event-Format": "openai", "X-Session-Id": "sess-nontool"},
+            )
+
+        assert response.status_code == 400
+        assert "external tool execution" in response.json()["error"]["message"]

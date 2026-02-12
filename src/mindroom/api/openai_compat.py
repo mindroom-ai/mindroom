@@ -421,9 +421,7 @@ def _extract_tool_results(messages: list[ChatMessage]) -> dict[str, str]:
     for msg in messages:
         if msg.role != "tool" or not msg.tool_call_id:
             continue
-        result_text = _extract_content_text(msg.content)
-        if result_text:
-            results[msg.tool_call_id] = result_text
+        results[msg.tool_call_id] = _extract_content_text(msg.content)
     return results
 
 
@@ -486,10 +484,12 @@ def _apply_tool_results_to_requirements(
     tool_results: dict[str, str],
 ) -> str | None:
     """Apply tool message results onto pending requirements."""
+    expected_ids: set[str] = set()
     missing: list[str] = []
     for requirement in requirements:
         assert requirement.tool_execution is not None
         tool_call_id = _ensure_tool_call_id(requirement.tool_execution)
+        expected_ids.add(tool_call_id)
         result = tool_results.get(tool_call_id)
         if result is None:
             missing.append(tool_call_id)
@@ -499,6 +499,11 @@ def _apply_tool_results_to_requirements(
     if missing:
         missing_list = ", ".join(missing)
         return f"Missing tool results for tool_call_id(s): {missing_list}"
+
+    extra_ids = set(tool_results) - expected_ids
+    if extra_ids:
+        extra_list = ", ".join(sorted(extra_ids))
+        return f"Unknown tool_call_id(s) not in pending requirements: {extra_list}"
     return None
 
 
@@ -765,7 +770,7 @@ async def list_models(
 
 
 @router.post("/chat/completions", response_model=None)
-async def chat_completions(  # noqa: C901, PLR0911
+async def chat_completions(  # noqa: C901, PLR0911, PLR0912
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse | StreamingResponse:
@@ -800,6 +805,15 @@ async def chat_completions(  # noqa: C901, PLR0911
 
     # Derive a namespaced session ID from request headers or fallback UUID.
     session_id = _derive_session_id(agent_name, request)
+
+    # In strict OpenAI mode, if a pending run exists for this session, force
+    # continuation to the pending agent_name.  This prevents model="auto"
+    # re-routing to a different agent on the continuation turn, which would
+    # cause a false 400 "Pending tool run belongs to a different model".
+    if tool_event_format == TOOL_EVENT_FORMAT_OPENAI:
+        pending = _openai_state.pending_runs.get(session_id)
+        if pending is not None and pending.agent_name != agent_name:
+            agent_name = pending.agent_name
     logger.info(
         "Chat completion request",
         model=agent_name,
@@ -1150,7 +1164,7 @@ async def _non_stream_strict_openai_completion(  # noqa: C901, PLR0911, PLR0912
         return JSONResponse(content=response.model_dump(exclude_none=True))
 
 
-async def _stream_strict_openai_completion(  # noqa: C901, PLR0911, PLR0915
+async def _stream_strict_openai_completion(  # noqa: C901, PLR0911, PLR0912, PLR0915
     agent_name: str,
     prompt: str,
     session_id: str,
@@ -1226,6 +1240,18 @@ async def _stream_strict_openai_completion(  # noqa: C901, PLR0911, PLR0915
         if isinstance(first_event, str) and _is_error_response(first_event):
             _clear_pending_openai_run(session_id)
             return _error_response(500, "Agent execution failed", error_type="server_error")
+        # If the very first event is an unsupported (non-tool) pause, return
+        # 400 before starting SSE — matching the non-streaming contract.
+        if isinstance(first_event, RunPausedEvent) and not _external_requirements(first_event.requirements):
+            _clear_pending_openai_run(session_id)
+            return _error_response(400, _strict_openai_non_tool_pause_message(), error_type="server_error")
+        if (
+            isinstance(first_event, RunOutput)
+            and first_event.status == RunStatus.paused
+            and not _external_requirements(first_event.requirements)
+        ):
+            _clear_pending_openai_run(session_id)
+            return _error_response(400, _strict_openai_non_tool_pause_message(), error_type="server_error")
 
         _openai_state.active_stream_sessions.add(session_id)
 
