@@ -6,10 +6,16 @@ import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from agno.knowledge.knowledge import Knowledge
+
 from .logging_config import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from agno.knowledge.document import Document
+
+    from .config import Config
 
 logger = get_logger(__name__)
 
@@ -108,3 +114,43 @@ def _interleave_documents(results_by_db: list[list[Document]], limit: int) -> li
             break
         index += 1
     return merged
+
+
+def _merge_knowledge(agent_name: str, knowledges: list[Knowledge]) -> Knowledge | None:
+    """Return a single Knowledge instance, merging when multiple bases are assigned."""
+    if not knowledges:
+        return None
+    if len(knowledges) == 1:
+        return knowledges[0]
+    return Knowledge(
+        name=f"{agent_name}_multi_knowledge",
+        vector_db=MultiKnowledgeVectorDb(vector_dbs=[knowledge.vector_db for knowledge in knowledges]),
+        max_results=max(knowledge.max_results for knowledge in knowledges),
+    )
+
+
+def resolve_agent_knowledge(
+    agent_name: str,
+    config: Config,
+    get_knowledge: Callable[[str], Knowledge | None],
+    *,
+    on_missing_bases: Callable[[list[str]], None] | None = None,
+) -> Knowledge | None:
+    """Resolve configured knowledge base(s) for an agent into one Knowledge instance."""
+    agent_config = config.agents.get(agent_name)
+    if agent_config is None or not agent_config.knowledge_bases:
+        return None
+
+    missing_base_ids: list[str] = []
+    knowledges: list[Knowledge] = []
+    for base_id in agent_config.knowledge_bases:
+        knowledge = get_knowledge(base_id)
+        if knowledge is None:
+            missing_base_ids.append(base_id)
+            continue
+        knowledges.append(knowledge)
+
+    if missing_base_ids and on_missing_bases is not None:
+        on_missing_bases(missing_base_ids)
+
+    return _merge_knowledge(agent_name, knowledges)

@@ -61,7 +61,10 @@ def app_client(test_config: Config) -> Iterator[TestClient]:
     app = FastAPI()
     app.include_router(router)
 
-    with patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))):
+    with (
+        patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
+        patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
+    ):
         yield TestClient(app)
 
 
@@ -152,7 +155,10 @@ class TestListModels:
             models={"default": ModelConfig(provider="ollama", id="test")},
             router=RouterConfig(model="default"),
         )
-        with patch("mindroom.api.openai_compat._load_config", return_value=(empty_config, Path(__file__))):
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(empty_config, Path(__file__))),
+            patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
+        ):
             client = TestClient(app)
             response = client.get("/v1/models")
             assert response.status_code == 200
@@ -548,8 +554,31 @@ class TestAuthentication:
         )
         assert response.status_code == 401
 
-    def test_no_auth_when_unset(self, app_client: TestClient) -> None:
-        """No auth required when OPENAI_COMPAT_API_KEYS is unset."""
+    def test_auth_required_when_keys_unset(self, test_config: Config) -> None:
+        """Auth is required by default when OPENAI_COMPAT_API_KEYS is unset."""
+        from fastapi import FastAPI  # noqa: PLC0415
+
+        from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+        app = FastAPI()
+        app.include_router(router)
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
+            patch.dict(
+                "os.environ",
+                {
+                    "OPENAI_COMPAT_API_KEYS": "",
+                    "OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "false",
+                },
+            ),
+        ):
+            client = TestClient(app)
+            response = client.get("/v1/models")
+        assert response.status_code == 401
+        assert response.json()["error"]["code"] == "invalid_api_key"
+
+    def test_no_auth_when_explicitly_allowed(self, app_client: TestClient) -> None:
+        """Unauthenticated mode works when explicitly opted in."""
         response = app_client.get("/v1/models")
         assert response.status_code == 200
 
@@ -736,29 +765,22 @@ class TestSessionIdDerivation:
         assert "explicit" in sid
         assert "libre" not in sid
 
-    def test_hash_fallback_deterministic(self) -> None:
-        """Hash fallback produces same ID for same inputs."""
+    def test_fallback_generates_ephemeral_session_id(self) -> None:
+        """Fallback generates an ephemeral namespaced session ID."""
+        request = self._mock_request()
+        sid1 = _derive_session_id("general", "user1", "Hello", request)
+        assert sid1.startswith("noauth:ephemeral:")
+        assert len(sid1) > len("noauth:ephemeral:")
+
+    def test_fallback_is_not_deterministic(self) -> None:
+        """Fallback IDs differ across requests to avoid cross-chat collisions."""
         request = self._mock_request()
         sid1 = _derive_session_id("general", "user1", "Hello", request)
         sid2 = _derive_session_id("general", "user1", "Hello", request)
-        assert sid1 == sid2
-
-    def test_different_models_different_sessions(self) -> None:
-        """Different model names produce different session IDs."""
-        request = self._mock_request()
-        sid1 = _derive_session_id("general", "user1", "Hello", request)
-        sid2 = _derive_session_id("code", "user1", "Hello", request)
         assert sid1 != sid2
 
-    def test_different_users_different_sessions(self) -> None:
-        """Different users produce different session IDs."""
-        request = self._mock_request()
-        sid1 = _derive_session_id("general", "user1", "Hello", request)
-        sid2 = _derive_session_id("general", "user2", "Hello", request)
-        assert sid1 != sid2
-
-    def test_first_user_message_used_for_session_id(self, app_client: TestClient) -> None:
-        """Session ID uses first user message, not the last, for stable hashing."""
+    def test_fallback_ignores_user_message_content(self, app_client: TestClient) -> None:
+        """Without explicit conversation IDs, each request gets a distinct session ID."""
         session_ids: list[str] = []
 
         original_derive = _derive_session_id
@@ -774,7 +796,7 @@ class TestSessionIdDerivation:
         ):
             mock_ai.return_value = "Response"
 
-            # First request: single user message
+            # First request
             app_client.post(
                 "/v1/chat/completions",
                 json={
@@ -782,7 +804,7 @@ class TestSessionIdDerivation:
                     "messages": [{"role": "user", "content": "Hello"}],
                 },
             )
-            # Second request: same first message, different last message
+            # Second request with the same first message and extra history
             app_client.post(
                 "/v1/chat/completions",
                 json={
@@ -795,10 +817,9 @@ class TestSessionIdDerivation:
                 },
             )
 
-        # Both should produce the same session ID because the first user
-        # message ("Hello") is the same
+        # Fallback sessions are intentionally distinct to avoid collisions.
         assert len(session_ids) == 2
-        assert session_ids[0] == session_ids[1]
+        assert session_ids[0] != session_ids[1]
 
 
 # ---------------------------------------------------------------------------
@@ -1019,6 +1040,7 @@ class TestAutoRouting:
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(empty_config, Path(__file__))),
             patch("mindroom.api.openai_compat.suggest_agent", new_callable=AsyncMock) as mock_route,
+            patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
         ):
             mock_route.return_value = None
             client = TestClient(app)
@@ -1048,19 +1070,15 @@ class TestAutoRouting:
                     "model": "auto",
                     "messages": [{"role": "user", "content": "Write code"}],
                 },
+                headers={"X-LibreChat-Conversation-Id": "conv-abc"},
             )
 
             # ai_response should receive agent_name="code", not "auto"
             assert mock_ai.call_args.kwargs["agent_name"] == "code"
-            # Session ID should contain "code" context, not "auto"
+            # Session ID should use the resolved model name with LibreChat IDs.
             session_id = mock_ai.call_args.kwargs["session_id"]
-            # Generate what a "code" session would look like vs "auto"
-            from mindroom.api.openai_compat import _derive_session_id  # noqa: PLC0415
-
-            mock_request = MagicMock(spec=Request)
-            mock_request.headers = {}
-            expected = _derive_session_id("code", None, "Write code", mock_request)
-            assert session_id == expected
+            assert session_id.endswith(":conv-abc:code")
+            assert "auto" not in session_id
 
     def test_auto_routing_exception_falls_back(self, app_client: TestClient) -> None:
         """If suggest_agent raises an exception, it should still fall back gracefully."""
@@ -1127,7 +1145,10 @@ def team_app_client(team_config: Config) -> Iterator[TestClient]:
 
     app = FastAPI()
     app.include_router(router)
-    with patch("mindroom.api.openai_compat._load_config", return_value=(team_config, Path(__file__))):
+    with (
+        patch("mindroom.api.openai_compat._load_config", return_value=(team_config, Path(__file__))),
+        patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
+    ):
         yield TestClient(app)
 
 
@@ -1276,6 +1297,63 @@ class TestTeamCompletion:
         assert response.status_code == 500
         assert response.json()["error"]["type"] == "server_error"
 
+    def test_team_streaming_execution_failure_500(self, team_app_client: TestClient) -> None:
+        """Team streaming exceptions before first chunk return 500."""
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        mock_team = MagicMock()
+        mock_team.arun = MagicMock(side_effect=RuntimeError("boom"))
+        mock_agents = [MagicMock(name="GeneralAgent")]
+
+        with patch(
+            "mindroom.api.openai_compat._build_team",
+            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+        ):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 500
+        assert response.json()["error"]["type"] == "server_error"
+
+    def test_team_non_streaming_includes_thread_history(self, team_app_client: TestClient) -> None:
+        """Team prompt includes prior messages converted from request history."""
+        from agno.run.team import TeamRunOutput  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        mock_team = MagicMock()
+        mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="ok"))
+        mock_agents = [MagicMock(name="GeneralAgent"), MagicMock(name="CodeAgent")]
+
+        with patch(
+            "mindroom.api.openai_compat._build_team",
+            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+        ):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [
+                        {"role": "user", "content": "Start"},
+                        {"role": "assistant", "content": "Ack"},
+                        {"role": "user", "content": "Follow-up"},
+                    ],
+                },
+            )
+
+        assert response.status_code == 200
+        prompt = mock_team.arun.call_args.args[0]
+        assert "Previous conversation in this thread:" in prompt
+        assert "user: Start" in prompt
+        assert "assistant: Ack" in prompt
+        assert "Current message:\nFollow-up" in prompt
+
     def test_collaborate_mode_delegates_to_all(self) -> None:
         """Collaborate mode sets delegate_to_all_members=True on Team."""
         collaborate_config = Config(
@@ -1337,6 +1415,49 @@ class TestTeamCompletion:
             mock_team_init.assert_called_once()
             assert mock_team_init.call_args.kwargs["delegate_to_all_members"] is False
 
+    def test_build_team_passes_knowledge_to_member_agents(self) -> None:
+        """Team member creation resolves and passes configured knowledge."""
+        from mindroom.config import KnowledgeBaseConfig  # noqa: PLC0415
+
+        config = Config(
+            agents={
+                "research": AgentConfig(
+                    display_name="Research",
+                    role="Research role",
+                    rooms=[],
+                    knowledge_bases=["docs"],
+                ),
+            },
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+            teams={
+                "team_with_kb": TeamConfig(
+                    display_name="KB Team",
+                    role="Team with KB",
+                    agents=["research"],
+                    mode="coordinate",
+                ),
+            },
+            knowledge_bases={"docs": KnowledgeBaseConfig(path="./docs")},
+        )
+        mock_knowledge = MagicMock()
+        mock_manager = MagicMock()
+        mock_manager.get_knowledge.return_value = mock_knowledge
+
+        with (
+            patch("mindroom.api.openai_compat.create_agent") as mock_create,
+            patch("mindroom.api.openai_compat.get_model_instance"),
+            patch("mindroom.api.openai_compat.get_knowledge_manager", return_value=mock_manager),
+            patch("agno.team.Team.__init__", return_value=None),
+        ):
+            mock_create.return_value = MagicMock(name="Research")
+
+            from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
+
+            _build_team("team_with_kb", config)
+
+            assert mock_create.call_args.kwargs["knowledge"] is mock_knowledge
+
 
 # ---------------------------------------------------------------------------
 # Knowledge base integration (Phase 4)
@@ -1379,7 +1500,10 @@ def knowledge_app_client(knowledge_config: Config) -> Iterator[TestClient]:
 
     app = FastAPI()
     app.include_router(router)
-    with patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, Path(__file__))):
+    with (
+        patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, Path(__file__))),
+        patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
+    ):
         yield TestClient(app)
 
 
@@ -1528,6 +1652,7 @@ class TestKnowledgeIntegration:
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
             patch("mindroom.api.openai_compat.initialize_knowledge_managers", new_callable=AsyncMock),
             patch("mindroom.api.openai_compat.get_knowledge_manager", side_effect=fake_get_manager),
+            patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
         ):
             mock_ai.return_value = "Merged knowledge response"
 

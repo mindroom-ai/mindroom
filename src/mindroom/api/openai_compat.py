@@ -13,7 +13,6 @@ import time
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import uuid4
 
-from agno.knowledge.knowledge import Knowledge
 from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 from agno.run.team import RunContentEvent as TeamContentEvent
 from agno.run.team import TeamRunOutput
@@ -23,11 +22,17 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from mindroom.agents import create_agent
-from mindroom.ai import AIStreamChunk, ai_response, get_model_instance, stream_agent_response
+from mindroom.ai import (
+    AIStreamChunk,
+    ai_response,
+    build_prompt_with_thread_history,
+    get_model_instance,
+    stream_agent_response,
+)
 from mindroom.config import Config
 from mindroom.constants import DEFAULT_AGENTS_CONFIG, ROUTER_AGENT_NAME, STORAGE_PATH_OBJ
 from mindroom.knowledge import get_knowledge_manager, initialize_knowledge_managers
-from mindroom.knowledge_utils import MultiKnowledgeVectorDb
+from mindroom.knowledge_utils import resolve_agent_knowledge
 from mindroom.logging_config import get_logger
 from mindroom.routing import suggest_agent
 from mindroom.teams import TeamMode, format_team_response
@@ -42,6 +47,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.agent import Agent
+    from agno.knowledge.knowledge import Knowledge
     from agno.run.agent import RunOutput
 
 logger = get_logger(__name__)
@@ -214,9 +220,19 @@ def _verify_api_key(authorization: str | None) -> JSONResponse | None:
     Returns None if valid, or an error JSONResponse if invalid.
     """
     keys_env = os.getenv("OPENAI_COMPAT_API_KEYS", "")
+    allow_unauthenticated = os.getenv("OPENAI_COMPAT_ALLOW_UNAUTHENTICATED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
     if not keys_env.strip():
-        # No keys configured — allow unauthenticated access
-        return None
+        if allow_unauthenticated:
+            return None
+        return _error_response(
+            401,
+            "OpenAI-compatible API keys are not configured",
+            code="invalid_api_key",
+        )
 
     valid_keys = {k.strip() for k in keys_env.split(",") if k.strip()}
 
@@ -321,8 +337,8 @@ def _convert_messages(
 
 def _derive_session_id(
     model: str,
-    user: str | None,
-    first_user_message: str,
+    _user: str | None,
+    _first_user_message: str,
     request: Request,
 ) -> str:
     """Derive a session ID from request headers or content.
@@ -330,8 +346,7 @@ def _derive_session_id(
     Priority cascade:
     1. X-Session-Id header (namespaced with API key to prevent cross-key collision)
     2. X-LibreChat-Conversation-Id header + model
-    3. Hash of (model, user, first_user_message) — uses the first user message
-       so the session ID stays stable across all messages in a conversation.
+    3. Random UUID fallback (collision-safe default when no conversation ID is provided)
     """
     # Namespace prefix from API key to prevent session hijack across keys
     auth = request.headers.get("authorization", "")
@@ -347,10 +362,9 @@ def _derive_session_id(
     if libre_id:
         return f"{key_namespace}:{libre_id}:{model}"
 
-    # 3. Deterministic hash fallback
-    user_id = user or "anonymous"
-    hash_input = f"{key_namespace}:{model}:{user_id}:{first_user_message}"
-    return hashlib.sha256(hash_input.encode()).hexdigest()[:16]
+    # 3. Collision-safe fallback for clients that do not provide a conversation ID.
+    # This avoids unintended session sharing across unrelated chats.
+    return f"{key_namespace}:ephemeral:{uuid4().hex}"
 
 
 def _validate_chat_request(
@@ -455,28 +469,15 @@ def _resolve_knowledge(agent_name: str, config: Config) -> Knowledge | None:
 
     Mirrors the logic in bot.py's AgentBot._knowledge_for_agent().
     """
-    agent_config = config.agents.get(agent_name)
-    if agent_config is None or not agent_config.knowledge_bases:
-        return None
-
-    knowledges: list[Knowledge] = []
-    for base_id in agent_config.knowledge_bases:
-        manager = get_knowledge_manager(base_id)
-        if manager is None:
-            logger.warning("Knowledge base not available", agent=agent_name, base_id=base_id)
-            continue
-        knowledges.append(manager.get_knowledge())
-
-    if not knowledges:
-        return None
-    if len(knowledges) == 1:
-        return knowledges[0]
-
-    # Multiple knowledge bases — merge via MultiKnowledgeVectorDb
-    return Knowledge(
-        name=f"{agent_name}_multi_knowledge",
-        vector_db=MultiKnowledgeVectorDb(vector_dbs=[knowledge.vector_db for knowledge in knowledges]),
-        max_results=max(knowledge.max_results for knowledge in knowledges),
+    return resolve_agent_knowledge(
+        agent_name,
+        config,
+        lambda base_id: (manager.get_knowledge() if (manager := get_knowledge_manager(base_id)) is not None else None),
+        on_missing_bases=lambda missing_base_ids: logger.warning(
+            "Knowledge bases not available for agent",
+            agent=agent_name,
+            knowledge_bases=missing_base_ids,
+        ),
     )
 
 
@@ -574,6 +575,13 @@ async def chat_completions(
         session_id=session_id,
     )
 
+    # Initialize shared knowledge managers once per request (idempotent).
+    # Team and single-agent paths both rely on this for knowledge resolution.
+    try:
+        await _ensure_knowledge_initialized(config)
+    except Exception:
+        logger.warning("Knowledge initialization failed, proceeding without knowledge", exc_info=True)
+
     # Team execution path
     if agent_name.startswith(TEAM_MODEL_PREFIX):
         team_name = agent_name.removeprefix(TEAM_MODEL_PREFIX)
@@ -597,12 +605,11 @@ async def chat_completions(
             req.user,
         )
 
-    # Resolve knowledge base for this agent (init is idempotent)
+    # Resolve knowledge base for this agent
     try:
-        await _ensure_knowledge_initialized(config)
         knowledge = _resolve_knowledge(agent_name, config)
     except Exception:
-        logger.warning("Knowledge initialization failed, proceeding without knowledge", exc_info=True)
+        logger.warning("Knowledge resolution failed, proceeding without knowledge", exc_info=True)
         knowledge = None
 
     handler = _stream_completion if req.stream else _non_stream_completion
@@ -788,7 +795,13 @@ def _build_team(team_name: str, config: Config) -> tuple[list[Agent], Team | Non
             continue
         try:
             agents.append(
-                create_agent(member_name, config, storage_path=STORAGE_PATH_OBJ, include_default_tools=False),
+                create_agent(
+                    member_name,
+                    config,
+                    storage_path=STORAGE_PATH_OBJ,
+                    knowledge=_resolve_knowledge(member_name, config),
+                    include_default_tools=False,
+                ),
             )
         except Exception:
             logger.warning("Failed to create team member, skipping", team=team_name, agent=member_name, exc_info=True)
@@ -819,7 +832,7 @@ async def _non_stream_team_completion(
     prompt: str,
     session_id: str,
     config: Config,
-    _thread_history: list[dict[str, Any]] | None,
+    thread_history: list[dict[str, Any]] | None,
     user: str | None = None,
 ) -> JSONResponse:
     """Handle non-streaming team completion."""
@@ -829,8 +842,10 @@ async def _non_stream_team_completion(
 
     logger.info("Team completion request", team=team_name, mode=mode.value, members=len(agents), session_id=session_id)
 
+    team_prompt = build_prompt_with_thread_history(prompt, thread_history)
+
     try:
-        response = await team.arun(prompt, session_id=session_id, user_id=user)
+        response = await team.arun(team_prompt, session_id=session_id, user_id=user)
     except Exception:
         logger.exception("Team execution failed", team=team_name)
         return _error_response(500, "Team execution failed", error_type="server_error")
@@ -862,7 +877,7 @@ async def _stream_team_completion(
     prompt: str,
     session_id: str,
     config: Config,
-    _thread_history: list[dict[str, Any]] | None,
+    thread_history: list[dict[str, Any]] | None,
     user: str | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
@@ -872,12 +887,21 @@ async def _stream_team_completion(
 
     logger.info("Team streaming request", team=team_name, mode=mode.value, members=len(agents), session_id=session_id)
 
-    stream = team.arun(prompt, stream=True, stream_events=True, session_id=session_id, user_id=user)
+    team_prompt = build_prompt_with_thread_history(prompt, thread_history)
 
-    # Peek at first event
-    first_event = await anext(aiter(stream), None)
+    try:
+        stream = team.arun(team_prompt, stream=True, stream_events=True, session_id=session_id, user_id=user)
+        # Peek at first event
+        first_event = await anext(aiter(stream), None)
+    except Exception:
+        logger.exception("Team execution failed", team=team_name)
+        return _error_response(500, "Team execution failed", error_type="server_error")
+
     if first_event is None:
         return _error_response(500, "Team returned empty response", error_type="server_error")
+    if isinstance(first_event, str) and _is_error_response(first_event):
+        logger.warning("Team streaming returned error", team=team_name, error=first_event)
+        return _error_response(500, "Team execution failed", error_type="server_error")
 
     completion_id = f"chatcmpl-{uuid4().hex[:12]}"
     created = int(time.time())
@@ -892,10 +916,14 @@ async def _stream_team_completion(
             yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': text})}\n\n"
 
         # 3. Remaining events
-        async for event in stream:
-            text = _extract_team_stream_text(event)
-            if text:
-                yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': text})}\n\n"
+        try:
+            async for event in stream:
+                text = _extract_team_stream_text(event)
+                if text:
+                    yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': text})}\n\n"
+        except Exception:
+            logger.exception("Team stream failed during iteration", team=team_name)
+            yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': 'Team execution failed.'})}\n\n"
 
         # 4. Finish
         logger.info("Team completion sent", team=team_name, stream=True)

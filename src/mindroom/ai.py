@@ -201,16 +201,23 @@ def get_model_instance(config: Config, model_name: str = "default") -> Model:
     return _create_model_for_provider(provider, model_id, model_config, extra_kwargs)
 
 
-def _build_full_prompt(prompt: str, thread_history: list[dict[str, Any]] | None = None) -> str:
-    """Build full prompt with thread history context."""
+def build_prompt_with_thread_history(prompt: str, thread_history: list[dict[str, Any]] | None = None) -> str:
+    """Build a prompt with thread history context when available."""
     if not thread_history:
         return prompt
 
-    context = "Previous conversation in this thread:\n"
-    for msg in thread_history:
-        context += f"{msg['sender']}: {msg['body']}\n"
-    context += "\nCurrent message:\n"
-    return context + prompt
+    context_lines: list[str] = []
+    for message in thread_history:
+        sender = message.get("sender")
+        body = message.get("body")
+        if sender and body:
+            context_lines.append(f"{sender}: {body}")
+
+    if not context_lines:
+        return prompt
+
+    context = "\n".join(context_lines)
+    return f"Previous conversation in this thread:\n{context}\n\nCurrent message:\n{prompt}"
 
 
 def _build_cache_key(agent: Agent, full_prompt: str, session_id: str) -> str:
@@ -265,7 +272,7 @@ async def _prepare_agent_and_prompt(
 
     """
     enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, storage_path, config, room_id)
-    full_prompt = _build_full_prompt(enhanced_prompt, thread_history)
+    full_prompt = build_prompt_with_thread_history(enhanced_prompt, thread_history)
     logger.info("Preparing agent and prompt", agent=agent_name, full_prompt=full_prompt)
     agent = create_agent(
         agent_name,

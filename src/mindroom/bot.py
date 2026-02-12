@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import nio
-from agno.knowledge.knowledge import Knowledge
 from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
 
 from . import config_confirmation, interactive, voice_handler
@@ -31,7 +30,7 @@ from .constants import ENABLE_STREAMING, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, V
 from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
 from .knowledge import initialize_knowledge_managers, shutdown_knowledge_managers
-from .knowledge_utils import MultiKnowledgeVectorDb
+from .knowledge_utils import MultiKnowledgeVectorDb, resolve_agent_knowledge
 from .logging_config import emoji, get_logger, setup_logging
 from .matrix.client import (
     _latest_thread_event_id,
@@ -111,12 +110,15 @@ if TYPE_CHECKING:
 
     import structlog
     from agno.agent import Agent
+    from agno.knowledge.knowledge import Knowledge
     from agno.tools.function import Function
     from agno.tools.toolkit import Toolkit
 
     from .knowledge import KnowledgeManager
 
 logger = get_logger(__name__)
+
+__all__ = ["AgentBot", "MultiAgentOrchestrator", "MultiKnowledgeVectorDb"]
 
 
 # Constants
@@ -592,39 +594,15 @@ class AgentBot:
 
     def _knowledge_for_agent(self, agent_name: str) -> Knowledge | None:
         """Return shared knowledge for agents assigned to one or more knowledge bases."""
-        agent_config = self.config.agents.get(agent_name)
-        if agent_config is None:
-            return None
-
-        if not agent_config.knowledge_bases:
-            return None
-
-        missing_base_ids: list[str] = []
-        knowledges: list[Knowledge] = []
-        for base_id in agent_config.knowledge_bases:
-            knowledge = self._get_shared_knowledge(base_id)
-            if knowledge is None:
-                missing_base_ids.append(base_id)
-                continue
-            knowledges.append(knowledge)
-
-        if missing_base_ids:
-            self.logger.warning(
+        return resolve_agent_knowledge(
+            agent_name,
+            self.config,
+            self._get_shared_knowledge,
+            on_missing_bases=lambda missing_base_ids: self.logger.warning(
                 "Knowledge bases not available for agent",
                 agent_name=agent_name,
                 knowledge_bases=missing_base_ids,
-            )
-
-        if not knowledges:
-            return None
-
-        if len(knowledges) == 1:
-            return knowledges[0]
-
-        return Knowledge(
-            name=f"{agent_name}_multi_knowledge",
-            vector_db=MultiKnowledgeVectorDb(vector_dbs=[k.vector_db for k in knowledges]),
-            max_results=max(knowledge.max_results for knowledge in knowledges),
+            ),
         )
 
     @property  # Not cached_property because Team mutates it!
