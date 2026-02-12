@@ -26,6 +26,7 @@ from mindroom.routing import suggest_agent
 from mindroom.tool_events import extract_tool_completed_info, format_tool_started_event
 
 AUTO_MODEL_NAME = "auto"
+RESERVED_MODEL_NAMES = {AUTO_MODEL_NAME}
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -242,8 +243,23 @@ def _extract_content_text(content: str | list[dict] | None) -> str:
         return ""
     if isinstance(content, str):
         return content
-    # Multimodal: concatenate text parts
-    return " ".join(p["text"] for p in content if isinstance(p, dict) and p.get("type") == "text" and "text" in p)
+    # Multimodal: concatenate text parts (coerce to str for robustness)
+    return " ".join(str(p["text"]) for p in content if isinstance(p, dict) and p.get("type") == "text" and "text" in p)
+
+
+def _find_last_user_message(
+    conversation: list[dict[str, str]],
+) -> tuple[str, list[dict[str, str]] | None] | None:
+    """Find the last user message and split into (prompt, thread_history).
+
+    Returns None if no user message exists.
+    """
+    for i in range(len(conversation) - 1, -1, -1):
+        if conversation[i]["sender"] == "user":
+            prompt = conversation[i]["body"]
+            history = conversation[:i] if i > 0 else None
+            return prompt, history
+    return None
 
 
 def _convert_messages(
@@ -264,26 +280,25 @@ def _convert_messages(
             if text:
                 system_parts.append(text)
         elif msg.role == "tool":
-            # Skip tool messages — agent handles its own tool calls
             continue
         elif msg.role in ("user", "assistant"):
             text = _extract_content_text(msg.content)
             if text:
                 conversation.append({"sender": msg.role, "body": text})
 
+    system_prompt = "\n\n".join(system_parts) if system_parts else ""
+
     if not conversation:
-        # No user/assistant messages — use system message as prompt
-        prompt = "\n\n".join(system_parts) if system_parts else ""
-        return prompt, None
+        return system_prompt, None
 
-    # Last user message becomes the prompt
-    prompt = conversation[-1]["body"]
-    thread_history = conversation[:-1] if len(conversation) > 1 else None
+    result = _find_last_user_message(conversation)
+    if result is None:
+        return system_prompt, None
 
-    # Prepend system message to prompt
-    if system_parts:
-        system_context = "\n\n".join(system_parts)
-        prompt = f"{system_context}\n\n{prompt}"
+    prompt, thread_history = result
+
+    if system_prompt:
+        prompt = f"{system_prompt}\n\n{prompt}"
 
     return prompt, thread_history
 
@@ -338,7 +353,7 @@ def _validate_chat_request(
     if agent_name == AUTO_MODEL_NAME:
         return None  # auto-routing handled in chat_completions
 
-    if agent_name not in config.agents or agent_name == ROUTER_AGENT_NAME:
+    if agent_name not in config.agents or agent_name == ROUTER_AGENT_NAME or agent_name in RESERVED_MODEL_NAMES:
         return _error_response(
             404,
             f"Model '{agent_name}' not found",
@@ -390,7 +405,8 @@ async def _resolve_auto_route(
             return _error_response(500, "No agents configured for auto-routing", error_type="server_error")
         routed = available[0]
         logger.warning("Auto-routing failed, falling back", agent=routed)
-    logger.info("Auto-routed", requested="auto", resolved=routed)
+    else:
+        logger.info("Auto-routed", requested="auto", resolved=routed)
     return routed
 
 
@@ -425,7 +441,7 @@ async def list_models(
         ),
     ]
     for agent_name, agent_config in config.agents.items():
-        if agent_name == ROUTER_AGENT_NAME:
+        if agent_name == ROUTER_AGENT_NAME or agent_name in RESERVED_MODEL_NAMES:
             continue
         models.append(
             ModelObject(
@@ -511,8 +527,8 @@ async def _non_stream_completion(
 
     # Detect error responses from ai_response()
     if _is_error_response(response_text):
-        logger.warning("AI response returned error", model=agent_name, session_id=session_id)
-        return _error_response(500, response_text, error_type="server_error")
+        logger.warning("AI response returned error", model=agent_name, session_id=session_id, error=response_text)
+        return _error_response(500, "Agent execution failed", error_type="server_error")
 
     logger.info("Chat completion sent", model=agent_name, stream=False, session_id=session_id)
     completion_id = f"chatcmpl-{uuid4().hex[:12]}"
@@ -566,6 +582,15 @@ def _format_stream_tool_event(event: object) -> str | None:
     return None
 
 
+def _extract_stream_text(event: AIStreamChunk) -> str | None:
+    """Extract text content from a stream event."""
+    if isinstance(event, RunContentEvent) and event.content:
+        return str(event.content)
+    if isinstance(event, str):
+        return event
+    return _format_stream_tool_event(event)
+
+
 async def _stream_completion(
     agent_name: str,
     prompt: str,
@@ -573,8 +598,30 @@ async def _stream_completion(
     config: Config,
     thread_history: list[dict[str, Any]] | None,
     user: str | None,
-) -> StreamingResponse:
+) -> StreamingResponse | JSONResponse:
     """Handle streaming chat completion via SSE."""
+    stream: AsyncIterator[AIStreamChunk] = stream_agent_response(
+        agent_name=agent_name,
+        prompt=prompt,
+        session_id=session_id,
+        storage_path=STORAGE_PATH_OBJ,
+        config=config,
+        thread_history=thread_history,
+        room_id=None,
+        knowledge=None,
+        user_id=user,
+        include_default_tools=False,
+    )
+
+    # Peek at first event to detect errors before committing to SSE
+    first_event = await anext(aiter(stream), None)
+    if first_event is None:
+        return _error_response(500, "Agent returned empty response", error_type="server_error")
+
+    if isinstance(first_event, str) and _is_error_response(first_event):
+        logger.warning("Stream returned error", model=agent_name, session_id=session_id, error=first_event)
+        return _error_response(500, "Agent execution failed", error_type="server_error")
+
     completion_id = f"chatcmpl-{uuid4().hex[:12]}"
     created = int(time.time())
 
@@ -582,39 +629,24 @@ async def _stream_completion(
         # 1. Initial role announcement
         yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'role': 'assistant'})}\n\n"
 
-        # 2. Stream content
-        stream: AsyncIterator[AIStreamChunk] = stream_agent_response(
-            agent_name=agent_name,
-            prompt=prompt,
-            session_id=session_id,
-            storage_path=STORAGE_PATH_OBJ,
-            config=config,
-            thread_history=thread_history,
-            room_id=None,
-            knowledge=None,
-            user_id=user,
-            include_default_tools=False,
-        )
+        # 2. Yield the peeked first event
+        text = _extract_stream_text(first_event)
+        if text:
+            yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
 
-        # Error strings from stream_agent_response() are sent as content chunks
+        # 3. Stream remaining content
+        # Error strings after the first event are sent as content chunks
         # since we can't switch to an error HTTP status mid-stream.
         async for event in stream:
-            text: str | None
-            if isinstance(event, RunContentEvent) and event.content:
-                text = str(event.content)
-            elif isinstance(event, str):
-                text = event
-            else:
-                text = _format_stream_tool_event(event)
-
+            text = _extract_stream_text(event)
             if text:
                 yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
 
-        # 3. Final chunk with finish_reason
+        # 4. Final chunk with finish_reason
         logger.info("Chat completion sent", model=agent_name, stream=True)
         yield f"data: {_chunk_json(completion_id, created, agent_name, delta={}, finish_reason='stop')}\n\n"
 
-        # 4. Stream terminator
+        # 5. Stream terminator
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")

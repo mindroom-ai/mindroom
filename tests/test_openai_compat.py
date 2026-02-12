@@ -308,7 +308,7 @@ class TestChatCompletions:
         assert response.status_code == 200
 
     def test_error_response_detection(self, app_client: TestClient) -> None:
-        """Error strings from ai_response() become HTTP 500."""
+        """Error strings from ai_response() become HTTP 500 with sanitized message."""
         with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
             mock_ai.return_value = "❌ Authentication failed (openai): Invalid API key"
 
@@ -321,7 +321,10 @@ class TestChatCompletions:
             )
 
         assert response.status_code == 500
-        assert response.json()["error"]["type"] == "server_error"
+        error = response.json()["error"]
+        assert error["type"] == "server_error"
+        # Error message is sanitized — raw backend details are not exposed
+        assert error["message"] == "Agent execution failed"
 
     def test_agent_prefix_error_detection(self, app_client: TestClient) -> None:
         """Error strings with [agent] prefix are detected."""
@@ -436,6 +439,74 @@ class TestStreamingCompletion:
         lines = response.text.strip().split("\n\n")
         content_chunk = json.loads(lines[1].removeprefix("data: "))
         assert content_chunk["choices"][0]["delta"]["content"] == "This is a cached response"
+
+    def test_streaming_first_event_error_returns_500(self, app_client: TestClient) -> None:
+        """If first stream event is an error string, return HTTP 500 instead of SSE."""
+
+        async def mock_stream(**_kw: object) -> AsyncIterator[str]:
+            yield "❌ Authentication failed (openai): Invalid API key"
+
+        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 500
+        error = response.json()["error"]
+        assert error["type"] == "server_error"
+        assert error["message"] == "Agent execution failed"
+
+    def test_streaming_tool_events(self, app_client: TestClient) -> None:
+        """Tool call events are formatted as inline text in stream."""
+        from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent  # noqa: PLC0415
+
+        mock_tool_started = MagicMock()
+        mock_tool_completed = MagicMock()
+
+        async def mock_stream(**_kw: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="Let me search. ")
+            yield ToolCallStartedEvent(tool=mock_tool_started)
+            yield ToolCallCompletedEvent(tool=mock_tool_completed)
+            yield RunContentEvent(content="Found it!")
+
+        with (
+            patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream),
+            patch("mindroom.api.openai_compat.format_tool_started_event", return_value=("🔧 Searching...", None)),
+            patch(
+                "mindroom.api.openai_compat.extract_tool_completed_info",
+                return_value=("search", "3 results"),
+            ),
+        ):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Search for X"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        # Collect all content from chunks
+        lines = response.text.strip().split("\n\n")
+        contents = []
+        for line in lines:
+            text = line.removeprefix("data: ")
+            if text == "[DONE]":
+                continue
+            chunk = json.loads(text)
+            delta = chunk["choices"][0]["delta"]
+            if "content" in delta:
+                contents.append(delta["content"])
+
+        assert "Let me search. " in contents
+        assert "🔧 Searching..." in contents
+        assert any("3 results" in c for c in contents)
 
 
 # ---------------------------------------------------------------------------
@@ -590,6 +661,17 @@ class TestMessageConversion:
         ]
         prompt, history = _convert_messages(messages)
         assert prompt == "Be helpful."
+        assert history is None
+
+    def test_conversation_ending_with_assistant(self) -> None:
+        """Prompt uses last user message even when conversation ends with assistant."""
+        messages = [
+            ChatMessage(role="user", content="Hi"),
+            ChatMessage(role="assistant", content="Hello! How can I help?"),
+        ]
+        prompt, history = _convert_messages(messages)
+        # Last user message is "Hi", not the trailing assistant message
+        assert prompt == "Hi"
         assert history is None
 
     def test_empty_messages(self) -> None:
@@ -783,6 +865,14 @@ class TestContentExtraction:
         ]
         assert _extract_content_text(content) == "Valid"
 
+    def test_non_string_text_coerced(self) -> None:
+        """Non-string text values are coerced to str."""
+        content: list[dict] = [
+            {"type": "text", "text": 123},
+            {"type": "text", "text": "Hello"},
+        ]
+        assert _extract_content_text(content) == "123 Hello"
+
 
 # ---------------------------------------------------------------------------
 # Auto-routing (Phase 2)
@@ -833,8 +923,8 @@ class TestAutoRouting:
             )
 
         assert response.status_code == 200
-        # Falls back to first agent in config
-        assert response.json()["model"] in {"general", "code", "research"}
+        # Falls back to first agent in config (dict insertion order)
+        assert response.json()["model"] == "general"
 
     def test_auto_passes_thread_history(self, app_client: TestClient) -> None:
         """Auto-routing passes thread_history to suggest_agent for context."""
@@ -857,14 +947,17 @@ class TestAutoRouting:
                 },
             )
 
-            # suggest_agent should receive thread_history
+            # suggest_agent should receive thread_history as 4th positional arg
             call_args = mock_route.call_args
             assert call_args[0][0] == "Write code"  # prompt
-            thread_history = call_args[1].get("thread_context") or call_args[0][3]
-            assert thread_history is not None
+            thread_history = call_args[0][3]
+            assert thread_history == [
+                {"sender": "user", "body": "Hi"},
+                {"sender": "assistant", "body": "Hello!"},
+            ]
 
     def test_auto_streaming(self, app_client: TestClient) -> None:
-        """Auto model works with streaming responses."""
+        """Auto model works with streaming, chunks carry resolved agent name."""
         from agno.run.agent import RunContentEvent  # noqa: PLC0415
 
         async def mock_stream(**_kw: object) -> AsyncIterator[RunContentEvent]:
@@ -887,6 +980,11 @@ class TestAutoRouting:
 
         assert response.status_code == 200
         assert "text/event-stream" in response.headers["content-type"]
+
+        # Verify SSE chunks carry the resolved agent name, not "auto"
+        lines = response.text.strip().split("\n\n")
+        first_chunk = json.loads(lines[0].removeprefix("data: "))
+        assert first_chunk["model"] == "research"
 
     def test_auto_no_agents_returns_500(self) -> None:
         """Auto with no configured agents returns 500."""
@@ -918,3 +1016,53 @@ class TestAutoRouting:
 
         assert response.status_code == 500
         assert "no agents" in response.json()["error"]["message"].lower()
+
+    def test_auto_session_id_uses_resolved_agent(self, app_client: TestClient) -> None:
+        """Session ID derivation uses the resolved agent name, not 'auto'."""
+        with (
+            patch("mindroom.api.openai_compat.suggest_agent", new_callable=AsyncMock) as mock_route,
+            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+        ):
+            mock_route.return_value = "code"
+            mock_ai.return_value = "Response"
+
+            app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "auto",
+                    "messages": [{"role": "user", "content": "Write code"}],
+                },
+            )
+
+            # ai_response should receive agent_name="code", not "auto"
+            assert mock_ai.call_args.kwargs["agent_name"] == "code"
+            # Session ID should contain "code" context, not "auto"
+            session_id = mock_ai.call_args.kwargs["session_id"]
+            # Generate what a "code" session would look like vs "auto"
+            from mindroom.api.openai_compat import _derive_session_id  # noqa: PLC0415
+
+            mock_request = MagicMock(spec=Request)
+            mock_request.headers = {}
+            expected = _derive_session_id("code", None, "Write code", mock_request)
+            assert session_id == expected
+
+    def test_auto_routing_exception_falls_back(self, app_client: TestClient) -> None:
+        """If suggest_agent raises an exception, it should still fall back gracefully."""
+        with (
+            patch("mindroom.api.openai_compat.suggest_agent", new_callable=AsyncMock) as mock_route,
+            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+        ):
+            # suggest_agent catches exceptions internally and returns None
+            mock_route.return_value = None
+            mock_ai.return_value = "Fallback response"
+
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "auto",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+        assert response.status_code == 200
+        assert response.json()["model"] == "general"
