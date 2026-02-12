@@ -1181,6 +1181,7 @@ class TestTeamCompletion:
         assert data["model"] == "team/super_team"
         assert data["object"] == "chat.completion"
         assert data["choices"][0]["finish_reason"] == "stop"
+        assert "Team consensus result" in data["choices"][0]["message"]["content"]
 
     def test_team_streaming(self, team_app_client: TestClient) -> None:
         """Streaming team completion returns SSE events."""
@@ -1222,15 +1223,24 @@ class TestTeamCompletion:
         assert first["choices"][0]["delta"] == {"role": "assistant"}
         assert first["model"] == "team/super_team"
 
+        # Verify content chunks contain the expected text
+        content_parts = []
+        for line in lines:
+            if line.startswith("data: ") and line != "data: [DONE]":
+                chunk = json.loads(line.removeprefix("data: "))
+                delta = chunk["choices"][0]["delta"]
+                if "content" in delta:
+                    content_parts.append(delta["content"])
+        assert "".join(content_parts) == "Team response!"
+
     def test_team_no_valid_agents_500(self, team_app_client: TestClient) -> None:
         """Team with no valid agents returns 500."""
         from mindroom.teams import TeamMode  # noqa: PLC0415
 
-        mock_team = MagicMock()
-        # Empty agents list → should return 500
+        # _build_team returns None for team when no agents created
         with patch(
             "mindroom.api.openai_compat._build_team",
-            return_value=([], mock_team, TeamMode.COORDINATE),
+            return_value=([], None, TeamMode.COORDINATE),
         ):
             response = team_app_client.post(
                 "/v1/chat/completions",
@@ -1265,6 +1275,67 @@ class TestTeamCompletion:
 
         assert response.status_code == 500
         assert response.json()["error"]["type"] == "server_error"
+
+    def test_collaborate_mode_delegates_to_all(self) -> None:
+        """Collaborate mode sets delegate_to_all_members=True on Team."""
+        collaborate_config = Config(
+            agents={
+                "general": AgentConfig(display_name="GeneralAgent", role="General", rooms=[]),
+            },
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+            teams={
+                "collab_team": TeamConfig(
+                    display_name="Collab Team",
+                    role="Collaborative team",
+                    agents=["general"],
+                    mode="collaborate",
+                ),
+            },
+        )
+        with (
+            patch("mindroom.api.openai_compat.create_agent") as mock_create,
+            patch("mindroom.api.openai_compat.get_model_instance"),
+            patch("agno.team.Team.__init__", return_value=None) as mock_team_init,
+        ):
+            mock_create.return_value = MagicMock(name="GeneralAgent")
+
+            from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
+
+            _build_team("collab_team", collaborate_config)
+
+            mock_team_init.assert_called_once()
+            assert mock_team_init.call_args.kwargs["delegate_to_all_members"] is True
+
+    def test_coordinate_mode_no_delegate_all(self) -> None:
+        """Coordinate mode sets delegate_to_all_members=False on Team."""
+        with (
+            patch("mindroom.api.openai_compat.create_agent") as mock_create,
+            patch("mindroom.api.openai_compat.get_model_instance"),
+            patch("agno.team.Team.__init__", return_value=None) as mock_team_init,
+        ):
+            mock_create.return_value = MagicMock(name="GeneralAgent")
+
+            from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
+
+            # team_config fixture uses coordinate mode
+            config = Config(
+                agents={"general": AgentConfig(display_name="GeneralAgent", role="General", rooms=[])},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+                teams={
+                    "coord_team": TeamConfig(
+                        display_name="Coord Team",
+                        role="Coordinated team",
+                        agents=["general"],
+                        mode="coordinate",
+                    ),
+                },
+            )
+            _build_team("coord_team", config)
+
+            mock_team_init.assert_called_once()
+            assert mock_team_init.call_args.kwargs["delegate_to_all_members"] is False
 
 
 # ---------------------------------------------------------------------------

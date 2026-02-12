@@ -38,7 +38,9 @@ if TYPE_CHECKING:
 
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
+    from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
+    from agno.team import Team
 
 logger = get_logger(__name__)
 
@@ -588,8 +590,24 @@ async def chat_completions(
     if agent_name.startswith(TEAM_MODEL_PREFIX):
         team_name = agent_name.removeprefix(TEAM_MODEL_PREFIX)
         if req.stream:
-            return await _stream_team_completion(team_name, agent_name, prompt, config, thread_history)
-        return await _non_stream_team_completion(team_name, agent_name, prompt, config, thread_history)
+            return await _stream_team_completion(
+                team_name,
+                agent_name,
+                prompt,
+                session_id,
+                config,
+                thread_history,
+                req.user,
+            )
+        return await _non_stream_team_completion(
+            team_name,
+            agent_name,
+            prompt,
+            session_id,
+            config,
+            thread_history,
+            req.user,
+        )
 
     # Resolve knowledge base for this agent
     knowledge = _resolve_knowledge(agent_name, config)
@@ -759,10 +777,11 @@ async def _stream_completion(
 # ---------------------------------------------------------------------------
 
 
-def _build_team(team_name: str, config: Config) -> tuple[list[Agent], Any, TeamMode]:
+def _build_team(team_name: str, config: Config) -> tuple[list[Agent], Team | None, TeamMode]:
     """Create agents and build an agno.Team for the given team config.
 
-    Returns (agents, team, mode).
+    Returns (agents, team, mode). When no agents can be created,
+    returns ([], None, mode) so callers can handle it gracefully.
     """
     from agno.team import Team  # noqa: PLC0415
 
@@ -781,7 +800,10 @@ def _build_team(team_name: str, config: Config) -> tuple[list[Agent], Any, TeamM
                 create_agent(member_name, config, storage_path=STORAGE_PATH_OBJ, include_default_tools=False),
             )
         except Exception:
-            logger.warning("Failed to create team member, skipping", team=team_name, agent=member_name)
+            logger.warning("Failed to create team member, skipping", team=team_name, agent=member_name, exc_info=True)
+
+    if not agents:
+        return [], None, mode
 
     team = Team(
         members=agents,  # type: ignore[arg-type]
@@ -794,7 +816,7 @@ def _build_team(team_name: str, config: Config) -> tuple[list[Agent], Any, TeamM
     return agents, team, mode
 
 
-def _format_team_output(response: TeamRunOutput) -> str:
+def _format_team_output(response: TeamRunOutput | RunOutput) -> str:
     """Format a TeamRunOutput into a single string for the API response."""
     parts = format_team_response(response)
     return "\n\n".join(parts) if parts else str(response.content or "")
@@ -804,18 +826,20 @@ async def _non_stream_team_completion(
     team_name: str,
     model_id: str,
     prompt: str,
+    session_id: str,
     config: Config,
     _thread_history: list[dict[str, Any]] | None,
+    user: str | None = None,
 ) -> JSONResponse:
     """Handle non-streaming team completion."""
     agents, team, mode = _build_team(team_name, config)
-    if not agents:
+    if not agents or team is None:
         return _error_response(500, "No valid agents found for team", error_type="server_error")
 
-    logger.info("Team completion request", team=team_name, mode=mode.value, members=len(agents))
+    logger.info("Team completion request", team=team_name, mode=mode.value, members=len(agents), session_id=session_id)
 
     try:
-        response = await team.arun(prompt)
+        response = await team.arun(prompt, session_id=session_id, user_id=user)
     except Exception:
         logger.exception("Team execution failed", team=team_name)
         return _error_response(500, "Team execution failed", error_type="server_error")
@@ -823,6 +847,10 @@ async def _non_stream_team_completion(
     from agno.run.team import TeamRunOutput as _TeamRunOutput  # noqa: PLC0415
 
     response_text = _format_team_output(response) if isinstance(response, _TeamRunOutput) else str(response)
+
+    if _is_error_response(response_text):
+        logger.warning("Team response returned error", team=team_name, error=response_text)
+        return _error_response(500, "Team execution failed", error_type="server_error")
 
     logger.info("Team completion sent", team=team_name, stream=False)
     completion_id = f"chatcmpl-{uuid4().hex[:12]}"
@@ -843,21 +871,19 @@ async def _stream_team_completion(
     team_name: str,
     model_id: str,
     prompt: str,
+    session_id: str,
     config: Config,
     _thread_history: list[dict[str, Any]] | None,
+    user: str | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
     agents, team, mode = _build_team(team_name, config)
-    if not agents:
+    if not agents or team is None:
         return _error_response(500, "No valid agents found for team", error_type="server_error")
 
-    logger.info("Team streaming request", team=team_name, mode=mode.value, members=len(agents))
+    logger.info("Team streaming request", team=team_name, mode=mode.value, members=len(agents), session_id=session_id)
 
-    try:
-        stream = team.arun(prompt, stream=True, stream_events=True)
-    except Exception:
-        logger.exception("Team streaming failed to start", team=team_name)
-        return _error_response(500, "Team execution failed", error_type="server_error")
+    stream = team.arun(prompt, stream=True, stream_events=True, session_id=session_id, user_id=user)
 
     # Peek at first event
     first_event = await anext(aiter(stream), None)
