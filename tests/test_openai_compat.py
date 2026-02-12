@@ -2565,6 +2565,91 @@ class TestStrictOpenAIToolCalling:
         assert second_response.status_code == 200
         assert second_response.json()["choices"][0]["message"]["content"] == "Done"
 
+    def test_openai_mode_explicit_model_mismatch_still_errors(self, app_client: TestClient) -> None:
+        """Continuation with an explicit different model returns 400 mismatch."""
+        requirement = self._external_requirement(tool_call_id="call_model_mismatch")
+        paused_run = RunOutput(run_id="run-model-mismatch", status=RunStatus.paused, requirements=[requirement])
+        completed_run = RunOutput(run_id="run-model-mismatch", status=RunStatus.completed, content="Done")
+
+        first_agent = MagicMock()
+        first_agent.arun = AsyncMock(return_value=paused_run)
+        second_agent = MagicMock()
+        second_agent.acontinue_run = AsyncMock(return_value=completed_run)
+
+        with (
+            patch("mindroom.api.openai_compat.create_agent", side_effect=[first_agent, second_agent]),
+            patch(
+                "mindroom.api.openai_compat.build_memory_enhanced_prompt",
+                new_callable=AsyncMock,
+                return_value="Hello",
+            ),
+        ):
+            first_response = app_client.post(
+                "/v1/chat/completions",
+                json={"model": "general", "messages": [{"role": "user", "content": "Hello"}]},
+                headers={"X-Tool-Event-Format": "openai", "X-Session-Id": "sess-model-mismatch"},
+            )
+            assert first_response.status_code == 200
+            assert first_response.json()["choices"][0]["finish_reason"] == "tool_calls"
+
+            second_response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "code",
+                    "messages": [
+                        {"role": "user", "content": "Hello"},
+                        {"role": "tool", "tool_call_id": "call_model_mismatch", "content": "result"},
+                    ],
+                },
+                headers={"X-Tool-Event-Format": "openai", "X-Session-Id": "sess-model-mismatch"},
+            )
+
+        assert second_response.status_code == 400
+        assert "different model" in second_response.json()["error"]["message"]
+
+    def test_openai_mode_pending_run_does_not_bypass_team_rejection(self, team_app_client: TestClient) -> None:
+        """Pending strict state must not allow team/* continuations in openai mode."""
+        requirement = self._external_requirement(tool_call_id="call_team_block")
+        paused_run = RunOutput(run_id="run-team-block", status=RunStatus.paused, requirements=[requirement])
+        completed_run = RunOutput(run_id="run-team-block", status=RunStatus.completed, content="Done")
+
+        first_agent = MagicMock()
+        first_agent.arun = AsyncMock(return_value=paused_run)
+        second_agent = MagicMock()
+        second_agent.acontinue_run = AsyncMock(return_value=completed_run)
+
+        with (
+            patch("mindroom.api.openai_compat.create_agent", side_effect=[first_agent, second_agent]),
+            patch(
+                "mindroom.api.openai_compat.build_memory_enhanced_prompt",
+                new_callable=AsyncMock,
+                return_value="Hello",
+            ),
+        ):
+            first_response = team_app_client.post(
+                "/v1/chat/completions",
+                json={"model": "general", "messages": [{"role": "user", "content": "Hello"}]},
+                headers={"X-Tool-Event-Format": "openai", "X-Session-Id": "sess-team-block"},
+            )
+            assert first_response.status_code == 200
+            assert first_response.json()["choices"][0]["finish_reason"] == "tool_calls"
+
+            second_response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [
+                        {"role": "user", "content": "Hello"},
+                        {"role": "tool", "tool_call_id": "call_team_block", "content": "result"},
+                    ],
+                },
+                headers={"X-Tool-Event-Format": "openai", "X-Session-Id": "sess-team-block"},
+            )
+
+        assert second_response.status_code == 400
+        assert "single-agent" in second_response.json()["error"]["message"]
+        second_agent.acontinue_run.assert_not_called()
+
     def test_openai_mode_rejects_unknown_tool_call_ids(self, app_client: TestClient) -> None:
         """Extra tool_call_id results not in pending requirements return 400."""
         requirement = self._external_requirement(tool_call_id="call_expected")

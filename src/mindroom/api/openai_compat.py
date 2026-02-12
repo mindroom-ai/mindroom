@@ -806,11 +806,10 @@ async def chat_completions(  # noqa: C901, PLR0911, PLR0912
     # Derive a namespaced session ID from request headers or fallback UUID.
     session_id = _derive_session_id(agent_name, request)
 
-    # In strict OpenAI mode, if a pending run exists for this session, force
-    # continuation to the pending agent_name.  This prevents model="auto"
-    # re-routing to a different agent on the continuation turn, which would
-    # cause a false 400 "Pending tool run belongs to a different model".
-    if tool_event_format == TOOL_EVENT_FORMAT_OPENAI:
+    # In strict OpenAI mode, when the client requested model="auto", force
+    # continuation to the pending run's agent. Explicit model requests must
+    # still validate against pending.agent_name and can return a 400 mismatch.
+    if tool_event_format == TOOL_EVENT_FORMAT_OPENAI and req.model == AUTO_MODEL_NAME:
         pending = _openai_state.pending_runs.get(session_id)
         if pending is not None and pending.agent_name != agent_name:
             agent_name = pending.agent_name
