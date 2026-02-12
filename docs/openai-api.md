@@ -21,7 +21,7 @@ Chat Frontend (LibreChat, Open WebUI, etc.)
                          └──→ agents, tools, memory, knowledge bases
 ```
 
-No Matrix dependency. The API works standalone.
+No Matrix auth dependency. You can run the OpenAI-compatible API standalone or alongside the Matrix bot.
 
 ## Setup
 
@@ -42,8 +42,10 @@ Without either of these, the API returns 401 on all requests.
 ### 2. Start the backend
 
 ```bash
-uv run mindroom run
-# or
+# API only (OpenAI-compatible endpoints)
+uv run uvicorn mindroom.api.main:app --host 0.0.0.0 --port 8765
+
+# Full backend (Matrix bot + API server)
 just start-backend-dev
 ```
 
@@ -101,7 +103,7 @@ endpoints:
 
 ### Any OpenAI-compatible client
 
-Point the base URL at `http://localhost:8765/v1` and set the API key. MindRoom responds to the same endpoints as the OpenAI API.
+Point the base URL at `http://localhost:8765/v1` and set the API key. MindRoom implements the OpenAI-compatible `GET /v1/models` and `POST /v1/chat/completions` endpoints.
 
 ## Features
 
