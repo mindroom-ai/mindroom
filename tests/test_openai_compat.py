@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 import pytest
 from agno.models.response import ToolExecution
 from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
+from agno.run.team import RunContentEvent as TeamContentEvent
 from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
 from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
 from fastapi import Request
@@ -29,6 +30,7 @@ from mindroom.api.openai_compat import (
     _ToolDetailsTracker,
 )
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig, TeamConfig
+from mindroom.teams import TeamMode
 
 
 @pytest.fixture
@@ -1959,6 +1961,20 @@ class TestToolDetailsTracker:
         assert "<details" in result
 
 
+def _extract_sse_contents(response: object) -> list[str]:
+    """Extract content strings from an SSE streaming response."""
+    contents: list[str] = []
+    for line in response.text.strip().split("\n\n"):  # type: ignore[union-attr]
+        text = line.removeprefix("data: ")
+        if text == "[DONE]":
+            continue
+        chunk = json.loads(text)
+        delta = chunk["choices"][0]["delta"]
+        if "content" in delta:
+            contents.append(delta["content"])
+    return contents
+
+
 class TestToolDetailsIntegration:
     """Integration tests for <details> HTML tool call rendering in streaming."""
 
@@ -1994,17 +2010,7 @@ class TestToolDetailsIntegration:
             )
 
         assert response.status_code == 200
-        lines = response.text.strip().split("\n\n")
-        contents: list[str] = []
-        for line in lines:
-            text = line.removeprefix("data: ")
-            if text == "[DONE]":
-                continue
-            chunk = json.loads(text)
-            delta = chunk["choices"][0]["delta"]
-            if "content" in delta:
-                contents.append(delta["content"])
-
+        contents = _extract_sse_contents(response)
         full_content = "".join(contents)
         # Should contain <details> HTML from tool completion
         assert "<details" in full_content
@@ -2014,12 +2020,17 @@ class TestToolDetailsIntegration:
 
     def test_no_header_uses_inline_text(self, app_client: TestClient) -> None:
         """Without X-Tool-Event-Format header, inline emoji text is used."""
-        mock_tool_started = MagicMock()
-        mock_tool_completed = MagicMock()
+        tool_started = ToolExecution(tool_name="web_search", tool_args={"query": "test"}, tool_call_id="tc-inline-1")
+        tool_completed = ToolExecution(
+            tool_name="web_search",
+            tool_args={"query": "test"},
+            tool_call_id="tc-inline-1",
+            result="3 results",
+        )
 
         async def mock_stream(**_kw: object) -> AsyncIterator[object]:
-            yield ToolCallStartedEvent(tool=mock_tool_started)
-            yield ToolCallCompletedEvent(tool=mock_tool_completed)
+            yield ToolCallStartedEvent(tool=tool_started)
+            yield ToolCallCompletedEvent(tool=tool_completed)
             yield RunContentEvent(content="Done!")
 
         with (
@@ -2044,17 +2055,7 @@ class TestToolDetailsIntegration:
             )
 
         assert response.status_code == 200
-        lines = response.text.strip().split("\n\n")
-        contents: list[str] = []
-        for line in lines:
-            text = line.removeprefix("data: ")
-            if text == "[DONE]":
-                continue
-            chunk = json.loads(text)
-            delta = chunk["choices"][0]["delta"]
-            if "content" in delta:
-                contents.append(delta["content"])
-
+        contents = _extract_sse_contents(response)
         full_content = "".join(contents)
         # Should contain inline emoji text
         assert "\U0001f527 Searching..." in contents
@@ -2063,8 +2064,6 @@ class TestToolDetailsIntegration:
 
     def test_team_streaming_with_tool_details(self, team_app_client: TestClient) -> None:
         """Team streaming with X-Tool-Event-Format header produces <details> HTML."""
-        from mindroom.teams import TeamMode  # noqa: PLC0415
-
         tool_started = ToolExecution(
             tool_name="code_exec",
             tool_args={"code": "print('hi')"},
@@ -2081,8 +2080,6 @@ class TestToolDetailsIntegration:
         mock_agents = [MagicMock(name="GeneralAgent")]
 
         async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
-            from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
-
             yield TeamToolCallStartedEvent(tool=tool_started)
             yield TeamContentEvent(content="Running code. ")
             yield TeamToolCallCompletedEvent(tool=tool_completed)
@@ -2105,17 +2102,7 @@ class TestToolDetailsIntegration:
             )
 
         assert response.status_code == 200
-        lines = response.text.strip().split("\n\n")
-        contents: list[str] = []
-        for line in lines:
-            text = line.removeprefix("data: ")
-            if text == "[DONE]":
-                continue
-            chunk = json.loads(text)
-            delta = chunk["choices"][0]["delta"]
-            if "content" in delta:
-                contents.append(delta["content"])
-
+        contents = _extract_sse_contents(response)
         full_content = "".join(contents)
         assert "<details" in full_content
         assert 'type="tool_calls"' in full_content
