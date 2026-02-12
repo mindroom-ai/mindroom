@@ -13,7 +13,7 @@ The frontend calls `GET /v1/models` and sees your agents in the model picker. Th
 ```
 Chat Frontend (LibreChat, Open WebUI, etc.)
 │
-│  GET /v1/models          → returns your agents as "models"
+│  GET  /v1/models           → returns your agents as "models"
 │  POST /v1/chat/completions → routes to the selected agent
 │
 └──→ MindRoom API ──→ ai_response() / stream_agent_response()
