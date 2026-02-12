@@ -730,7 +730,7 @@ class TestSessionIdDerivation:
     def test_explicit_session_id_header(self) -> None:
         """X-Session-Id header takes highest priority (namespaced with key)."""
         request = self._mock_request({"X-Session-Id": "my-session"})
-        sid = _derive_session_id("general", None, "Hello", request)
+        sid = _derive_session_id("general", request)
         # Session ID is namespaced with API key hash prefix
         assert sid.endswith(":my-session")
         assert sid.startswith("noauth:")  # No auth header
@@ -739,8 +739,8 @@ class TestSessionIdDerivation:
         """Different API keys produce different session namespaces."""
         req1 = self._mock_request({"X-Session-Id": "sess", "Authorization": "Bearer key-1"})
         req2 = self._mock_request({"X-Session-Id": "sess", "Authorization": "Bearer key-2"})
-        sid1 = _derive_session_id("general", None, "Hello", req1)
-        sid2 = _derive_session_id("general", None, "Hello", req2)
+        sid1 = _derive_session_id("general", req1)
+        sid2 = _derive_session_id("general", req2)
         # Same session ID but different keys → different derived IDs
         assert sid1 != sid2
         assert sid1.endswith(":sess")
@@ -749,7 +749,7 @@ class TestSessionIdDerivation:
     def test_librechat_conversation_id(self) -> None:
         """X-LibreChat-Conversation-Id header is used when no X-Session-Id."""
         request = self._mock_request({"X-LibreChat-Conversation-Id": "conv-123"})
-        sid = _derive_session_id("general", None, "Hello", request)
+        sid = _derive_session_id("general", request)
         assert "conv-123" in sid
         assert "general" in sid
 
@@ -761,22 +761,22 @@ class TestSessionIdDerivation:
                 "X-LibreChat-Conversation-Id": "libre",
             },
         )
-        sid = _derive_session_id("general", None, "Hello", request)
+        sid = _derive_session_id("general", request)
         assert "explicit" in sid
         assert "libre" not in sid
 
     def test_fallback_generates_ephemeral_session_id(self) -> None:
         """Fallback generates an ephemeral namespaced session ID."""
         request = self._mock_request()
-        sid1 = _derive_session_id("general", "user1", "Hello", request)
+        sid1 = _derive_session_id("general", request)
         assert sid1.startswith("noauth:ephemeral:")
         assert len(sid1) > len("noauth:ephemeral:")
 
     def test_fallback_is_not_deterministic(self) -> None:
         """Fallback IDs differ across requests to avoid cross-chat collisions."""
         request = self._mock_request()
-        sid1 = _derive_session_id("general", "user1", "Hello", request)
-        sid2 = _derive_session_id("general", "user1", "Hello", request)
+        sid1 = _derive_session_id("general", request)
+        sid2 = _derive_session_id("general", request)
         assert sid1 != sid2
 
     def test_fallback_ignores_user_message_content(self, app_client: TestClient) -> None:

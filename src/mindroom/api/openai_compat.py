@@ -337,8 +337,6 @@ def _convert_messages(
 
 def _derive_session_id(
     model: str,
-    _user: str | None,
-    _first_user_message: str,
     request: Request,
 ) -> str:
     """Derive a session ID from request headers or content.
@@ -562,12 +560,8 @@ async def chat_completions(
             return result
         agent_name = result
 
-    # Derive session ID using first user message for stable hashing
-    first_user_content = next(
-        (_extract_content_text(m.content) for m in req.messages if m.role == "user"),
-        prompt,
-    )
-    session_id = _derive_session_id(agent_name, req.user, first_user_content, request)
+    # Derive a namespaced session ID from request headers or fallback UUID.
+    session_id = _derive_session_id(agent_name, request)
     logger.info(
         "Chat completion request",
         model=agent_name,
