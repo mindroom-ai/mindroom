@@ -1,0 +1,729 @@
+"""Tests for the OpenAI-compatible chat completions API."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock, patch
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterator
+
+import pytest
+from fastapi import Request
+from fastapi.testclient import TestClient
+
+from mindroom.api.openai_compat import (
+    ChatMessage,
+    _convert_messages,
+    _derive_session_id,
+    _extract_content_text,
+    _is_error_response,
+)
+from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
+
+
+@pytest.fixture
+def test_config() -> Config:
+    """Create a minimal test config with a few agents."""
+    return Config(
+        agents={
+            "general": AgentConfig(
+                display_name="GeneralAgent",
+                role="General-purpose assistant",
+                rooms=[],
+            ),
+            "code": AgentConfig(
+                display_name="CodeAgent",
+                role="Generate code and manage files",
+                tools=["file", "shell"],
+                rooms=[],
+            ),
+            "research": AgentConfig(
+                display_name="ResearchAgent",
+                role="",
+                rooms=[],
+            ),
+        },
+        models={"default": ModelConfig(provider="ollama", id="test-model")},
+        router=RouterConfig(model="default"),
+    )
+
+
+@pytest.fixture
+def app_client(test_config: Config) -> Iterator[TestClient]:
+    """Create a FastAPI test client with mocked config."""
+    from fastapi import FastAPI  # noqa: PLC0415
+
+    from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+    app = FastAPI()
+    app.include_router(router)
+
+    with patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))):
+        yield TestClient(app)
+
+
+@pytest.fixture
+def authed_client(test_config: Config) -> Iterator[TestClient]:
+    """Create a test client with API key auth enabled."""
+    from fastapi import FastAPI  # noqa: PLC0415
+
+    from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+    app = FastAPI()
+    app.include_router(router)
+
+    with (
+        patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
+        patch.dict("os.environ", {"OPENAI_COMPAT_API_KEYS": "test-key-1,test-key-2"}),
+    ):
+        yield TestClient(app)
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/models
+# ---------------------------------------------------------------------------
+
+
+class TestListModels:
+    """Tests for GET /v1/models."""
+
+    def test_lists_agents(self, app_client: TestClient) -> None:
+        """Lists all configured agents as models."""
+        response = app_client.get("/v1/models")
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["object"] == "list"
+        model_ids = [m["id"] for m in data["data"]]
+        assert "general" in model_ids
+        assert "code" in model_ids
+        assert "research" in model_ids
+
+    def test_includes_name_and_description(self, app_client: TestClient) -> None:
+        """Models include display name and role description."""
+        response = app_client.get("/v1/models")
+        data = response.json()
+
+        general = next(m for m in data["data"] if m["id"] == "general")
+        assert general["name"] == "GeneralAgent"
+        assert general["description"] == "General-purpose assistant"
+        assert general["owned_by"] == "mindroom"
+        assert general["object"] == "model"
+
+    def test_empty_role_is_none(self, app_client: TestClient) -> None:
+        """Agents with empty role have description=None."""
+        response = app_client.get("/v1/models")
+        data = response.json()
+
+        research = next(m for m in data["data"] if m["id"] == "research")
+        assert research["description"] is None
+
+    def test_excludes_router(self, app_client: TestClient) -> None:
+        """Router agent is not listed."""
+        response = app_client.get("/v1/models")
+        data = response.json()
+        model_ids = [m["id"] for m in data["data"]]
+        assert "router" not in model_ids
+
+    def test_empty_agents(self) -> None:
+        """Returns empty list when no agents configured."""
+        from fastapi import FastAPI  # noqa: PLC0415
+
+        from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+        app = FastAPI()
+        app.include_router(router)
+
+        empty_config = Config(
+            agents={},
+            models={"default": ModelConfig(provider="ollama", id="test")},
+            router=RouterConfig(model="default"),
+        )
+        with patch("mindroom.api.openai_compat._load_config", return_value=(empty_config, Path(__file__))):
+            client = TestClient(app)
+            response = client.get("/v1/models")
+            assert response.status_code == 200
+            assert response.json()["data"] == []
+
+
+class TestChatCompletions:
+    """Tests for POST /v1/chat/completions (non-streaming)."""
+
+    def test_basic_completion(self, app_client: TestClient) -> None:
+        """Basic non-streaming completion returns correct shape."""
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+            mock_ai.return_value = "Hello! How can I help?"
+
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["object"] == "chat.completion"
+        assert data["model"] == "general"
+        assert data["id"].startswith("chatcmpl-")
+        assert len(data["choices"]) == 1
+        assert data["choices"][0]["message"]["role"] == "assistant"
+        assert data["choices"][0]["message"]["content"] == "Hello! How can I help?"
+        assert data["choices"][0]["finish_reason"] == "stop"
+        assert data["usage"]["prompt_tokens"] == 0
+
+    def test_passes_include_default_tools_false(self, app_client: TestClient) -> None:
+        """Passes include_default_tools=False to exclude scheduler."""
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+            mock_ai.return_value = "Response"
+
+            app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+            assert mock_ai.call_args.kwargs["include_default_tools"] is False
+
+    def test_passes_knowledge_none(self, app_client: TestClient) -> None:
+        """Passes knowledge=None for Phase 1."""
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+            mock_ai.return_value = "Response"
+
+            app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+            assert mock_ai.call_args.kwargs["knowledge"] is None
+
+    def test_passes_user_id(self, app_client: TestClient) -> None:
+        """Passes user field as user_id to ai_response."""
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+            mock_ai.return_value = "Response"
+
+            app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "user": "user-123",
+                },
+            )
+
+            assert mock_ai.call_args.kwargs["user_id"] == "user-123"
+
+    def test_unknown_model_404(self, app_client: TestClient) -> None:
+        """Unknown model returns 404 with OpenAI error format."""
+        response = app_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "nonexistent",
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+        )
+
+        assert response.status_code == 404
+        data = response.json()
+        assert data["error"]["code"] == "model_not_found"
+        assert data["error"]["param"] == "model"
+        assert "nonexistent" in data["error"]["message"]
+
+    def test_router_model_404(self, app_client: TestClient) -> None:
+        """Router agent cannot be used as a model."""
+        response = app_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "router",
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+        )
+
+        assert response.status_code == 404
+
+    def test_team_model_501(self, app_client: TestClient) -> None:
+        """Team models return 501."""
+        response = app_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "team/super_team",
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+        )
+
+        assert response.status_code == 501
+        assert response.json()["error"]["code"] == "not_implemented"
+
+    def test_empty_messages_400(self, app_client: TestClient) -> None:
+        """Empty messages array returns 400."""
+        response = app_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "general",
+                "messages": [],
+            },
+        )
+
+        assert response.status_code == 400
+
+    def test_extra_fields_ignored(self, app_client: TestClient) -> None:
+        """Extra/unknown fields don't cause 422."""
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+            mock_ai.return_value = "Response"
+
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "temperature": 0.7,
+                    "max_tokens": 100,
+                    "logit_bias": {"42": 10},
+                    "seed": 42,
+                    "unknown_field": "should be ignored",
+                },
+            )
+
+        assert response.status_code == 200
+
+    def test_error_response_detection(self, app_client: TestClient) -> None:
+        """Error strings from ai_response() become HTTP 500."""
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+            mock_ai.return_value = "❌ Authentication failed (openai): Invalid API key"
+
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+        assert response.status_code == 500
+        assert response.json()["error"]["type"] == "server_error"
+
+    def test_agent_prefix_error_detection(self, app_client: TestClient) -> None:
+        """Error strings with [agent] prefix are detected."""
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+            mock_ai.return_value = "[general] ⚠️ Error: something went wrong"
+
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+        assert response.status_code == 500
+
+
+class TestStreamingCompletion:
+    """Tests for POST /v1/chat/completions with stream=true."""
+
+    def test_streaming_sse_format(self, app_client: TestClient) -> None:
+        """Streaming returns valid SSE format."""
+        from agno.run.agent import RunContentEvent  # noqa: PLC0415
+
+        async def mock_stream(**_kw: object) -> AsyncIterator[RunContentEvent]:
+            yield RunContentEvent(content="Hello ")
+            yield RunContentEvent(content="world!")
+
+        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        assert "text/event-stream" in response.headers["content-type"]
+
+        # Parse SSE lines
+        lines = response.text.strip().split("\n\n")
+        assert len(lines) >= 4  # role + 2 content + finish + [DONE]
+
+        # First chunk: role announcement
+        first = json.loads(lines[0].removeprefix("data: "))
+        assert first["choices"][0]["delta"] == {"role": "assistant"}
+        assert first["object"] == "chat.completion.chunk"
+
+        # Content chunks
+        second = json.loads(lines[1].removeprefix("data: "))
+        assert second["choices"][0]["delta"]["content"] == "Hello "
+
+        third = json.loads(lines[2].removeprefix("data: "))
+        assert third["choices"][0]["delta"]["content"] == "world!"
+
+        # Finish chunk
+        fourth = json.loads(lines[3].removeprefix("data: "))
+        assert fourth["choices"][0]["finish_reason"] == "stop"
+        assert fourth["choices"][0]["delta"] == {}
+
+        # [DONE] terminator
+        assert lines[4] == "data: [DONE]"
+
+    def test_streaming_consistent_id(self, app_client: TestClient) -> None:
+        """All streaming chunks have the same completion ID."""
+        from agno.run.agent import RunContentEvent  # noqa: PLC0415
+
+        async def mock_stream(**_kw: object) -> AsyncIterator[RunContentEvent]:
+            yield RunContentEvent(content="test")
+
+        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "stream": True,
+                },
+            )
+
+        lines = response.text.strip().split("\n\n")
+        ids = []
+        for line in lines:
+            text = line.removeprefix("data: ")
+            if text == "[DONE]":
+                continue
+            chunk = json.loads(text)
+            ids.append(chunk["id"])
+
+        assert len(set(ids)) == 1  # All same ID
+        assert ids[0].startswith("chatcmpl-")
+
+    def test_streaming_cached_response(self, app_client: TestClient) -> None:
+        """Cached full response (string) is streamed correctly."""
+
+        async def mock_stream(**_kw: object) -> AsyncIterator[str]:
+            yield "This is a cached response"
+
+        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        lines = response.text.strip().split("\n\n")
+        content_chunk = json.loads(lines[1].removeprefix("data: "))
+        assert content_chunk["choices"][0]["delta"]["content"] == "This is a cached response"
+
+
+# ---------------------------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------------------------
+
+
+class TestAuthentication:
+    """Tests for bearer token authentication."""
+
+    def test_valid_key_accepted(self, authed_client: TestClient) -> None:
+        """Valid API key allows access."""
+        response = authed_client.get(
+            "/v1/models",
+            headers={"Authorization": "Bearer test-key-1"},
+        )
+        assert response.status_code == 200
+
+    def test_second_key_accepted(self, authed_client: TestClient) -> None:
+        """Second key from comma-separated list works."""
+        response = authed_client.get(
+            "/v1/models",
+            headers={"Authorization": "Bearer test-key-2"},
+        )
+        assert response.status_code == 200
+
+    def test_missing_key_401(self, authed_client: TestClient) -> None:
+        """Missing key returns 401."""
+        response = authed_client.get("/v1/models")
+        assert response.status_code == 401
+        assert response.json()["error"]["code"] == "invalid_api_key"
+
+    def test_wrong_key_401(self, authed_client: TestClient) -> None:
+        """Wrong key returns 401."""
+        response = authed_client.get(
+            "/v1/models",
+            headers={"Authorization": "Bearer wrong-key"},
+        )
+        assert response.status_code == 401
+
+    def test_no_auth_when_unset(self, app_client: TestClient) -> None:
+        """No auth required when OPENAI_COMPAT_API_KEYS is unset."""
+        response = app_client.get("/v1/models")
+        assert response.status_code == 200
+
+    def test_auth_on_completions(self, authed_client: TestClient) -> None:
+        """Auth is checked on completions endpoint too."""
+        response = authed_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "general",
+                "messages": [{"role": "user", "content": "Hi"}],
+            },
+        )
+        assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Message conversion
+# ---------------------------------------------------------------------------
+
+
+class TestMessageConversion:
+    """Tests for _convert_messages()."""
+
+    def test_simple_user_message(self) -> None:
+        """Single user message becomes prompt with no history."""
+        messages = [ChatMessage(role="user", content="Hello")]
+        prompt, history = _convert_messages(messages)
+        assert prompt == "Hello"
+        assert history is None
+
+    def test_multi_turn_conversation(self) -> None:
+        """Multi-turn conversation splits into history + prompt."""
+        messages = [
+            ChatMessage(role="user", content="Hi"),
+            ChatMessage(role="assistant", content="Hello!"),
+            ChatMessage(role="user", content="How are you?"),
+        ]
+        prompt, history = _convert_messages(messages)
+        assert prompt == "How are you?"
+        assert history == [
+            {"sender": "user", "body": "Hi"},
+            {"sender": "assistant", "body": "Hello!"},
+        ]
+
+    def test_system_message_prepended(self) -> None:
+        """System message is prepended to prompt."""
+        messages = [
+            ChatMessage(role="system", content="You are helpful."),
+            ChatMessage(role="user", content="Hello"),
+        ]
+        prompt, history = _convert_messages(messages)
+        assert "You are helpful." in prompt
+        assert "Hello" in prompt
+        assert history is None
+
+    def test_developer_role_treated_as_system(self) -> None:
+        """Developer role is treated same as system."""
+        messages = [
+            ChatMessage(role="developer", content="Be concise."),
+            ChatMessage(role="user", content="Hello"),
+        ]
+        prompt, _ = _convert_messages(messages)
+        assert "Be concise." in prompt
+        assert "Hello" in prompt
+
+    def test_tool_messages_skipped(self) -> None:
+        """Tool role messages are skipped."""
+        messages = [
+            ChatMessage(role="user", content="Run search"),
+            ChatMessage(role="assistant", content="I'll search for that."),
+            ChatMessage(role="tool", content="Search results: ..."),
+            ChatMessage(role="user", content="Thanks"),
+        ]
+        prompt, history = _convert_messages(messages)
+        assert prompt == "Thanks"
+        # tool message should not appear in history
+        assert history is not None
+        assert all(h["sender"] != "tool" for h in history)
+
+    def test_multimodal_content(self) -> None:
+        """Multimodal content extracts text parts."""
+        messages = [
+            ChatMessage(
+                role="user",
+                content=[
+                    {"type": "text", "text": "What is this?"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+                    {"type": "text", "text": "Describe it."},
+                ],
+            ),
+        ]
+        prompt, _ = _convert_messages(messages)
+        assert "What is this?" in prompt
+        assert "Describe it." in prompt
+
+    def test_none_content_skipped(self) -> None:
+        """Messages with None content are skipped."""
+        messages = [
+            ChatMessage(role="assistant", content=None),
+            ChatMessage(role="user", content="Hello"),
+        ]
+        prompt, history = _convert_messages(messages)
+        assert prompt == "Hello"
+        assert history is None
+
+    def test_only_system_messages(self) -> None:
+        """Only system messages become the prompt."""
+        messages = [
+            ChatMessage(role="system", content="Be helpful."),
+        ]
+        prompt, history = _convert_messages(messages)
+        assert prompt == "Be helpful."
+        assert history is None
+
+    def test_empty_messages(self) -> None:
+        """Empty messages returns empty prompt."""
+        prompt, history = _convert_messages([])
+        assert prompt == ""
+        assert history is None
+
+
+# ---------------------------------------------------------------------------
+# Session ID derivation
+# ---------------------------------------------------------------------------
+
+
+class TestSessionIdDerivation:
+    """Tests for _derive_session_id()."""
+
+    @staticmethod
+    def _mock_request(headers: dict[str, str] | None = None) -> Request:
+        """Create a mock Request with given headers."""
+        mock = MagicMock(spec=Request)
+        header_dict = headers or {}
+        mock.headers = {k.lower(): v for k, v in header_dict.items()}
+        return mock
+
+    def test_explicit_session_id_header(self) -> None:
+        """X-Session-Id header takes highest priority."""
+        request = self._mock_request({"X-Session-Id": "my-session"})
+        sid = _derive_session_id("general", None, "Hello", request)
+        assert sid == "my-session"
+
+    def test_librechat_conversation_id(self) -> None:
+        """X-LibreChat-Conversation-Id header is used when no X-Session-Id."""
+        request = self._mock_request({"X-LibreChat-Conversation-Id": "conv-123"})
+        sid = _derive_session_id("general", None, "Hello", request)
+        assert sid == "conv-123:general"
+
+    def test_session_id_takes_priority_over_librechat(self) -> None:
+        """X-Session-Id takes priority over X-LibreChat-Conversation-Id."""
+        request = self._mock_request(
+            {
+                "X-Session-Id": "explicit",
+                "X-LibreChat-Conversation-Id": "libre",
+            },
+        )
+        sid = _derive_session_id("general", None, "Hello", request)
+        assert sid == "explicit"
+
+    def test_hash_fallback_deterministic(self) -> None:
+        """Hash fallback produces same ID for same inputs."""
+        request = self._mock_request()
+        sid1 = _derive_session_id("general", "user1", "Hello", request)
+        sid2 = _derive_session_id("general", "user1", "Hello", request)
+        assert sid1 == sid2
+
+    def test_different_models_different_sessions(self) -> None:
+        """Different model names produce different session IDs."""
+        request = self._mock_request()
+        sid1 = _derive_session_id("general", "user1", "Hello", request)
+        sid2 = _derive_session_id("code", "user1", "Hello", request)
+        assert sid1 != sid2
+
+    def test_different_users_different_sessions(self) -> None:
+        """Different users produce different session IDs."""
+        request = self._mock_request()
+        sid1 = _derive_session_id("general", "user1", "Hello", request)
+        sid2 = _derive_session_id("general", "user2", "Hello", request)
+        assert sid1 != sid2
+
+
+# ---------------------------------------------------------------------------
+# Error detection
+# ---------------------------------------------------------------------------
+
+
+class TestErrorDetection:
+    """Tests for _is_error_response()."""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "❌ Authentication failed (openai): Invalid API key",
+            "⏱️ Rate limited. Please wait a moment and try again.",
+            "⏰ Request timed out. Please try again.",
+            "⚠️ Error: something went wrong",
+        ],
+    )
+    def test_detects_error_prefixes(self, text: str) -> None:
+        """Detects all error emoji prefixes."""
+        assert _is_error_response(text) is True
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "[general] ❌ Authentication failed",
+            "[code] ⚠️ Error: model not available",
+            "[research] ⏱️ Rate limited",
+        ],
+    )
+    def test_detects_agent_prefix_errors(self, text: str) -> None:
+        """Detects errors with [agent_name] prefix."""
+        assert _is_error_response(text) is True
+
+    def test_normal_response_not_error(self) -> None:
+        """Normal response text is not detected as error."""
+        assert _is_error_response("Hello! How can I help you?") is False
+
+    def test_empty_string_not_error(self) -> None:
+        """Empty string is not detected as error."""
+        assert _is_error_response("") is False
+
+
+# ---------------------------------------------------------------------------
+# Content extraction
+# ---------------------------------------------------------------------------
+
+
+class TestContentExtraction:
+    """Tests for _extract_content_text()."""
+
+    def test_string_content(self) -> None:
+        """String content is returned as-is."""
+        assert _extract_content_text("Hello") == "Hello"
+
+    def test_none_content(self) -> None:
+        """None content returns empty string."""
+        assert _extract_content_text(None) == ""
+
+    def test_multimodal_content(self) -> None:
+        """Multimodal content concatenates text parts."""
+        content: list[dict] = [
+            {"type": "text", "text": "First"},
+            {"type": "image_url", "image_url": {"url": "..."}},
+            {"type": "text", "text": "Second"},
+        ]
+        assert _extract_content_text(content) == "First Second"
+
+    def test_empty_list(self) -> None:
+        """Empty list returns empty string."""
+        assert _extract_content_text([]) == ""
+
+    def test_malformed_content_part(self) -> None:
+        """Malformed content parts are skipped."""
+        content: list[dict] = [
+            {"type": "text"},  # missing "text" key
+            {"type": "text", "text": "Valid"},
+            "not a dict",  # type: ignore[list-item]
+        ]
+        assert _extract_content_text(content) == "Valid"
