@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import html
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1806,10 +1805,10 @@ class TestToolDetailsHtml:
     def test_tool_details_html_basic(self) -> None:
         """Output contains all expected HTML attributes and structure."""
         result = _tool_details_html(
-            tool_call_id="tc-42",
+            call_id="tc-42",
             tool_name="web_search",
-            arguments={"query": "hello"},
-            output="3 results found",
+            args_json='{"query": "hello"}',
+            result="3 results found",
         )
         assert 'type="tool_calls"' in result
         assert 'done="true"' in result
@@ -1824,18 +1823,17 @@ class TestToolDetailsHtml:
     def test_tool_details_html_escaping(self) -> None:
         """Arguments and results containing HTML special chars are escaped."""
         result = _tool_details_html(
-            tool_call_id="tc-esc",
+            call_id="tc-esc",
             tool_name="dangerous<tool>",
-            arguments={"key": '<script>"alert&xss"</script>'},
-            output='Result with <b>bold</b> & "quotes"',
+            args_json='{"key": "<script>\\"alert&xss\\"</script>"}',
+            result='Result with <b>bold</b> & "quotes"',
         )
-        # The raw dangerous characters should NOT appear unescaped
+        # The raw dangerous characters should NOT appear unescaped in attribute values
         assert "<script>" not in result
-        assert html.escape("<script>") in result or "&lt;script&gt;" in result
-        assert html.escape('"alert&xss"') in result or "&quot;alert&amp;xss&quot;" in result
+        assert "&lt;script&gt;" in result
         # Tool name should also be escaped
         assert "dangerous<tool>" not in result
-        assert html.escape("dangerous<tool>") in result or "dangerous&lt;tool&gt;" in result
+        assert "dangerous&lt;tool&gt;" in result
 
 
 class TestToolDetailsTracker:

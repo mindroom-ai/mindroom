@@ -754,7 +754,7 @@ def _tool_details_html(call_id: str, tool_name: str, args_json: str, result: str
     """Format a completed tool call as Open WebUI <details> HTML."""
     return (
         f'<details type="tool_calls" done="true" id="{call_id}" '
-        f'name="{tool_name}" arguments="{html.escape(args_json)}" '
+        f'name="{html.escape(tool_name)}" arguments="{html.escape(args_json)}" '
         f'result="{html.escape(result)}">\n'
         f"<summary>Tool Executed</summary>\n</details>\n"
     )
