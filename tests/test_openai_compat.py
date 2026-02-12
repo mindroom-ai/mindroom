@@ -21,7 +21,7 @@ from mindroom.api.openai_compat import (
     _extract_content_text,
     _is_error_response,
 )
-from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
+from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig, TeamConfig
 
 
 @pytest.fixture
@@ -262,18 +262,19 @@ class TestChatCompletions:
 
         assert response.status_code == 404
 
-    def test_team_model_501(self, app_client: TestClient) -> None:
-        """Team models return 501."""
+    def test_unknown_team_404(self, app_client: TestClient) -> None:
+        """Unknown team models return 404 (no teams in test_config)."""
         response = app_client.post(
             "/v1/chat/completions",
             json={
-                "model": "team/super_team",
+                "model": "team/nonexistent",
                 "messages": [{"role": "user", "content": "Hello"}],
             },
         )
 
-        assert response.status_code == 501
-        assert response.json()["error"]["code"] == "not_implemented"
+        assert response.status_code == 404
+        assert "nonexistent" in response.json()["error"]["message"]
+        assert response.json()["error"]["code"] == "model_not_found"
 
     def test_empty_messages_400(self, app_client: TestClient) -> None:
         """Empty messages array returns 400."""
@@ -1081,3 +1082,186 @@ class TestAutoRouting:
 
         assert response.status_code == 200
         assert response.json()["model"] == "general"
+
+
+# ---------------------------------------------------------------------------
+# Team completion (Phase 3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def team_config() -> Config:
+    """Create a test config with agents and a team."""
+    return Config(
+        agents={
+            "general": AgentConfig(
+                display_name="GeneralAgent",
+                role="General-purpose assistant",
+                rooms=[],
+            ),
+            "code": AgentConfig(
+                display_name="CodeAgent",
+                role="Generate code",
+                rooms=[],
+            ),
+        },
+        models={"default": ModelConfig(provider="ollama", id="test-model")},
+        router=RouterConfig(model="default"),
+        teams={
+            "super_team": TeamConfig(
+                display_name="Super Team",
+                role="Collaborative engineering team",
+                agents=["general", "code"],
+                mode="coordinate",
+            ),
+        },
+    )
+
+
+@pytest.fixture
+def team_app_client(team_config: Config) -> Iterator[TestClient]:
+    """Create a FastAPI test client with team-enabled config."""
+    from fastapi import FastAPI  # noqa: PLC0415
+
+    from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+    app = FastAPI()
+    app.include_router(router)
+    with patch("mindroom.api.openai_compat._load_config", return_value=(team_config, Path(__file__))):
+        yield TestClient(app)
+
+
+class TestTeamCompletion:
+    """Tests for team model support (Phase 3)."""
+
+    def test_team_listed_in_models(self, team_app_client: TestClient) -> None:
+        """Teams appear in /v1/models with team/ prefix."""
+        response = team_app_client.get("/v1/models")
+        assert response.status_code == 200
+        models = response.json()["data"]
+        team_models = [m for m in models if m["id"].startswith("team/")]
+        assert len(team_models) == 1
+        assert team_models[0]["id"] == "team/super_team"
+        assert team_models[0]["name"] == "Super Team"
+        assert team_models[0]["description"] == "Collaborative engineering team"
+
+    def test_unknown_team_404(self, team_app_client: TestClient) -> None:
+        """Unknown team name returns 404."""
+        response = team_app_client.post(
+            "/v1/chat/completions",
+            json={"model": "team/nonexistent", "messages": [{"role": "user", "content": "Hi"}]},
+        )
+        assert response.status_code == 404
+        assert "nonexistent" in response.json()["error"]["message"]
+
+    def test_team_non_streaming(self, team_app_client: TestClient) -> None:
+        """Non-streaming team completion returns proper OpenAI response."""
+        from agno.run.team import TeamRunOutput  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        mock_team = MagicMock()
+        mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Team consensus result"))
+        mock_agents = [MagicMock(name="GeneralAgent"), MagicMock(name="CodeAgent")]
+
+        with patch(
+            "mindroom.api.openai_compat._build_team",
+            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+        ):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Build a feature"}],
+                },
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["model"] == "team/super_team"
+        assert data["object"] == "chat.completion"
+        assert data["choices"][0]["finish_reason"] == "stop"
+
+    def test_team_streaming(self, team_app_client: TestClient) -> None:
+        """Streaming team completion returns SSE events."""
+        from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        mock_team = MagicMock()
+        mock_agents = [MagicMock(name="GeneralAgent")]
+
+        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
+            yield TeamContentEvent(content="Team ")
+            yield TeamContentEvent(content="response!")
+
+        mock_team.arun = mock_stream_events
+
+        with patch(
+            "mindroom.api.openai_compat._build_team",
+            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+        ):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Build it"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        assert "text/event-stream" in response.headers["content-type"]
+
+        lines = response.text.strip().split("\n\n")
+        # Role announcement + content chunks + finish + [DONE]
+        assert len(lines) >= 4
+
+        # First chunk is role announcement
+        first = json.loads(lines[0].removeprefix("data: "))
+        assert first["choices"][0]["delta"] == {"role": "assistant"}
+        assert first["model"] == "team/super_team"
+
+    def test_team_no_valid_agents_500(self, team_app_client: TestClient) -> None:
+        """Team with no valid agents returns 500."""
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        mock_team = MagicMock()
+        # Empty agents list → should return 500
+        with patch(
+            "mindroom.api.openai_compat._build_team",
+            return_value=([], mock_team, TeamMode.COORDINATE),
+        ):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+        assert response.status_code == 500
+        assert "no valid agents" in response.json()["error"]["message"].lower()
+
+    def test_team_execution_failure_500(self, team_app_client: TestClient) -> None:
+        """Team execution exception returns 500."""
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        mock_team = MagicMock()
+        mock_team.arun = AsyncMock(side_effect=RuntimeError("Model error"))
+        mock_agents = [MagicMock(name="GeneralAgent")]
+
+        with patch(
+            "mindroom.api.openai_compat._build_team",
+            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+        ):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+        assert response.status_code == 500
+        assert response.json()["error"]["type"] == "server_error"

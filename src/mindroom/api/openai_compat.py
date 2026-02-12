@@ -18,19 +18,25 @@ from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from mindroom.ai import AIStreamChunk, ai_response, stream_agent_response
+from mindroom.agents import create_agent
+from mindroom.ai import AIStreamChunk, ai_response, get_model_instance, stream_agent_response
 from mindroom.config import Config
 from mindroom.constants import DEFAULT_AGENTS_CONFIG, ROUTER_AGENT_NAME, STORAGE_PATH_OBJ
 from mindroom.logging_config import get_logger
 from mindroom.routing import suggest_agent
+from mindroom.teams import TeamMode, format_team_response
 from mindroom.tool_events import extract_tool_completed_info, format_tool_started_event
 
 AUTO_MODEL_NAME = "auto"
+TEAM_MODEL_PREFIX = "team/"
 RESERVED_MODEL_NAMES = {AUTO_MODEL_NAME}
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
+
+    from agno.agent import Agent
+    from agno.run.team import TeamRunOutput
 
 logger = get_logger(__name__)
 
@@ -351,12 +357,16 @@ def _validate_chat_request(
 
     agent_name = req.model
 
-    if agent_name.startswith("team/"):
-        return _error_response(
-            501,
-            "Team support via OpenAI API is not yet available",
-            code="not_implemented",
-        )
+    if agent_name.startswith(TEAM_MODEL_PREFIX):
+        team_name = agent_name.removeprefix(TEAM_MODEL_PREFIX)
+        if not config.teams or team_name not in config.teams:
+            return _error_response(
+                404,
+                f"Team '{team_name}' not found",
+                param="model",
+                code="model_not_found",
+            )
+        return None  # team execution handled in chat_completions
 
     if agent_name == AUTO_MODEL_NAME:
         return None  # auto-routing handled in chat_completions
@@ -460,6 +470,17 @@ async def list_models(
             ),
         )
 
+    # Add teams
+    for team_name, team_config in (config.teams or {}).items():
+        models.append(
+            ModelObject(
+                id=f"{TEAM_MODEL_PREFIX}{team_name}",
+                name=team_config.display_name,
+                description=team_config.role or None,
+                created=created,
+            ),
+        )
+
     response = ModelListResponse(data=models)
     return JSONResponse(content=response.model_dump())
 
@@ -501,9 +522,15 @@ async def chat_completions(
         session_id=session_id,
     )
 
-    if req.stream:
-        return await _stream_completion(agent_name, prompt, session_id, config, thread_history, req.user)
-    return await _non_stream_completion(agent_name, prompt, session_id, config, thread_history, req.user)
+    # Team execution path
+    if agent_name.startswith(TEAM_MODEL_PREFIX):
+        team_name = agent_name.removeprefix(TEAM_MODEL_PREFIX)
+        if req.stream:
+            return await _stream_team_completion(team_name, agent_name, prompt, config, thread_history)
+        return await _non_stream_team_completion(team_name, agent_name, prompt, config, thread_history)
+
+    handler = _stream_completion if req.stream else _non_stream_completion
+    return await handler(agent_name, prompt, session_id, config, thread_history, req.user)
 
 
 # ---------------------------------------------------------------------------
@@ -658,3 +685,155 @@ async def _stream_completion(
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# Team completion
+# ---------------------------------------------------------------------------
+
+
+def _build_team(team_name: str, config: Config) -> tuple[list[Agent], Any, TeamMode]:
+    """Create agents and build an agno.Team for the given team config.
+
+    Returns (agents, team, mode).
+    """
+    from agno.team import Team  # noqa: PLC0415
+
+    team_config = config.teams[team_name]
+    mode = TeamMode(team_config.mode)
+    model_name = team_config.model or "default"
+    model = get_model_instance(config, model_name)
+
+    agents: list[Agent] = []
+    for member_name in team_config.agents:
+        if member_name not in config.agents or member_name == ROUTER_AGENT_NAME:
+            logger.warning("Team member not found, skipping", team=team_name, agent=member_name)
+            continue
+        try:
+            agents.append(
+                create_agent(member_name, config, storage_path=STORAGE_PATH_OBJ, include_default_tools=False),
+            )
+        except Exception:
+            logger.warning("Failed to create team member, skipping", team=team_name, agent=member_name)
+
+    team = Team(
+        members=agents,  # type: ignore[arg-type]
+        name=f"Team-{team_name}",
+        model=model,
+        delegate_to_all_members=mode == TeamMode.COLLABORATE,
+        show_members_responses=True,
+        debug_mode=False,
+    )
+    return agents, team, mode
+
+
+def _format_team_output(response: TeamRunOutput) -> str:
+    """Format a TeamRunOutput into a single string for the API response."""
+    parts = format_team_response(response)
+    return "\n\n".join(parts) if parts else str(response.content or "")
+
+
+async def _non_stream_team_completion(
+    team_name: str,
+    model_id: str,
+    prompt: str,
+    config: Config,
+    _thread_history: list[dict[str, Any]] | None,
+) -> JSONResponse:
+    """Handle non-streaming team completion."""
+    agents, team, mode = _build_team(team_name, config)
+    if not agents:
+        return _error_response(500, "No valid agents found for team", error_type="server_error")
+
+    logger.info("Team completion request", team=team_name, mode=mode.value, members=len(agents))
+
+    try:
+        response = await team.arun(prompt)
+    except Exception:
+        logger.exception("Team execution failed", team=team_name)
+        return _error_response(500, "Team execution failed", error_type="server_error")
+
+    from agno.run.team import TeamRunOutput as _TeamRunOutput  # noqa: PLC0415
+
+    response_text = _format_team_output(response) if isinstance(response, _TeamRunOutput) else str(response)
+
+    logger.info("Team completion sent", team=team_name, stream=False)
+    completion_id = f"chatcmpl-{uuid4().hex[:12]}"
+    result = ChatCompletionResponse(
+        id=completion_id,
+        created=int(time.time()),
+        model=model_id,
+        choices=[
+            ChatCompletionChoice(
+                message=ChatMessage(role="assistant", content=response_text),
+            ),
+        ],
+    )
+    return JSONResponse(content=result.model_dump())
+
+
+async def _stream_team_completion(
+    team_name: str,
+    model_id: str,
+    prompt: str,
+    config: Config,
+    _thread_history: list[dict[str, Any]] | None,
+) -> StreamingResponse | JSONResponse:
+    """Handle streaming team completion via SSE."""
+    agents, team, mode = _build_team(team_name, config)
+    if not agents:
+        return _error_response(500, "No valid agents found for team", error_type="server_error")
+
+    logger.info("Team streaming request", team=team_name, mode=mode.value, members=len(agents))
+
+    try:
+        stream = team.arun(prompt, stream=True, stream_events=True)
+    except Exception:
+        logger.exception("Team streaming failed to start", team=team_name)
+        return _error_response(500, "Team execution failed", error_type="server_error")
+
+    # Peek at first event
+    first_event = await anext(aiter(stream), None)
+    if first_event is None:
+        return _error_response(500, "Team returned empty response", error_type="server_error")
+
+    completion_id = f"chatcmpl-{uuid4().hex[:12]}"
+    created = int(time.time())
+
+    async def event_generator() -> AsyncIterator[str]:
+        # 1. Role announcement
+        yield f"data: {_chunk_json(completion_id, created, model_id, delta={'role': 'assistant'})}\n\n"
+
+        # 2. First event
+        text = _extract_team_stream_text(first_event)
+        if text:
+            yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': text})}\n\n"
+
+        # 3. Remaining events
+        async for event in stream:
+            text = _extract_team_stream_text(event)
+            if text:
+                yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': text})}\n\n"
+
+        # 4. Finish
+        logger.info("Team completion sent", team=team_name, stream=True)
+        yield f"data: {_chunk_json(completion_id, created, model_id, delta={}, finish_reason='stop')}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+def _extract_team_stream_text(event: object) -> str | None:
+    """Extract text content from a team stream event."""
+    from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
+    from agno.run.team import TeamRunOutput as _TeamRunOutput  # noqa: PLC0415
+
+    if isinstance(event, TeamContentEvent) and event.content:
+        return str(event.content)
+    if isinstance(event, RunContentEvent) and event.content:
+        return str(event.content)
+    if isinstance(event, _TeamRunOutput):
+        return _format_team_output(event)
+    if isinstance(event, str):
+        return event
+    return None
