@@ -1050,7 +1050,104 @@ def _strict_openai_stream_event_chunks(  # noqa: PLR0911
     return ([], False, False)
 
 
-async def _non_stream_strict_openai_completion(  # noqa: C901, PLR0911, PLR0912
+async def _strict_openai_validate_and_run(  # noqa: PLR0911
+    *,
+    agent_name: str,
+    prompt: str,
+    session_id: str,
+    config: Config,
+    thread_history: list[dict[str, Any]] | None,
+    user: str | None,
+    knowledge: Knowledge | None,
+    messages: list[ChatMessage],
+    stream: bool,
+) -> JSONResponse | RunOutput | AsyncIterator:
+    """Validate strict OpenAI request and start/continue the agent run.
+
+    Must be called under the session lock. Returns JSONResponse on validation
+    error, RunOutput for non-streaming success, or an async iterator for
+    streaming success.
+    """
+    if session_id in _openai_state.active_stream_sessions:
+        return _error_response(
+            409,
+            "Another strict OpenAI stream is already active for this session",
+            param="x-session-id",
+        )
+
+    pending = _openai_state.pending_runs.get(session_id)
+    if pending is not None and pending.agent_name != agent_name:
+        return _error_response(
+            400,
+            "Pending tool run belongs to a different model for this session",
+            param="model",
+        )
+
+    tool_results = _extract_tool_results(messages)
+    stream_kwargs: dict[str, Any] = {"stream": True, "stream_events": True} if stream else {}
+    try:
+        if pending is not None:
+            if not tool_results:
+                return _error_response(400, "Tool result messages are required to continue the paused run")
+            missing_error = _apply_tool_results_to_requirements(pending.requirements, tool_results)
+            if missing_error is not None:
+                return _error_response(400, missing_error, param="messages")
+            agent = _create_strict_openai_agent(agent_name, config, knowledge)
+            result = agent.acontinue_run(
+                run_id=pending.run_id,
+                requirements=pending.requirements,
+                session_id=session_id,
+                user_id=user,
+                **stream_kwargs,
+            )
+            return result if stream else await result  # type: ignore[no-any-return]
+
+        if tool_results:
+            return _error_response(400, "No pending tool run exists for these tool results", param="messages")
+
+        enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, STORAGE_PATH_OBJ, config, None)
+        full_prompt = build_prompt_with_thread_history(enhanced_prompt, thread_history)
+        agent = _create_strict_openai_agent(agent_name, config, knowledge)
+        result = agent.arun(full_prompt, session_id=session_id, user_id=user, **stream_kwargs)
+        return result if stream else await result  # type: ignore[no-any-return]
+    except Exception:
+        logger.exception("Strict OpenAI run failed", model=agent_name, session_id=session_id)
+        _clear_pending_openai_run(session_id)
+        return _error_response(500, "Agent execution failed", error_type="server_error")
+
+
+def _validate_first_strict_stream_event(
+    first_event: RunOutputEvent | RunOutput | str | None,
+    session_id: str,
+) -> JSONResponse | None:
+    """Validate the first event from a strict OpenAI stream.
+
+    Returns a JSONResponse error if the event indicates a failure, None if valid.
+    """
+    if first_event is None:
+        _clear_pending_openai_run(session_id)
+        return _error_response(500, "Agent returned empty response", error_type="server_error")
+    if isinstance(first_event, RunErrorEvent):
+        _clear_pending_openai_run(session_id)
+        return _error_response(500, "Agent execution failed", error_type="server_error")
+    if isinstance(first_event, str) and _is_error_response(first_event):
+        _clear_pending_openai_run(session_id)
+        return _error_response(500, "Agent execution failed", error_type="server_error")
+    # Non-tool pauses (confirmation/user-input) are unsupported in strict mode.
+    if isinstance(first_event, RunPausedEvent) and not _external_requirements(first_event.requirements):
+        _clear_pending_openai_run(session_id)
+        return _error_response(400, _strict_openai_non_tool_pause_message(), error_type="server_error")
+    if (
+        isinstance(first_event, RunOutput)
+        and first_event.status == RunStatus.paused
+        and not _external_requirements(first_event.requirements)
+    ):
+        _clear_pending_openai_run(session_id)
+        return _error_response(400, _strict_openai_non_tool_pause_message(), error_type="server_error")
+    return None
+
+
+async def _non_stream_strict_openai_completion(
     agent_name: str,
     prompt: str,
     session_id: str,
@@ -1063,51 +1160,22 @@ async def _non_stream_strict_openai_completion(  # noqa: C901, PLR0911, PLR0912
     """Handle strict OpenAI mode for non-streaming responses."""
     _cleanup_expired_openai_runs()
     session_lock = _get_openai_session_lock(session_id)
-    tool_results = _extract_tool_results(messages)
 
     async with session_lock:
-        if session_id in _openai_state.active_stream_sessions:
-            return _error_response(
-                409,
-                "Another strict OpenAI stream is already active for this session",
-                param="x-session-id",
-            )
-
-        pending = _openai_state.pending_runs.get(session_id)
-        if pending is not None and pending.agent_name != agent_name:
-            return _error_response(
-                400,
-                "Pending tool run belongs to a different model for this session",
-                param="model",
-            )
-
-        try:
-            if pending is not None:
-                if not tool_results:
-                    return _error_response(400, "Tool result messages are required to continue the paused run")
-                missing_error = _apply_tool_results_to_requirements(pending.requirements, tool_results)
-                if missing_error is not None:
-                    return _error_response(400, missing_error, param="messages")
-
-                agent = _create_strict_openai_agent(agent_name, config, knowledge)
-                run_output = await agent.acontinue_run(
-                    run_id=pending.run_id,
-                    requirements=pending.requirements,
-                    session_id=session_id,
-                    user_id=user,
-                )
-            else:
-                if tool_results:
-                    return _error_response(400, "No pending tool run exists for these tool results", param="messages")
-
-                enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, STORAGE_PATH_OBJ, config, None)
-                full_prompt = build_prompt_with_thread_history(enhanced_prompt, thread_history)
-                agent = _create_strict_openai_agent(agent_name, config, knowledge)
-                run_output = await agent.arun(full_prompt, session_id=session_id, user_id=user)
-        except Exception:
-            logger.exception("Strict OpenAI run failed", model=agent_name, session_id=session_id)
-            _clear_pending_openai_run(session_id)
-            return _error_response(500, "Agent execution failed", error_type="server_error")
+        result = await _strict_openai_validate_and_run(
+            agent_name=agent_name,
+            prompt=prompt,
+            session_id=session_id,
+            config=config,
+            thread_history=thread_history,
+            user=user,
+            knowledge=knowledge,
+            messages=messages,
+            stream=False,
+        )
+        if isinstance(result, JSONResponse):
+            return result
+        run_output: RunOutput = result  # type: ignore[assignment]
 
         completion_id = f"chatcmpl-{uuid4().hex[:12]}"
         created = int(time.time())
@@ -1164,7 +1232,69 @@ async def _non_stream_strict_openai_completion(  # noqa: C901, PLR0911, PLR0912
         return JSONResponse(content=response.model_dump(exclude_none=True))
 
 
-async def _stream_strict_openai_completion(  # noqa: C901, PLR0911, PLR0912, PLR0915
+async def _strict_openai_event_generator(
+    *,
+    completion_id: str,
+    created: int,
+    agent_name: str,
+    session_id: str,
+    session_lock: asyncio.Lock,
+    first_event: RunOutputEvent | RunOutput | str,
+    event_stream: AsyncIterator,
+) -> AsyncIterator[str]:
+    """Yield SSE chunks for a strict OpenAI streaming response."""
+    stopped_on_pause = False
+    should_stop = False
+    try:
+        yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'role': 'assistant'})}\n\n"
+
+        async with session_lock:
+            payloads, should_stop, stopped_on_pause = _strict_openai_stream_event_chunks(
+                event=first_event,
+                completion_id=completion_id,
+                created=created,
+                agent_name=agent_name,
+                session_id=session_id,
+            )
+        for payload in payloads:
+            yield f"data: {payload}\n\n"
+
+        if not should_stop:
+            async for event in event_stream:
+                async with session_lock:
+                    payloads, should_stop, stopped_on_pause = _strict_openai_stream_event_chunks(
+                        event=event,
+                        completion_id=completion_id,
+                        created=created,
+                        agent_name=agent_name,
+                        session_id=session_id,
+                    )
+                for payload in payloads:
+                    yield f"data: {payload}\n\n"
+                if should_stop:
+                    break
+
+        if not stopped_on_pause:
+            async with session_lock:
+                _clear_pending_openai_run(session_id)
+            yield f"data: {_chunk_json(completion_id, created, agent_name, delta={}, finish_reason='stop')}\n\n"
+    except Exception:
+        logger.exception("Strict OpenAI stream failed during iteration", model=agent_name, session_id=session_id)
+        async with session_lock:
+            _clear_pending_openai_run(session_id)
+        for payload in (
+            _strict_mode_error_chunk(completion_id, created, agent_name, "Agent execution failed"),
+            _chunk_json(completion_id, created, agent_name, delta={}, finish_reason="stop"),
+        ):
+            yield f"data: {payload}\n\n"
+    finally:
+        async with session_lock:
+            _openai_state.active_stream_sessions.discard(session_id)
+        _cleanup_expired_openai_runs()
+        yield "data: [DONE]\n\n"
+
+
+async def _stream_strict_openai_completion(
     agent_name: str,
     prompt: str,
     session_id: str,
@@ -1176,137 +1306,52 @@ async def _stream_strict_openai_completion(  # noqa: C901, PLR0911, PLR0912, PLR
 ) -> StreamingResponse | JSONResponse:
     """Handle strict OpenAI mode for streaming responses."""
     _cleanup_expired_openai_runs()
-    tool_results = _extract_tool_results(messages)
     completion_id = f"chatcmpl-{uuid4().hex[:12]}"
     created = int(time.time())
     session_lock = _get_openai_session_lock(session_id)
-    async with session_lock:
-        if session_id in _openai_state.active_stream_sessions:
-            return _error_response(
-                409,
-                "Another strict OpenAI stream is already active for this session",
-                param="x-session-id",
-            )
 
-        pending = _openai_state.pending_runs.get(session_id)
-        if pending is not None and pending.agent_name != agent_name:
-            return _error_response(
-                400,
-                "Pending tool run belongs to a different model for this session",
-                param="model",
-            )
+    async with session_lock:
+        result = await _strict_openai_validate_and_run(
+            agent_name=agent_name,
+            prompt=prompt,
+            session_id=session_id,
+            config=config,
+            thread_history=thread_history,
+            user=user,
+            knowledge=knowledge,
+            messages=messages,
+            stream=True,
+        )
+        if isinstance(result, JSONResponse):
+            return result
+        event_stream: AsyncIterator = result  # type: ignore[assignment]
 
         try:
-            if pending is not None:
-                if not tool_results:
-                    return _error_response(400, "Tool result messages are required to continue the paused run")
-                missing_error = _apply_tool_results_to_requirements(pending.requirements, tool_results)
-                if missing_error is not None:
-                    return _error_response(400, missing_error, param="messages")
-                agent = _create_strict_openai_agent(agent_name, config, knowledge)
-                stream = agent.acontinue_run(
-                    run_id=pending.run_id,
-                    requirements=pending.requirements,
-                    session_id=session_id,
-                    user_id=user,
-                    stream=True,
-                    stream_events=True,
-                )
-            else:
-                if tool_results:
-                    return _error_response(400, "No pending tool run exists for these tool results", param="messages")
-                enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, STORAGE_PATH_OBJ, config, None)
-                full_prompt = build_prompt_with_thread_history(enhanced_prompt, thread_history)
-                agent = _create_strict_openai_agent(agent_name, config, knowledge)
-                stream = agent.arun(
-                    full_prompt,
-                    session_id=session_id,
-                    user_id=user,
-                    stream=True,
-                    stream_events=True,
-                )
-            first_event = await anext(aiter(stream), None)
+            first_event = await anext(aiter(event_stream), None)
         except Exception:
             logger.exception("Strict OpenAI streaming run failed", model=agent_name, session_id=session_id)
             _clear_pending_openai_run(session_id)
             return _error_response(500, "Agent execution failed", error_type="server_error")
 
-        if first_event is None:
-            _clear_pending_openai_run(session_id)
-            return _error_response(500, "Agent returned empty response", error_type="server_error")
-        if isinstance(first_event, RunErrorEvent):
-            _clear_pending_openai_run(session_id)
-            return _error_response(500, "Agent execution failed", error_type="server_error")
-        if isinstance(first_event, str) and _is_error_response(first_event):
-            _clear_pending_openai_run(session_id)
-            return _error_response(500, "Agent execution failed", error_type="server_error")
-        # If the very first event is an unsupported (non-tool) pause, return
-        # 400 before starting SSE — matching the non-streaming contract.
-        if isinstance(first_event, RunPausedEvent) and not _external_requirements(first_event.requirements):
-            _clear_pending_openai_run(session_id)
-            return _error_response(400, _strict_openai_non_tool_pause_message(), error_type="server_error")
-        if (
-            isinstance(first_event, RunOutput)
-            and first_event.status == RunStatus.paused
-            and not _external_requirements(first_event.requirements)
-        ):
-            _clear_pending_openai_run(session_id)
-            return _error_response(400, _strict_openai_non_tool_pause_message(), error_type="server_error")
+        error = _validate_first_strict_stream_event(first_event, session_id)
+        if error is not None:
+            return error
+        assert first_event is not None  # guaranteed by _validate_first_strict_stream_event
 
         _openai_state.active_stream_sessions.add(session_id)
 
-    async def event_generator() -> AsyncIterator[str]:
-        stopped_on_pause = False
-        should_stop = False
-        try:
-            yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'role': 'assistant'})}\n\n"
-
-            async with session_lock:
-                payloads, should_stop, stopped_on_pause = _strict_openai_stream_event_chunks(
-                    event=first_event,
-                    completion_id=completion_id,
-                    created=created,
-                    agent_name=agent_name,
-                    session_id=session_id,
-                )
-            for payload in payloads:
-                yield f"data: {payload}\n\n"
-
-            if not should_stop:
-                async for event in stream:
-                    async with session_lock:
-                        payloads, should_stop, stopped_on_pause = _strict_openai_stream_event_chunks(
-                            event=event,
-                            completion_id=completion_id,
-                            created=created,
-                            agent_name=agent_name,
-                            session_id=session_id,
-                        )
-                    for payload in payloads:
-                        yield f"data: {payload}\n\n"
-                    if should_stop:
-                        break
-
-            if not stopped_on_pause:
-                async with session_lock:
-                    _clear_pending_openai_run(session_id)
-                yield f"data: {_chunk_json(completion_id, created, agent_name, delta={}, finish_reason='stop')}\n\n"
-        except Exception:
-            logger.exception("Strict OpenAI stream failed during iteration", model=agent_name, session_id=session_id)
-            async with session_lock:
-                _clear_pending_openai_run(session_id)
-            for payload in (
-                _strict_mode_error_chunk(completion_id, created, agent_name, "Agent execution failed"),
-                _chunk_json(completion_id, created, agent_name, delta={}, finish_reason="stop"),
-            ):
-                yield f"data: {payload}\n\n"
-        finally:
-            async with session_lock:
-                _openai_state.active_stream_sessions.discard(session_id)
-            _cleanup_expired_openai_runs()
-            yield "data: [DONE]\n\n"
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        _strict_openai_event_generator(
+            completion_id=completion_id,
+            created=created,
+            agent_name=agent_name,
+            session_id=session_id,
+            session_lock=session_lock,
+            first_event=first_event,
+            event_stream=event_stream,
+        ),
+        media_type="text/event-stream",
+    )
 
 
 # ---------------------------------------------------------------------------
