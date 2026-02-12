@@ -10,10 +10,10 @@ from pydantic import BaseModel, Field
 from .agents import describe_agent
 from .ai import get_model_instance
 from .logging_config import get_logger
+from .matrix.identity import MatrixID
 
 if TYPE_CHECKING:
     from .config import Config
-    from .matrix.identity import MatrixID
 
 logger = get_logger(__name__)
 
@@ -128,8 +128,6 @@ async def suggest_agent_for_message(
     objects to plain agent names and resolves sender identities in
     thread context.
     """
-    from .matrix.identity import MatrixID  # noqa: PLC0415
-
     agent_names = [name for mid in available_agents if (name := mid.agent_name(config)) is not None]
 
     # Resolve Matrix sender IDs to readable names for thread context

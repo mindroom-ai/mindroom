@@ -13,16 +13,21 @@ import time
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import uuid4
 
+from agno.knowledge.knowledge import Knowledge
 from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
+from agno.run.team import RunContentEvent as TeamContentEvent
+from agno.run.team import TeamRunOutput
+from agno.team import Team
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from mindroom.agents import create_agent
 from mindroom.ai import AIStreamChunk, ai_response, get_model_instance, stream_agent_response
 from mindroom.config import Config
 from mindroom.constants import DEFAULT_AGENTS_CONFIG, ROUTER_AGENT_NAME, STORAGE_PATH_OBJ
 from mindroom.knowledge import get_knowledge_manager, initialize_knowledge_managers
+from mindroom.knowledge_utils import MultiKnowledgeVectorDb
 from mindroom.logging_config import get_logger
 from mindroom.routing import suggest_agent
 from mindroom.teams import TeamMode, format_team_response
@@ -37,10 +42,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.agent import Agent
-    from agno.knowledge.knowledge import Knowledge
     from agno.run.agent import RunOutput
-    from agno.run.team import TeamRunOutput
-    from agno.team import Team
 
 logger = get_logger(__name__)
 
@@ -395,7 +397,7 @@ def _parse_chat_request(
     """
     try:
         req = ChatCompletionRequest(**json.loads(body))
-    except Exception:
+    except (json.JSONDecodeError, ValidationError):
         return _error_response(400, "Invalid request body")
 
     config, _ = _load_config()
@@ -457,9 +459,7 @@ def _resolve_knowledge(agent_name: str, config: Config) -> Knowledge | None:
     if agent_config is None or not agent_config.knowledge_bases:
         return None
 
-    from agno.knowledge.knowledge import Knowledge as _Knowledge  # noqa: PLC0415
-
-    knowledges: list[_Knowledge] = []
+    knowledges: list[Knowledge] = []
     for base_id in agent_config.knowledge_bases:
         manager = get_knowledge_manager(base_id)
         if manager is None:
@@ -473,9 +473,7 @@ def _resolve_knowledge(agent_name: str, config: Config) -> Knowledge | None:
         return knowledges[0]
 
     # Multiple knowledge bases — merge via MultiKnowledgeVectorDb
-    from mindroom.bot import MultiKnowledgeVectorDb  # noqa: PLC0415
-
-    return _Knowledge(
+    return Knowledge(
         name=f"{agent_name}_multi_knowledge",
         vector_db=MultiKnowledgeVectorDb(vector_dbs=[knowledge.vector_db for knowledge in knowledges]),
         max_results=max(knowledge.max_results for knowledge in knowledges),
@@ -778,8 +776,6 @@ def _build_team(team_name: str, config: Config) -> tuple[list[Agent], Team | Non
     Returns (agents, team, mode). When no agents can be created,
     returns ([], None, mode) so callers can handle it gracefully.
     """
-    from agno.team import Team  # noqa: PLC0415
-
     team_config = config.teams[team_name]
     mode = TeamMode(team_config.mode)
     model_name = team_config.model or "default"
@@ -839,9 +835,7 @@ async def _non_stream_team_completion(
         logger.exception("Team execution failed", team=team_name)
         return _error_response(500, "Team execution failed", error_type="server_error")
 
-    from agno.run.team import TeamRunOutput as _TeamRunOutput  # noqa: PLC0415
-
-    response_text = _format_team_output(response) if isinstance(response, _TeamRunOutput) else str(response)
+    response_text = _format_team_output(response) if isinstance(response, TeamRunOutput) else str(response)
 
     if _is_error_response(response_text):
         logger.warning("Team response returned error", team=team_name, error=response_text)
@@ -913,14 +907,11 @@ async def _stream_team_completion(
 
 def _extract_team_stream_text(event: object) -> str | None:
     """Extract text content from a team stream event."""
-    from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
-    from agno.run.team import TeamRunOutput as _TeamRunOutput  # noqa: PLC0415
-
     if isinstance(event, TeamContentEvent) and event.content:
         return str(event.content)
     if isinstance(event, RunContentEvent) and event.content:
         return str(event.content)
-    if isinstance(event, _TeamRunOutput):
+    if isinstance(event, TeamRunOutput):
         return _format_team_output(event)
     if isinstance(event, str):
         return event
