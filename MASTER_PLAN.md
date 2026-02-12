@@ -1,6 +1,6 @@
 # Master Plan: OpenAI-Compatible API for MindRoom Agents
 
-> Synthesized from three independent plans, refined by multi-agent review.
+> Synthesized from three independent plans, refined by two rounds of multi-agent review.
 
 ## Goal
 
@@ -12,6 +12,28 @@ MindRoom is a general-purpose agent backend, but today it's locked behind Matrix
 
 - **MindRoom becomes a universal agent backend.** An OpenAI-compatible API is the de facto interop standard. One implementation unlocks dozens of chat frontends — LibreChat, Open WebUI, LobeChat, ChatBox, BoltAI, and anything else that can talk to an OpenAI endpoint. MindRoom stops being "the Matrix agent thing" and becomes "the agent backend that works everywhere."
 - **People already running chat UIs can plug in MindRoom without changing their workflow.** Someone using LibreChat today just adds a custom endpoint and sees MindRoom agents in their model dropdown, right next to Claude and GPT. No new UI to learn, no Matrix account to create, no bridges to configure. They pick an agent instead of picking a model, and tools/memory work transparently in Phase 1, with knowledge bases added in a later phase.
+
+## What the User Sees
+
+A user opens LibreChat (or Open WebUI, LobeChat, etc.) and sees a model picker. Instead of just "GPT-4" and "Claude", they also see:
+
+- **CodeAgent** — "Generate code, manage files, execute shell commands"
+- **ResearchAgent** — "Research topics, summarize findings"
+- **GeneralAgent** — "General-purpose assistant"
+
+Each one is a fully-featured MindRoom agent with its own tools, personality, memory, and instructions. The user picks "CodeAgent", types a question, and gets a response from an agent that has file tools, shell access, and coding-specific instructions — not just a raw LLM.
+
+When the admin adds a new agent to `config.yaml`, it automatically appears in the frontend's model list the next time the frontend refreshes (typically on page load). No frontend reconfiguration needed.
+
+### Auto-discovery flow
+
+1. **One-time setup**: User adds MindRoom as a custom OpenAI-compatible endpoint in their chat frontend (URL + API key). Done once.
+2. **Model fetch**: The frontend calls `GET /v1/models`. MindRoom reads `config.yaml` and returns every configured agent as a model object with its display name and description.
+3. **Agent selection**: The frontend populates its model picker. The user sees agent names and descriptions alongside any other configured models.
+4. **Chat**: The user picks an agent and chats. The frontend sends `POST /v1/chat/completions` with `model: "code"`. MindRoom routes to that specific agent with all its tools, instructions, and memory.
+5. **Dynamic updates**: When an admin adds, removes, or renames an agent in `config.yaml`, the change appears automatically — `load_runtime_config()` re-reads the YAML file on each call, so hot-reloaded agents are immediately discoverable.
+
+The frontend does not know or care that "CodeAgent" is an agent with tools and memory rather than a raw model. It is transparent.
 
 ---
 
@@ -33,13 +55,14 @@ Chat Frontend (LibreChat / Open WebUI / etc.)
 │                │  GET /v1/models      ┌──────────────────────────────┐
 │  Model Picker  │ ───────────────────> │  openai_compat.py            │
 │                │ <─────────────────── │  → list config.agents        │
-│                │                      │                              │
-│  Chat UI       │  POST /v1/chat/      │  → parse OpenAI messages     │
-│                │  completions         │  → derive session_id         │
-│                │ ───────────────────> │  → call ai_response() or     │
-│                │ <─────────────────── │    stream_agent_response()   │
-│                │  (JSON or SSE)       │  → format to OpenAI response │
-└────────────────┘                      └──────────────────────────────┘
+│                │                      │    (with name + description) │
+│  Chat UI       │  POST /v1/chat/      │                              │
+│                │  completions         │  → parse OpenAI messages     │
+│                │ ───────────────────> │  → derive session_id         │
+│                │ <─────────────────── │  → call ai_response() or    │
+│                │  (JSON or SSE)       │    stream_agent_response()   │
+└────────────────┘                      │  → format to OpenAI response │
+                                        └──────────────────────────────┘
                                               │
                                               │ calls (Matrix-free)
                                               ▼
@@ -62,7 +85,7 @@ No Matrix dependency. MindRoom can run purely as an OpenAI-compatible agent serv
 | `stream: true` | `stream_agent_response()` → SSE |
 | `stream: false` | `ai_response()` → JSON |
 | `user` field | `user_id` parameter for Agno learning |
-| `GET /v1/models` | Enumerate `config.agents` (Phase 1), add `auto` (Phase 2), teams (Phase 3) |
+| `GET /v1/models` | Enumerate `config.agents` (Phase 1), add `auto` (Phase 2), teams (Phase 3). Router agent is excluded (internal construct). |
 
 ## Implementation Phases
 
@@ -73,7 +96,7 @@ No Matrix dependency. MindRoom can run purely as an OpenAI-compatible agent serv
 #### Pydantic models
 
 ```python
-from pydantic import ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 class ChatMessage(BaseModel):
     role: Literal["system", "developer", "user", "assistant", "tool"]
@@ -97,9 +120,9 @@ class ChatCompletionRequest(BaseModel):
     presence_penalty: float | None = None
     seed: int | None = None
     response_format: dict | None = None
-    tools: list | None = None
-    tool_choice: str | dict | None = None
-    stream_options: dict | None = None
+    tools: list | None = None          # ignored — agent uses its own configured tools
+    tool_choice: str | dict | None = None  # ignored
+    stream_options: dict | None = None     # ignored (include_usage is a no-op since usage is zeros)
     logprobs: bool | None = None
     logit_bias: dict | None = None
 
@@ -142,10 +165,13 @@ class ChatCompletionChunk(BaseModel):
 # --- Model listing ---
 
 class ModelObject(BaseModel):
-    id: str
+    id: str                               # internal agent name: "code" (stable, URL-safe)
     object: str = "model"
-    created: int = 0                  # ideally: int(config_file_mtime) or int(time.time())
+    created: int = 0
     owned_by: str = "mindroom"
+    # Extra fields — ignored by strict clients, used by Open WebUI (reads `name`) and others:
+    name: str | None = None               # display name from config: "CodeAgent"
+    description: str | None = None        # agent role from config: "Generate code, manage files..."
 
 class ModelListResponse(BaseModel):
     object: str = "list"
@@ -163,22 +189,33 @@ class OpenAIErrorResponse(BaseModel):
     error: OpenAIError
 ```
 
+**Model ID strategy:** Model IDs use the internal agent name (`code`, not `CodeAgent`) for stability. Renaming an agent's `display_name` in config does not break existing client configurations or session history. Display names are conveyed via the `name` field in the model response for frontends that support it (Open WebUI reads `name`; LibreChat uses the `id`).
+
 #### `GET /v1/models`
 
 - Call `config, _ = load_runtime_config()` (returns a tuple)
-- Return each agent as `{"id": "code", "object": "model", "created": <timestamp>, "owned_by": "mindroom"}`
-- Do not return teams in Phase 1
-- Phase 2 adds `auto`
-- Phase 3 adds `team/<name>`
+- Return each agent with rich metadata:
+  ```python
+  ModelObject(
+      id=agent_name,                       # "code"
+      name=agent_config.display_name,      # "CodeAgent"
+      description=agent_config.role,       # "Generate code, manage files..."
+      created=int(config_file_mtime),
+  )
+  ```
+- Do not return the router agent (internal construct, not user-selectable)
+- Do not return teams in Phase 1; Phase 2 adds `auto`; Phase 3 adds `team/<name>`
+- If no agents are configured, return an empty list
 
 #### `POST /v1/chat/completions`
 
 **Message conversion:**
 1. Extract the last `user` message as `prompt`
 2. Convert all prior `user`/`assistant` messages to `thread_history`: `[{"sender": role, "body": content}]`
-3. If a `system` or `developer` message exists, prepend it to the prompt (the agent already has its own system instructions, so this is additive context)
+3. If a `system` or `developer` message exists, prepend it to the prompt. Note: this is additive — the agent already has its own system instructions and personality. Client system messages augment, not replace, the agent's built-in identity.
 4. Skip `tool` role messages (these are from previous tool-call conversations the client replays; the agent handles its own tool calls)
 5. When `content` is a list (multimodal), extract and concatenate the `text` parts: `" ".join(p["text"] for p in content if p.get("type") == "text")`
+6. Pass `request.user` (if present) as `user_id` to `ai_response()` / `stream_agent_response()` — this drives Agno's LearningMachine
 
 **Session ID derivation (priority cascade):**
 1. `X-Session-Id` header (explicit control)
@@ -192,6 +229,8 @@ Both LibreChat and Open WebUI send the full message history with every request (
 **Streaming (SSE):**
 
 ```python
+from agno.run.agent import RunContentEvent, ToolCallStartedEvent, ToolCallCompletedEvent
+
 async def _stream_response(agent_name, prompt, session_id, config, ...):
     completion_id = f"chatcmpl-{uuid4().hex[:12]}"
     created = int(time.time())
@@ -205,8 +244,9 @@ async def _stream_response(agent_name, prompt, session_id, config, ...):
             if isinstance(event, RunContentEvent) and event.content:
                 yield f"data: {json.dumps(chunk_payload(completion_id, created, agent_name, delta={'content': str(event.content)}))}\n\n"
             elif isinstance(event, (ToolCallStartedEvent, ToolCallCompletedEvent)):
-                # Format tool events as content text (same as Matrix bridge does)
-                text = format_tool_event_as_text(event)
+                # Format tool events as content text using the same pattern as
+                # stream_agent_response() in ai.py (format_tool_started_event / complete_pending_tool_block)
+                text = _format_tool_event(event)
                 if text:
                     yield f"data: {json.dumps(chunk_payload(completion_id, created, agent_name, delta={'content': text}))}\n\n"
             elif isinstance(event, str):
@@ -226,11 +266,13 @@ async def _stream_response(agent_name, prompt, session_id, config, ...):
 
 #### Error handling: `ai_response()` never raises
 
-`ai_response()` catches all exceptions internally and returns a user-friendly error *string* instead of raising. This means the OpenAI compat layer will get a 200-level response containing error text as if it were a normal agent reply. The layer must detect these error strings (they come from `get_user_friendly_error_message()` and contain recognizable patterns) and convert them to proper HTTP 500 responses with OpenAI error format. Same applies to `stream_agent_response()`, which yields error strings.
+`ai_response()` catches all exceptions internally and returns a user-friendly error *string* instead of raising. This means the OpenAI compat layer will get a 200-level response containing error text as if it were a normal agent reply. The layer must detect these error strings and convert them to proper HTTP 500 responses with OpenAI error format. Same applies to `stream_agent_response()`, which yields error strings.
+
+Detection heuristic: error strings from `get_user_friendly_error_message()` in `error_handling.py` contain emoji prefixes and recognizable patterns. The simplest approach is to check if the response starts with known error emoji characters or the `[agent_name]` bracket pattern.
 
 #### Scheduler tool: Matrix dependency in all agents
 
-`create_agent()` appends the `scheduler` tool to ALL agents by default (`DEFAULT_AGENT_TOOL_NAMES = ["scheduler"]`). The scheduler requires a Matrix client context (`SchedulingToolContext`) that won't be available via the API. The compat layer should strip `scheduler` from the tool list when creating agents for API use, or accept that scheduler tool calls will fail with a runtime error (acceptable for Phase 1, since most chat interactions don't trigger scheduling).
+`create_agent()` appends the `scheduler` tool to ALL agents by default (`DEFAULT_AGENT_TOOL_NAMES = ["scheduler"]`). The scheduler uses a `ContextVar` (`SchedulingToolContext`) — when no context is set, `get_scheduling_tool_context()` returns `None`, and the tool fails at call time when it tries to use the `None` context. The compat layer should strip `scheduler` from the tool list when creating agents for API use, or accept that scheduler tool calls will fail with a runtime error (acceptable for Phase 1, since most chat interactions don't trigger scheduling).
 
 #### Room memory: not available without room_id
 
@@ -265,6 +307,17 @@ All errors use OpenAI-style format:
 from mindroom.api.openai_compat import router as openai_compat_router
 app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify_user
 ```
+
+CORS is already handled by the existing `CORSMiddleware` in `main.py` — no additional configuration needed for the `/v1/` prefix.
+
+Health check is already available at `GET /api/health`. No separate `/v1/health` endpoint needed.
+
+#### Logging
+
+Use the existing `get_logger(__name__)` from `mindroom.logging_config`. Log at minimum:
+- Each incoming request with model name and streaming mode
+- Session ID derivation result
+- Agent response completion or error
 
 #### Knowledge base integration
 
@@ -307,6 +360,12 @@ In `openai_compat.py`:
 - Pass the `Knowledge` object to `ai_response()` / `stream_agent_response()`
 - Cache initialized knowledge managers (they load vector stores, which is expensive)
 
+### Future considerations
+
+- Agent avatars/icons for chat frontends that support per-model icons
+- Richer capability metadata (list of tools per agent) for frontends that show it
+- Native OpenAI `tool_calls` format (streaming tool call deltas) instead of inline text
+
 ## Files to create/modify
 
 | File | Action | Phase |
@@ -320,15 +379,16 @@ In `openai_compat.py`:
 
 ### Unit / API tests (`tests/test_openai_compat.py`)
 
-- **Models endpoint**: lists agents from config (no teams in Phase 1)
+- **Models endpoint**: lists agents from config with `name` and `description`; no teams; router excluded; empty agents returns empty list
 - **Chat completion (non-streaming)**: correct OpenAI response shape, correct agent invocation, message conversion (messages → thread_history + prompt)
 - **Chat completion (streaming)**: SSE format with initial role chunk, content chunks, `finish_reason: "stop"` final chunk, `data: [DONE]` terminator
 - **Auth**: valid key accepted, missing key returns 401, wrong key returns 401, no key required when env var unset
 - **Errors**: unknown model returns 404 with `param: "model"`, empty messages returns 400, explicit `team/...` model returns 501
 - **Session ID**: same conversation header → same session_id, different conversations → different session_ids
-- **Message parsing**: `content` as string, as list of content parts, as `None` — all handled correctly
+- **Message parsing**: `content` as string, as list of content parts, as `None` — all handled correctly; `developer` role treated as `system`; `tool` role messages skipped
 - **Extra fields**: request with unknown fields (e.g., `logit_bias`, `seed`) does not cause 422
 - **Error string detection**: `ai_response()` returning error string → HTTP 500 response
+- **User ID passthrough**: `request.user` forwarded as `user_id` to agent functions
 
 Mock strategy: monkeypatch `ai_response` and `stream_agent_response` for deterministic outputs. Use a temporary config fixture with 2-3 agents.
 
@@ -338,7 +398,7 @@ Mock strategy: monkeypatch `ai_response` and `stream_agent_response` for determi
 # Start backend
 just start-backend-dev
 
-# List models
+# List models (should show agent names and descriptions)
 curl -s -H "Authorization: Bearer $KEY" http://localhost:8765/v1/models | python -m json.tool
 
 # Non-streaming completion
@@ -370,24 +430,22 @@ endpoints:
       modelDisplayLabel: "MindRoom"
       titleConvo: true
       titleModel: "general"
-      dropParams: ["stop", "user", "frequency_penalty", "presence_penalty", "top_p"]
+      dropParams: ["stop", "frequency_penalty", "presence_penalty", "top_p"]
       headers:
         X-LibreChat-Conversation-Id: "{{LIBRECHAT_BODY_CONVERSATIONID}}"
         X-LibreChat-User-Id: "{{LIBRECHAT_USER_ID}}"
 ```
-
-Agents appear in LibreChat's model dropdown. Selecting one routes messages to that MindRoom agent with full tool/memory capabilities in Phase 1, and knowledge-base support in Phase 4.
 
 ### Open WebUI
 
 1. Go to **Admin Settings → Connections → OpenAI → Manage**
 2. Set API URL to: `http://localhost:8765/v1`
 3. Set API Key to one of your `OPENAI_COMPAT_API_KEYS`
-4. Models auto-discover via `/v1/models`
+4. Models auto-discover via `/v1/models` — Open WebUI will display the `name` field (agent display name) instead of the raw ID
 
 ## Acceptance Criteria
 
-- [ ] `GET /v1/models` lists all configured agents (teams are added in Phase 3)
+- [ ] `GET /v1/models` lists all configured agents with `name` and `description` (teams added in Phase 3)
 - [ ] `POST /v1/chat/completions` returns valid OpenAI-compatible JSON for non-streaming
 - [ ] `POST /v1/chat/completions` with `stream: true` returns valid SSE stream with role chunk, content chunks, finish chunk, and `[DONE]`
 - [ ] Selecting agent X always routes to agent X (deterministic)
@@ -396,6 +454,7 @@ Agents appear in LibreChat's model dropdown. Selecting one routes messages to th
 - [ ] Auth allows unauthenticated access when env var is unset (standalone mode)
 - [ ] Unknown model returns 404 with OpenAI error format
 - [ ] Request with extra/unknown fields does not return 422
+- [ ] Adding a new agent to config.yaml makes it appear in `/v1/models` without restart
 - [ ] All tests pass with `pytest`
 
 ## Risks and Mitigations
@@ -405,19 +464,18 @@ Agents appear in LibreChat's model dropdown. Selecting one routes messages to th
 | OpenAI schema mismatch causes client parsing issues | Strict response-shape tests; separate chunk model for streaming; `ConfigDict(extra="ignore")` on requests; manual LibreChat + Open WebUI smoke test |
 | Session key instability breaks memory continuity | Deterministic session formula with explicit tests; priority cascade with `X-Session-Id` as most reliable |
 | Team execution path depends on `MultiAgentOrchestrator` | Keep teams out of Phase 1; build direct `create_agent()` + `Team()` path in Phase 3 |
-| Agno sees duplicate messages (session DB + thread_history) | Already a tested pattern from the Matrix bridge — not a new risk |
-| Knowledge base initialization is expensive | Defer to Phase 4; cache initialized knowledge managers |
-| Scheduler tool fails without Matrix context | Strip scheduler from API agents or accept runtime error (most chats don't trigger it) |
-| `ai_response()` swallows exceptions as strings | Detect error strings from `get_user_friendly_error_message()` and convert to HTTP 500 |
-| Room-scoped memory unavailable without `room_id` | Document limitation; agent-scoped memory still works; future: `X-Room-Id` header |
-| API and Matrix agents share memory/session state | Intentional — agent remembers things regardless of transport |
+| `ai_response()` swallows exceptions as strings | Detect error strings via emoji/bracket prefix heuristic; convert to HTTP 500 |
+| Scheduler tool fails without Matrix context | `ContextVar` returns `None`; strip scheduler from API agents or accept runtime error |
 
 ## Known Limitations (Phase 1)
 
 - **No RAG/knowledge bases** — agents work but without knowledge base retrieval (Phase 4)
-- **No team support** — teams are not listed and return 501 if requested (Phase 3)
+- **No team support** — teams return 501 if requested (Phase 3)
 - **No auto-routing** — must specify agent name explicitly (Phase 2)
-- **No room memory** — only agent-scoped memory, not room-scoped
+- **No room memory** — only agent-scoped memory, not room-scoped (no `room_id`)
 - **No native tool_calls format** — tool results appear inline in content text
+- **Client-provided `tools`/`tool_choice` are ignored** — the agent uses its own configured tools
+- **Client-provided `system` messages augment, not replace** the agent's built-in instructions
 - **Token usage is zeros** — Agno doesn't expose token counts through `ai_response()`
-- **Scheduler tool may fail** — requires Matrix context not available via API
+- **Scheduler tool may fail** — `SchedulingToolContext` is `None` without Matrix
+- **Shared state** — API and Matrix agents share memory/session stores (intentional)
