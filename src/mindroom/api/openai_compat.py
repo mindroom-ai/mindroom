@@ -11,7 +11,7 @@ import json
 import os
 import re
 import time
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, NamedTuple
 from uuid import uuid4
 
 from agno.run.agent import RunContentEvent, RunErrorEvent, ToolCallCompletedEvent, ToolCallStartedEvent
@@ -576,7 +576,7 @@ async def list_models(
 
 
 @router.post("/chat/completions", response_model=None)
-async def chat_completions(
+async def chat_completions(  # noqa: PLR0911
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse | StreamingResponse:
@@ -601,6 +601,7 @@ async def chat_completions(
 
     # Derive a namespaced session ID from request headers or fallback UUID.
     session_id = _derive_session_id(agent_name, request)
+    tool_event_format = request.headers.get("x-tool-event-format")
     logger.info(
         "Chat completion request",
         model=agent_name,
@@ -627,6 +628,7 @@ async def chat_completions(
                 config,
                 thread_history,
                 req.user,
+                tool_event_format=tool_event_format,
             )
         return await _non_stream_team_completion(
             team_name,
@@ -645,8 +647,18 @@ async def chat_completions(
         logger.warning("Knowledge resolution failed, proceeding without knowledge", exc_info=True)
         knowledge = None
 
-    handler = _stream_completion if req.stream else _non_stream_completion
-    return await handler(agent_name, prompt, session_id, config, thread_history, req.user, knowledge)
+    if req.stream:
+        return await _stream_completion(
+            agent_name,
+            prompt,
+            session_id,
+            config,
+            thread_history,
+            req.user,
+            knowledge,
+            tool_event_format=tool_event_format,
+        )
+    return await _non_stream_completion(agent_name, prompt, session_id, config, thread_history, req.user, knowledge)
 
 
 # ---------------------------------------------------------------------------
@@ -734,6 +746,149 @@ def _format_stream_tool_event(event: RunOutputEvent | TeamRunOutputEvent) -> str
     return None
 
 
+# ---------------------------------------------------------------------------
+# LibreChat structured tool events
+# ---------------------------------------------------------------------------
+
+
+def _librechat_step_event(event_name: str, data: dict[str, Any]) -> str:
+    r"""Format a LibreChat structured SSE step event.
+
+    LibreChat expects: data: {"event": "<name>", "data": {...}}\n\n
+    The event field is inside the JSON payload, not an SSE named event.
+    """
+    return f"data: {json.dumps({'event': event_name, 'data': data})}\n\n"
+
+
+def _librechat_tool_start_sse(
+    step_id: str,
+    call_id: str,
+    run_id: str,
+    step_index: int,
+    tool_name: str,
+    args_json: str,
+) -> str:
+    """Format an on_run_step SSE line for a tool call start."""
+    return _librechat_step_event(
+        "on_run_step",
+        {
+            "id": step_id,
+            "runId": run_id,
+            "index": step_index,
+            "type": "tool_calls",
+            "stepDetails": {
+                "type": "tool_calls",
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "name": tool_name,
+                        "args": args_json,
+                        "type": "tool_call",
+                    },
+                ],
+            },
+            "usage": None,
+        },
+    )
+
+
+def _librechat_tool_end_sse(
+    step_id: str,
+    call_id: str,
+    step_index: int,
+    tool_name: str,
+    args_json: str,
+    output: str,
+) -> str:
+    """Format an on_run_step_completed SSE line for a tool call completion."""
+    return _librechat_step_event(
+        "on_run_step_completed",
+        {
+            "result": {
+                "id": step_id,
+                "index": step_index,
+                "tool_call": {
+                    "id": call_id,
+                    "name": tool_name,
+                    "args": args_json,
+                    "output": output,
+                    "progress": 1,
+                    "type": "tool_call",
+                },
+            },
+        },
+    )
+
+
+class _PendingToolCall(NamedTuple):
+    """State stored for a tool call between start and complete events."""
+
+    step_id: str
+    call_id: str
+    step_index: int
+    tool_name: str
+    args_json: str
+
+
+class _LibreChatToolTracker:
+    """Track tool call state for LibreChat structured SSE events.
+
+    Converts agno ToolCallStartedEvent/ToolCallCompletedEvent pairs into
+    LibreChat's on_run_step/on_run_step_completed SSE events with matched IDs.
+
+    Tool calls are correlated by ``tool_call_id`` from agno's ToolExecution
+    so concurrent/parallel tool calls are completed correctly (not LIFO).
+    """
+
+    def __init__(self, run_id: str) -> None:
+        self._run_id = run_id
+        self._step_index = 0
+        self._pending: dict[str, _PendingToolCall] = {}
+
+    def handle_event(self, event: object) -> str | None:
+        """Try to handle event as a tool event. Returns SSE line or None."""
+        if isinstance(event, (ToolCallStartedEvent, TeamToolCallStartedEvent)):
+            return self._on_start(event.tool)
+        if isinstance(event, (ToolCallCompletedEvent, TeamToolCallCompletedEvent)):
+            return self._on_complete(event.tool)
+        return None
+
+    def _on_start(self, tool: object) -> str | None:
+        if tool is None:
+            return None
+        tool_name = getattr(tool, "tool_name", None) or "tool"
+        raw_args = getattr(tool, "tool_args", None)
+        tool_args = {str(k): v for k, v in raw_args.items()} if isinstance(raw_args, dict) else {}
+        args_json = json.dumps(tool_args, default=str)
+
+        idx = self._step_index
+        self._step_index += 1
+        step_id = f"step-{uuid4().hex[:8]}"
+        call_id = f"call-{uuid4().hex[:8]}"
+
+        tool_call_id = getattr(tool, "tool_call_id", None) or call_id
+        self._pending[tool_call_id] = _PendingToolCall(step_id, call_id, idx, tool_name, args_json)
+        return _librechat_tool_start_sse(step_id, call_id, self._run_id, idx, tool_name, args_json)
+
+    def _on_complete(self, tool: object) -> str | None:
+        if tool is None:
+            return None
+        result = str(getattr(tool, "result", "") or "")
+        tool_call_id = getattr(tool, "tool_call_id", None)
+
+        pending = self._pending.pop(tool_call_id, None) if tool_call_id else None
+        if pending is None:
+            return None
+        return _librechat_tool_end_sse(
+            pending.step_id,
+            pending.call_id,
+            pending.step_index,
+            pending.tool_name,
+            pending.args_json,
+            result,
+        )
+
+
 def _extract_stream_text(event: AIStreamChunk) -> str | None:
     """Extract text content from a stream event."""
     if isinstance(event, RunContentEvent) and event.content:
@@ -751,6 +906,8 @@ async def _stream_completion(
     thread_history: list[dict[str, Any]] | None,
     user: str | None,
     knowledge: Knowledge | None = None,
+    *,
+    tool_event_format: str | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming chat completion via SSE."""
     stream: AsyncIterator[AIStreamChunk] = stream_agent_response(
@@ -777,20 +934,29 @@ async def _stream_completion(
 
     completion_id = f"chatcmpl-{uuid4().hex[:12]}"
     created = int(time.time())
+    tracker = _LibreChatToolTracker(completion_id) if tool_event_format == "librechat" else None
 
     async def event_generator() -> AsyncIterator[str]:
         # 1. Initial role announcement
         yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'role': 'assistant'})}\n\n"
 
         # 2. Yield the peeked first event
-        text = _extract_stream_text(first_event)
-        if text:
-            yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
+        lc_sse = tracker.handle_event(first_event) if tracker else None
+        if lc_sse:
+            yield lc_sse
+        else:
+            text = _extract_stream_text(first_event)
+            if text:
+                yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
 
         # 3. Stream remaining content
         # Error strings after the first event are sent as content chunks
         # since we can't switch to an error HTTP status mid-stream.
         async for event in stream:
+            lc_sse = tracker.handle_event(event) if tracker else None
+            if lc_sse:
+                yield lc_sse
+                continue
             text = _extract_stream_text(event)
             if text:
                 yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
@@ -912,6 +1078,8 @@ async def _stream_team_completion(
     config: Config,
     thread_history: list[dict[str, Any]] | None,
     user: str | None = None,
+    *,
+    tool_event_format: str | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
     agents, team, mode = _build_team(team_name, config)
@@ -946,6 +1114,7 @@ async def _stream_team_completion(
             created=created,
             model_id=model_id,
             team_name=team_name,
+            tool_event_format=tool_event_format,
         ),
         media_type="text/event-stream",
     )
@@ -997,15 +1166,22 @@ async def _team_stream_event_generator(
     created: int,
     model_id: str,
     team_name: str,
+    tool_event_format: str | None = None,
 ) -> AsyncIterator[str]:
     """Yield SSE chunks for team streaming responses."""
+    tracker = _LibreChatToolTracker(completion_id) if tool_event_format == "librechat" else None
+
     # 1. Role announcement
     yield f"data: {_chunk_json(completion_id, created, model_id, delta={'role': 'assistant'})}\n\n"
 
     # 2. First event
-    first_text = _extract_team_stream_text(first_event)
-    if first_text:
-        yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': first_text})}\n\n"
+    lc_sse = tracker.handle_event(first_event) if tracker else None
+    if lc_sse:
+        yield lc_sse
+    else:
+        first_text = _extract_team_stream_text(first_event)
+        if first_text:
+            yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': first_text})}\n\n"
 
     # 3. Remaining events
     try:
@@ -1015,6 +1191,11 @@ async def _team_stream_event_generator(
                 logger.warning("Team stream emitted error event", team=team_name, error=error_text)
                 yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': 'Team execution failed.'})}\n\n"
                 break
+
+            lc_sse = tracker.handle_event(event) if tracker else None
+            if lc_sse:
+                yield lc_sse
+                continue
 
             text = _extract_team_stream_text(event)
             if text:

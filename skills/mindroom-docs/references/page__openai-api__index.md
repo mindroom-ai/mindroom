@@ -89,7 +89,8 @@ endpoints:
       titleModel: "general"
       dropParams: ["stop", "frequency_penalty", "presence_penalty", "top_p"]
       headers:
-        X-LibreChat-Conversation-Id: "{{LIBRECHAT_BODY_CONVERSATIONID}}"
+        X-Tool-Event-Format: "librechat"  # structured tool call rendering
+        X-LibreChat-Conversation-Id: "{{LIBRECHAT_BODY_CONVERSATIONID}}"  # session continuity
 ```
 
 ### Open WebUI
@@ -121,7 +122,7 @@ Teams are exposed as `team/<team_name>` models. Selecting `team/super_team` runs
 
 `stream: true` returns Server-Sent Events in the standard OpenAI format: role chunk, content chunks, finish chunk, `[DONE]`.
 
-Tool calls appear inline as text in the stream (not as native OpenAI `tool_calls` deltas).
+Tool calls appear inline as text in the stream by default. When `X-Tool-Event-Format: librechat` header is set, tool calls are emitted as structured `on_run_step` / `on_run_step_completed` SSE events that render as collapsible tool call sections with formatted arguments and results.
 
 ### Session continuity
 
@@ -162,6 +163,6 @@ The OpenAI-compatible API uses its own auth, separate from the dashboard's Supab
 ## Limitations
 
 - **Token usage is always zeros** — Agno doesn't expose token counts
-- **No native `tool_calls` format** — tool results appear inline in content text
+- **No native `tool_calls` format** — tool results appear inline in content text (LibreChat gets structured events via `X-Tool-Event-Format: librechat` header)
 - **No room memory** — only agent-scoped memory (no `room_id` in API requests)
 - **Scheduler tool unavailable** — scheduling requires Matrix context and is stripped from API agents
