@@ -1914,6 +1914,19 @@ class TestToolDetailsTracker:
         result = tracker.handle_event(ToolCallCompletedEvent(tool=tool))
         assert result is None
 
+    def test_start_complete_without_tool_call_id(self) -> None:
+        """Start + complete both with tool_call_id=None still emits <details> HTML."""
+        tracker = _ToolDetailsTracker()
+        tool_start = ToolExecution(tool_name="my_tool", tool_args={"a": 1}, tool_call_id=None)
+        tool_complete = ToolExecution(tool_name="my_tool", tool_args={"a": 1}, tool_call_id=None, result="done")
+        start_result = tracker.handle_event(ToolCallStartedEvent(tool=tool_start))
+        assert start_result == ""
+        complete_result = tracker.handle_event(ToolCallCompletedEvent(tool=tool_complete))
+        assert complete_result is not None
+        assert "<details" in complete_result
+        assert "my_tool" in complete_result
+        assert "done" in complete_result
+
     def test_non_serializable_args(self) -> None:
         """Non-serializable tool_args (datetime, Path) don't crash."""
         tracker = _ToolDetailsTracker()

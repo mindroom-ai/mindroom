@@ -791,7 +791,13 @@ class _ToolDetailsTracker:
             return None
         result = str(tool.result or "")
         tool_call_id = tool.tool_call_id
-        pending = self._pending.pop(tool_call_id, None) if tool_call_id else None
+        if tool_call_id:
+            pending = self._pending.pop(tool_call_id, None)
+        elif len(self._pending) == 1:
+            # No tool_call_id but exactly one pending — unambiguous match
+            pending = self._pending.pop(next(iter(self._pending)))
+        else:
+            pending = None
         if pending is None:
             return None
         call_id, tool_name, args_json = pending
