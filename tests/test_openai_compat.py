@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -13,13 +15,16 @@ if TYPE_CHECKING:
 
 import pytest
 from agno.models.response import ToolExecution
-from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
+from agno.run.agent import RunContentEvent, RunOutput, RunPausedEvent, ToolCallCompletedEvent, ToolCallStartedEvent
+from agno.run.base import RunStatus
+from agno.run.requirement import RunRequirement
 from agno.run.team import RunContentEvent as TeamContentEvent
 from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
 from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
 from fastapi import Request
 from fastapi.testclient import TestClient
 
+from mindroom.api import openai_compat as openai_compat_module
 from mindroom.api.openai_compat import (
     ChatMessage,
     _convert_messages,
@@ -1961,11 +1966,22 @@ class TestToolDetailsTracker:
         assert "<details" in result
 
 
+def _extract_sse_data_events(response: object) -> list[str]:
+    """Extract SSE data payloads from a response."""
+    events: list[str] = []
+    for block in response.text.strip().split("\n\n"):  # type: ignore[union-attr]
+        if not block.strip():
+            continue
+        data_lines = [line.removeprefix("data:").lstrip() for line in block.splitlines() if line.startswith("data:")]
+        if data_lines:
+            events.append("\n".join(data_lines))
+    return events
+
+
 def _extract_sse_contents(response: object) -> list[str]:
     """Extract content strings from an SSE streaming response."""
     contents: list[str] = []
-    for line in response.text.strip().split("\n\n"):  # type: ignore[union-attr]
-        text = line.removeprefix("data: ")
+    for text in _extract_sse_data_events(response):
         if text == "[DONE]":
             continue
         chunk = json.loads(text)
@@ -1973,6 +1989,16 @@ def _extract_sse_contents(response: object) -> list[str]:
         if "content" in delta:
             contents.append(delta["content"])
     return contents
+
+
+def _extract_sse_chunks(response: object) -> list[dict]:
+    """Extract parsed JSON SSE chunks (excluding [DONE])."""
+    chunks: list[dict] = []
+    for text in _extract_sse_data_events(response):
+        if text == "[DONE]":
+            continue
+        chunks.append(json.loads(text))
+    return chunks
 
 
 class TestToolDetailsIntegration:
@@ -2106,3 +2132,390 @@ class TestToolDetailsIntegration:
         full_content = "".join(contents)
         assert "<details" in full_content
         assert 'type="tool_calls"' in full_content
+
+
+class TestStrictOpenAIToolCalling:
+    """Tests for X-Tool-Event-Format: openai strict tool-calling mode."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_pending_openai_state(self) -> Iterator[None]:
+        openai_compat_module._openai_state.pending_runs.clear()
+        openai_compat_module._openai_state.session_locks.clear()
+        openai_compat_module._openai_state.active_stream_sessions.clear()
+        yield
+        openai_compat_module._openai_state.pending_runs.clear()
+        openai_compat_module._openai_state.session_locks.clear()
+        openai_compat_module._openai_state.active_stream_sessions.clear()
+
+    @staticmethod
+    def _external_requirement(
+        *,
+        tool_call_id: str | None,
+        tool_name: str = "search",
+        tool_args: dict[str, object] | None = None,
+    ) -> RunRequirement:
+        return RunRequirement(
+            tool_execution=ToolExecution(
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                tool_args=tool_args or {"q": "test"},
+                external_execution_required=True,
+            ),
+        )
+
+    def test_openai_mode_requires_session_id(self, app_client: TestClient) -> None:
+        """Strict openai mode requires X-Session-Id for continuation state."""
+        response = app_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "general",
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+            headers={"X-Tool-Event-Format": "openai"},
+        )
+        assert response.status_code == 400
+        assert "X-Session-Id" in response.json()["error"]["message"]
+
+    def test_openai_mode_rejects_team_models(self, team_app_client: TestClient) -> None:
+        """Strict openai mode is limited to single-agent models."""
+        response = team_app_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "team/super_team",
+                "messages": [{"role": "user", "content": "Hello team"}],
+            },
+            headers={"X-Tool-Event-Format": "openai", "X-Session-Id": "sess-1"},
+        )
+        assert response.status_code == 400
+        assert "single-agent" in response.json()["error"]["message"]
+
+    def test_openai_mode_rejects_when_stream_is_active(self, app_client: TestClient) -> None:
+        """Strict mode returns 409 when another stream is active for the session."""
+        openai_compat_module._openai_state.active_stream_sessions.add("noauth:sess-busy")
+        response = app_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "general",
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+            headers={"X-Tool-Event-Format": "openai", "X-Session-Id": "sess-busy"},
+        )
+        assert response.status_code == 409
+        assert "already active" in response.json()["error"]["message"]
+
+    def test_openai_mode_non_stream_returns_tool_calls(self, app_client: TestClient) -> None:
+        """Paused non-stream runs return OpenAI tool_calls payloads."""
+        requirement = self._external_requirement(tool_call_id="call_123")
+        paused_run = RunOutput(run_id="run-1", status=RunStatus.paused, requirements=[requirement])
+        mock_agent = MagicMock()
+        mock_agent.arun = AsyncMock(return_value=paused_run)
+
+        with (
+            patch("mindroom.api.openai_compat.create_agent", return_value=mock_agent),
+            patch(
+                "mindroom.api.openai_compat.build_memory_enhanced_prompt",
+                new_callable=AsyncMock,
+                return_value="Hello",
+            ),
+        ):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+                headers={"X-Tool-Event-Format": "openai", "X-Session-Id": "sess-2"},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["choices"][0]["finish_reason"] == "tool_calls"
+        tool_call = data["choices"][0]["message"]["tool_calls"][0]
+        assert tool_call["id"] == "call_123"
+        assert tool_call["function"]["name"] == "search"
+        assert json.loads(tool_call["function"]["arguments"]) == {"q": "test"}
+
+    def test_openai_mode_continuation_resumes_with_tool_result(self, app_client: TestClient) -> None:
+        """Tool result messages resume paused runs and produce final assistant text."""
+        requirement = self._external_requirement(tool_call_id="call_abc")
+        paused_run = RunOutput(run_id="run-abc", status=RunStatus.paused, requirements=[requirement])
+        completed_run = RunOutput(run_id="run-abc", status=RunStatus.completed, content="Final answer")
+
+        first_agent = MagicMock()
+        first_agent.arun = AsyncMock(return_value=paused_run)
+        second_agent = MagicMock()
+        second_agent.acontinue_run = AsyncMock(return_value=completed_run)
+
+        with (
+            patch("mindroom.api.openai_compat.create_agent", side_effect=[first_agent, second_agent]),
+            patch(
+                "mindroom.api.openai_compat.build_memory_enhanced_prompt",
+                new_callable=AsyncMock,
+                return_value="Hello",
+            ),
+        ):
+            first_response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+                headers={"X-Tool-Event-Format": "openai", "X-Session-Id": "sess-3"},
+            )
+            assert first_response.status_code == 200
+            assert first_response.json()["choices"][0]["finish_reason"] == "tool_calls"
+
+            second_response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [
+                        {"role": "user", "content": "Hello"},
+                        {"role": "tool", "tool_call_id": "call_abc", "content": "tool result"},
+                    ],
+                },
+                headers={"X-Tool-Event-Format": "openai", "X-Session-Id": "sess-3"},
+            )
+
+        assert second_response.status_code == 200
+        assert second_response.json()["choices"][0]["message"]["content"] == "Final answer"
+        requirements = second_agent.acontinue_run.call_args.kwargs["requirements"]
+        assert requirements[0].external_execution_result == "tool result"
+
+    def test_openai_mode_missing_tool_result_errors(self, app_client: TestClient) -> None:
+        """Continuation without required role=tool results returns HTTP 400."""
+        requirement = self._external_requirement(tool_call_id="call_miss")
+        paused_run = RunOutput(run_id="run-miss", status=RunStatus.paused, requirements=[requirement])
+        first_agent = MagicMock()
+        first_agent.arun = AsyncMock(return_value=paused_run)
+
+        with (
+            patch("mindroom.api.openai_compat.create_agent", return_value=first_agent),
+            patch(
+                "mindroom.api.openai_compat.build_memory_enhanced_prompt",
+                new_callable=AsyncMock,
+                return_value="Hello",
+            ),
+        ):
+            first_response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+                headers={"X-Tool-Event-Format": "openai", "X-Session-Id": "sess-4"},
+            )
+            assert first_response.status_code == 200
+
+            second_response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+                headers={"X-Tool-Event-Format": "openai", "X-Session-Id": "sess-4"},
+            )
+
+        assert second_response.status_code == 400
+        assert "Tool result messages are required" in second_response.json()["error"]["message"]
+
+    def test_openai_mode_synthesizes_missing_tool_call_id(self, app_client: TestClient) -> None:
+        """Missing upstream tool_call_id values are synthesized as call_* IDs."""
+        requirement = self._external_requirement(tool_call_id=None)
+        paused_run = RunOutput(run_id="run-synth", status=RunStatus.paused, requirements=[requirement])
+        mock_agent = MagicMock()
+        mock_agent.arun = AsyncMock(return_value=paused_run)
+
+        with (
+            patch("mindroom.api.openai_compat.create_agent", return_value=mock_agent),
+            patch(
+                "mindroom.api.openai_compat.build_memory_enhanced_prompt",
+                new_callable=AsyncMock,
+                return_value="Hello",
+            ),
+        ):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+                headers={"X-Tool-Event-Format": "openai", "X-Session-Id": "sess-5"},
+            )
+
+        assert response.status_code == 200
+        tool_call = response.json()["choices"][0]["message"]["tool_calls"][0]
+        assert tool_call["id"].startswith("call_")
+
+    def test_openai_mode_streaming_emits_delta_tool_calls(self, app_client: TestClient) -> None:
+        """Streaming strict mode emits delta.tool_calls and tool_calls finish reason."""
+        requirement = self._external_requirement(tool_call_id="call_stream")
+        mock_agent = MagicMock()
+
+        async def mock_stream(*_args: object, **_kwargs: object) -> AsyncIterator[RunPausedEvent]:
+            yield RunPausedEvent(run_id="run-stream", requirements=[requirement])
+
+        mock_agent.arun = mock_stream
+
+        with (
+            patch("mindroom.api.openai_compat.create_agent", return_value=mock_agent),
+            patch(
+                "mindroom.api.openai_compat.build_memory_enhanced_prompt",
+                new_callable=AsyncMock,
+                return_value="Hello",
+            ),
+        ):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "stream": True,
+                },
+                headers={"X-Tool-Event-Format": "openai", "X-Session-Id": "sess-6"},
+            )
+
+        assert response.status_code == 200
+        chunks = _extract_sse_chunks(response)
+        assert chunks[0]["choices"][0]["delta"] == {"role": "assistant"}
+        tool_chunks = [chunk for chunk in chunks if "tool_calls" in chunk["choices"][0]["delta"]]
+        assert len(tool_chunks) == 1
+        tool_call = tool_chunks[0]["choices"][0]["delta"]["tool_calls"][0]
+        assert tool_call["id"] == "call_stream"
+        assert tool_call["function"]["name"] == "search"
+        assert chunks[-1]["choices"][0]["finish_reason"] == "tool_calls"
+
+    def test_openai_mode_streaming_continuation_resumes_with_tool_result(self, app_client: TestClient) -> None:
+        """Streaming continuation resumes paused runs and emits final assistant text."""
+        requirement = self._external_requirement(tool_call_id="call_stream_resume")
+        first_agent = MagicMock()
+        second_agent = MagicMock()
+
+        async def first_stream(*_args: object, **_kwargs: object) -> AsyncIterator[RunPausedEvent]:
+            yield RunPausedEvent(run_id="run-stream-resume", requirements=[requirement])
+
+        async def continuation_stream() -> AsyncIterator[RunContentEvent]:
+            yield RunContentEvent(content="Final streamed answer")
+
+        second_agent.acontinue_run = MagicMock(side_effect=lambda *_a, **_kw: continuation_stream())
+        first_agent.arun = first_stream
+
+        with (
+            patch("mindroom.api.openai_compat.create_agent", side_effect=[first_agent, second_agent]),
+            patch(
+                "mindroom.api.openai_compat.build_memory_enhanced_prompt",
+                new_callable=AsyncMock,
+                return_value="Hello",
+            ),
+        ):
+            first_response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "stream": True,
+                },
+                headers={"X-Tool-Event-Format": "openai", "X-Session-Id": "sess-7"},
+            )
+            assert first_response.status_code == 200
+            first_chunks = _extract_sse_chunks(first_response)
+            assert first_chunks[-1]["choices"][0]["finish_reason"] == "tool_calls"
+
+            second_response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [
+                        {"role": "user", "content": "Hello"},
+                        {
+                            "role": "tool",
+                            "tool_call_id": "call_stream_resume",
+                            "content": "stream tool result",
+                        },
+                    ],
+                    "stream": True,
+                },
+                headers={"X-Tool-Event-Format": "openai", "X-Session-Id": "sess-7"},
+            )
+
+        assert second_response.status_code == 200
+        chunks = _extract_sse_chunks(second_response)
+        assert chunks[0]["choices"][0]["delta"] == {"role": "assistant"}
+        contents = [
+            chunk["choices"][0]["delta"]["content"] for chunk in chunks if "content" in chunk["choices"][0]["delta"]
+        ]
+        assert "".join(contents) == "Final streamed answer"
+        assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
+        requirements = second_agent.acontinue_run.call_args.kwargs["requirements"]
+        assert requirements[0].external_execution_result == "stream tool result"
+
+    def test_openai_mode_streaming_missing_tool_result_errors(self, app_client: TestClient) -> None:
+        """Streaming continuation preflight returns HTTP 400 when tool results are missing."""
+        requirement = self._external_requirement(tool_call_id="call_stream_missing")
+        first_agent = MagicMock()
+
+        async def first_stream(*_args: object, **_kwargs: object) -> AsyncIterator[RunPausedEvent]:
+            yield RunPausedEvent(run_id="run-stream-missing", requirements=[requirement])
+
+        first_agent.arun = first_stream
+
+        with (
+            patch("mindroom.api.openai_compat.create_agent", return_value=first_agent),
+            patch(
+                "mindroom.api.openai_compat.build_memory_enhanced_prompt",
+                new_callable=AsyncMock,
+                return_value="Hello",
+            ),
+        ):
+            first_response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "stream": True,
+                },
+                headers={"X-Tool-Event-Format": "openai", "X-Session-Id": "sess-8"},
+            )
+            assert first_response.status_code == 200
+
+            second_response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "stream": True,
+                },
+                headers={"X-Tool-Event-Format": "openai", "X-Session-Id": "sess-8"},
+            )
+
+        assert second_response.status_code == 400
+        assert "Tool result messages are required" in second_response.json()["error"]["message"]
+
+    def test_openai_mode_cleanup_prunes_expired_pending_and_orphan_locks(self) -> None:
+        """Strict-mode cleanup removes expired pending runs and idle orphan session locks."""
+        stale_requirement = self._external_requirement(tool_call_id="call_stale")
+        fresh_requirement = self._external_requirement(tool_call_id="call_fresh")
+
+        openai_compat_module._openai_state.pending_runs["sess-expired"] = openai_compat_module._PendingOpenAIRun(
+            run_id="run-expired",
+            agent_name="general",
+            session_id="sess-expired",
+            requirements=[stale_requirement],
+            created_at=0,
+        )
+        openai_compat_module._openai_state.pending_runs["sess-fresh"] = openai_compat_module._PendingOpenAIRun(
+            run_id="run-fresh",
+            agent_name="general",
+            session_id="sess-fresh",
+            requirements=[fresh_requirement],
+            created_at=time.time(),
+        )
+        openai_compat_module._openai_state.session_locks["sess-expired"] = asyncio.Lock()
+        openai_compat_module._openai_state.session_locks["sess-fresh"] = asyncio.Lock()
+        openai_compat_module._openai_state.session_locks["sess-orphan"] = asyncio.Lock()
+
+        openai_compat_module._cleanup_expired_openai_runs()
+
+        assert "sess-expired" not in openai_compat_module._openai_state.pending_runs
+        assert "sess-fresh" in openai_compat_module._openai_state.pending_runs
+        assert "sess-orphan" not in openai_compat_module._openai_state.session_locks

@@ -6,16 +6,27 @@ Exposes MindRoom agents as an OpenAI-compatible API so any chat frontend
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import html
 import json
 import os
 import re
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import uuid4
 
-from agno.run.agent import RunContentEvent, RunErrorEvent, ToolCallCompletedEvent, ToolCallStartedEvent
+from agno.run.agent import (
+    RunContentEvent,
+    RunErrorEvent,
+    RunOutput,
+    RunOutputEvent,
+    RunPausedEvent,
+    RunStatus,
+    ToolCallCompletedEvent,
+    ToolCallStartedEvent,
+)
 from agno.run.team import RunContentEvent as TeamContentEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
@@ -39,6 +50,7 @@ from mindroom.constants import DEFAULT_AGENTS_CONFIG, ROUTER_AGENT_NAME, STORAGE
 from mindroom.knowledge import get_knowledge_manager, initialize_knowledge_managers
 from mindroom.knowledge_utils import resolve_agent_knowledge
 from mindroom.logging_config import get_logger
+from mindroom.memory import build_memory_enhanced_prompt
 from mindroom.routing import suggest_agent
 from mindroom.teams import TeamMode, format_team_response
 from mindroom.tool_events import extract_tool_completed_info, format_tool_started_event
@@ -46,6 +58,9 @@ from mindroom.tool_events import extract_tool_completed_info, format_tool_starte
 AUTO_MODEL_NAME = "auto"
 TEAM_MODEL_PREFIX = "team/"
 RESERVED_MODEL_NAMES = {AUTO_MODEL_NAME}
+TOOL_EVENT_FORMAT_OPENAI = "openai"
+TOOL_EVENT_FORMAT_OPEN_WEBUI = "open-webui"
+OPENAI_PENDING_RUN_TTL_SECONDS = 300
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -54,7 +69,7 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
     from agno.models.response import ToolExecution
-    from agno.run.agent import RunOutput, RunOutputEvent
+    from agno.run.requirement import RunRequirement
     from agno.run.team import TeamRunOutputEvent
 
 logger = get_logger(__name__)
@@ -76,11 +91,28 @@ def _load_config() -> tuple[Config, Path]:
 # ---------------------------------------------------------------------------
 
 
+class ToolCallFunction(BaseModel):
+    """OpenAI function payload for a tool call."""
+
+    name: str
+    arguments: str
+
+
+class ToolCall(BaseModel):
+    """OpenAI tool call payload."""
+
+    id: str
+    type: Literal["function"] = "function"
+    function: ToolCallFunction
+
+
 class ChatMessage(BaseModel):
     """A single message in the chat conversation."""
 
     role: Literal["system", "developer", "user", "assistant", "tool"]
     content: str | list[dict] | None = None
+    tool_call_id: str | None = None
+    tool_calls: list[ToolCall] | None = None
 
 
 class ChatCompletionRequest(BaseModel):
@@ -202,9 +234,35 @@ class OpenAIErrorResponse(BaseModel):
     error: OpenAIError
 
 
+@dataclass
+class _PendingOpenAIRun:
+    """Paused run state for strict OpenAI tool-calling mode."""
+
+    run_id: str
+    agent_name: str
+    session_id: str
+    requirements: list[RunRequirement]
+    created_at: float
+
+
+@dataclass
+class _StrictOpenAIState:
+    """Mutable strict-mode session state kept at module scope."""
+
+    pending_runs: dict[str, _PendingOpenAIRun]
+    session_locks: dict[str, asyncio.Lock]
+    active_stream_sessions: set[str]
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+_openai_state = _StrictOpenAIState(
+    pending_runs={},
+    session_locks={},
+    active_stream_sessions=set(),
+)
 
 
 def _error_response(
@@ -318,6 +376,141 @@ def _extract_content_text(content: str | list[dict] | None) -> str:
         return content
     # Multimodal: concatenate text parts (coerce to str for robustness)
     return " ".join(str(p["text"]) for p in content if isinstance(p, dict) and p.get("type") == "text" and "text" in p)
+
+
+def _cleanup_expired_openai_runs() -> None:
+    """Drop stale strict OpenAI paused runs."""
+    now = time.time()
+    expired_session_ids: list[str] = []
+    for session_id, pending in list(_openai_state.pending_runs.items()):
+        lock = _openai_state.session_locks.get(session_id)
+        if lock is not None and lock.locked():
+            if now - pending.created_at > OPENAI_PENDING_RUN_TTL_SECONDS:
+                logger.warning(
+                    "Strict OpenAI cleanup skipped an expired run because its session lock is still held",
+                    session_id=session_id,
+                )
+            continue
+        if now - pending.created_at > OPENAI_PENDING_RUN_TTL_SECONDS:
+            expired_session_ids.append(session_id)
+
+    for session_id in expired_session_ids:
+        _openai_state.pending_runs.pop(session_id, None)
+
+    # Locks can outlive pending runs (e.g. completed sessions); keep only active ones.
+    for session_id, lock in list(_openai_state.session_locks.items()):
+        if session_id in _openai_state.pending_runs:
+            continue
+        if session_id in _openai_state.active_stream_sessions:
+            continue
+        if lock.locked():
+            continue
+        _openai_state.session_locks.pop(session_id, None)
+
+
+def _get_openai_session_lock(session_id: str) -> asyncio.Lock:
+    """Get or create the strict-mode lock for a session."""
+    return _openai_state.session_locks.setdefault(session_id, asyncio.Lock())
+
+
+def _extract_tool_results(messages: list[ChatMessage]) -> dict[str, str]:
+    """Extract tool_call_id -> result content from role=tool messages."""
+    results: dict[str, str] = {}
+    for msg in messages:
+        if msg.role != "tool" or not msg.tool_call_id:
+            continue
+        result_text = _extract_content_text(msg.content)
+        if result_text:
+            results[msg.tool_call_id] = result_text
+    return results
+
+
+def _enable_external_execution(agent: Agent) -> None:
+    """Mark all tools on an agent for external execution in strict mode."""
+    for tool in agent.tools or []:
+        marked_external_execution = False
+        functions = getattr(tool, "functions", None)
+        if isinstance(functions, dict):
+            for function in functions.values():
+                if hasattr(function, "external_execution"):
+                    function.external_execution = True
+                    marked_external_execution = True
+            if hasattr(tool, "external_execution_required_tools"):
+                tool.external_execution_required_tools = list(functions.keys())
+                marked_external_execution = True
+        elif hasattr(tool, "external_execution"):
+            tool.external_execution = True
+            marked_external_execution = True
+
+        if not marked_external_execution:
+            logger.warning(
+                "Tool does not expose external execution flags; strict OpenAI mode may not pause this tool",
+                tool_type=type(tool).__name__,
+            )
+
+
+def _external_requirements(requirements: list[RunRequirement] | None) -> list[RunRequirement]:
+    """Return unresolved external-execution requirements."""
+    if not requirements:
+        return []
+    return [
+        requirement
+        for requirement in requirements
+        if requirement.tool_execution is not None and requirement.needs_external_execution
+    ]
+
+
+def _ensure_tool_call_id(tool: ToolExecution) -> str:
+    """Ensure a stable tool_call_id exists for OpenAI tool_calls output."""
+    if tool.tool_call_id:
+        return tool.tool_call_id
+    generated_id = f"call_{uuid4().hex[:24]}"
+    tool.tool_call_id = generated_id
+    return generated_id
+
+
+def _tool_call_from_requirement(requirement: RunRequirement) -> ToolCall:
+    """Convert a requirement into OpenAI tool call payload."""
+    assert requirement.tool_execution is not None
+    tool = requirement.tool_execution
+    tool_call_id = _ensure_tool_call_id(tool)
+    tool_name = tool.tool_name or "tool"
+    args_json = json.dumps(tool.tool_args or {}, default=str)
+    return ToolCall(
+        id=tool_call_id,
+        function=ToolCallFunction(name=tool_name, arguments=args_json),
+    )
+
+
+def _tool_calls_from_requirements(requirements: list[RunRequirement]) -> list[ToolCall]:
+    """Build OpenAI tool call payload list from requirements."""
+    return [_tool_call_from_requirement(requirement) for requirement in requirements]
+
+
+def _apply_tool_results_to_requirements(
+    requirements: list[RunRequirement],
+    tool_results: dict[str, str],
+) -> str | None:
+    """Apply tool message results onto pending requirements."""
+    missing: list[str] = []
+    for requirement in requirements:
+        assert requirement.tool_execution is not None
+        tool_call_id = _ensure_tool_call_id(requirement.tool_execution)
+        result = tool_results.get(tool_call_id)
+        if result is None:
+            missing.append(tool_call_id)
+            continue
+        requirement.set_external_execution_result(result)
+
+    if missing:
+        missing_list = ", ".join(missing)
+        return f"Missing tool results for tool_call_id(s): {missing_list}"
+    return None
+
+
+def _strict_mode_error_chunk(completion_id: str, created: int, model: str, message: str) -> str:
+    """Build an SSE chunk with an assistant error message."""
+    return _chunk_json(completion_id, created, model, delta={"content": message})
 
 
 def _find_last_user_message(
@@ -578,7 +771,7 @@ async def list_models(
 
 
 @router.post("/chat/completions", response_model=None)
-async def chat_completions(
+async def chat_completions(  # noqa: C901, PLR0911
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse | StreamingResponse:
@@ -601,8 +794,15 @@ async def chat_completions(
             return result
         agent_name = result
 
-    # Check for tool event format header (e.g., "open-webui" for <details> HTML)
+    # Check for tool event format header.
     tool_event_format = request.headers.get("x-tool-event-format")
+
+    if tool_event_format == TOOL_EVENT_FORMAT_OPENAI and not request.headers.get("x-session-id"):
+        return _error_response(
+            400,
+            "X-Session-Id header is required for x-tool-event-format=openai",
+            param="x-session-id",
+        )
 
     # Derive a namespaced session ID from request headers or fallback UUID.
     session_id = _derive_session_id(agent_name, request)
@@ -622,6 +822,12 @@ async def chat_completions(
 
     # Team execution path
     if agent_name.startswith(TEAM_MODEL_PREFIX):
+        if tool_event_format == TOOL_EVENT_FORMAT_OPENAI:
+            return _error_response(
+                400,
+                "x-tool-event-format=openai is only supported for single-agent models",
+                param="model",
+            )
         team_name = agent_name.removeprefix(TEAM_MODEL_PREFIX)
         if req.stream:
             return await _stream_team_completion(
@@ -651,6 +857,29 @@ async def chat_completions(
         logger.warning("Knowledge resolution failed, proceeding without knowledge", exc_info=True)
         knowledge = None
 
+    if tool_event_format == TOOL_EVENT_FORMAT_OPENAI:
+        if req.stream:
+            return await _stream_strict_openai_completion(
+                agent_name,
+                prompt,
+                session_id=session_id,
+                config=config,
+                thread_history=thread_history,
+                user=req.user,
+                knowledge=knowledge,
+                messages=req.messages,
+            )
+        return await _non_stream_strict_openai_completion(
+            agent_name,
+            prompt,
+            session_id=session_id,
+            config=config,
+            thread_history=thread_history,
+            user=req.user,
+            knowledge=knowledge,
+            messages=req.messages,
+        )
+
     handler = _stream_completion if req.stream else _non_stream_completion
     return await handler(
         agent_name,
@@ -662,6 +891,402 @@ async def chat_completions(
         knowledge,
         **({"tool_event_format": tool_event_format} if req.stream else {}),
     )
+
+
+# ---------------------------------------------------------------------------
+# Strict OpenAI tool-calling mode
+# ---------------------------------------------------------------------------
+
+
+def _create_strict_openai_agent(
+    agent_name: str,
+    config: Config,
+    knowledge: Knowledge | None,
+) -> Agent:
+    """Create an agent configured for strict OpenAI tool-calling mode."""
+    # Keep tool set aligned with existing /chat/completions behavior
+    # (scheduler/default tools are excluded in OpenAI-compat mode).
+    # create_agent builds a fresh tool list per call from config metadata,
+    # so strict-mode external-execution flags stay request-local.
+    agent = create_agent(
+        agent_name,
+        config,
+        storage_path=STORAGE_PATH_OBJ,
+        knowledge=knowledge,
+        include_default_tools=False,
+    )
+    _enable_external_execution(agent)
+    return agent
+
+
+def _tool_call_delta(tool_call: ToolCall, index: int) -> dict[str, list[dict[str, Any]]]:
+    """Create an OpenAI delta payload for one tool call."""
+    payload = tool_call.model_dump()
+    payload["index"] = index
+    return {"tool_calls": [payload]}
+
+
+def _strict_openai_non_tool_pause_message() -> str:
+    """Error message when Agno pauses for non-external-execution reasons."""
+    return (
+        "Strict OpenAI mode only supports external tool execution pauses. "
+        "Confirmation/user-input pauses are not supported."
+    )
+
+
+def _strict_openai_message_with_tool_calls(requirements: list[RunRequirement]) -> ChatMessage:
+    """Build assistant message containing OpenAI tool_calls."""
+    return ChatMessage(role="assistant", content=None, tool_calls=_tool_calls_from_requirements(requirements))
+
+
+def _clear_pending_openai_run(session_id: str) -> None:
+    """Remove pending strict OpenAI run state for a session."""
+    _openai_state.pending_runs.pop(session_id, None)
+
+
+def _strict_openai_pause_chunks(
+    *,
+    run_id: str | None,
+    requirements: list[RunRequirement] | None,
+    completion_id: str,
+    created: int,
+    agent_name: str,
+    session_id: str,
+) -> tuple[list[str], bool, bool]:
+    """Build strict-mode stream payloads for paused runs."""
+    external_requirements = _external_requirements(requirements)
+    if not external_requirements:
+        _clear_pending_openai_run(session_id)
+        return (
+            [_strict_mode_error_chunk(completion_id, created, agent_name, _strict_openai_non_tool_pause_message())],
+            True,
+            False,
+        )
+    if run_id is None:
+        _clear_pending_openai_run(session_id)
+        return (
+            [_strict_mode_error_chunk(completion_id, created, agent_name, "Paused run is missing run_id")],
+            True,
+            False,
+        )
+
+    _openai_state.pending_runs[session_id] = _PendingOpenAIRun(
+        run_id=run_id,
+        agent_name=agent_name,
+        session_id=session_id,
+        requirements=external_requirements,
+        created_at=time.time(),
+    )
+    payloads = [
+        _chunk_json(completion_id, created, agent_name, delta=_tool_call_delta(tool_call, index))
+        for index, tool_call in enumerate(_tool_calls_from_requirements(external_requirements))
+    ]
+    payloads.append(_chunk_json(completion_id, created, agent_name, delta={}, finish_reason="tool_calls"))
+    return (payloads, True, True)
+
+
+def _strict_openai_stream_event_chunks(  # noqa: PLR0911
+    *,
+    event: RunOutputEvent | RunOutput | str,
+    completion_id: str,
+    created: int,
+    agent_name: str,
+    session_id: str,
+) -> tuple[list[str], bool, bool]:
+    """Convert a strict-mode stream event to chunk payloads.
+
+    Returns:
+        (chunk_payloads, should_stop, stopped_on_pause)
+
+    """
+    if isinstance(event, RunContentEvent) and event.content:
+        return ([_chunk_json(completion_id, created, agent_name, delta={"content": str(event.content)})], False, False)
+
+    if isinstance(event, RunPausedEvent):
+        return _strict_openai_pause_chunks(
+            run_id=event.run_id,
+            requirements=event.requirements,
+            completion_id=completion_id,
+            created=created,
+            agent_name=agent_name,
+            session_id=session_id,
+        )
+
+    # Some agno providers surface a paused state as a RunOutput terminal event
+    # instead of emitting RunPausedEvent; handle both shapes consistently.
+    if isinstance(event, RunOutput) and event.status == RunStatus.paused:
+        return _strict_openai_pause_chunks(
+            run_id=event.run_id,
+            requirements=event.requirements,
+            completion_id=completion_id,
+            created=created,
+            agent_name=agent_name,
+            session_id=session_id,
+        )
+
+    if isinstance(event, RunErrorEvent):
+        _clear_pending_openai_run(session_id)
+        return ([_strict_mode_error_chunk(completion_id, created, agent_name, "Agent execution failed")], True, False)
+
+    if isinstance(event, str):
+        if _is_error_response(event):
+            _clear_pending_openai_run(session_id)
+            return (
+                [_strict_mode_error_chunk(completion_id, created, agent_name, "Agent execution failed")],
+                True,
+                False,
+            )
+        if event:
+            return ([_chunk_json(completion_id, created, agent_name, delta={"content": event})], False, False)
+
+    return ([], False, False)
+
+
+async def _non_stream_strict_openai_completion(  # noqa: C901, PLR0911, PLR0912
+    agent_name: str,
+    prompt: str,
+    session_id: str,
+    config: Config,
+    thread_history: list[dict[str, Any]] | None,
+    user: str | None,
+    knowledge: Knowledge | None,
+    messages: list[ChatMessage],
+) -> JSONResponse:
+    """Handle strict OpenAI mode for non-streaming responses."""
+    _cleanup_expired_openai_runs()
+    session_lock = _get_openai_session_lock(session_id)
+    tool_results = _extract_tool_results(messages)
+
+    async with session_lock:
+        if session_id in _openai_state.active_stream_sessions:
+            return _error_response(
+                409,
+                "Another strict OpenAI stream is already active for this session",
+                param="x-session-id",
+            )
+
+        pending = _openai_state.pending_runs.get(session_id)
+        if pending is not None and pending.agent_name != agent_name:
+            return _error_response(
+                400,
+                "Pending tool run belongs to a different model for this session",
+                param="model",
+            )
+
+        try:
+            if pending is not None:
+                if not tool_results:
+                    return _error_response(400, "Tool result messages are required to continue the paused run")
+                missing_error = _apply_tool_results_to_requirements(pending.requirements, tool_results)
+                if missing_error is not None:
+                    return _error_response(400, missing_error, param="messages")
+
+                agent = _create_strict_openai_agent(agent_name, config, knowledge)
+                run_output = await agent.acontinue_run(
+                    run_id=pending.run_id,
+                    requirements=pending.requirements,
+                    session_id=session_id,
+                    user_id=user,
+                )
+            else:
+                if tool_results:
+                    return _error_response(400, "No pending tool run exists for these tool results", param="messages")
+
+                enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, STORAGE_PATH_OBJ, config, None)
+                full_prompt = build_prompt_with_thread_history(enhanced_prompt, thread_history)
+                agent = _create_strict_openai_agent(agent_name, config, knowledge)
+                run_output = await agent.arun(full_prompt, session_id=session_id, user_id=user)
+        except Exception:
+            logger.exception("Strict OpenAI run failed", model=agent_name, session_id=session_id)
+            _clear_pending_openai_run(session_id)
+            return _error_response(500, "Agent execution failed", error_type="server_error")
+
+        completion_id = f"chatcmpl-{uuid4().hex[:12]}"
+        created = int(time.time())
+        external_requirements = _external_requirements(run_output.requirements)
+
+        if run_output.status == RunStatus.paused:
+            if not external_requirements:
+                _clear_pending_openai_run(session_id)
+                return _error_response(400, _strict_openai_non_tool_pause_message(), error_type="server_error")
+            if run_output.run_id is None:
+                _clear_pending_openai_run(session_id)
+                return _error_response(500, "Paused run is missing run_id", error_type="server_error")
+
+            _openai_state.pending_runs[session_id] = _PendingOpenAIRun(
+                run_id=run_output.run_id,
+                agent_name=agent_name,
+                session_id=session_id,
+                requirements=external_requirements,
+                created_at=time.time(),
+            )
+
+            response = ChatCompletionResponse(
+                id=completion_id,
+                created=created,
+                model=agent_name,
+                choices=[
+                    ChatCompletionChoice(
+                        message=_strict_openai_message_with_tool_calls(external_requirements),
+                        finish_reason="tool_calls",
+                    ),
+                ],
+            )
+            return JSONResponse(content=response.model_dump(exclude_none=True))
+
+        _clear_pending_openai_run(session_id)
+        if run_output.content is None:
+            assistant_content = None
+        elif isinstance(run_output.content, (str, list)):
+            extracted = _extract_content_text(run_output.content)
+            assistant_content = extracted or None
+        else:
+            assistant_content = str(run_output.content)
+
+        response = ChatCompletionResponse(
+            id=completion_id,
+            created=created,
+            model=agent_name,
+            choices=[
+                ChatCompletionChoice(
+                    message=ChatMessage(role="assistant", content=assistant_content),
+                ),
+            ],
+        )
+        return JSONResponse(content=response.model_dump(exclude_none=True))
+
+
+async def _stream_strict_openai_completion(  # noqa: C901, PLR0911, PLR0915
+    agent_name: str,
+    prompt: str,
+    session_id: str,
+    config: Config,
+    thread_history: list[dict[str, Any]] | None,
+    user: str | None,
+    knowledge: Knowledge | None,
+    messages: list[ChatMessage],
+) -> StreamingResponse | JSONResponse:
+    """Handle strict OpenAI mode for streaming responses."""
+    _cleanup_expired_openai_runs()
+    tool_results = _extract_tool_results(messages)
+    completion_id = f"chatcmpl-{uuid4().hex[:12]}"
+    created = int(time.time())
+    session_lock = _get_openai_session_lock(session_id)
+    async with session_lock:
+        if session_id in _openai_state.active_stream_sessions:
+            return _error_response(
+                409,
+                "Another strict OpenAI stream is already active for this session",
+                param="x-session-id",
+            )
+
+        pending = _openai_state.pending_runs.get(session_id)
+        if pending is not None and pending.agent_name != agent_name:
+            return _error_response(
+                400,
+                "Pending tool run belongs to a different model for this session",
+                param="model",
+            )
+
+        try:
+            if pending is not None:
+                if not tool_results:
+                    return _error_response(400, "Tool result messages are required to continue the paused run")
+                missing_error = _apply_tool_results_to_requirements(pending.requirements, tool_results)
+                if missing_error is not None:
+                    return _error_response(400, missing_error, param="messages")
+                agent = _create_strict_openai_agent(agent_name, config, knowledge)
+                stream = agent.acontinue_run(
+                    run_id=pending.run_id,
+                    requirements=pending.requirements,
+                    session_id=session_id,
+                    user_id=user,
+                    stream=True,
+                    stream_events=True,
+                )
+            else:
+                if tool_results:
+                    return _error_response(400, "No pending tool run exists for these tool results", param="messages")
+                enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, STORAGE_PATH_OBJ, config, None)
+                full_prompt = build_prompt_with_thread_history(enhanced_prompt, thread_history)
+                agent = _create_strict_openai_agent(agent_name, config, knowledge)
+                stream = agent.arun(
+                    full_prompt,
+                    session_id=session_id,
+                    user_id=user,
+                    stream=True,
+                    stream_events=True,
+                )
+            first_event = await anext(aiter(stream), None)
+        except Exception:
+            logger.exception("Strict OpenAI streaming run failed", model=agent_name, session_id=session_id)
+            _clear_pending_openai_run(session_id)
+            return _error_response(500, "Agent execution failed", error_type="server_error")
+
+        if first_event is None:
+            _clear_pending_openai_run(session_id)
+            return _error_response(500, "Agent returned empty response", error_type="server_error")
+        if isinstance(first_event, RunErrorEvent):
+            _clear_pending_openai_run(session_id)
+            return _error_response(500, "Agent execution failed", error_type="server_error")
+        if isinstance(first_event, str) and _is_error_response(first_event):
+            _clear_pending_openai_run(session_id)
+            return _error_response(500, "Agent execution failed", error_type="server_error")
+
+        _openai_state.active_stream_sessions.add(session_id)
+
+    async def event_generator() -> AsyncIterator[str]:
+        stopped_on_pause = False
+        should_stop = False
+        try:
+            yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'role': 'assistant'})}\n\n"
+
+            async with session_lock:
+                payloads, should_stop, stopped_on_pause = _strict_openai_stream_event_chunks(
+                    event=first_event,
+                    completion_id=completion_id,
+                    created=created,
+                    agent_name=agent_name,
+                    session_id=session_id,
+                )
+            for payload in payloads:
+                yield f"data: {payload}\n\n"
+
+            if not should_stop:
+                async for event in stream:
+                    async with session_lock:
+                        payloads, should_stop, stopped_on_pause = _strict_openai_stream_event_chunks(
+                            event=event,
+                            completion_id=completion_id,
+                            created=created,
+                            agent_name=agent_name,
+                            session_id=session_id,
+                        )
+                    for payload in payloads:
+                        yield f"data: {payload}\n\n"
+                    if should_stop:
+                        break
+
+            if not stopped_on_pause:
+                async with session_lock:
+                    _clear_pending_openai_run(session_id)
+                yield f"data: {_chunk_json(completion_id, created, agent_name, delta={}, finish_reason='stop')}\n\n"
+        except Exception:
+            logger.exception("Strict OpenAI stream failed during iteration", model=agent_name, session_id=session_id)
+            async with session_lock:
+                _clear_pending_openai_run(session_id)
+            for payload in (
+                _strict_mode_error_chunk(completion_id, created, agent_name, "Agent execution failed"),
+                _chunk_json(completion_id, created, agent_name, delta={}, finish_reason="stop"),
+            ):
+                yield f"data: {payload}\n\n"
+        finally:
+            async with session_lock:
+                _openai_state.active_stream_sessions.discard(session_id)
+            _cleanup_expired_openai_runs()
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 # ---------------------------------------------------------------------------
@@ -709,7 +1334,7 @@ async def _non_stream_completion(
             ),
         ],
     )
-    return JSONResponse(content=response.model_dump())
+    return JSONResponse(content=response.model_dump(exclude_none=True))
 
 
 # ---------------------------------------------------------------------------
@@ -849,7 +1474,7 @@ async def _stream_completion(
     created = int(time.time())
 
     async def event_generator() -> AsyncIterator[str]:
-        tracker = _ToolDetailsTracker() if tool_event_format == "open-webui" else None
+        tracker = _ToolDetailsTracker() if tool_event_format == TOOL_EVENT_FORMAT_OPEN_WEBUI else None
 
         # 1. Initial role announcement
         yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'role': 'assistant'})}\n\n"
@@ -977,7 +1602,7 @@ async def _non_stream_team_completion(
             ),
         ],
     )
-    return JSONResponse(content=result.model_dump())
+    return JSONResponse(content=result.model_dump(exclude_none=True))
 
 
 async def _stream_team_completion(
@@ -1079,7 +1704,7 @@ async def _team_stream_event_generator(
     tool_event_format: str | None = None,
 ) -> AsyncIterator[str]:
     """Yield SSE chunks for team streaming responses."""
-    tracker = _ToolDetailsTracker() if tool_event_format == "open-webui" else None
+    tracker = _ToolDetailsTracker() if tool_event_format == TOOL_EVENT_FORMAT_OPEN_WEBUI else None
 
     # 1. Role announcement
     yield f"data: {_chunk_json(completion_id, created, model_id, delta={'role': 'assistant'})}\n\n"

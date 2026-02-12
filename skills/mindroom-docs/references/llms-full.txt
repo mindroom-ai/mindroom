@@ -2159,7 +2159,18 @@ Teams are exposed as `team/<team_name>` models. Selecting `team/super_team` runs
 
 `stream: true` returns Server-Sent Events in the standard OpenAI format: role chunk, content chunks, finish chunk, `[DONE]`.
 
-By default, tool calls appear inline as text in the stream (not as native OpenAI `tool_calls` deltas). When the `X-Tool-Event-Format: open-webui` request header is set, tool calls are rendered as `<details>` HTML blocks that Open WebUI and LibreChat display as collapsible tool call cards.
+Tool rendering mode is controlled by `X-Tool-Event-Format`:
+
+- No header: tool events are emitted as inline content text
+- `open-webui`: tool events are rendered as `<details>` HTML blocks in content chunks
+- `openai`: strict OpenAI tool-calling mode (`delta.tool_calls` / `finish_reason: "tool_calls"`)
+
+Strict `openai` mode requirements:
+
+- `X-Session-Id` header is required
+- only single-agent models are supported (`team/*` models are rejected)
+- tool execution remains server-side; client returns `role="tool"` messages with `tool_call_id` + result content to continue the run
+- one active strict-mode stream is allowed per `X-Session-Id` (parallel stream requests for the same session return `409`)
 
 ### Session continuity
 
@@ -2170,6 +2181,8 @@ Session IDs are derived from request headers:
 1. Random UUID fallback
 
 Agent memory and conversation history persist across requests with the same session ID.
+
+In strict `openai` mode, MindRoom keeps paused tool-call state in-memory with a short TTL. Use a stable `X-Session-Id` across the initial request and continuation requests.
 
 ### Knowledge bases
 
@@ -2200,7 +2213,8 @@ The OpenAI-compatible API uses its own auth, separate from the dashboard's Supab
 ## Limitations
 
 - **Token usage is always zeros** — Agno doesn't expose token counts
-- **No native `tool_calls` format** — tool results appear inline in content text (or as `<details>` HTML with the `X-Tool-Event-Format: open-webui` header)
+- **Strict `openai` mode state is process-local** — paused tool-call state is in-memory (single-process or sticky routing recommended)
+- **Strict `openai` mode cleanup is request-driven** — stale paused runs/locks are pruned on incoming requests (not by a background task)
 - **No room memory** — only agent-scoped memory (no `room_id` in API requests)
 - **Scheduler tool unavailable** — scheduling requires Matrix context and is stripped from API agents
 
