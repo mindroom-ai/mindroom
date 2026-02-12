@@ -53,6 +53,7 @@ if TYPE_CHECKING:
 
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
+    from agno.models.response import ToolExecution
     from agno.run.agent import RunOutput, RunOutputEvent
     from agno.run.team import TeamRunOutputEvent
 
@@ -774,23 +775,22 @@ class _ToolDetailsTracker:
             return self._on_complete(event.tool)
         return None
 
-    def _on_start(self, tool: object) -> str:
+    def _on_start(self, tool: ToolExecution | None) -> str:
         if tool is None:
             return ""
-        tool_name = getattr(tool, "tool_name", None) or "tool"
-        raw_args = getattr(tool, "tool_args", None)
-        tool_args = {str(k): v for k, v in raw_args.items()} if isinstance(raw_args, dict) else {}
+        tool_name = tool.tool_name or "tool"
+        tool_args = {str(k): v for k, v in tool.tool_args.items()} if tool.tool_args else {}
         args_json = json.dumps(tool_args, default=str)
         call_id = f"call-{uuid4().hex[:8]}"
-        tool_call_id = getattr(tool, "tool_call_id", None) or call_id
+        tool_call_id = tool.tool_call_id or call_id
         self._pending[tool_call_id] = (call_id, tool_name, args_json)
         return ""  # suppress inline text, emit nothing
 
-    def _on_complete(self, tool: object) -> str | None:
+    def _on_complete(self, tool: ToolExecution | None) -> str | None:
         if tool is None:
             return None
-        result = str(getattr(tool, "result", "") or "")
-        tool_call_id = getattr(tool, "tool_call_id", None)
+        result = str(tool.result or "")
+        tool_call_id = tool.tool_call_id
         pending = self._pending.pop(tool_call_id, None) if tool_call_id else None
         if pending is None:
             return None
