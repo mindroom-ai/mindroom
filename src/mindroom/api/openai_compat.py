@@ -7,6 +7,7 @@ Exposes MindRoom agents as an OpenAI-compatible API so any chat frontend
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import os
 import re
@@ -52,6 +53,7 @@ if TYPE_CHECKING:
 
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
+    from agno.models.response import ToolExecution
     from agno.run.agent import RunOutput, RunOutputEvent
     from agno.run.team import TeamRunOutputEvent
 
@@ -599,6 +601,9 @@ async def chat_completions(
             return result
         agent_name = result
 
+    # Check for tool event format header (e.g., "open-webui" for <details> HTML)
+    tool_event_format = request.headers.get("x-tool-event-format")
+
     # Derive a namespaced session ID from request headers or fallback UUID.
     session_id = _derive_session_id(agent_name, request)
     logger.info(
@@ -627,6 +632,7 @@ async def chat_completions(
                 config,
                 thread_history,
                 req.user,
+                tool_event_format=tool_event_format,
             )
         return await _non_stream_team_completion(
             team_name,
@@ -646,7 +652,16 @@ async def chat_completions(
         knowledge = None
 
     handler = _stream_completion if req.stream else _non_stream_completion
-    return await handler(agent_name, prompt, session_id, config, thread_history, req.user, knowledge)
+    return await handler(
+        agent_name,
+        prompt,
+        session_id,
+        config,
+        thread_history,
+        req.user,
+        knowledge,
+        **({"tool_event_format": tool_event_format} if req.stream else {}),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -734,6 +749,59 @@ def _format_stream_tool_event(event: RunOutputEvent | TeamRunOutputEvent) -> str
     return None
 
 
+def _tool_details_html(call_id: str, tool_name: str, args_json: str, result: str) -> str:
+    """Format a completed tool call as Open WebUI <details> HTML."""
+    return (
+        f'<details type="tool_calls" done="true" id="{html.escape(call_id)}" '
+        f'name="{html.escape(tool_name)}" arguments="{html.escape(args_json)}" '
+        f'result="{html.escape(result)}">\n'
+        f"<summary>Tool Executed</summary>\n</details>\n"
+    )
+
+
+class _ToolDetailsTracker:
+    """Track tool calls and emit <details> HTML on completion."""
+
+    def __init__(self) -> None:
+        self._pending: dict[str, tuple[str, str, str]] = {}
+
+    def handle_event(self, event: object) -> str | None:
+        """Return <details> HTML on tool completion, '' to suppress inline text, None to ignore."""
+        if isinstance(event, (ToolCallStartedEvent, TeamToolCallStartedEvent)):
+            return self._on_start(event.tool)
+        if isinstance(event, (ToolCallCompletedEvent, TeamToolCallCompletedEvent)):
+            return self._on_complete(event.tool)
+        return None
+
+    def _on_start(self, tool: ToolExecution | None) -> str:
+        if tool is None:
+            return ""
+        tool_name = tool.tool_name or "tool"
+        tool_args = {str(k): v for k, v in tool.tool_args.items()} if tool.tool_args else {}
+        args_json = json.dumps(tool_args, default=str)
+        call_id = f"call-{uuid4().hex[:8]}"
+        tool_call_id = tool.tool_call_id or call_id
+        self._pending[tool_call_id] = (call_id, tool_name, args_json)
+        return ""  # suppress inline text, emit nothing
+
+    def _on_complete(self, tool: ToolExecution | None) -> str | None:
+        if tool is None:
+            return None
+        result = str(tool.result or "")
+        tool_call_id = tool.tool_call_id
+        if tool_call_id:
+            pending = self._pending.pop(tool_call_id, None)
+        elif len(self._pending) == 1:
+            # No tool_call_id but exactly one pending — unambiguous match
+            pending = self._pending.pop(next(iter(self._pending)))
+        else:
+            pending = None
+        if pending is None:
+            return None
+        call_id, tool_name, args_json = pending
+        return _tool_details_html(call_id, tool_name, args_json, result)
+
+
 def _extract_stream_text(event: AIStreamChunk) -> str | None:
     """Extract text content from a stream event."""
     if isinstance(event, RunContentEvent) and event.content:
@@ -751,6 +819,8 @@ async def _stream_completion(
     thread_history: list[dict[str, Any]] | None,
     user: str | None,
     knowledge: Knowledge | None = None,
+    *,
+    tool_event_format: str | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming chat completion via SSE."""
     stream: AsyncIterator[AIStreamChunk] = stream_agent_response(
@@ -779,11 +849,15 @@ async def _stream_completion(
     created = int(time.time())
 
     async def event_generator() -> AsyncIterator[str]:
+        tracker = _ToolDetailsTracker() if tool_event_format == "open-webui" else None
+
         # 1. Initial role announcement
         yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'role': 'assistant'})}\n\n"
 
         # 2. Yield the peeked first event
-        text = _extract_stream_text(first_event)
+        text = tracker.handle_event(first_event) if tracker is not None else None
+        if text is None:
+            text = _extract_stream_text(first_event)
         if text:
             yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
 
@@ -791,7 +865,9 @@ async def _stream_completion(
         # Error strings after the first event are sent as content chunks
         # since we can't switch to an error HTTP status mid-stream.
         async for event in stream:
-            text = _extract_stream_text(event)
+            text = tracker.handle_event(event) if tracker is not None else None
+            if text is None:
+                text = _extract_stream_text(event)
             if text:
                 yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
 
@@ -912,6 +988,8 @@ async def _stream_team_completion(
     config: Config,
     thread_history: list[dict[str, Any]] | None,
     user: str | None = None,
+    *,
+    tool_event_format: str | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
     agents, team, mode = _build_team(team_name, config)
@@ -946,6 +1024,7 @@ async def _stream_team_completion(
             created=created,
             model_id=model_id,
             team_name=team_name,
+            tool_event_format=tool_event_format,
         ),
         media_type="text/event-stream",
     )
@@ -997,13 +1076,18 @@ async def _team_stream_event_generator(
     created: int,
     model_id: str,
     team_name: str,
+    tool_event_format: str | None = None,
 ) -> AsyncIterator[str]:
     """Yield SSE chunks for team streaming responses."""
+    tracker = _ToolDetailsTracker() if tool_event_format == "open-webui" else None
+
     # 1. Role announcement
     yield f"data: {_chunk_json(completion_id, created, model_id, delta={'role': 'assistant'})}\n\n"
 
     # 2. First event
-    first_text = _extract_team_stream_text(first_event)
+    first_text = tracker.handle_event(first_event) if tracker is not None else None
+    if first_text is None:
+        first_text = _extract_team_stream_text(first_event)
     if first_text:
         yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': first_text})}\n\n"
 
@@ -1016,7 +1100,9 @@ async def _team_stream_event_generator(
                 yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': 'Team execution failed.'})}\n\n"
                 break
 
-            text = _extract_team_stream_text(event)
+            text = tracker.handle_event(event) if tracker is not None else None
+            if text is None:
+                text = _extract_team_stream_text(event)
             if text:
                 yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': text})}\n\n"
     except Exception:
