@@ -25,8 +25,8 @@ services:
       - mynetwork
     labels:
       - traefik.enable=true
-      # API routes - backend now serves the API on port 8765
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.rule=Host(`${INSTANCE_DOMAIN}`) && PathPrefix(`/api`)
+      # API routes - backend now serves REST and OpenAI-compatible endpoints on port 8765
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.rule=Host(`${INSTANCE_DOMAIN}`) && (PathPrefix(`/api`) || PathPrefix(`/v1`))
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.entrypoints=websecure
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.tls=true
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.tls.certresolver=porkbun
