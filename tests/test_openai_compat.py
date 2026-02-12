@@ -698,16 +698,30 @@ class TestSessionIdDerivation:
         return mock
 
     def test_explicit_session_id_header(self) -> None:
-        """X-Session-Id header takes highest priority."""
+        """X-Session-Id header takes highest priority (namespaced with key)."""
         request = self._mock_request({"X-Session-Id": "my-session"})
         sid = _derive_session_id("general", None, "Hello", request)
-        assert sid == "my-session"
+        # Session ID is namespaced with API key hash prefix
+        assert sid.endswith(":my-session")
+        assert sid.startswith("noauth:")  # No auth header
+
+    def test_explicit_session_id_namespaced_by_key(self) -> None:
+        """Different API keys produce different session namespaces."""
+        req1 = self._mock_request({"X-Session-Id": "sess", "Authorization": "Bearer key-1"})
+        req2 = self._mock_request({"X-Session-Id": "sess", "Authorization": "Bearer key-2"})
+        sid1 = _derive_session_id("general", None, "Hello", req1)
+        sid2 = _derive_session_id("general", None, "Hello", req2)
+        # Same session ID but different keys → different derived IDs
+        assert sid1 != sid2
+        assert sid1.endswith(":sess")
+        assert sid2.endswith(":sess")
 
     def test_librechat_conversation_id(self) -> None:
         """X-LibreChat-Conversation-Id header is used when no X-Session-Id."""
         request = self._mock_request({"X-LibreChat-Conversation-Id": "conv-123"})
         sid = _derive_session_id("general", None, "Hello", request)
-        assert sid == "conv-123:general"
+        assert "conv-123" in sid
+        assert "general" in sid
 
     def test_session_id_takes_priority_over_librechat(self) -> None:
         """X-Session-Id takes priority over X-LibreChat-Conversation-Id."""
@@ -718,7 +732,8 @@ class TestSessionIdDerivation:
             },
         )
         sid = _derive_session_id("general", None, "Hello", request)
-        assert sid == "explicit"
+        assert "explicit" in sid
+        assert "libre" not in sid
 
     def test_hash_fallback_deterministic(self) -> None:
         """Hash fallback produces same ID for same inputs."""

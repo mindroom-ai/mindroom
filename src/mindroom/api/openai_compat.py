@@ -38,7 +38,11 @@ router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])
 
 
 def _load_config() -> tuple[Config, Path]:
-    """Load the current runtime config and return it with its path."""
+    """Load the current runtime config and return it with its path.
+
+    Loads directly from Config.from_yaml rather than sharing with main.py's
+    loader to avoid circular imports (main.py imports this router).
+    """
     return Config.from_yaml(DEFAULT_AGENTS_CONFIG), DEFAULT_AGENTS_CONFIG
 
 
@@ -312,24 +316,28 @@ def _derive_session_id(
     """Derive a session ID from request headers or content.
 
     Priority cascade:
-    1. X-Session-Id header
+    1. X-Session-Id header (namespaced with API key to prevent cross-key collision)
     2. X-LibreChat-Conversation-Id header + model
     3. Hash of (model, user, first_user_message) — uses the first user message
        so the session ID stays stable across all messages in a conversation.
     """
-    # 1. Explicit session ID
+    # Namespace prefix from API key to prevent session hijack across keys
+    auth = request.headers.get("authorization", "")
+    key_namespace = hashlib.sha256(auth.encode()).hexdigest()[:8] if auth else "noauth"
+
+    # 1. Explicit session ID (namespaced to prevent cross-key collision)
     session_id = request.headers.get("x-session-id")
     if session_id:
-        return session_id
+        return f"{key_namespace}:{session_id}"
 
     # 2. LibreChat conversation ID
     libre_id = request.headers.get("x-librechat-conversation-id")
     if libre_id:
-        return f"{libre_id}:{model}"
+        return f"{key_namespace}:{libre_id}:{model}"
 
     # 3. Deterministic hash fallback
     user_id = user or "anonymous"
-    hash_input = f"{model}:{user_id}:{first_user_message}"
+    hash_input = f"{key_namespace}:{model}:{user_id}:{first_user_message}"
     return hashlib.sha256(hash_input.encode()).hexdigest()[:16]
 
 
