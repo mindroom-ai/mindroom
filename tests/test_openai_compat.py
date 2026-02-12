@@ -91,13 +91,14 @@ class TestListModels:
     """Tests for GET /v1/models."""
 
     def test_lists_agents(self, app_client: TestClient) -> None:
-        """Lists all configured agents as models."""
+        """Lists all configured agents as models, plus auto."""
         response = app_client.get("/v1/models")
         assert response.status_code == 200
 
         data = response.json()
         assert data["object"] == "list"
         model_ids = [m["id"] for m in data["data"]]
+        assert "auto" in model_ids
         assert "general" in model_ids
         assert "code" in model_ids
         assert "research" in model_ids
@@ -128,8 +129,17 @@ class TestListModels:
         model_ids = [m["id"] for m in data["data"]]
         assert "router" not in model_ids
 
-    def test_empty_agents(self) -> None:
-        """Returns empty list when no agents configured."""
+    def test_auto_model_listed_first(self, app_client: TestClient) -> None:
+        """Auto model is listed first with description."""
+        response = app_client.get("/v1/models")
+        data = response.json()
+        first = data["data"][0]
+        assert first["id"] == "auto"
+        assert first["name"] == "Auto"
+        assert "routes" in first["description"].lower() or "auto" in first["description"].lower()
+
+    def test_empty_agents_still_has_auto(self) -> None:
+        """With no agents configured, only auto is listed."""
         from fastapi import FastAPI  # noqa: PLC0415
 
         from mindroom.api.openai_compat import router  # noqa: PLC0415
@@ -146,7 +156,9 @@ class TestListModels:
             client = TestClient(app)
             response = client.get("/v1/models")
             assert response.status_code == 200
-            assert response.json()["data"] == []
+            data = response.json()["data"]
+            assert len(data) == 1
+            assert data[0]["id"] == "auto"
 
 
 class TestChatCompletions:
@@ -770,3 +782,139 @@ class TestContentExtraction:
             "not a dict",  # type: ignore[list-item]
         ]
         assert _extract_content_text(content) == "Valid"
+
+
+# ---------------------------------------------------------------------------
+# Auto-routing (Phase 2)
+# ---------------------------------------------------------------------------
+
+
+class TestAutoRouting:
+    """Tests for auto-routing via model='auto'."""
+
+    def test_auto_routes_to_suggested_agent(self, app_client: TestClient) -> None:
+        """Auto model routes to the agent suggested by suggest_agent()."""
+        with (
+            patch("mindroom.api.openai_compat.suggest_agent", new_callable=AsyncMock) as mock_route,
+            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+        ):
+            mock_route.return_value = "code"
+            mock_ai.return_value = "Here is your code"
+
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "auto",
+                    "messages": [{"role": "user", "content": "Write Python code"}],
+                },
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        # Response model field shows the resolved agent, not "auto"
+        assert data["model"] == "code"
+        assert data["choices"][0]["message"]["content"] == "Here is your code"
+
+    def test_auto_fallback_when_routing_fails(self, app_client: TestClient) -> None:
+        """When suggest_agent returns None, falls back to first agent."""
+        with (
+            patch("mindroom.api.openai_compat.suggest_agent", new_callable=AsyncMock) as mock_route,
+            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+        ):
+            mock_route.return_value = None
+            mock_ai.return_value = "Fallback response"
+
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "auto",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+        assert response.status_code == 200
+        # Falls back to first agent in config
+        assert response.json()["model"] in {"general", "code", "research"}
+
+    def test_auto_passes_thread_history(self, app_client: TestClient) -> None:
+        """Auto-routing passes thread_history to suggest_agent for context."""
+        with (
+            patch("mindroom.api.openai_compat.suggest_agent", new_callable=AsyncMock) as mock_route,
+            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+        ):
+            mock_route.return_value = "general"
+            mock_ai.return_value = "Response"
+
+            app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "auto",
+                    "messages": [
+                        {"role": "user", "content": "Hi"},
+                        {"role": "assistant", "content": "Hello!"},
+                        {"role": "user", "content": "Write code"},
+                    ],
+                },
+            )
+
+            # suggest_agent should receive thread_history
+            call_args = mock_route.call_args
+            assert call_args[0][0] == "Write code"  # prompt
+            thread_history = call_args[1].get("thread_context") or call_args[0][3]
+            assert thread_history is not None
+
+    def test_auto_streaming(self, app_client: TestClient) -> None:
+        """Auto model works with streaming responses."""
+        from agno.run.agent import RunContentEvent  # noqa: PLC0415
+
+        async def mock_stream(**_kw: object) -> AsyncIterator[RunContentEvent]:
+            yield RunContentEvent(content="Streamed!")
+
+        with (
+            patch("mindroom.api.openai_compat.suggest_agent", new_callable=AsyncMock) as mock_route,
+            patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream),
+        ):
+            mock_route.return_value = "research"
+
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "auto",
+                    "messages": [{"role": "user", "content": "Research this"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        assert "text/event-stream" in response.headers["content-type"]
+
+    def test_auto_no_agents_returns_500(self) -> None:
+        """Auto with no configured agents returns 500."""
+        from fastapi import FastAPI  # noqa: PLC0415
+
+        from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+        app = FastAPI()
+        app.include_router(router)
+
+        empty_config = Config(
+            agents={},
+            models={"default": ModelConfig(provider="ollama", id="test")},
+            router=RouterConfig(model="default"),
+        )
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(empty_config, Path(__file__))),
+            patch("mindroom.api.openai_compat.suggest_agent", new_callable=AsyncMock) as mock_route,
+        ):
+            mock_route.return_value = None
+            client = TestClient(app)
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "auto",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+        assert response.status_code == 500
+        assert "no agents" in response.json()["error"]["message"].lower()

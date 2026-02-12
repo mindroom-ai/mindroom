@@ -7,6 +7,7 @@ Exposes MindRoom agents as an OpenAI-compatible API so any chat frontend
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import time
 from typing import TYPE_CHECKING, Annotated, Any, Literal
@@ -21,7 +22,10 @@ from mindroom.ai import AIStreamChunk, ai_response, stream_agent_response
 from mindroom.config import Config
 from mindroom.constants import DEFAULT_AGENTS_CONFIG, ROUTER_AGENT_NAME, STORAGE_PATH_OBJ
 from mindroom.logging_config import get_logger
+from mindroom.routing import suggest_agent
 from mindroom.tool_events import extract_tool_completed_info, format_tool_started_event
+
+AUTO_MODEL_NAME = "auto"
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -331,6 +335,9 @@ def _validate_chat_request(
             code="not_implemented",
         )
 
+    if agent_name == AUTO_MODEL_NAME:
+        return None  # auto-routing handled in chat_completions
+
     if agent_name not in config.agents or agent_name == ROUTER_AGENT_NAME:
         return _error_response(
             404,
@@ -340,6 +347,51 @@ def _validate_chat_request(
         )
 
     return None
+
+
+def _parse_chat_request(
+    body: bytes,
+) -> tuple[ChatCompletionRequest, Config, str, list[dict[str, Any]] | None] | JSONResponse:
+    """Parse and validate a chat completion request body.
+
+    Returns (request, config, prompt, thread_history) on success, or a JSONResponse error.
+    """
+    try:
+        req = ChatCompletionRequest(**json.loads(body))
+    except Exception:
+        return _error_response(400, "Invalid request body")
+
+    config, _ = _load_config()
+    validation_error = _validate_chat_request(req, config)
+    if validation_error:
+        return validation_error
+
+    prompt, thread_history = _convert_messages(req.messages)
+    if not prompt:
+        return _error_response(400, "No user message content found in messages")
+
+    return req, config, prompt, thread_history
+
+
+async def _resolve_auto_route(
+    prompt: str,
+    config: Config,
+    thread_history: list[dict[str, Any]] | None,
+) -> str | JSONResponse:
+    """Resolve auto-routing to a specific agent name.
+
+    Returns the resolved agent name, or a JSONResponse error if routing fails
+    and no agents are available.
+    """
+    available = [n for n in config.agents if n != ROUTER_AGENT_NAME]
+    routed = await suggest_agent(prompt, available, config, thread_history)
+    if routed is None:
+        if not available:
+            return _error_response(500, "No agents configured for auto-routing", error_type="server_error")
+        routed = available[0]
+        logger.warning("Auto-routing failed, falling back", agent=routed)
+    logger.info("Auto-routed", requested="auto", resolved=routed)
+    return routed
 
 
 # ---------------------------------------------------------------------------
@@ -364,7 +416,14 @@ async def list_models(
     except OSError:
         created = 0
 
-    models = []
+    models: list[ModelObject] = [
+        ModelObject(
+            id=AUTO_MODEL_NAME,
+            name="Auto",
+            description="Automatically routes to the best agent for your message",
+            created=created,
+        ),
+    ]
     for agent_name, agent_config in config.agents.items():
         if agent_name == ROUTER_AGENT_NAME:
             continue
@@ -391,26 +450,21 @@ async def chat_completions(
     if auth_error:
         return auth_error
 
-    # Parse request body
-    try:
-        body = await request.json()
-        req = ChatCompletionRequest(**body)
-    except Exception:
-        return _error_response(400, "Invalid request body")
+    # Parse and validate request
+    parsed = _parse_chat_request(await request.body())
+    if isinstance(parsed, JSONResponse):
+        return parsed
+    req, config, prompt, thread_history = parsed
 
-    # Validate request
-    config, _ = _load_config()
-    validation_error = _validate_chat_request(req, config)
-    if validation_error:
-        return validation_error
-
-    # Convert messages
-    prompt, thread_history = _convert_messages(req.messages)
-    if not prompt:
-        return _error_response(400, "No user message content found in messages")
+    # Resolve auto-routing if model is "auto"
+    agent_name = req.model
+    if agent_name == AUTO_MODEL_NAME:
+        result = await _resolve_auto_route(prompt, config, thread_history)
+        if isinstance(result, JSONResponse):
+            return result
+        agent_name = result
 
     # Derive session ID using first user message for stable hashing
-    agent_name = req.model
     first_user_content = next(
         (_extract_content_text(m.content) for m in req.messages if m.role == "user"),
         prompt,
