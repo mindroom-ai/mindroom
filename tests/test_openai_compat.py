@@ -20,6 +20,9 @@ from mindroom.api.openai_compat import (
     _derive_session_id,
     _extract_content_text,
     _is_error_response,
+    _librechat_tool_end_sse,
+    _librechat_tool_start_sse,
+    _LibreChatToolTracker,
 )
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig, TeamConfig
 
@@ -1785,3 +1788,358 @@ class TestKnowledgeIntegration:
         assert mock_ai.call_args.kwargs["knowledge"] is None
         data = response.json()
         assert data["choices"][0]["message"]["content"] == "Response without knowledge"
+
+
+# ---------------------------------------------------------------------------
+# LibreChat structured tool events
+# ---------------------------------------------------------------------------
+
+
+class TestLibreChatToolSSEFormatters:
+    """Tests for LibreChat SSE event formatting functions."""
+
+    def test_tool_start_sse_shape(self) -> None:
+        """on_run_step SSE has correct LibreChat shape."""
+        sse = _librechat_tool_start_sse(
+            step_id="step-abc",
+            call_id="call-xyz",
+            run_id="chatcmpl-123",
+            step_index=0,
+            tool_name="run_shell_command",
+            args_json='{"command": "pwd"}',
+        )
+        assert sse.startswith("data: ")
+        assert sse.endswith("\n\n")
+
+        payload = json.loads(sse.removeprefix("data: ").strip())
+        assert payload["event"] == "on_run_step"
+        data = payload["data"]
+        assert data["id"] == "step-abc"
+        assert data["runId"] == "chatcmpl-123"
+        assert data["index"] == 0
+        assert data["type"] == "tool_calls"
+        assert data["usage"] is None
+
+        tool_calls = data["stepDetails"]["tool_calls"]
+        assert len(tool_calls) == 1
+        assert tool_calls[0]["id"] == "call-xyz"
+        assert tool_calls[0]["name"] == "run_shell_command"
+        assert tool_calls[0]["args"] == '{"command": "pwd"}'
+        assert tool_calls[0]["type"] == "tool_call"
+
+    def test_tool_end_sse_shape(self) -> None:
+        """on_run_step_completed SSE has correct LibreChat shape."""
+        sse = _librechat_tool_end_sse(
+            step_id="step-abc",
+            call_id="call-xyz",
+            step_index=0,
+            tool_name="run_shell_command",
+            args_json='{"command": "pwd"}',
+            output="/app",
+        )
+        payload = json.loads(sse.removeprefix("data: ").strip())
+        assert payload["event"] == "on_run_step_completed"
+
+        result = payload["data"]["result"]
+        assert result["id"] == "step-abc"
+        assert result["index"] == 0
+
+        tc = result["tool_call"]
+        assert tc["id"] == "call-xyz"
+        assert tc["name"] == "run_shell_command"
+        assert tc["args"] == '{"command": "pwd"}'
+        assert tc["output"] == "/app"
+        assert tc["progress"] == 1
+        assert tc["type"] == "tool_call"
+
+
+class TestLibreChatToolTracker:
+    """Tests for _LibreChatToolTracker state management."""
+
+    def test_start_event_generates_sse(self) -> None:
+        """ToolCallStartedEvent produces on_run_step SSE."""
+        from agno.run.agent import ToolCallStartedEvent  # noqa: PLC0415
+
+        tracker = _LibreChatToolTracker("chatcmpl-test")
+        mock_tool = MagicMock()
+        mock_tool.tool_name = "search"
+        mock_tool.tool_args = {"query": "test"}
+
+        result = tracker.handle_event(ToolCallStartedEvent(tool=mock_tool))
+        assert result is not None
+        payload = json.loads(result.removeprefix("data: ").strip())
+        assert payload["event"] == "on_run_step"
+        assert payload["data"]["stepDetails"]["tool_calls"][0]["name"] == "search"
+        assert payload["data"]["stepDetails"]["tool_calls"][0]["args"] == '{"query": "test"}'
+
+    def test_complete_event_generates_sse(self) -> None:
+        """ToolCallCompletedEvent produces on_run_step_completed SSE."""
+        from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent  # noqa: PLC0415
+
+        tracker = _LibreChatToolTracker("chatcmpl-test")
+
+        # Start a tool call first
+        start_tool = MagicMock()
+        start_tool.tool_name = "search"
+        start_tool.tool_args = {"query": "test"}
+        tracker.handle_event(ToolCallStartedEvent(tool=start_tool))
+
+        # Complete it
+        end_tool = MagicMock()
+        end_tool.tool_name = "search"
+        end_tool.result = "3 results found"
+        result = tracker.handle_event(ToolCallCompletedEvent(tool=end_tool))
+
+        assert result is not None
+        payload = json.loads(result.removeprefix("data: ").strip())
+        assert payload["event"] == "on_run_step_completed"
+        assert payload["data"]["result"]["tool_call"]["output"] == "3 results found"
+        assert payload["data"]["result"]["tool_call"]["progress"] == 1
+
+    def test_start_complete_ids_match(self) -> None:
+        """Step IDs and call IDs match between start and complete events."""
+        from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent  # noqa: PLC0415
+
+        tracker = _LibreChatToolTracker("chatcmpl-test")
+
+        start_tool = MagicMock()
+        start_tool.tool_name = "search"
+        start_tool.tool_args = {}
+        start_sse = tracker.handle_event(ToolCallStartedEvent(tool=start_tool))
+
+        end_tool = MagicMock()
+        end_tool.tool_name = "search"
+        end_tool.result = "done"
+        end_sse = tracker.handle_event(ToolCallCompletedEvent(tool=end_tool))
+
+        start_data = json.loads(start_sse.removeprefix("data: ").strip())
+        end_data = json.loads(end_sse.removeprefix("data: ").strip())
+
+        start_step_id = start_data["data"]["id"]
+        start_call_id = start_data["data"]["stepDetails"]["tool_calls"][0]["id"]
+        end_step_id = end_data["data"]["result"]["id"]
+        end_call_id = end_data["data"]["result"]["tool_call"]["id"]
+
+        assert start_step_id == end_step_id
+        assert start_call_id == end_call_id
+
+    def test_content_event_returns_none(self) -> None:
+        """Content events are not handled by the tracker."""
+        from agno.run.agent import RunContentEvent  # noqa: PLC0415
+
+        tracker = _LibreChatToolTracker("chatcmpl-test")
+        result = tracker.handle_event(RunContentEvent(content="Hello"))
+        assert result is None
+
+    def test_step_index_increments(self) -> None:
+        """Each tool call gets a unique, incrementing step index."""
+        from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent  # noqa: PLC0415
+
+        tracker = _LibreChatToolTracker("chatcmpl-test")
+
+        for i in range(3):
+            tool = MagicMock()
+            tool.tool_name = f"tool_{i}"
+            tool.tool_args = {}
+            start_sse = tracker.handle_event(ToolCallStartedEvent(tool=tool))
+            data = json.loads(start_sse.removeprefix("data: ").strip())
+            assert data["data"]["index"] == i
+
+            tool.result = "ok"
+            tracker.handle_event(ToolCallCompletedEvent(tool=tool))
+
+    def test_none_tool_returns_none(self) -> None:
+        """Events with tool=None are skipped."""
+        from agno.run.agent import ToolCallStartedEvent  # noqa: PLC0415
+
+        tracker = _LibreChatToolTracker("chatcmpl-test")
+        result = tracker.handle_event(ToolCallStartedEvent(tool=None))
+        assert result is None
+
+    def test_team_tool_events_handled(self) -> None:
+        """Team tool events are also handled by the tracker."""
+        from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent  # noqa: PLC0415
+
+        tracker = _LibreChatToolTracker("chatcmpl-test")
+        mock_tool = MagicMock()
+        mock_tool.tool_name = "team_search"
+        mock_tool.tool_args = {"q": "test"}
+
+        result = tracker.handle_event(TeamToolCallStartedEvent(tool=mock_tool))
+        assert result is not None
+        payload = json.loads(result.removeprefix("data: ").strip())
+        assert payload["event"] == "on_run_step"
+        assert payload["data"]["stepDetails"]["tool_calls"][0]["name"] == "team_search"
+
+
+class TestLibreChatStreamingIntegration:
+    """Integration tests for LibreChat structured tool events in streaming."""
+
+    def test_librechat_header_triggers_structured_events(self, app_client: TestClient) -> None:
+        """X-LibreChat-Conversation-Id header triggers structured tool events."""
+        from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent  # noqa: PLC0415
+
+        mock_tool_started = MagicMock()
+        mock_tool_started.tool_name = "run_shell_command"
+        mock_tool_started.tool_args = {"command": "pwd"}
+
+        mock_tool_completed = MagicMock()
+        mock_tool_completed.tool_name = "run_shell_command"
+        mock_tool_completed.tool_args = {"command": "pwd"}
+        mock_tool_completed.result = "/app"
+
+        async def mock_stream(**_kw: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="Let me check. ")
+            yield ToolCallStartedEvent(tool=mock_tool_started)
+            yield ToolCallCompletedEvent(tool=mock_tool_completed)
+            yield RunContentEvent(content="Done!")
+
+        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Run pwd"}],
+                    "stream": True,
+                },
+                headers={"X-LibreChat-Conversation-Id": "conv-123"},
+            )
+
+        assert response.status_code == 200
+        lines = response.text.strip().split("\n\n")
+
+        # Collect structured events and content chunks
+        structured_events = []
+        content_chunks = []
+        for line in lines:
+            text = line.removeprefix("data: ")
+            if text == "[DONE]":
+                continue
+            data = json.loads(text)
+            if "event" in data:
+                structured_events.append(data)
+            elif "choices" in data and "content" in data.get("choices", [{}])[0].get("delta", {}):
+                content_chunks.append(data["choices"][0]["delta"]["content"])
+
+        # Should have on_run_step and on_run_step_completed
+        assert len(structured_events) == 2
+        assert structured_events[0]["event"] == "on_run_step"
+        assert structured_events[1]["event"] == "on_run_step_completed"
+
+        # Tool name and args should be correct
+        tool_call = structured_events[0]["data"]["stepDetails"]["tool_calls"][0]
+        assert tool_call["name"] == "run_shell_command"
+        assert json.loads(tool_call["args"]) == {"command": "pwd"}
+
+        # Result should be in completed event
+        completed_tc = structured_events[1]["data"]["result"]["tool_call"]
+        assert completed_tc["output"] == "/app"
+        assert completed_tc["progress"] == 1
+
+        # Content should still be streamed normally
+        assert "Let me check. " in content_chunks
+        assert "Done!" in content_chunks
+
+        # Inline tool text should NOT be present
+        assert not any("<tool>" in c for c in content_chunks)
+        assert not any("Result:" in c for c in content_chunks)
+
+    def test_no_librechat_header_uses_inline_text(self, app_client: TestClient) -> None:
+        """Without LibreChat header, tool events remain inline text."""
+        from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent  # noqa: PLC0415
+
+        mock_tool_started = MagicMock()
+        mock_tool_completed = MagicMock()
+
+        async def mock_stream(**_kw: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="Checking. ")
+            yield ToolCallStartedEvent(tool=mock_tool_started)
+            yield ToolCallCompletedEvent(tool=mock_tool_completed)
+            yield RunContentEvent(content="Done!")
+
+        with (
+            patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream),
+            patch("mindroom.api.openai_compat.format_tool_started_event", return_value=("🔧 Running...", None)),
+            patch(
+                "mindroom.api.openai_compat.extract_tool_completed_info",
+                return_value=("shell", "ok"),
+            ),
+        ):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Run command"}],
+                    "stream": True,
+                },
+                # No X-LibreChat-Conversation-Id header
+            )
+
+        assert response.status_code == 200
+        lines = response.text.strip().split("\n\n")
+
+        # No structured events
+        for line in lines:
+            text = line.removeprefix("data: ")
+            if text == "[DONE]":
+                continue
+            data = json.loads(text)
+            assert "event" not in data  # No structured events
+
+        # Inline tool text should be present
+        contents = []
+        for line in lines:
+            text = line.removeprefix("data: ")
+            if text == "[DONE]":
+                continue
+            data = json.loads(text)
+            delta = data.get("choices", [{}])[0].get("delta", {})
+            if "content" in delta:
+                contents.append(delta["content"])
+
+        assert "🔧 Running..." in contents
+        assert any("ok" in c for c in contents)
+
+    def test_librechat_ids_consistent_across_events(self, app_client: TestClient) -> None:
+        """Step IDs and call IDs match between start and complete SSE events."""
+        from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent  # noqa: PLC0415
+
+        mock_tool = MagicMock()
+        mock_tool.tool_name = "search"
+        mock_tool.tool_args = {"q": "test"}
+        mock_tool.result = "found it"
+
+        async def mock_stream(**_kw: object) -> AsyncIterator[object]:
+            yield ToolCallStartedEvent(tool=mock_tool)
+            yield ToolCallCompletedEvent(tool=mock_tool)
+            yield RunContentEvent(content="Done")
+
+        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Search"}],
+                    "stream": True,
+                },
+                headers={"X-LibreChat-Conversation-Id": "conv-456"},
+            )
+
+        structured = []
+        for line in response.text.strip().split("\n\n"):
+            text = line.removeprefix("data: ")
+            if text == "[DONE]":
+                continue
+            data = json.loads(text)
+            if "event" in data:
+                structured.append(data)
+
+        assert len(structured) == 2
+
+        start_step_id = structured[0]["data"]["id"]
+        start_call_id = structured[0]["data"]["stepDetails"]["tool_calls"][0]["id"]
+        end_step_id = structured[1]["data"]["result"]["id"]
+        end_call_id = structured[1]["data"]["result"]["tool_call"]["id"]
+
+        assert start_step_id == end_step_id
+        assert start_call_id == end_call_id
