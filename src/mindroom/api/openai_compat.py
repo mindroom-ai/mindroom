@@ -877,30 +877,16 @@ class _LibreChatToolTracker:
         tool_call_id = getattr(tool, "tool_call_id", None)
 
         pending = self._pending.pop(tool_call_id, None) if tool_call_id else None
-        if pending is not None:
-            return _librechat_tool_end_sse(
-                pending.step_id,
-                pending.call_id,
-                pending.step_index,
-                pending.tool_name,
-                pending.args_json,
-                result,
-            )
-
-        # Orphaned complete — no prior start event. Emit a synthetic
-        # on_run_step immediately followed by on_run_step_completed so
-        # LibreChat can render a complete collapsible section.
-        tool_name = getattr(tool, "tool_name", None) or "tool"
-        raw_args = getattr(tool, "tool_args", None)
-        tool_args = {str(k): v for k, v in raw_args.items()} if isinstance(raw_args, dict) else {}
-        args_json = json.dumps(tool_args, default=str)
-        idx = self._step_index
-        self._step_index += 1
-        step_id = f"step-{uuid4().hex[:8]}"
-        call_id = f"call-{uuid4().hex[:8]}"
-        start_sse = _librechat_tool_start_sse(step_id, call_id, self._run_id, idx, tool_name, args_json)
-        end_sse = _librechat_tool_end_sse(step_id, call_id, idx, tool_name, args_json, result)
-        return start_sse + end_sse
+        if pending is None:
+            return None
+        return _librechat_tool_end_sse(
+            pending.step_id,
+            pending.call_id,
+            pending.step_index,
+            pending.tool_name,
+            pending.args_json,
+            result,
+        )
 
 
 def _extract_stream_text(event: AIStreamChunk) -> str | None:

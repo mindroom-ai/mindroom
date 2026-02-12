@@ -23,7 +23,6 @@ from mindroom.api.openai_compat import (
     _librechat_tool_end_sse,
     _librechat_tool_start_sse,
     _LibreChatToolTracker,
-    _PendingToolCall,
 )
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig, TeamConfig
 
@@ -2032,45 +2031,14 @@ class TestLibreChatToolTracker:
         assert args["path"] == "/home/user/test.txt"
         assert args["count"] == 10
 
-    def test_orphaned_complete_emits_synthetic_start(self) -> None:
-        """Complete without prior start emits synthetic on_run_step + on_run_step_completed."""
+    def test_orphaned_complete_returns_none(self) -> None:
+        """Complete without prior start returns None (no matching tool_call_id)."""
         from agno.run.agent import ToolCallCompletedEvent  # noqa: PLC0415
 
         tracker = _LibreChatToolTracker("chatcmpl-test")
-
-        orphan_tool = self._make_tool(
-            tool_name="search",
-            tool_args={"q": "orphan"},
-            tool_call_id="tc-orphan",
-            result="found",
-        )
+        orphan_tool = self._make_tool(tool_call_id="tc-orphan", result="found")
         result = tracker.handle_event(ToolCallCompletedEvent(tool=orphan_tool))
-        assert result is not None
-
-        # Should contain both events concatenated
-        parts = result.split("data: ")
-        # Filter out empty strings from split
-        events = [json.loads(p.strip()) for p in parts if p.strip()]
-        assert len(events) == 2
-        assert events[0]["event"] == "on_run_step"
-        assert events[1]["event"] == "on_run_step_completed"
-
-        # IDs should match between synthetic start and complete
-        assert events[0]["data"]["id"] == events[1]["data"]["result"]["id"]
-        start_call_id = events[0]["data"]["stepDetails"]["tool_calls"][0]["id"]
-        end_call_id = events[1]["data"]["result"]["tool_call"]["id"]
-        assert start_call_id == end_call_id
-
-    def test_pending_uses_named_tuple(self) -> None:
-        """Internal _pending state uses _PendingToolCall NamedTuple."""
-        tracker = _LibreChatToolTracker("chatcmpl-test")
-        assert isinstance(tracker._pending, dict)
-
-        # Verify _PendingToolCall is accessible
-        ptc = _PendingToolCall("s1", "c1", 0, "tool", "{}")
-        assert ptc.step_id == "s1"
-        assert ptc.call_id == "c1"
-        assert ptc.step_index == 0
+        assert result is None
 
 
 class TestLibreChatStreamingIntegration:
