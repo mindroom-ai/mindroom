@@ -432,18 +432,12 @@ async def _resolve_auto_route(
     return routed
 
 
-_knowledge_initialized = False
-
-
 async def _ensure_knowledge_initialized(config: Config) -> None:
-    """Lazily initialize knowledge managers on first use.
+    """Initialize knowledge managers if needed.
 
     Safe to call multiple times — `initialize_knowledge_managers` is
     idempotent and reuses existing managers that match the config.
     """
-    global _knowledge_initialized
-    if _knowledge_initialized and not config.knowledge_bases:
-        return
     if not config.knowledge_bases:
         return
     await initialize_knowledge_managers(
@@ -452,7 +446,6 @@ async def _ensure_knowledge_initialized(config: Config) -> None:
         start_watchers=False,
         reindex_on_create=False,
     )
-    _knowledge_initialized = True
 
 
 def _resolve_knowledge(agent_name: str, config: Config) -> Knowledge | None:
@@ -484,8 +477,8 @@ def _resolve_knowledge(agent_name: str, config: Config) -> Knowledge | None:
 
     return _Knowledge(
         name=f"{agent_name}_multi_knowledge",
-        vector_db=MultiKnowledgeVectorDb(vector_dbs=[k.vector_db for k in knowledges]),
-        max_results=max(k.max_results for k in knowledges),
+        vector_db=MultiKnowledgeVectorDb(vector_dbs=[knowledge.vector_db for knowledge in knowledges]),
+        max_results=max(knowledge.max_results for knowledge in knowledges),
     )
 
 
@@ -583,9 +576,6 @@ async def chat_completions(
         session_id=session_id,
     )
 
-    # Initialize knowledge managers (lazy, idempotent)
-    await _ensure_knowledge_initialized(config)
-
     # Team execution path
     if agent_name.startswith(TEAM_MODEL_PREFIX):
         team_name = agent_name.removeprefix(TEAM_MODEL_PREFIX)
@@ -609,8 +599,13 @@ async def chat_completions(
             req.user,
         )
 
-    # Resolve knowledge base for this agent
-    knowledge = _resolve_knowledge(agent_name, config)
+    # Resolve knowledge base for this agent (init is idempotent)
+    try:
+        await _ensure_knowledge_initialized(config)
+        knowledge = _resolve_knowledge(agent_name, config)
+    except Exception:
+        logger.warning("Knowledge initialization failed, proceeding without knowledge", exc_info=True)
+        knowledge = None
 
     handler = _stream_completion if req.stream else _non_stream_completion
     return await handler(agent_name, prompt, session_id, config, thread_history, req.user, knowledge)

@@ -1493,3 +1493,83 @@ class TestKnowledgeIntegration:
 
         assert response.status_code == 200
         assert mock_stream_fn.call_args.kwargs["knowledge"] is mock_knowledge
+
+    def test_multi_knowledge_bases_merged(self, knowledge_config: Config) -> None:
+        """Agent with multiple knowledge_bases gets a merged Knowledge object."""
+        from fastapi import FastAPI  # noqa: PLC0415
+
+        from mindroom.api.openai_compat import router  # noqa: PLC0415
+        from mindroom.config import KnowledgeBaseConfig  # noqa: PLC0415
+
+        # Add a second knowledge base and assign both to the research agent
+        knowledge_config.knowledge_bases["wiki"] = KnowledgeBaseConfig(path="./test_wiki")
+        knowledge_config.agents["research"].knowledge_bases = ["docs", "wiki"]
+
+        app = FastAPI()
+        app.include_router(router)
+
+        mock_manager_docs = MagicMock()
+        mock_knowledge_docs = MagicMock()
+        mock_knowledge_docs.vector_db = MagicMock()
+        mock_knowledge_docs.max_results = 5
+        mock_manager_docs.get_knowledge.return_value = mock_knowledge_docs
+
+        mock_manager_wiki = MagicMock()
+        mock_knowledge_wiki = MagicMock()
+        mock_knowledge_wiki.vector_db = MagicMock()
+        mock_knowledge_wiki.max_results = 10
+        mock_manager_wiki.get_knowledge.return_value = mock_knowledge_wiki
+
+        def fake_get_manager(base_id: str) -> MagicMock | None:
+            return {"docs": mock_manager_docs, "wiki": mock_manager_wiki}.get(base_id)
+
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, Path(__file__))),
+            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch("mindroom.api.openai_compat.initialize_knowledge_managers", new_callable=AsyncMock),
+            patch("mindroom.api.openai_compat.get_knowledge_manager", side_effect=fake_get_manager),
+        ):
+            mock_ai.return_value = "Merged knowledge response"
+
+            client = TestClient(app)
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "research",
+                    "messages": [{"role": "user", "content": "Multi-KB query"}],
+                },
+            )
+
+        assert response.status_code == 200
+        knowledge_arg = mock_ai.call_args.kwargs["knowledge"]
+        assert knowledge_arg is not None
+        # Should be a merged Knowledge with MultiKnowledgeVectorDb
+        from mindroom.bot import MultiKnowledgeVectorDb  # noqa: PLC0415
+
+        assert isinstance(knowledge_arg.vector_db, MultiKnowledgeVectorDb)
+        assert knowledge_arg.max_results == 10  # max(5, 10)
+
+    def test_knowledge_init_failure_graceful_fallback(self, knowledge_app_client: TestClient) -> None:
+        """When knowledge initialization fails, request proceeds with knowledge=None."""
+        with (
+            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch(
+                "mindroom.api.openai_compat.initialize_knowledge_managers",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("DB connection failed"),
+            ),
+        ):
+            mock_ai.return_value = "Response without knowledge"
+
+            response = knowledge_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "research",
+                    "messages": [{"role": "user", "content": "Query with broken KB"}],
+                },
+            )
+
+        assert response.status_code == 200
+        assert mock_ai.call_args.kwargs["knowledge"] is None
+        data = response.json()
+        assert data["choices"][0]["message"]["content"] == "Response without knowledge"
