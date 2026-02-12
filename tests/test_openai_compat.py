@@ -204,7 +204,7 @@ class TestChatCompletions:
             assert mock_ai.call_args.kwargs["include_default_tools"] is False
 
     def test_passes_knowledge_none(self, app_client: TestClient) -> None:
-        """Passes knowledge=None for Phase 1."""
+        """Passes knowledge=None when agent has no knowledge_bases."""
         with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
             mock_ai.return_value = "Response"
 
@@ -1265,3 +1265,160 @@ class TestTeamCompletion:
 
         assert response.status_code == 500
         assert response.json()["error"]["type"] == "server_error"
+
+
+# ---------------------------------------------------------------------------
+# Knowledge base integration (Phase 4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def knowledge_config() -> Config:
+    """Config with an agent that has knowledge_bases assigned."""
+    from mindroom.config import KnowledgeBaseConfig  # noqa: PLC0415
+
+    return Config(
+        agents={
+            "general": AgentConfig(
+                display_name="GeneralAgent",
+                role="General-purpose assistant",
+                rooms=[],
+            ),
+            "research": AgentConfig(
+                display_name="ResearchAgent",
+                role="Research assistant with knowledge base",
+                rooms=[],
+                knowledge_bases=["docs"],
+            ),
+        },
+        models={"default": ModelConfig(provider="ollama", id="test-model")},
+        router=RouterConfig(model="default"),
+        knowledge_bases={
+            "docs": KnowledgeBaseConfig(path="./test_docs"),
+        },
+    )
+
+
+@pytest.fixture
+def knowledge_app_client(knowledge_config: Config) -> Iterator[TestClient]:
+    """Create a FastAPI test client with knowledge-enabled config."""
+    from fastapi import FastAPI  # noqa: PLC0415
+
+    from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+    app = FastAPI()
+    app.include_router(router)
+    with patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, Path(__file__))):
+        yield TestClient(app)
+
+
+class TestKnowledgeIntegration:
+    """Tests for knowledge base integration (Phase 4)."""
+
+    def test_knowledge_passed_when_configured(self, knowledge_app_client: TestClient) -> None:
+        """Knowledge is passed to ai_response when agent has knowledge_bases."""
+        mock_knowledge = MagicMock()
+        mock_manager = MagicMock()
+        mock_manager.get_knowledge.return_value = mock_knowledge
+
+        with (
+            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch("mindroom.api.openai_compat.initialize_knowledge_managers", new_callable=AsyncMock),
+            patch("mindroom.api.openai_compat.get_knowledge_manager", return_value=mock_manager),
+        ):
+            mock_ai.return_value = "Response with knowledge"
+
+            response = knowledge_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "research",
+                    "messages": [{"role": "user", "content": "What do the docs say?"}],
+                },
+            )
+
+        assert response.status_code == 200
+        assert mock_ai.call_args.kwargs["knowledge"] is mock_knowledge
+
+    def test_knowledge_none_when_not_configured(self, knowledge_app_client: TestClient) -> None:
+        """Knowledge is None when agent has no knowledge_bases."""
+        with (
+            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch("mindroom.api.openai_compat.initialize_knowledge_managers", new_callable=AsyncMock),
+        ):
+            mock_ai.return_value = "Response"
+
+            knowledge_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+        assert mock_ai.call_args.kwargs["knowledge"] is None
+
+    def test_knowledge_initialization_called(self, knowledge_app_client: TestClient) -> None:
+        """_ensure_knowledge_initialized is called for configs with knowledge_bases."""
+        with (
+            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch("mindroom.api.openai_compat.initialize_knowledge_managers", new_callable=AsyncMock) as mock_init,
+        ):
+            mock_ai.return_value = "Response"
+
+            knowledge_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+        mock_init.assert_called_once()
+
+    def test_knowledge_unavailable_returns_none(self, knowledge_app_client: TestClient) -> None:
+        """When knowledge manager is not found, knowledge is None."""
+        with (
+            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch("mindroom.api.openai_compat.initialize_knowledge_managers", new_callable=AsyncMock),
+            patch("mindroom.api.openai_compat.get_knowledge_manager", return_value=None),
+        ):
+            mock_ai.return_value = "Response without knowledge"
+
+            response = knowledge_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "research",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+        assert response.status_code == 200
+        assert mock_ai.call_args.kwargs["knowledge"] is None
+
+    def test_streaming_with_knowledge(self, knowledge_app_client: TestClient) -> None:
+        """Knowledge is passed through in streaming mode too."""
+        from agno.run.agent import RunContentEvent  # noqa: PLC0415
+
+        mock_knowledge = MagicMock()
+        mock_manager = MagicMock()
+        mock_manager.get_knowledge.return_value = mock_knowledge
+
+        async def mock_stream(**_kw: object) -> AsyncIterator[RunContentEvent]:
+            yield RunContentEvent(content="Streamed!")
+
+        with (
+            patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream) as mock_stream_fn,
+            patch("mindroom.api.openai_compat.initialize_knowledge_managers", new_callable=AsyncMock),
+            patch("mindroom.api.openai_compat.get_knowledge_manager", return_value=mock_manager),
+        ):
+            response = knowledge_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "research",
+                    "messages": [{"role": "user", "content": "Stream with knowledge"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        assert mock_stream_fn.call_args.kwargs["knowledge"] is mock_knowledge

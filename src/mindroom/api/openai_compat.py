@@ -22,6 +22,7 @@ from mindroom.agents import create_agent
 from mindroom.ai import AIStreamChunk, ai_response, get_model_instance, stream_agent_response
 from mindroom.config import Config
 from mindroom.constants import DEFAULT_AGENTS_CONFIG, ROUTER_AGENT_NAME, STORAGE_PATH_OBJ
+from mindroom.knowledge import get_knowledge_manager, initialize_knowledge_managers
 from mindroom.logging_config import get_logger
 from mindroom.routing import suggest_agent
 from mindroom.teams import TeamMode, format_team_response
@@ -36,6 +37,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.agent import Agent
+    from agno.knowledge.knowledge import Knowledge
     from agno.run.team import TeamRunOutput
 
 logger = get_logger(__name__)
@@ -428,6 +430,63 @@ async def _resolve_auto_route(
     return routed
 
 
+_knowledge_initialized = False
+
+
+async def _ensure_knowledge_initialized(config: Config) -> None:
+    """Lazily initialize knowledge managers on first use.
+
+    Safe to call multiple times — `initialize_knowledge_managers` is
+    idempotent and reuses existing managers that match the config.
+    """
+    global _knowledge_initialized
+    if _knowledge_initialized and not config.knowledge_bases:
+        return
+    if not config.knowledge_bases:
+        return
+    await initialize_knowledge_managers(
+        config=config,
+        storage_path=STORAGE_PATH_OBJ,
+        start_watchers=False,
+        reindex_on_create=False,
+    )
+    _knowledge_initialized = True
+
+
+def _resolve_knowledge(agent_name: str, config: Config) -> Knowledge | None:
+    """Resolve knowledge base(s) for an agent from the global knowledge managers.
+
+    Mirrors the logic in bot.py's AgentBot._knowledge_for_agent().
+    """
+    agent_config = config.agents.get(agent_name)
+    if agent_config is None or not agent_config.knowledge_bases:
+        return None
+
+    from agno.knowledge.knowledge import Knowledge as _Knowledge  # noqa: PLC0415
+
+    knowledges: list[_Knowledge] = []
+    for base_id in agent_config.knowledge_bases:
+        manager = get_knowledge_manager(base_id)
+        if manager is None:
+            logger.warning("Knowledge base not available", agent=agent_name, base_id=base_id)
+            continue
+        knowledges.append(manager.get_knowledge())
+
+    if not knowledges:
+        return None
+    if len(knowledges) == 1:
+        return knowledges[0]
+
+    # Multiple knowledge bases — merge via MultiKnowledgeVectorDb
+    from mindroom.bot import MultiKnowledgeVectorDb  # noqa: PLC0415
+
+    return _Knowledge(
+        name=f"{agent_name}_multi_knowledge",
+        vector_db=MultiKnowledgeVectorDb(vector_dbs=[k.vector_db for k in knowledges]),
+        max_results=max(k.max_results for k in knowledges),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -522,6 +581,9 @@ async def chat_completions(
         session_id=session_id,
     )
 
+    # Initialize knowledge managers (lazy, idempotent)
+    await _ensure_knowledge_initialized(config)
+
     # Team execution path
     if agent_name.startswith(TEAM_MODEL_PREFIX):
         team_name = agent_name.removeprefix(TEAM_MODEL_PREFIX)
@@ -529,8 +591,11 @@ async def chat_completions(
             return await _stream_team_completion(team_name, agent_name, prompt, config, thread_history)
         return await _non_stream_team_completion(team_name, agent_name, prompt, config, thread_history)
 
+    # Resolve knowledge base for this agent
+    knowledge = _resolve_knowledge(agent_name, config)
+
     handler = _stream_completion if req.stream else _non_stream_completion
-    return await handler(agent_name, prompt, session_id, config, thread_history, req.user)
+    return await handler(agent_name, prompt, session_id, config, thread_history, req.user, knowledge)
 
 
 # ---------------------------------------------------------------------------
@@ -545,6 +610,7 @@ async def _non_stream_completion(
     config: Config,
     thread_history: list[dict[str, Any]] | None,
     user: str | None,
+    knowledge: Knowledge | None = None,
 ) -> JSONResponse:
     """Handle non-streaming chat completion."""
     response_text = await ai_response(
@@ -555,7 +621,7 @@ async def _non_stream_completion(
         config=config,
         thread_history=thread_history,
         room_id=None,
-        knowledge=None,
+        knowledge=knowledge,
         user_id=user,
         include_default_tools=False,
     )
@@ -633,6 +699,7 @@ async def _stream_completion(
     config: Config,
     thread_history: list[dict[str, Any]] | None,
     user: str | None,
+    knowledge: Knowledge | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming chat completion via SSE."""
     stream: AsyncIterator[AIStreamChunk] = stream_agent_response(
@@ -643,7 +710,7 @@ async def _stream_completion(
         config=config,
         thread_history=thread_history,
         room_id=None,
-        knowledge=None,
+        knowledge=knowledge,
         user_id=user,
         include_default_tools=False,
     )
