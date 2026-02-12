@@ -47,6 +47,8 @@ just start-backend-dev
 
 The API is available at `http://localhost:8765/v1/`.
 
+> [!IMPORTANT] If frontend and backend are served on the same domain behind a reverse proxy, route `/v1/*` to the backend (in addition to `/api/*`). Otherwise OpenAI-compatible requests can be handled by the frontend and fail.
+
 ### 3. Verify
 
 ```
