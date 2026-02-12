@@ -12,6 +12,7 @@ import time
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import uuid4
 
+from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -20,6 +21,7 @@ from mindroom.ai import AIStreamChunk, ai_response, stream_agent_response
 from mindroom.config import Config
 from mindroom.constants import DEFAULT_AGENTS_CONFIG, ROUTER_AGENT_NAME, STORAGE_PATH_OBJ
 from mindroom.logging_config import get_logger
+from mindroom.tool_events import extract_tool_completed_info, format_tool_started_event
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -285,7 +287,7 @@ def _convert_messages(
 def _derive_session_id(
     model: str,
     user: str | None,
-    prompt: str,
+    first_user_message: str,
     request: Request,
 ) -> str:
     """Derive a session ID from request headers or content.
@@ -293,7 +295,8 @@ def _derive_session_id(
     Priority cascade:
     1. X-Session-Id header
     2. X-LibreChat-Conversation-Id header + model
-    3. Hash of (model, user, first_user_message)
+    3. Hash of (model, user, first_user_message) — uses the first user message
+       so the session ID stays stable across all messages in a conversation.
     """
     # 1. Explicit session ID
     session_id = request.headers.get("x-session-id")
@@ -307,7 +310,7 @@ def _derive_session_id(
 
     # 3. Deterministic hash fallback
     user_id = user or "anonymous"
-    hash_input = f"{model}:{user_id}:{prompt}"
+    hash_input = f"{model}:{user_id}:{first_user_message}"
     return hashlib.sha256(hash_input.encode()).hexdigest()[:16]
 
 
@@ -406,9 +409,13 @@ async def chat_completions(
     if not prompt:
         return _error_response(400, "No user message content found in messages")
 
-    # Derive session ID
+    # Derive session ID using first user message for stable hashing
     agent_name = req.model
-    session_id = _derive_session_id(agent_name, req.user, prompt, request)
+    first_user_content = next(
+        (_extract_content_text(m.content) for m in req.messages if m.role == "user"),
+        prompt,
+    )
+    session_id = _derive_session_id(agent_name, req.user, first_user_content, request)
     logger.info(
         "Chat completion request",
         model=agent_name,
@@ -450,8 +457,10 @@ async def _non_stream_completion(
 
     # Detect error responses from ai_response()
     if _is_error_response(response_text):
+        logger.warning("AI response returned error", model=agent_name, session_id=session_id)
         return _error_response(500, response_text, error_type="server_error")
 
+    logger.info("Chat completion sent", model=agent_name, stream=False, session_id=session_id)
     completion_id = f"chatcmpl-{uuid4().hex[:12]}"
     response = ChatCompletionResponse(
         id=completion_id,
@@ -492,10 +501,6 @@ def _chunk_json(
 
 def _format_stream_tool_event(event: object) -> str | None:
     """Format a tool event as inline text for the SSE stream."""
-    from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent  # noqa: PLC0415
-
-    from mindroom.tool_events import extract_tool_completed_info, format_tool_started_event  # noqa: PLC0415
-
     if isinstance(event, ToolCallStartedEvent):
         tool_msg, _ = format_tool_started_event(event.tool)
         return tool_msg or None
@@ -516,8 +521,6 @@ async def _stream_completion(
     user: str | None,
 ) -> StreamingResponse:
     """Handle streaming chat completion via SSE."""
-    from agno.run.agent import RunContentEvent  # noqa: PLC0415
-
     completion_id = f"chatcmpl-{uuid4().hex[:12]}"
     created = int(time.time())
 
@@ -539,6 +542,8 @@ async def _stream_completion(
             include_default_tools=False,
         )
 
+        # Error strings from stream_agent_response() are sent as content chunks
+        # since we can't switch to an error HTTP status mid-stream.
         async for event in stream:
             text: str | None
             if isinstance(event, RunContentEvent) and event.content:
@@ -552,6 +557,7 @@ async def _stream_completion(
                 yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
 
         # 3. Final chunk with finish_reason
+        logger.info("Chat completion sent", model=agent_name, stream=True)
         yield f"data: {_chunk_json(completion_id, created, agent_name, delta={}, finish_reason='stop')}\n\n"
 
         # 4. Stream terminator

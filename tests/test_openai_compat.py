@@ -647,6 +647,49 @@ class TestSessionIdDerivation:
         sid2 = _derive_session_id("general", "user2", "Hello", request)
         assert sid1 != sid2
 
+    def test_first_user_message_used_for_session_id(self, app_client: TestClient) -> None:
+        """Session ID uses first user message, not the last, for stable hashing."""
+        session_ids: list[str] = []
+
+        original_derive = _derive_session_id
+
+        def capture_session_id(*args: object, **kwargs: object) -> str:
+            sid = original_derive(*args, **kwargs)  # type: ignore[arg-type]
+            session_ids.append(sid)
+            return sid
+
+        with (
+            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch("mindroom.api.openai_compat._derive_session_id", side_effect=capture_session_id),
+        ):
+            mock_ai.return_value = "Response"
+
+            # First request: single user message
+            app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+            # Second request: same first message, different last message
+            app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [
+                        {"role": "user", "content": "Hello"},
+                        {"role": "assistant", "content": "Hi!"},
+                        {"role": "user", "content": "Different follow-up"},
+                    ],
+                },
+            )
+
+        # Both should produce the same session ID because the first user
+        # message ("Hello") is the same
+        assert len(session_ids) == 2
+        assert session_ids[0] == session_ids[1]
+
 
 # ---------------------------------------------------------------------------
 # Error detection
