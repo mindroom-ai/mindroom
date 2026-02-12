@@ -94,8 +94,8 @@ endpoints:
       titleModel: "general"
       dropParams: ["stop", "frequency_penalty", "presence_penalty", "top_p"]
       headers:
-        X-Tool-Event-Format: "librechat"
-        X-LibreChat-Conversation-Id: "{{LIBRECHAT_BODY_CONVERSATIONID}}"
+        X-Tool-Event-Format: "librechat"  # structured tool call rendering
+        X-LibreChat-Conversation-Id: "{{LIBRECHAT_BODY_CONVERSATIONID}}"  # session continuity
 ```
 
 ### Open WebUI
@@ -168,6 +168,6 @@ The OpenAI-compatible API uses its own auth, separate from the dashboard's Supab
 ## Limitations
 
 - **Token usage is always zeros** — Agno doesn't expose token counts
-- **No native `tool_calls` format** — tool results appear inline in content text (LibreChat gets structured events automatically)
+- **No native `tool_calls` format** — tool results appear inline in content text (LibreChat gets structured events via `X-Tool-Event-Format: librechat` header)
 - **No room memory** — only agent-scoped memory (no `room_id` in API requests)
 - **Scheduler tool unavailable** — scheduling requires Matrix context and is stripped from API agents
