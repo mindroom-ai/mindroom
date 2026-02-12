@@ -25,21 +25,31 @@ class AgentSuggestion(BaseModel):
     reasoning: str = Field(description="Brief explanation of why this agent was chosen")
 
 
-async def suggest_agent_for_message(
+async def suggest_agent(
     message: str,
-    available_agents: list[MatrixID],
+    available_agent_names: list[str],
     config: Config,
     thread_context: list[dict[str, Any]] | None = None,
 ) -> str | None:
-    """Use AI to suggest which agent should respond to a message."""
-    try:
-        # The available_agents list already contains only configured agents
-        agent_names = [mid.agent_name(config) for mid in available_agents]
+    """Use AI to suggest which agent should respond to a message.
 
+    This is the core routing logic, independent of any transport layer.
+
+    Args:
+        message: The user message to route.
+        available_agent_names: Plain agent names (e.g. ["code", "research"]).
+        config: Application configuration.
+        thread_context: Optional recent messages for context.
+            Each dict should have "sender" and "body" keys.
+
+    Returns:
+        The suggested agent name, or None if routing fails.
+
+    """
+    try:
         # Build agent descriptions
         agent_descriptions = []
-        for agent_name in agent_names:
-            assert agent_name is not None
+        for agent_name in available_agent_names:
             description = describe_agent(agent_name, config)
             agent_descriptions.append(f"{agent_name}:\n  {description}")
 
@@ -59,11 +69,6 @@ Choose the most appropriate agent based on their role, tools, and instructions."
             context = "Previous messages:\n"
             for msg in thread_context[-3:]:  # Last 3 messages
                 sender = msg.get("sender", "")
-                # For display, just show the username or domain
-                if sender.startswith("@") and ":" in sender:
-                    sender_id = MatrixID.parse(sender)
-                    # Show agent name or just domain for users
-                    sender = sender_id.agent_name(config) or sender_id.domain
                 body = msg.get("body", "")[:100]
                 context += f"{sender}: {body}\n"
             prompt = context + "\n" + prompt
@@ -94,8 +99,12 @@ Choose the most appropriate agent based on their role, tools, and instructions."
             return None
 
         # The AI should only suggest agents from the available list
-        if suggestion.agent_name not in agent_names:
-            logger.warning("AI suggested invalid agent", suggested=suggestion.agent_name, available=agent_names)
+        if suggestion.agent_name not in available_agent_names:
+            logger.warning(
+                "AI suggested invalid agent",
+                suggested=suggestion.agent_name,
+                available=available_agent_names,
+            )
             return None
 
         logger.info("Routing decision", agent=suggestion.agent_name, reason=suggestion.reasoning)
@@ -105,3 +114,31 @@ Choose the most appropriate agent based on their role, tools, and instructions."
         return None
     else:
         return suggestion.agent_name
+
+
+async def suggest_agent_for_message(
+    message: str,
+    available_agents: list[MatrixID],
+    config: Config,
+    thread_context: list[dict[str, Any]] | None = None,
+) -> str | None:
+    """Use AI to suggest which agent should respond to a message.
+
+    Matrix-aware wrapper around suggest_agent() that converts MatrixID
+    objects to plain agent names and resolves sender identities in
+    thread context.
+    """
+    agent_names = [name for mid in available_agents if (name := mid.agent_name(config)) is not None]
+
+    # Resolve Matrix sender IDs to readable names for thread context
+    resolved_context = None
+    if thread_context:
+        resolved_context = []
+        for msg in thread_context:
+            sender = msg.get("sender", "")
+            if sender.startswith("@") and ":" in sender:
+                sender_id = MatrixID.parse(sender)
+                sender = sender_id.agent_name(config) or sender_id.domain
+            resolved_context.append({"sender": sender, "body": msg.get("body", "")})
+
+    return await suggest_agent(message, agent_names, config, resolved_context)

@@ -27,6 +27,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Voice Messages | `voice.md` | `voice/index.md` | `page__voice__index.md` |
 | Scheduling | `scheduling.md` | `scheduling/index.md` | `page__scheduling__index.md` |
 | Authorization | `authorization.md` | `authorization/index.md` | `page__authorization__index.md` |
+| OpenAI-Compatible API | `openai-api.md` | `openai-api/index.md` | `page__openai-api__index.md` |
 | Overview | `architecture/index.md` | `architecture/index.md` | `page__architecture__index.md` |
 | Matrix Integration | `architecture/matrix.md` | `architecture/matrix/index.md` | `page__architecture__matrix__index.md` |
 | Agent Orchestration | `architecture/orchestration.md` | `architecture/orchestration/index.md` | `page__architecture__orchestration__index.md` |
