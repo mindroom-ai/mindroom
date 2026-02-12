@@ -115,6 +115,7 @@ def create_agent(
     *,
     storage_path: Path | None = None,
     knowledge: KnowledgeProtocol | None = None,
+    include_default_tools: bool = True,
 ) -> Agent:
     """Create an agent instance from configuration.
 
@@ -124,6 +125,9 @@ def create_agent(
         storage_path: Runtime storage path. Falls back to the
             module-level ``STORAGE_PATH_OBJ`` when *None*.
         knowledge: Optional shared knowledge base instance for RAG-enabled agents.
+        include_default_tools: Whether to include DEFAULT_AGENT_TOOL_NAMES
+            (e.g. "scheduler"). Set to False when creating agents outside
+            of Matrix context where those tools are unavailable.
 
     Returns:
         Configured Agent instance
@@ -143,9 +147,10 @@ def create_agent(
     load_plugins(config)
 
     tool_names = list(agent_config.tools)
-    for default_tool_name in DEFAULT_AGENT_TOOL_NAMES:
-        if default_tool_name not in tool_names:
-            tool_names.append(default_tool_name)
+    if include_default_tools:
+        for default_tool_name in DEFAULT_AGENT_TOOL_NAMES:
+            if default_tool_name not in tool_names:
+                tool_names.append(default_tool_name)
 
     # Create tools
     tools: list = []  # Use list type to satisfy Agent's parameter type

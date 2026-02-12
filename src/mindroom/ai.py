@@ -256,6 +256,7 @@ async def _prepare_agent_and_prompt(
     config: Config,
     thread_history: list[dict[str, Any]] | None = None,
     knowledge: Knowledge | None = None,
+    include_default_tools: bool = True,
 ) -> tuple[Agent, str]:
     """Prepare agent and full prompt for AI processing.
 
@@ -266,7 +267,13 @@ async def _prepare_agent_and_prompt(
     enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, storage_path, config, room_id)
     full_prompt = _build_full_prompt(enhanced_prompt, thread_history)
     logger.info("Preparing agent and prompt", agent=agent_name, full_prompt=full_prompt)
-    agent = create_agent(agent_name, config, storage_path=storage_path, knowledge=knowledge)
+    agent = create_agent(
+        agent_name,
+        config,
+        storage_path=storage_path,
+        knowledge=knowledge,
+        include_default_tools=include_default_tools,
+    )
     return agent, full_prompt
 
 
@@ -280,6 +287,7 @@ async def ai_response(
     room_id: str | None = None,
     knowledge: Knowledge | None = None,
     user_id: str | None = None,
+    include_default_tools: bool = True,
 ) -> str:
     """Generates a response using the specified agno Agent with memory integration.
 
@@ -293,6 +301,8 @@ async def ai_response(
         room_id: Optional room ID for room memory access
         knowledge: Optional shared knowledge base for RAG-enabled agents
         user_id: Matrix user ID of the sender, used by Agno's LearningMachine
+        include_default_tools: Whether to include default tools (e.g. scheduler).
+            Set to False when calling outside of Matrix context.
 
     Returns:
         Agent response string
@@ -310,6 +320,7 @@ async def ai_response(
             config,
             thread_history,
             knowledge,
+            include_default_tools=include_default_tools,
         )
     except Exception as e:
         logger.exception("Error preparing agent", agent=agent_name)
@@ -336,6 +347,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912
     room_id: str | None = None,
     knowledge: Knowledge | None = None,
     user_id: str | None = None,
+    include_default_tools: bool = True,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
 
@@ -352,6 +364,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912
         room_id: Optional room ID for room memory access
         knowledge: Optional shared knowledge base for RAG-enabled agents
         user_id: Matrix user ID of the sender, used by Agno's LearningMachine
+        include_default_tools: Whether to include default tools (e.g. scheduler).
+            Set to False when calling outside of Matrix context.
 
     Yields:
         Streaming chunks/events as they become available
@@ -369,6 +383,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912
             config,
             thread_history,
             knowledge,
+            include_default_tools=include_default_tools,
         )
     except Exception as e:
         logger.exception("Error preparing agent for streaming", agent=agent_name)
