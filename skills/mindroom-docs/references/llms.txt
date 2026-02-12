@@ -20,6 +20,7 @@
 - [Voice Messages](https://docs.mindroom.chat/voice/index.md)
 - [Scheduling](https://docs.mindroom.chat/scheduling/index.md)
 - [Authorization](https://docs.mindroom.chat/authorization/index.md)
+- [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/index.md)
 - [Overview](https://docs.mindroom.chat/architecture/index.md)
 - [Matrix Integration](https://docs.mindroom.chat/architecture/matrix/index.md)
 - [Agent Orchestration](https://docs.mindroom.chat/architecture/orchestration/index.md)

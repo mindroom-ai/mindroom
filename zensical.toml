@@ -33,6 +33,7 @@ nav = [
   { "Voice Messages" = "voice.md" },
   { "Scheduling" = "scheduling.md" },
   { "Authorization" = "authorization.md" },
+  { "OpenAI-Compatible API" = "openai-api.md" },
   { "Architecture" = [
     { "Overview" = "architecture/index.md" },
     { "Matrix Integration" = "architecture/matrix.md" },
