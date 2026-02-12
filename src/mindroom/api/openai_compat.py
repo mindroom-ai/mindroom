@@ -11,7 +11,7 @@ import json
 import os
 import re
 import time
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, NamedTuple
 from uuid import uuid4
 
 from agno.run.agent import RunContentEvent, RunErrorEvent, ToolCallCompletedEvent, ToolCallStartedEvent
@@ -820,17 +820,30 @@ def _librechat_tool_end_sse(
     )
 
 
+class _PendingToolCall(NamedTuple):
+    """State stored for a tool call between start and complete events."""
+
+    step_id: str
+    call_id: str
+    step_index: int
+    tool_name: str
+    args_json: str
+
+
 class _LibreChatToolTracker:
     """Track tool call state for LibreChat structured SSE events.
 
     Converts agno ToolCallStartedEvent/ToolCallCompletedEvent pairs into
     LibreChat's on_run_step/on_run_step_completed SSE events with matched IDs.
+
+    Tool calls are correlated by ``tool_call_id`` from agno's ToolExecution
+    so concurrent/parallel tool calls are completed correctly (not LIFO).
     """
 
     def __init__(self, run_id: str) -> None:
         self._run_id = run_id
         self._step_index = 0
-        self._pending: list[tuple[str, str, int, str, str]] = []
+        self._pending: dict[str, _PendingToolCall] = {}
 
     def handle_event(self, event: object) -> str | None:
         """Try to handle event as a tool event. Returns SSE line or None."""
@@ -846,29 +859,48 @@ class _LibreChatToolTracker:
         tool_name = getattr(tool, "tool_name", None) or "tool"
         raw_args = getattr(tool, "tool_args", None)
         tool_args = {str(k): v for k, v in raw_args.items()} if isinstance(raw_args, dict) else {}
-        args_json = json.dumps(tool_args)
+        args_json = json.dumps(tool_args, default=str)
 
         idx = self._step_index
         self._step_index += 1
         step_id = f"step-{uuid4().hex[:8]}"
         call_id = f"call-{uuid4().hex[:8]}"
-        self._pending.append((step_id, call_id, idx, tool_name, args_json))
+
+        tool_call_id = getattr(tool, "tool_call_id", None) or call_id
+        self._pending[tool_call_id] = _PendingToolCall(step_id, call_id, idx, tool_name, args_json)
         return _librechat_tool_start_sse(step_id, call_id, self._run_id, idx, tool_name, args_json)
 
     def _on_complete(self, tool: object) -> str | None:
         if tool is None:
             return None
         result = str(getattr(tool, "result", "") or "")
-        if self._pending:
-            step_id, call_id, idx, tool_name, args_json = self._pending.pop()
-        else:
-            tool_name = getattr(tool, "tool_name", None) or "tool"
-            idx = self._step_index
-            self._step_index += 1
-            step_id = f"step-{uuid4().hex[:8]}"
-            call_id = f"call-{uuid4().hex[:8]}"
-            args_json = "{}"
-        return _librechat_tool_end_sse(step_id, call_id, idx, tool_name, args_json, result)
+        tool_call_id = getattr(tool, "tool_call_id", None)
+
+        pending = self._pending.pop(tool_call_id, None) if tool_call_id else None
+        if pending is not None:
+            return _librechat_tool_end_sse(
+                pending.step_id,
+                pending.call_id,
+                pending.step_index,
+                pending.tool_name,
+                pending.args_json,
+                result,
+            )
+
+        # Orphaned complete — no prior start event. Emit a synthetic
+        # on_run_step immediately followed by on_run_step_completed so
+        # LibreChat can render a complete collapsible section.
+        tool_name = getattr(tool, "tool_name", None) or "tool"
+        raw_args = getattr(tool, "tool_args", None)
+        tool_args = {str(k): v for k, v in raw_args.items()} if isinstance(raw_args, dict) else {}
+        args_json = json.dumps(tool_args, default=str)
+        idx = self._step_index
+        self._step_index += 1
+        step_id = f"step-{uuid4().hex[:8]}"
+        call_id = f"call-{uuid4().hex[:8]}"
+        start_sse = _librechat_tool_start_sse(step_id, call_id, self._run_id, idx, tool_name, args_json)
+        end_sse = _librechat_tool_end_sse(step_id, call_id, idx, tool_name, args_json, result)
+        return start_sse + end_sse
 
 
 def _extract_stream_text(event: AIStreamChunk) -> str | None:

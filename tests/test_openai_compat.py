@@ -23,6 +23,7 @@ from mindroom.api.openai_compat import (
     _librechat_tool_end_sse,
     _librechat_tool_start_sse,
     _LibreChatToolTracker,
+    _PendingToolCall,
 )
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig, TeamConfig
 
@@ -1856,14 +1857,28 @@ class TestLibreChatToolSSEFormatters:
 class TestLibreChatToolTracker:
     """Tests for _LibreChatToolTracker state management."""
 
+    def _make_tool(
+        self,
+        *,
+        tool_name: str = "search",
+        tool_args: dict | None = None,
+        tool_call_id: str | None = None,
+        result: str | None = None,
+    ) -> MagicMock:
+        """Helper to create a mock ToolExecution-like object."""
+        tool = MagicMock()
+        tool.tool_name = tool_name
+        tool.tool_args = tool_args if tool_args is not None else {}
+        tool.tool_call_id = tool_call_id
+        tool.result = result
+        return tool
+
     def test_start_event_generates_sse(self) -> None:
         """ToolCallStartedEvent produces on_run_step SSE."""
         from agno.run.agent import ToolCallStartedEvent  # noqa: PLC0415
 
         tracker = _LibreChatToolTracker("chatcmpl-test")
-        mock_tool = MagicMock()
-        mock_tool.tool_name = "search"
-        mock_tool.tool_args = {"query": "test"}
+        mock_tool = self._make_tool(tool_name="search", tool_args={"query": "test"}, tool_call_id="tc-1")
 
         result = tracker.handle_event(ToolCallStartedEvent(tool=mock_tool))
         assert result is not None
@@ -1878,16 +1893,10 @@ class TestLibreChatToolTracker:
 
         tracker = _LibreChatToolTracker("chatcmpl-test")
 
-        # Start a tool call first
-        start_tool = MagicMock()
-        start_tool.tool_name = "search"
-        start_tool.tool_args = {"query": "test"}
+        start_tool = self._make_tool(tool_name="search", tool_args={"query": "test"}, tool_call_id="tc-1")
         tracker.handle_event(ToolCallStartedEvent(tool=start_tool))
 
-        # Complete it
-        end_tool = MagicMock()
-        end_tool.tool_name = "search"
-        end_tool.result = "3 results found"
+        end_tool = self._make_tool(tool_name="search", tool_call_id="tc-1", result="3 results found")
         result = tracker.handle_event(ToolCallCompletedEvent(tool=end_tool))
 
         assert result is not None
@@ -1902,14 +1911,10 @@ class TestLibreChatToolTracker:
 
         tracker = _LibreChatToolTracker("chatcmpl-test")
 
-        start_tool = MagicMock()
-        start_tool.tool_name = "search"
-        start_tool.tool_args = {}
+        start_tool = self._make_tool(tool_call_id="tc-1")
         start_sse = tracker.handle_event(ToolCallStartedEvent(tool=start_tool))
 
-        end_tool = MagicMock()
-        end_tool.tool_name = "search"
-        end_tool.result = "done"
+        end_tool = self._make_tool(tool_call_id="tc-1", result="done")
         end_sse = tracker.handle_event(ToolCallCompletedEvent(tool=end_tool))
 
         start_data = json.loads(start_sse.removeprefix("data: ").strip())
@@ -1938,9 +1943,7 @@ class TestLibreChatToolTracker:
         tracker = _LibreChatToolTracker("chatcmpl-test")
 
         for i in range(3):
-            tool = MagicMock()
-            tool.tool_name = f"tool_{i}"
-            tool.tool_args = {}
+            tool = self._make_tool(tool_name=f"tool_{i}", tool_call_id=f"tc-{i}")
             start_sse = tracker.handle_event(ToolCallStartedEvent(tool=tool))
             data = json.loads(start_sse.removeprefix("data: ").strip())
             assert data["data"]["index"] == i
@@ -1961,15 +1964,113 @@ class TestLibreChatToolTracker:
         from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent  # noqa: PLC0415
 
         tracker = _LibreChatToolTracker("chatcmpl-test")
-        mock_tool = MagicMock()
-        mock_tool.tool_name = "team_search"
-        mock_tool.tool_args = {"q": "test"}
+        mock_tool = self._make_tool(tool_name="team_search", tool_args={"q": "test"}, tool_call_id="tc-1")
 
         result = tracker.handle_event(TeamToolCallStartedEvent(tool=mock_tool))
         assert result is not None
         payload = json.loads(result.removeprefix("data: ").strip())
         assert payload["event"] == "on_run_step"
         assert payload["data"]["stepDetails"]["tool_calls"][0]["name"] == "team_search"
+
+    def test_parallel_tool_calls_correlate_correctly(self) -> None:
+        """Concurrent tool calls match start/complete by tool_call_id, not LIFO."""
+        from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent  # noqa: PLC0415
+
+        tracker = _LibreChatToolTracker("chatcmpl-test")
+
+        # Start two tool calls in parallel
+        tool_a = self._make_tool(tool_name="search", tool_args={"q": "a"}, tool_call_id="tc-a")
+        tool_b = self._make_tool(tool_name="fetch", tool_args={"url": "b"}, tool_call_id="tc-b")
+        start_a = tracker.handle_event(ToolCallStartedEvent(tool=tool_a))
+        start_b = tracker.handle_event(ToolCallStartedEvent(tool=tool_b))
+
+        # Complete A first (not B!) — with LIFO this would mismatch
+        end_a = self._make_tool(tool_name="search", tool_call_id="tc-a", result="result-a")
+        end_a_sse = tracker.handle_event(ToolCallCompletedEvent(tool=end_a))
+
+        # Complete B
+        end_b = self._make_tool(tool_name="fetch", tool_call_id="tc-b", result="result-b")
+        end_b_sse = tracker.handle_event(ToolCallCompletedEvent(tool=end_b))
+
+        # Verify A's start and complete share the same IDs
+        start_a_data = json.loads(start_a.removeprefix("data: ").strip())
+        end_a_data = json.loads(end_a_sse.removeprefix("data: ").strip())
+        assert start_a_data["data"]["id"] == end_a_data["data"]["result"]["id"]
+        assert (
+            start_a_data["data"]["stepDetails"]["tool_calls"][0]["id"]
+            == end_a_data["data"]["result"]["tool_call"]["id"]
+        )
+        assert end_a_data["data"]["result"]["tool_call"]["output"] == "result-a"
+        assert end_a_data["data"]["result"]["tool_call"]["name"] == "search"
+
+        # Verify B's start and complete share the same IDs
+        start_b_data = json.loads(start_b.removeprefix("data: ").strip())
+        end_b_data = json.loads(end_b_sse.removeprefix("data: ").strip())
+        assert start_b_data["data"]["id"] == end_b_data["data"]["result"]["id"]
+        assert (
+            start_b_data["data"]["stepDetails"]["tool_calls"][0]["id"]
+            == end_b_data["data"]["result"]["tool_call"]["id"]
+        )
+        assert end_b_data["data"]["result"]["tool_call"]["output"] == "result-b"
+        assert end_b_data["data"]["result"]["tool_call"]["name"] == "fetch"
+
+    def test_non_serializable_args_handled(self) -> None:
+        """Non-JSON-serializable tool args (e.g. Path) are serialized via str()."""
+        from agno.run.agent import ToolCallStartedEvent  # noqa: PLC0415
+
+        tracker = _LibreChatToolTracker("chatcmpl-test")
+        mock_tool = self._make_tool(
+            tool_name="read_file",
+            tool_args={"path": Path("/home/user/test.txt"), "count": 10},
+            tool_call_id="tc-1",
+        )
+
+        result = tracker.handle_event(ToolCallStartedEvent(tool=mock_tool))
+        assert result is not None
+        payload = json.loads(result.removeprefix("data: ").strip())
+        args = json.loads(payload["data"]["stepDetails"]["tool_calls"][0]["args"])
+        assert args["path"] == "/home/user/test.txt"
+        assert args["count"] == 10
+
+    def test_orphaned_complete_emits_synthetic_start(self) -> None:
+        """Complete without prior start emits synthetic on_run_step + on_run_step_completed."""
+        from agno.run.agent import ToolCallCompletedEvent  # noqa: PLC0415
+
+        tracker = _LibreChatToolTracker("chatcmpl-test")
+
+        orphan_tool = self._make_tool(
+            tool_name="search",
+            tool_args={"q": "orphan"},
+            tool_call_id="tc-orphan",
+            result="found",
+        )
+        result = tracker.handle_event(ToolCallCompletedEvent(tool=orphan_tool))
+        assert result is not None
+
+        # Should contain both events concatenated
+        parts = result.split("data: ")
+        # Filter out empty strings from split
+        events = [json.loads(p.strip()) for p in parts if p.strip()]
+        assert len(events) == 2
+        assert events[0]["event"] == "on_run_step"
+        assert events[1]["event"] == "on_run_step_completed"
+
+        # IDs should match between synthetic start and complete
+        assert events[0]["data"]["id"] == events[1]["data"]["result"]["id"]
+        start_call_id = events[0]["data"]["stepDetails"]["tool_calls"][0]["id"]
+        end_call_id = events[1]["data"]["result"]["tool_call"]["id"]
+        assert start_call_id == end_call_id
+
+    def test_pending_uses_named_tuple(self) -> None:
+        """Internal _pending state uses _PendingToolCall NamedTuple."""
+        tracker = _LibreChatToolTracker("chatcmpl-test")
+        assert isinstance(tracker._pending, dict)
+
+        # Verify _PendingToolCall is accessible
+        ptc = _PendingToolCall("s1", "c1", 0, "tool", "{}")
+        assert ptc.step_id == "s1"
+        assert ptc.call_id == "c1"
+        assert ptc.step_index == 0
 
 
 class TestLibreChatStreamingIntegration:
@@ -1982,10 +2083,12 @@ class TestLibreChatStreamingIntegration:
         mock_tool_started = MagicMock()
         mock_tool_started.tool_name = "run_shell_command"
         mock_tool_started.tool_args = {"command": "pwd"}
+        mock_tool_started.tool_call_id = "tc-1"
 
         mock_tool_completed = MagicMock()
         mock_tool_completed.tool_name = "run_shell_command"
         mock_tool_completed.tool_args = {"command": "pwd"}
+        mock_tool_completed.tool_call_id = "tc-1"
         mock_tool_completed.result = "/app"
 
         async def mock_stream(**_kw: object) -> AsyncIterator[object]:
@@ -2049,7 +2152,9 @@ class TestLibreChatStreamingIntegration:
         from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent  # noqa: PLC0415
 
         mock_tool_started = MagicMock()
+        mock_tool_started.tool_call_id = "tc-1"
         mock_tool_completed = MagicMock()
+        mock_tool_completed.tool_call_id = "tc-1"
 
         async def mock_stream(**_kw: object) -> AsyncIterator[object]:
             yield RunContentEvent(content="Checking. ")
@@ -2107,6 +2212,7 @@ class TestLibreChatStreamingIntegration:
         mock_tool = MagicMock()
         mock_tool.tool_name = "search"
         mock_tool.tool_args = {"q": "test"}
+        mock_tool.tool_call_id = "tc-1"
         mock_tool.result = "found it"
 
         async def mock_stream(**_kw: object) -> AsyncIterator[object]:
