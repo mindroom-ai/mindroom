@@ -12,7 +12,6 @@ import json
 import os
 import re
 import time
-from collections.abc import Callable
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import uuid4
 
@@ -750,9 +749,6 @@ def _format_stream_tool_event(event: RunOutputEvent | TeamRunOutputEvent) -> str
     return None
 
 
-_ExtractTextFn = Callable[..., str | None]
-
-
 def _tool_details_html(call_id: str, tool_name: str, args_json: str, result: str) -> str:
     """Format a completed tool call as Open WebUI <details> HTML."""
     return (
@@ -804,25 +800,6 @@ class _ToolDetailsTracker:
             return None
         call_id, tool_name, args_json = pending
         return _tool_details_html(call_id, tool_name, args_json, result)
-
-
-def _get_stream_content(
-    tracker: _ToolDetailsTracker | None,
-    event: object,
-    extract_text: _ExtractTextFn,
-) -> str | None:
-    """Get content to emit for a stream event, or None to skip.
-
-    When a tracker is active, tool events are intercepted:
-    - Tool start: returns "" (suppressed) → caller skips via ``if text:``
-    - Tool complete: returns <details> HTML
-    - Other events: returns None → falls through to extract_text
-    """
-    if tracker is not None:
-        tool_content = tracker.handle_event(event)
-        if tool_content is not None:
-            return tool_content  # "" for start (suppressed), HTML for complete
-    return extract_text(event)
 
 
 def _extract_stream_text(event: AIStreamChunk) -> str | None:
@@ -878,7 +855,9 @@ async def _stream_completion(
         yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'role': 'assistant'})}\n\n"
 
         # 2. Yield the peeked first event
-        text = _get_stream_content(tracker, first_event, _extract_stream_text)
+        text = tracker.handle_event(first_event) if tracker is not None else None
+        if text is None:
+            text = _extract_stream_text(first_event)
         if text:
             yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
 
@@ -886,7 +865,9 @@ async def _stream_completion(
         # Error strings after the first event are sent as content chunks
         # since we can't switch to an error HTTP status mid-stream.
         async for event in stream:
-            text = _get_stream_content(tracker, event, _extract_stream_text)
+            text = tracker.handle_event(event) if tracker is not None else None
+            if text is None:
+                text = _extract_stream_text(event)
             if text:
                 yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
 
@@ -1104,7 +1085,9 @@ async def _team_stream_event_generator(
     yield f"data: {_chunk_json(completion_id, created, model_id, delta={'role': 'assistant'})}\n\n"
 
     # 2. First event
-    first_text = _get_stream_content(tracker, first_event, _extract_team_stream_text)
+    first_text = tracker.handle_event(first_event) if tracker is not None else None
+    if first_text is None:
+        first_text = _extract_team_stream_text(first_event)
     if first_text:
         yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': first_text})}\n\n"
 
@@ -1117,7 +1100,9 @@ async def _team_stream_event_generator(
                 yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': 'Team execution failed.'})}\n\n"
                 break
 
-            text = _get_stream_content(tracker, event, _extract_team_stream_text)
+            text = tracker.handle_event(event) if tracker is not None else None
+            if text is None:
+                text = _extract_team_stream_text(event)
             if text:
                 yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': text})}\n\n"
     except Exception:
