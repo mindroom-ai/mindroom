@@ -256,7 +256,10 @@ def _verify_api_key(authorization: str | None) -> JSONResponse | None:
 def _is_error_response(text: str) -> bool:
     """Detect error strings returned by ai_response() / stream_agent_response().
 
-    These come from get_user_friendly_error_message() and start with emoji prefixes.
+    Checks for:
+    - Emoji-prefixed errors from get_user_friendly_error_message()
+    - [agent_name] bracket prefix followed by error emoji
+    - Raw provider error strings (e.g. "Error code: 404 - ...")
     """
     error_prefixes = ("❌", "⏱️", "⏰", "⚠️")
     stripped = text.lstrip()
@@ -266,7 +269,10 @@ def _is_error_response(text: str) -> bool:
         if bracket_end != -1:
             after_bracket = stripped[bracket_end + 1 :].lstrip()
             return any(after_bracket.startswith(p) for p in error_prefixes)
-    return any(stripped.startswith(p) for p in error_prefixes)
+    if any(stripped.startswith(p) for p in error_prefixes):
+        return True
+    # Raw provider errors (agno may surface these as response content)
+    return stripped.startswith("Error code: ")
 
 
 def _extract_content_text(content: str | list[dict] | None) -> str:

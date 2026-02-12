@@ -15,7 +15,7 @@ from agno.models.groq import Groq
 from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat
 from agno.models.openrouter import OpenRouter
-from agno.run.agent import RunContentEvent, RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
+from agno.run.agent import RunContentEvent, RunErrorEvent, RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
 
 from .agents import create_agent
 from .constants import ENABLE_AI_CACHE
@@ -344,7 +344,7 @@ async def ai_response(
     return _extract_response_content(response)
 
 
-async def stream_agent_response(  # noqa: C901, PLR0912
+async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     agent_name: str,
     prompt: str,
     session_id: str,
@@ -444,6 +444,11 @@ async def stream_agent_response(  # noqa: C901, PLR0912
                     tool_name, result = info
                     full_response, _ = complete_pending_tool_block(full_response, tool_name, result)
                     yield event
+            elif isinstance(event, RunErrorEvent):
+                error_text = event.content or "Unknown agent error"
+                logger.error("Agent run error during streaming", agent=agent_name, error=error_text)
+                yield get_user_friendly_error_message(Exception(error_text), agent_name)
+                return
             else:
                 logger.debug("Skipping stream event", event_type=type(event).__name__)
     except Exception as e:

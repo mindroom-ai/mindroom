@@ -855,6 +855,17 @@ class TestErrorDetection:
         """Detects errors with [agent_name] prefix."""
         assert _is_error_response(text) is True
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Error code: 404 - {'type': 'error', 'error': {'type': 'not_found_error', 'message': 'model: foo'}}",
+            "Error code: 500 - Internal Server Error",
+        ],
+    )
+    def test_detects_raw_provider_errors(self, text: str) -> None:
+        """Detects raw provider error strings surfaced by agno."""
+        assert _is_error_response(text) is True
+
     def test_normal_response_not_error(self) -> None:
         """Normal response text is not detected as error."""
         assert _is_error_response("Hello! How can I help you?") is False
