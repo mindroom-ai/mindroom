@@ -33,6 +33,8 @@ from agno.run.team import TeamRunOutput
 from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
 from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
 from agno.team import Team
+from agno.tools.function import Function
+from agno.tools.toolkit import Toolkit
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -428,23 +430,15 @@ def _extract_tool_results(messages: list[ChatMessage]) -> dict[str, str]:
 def _enable_external_execution(agent: Agent) -> None:
     """Mark all tools on an agent for external execution in strict mode."""
     for tool in agent.tools or []:
-        marked_external_execution = False
-        functions = getattr(tool, "functions", None)
-        if isinstance(functions, dict):
-            for function in functions.values():
-                if hasattr(function, "external_execution"):
-                    function.external_execution = True
-                    marked_external_execution = True
-            if hasattr(tool, "external_execution_required_tools"):
-                tool.external_execution_required_tools = list(functions.keys())
-                marked_external_execution = True
-        elif hasattr(tool, "external_execution"):
+        if isinstance(tool, Toolkit):
+            for function in tool.functions.values():
+                function.external_execution = True
+            tool.external_execution_required_tools = list(tool.functions.keys())
+        elif isinstance(tool, Function):
             tool.external_execution = True
-            marked_external_execution = True
-
-        if not marked_external_execution:
+        else:
             logger.warning(
-                "Tool does not expose external execution flags; strict OpenAI mode may not pause this tool",
+                "Tool is not a Toolkit or Function; strict OpenAI mode may not pause this tool",
                 tool_type=type(tool).__name__,
             )
 
