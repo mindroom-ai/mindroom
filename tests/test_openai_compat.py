@@ -470,6 +470,7 @@ class TestStreamingCompletion:
 
     def test_streaming_tool_events(self, app_client: TestClient) -> None:
         """Tool call events are formatted as inline text in stream."""
+        from agno.models.response import ToolExecution  # noqa: PLC0415
         from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent  # noqa: PLC0415
 
         tool_started = ToolExecution(
