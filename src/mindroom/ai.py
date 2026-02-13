@@ -264,6 +264,7 @@ async def _prepare_agent_and_prompt(
     thread_history: list[dict[str, Any]] | None = None,
     knowledge: Knowledge | None = None,
     include_default_tools: bool = True,
+    include_interactive_questions: bool = True,
 ) -> tuple[Agent, str]:
     """Prepare agent and full prompt for AI processing.
 
@@ -280,6 +281,7 @@ async def _prepare_agent_and_prompt(
         storage_path=storage_path,
         knowledge=knowledge,
         include_default_tools=include_default_tools,
+        include_interactive_questions=include_interactive_questions,
     )
     return agent, full_prompt
 
@@ -295,6 +297,7 @@ async def ai_response(
     knowledge: Knowledge | None = None,
     user_id: str | None = None,
     include_default_tools: bool = True,
+    include_interactive_questions: bool = True,
 ) -> str:
     """Generates a response using the specified agno Agent with memory integration.
 
@@ -310,6 +313,9 @@ async def ai_response(
         user_id: Matrix user ID of the sender, used by Agno's LearningMachine
         include_default_tools: Whether to include default tools (e.g. scheduler).
             Set to False when calling outside of Matrix context.
+        include_interactive_questions: Whether to include the interactive
+            question authoring prompt. Set to False for channels that do not
+            support Matrix reaction-based question flows.
 
     Returns:
         Agent response string
@@ -328,6 +334,7 @@ async def ai_response(
             thread_history,
             knowledge,
             include_default_tools=include_default_tools,
+            include_interactive_questions=include_interactive_questions,
         )
     except Exception as e:
         logger.exception("Error preparing agent", agent=agent_name)
@@ -355,6 +362,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     knowledge: Knowledge | None = None,
     user_id: str | None = None,
     include_default_tools: bool = True,
+    include_interactive_questions: bool = True,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
 
@@ -373,6 +381,9 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         user_id: Matrix user ID of the sender, used by Agno's LearningMachine
         include_default_tools: Whether to include default tools (e.g. scheduler).
             Set to False when calling outside of Matrix context.
+        include_interactive_questions: Whether to include the interactive
+            question authoring prompt. Set to False for channels that do not
+            support Matrix reaction-based question flows.
 
     Yields:
         Streaming chunks/events as they become available
@@ -391,6 +402,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             thread_history,
             knowledge,
             include_default_tools=include_default_tools,
+            include_interactive_questions=include_interactive_questions,
         )
     except Exception as e:
         logger.exception("Error preparing agent for streaming", agent=agent_name)

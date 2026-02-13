@@ -208,6 +208,7 @@ class TestChatCompletions:
             )
 
             assert mock_ai.call_args.kwargs["include_default_tools"] is False
+            assert mock_ai.call_args.kwargs["include_interactive_questions"] is False
 
     def test_passes_knowledge_none(self, app_client: TestClient) -> None:
         """Passes knowledge=None when agent has no knowledge_bases."""
@@ -396,6 +397,27 @@ class TestStreamingCompletion:
 
         # [DONE] terminator
         assert lines[4] == "data: [DONE]"
+
+    def test_streaming_passes_include_interactive_questions_false(self, app_client: TestClient) -> None:
+        """Streaming disables interactive question prompting for OpenAI compatibility."""
+        from agno.run.agent import RunContentEvent  # noqa: PLC0415
+
+        async def mock_stream(**_kw: object) -> AsyncIterator[RunContentEvent]:
+            yield RunContentEvent(content="ok")
+
+        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream) as mock_stream_fn:
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        assert mock_stream_fn.call_args.kwargs["include_default_tools"] is False
+        assert mock_stream_fn.call_args.kwargs["include_interactive_questions"] is False
 
     def test_streaming_consistent_id(self, app_client: TestClient) -> None:
         """All streaming chunks have the same completion ID."""
@@ -1679,6 +1701,7 @@ class TestTeamCompletion:
             _build_team("team_with_kb", config)
 
             assert mock_create.call_args.kwargs["knowledge"] is mock_knowledge
+            assert mock_create.call_args.kwargs["include_interactive_questions"] is False
 
 
 # ---------------------------------------------------------------------------
