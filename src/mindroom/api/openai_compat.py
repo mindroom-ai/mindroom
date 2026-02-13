@@ -40,7 +40,7 @@ from mindroom.knowledge_utils import resolve_agent_knowledge
 from mindroom.logging_config import get_logger
 from mindroom.routing import suggest_agent
 from mindroom.teams import TeamMode, format_team_response
-from mindroom.tool_events import extract_tool_completed_info, format_tool_started_event
+from mindroom.tool_events import format_tool_completed_event, format_tool_started_event
 
 AUTO_MODEL_NAME = "auto"
 TEAM_MODEL_PREFIX = "team/"
@@ -727,10 +727,8 @@ def _format_stream_tool_event(event: RunOutputEvent | TeamRunOutputEvent) -> str
         tool_msg, _ = format_tool_started_event(event.tool)
         return tool_msg or None
     if isinstance(event, (ToolCallCompletedEvent, TeamToolCallCompletedEvent)):
-        info = extract_tool_completed_info(event.tool)
-        if info:
-            _tool_name, result = info
-            return f"\nResult: {result}\n" if result else None
+        tool_msg, _ = format_tool_completed_event(event.tool)
+        return tool_msg or None
     return None
 
 

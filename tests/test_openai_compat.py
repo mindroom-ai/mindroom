@@ -470,25 +470,28 @@ class TestStreamingCompletion:
 
     def test_streaming_tool_events(self, app_client: TestClient) -> None:
         """Tool call events are formatted as inline text in stream."""
+        from agno.models.response import ToolExecution  # noqa: PLC0415
         from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent  # noqa: PLC0415
 
-        mock_tool_started = MagicMock()
-        mock_tool_completed = MagicMock()
+        tool_started = ToolExecution(
+            tool_name="search",
+            tool_args={"query": "X"},
+            tool_call_id="tc-stream-1",
+        )
+        tool_completed = ToolExecution(
+            tool_name="search",
+            tool_args={"query": "X"},
+            tool_call_id="tc-stream-1",
+            result="3 results",
+        )
 
         async def mock_stream(**_kw: object) -> AsyncIterator[object]:
             yield RunContentEvent(content="Let me search. ")
-            yield ToolCallStartedEvent(tool=mock_tool_started)
-            yield ToolCallCompletedEvent(tool=mock_tool_completed)
+            yield ToolCallStartedEvent(tool=tool_started)
+            yield ToolCallCompletedEvent(tool=tool_completed)
             yield RunContentEvent(content="Found it!")
 
-        with (
-            patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream),
-            patch("mindroom.api.openai_compat.format_tool_started_event", return_value=("🔧 Searching...", None)),
-            patch(
-                "mindroom.api.openai_compat.extract_tool_completed_info",
-                return_value=("search", "3 results"),
-            ),
-        ):
+        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
             response = app_client.post(
                 "/v1/chat/completions",
                 json={
@@ -511,9 +514,11 @@ class TestStreamingCompletion:
             if "content" in delta:
                 contents.append(delta["content"])
 
-        assert "Let me search. " in contents
-        assert "🔧 Searching..." in contents
-        assert any("3 results" in c for c in contents)
+        full_content = "".join(contents)
+        assert "Let me search. " in full_content
+        assert "<tool>search(query=X)</tool>" in full_content
+        assert "<tool>search(query=X)\n3 results</tool>" in full_content
+        assert "Result:" not in full_content
 
 
 # ---------------------------------------------------------------------------

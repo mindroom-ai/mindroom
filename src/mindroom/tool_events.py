@@ -198,6 +198,16 @@ def format_tool_started_event(tool: ToolExecution | None) -> tuple[str, ToolTrac
     return text, trace
 
 
+def format_tool_completed_event(tool: ToolExecution | None) -> tuple[str, ToolTraceEntry | None]:
+    """Format an Agno tool-call completion into display text and trace metadata."""
+    if tool is None:
+        return "", None
+    tool_name = tool.tool_name or "tool"
+    tool_args = {str(k): v for k, v in tool.tool_args.items()} if isinstance(tool.tool_args, dict) else {}
+    text, trace = format_tool_combined(tool_name, tool_args, tool.result)
+    return text, trace
+
+
 def extract_tool_completed_info(tool: ToolExecution | None) -> tuple[str, str | None] | None:
     """Extract tool name and result from a ToolExecution.
 
