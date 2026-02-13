@@ -11,14 +11,15 @@ import { type ColumnDef, flexRender, getCoreRowModel, useReactTable } from '@tan
 import { API_ENDPOINTS } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { useConfigStore } from '@/store/configStore';
-import type { KnowledgeBaseConfig } from '@/types/config';
+import type { KnowledgeBaseConfig, KnowledgeGitConfig } from '@/types/config';
 import { useToast } from '@/components/ui/use-toast';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
-import { Plus, RefreshCw, Trash2, Upload } from 'lucide-react';
+import { Textarea } from '@/components/ui/textarea';
+import { GitBranch, Plus, RefreshCw, Trash2, Upload } from 'lucide-react';
 
 interface KnowledgeFile {
   name: string;
@@ -48,6 +49,13 @@ const DEFAULT_BASE_SETTINGS: KnowledgeBaseConfig = {
   watch: true,
 };
 
+const DEFAULT_GIT_SETTINGS: KnowledgeGitConfig = {
+  repo_url: '',
+  branch: 'main',
+  poll_interval_seconds: 300,
+  skip_hidden: true,
+};
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -62,6 +70,18 @@ function formatModifiedDate(value: string): string {
 
 function defaultPathForBase(baseName: string): string {
   return `./knowledge_docs/${baseName}`;
+}
+
+function parsePatternsFromTextarea(value: string): string[] | undefined {
+  const patterns = value
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean);
+  return patterns.length > 0 ? patterns : undefined;
+}
+
+function formatPatternsForTextarea(patterns?: string[]): string {
+  return patterns?.join('\n') ?? '';
 }
 
 function validateBaseName(baseName: string): string | null {
@@ -145,6 +165,12 @@ export function Knowledge() {
     setSettings({
       path: selectedConfig.path,
       watch: selectedConfig.watch,
+      git: selectedConfig.git
+        ? {
+            ...DEFAULT_GIT_SETTINGS,
+            ...selectedConfig.git,
+          }
+        : undefined,
     });
   }, [knowledgeBases, selectedBase]);
 
@@ -193,6 +219,22 @@ export function Knowledge() {
       });
     },
     [selectedBase, updateKnowledgeBase]
+  );
+
+  const updateGitSettings = useCallback(
+    (updates: Partial<KnowledgeGitConfig>) => {
+      if (!settings.git) {
+        return;
+      }
+
+      updateSettings({
+        git: {
+          ...settings.git,
+          ...updates,
+        },
+      });
+    },
+    [settings.git, updateSettings]
   );
 
   const handleSaveSettings = useCallback(async () => {
@@ -520,8 +562,16 @@ export function Knowledge() {
                           aria-pressed={isActive}
                         >
                           <div className="flex items-center justify-between gap-2">
-                            <span className="font-medium">{baseName}</span>
-                            {isActive && <Badge variant="default">Active</Badge>}
+                            <div className="flex items-center gap-2">
+                              <span className="font-medium">{baseName}</span>
+                              {baseConfig?.git ? (
+                                <Badge variant="secondary" className="gap-1">
+                                  <GitBranch className="h-3 w-3" />
+                                  Git
+                                </Badge>
+                              ) : null}
+                            </div>
+                            {isActive ? <Badge variant="default">Active</Badge> : null}
                           </div>
                           <p className="mt-1 truncate text-xs font-mono text-muted-foreground">
                             {baseConfig?.path ?? defaultPathForBase(baseName)}
@@ -575,7 +625,8 @@ export function Knowledge() {
               <CardHeader className="pb-3">
                 <CardTitle className="text-base">Base Settings</CardTitle>
                 <CardDescription>
-                  Configure folder path and watcher behavior for <code>{selectedBase}</code>.
+                  Configure folder path, watcher behavior, and Git sync for{' '}
+                  <code>{selectedBase}</code>.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -602,6 +653,178 @@ export function Knowledge() {
                     checked={settings.watch}
                     onCheckedChange={checked => updateSettings({ watch: checked === true })}
                   />
+                </div>
+
+                <div className="space-y-3 rounded-md border p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <GitBranch className="h-4 w-4 text-muted-foreground" />
+                        <p className="text-sm font-medium">Sync from Git Repository</p>
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        Pull and index files from a remote repository on a schedule.
+                      </p>
+                    </div>
+                    <Checkbox
+                      id="knowledge-git-enabled"
+                      aria-label="Sync from Git Repository"
+                      checked={Boolean(settings.git)}
+                      onCheckedChange={checked => {
+                        if (checked === true) {
+                          updateSettings({
+                            git: settings.git
+                              ? { ...DEFAULT_GIT_SETTINGS, ...settings.git }
+                              : { ...DEFAULT_GIT_SETTINGS },
+                          });
+                          return;
+                        }
+                        updateSettings({ git: undefined });
+                      }}
+                    />
+                  </div>
+
+                  {settings.git ? (
+                    <div className="space-y-4 border-t pt-3">
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium" htmlFor="knowledge-git-repo-url">
+                          Repository URL
+                        </label>
+                        <Input
+                          id="knowledge-git-repo-url"
+                          value={settings.git.repo_url}
+                          onChange={event => updateGitSettings({ repo_url: event.target.value })}
+                          placeholder="https://github.com/org/repo"
+                          required
+                        />
+                      </div>
+
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium" htmlFor="knowledge-git-branch">
+                          Branch
+                        </label>
+                        <Input
+                          id="knowledge-git-branch"
+                          value={settings.git.branch ?? 'main'}
+                          onChange={event =>
+                            updateGitSettings({
+                              branch: event.target.value || 'main',
+                            })
+                          }
+                          placeholder="main"
+                        />
+                      </div>
+
+                      <div className="space-y-2">
+                        <label
+                          className="text-sm font-medium"
+                          htmlFor="knowledge-git-poll-interval-seconds"
+                        >
+                          Poll Interval (seconds)
+                        </label>
+                        <Input
+                          id="knowledge-git-poll-interval-seconds"
+                          type="number"
+                          min={5}
+                          value={settings.git.poll_interval_seconds ?? 300}
+                          onChange={event => {
+                            const rawValue = Number.parseInt(event.target.value, 10);
+                            updateGitSettings({
+                              poll_interval_seconds:
+                                Number.isNaN(rawValue) || rawValue < 5 ? 5 : rawValue,
+                            });
+                          }}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Check for updates every X seconds.
+                        </p>
+                      </div>
+
+                      <div className="space-y-2">
+                        <label
+                          className="text-sm font-medium"
+                          htmlFor="knowledge-git-credentials-service"
+                        >
+                          Credentials Service (optional)
+                        </label>
+                        <Input
+                          id="knowledge-git-credentials-service"
+                          value={settings.git.credentials_service ?? ''}
+                          onChange={event =>
+                            updateGitSettings({
+                              credentials_service: event.target.value || undefined,
+                            })
+                          }
+                          placeholder="github-pat"
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Service name in Credentials tab for private HTTPS repos.
+                        </p>
+                      </div>
+
+                      <div className="flex items-center justify-between rounded-md border p-3">
+                        <div className="space-y-1">
+                          <p className="text-sm font-medium">Skip Hidden Files</p>
+                          <p className="text-xs text-muted-foreground">
+                            Ignore dotfiles and hidden paths while indexing.
+                          </p>
+                        </div>
+                        <Checkbox
+                          aria-label="Skip Hidden Files"
+                          checked={settings.git.skip_hidden ?? true}
+                          onCheckedChange={checked =>
+                            updateGitSettings({ skip_hidden: checked === true })
+                          }
+                        />
+                      </div>
+
+                      <div className="space-y-2">
+                        <label
+                          className="text-sm font-medium"
+                          htmlFor="knowledge-git-include-patterns"
+                        >
+                          Include Patterns (optional)
+                        </label>
+                        <Textarea
+                          id="knowledge-git-include-patterns"
+                          value={formatPatternsForTextarea(settings.git.include_patterns)}
+                          onChange={event =>
+                            updateGitSettings({
+                              include_patterns: parsePatternsFromTextarea(event.target.value),
+                            })
+                          }
+                          placeholder="docs/**"
+                          className="min-h-[96px]"
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Root-anchored glob patterns. Only matching files will be indexed.
+                        </p>
+                      </div>
+
+                      <div className="space-y-2">
+                        <label
+                          className="text-sm font-medium"
+                          htmlFor="knowledge-git-exclude-patterns"
+                        >
+                          Exclude Patterns (optional)
+                        </label>
+                        <Textarea
+                          id="knowledge-git-exclude-patterns"
+                          value={formatPatternsForTextarea(settings.git.exclude_patterns)}
+                          onChange={event =>
+                            updateGitSettings({
+                              exclude_patterns: parsePatternsFromTextarea(event.target.value),
+                            })
+                          }
+                          placeholder="docs/private/**"
+                          className="min-h-[96px]"
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Root-anchored glob patterns to exclude after include filtering.
+                        </p>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
 
                 <div className="flex justify-end">
