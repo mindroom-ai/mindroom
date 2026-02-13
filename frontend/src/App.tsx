@@ -15,6 +15,7 @@ import {
   Plug,
   Puzzle,
   Settings2,
+  Sparkles,
   type LucideIcon,
   Users,
 } from 'lucide-react';
@@ -63,7 +64,7 @@ const NAV_ITEMS: NavItem[] = [
   { value: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, group: 'Workspace' },
   { value: 'agents', label: 'Agents', icon: Bot, group: 'Workspace' },
   { value: 'teams', label: 'Teams', icon: Users, group: 'Workspace' },
-  { value: 'cultures', label: 'Culture', icon: BookOpen, group: 'Workspace' },
+  { value: 'cultures', label: 'Culture', icon: Sparkles, group: 'Workspace' },
   { value: 'rooms', label: 'Rooms', icon: Home, group: 'Workspace' },
   { value: 'schedules', label: 'Schedules', icon: CalendarClock, group: 'Workspace' },
   { value: 'unconfigured-rooms', label: 'External', icon: DoorOpen, group: 'Workspace' },

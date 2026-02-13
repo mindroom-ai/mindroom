@@ -1,5 +1,5 @@
 import { useConfigStore } from '@/store/configStore';
-import { BookOpen, Bot, Settings2 } from 'lucide-react';
+import { Sparkles, Bot, Settings2 } from 'lucide-react';
 import { ListPanel, ListItem } from '@/components/shared/ListPanel';
 import { ItemCard, ItemCardBadge } from '@/components/shared/ItemCard';
 
@@ -50,7 +50,7 @@ export function CultureList() {
   return (
     <ListPanel<CultureListItem>
       title="Cultures"
-      icon={BookOpen}
+      icon={Sparkles}
       items={cultures as CultureListItem[]}
       selectedId={selectedCultureId || undefined}
       onItemSelect={selectCulture}
@@ -61,7 +61,7 @@ export function CultureList() {
       creationMode="inline-form"
       createButtonText="Add"
       createPlaceholder="Culture name..."
-      emptyIcon={BookOpen}
+      emptyIcon={Sparkles}
       emptyMessage="No cultures found"
       emptySubtitle={'Click "Add" to create one'}
       creationBorderVariant="orange"

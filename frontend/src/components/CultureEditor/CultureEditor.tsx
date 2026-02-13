@@ -11,7 +11,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { BookOpen } from 'lucide-react';
+import { Sparkles } from 'lucide-react';
 import { EditorPanel, EditorPanelEmptyState, FieldGroup } from '@/components/shared';
 import { useForm, Controller } from 'react-hook-form';
 import { Culture } from '@/types/config';
@@ -70,12 +70,12 @@ export function CultureEditor() {
   };
 
   if (!selectedCulture) {
-    return <EditorPanelEmptyState icon={BookOpen} message="Select a culture to edit" />;
+    return <EditorPanelEmptyState icon={Sparkles} message="Select a culture to edit" />;
   }
 
   return (
     <EditorPanel
-      icon={BookOpen}
+      icon={Sparkles}
       title="Culture Details"
       isDirty={isDirty}
       onSave={handleSave}
