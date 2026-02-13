@@ -109,13 +109,14 @@ def create_learning_storage(agent_name: str, storage_path: Path) -> SqliteDb:
     return SqliteDb(session_table=f"{agent_name}_learning_sessions", db_file=str(learning_dir / f"{agent_name}.db"))
 
 
-def create_agent(
+def create_agent(  # noqa: C901, PLR0912
     agent_name: str,
     config: Config,
     *,
     storage_path: Path | None = None,
     knowledge: KnowledgeProtocol | None = None,
     include_default_tools: bool = True,
+    include_interactive_questions: bool = True,
 ) -> Agent:
     """Create an agent instance from configuration.
 
@@ -128,6 +129,9 @@ def create_agent(
         include_default_tools: Whether to include DEFAULT_AGENT_TOOL_NAMES
             (e.g. "scheduler"). Set to False when creating agents outside
             of Matrix context where those tools are unavailable.
+        include_interactive_questions: Whether to include the interactive
+            question authoring prompt. Set to False for channels that do not
+            support Matrix reaction-based question flows.
 
     Returns:
         Configured Agent instance
@@ -223,7 +227,8 @@ def create_agent(
     if skills and skills.get_skill_names():
         instructions.append(agent_prompts.SKILLS_TOOL_USAGE_PROMPT)
 
-    instructions.append(agent_prompts.INTERACTIVE_QUESTION_PROMPT)
+    if include_interactive_questions:
+        instructions.append(agent_prompts.INTERACTIVE_QUESTION_PROMPT)
 
     knowledge_enabled = bool(agent_config.knowledge_bases) and knowledge is not None
 

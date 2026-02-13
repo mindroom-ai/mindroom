@@ -685,6 +685,7 @@ async def _non_stream_completion(
         knowledge=knowledge,
         user_id=user,
         include_default_tools=False,
+        include_interactive_questions=False,
     )
 
     # Detect error responses from ai_response()
@@ -831,6 +832,7 @@ async def _stream_completion(
         knowledge=knowledge,
         user_id=user,
         include_default_tools=False,
+        include_interactive_questions=False,
     )
 
     # Peek at first event to detect errors before committing to SSE
@@ -903,6 +905,7 @@ def _build_team(team_name: str, config: Config) -> tuple[list[Agent], Team | Non
                     storage_path=STORAGE_PATH_OBJ,
                     knowledge=_resolve_knowledge(member_name, config),
                     include_default_tools=False,
+                    include_interactive_questions=False,
                 ),
             )
         except Exception:
