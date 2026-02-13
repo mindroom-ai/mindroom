@@ -167,7 +167,13 @@ curl -X POST http://localhost:8765/api/credentials/github_private \
   -d '{"credentials":{"username":"x-access-token","token":"ghp_your_token_here"}}'
 ```
 
-You can also set credentials from the Dashboard Integrations/API-Keys area. The service name must match `credentials_service`.
+You can also set credentials from the Dashboard **Credentials** tab. The service name must match `credentials_service`.
+
+Expected credential fields for Git HTTPS auth:
+
+- `username` + `token`
+- `username` + `password`
+- `api_key` (uses username `x-access-token` by default if no username is provided)
 
 ### Example: Clone Pipefunc, Index Only `docs/`
 
