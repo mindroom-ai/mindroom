@@ -2773,11 +2773,19 @@ def _get_changed_agents(config: Config | None, new_config: Config, agent_bots: d
             # One is None - they definitely differ
             agents_differ = old_agent != new_agent
 
+        old_culture = _culture_signature_for_agent(agent_name, config) if old_agent else None
+        new_culture = _culture_signature_for_agent(agent_name, new_config) if new_agent else None
+        culture_differ = old_culture != new_culture
+
         # Only restart if this specific agent's configuration has changed
-        # (not just global config changes like authorization)
-        if agents_differ and (agent_name in agent_bots or new_agent is not None):
+        # (not just global config changes like authorization). Culture assignment changes
+        # are stored outside agent config, so check them explicitly.
+        if (agents_differ or culture_differ) and (agent_name in agent_bots or new_agent is not None):
             if old_agent and new_agent:
-                logger.debug(f"Agent {agent_name} configuration changed, will restart")
+                if agents_differ:
+                    logger.debug(f"Agent {agent_name} configuration changed, will restart")
+                else:
+                    logger.debug(f"Agent {agent_name} culture assignment changed, will restart")
             elif new_agent:
                 logger.info(f"Agent {agent_name} is new, will start")
             else:
@@ -2785,6 +2793,14 @@ def _get_changed_agents(config: Config | None, new_config: Config, agent_bots: d
             changed.add(agent_name)
 
     return changed
+
+
+def _culture_signature_for_agent(agent_name: str, config: Config) -> tuple[str, str, str] | None:
+    assignment = config.get_agent_culture(agent_name)
+    if assignment is None:
+        return None
+    culture_name, culture_config = assignment
+    return (culture_name, culture_config.mode, culture_config.description)
 
 
 def _get_changed_teams(config: Config | None, new_config: Config, agent_bots: dict[str, Any]) -> set[str]:

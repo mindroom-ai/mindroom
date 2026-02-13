@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from mindroom.bot import AgentBot, MultiAgentOrchestrator
-from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig, TeamConfig
+from mindroom.bot import AgentBot, MultiAgentOrchestrator, _get_changed_agents
+from mindroom.config import AgentConfig, Config, CultureConfig, ModelConfig, RouterConfig, TeamConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 
@@ -19,6 +19,37 @@ from .conftest import TEST_PASSWORD
 def setup_test_bot(bot: AgentBot, mock_client: AsyncMock) -> None:
     """Helper to setup a test bot with required attributes."""
     bot.client = mock_client
+
+
+def test_get_changed_agents_detects_culture_config_updates() -> None:
+    """Agent restarts should trigger when their culture mode/assignment changes."""
+    old_config = Config(
+        agents={
+            "agent1": AgentConfig(display_name="Agent 1"),
+        },
+        cultures={
+            "engineering": CultureConfig(
+                description="Engineering standards",
+                agents=["agent1"],
+                mode="automatic",
+            ),
+        },
+    )
+    new_config = Config(
+        agents={
+            "agent1": AgentConfig(display_name="Agent 1"),
+        },
+        cultures={
+            "engineering": CultureConfig(
+                description="Engineering standards",
+                agents=["agent1"],
+                mode="agentic",
+            ),
+        },
+    )
+
+    changed = _get_changed_agents(old_config, new_config, agent_bots={"agent1": AsyncMock()})
+    assert changed == {"agent1"}
 
 
 @pytest.fixture

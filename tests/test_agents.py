@@ -11,8 +11,8 @@ from agno.agent import Agent
 from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
 from pydantic import ValidationError
 
-from mindroom.agents import create_agent
-from mindroom.config import AgentConfig, Config, KnowledgeBaseConfig
+from mindroom.agents import _CULTURE_MANAGER_CACHE, create_agent
+from mindroom.config import AgentConfig, Config, CultureConfig, KnowledgeBaseConfig, ModelConfig
 
 
 @patch("mindroom.agents.SqliteDb")
@@ -229,3 +229,124 @@ def test_config_accepts_valid_agent_knowledge_base_assignment() -> None:
     )
 
     assert config.agents["calculator"].knowledge_bases == ["research"]
+
+
+def test_config_rejects_culture_with_unknown_agent() -> None:
+    """Culture assignments must reference configured agents."""
+    with pytest.raises(ValidationError, match="Cultures reference unknown agents: engineering -> missing_agent"):
+        Config(
+            agents={
+                "calculator": AgentConfig(display_name="CalculatorAgent"),
+            },
+            cultures={
+                "engineering": CultureConfig(
+                    description="Engineering standards",
+                    agents=["missing_agent"],
+                    mode="automatic",
+                ),
+            },
+        )
+
+
+def test_config_rejects_agents_in_multiple_cultures() -> None:
+    """An agent can belong to at most one culture."""
+    with pytest.raises(
+        ValidationError,
+        match="Agents cannot belong to multiple cultures: calculator -> engineering, support",
+    ):
+        Config(
+            agents={
+                "calculator": AgentConfig(display_name="CalculatorAgent"),
+            },
+            cultures={
+                "engineering": CultureConfig(agents=["calculator"]),
+                "support": CultureConfig(agents=["calculator"]),
+            },
+        )
+
+
+def test_config_accepts_valid_culture_assignment() -> None:
+    """Config should expose culture assignment helpers for valid culture definitions."""
+    config = Config(
+        agents={
+            "calculator": AgentConfig(display_name="CalculatorAgent"),
+            "summary": AgentConfig(display_name="SummaryAgent"),
+        },
+        cultures={
+            "engineering": CultureConfig(
+                description="Shared engineering practices",
+                agents=["calculator", "summary"],
+                mode="automatic",
+            ),
+        },
+    )
+
+    assignment = config.get_agent_culture("calculator")
+    assert assignment is not None
+    culture_name, culture_config = assignment
+    assert culture_name == "engineering"
+    assert culture_config.mode == "automatic"
+    assert config.get_agent_culture("unknown") is None
+
+
+@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.CultureManager")
+@patch("mindroom.agents.Agent")
+def test_create_agent_shares_culture_manager_for_same_culture(
+    mock_agent_class: MagicMock,
+    mock_culture_manager_class: MagicMock,
+    mock_storage: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """Agents in the same culture should share one CultureManager and culture DB."""
+    _CULTURE_MANAGER_CACHE.clear()
+    config = Config(
+        agents={
+            "agent_one": AgentConfig(display_name="Agent One", role="First", learning=False),
+            "agent_two": AgentConfig(display_name="Agent Two", role="Second", learning=False),
+        },
+        cultures={
+            "engineering": CultureConfig(
+                description="Engineering best practices",
+                agents=["agent_one", "agent_two"],
+                mode="automatic",
+            ),
+        },
+        models={
+            "default": ModelConfig(provider="openai", id="gpt-4o-mini"),
+        },
+    )
+
+    model = MagicMock()
+    model.id = "gpt-4o-mini"
+    with patch("mindroom.ai.get_model_instance", return_value=model):
+        create_agent(
+            "agent_one",
+            config=config,
+            storage_path=tmp_path,
+            include_default_tools=False,
+            include_interactive_questions=False,
+        )
+        create_agent(
+            "agent_two",
+            config=config,
+            storage_path=tmp_path,
+            include_default_tools=False,
+            include_interactive_questions=False,
+        )
+
+    assert mock_culture_manager_class.call_count == 1
+    first_kwargs = mock_agent_class.call_args_list[0].kwargs
+    second_kwargs = mock_agent_class.call_args_list[1].kwargs
+
+    assert first_kwargs["culture_manager"] is second_kwargs["culture_manager"]
+    assert first_kwargs["add_culture_to_context"] is True
+    assert first_kwargs["update_cultural_knowledge"] is True
+    assert first_kwargs["enable_agentic_culture"] is False
+
+    culture_db_calls = [
+        call
+        for call in mock_storage.call_args_list
+        if str(call.kwargs.get("db_file", "")).endswith("/culture/engineering.db")
+    ]
+    assert len(culture_db_calls) == 1
