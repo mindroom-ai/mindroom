@@ -469,7 +469,7 @@ class TestStreamingCompletion:
         assert error["message"] == "Agent execution failed"
 
     def test_streaming_tool_events(self, app_client: TestClient) -> None:
-        """Tool call events are formatted as inline text in stream."""
+        """Streaming emits start/done tool blocks with a stable per-stream tool id."""
         from agno.models.response import ToolExecution  # noqa: PLC0415
         from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent  # noqa: PLC0415
 
@@ -516,9 +516,73 @@ class TestStreamingCompletion:
 
         full_content = "".join(contents)
         assert "Let me search. " in full_content
-        assert "<tool>search(query=X)</tool>" in full_content
-        assert "<tool>search(query=X)\n3 results</tool>" in full_content
+        assert '<tool id="1" state="start">search(query=X)</tool>' in full_content
+        assert '<tool id="1" state="done">search(query=X)\n3 results</tool>' in full_content
         assert "Result:" not in full_content
+
+    def test_streaming_tool_ids_increment_for_multiple_calls(self, app_client: TestClient) -> None:
+        """Tool ids start at 1 and increment for each new started tool call in a stream."""
+        from agno.models.response import ToolExecution  # noqa: PLC0415
+        from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent  # noqa: PLC0415
+
+        first_started = ToolExecution(
+            tool_name="search",
+            tool_args={"query": "one"},
+            tool_call_id="tc-stream-1",
+        )
+        first_completed = ToolExecution(
+            tool_name="search",
+            tool_args={"query": "one"},
+            tool_call_id="tc-stream-1",
+            result="one-result",
+        )
+        second_started = ToolExecution(
+            tool_name="search",
+            tool_args={"query": "two"},
+            tool_call_id="tc-stream-2",
+        )
+        second_completed = ToolExecution(
+            tool_name="search",
+            tool_args={"query": "two"},
+            tool_call_id="tc-stream-2",
+            result="two-result",
+        )
+
+        async def mock_stream(**_kw: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="Start ")
+            yield ToolCallStartedEvent(tool=first_started)
+            yield ToolCallCompletedEvent(tool=first_completed)
+            yield ToolCallStartedEvent(tool=second_started)
+            yield ToolCallCompletedEvent(tool=second_completed)
+            yield RunContentEvent(content="End")
+
+        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Run two searches"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        lines = response.text.strip().split("\n\n")
+        contents: list[str] = []
+        for line in lines:
+            text = line.removeprefix("data: ")
+            if text == "[DONE]":
+                continue
+            chunk = json.loads(text)
+            delta = chunk["choices"][0]["delta"]
+            if "content" in delta:
+                contents.append(delta["content"])
+
+        full_content = "".join(contents)
+        assert '<tool id="1" state="start">search(query=one)</tool>' in full_content
+        assert '<tool id="1" state="done">search(query=one)\none-result</tool>' in full_content
+        assert '<tool id="2" state="start">search(query=two)</tool>' in full_content
+        assert '<tool id="2" state="done">search(query=two)\ntwo-result</tool>' in full_content
 
 
 # ---------------------------------------------------------------------------
@@ -1271,6 +1335,72 @@ class TestTeamCompletion:
                 if "content" in delta:
                     content_parts.append(delta["content"])
         assert "".join(content_parts) == "Team response!"
+
+    def test_team_streaming_tool_events_emit_start_and_done_with_ids(
+        self,
+        team_app_client: TestClient,
+    ) -> None:
+        """Team streaming emits start/done tool blocks sharing the same stable id."""
+        from agno.models.response import ToolExecution  # noqa: PLC0415
+        from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
+        from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent  # noqa: PLC0415
+        from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        tool_started = ToolExecution(
+            tool_name="search",
+            tool_args={"query": "X"},
+            tool_call_id="tc-team-stream-1",
+        )
+        tool_completed = ToolExecution(
+            tool_name="search",
+            tool_args={"query": "X"},
+            tool_call_id="tc-team-stream-1",
+            result="3 results",
+        )
+
+        mock_team = MagicMock()
+        mock_agents = [MagicMock(name="GeneralAgent")]
+
+        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
+            yield TeamContentEvent(content="Team says: ")
+            yield TeamToolCallStartedEvent(tool=tool_started)
+            yield TeamToolCallCompletedEvent(tool=tool_completed)
+            yield TeamContentEvent(content="done.")
+
+        mock_team.arun = mock_stream_events
+
+        with patch(
+            "mindroom.api.openai_compat._build_team",
+            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+        ):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Search for X"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        lines = response.text.strip().split("\n\n")
+        contents: list[str] = []
+        for line in lines:
+            text = line.removeprefix("data: ")
+            if text == "[DONE]":
+                continue
+            chunk = json.loads(text)
+            delta = chunk["choices"][0]["delta"]
+            if "content" in delta:
+                contents.append(delta["content"])
+
+        full_content = "".join(contents)
+        assert "Team says: " in full_content
+        assert '<tool id="1" state="start">search(query=X)</tool>' in full_content
+        assert full_content.count('<tool id="1" state="done">search(query=X)\n3 results</tool>') == 1
+        assert "done." in full_content
 
     def test_team_streaming_first_event_error_returns_500(self, team_app_client: TestClient) -> None:
         """Team stream returns HTTP 500 when first event is an explicit run error."""

@@ -11,6 +11,7 @@ import json
 import os
 import re
 import time
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import uuid4
 
@@ -52,12 +53,21 @@ if TYPE_CHECKING:
 
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
+    from agno.models.response import ToolExecution
     from agno.run.agent import RunOutput, RunOutputEvent
     from agno.run.team import TeamRunOutputEvent
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])
+
+
+@dataclass(slots=True)
+class _ToolStreamState:
+    """Track per-stream IDs so tool started/completed updates can be reconciled client-side."""
+
+    next_tool_id: int = 1
+    tool_ids_by_call_id: dict[str, str] = field(default_factory=dict)
 
 
 def _load_config() -> tuple[Config, Path]:
@@ -721,24 +731,83 @@ def _chunk_json(
     return chunk.model_dump_json()
 
 
-def _format_stream_tool_event(event: RunOutputEvent | TeamRunOutputEvent) -> str | None:
-    """Format a tool event as inline text for the SSE stream."""
+def _extract_tool_call_id(tool: ToolExecution) -> str:
+    """Extract the required tool call identifier for streaming tool events."""
+    tool_call_id = str(tool.tool_call_id).strip()
+    if not tool_call_id:
+        msg = "Streaming tool events require a non-empty tool_call_id"
+        raise ValueError(msg)
+    return tool_call_id
+
+
+def _allocate_next_tool_id(tool_state: _ToolStreamState) -> str:
+    tool_id = str(tool_state.next_tool_id)
+    tool_state.next_tool_id += 1
+    return tool_id
+
+
+def _resolve_started_tool_id(tool: ToolExecution, tool_state: _ToolStreamState) -> str:
+    tool_call_id = _extract_tool_call_id(tool)
+
+    existing_tool_id = tool_state.tool_ids_by_call_id.get(tool_call_id)
+    if existing_tool_id is not None:
+        return existing_tool_id
+
+    tool_id = _allocate_next_tool_id(tool_state)
+    tool_state.tool_ids_by_call_id[tool_call_id] = tool_id
+    return tool_id
+
+
+def _resolve_completed_tool_id(tool: ToolExecution, tool_state: _ToolStreamState) -> str:
+    tool_call_id = _extract_tool_call_id(tool)
+
+    existing_tool_id = tool_state.tool_ids_by_call_id.pop(tool_call_id, None)
+    if existing_tool_id is not None:
+        return existing_tool_id
+
+    return _allocate_next_tool_id(tool_state)
+
+
+def _inject_tool_metadata(tool_message: str, *, tool_id: str, state: Literal["start", "done"]) -> str:
+    return tool_message.replace("<tool>", f'<tool id="{tool_id}" state="{state}">', 1)
+
+
+def _format_stream_tool_event(
+    event: RunOutputEvent | TeamRunOutputEvent,
+    tool_state: _ToolStreamState,
+) -> str | None:
+    """Format tool events as inline text for the SSE stream with stable IDs."""
     if isinstance(event, (ToolCallStartedEvent, TeamToolCallStartedEvent)):
-        tool_msg, _ = format_tool_started_event(event.tool)
-        return tool_msg or None
-    if isinstance(event, (ToolCallCompletedEvent, TeamToolCallCompletedEvent)):
-        tool_msg, _ = format_tool_completed_event(event.tool)
-        return tool_msg or None
-    return None
+        tool = event.tool
+        if tool is None:
+            return None
+        tool_msg, _ = format_tool_started_event(tool)
+        if not tool_msg:
+            return None
+        tool_id = _resolve_started_tool_id(tool, tool_state)
+        state: Literal["start", "done"] = "start"
+    elif isinstance(event, (ToolCallCompletedEvent, TeamToolCallCompletedEvent)):
+        tool = event.tool
+        if tool is None:
+            return None
+        tool_msg, _ = format_tool_completed_event(tool)
+        if not tool_msg:
+            return None
+        tool_id = _resolve_completed_tool_id(tool, tool_state)
+        state = "done"
+    else:
+        return None
+
+    return _inject_tool_metadata(tool_msg, tool_id=tool_id, state=state)
 
 
-def _extract_stream_text(event: AIStreamChunk) -> str | None:
+def _extract_stream_text(event: AIStreamChunk, tool_state: _ToolStreamState) -> str | None:
     """Extract text content from a stream event."""
     if isinstance(event, RunContentEvent) and event.content:
         return str(event.content)
     if isinstance(event, str):
         return event
-    return _format_stream_tool_event(event)
+    return _format_stream_tool_event(event, tool_state)
 
 
 async def _stream_completion(
@@ -777,11 +846,13 @@ async def _stream_completion(
     created = int(time.time())
 
     async def event_generator() -> AsyncIterator[str]:
+        tool_state = _ToolStreamState()
+
         # 1. Initial role announcement
         yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'role': 'assistant'})}\n\n"
 
         # 2. Yield the peeked first event
-        text = _extract_stream_text(first_event)
+        text = _extract_stream_text(first_event, tool_state)
         if text:
             yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
 
@@ -789,7 +860,7 @@ async def _stream_completion(
         # Error strings after the first event are sent as content chunks
         # since we can't switch to an error HTTP status mid-stream.
         async for event in stream:
-            text = _extract_stream_text(event)
+            text = _extract_stream_text(event, tool_state)
             if text:
                 yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
 
@@ -949,7 +1020,10 @@ async def _stream_team_completion(
     )
 
 
-def _extract_team_stream_text(event: RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str) -> str | None:
+def _extract_team_stream_text(
+    event: RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str,
+    tool_state: _ToolStreamState,
+) -> str | None:
     """Extract text content from a team stream event."""
     if isinstance(event, TeamContentEvent) and event.content:
         return str(event.content)
@@ -959,7 +1033,7 @@ def _extract_team_stream_text(event: RunOutputEvent | TeamRunOutputEvent | TeamR
         return _format_team_output(event)
     if isinstance(event, str):
         return event
-    return _format_stream_tool_event(event)
+    return _format_stream_tool_event(event, tool_state)
 
 
 def _extract_team_stream_error(event: RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str) -> str | None:
@@ -997,11 +1071,13 @@ async def _team_stream_event_generator(
     team_name: str,
 ) -> AsyncIterator[str]:
     """Yield SSE chunks for team streaming responses."""
+    tool_state = _ToolStreamState()
+
     # 1. Role announcement
     yield f"data: {_chunk_json(completion_id, created, model_id, delta={'role': 'assistant'})}\n\n"
 
     # 2. First event
-    first_text = _extract_team_stream_text(first_event)
+    first_text = _extract_team_stream_text(first_event, tool_state)
     if first_text:
         yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': first_text})}\n\n"
 
@@ -1014,7 +1090,7 @@ async def _team_stream_event_generator(
                 yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': 'Team execution failed.'})}\n\n"
                 break
 
-            text = _extract_team_stream_text(event)
+            text = _extract_team_stream_text(event, tool_state)
             if text:
                 yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': text})}\n\n"
     except Exception:
