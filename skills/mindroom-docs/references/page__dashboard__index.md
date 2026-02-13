@@ -98,6 +98,16 @@ Git-backed knowledge bases are supported, but Git settings are currently configu
 - The dashboard preserves existing `git` settings when you edit `path`/`watch`.
 - `/api/knowledge/bases/{base_id}/files` reflects the manager's filtered file set (for example `include_patterns`/`exclude_patterns`).
 
+### Credentials
+
+Manage service credentials directly from the dashboard:
+
+- **List configured credential services** from `CredentialsManager`
+- **Create/select service names** (for example `github_private` or `model:sonnet`)
+- **Edit raw JSON credential payloads** and save via `/api/credentials/{service}`
+- **Test credentials existence** using `/api/credentials/{service}/test`
+- **Delete credential sets** using `/api/credentials/{service}`
+
 ### Voice
 
 Configure voice message handling:

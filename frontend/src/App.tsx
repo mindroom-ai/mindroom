@@ -9,6 +9,7 @@ import {
   Check,
   DoorOpen,
   Home,
+  KeyRound,
   LayoutDashboard,
   Menu,
   Mic,
@@ -35,6 +36,7 @@ import { SyncStatus } from '@/components/SyncStatus/SyncStatus';
 import { Dashboard } from '@/components/Dashboard/Dashboard';
 import { Skills } from '@/components/Skills/Skills';
 import { Schedules } from '@/components/Schedules/Schedules';
+import { Credentials } from '@/components/Credentials/Credentials';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   Dialog,
@@ -67,6 +69,7 @@ const NAV_ITEMS: NavItem[] = [
   { value: 'models', label: 'Models', icon: Settings2, group: 'Configuration' },
   { value: 'memory', label: 'Memory', icon: Brain, group: 'Configuration' },
   { value: 'knowledge', label: 'Knowledge', icon: BookOpen, group: 'Configuration' },
+  { value: 'credentials', label: 'Credentials', icon: KeyRound, group: 'Configuration' },
   { value: 'voice', label: 'Voice', icon: Mic, group: 'Configuration' },
   { value: 'integrations', label: 'Tools', icon: Plug, group: 'Configuration' },
   { value: 'skills', label: 'Skills', icon: Puzzle, group: 'Configuration' },
@@ -459,6 +462,12 @@ function AppContent() {
             <TabsContent value="knowledge" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
               <div className="h-full overflow-hidden">
                 <Knowledge />
+              </div>
+            </TabsContent>
+
+            <TabsContent value="credentials" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
+              <div className="h-full overflow-hidden">
+                <Credentials />
               </div>
             </TabsContent>
 

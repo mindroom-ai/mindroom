@@ -68,6 +68,18 @@ export const API_ENDPOINTS = {
       `${API_BASE_URL}/api/knowledge/bases/${encodeURIComponent(baseId)}/reindex`,
   },
 
+  // Credentials operations
+  credentials: {
+    list: `${API_BASE_URL}/api/credentials/list`,
+    status: (service: string) =>
+      `${API_BASE_URL}/api/credentials/${encodeURIComponent(service)}/status`,
+    get: (service: string) => `${API_BASE_URL}/api/credentials/${encodeURIComponent(service)}`,
+    set: (service: string) => `${API_BASE_URL}/api/credentials/${encodeURIComponent(service)}`,
+    delete: (service: string) => `${API_BASE_URL}/api/credentials/${encodeURIComponent(service)}`,
+    test: (service: string) =>
+      `${API_BASE_URL}/api/credentials/${encodeURIComponent(service)}/test`,
+  },
+
   // Other endpoints
   tools: `${API_BASE_URL}/api/tools`,
   rooms: `${API_BASE_URL}/api/rooms`,
