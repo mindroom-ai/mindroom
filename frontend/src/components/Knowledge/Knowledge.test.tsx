@@ -327,6 +327,7 @@ describe('Knowledge', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Settings git source' }));
 
     expect(screen.getByLabelText('Repository URL')).toBeInTheDocument();
+    expect(screen.getByLabelText('Folder Path')).toBeInTheDocument();
     expect(mockUpdateKnowledgeBase).toHaveBeenCalledWith(
       'docs',
       expect.objectContaining({
@@ -384,16 +385,16 @@ describe('Knowledge', () => {
     await screen.findByText('Active: docs');
 
     fireEvent.change(screen.getByLabelText('Repository URL'), {
-      target: { value: 'https://github.com/org/repo-updated' },
+      target: { value: '  https://github.com/org/repo-updated  ' },
     });
     fireEvent.change(screen.getByLabelText('Branch'), {
-      target: { value: 'release' },
+      target: { value: '  release  ' },
     });
     fireEvent.change(screen.getByLabelText('Poll Interval (seconds)'), {
       target: { value: '45' },
     });
     fireEvent.change(screen.getByLabelText('Credentials Service (optional)'), {
-      target: { value: 'github-private' },
+      target: { value: '  github-private  ' },
     });
     fireEvent.click(screen.getByRole('checkbox', { name: 'Skip Hidden Files' }));
     fireEvent.change(screen.getByLabelText('Include Patterns (optional)'), {
@@ -403,24 +404,23 @@ describe('Knowledge', () => {
       target: { value: 'docs/private/**' },
     });
 
-    expect(mockUpdateKnowledgeBase).toHaveBeenLastCalledWith(
-      'docs',
-      expect.objectContaining({
-        git: {
-          repo_url: 'https://github.com/org/repo-updated',
-          branch: 'release',
-          poll_interval_seconds: 45,
-          credentials_service: 'github-private',
-          skip_hidden: false,
-          include_patterns: ['docs/**', 'knowledge/**'],
-          exclude_patterns: ['docs/private/**'],
-        },
-      })
-    );
-
     fireEvent.click(screen.getByRole('button', { name: 'Save Settings' }));
     await waitFor(() => {
       expect(mockSaveConfig).toHaveBeenCalledTimes(1);
+      expect(mockUpdateKnowledgeBase).toHaveBeenLastCalledWith(
+        'docs',
+        expect.objectContaining({
+          git: {
+            repo_url: 'https://github.com/org/repo-updated',
+            branch: 'release',
+            poll_interval_seconds: 45,
+            credentials_service: 'github-private',
+            skip_hidden: false,
+            include_patterns: ['docs/**', 'knowledge/**'],
+            exclude_patterns: ['docs/private/**'],
+          },
+        })
+      );
     });
   });
 });

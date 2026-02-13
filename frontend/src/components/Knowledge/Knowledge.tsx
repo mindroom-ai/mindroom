@@ -280,16 +280,30 @@ export function Knowledge() {
   }, []);
 
   const handleSaveSettings = useCallback(async () => {
+    if (!selectedBase) {
+      return;
+    }
+
     if (settings.git && !settings.git.repo_url.trim()) {
       setError('Repository URL is required when Git source is enabled');
       return;
     }
 
+    const nextSettings: KnowledgeBaseConfig = settings.git
+      ? {
+          ...settings,
+          git: normalizeGitConfig(settings.git),
+        }
+      : settings;
+
+    setSettings(nextSettings);
+    updateKnowledgeBase(selectedBase, nextSettings);
+
     setSavingSettings(true);
     setError(null);
     try {
       await saveConfig();
-      await loadData(selectedBase || null);
+      await loadData(selectedBase);
       toast({
         title: 'Knowledge settings saved',
         description: 'Configuration has been updated.',
@@ -305,7 +319,7 @@ export function Knowledge() {
     } finally {
       setSavingSettings(false);
     }
-  }, [loadData, saveConfig, selectedBase, settings.git, toast]);
+  }, [loadData, saveConfig, selectedBase, settings, toast, updateKnowledgeBase]);
 
   const handleCreateBase = useCallback(async () => {
     const baseName = newBaseName.trim();
@@ -839,34 +853,30 @@ export function Knowledge() {
                   </div>
                 </div>
 
-                {settingsSourceType === 'local' ? (
-                  <>
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium" htmlFor="knowledge-path">
-                        Folder Path
-                      </label>
-                      <Input
-                        id="knowledge-path"
-                        value={settings.path}
-                        onChange={event => updateSettings({ path: event.target.value })}
-                        placeholder={defaultPathForBase(selectedBase)}
-                      />
-                    </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium" htmlFor="knowledge-path">
+                    Folder Path
+                  </label>
+                  <Input
+                    id="knowledge-path"
+                    value={settings.path}
+                    onChange={event => updateSettings({ path: event.target.value })}
+                    placeholder={defaultPathForBase(selectedBase)}
+                  />
+                </div>
 
-                    <div className="flex items-center justify-between rounded-md border p-3">
-                      <div className="space-y-1">
-                        <p className="text-sm font-medium">Watch Folder</p>
-                        <p className="text-xs text-muted-foreground">
-                          Automatically index file additions and updates.
-                        </p>
-                      </div>
-                      <Checkbox
-                        checked={settings.watch}
-                        onCheckedChange={checked => updateSettings({ watch: checked === true })}
-                      />
-                    </div>
-                  </>
-                ) : null}
+                <div className="flex items-center justify-between rounded-md border p-3">
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium">Watch Folder</p>
+                    <p className="text-xs text-muted-foreground">
+                      Automatically index file additions and updates.
+                    </p>
+                  </div>
+                  <Checkbox
+                    checked={settings.watch}
+                    onCheckedChange={checked => updateSettings({ watch: checked === true })}
+                  />
+                </div>
 
                 {settingsSourceType === 'git' && settings.git ? (
                   <div className="space-y-4 rounded-md border p-3">
