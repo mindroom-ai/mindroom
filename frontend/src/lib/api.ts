@@ -87,18 +87,19 @@ export const API_ENDPOINTS = {
   encryptKey: `${API_BASE_URL}/api/keys/encrypt`,
 };
 
-// Helper function to make API calls
-export async function fetchAPI(url: string, options?: RequestInit) {
+export async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
   // Add a timeout to prevent hanging requests
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
 
   try {
+    const useJsonHeaders = typeof FormData === 'undefined' || !(options?.body instanceof FormData);
+
     const response = await fetch(url, {
       ...options,
       signal: controller.signal,
       headers: {
-        'Content-Type': 'application/json',
+        ...(useJsonHeaders ? { 'Content-Type': 'application/json' } : {}),
         ...options?.headers,
       },
     });
@@ -106,10 +107,23 @@ export async function fetchAPI(url: string, options?: RequestInit) {
     clearTimeout(timeoutId);
 
     if (!response.ok) {
-      throw new Error(`API call failed: ${response.status} ${response.statusText}`);
+      let detail = `API call failed: ${response.status} ${response.statusText}`;
+      try {
+        const payload = await response.json();
+        if (typeof payload?.detail === 'string') {
+          detail = payload.detail;
+        }
+      } catch {
+        // Keep fallback detail text.
+      }
+      throw new Error(detail);
     }
 
-    return response.json();
+    if (response.status === 204) {
+      return undefined as T;
+    }
+
+    return (await response.json()) as T;
   } catch (error) {
     clearTimeout(timeoutId);
     if (error instanceof Error && error.name === 'AbortError') {
@@ -117,4 +131,9 @@ export async function fetchAPI(url: string, options?: RequestInit) {
     }
     throw error;
   }
+}
+
+// Backward-compatible helper for existing call sites.
+export async function fetchAPI(url: string, options?: RequestInit): Promise<any> {
+  return fetchJSON<any>(url, options);
 }

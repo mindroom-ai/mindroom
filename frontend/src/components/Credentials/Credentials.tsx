@@ -1,6 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { CheckCircle2, Copy, FlaskConical, Plus, RefreshCw, Save, Trash2 } from 'lucide-react';
-import { API_ENDPOINTS } from '@/lib/api';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Copy,
+  FlaskConical,
+  Plus,
+  RefreshCw,
+  Save,
+  Trash2,
+} from 'lucide-react';
+import { API_ENDPOINTS, fetchJSON } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -28,29 +37,14 @@ interface ServiceStatus {
 
 const EMPTY_JSON = '{}';
 const SERVICE_NAME_PATTERN = /^[a-zA-Z0-9:_-]+$/;
+const PARTIAL_STATUS_ERROR =
+  'Some service statuses could not be loaded. You can still edit credentials.';
 
 function formatServiceJson(credentials: Record<string, unknown>): string {
   if (Object.keys(credentials).length === 0) {
     return EMPTY_JSON;
   }
   return JSON.stringify(credentials, null, 2);
-}
-
-async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(url, options);
-  if (!response.ok) {
-    let detail = response.statusText;
-    try {
-      const payload = await response.json();
-      if (typeof payload?.detail === 'string') {
-        detail = payload.detail;
-      }
-    } catch {
-      // keep fallback detail
-    }
-    throw new Error(detail || `Request failed (${response.status})`);
-  }
-  return response.json() as Promise<T>;
 }
 
 function normalizeStatus(status: CredentialStatusResponse): ServiceStatus {
@@ -78,31 +72,52 @@ export function Credentials() {
   const [selectedService, setSelectedService] = useState('');
   const [newServiceName, setNewServiceName] = useState('');
   const [jsonDraft, setJsonDraft] = useState(EMPTY_JSON);
+  const [loadedDraft, setLoadedDraft] = useState(EMPTY_JSON);
   const [isLoadingServices, setIsLoadingServices] = useState(true);
   const [isLoadingCredentials, setIsLoadingCredentials] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const latestCredentialsRequestRef = useRef(0);
+  const selectedServiceRef = useRef('');
 
   const sortedServices = useMemo(
     () => [...services].sort((a, b) => a.service.localeCompare(b.service)),
     [services]
   );
+  const hasUnsavedChanges = Boolean(selectedService) && jsonDraft !== loadedDraft;
+
+  useEffect(() => {
+    selectedServiceRef.current = selectedService;
+  }, [selectedService]);
 
   const loadServices = useCallback(async () => {
     setIsLoadingServices(true);
     try {
-      const serviceNames = await fetchJson<string[]>(API_ENDPOINTS.credentials.list);
-      const statuses = await Promise.all(
-        serviceNames.map(async service => {
-          const status = await fetchJson<CredentialStatusResponse>(
-            API_ENDPOINTS.credentials.status(service)
-          );
-          return normalizeStatus(status);
-        })
+      const serviceNames = await fetchJSON<string[]>(API_ENDPOINTS.credentials.list);
+      const statusResults = await Promise.allSettled(
+        serviceNames.map(service =>
+          fetchJSON<CredentialStatusResponse>(API_ENDPOINTS.credentials.status(service))
+        )
       );
+      const statuses = serviceNames.map((service, index) => {
+        const result = statusResults[index];
+        if (result.status === 'fulfilled') {
+          return normalizeStatus(result.value);
+        }
+        return {
+          service,
+          hasCredentials: false,
+          keyNames: [],
+        };
+      });
       setServices(statuses);
+      if (statusResults.some(result => result.status === 'rejected')) {
+        setError(PARTIAL_STATUS_ERROR);
+      } else {
+        setError(null);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to load credential services';
       setError(message);
@@ -112,17 +127,39 @@ export function Credentials() {
   }, []);
 
   const loadCredentials = useCallback(async (service: string) => {
+    const requestId = latestCredentialsRequestRef.current + 1;
+    latestCredentialsRequestRef.current = requestId;
     setIsLoadingCredentials(true);
     setError(null);
     try {
-      const data = await fetchJson<CredentialGetResponse>(API_ENDPOINTS.credentials.get(service));
-      setJsonDraft(formatServiceJson(data.credentials ?? {}));
+      const data = await fetchJSON<CredentialGetResponse>(API_ENDPOINTS.credentials.get(service));
+      if (
+        requestId !== latestCredentialsRequestRef.current ||
+        selectedServiceRef.current !== service
+      ) {
+        return;
+      }
+      const formatted = formatServiceJson(data.credentials ?? {});
+      setJsonDraft(formatted);
+      setLoadedDraft(formatted);
     } catch (err) {
+      if (
+        requestId !== latestCredentialsRequestRef.current ||
+        selectedServiceRef.current !== service
+      ) {
+        return;
+      }
       const message = err instanceof Error ? err.message : 'Failed to load credentials';
       setError(message);
       setJsonDraft(EMPTY_JSON);
+      setLoadedDraft(EMPTY_JSON);
     } finally {
-      setIsLoadingCredentials(false);
+      if (
+        requestId === latestCredentialsRequestRef.current &&
+        selectedServiceRef.current === service
+      ) {
+        setIsLoadingCredentials(false);
+      }
     }
   }, []);
 
@@ -132,8 +169,11 @@ export function Credentials() {
 
   useEffect(() => {
     if (sortedServices.length === 0) {
+      latestCredentialsRequestRef.current += 1;
       setSelectedService('');
       setJsonDraft(EMPTY_JSON);
+      setLoadedDraft(EMPTY_JSON);
+      setIsLoadingCredentials(false);
       return;
     }
     if (!selectedService || !sortedServices.some(service => service.service === selectedService)) {
@@ -147,6 +187,22 @@ export function Credentials() {
     }
     void loadCredentials(selectedService);
   }, [loadCredentials, selectedService]);
+
+  const handleSelectService = useCallback(
+    (service: string) => {
+      if (service === selectedService) {
+        return;
+      }
+      if (
+        hasUnsavedChanges &&
+        !window.confirm(`Discard unsaved changes for '${selectedService}'?`)
+      ) {
+        return;
+      }
+      setSelectedService(service);
+    },
+    [hasUnsavedChanges, selectedService]
+  );
 
   const handleCreateService = useCallback(() => {
     const candidate = newServiceName.trim();
@@ -171,12 +227,13 @@ export function Credentials() {
     ]);
     setSelectedService(candidate);
     setJsonDraft(EMPTY_JSON);
+    setLoadedDraft(EMPTY_JSON);
     setNewServiceName('');
   }, [newServiceName, services]);
 
   const refreshSelectedStatus = useCallback(async (service: string) => {
     try {
-      const status = await fetchJson<CredentialStatusResponse>(
+      const status = await fetchJSON<CredentialStatusResponse>(
         API_ENDPOINTS.credentials.status(service)
       );
       setServices(previous => {
@@ -215,11 +272,14 @@ export function Credentials() {
     setIsSaving(true);
     setError(null);
     try {
-      await fetchJson(API_ENDPOINTS.credentials.set(selectedService), {
+      await fetchJSON(API_ENDPOINTS.credentials.set(selectedService), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ credentials: parsed }),
       });
+      const formatted = formatServiceJson(parsed as Record<string, unknown>);
+      setJsonDraft(formatted);
+      setLoadedDraft(formatted);
       await refreshSelectedStatus(selectedService);
       toast({
         title: 'Credentials saved',
@@ -248,11 +308,13 @@ export function Credentials() {
     setIsDeleting(true);
     setError(null);
     try {
-      await fetchJson(API_ENDPOINTS.credentials.delete(selectedService), {
+      await fetchJSON(API_ENDPOINTS.credentials.delete(selectedService), {
         method: 'DELETE',
       });
       setServices(previous => previous.filter(service => service.service !== selectedService));
+      setSelectedService('');
       setJsonDraft(EMPTY_JSON);
+      setLoadedDraft(EMPTY_JSON);
       toast({
         title: 'Credentials deleted',
         description: `Removed credentials for '${selectedService}'.`,
@@ -277,7 +339,7 @@ export function Credentials() {
     setIsTesting(true);
     setError(null);
     try {
-      const response = await fetchJson<{ message?: string }>(
+      const response = await fetchJSON<{ message?: string }>(
         API_ENDPOINTS.credentials.test(selectedService),
         {
           method: 'POST',
@@ -301,12 +363,30 @@ export function Credentials() {
   }, [selectedService, toast]);
 
   const handleRefresh = useCallback(async () => {
+    if (
+      selectedService &&
+      hasUnsavedChanges &&
+      !window.confirm(`Discard unsaved changes for '${selectedService}' and refresh?`)
+    ) {
+      return;
+    }
     setError(null);
     await loadServices();
     if (selectedService) {
       await loadCredentials(selectedService);
     }
-  }, [loadCredentials, loadServices, selectedService]);
+  }, [hasUnsavedChanges, loadCredentials, loadServices, selectedService]);
+
+  const handleCopy = useCallback(async () => {
+    if (!selectedService) {
+      return;
+    }
+    await navigator.clipboard?.writeText(jsonDraft);
+    toast({
+      title: 'Copied credentials JSON',
+      description: 'Copied in cleartext. Handle clipboard contents carefully.',
+    });
+  }, [jsonDraft, selectedService, toast]);
 
   return (
     <div className="h-full overflow-y-auto overflow-x-hidden">
@@ -357,7 +437,7 @@ export function Credentials() {
                           <button
                             key={service.service}
                             type="button"
-                            onClick={() => setSelectedService(service.service)}
+                            onClick={() => handleSelectService(service.service)}
                             className={cn(
                               'w-full rounded-md border p-2 text-left transition-colors',
                               isActive
@@ -401,6 +481,13 @@ export function Credentials() {
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3">
+                  <div className="flex items-start gap-2 rounded-md border border-amber-300/70 bg-amber-50/80 p-2 text-xs text-amber-900 dark:border-amber-700/60 dark:bg-amber-900/20 dark:text-amber-200">
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                    <p>
+                      Credentials are shown and copied in cleartext. Avoid screen sharing or
+                      copy/pasting secrets into unsecured tools.
+                    </p>
+                  </div>
                   <Textarea
                     value={jsonDraft}
                     onChange={event => setJsonDraft(event.target.value)}
@@ -428,7 +515,7 @@ export function Credentials() {
                     </Button>
                     <Button
                       variant="outline"
-                      onClick={() => void navigator.clipboard?.writeText(jsonDraft)}
+                      onClick={() => void handleCopy()}
                       disabled={!selectedService}
                     >
                       <Copy className="h-4 w-4 mr-2" />

@@ -5,10 +5,25 @@ used by both agents and the widget interface.
 """
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 from .constants import CREDENTIALS_DIR
+
+SERVICE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9:_-]+$")
+
+
+def validate_service_name(service: str) -> str:
+    """Validate and normalize credential service names."""
+    normalized = service.strip()
+    if not normalized:
+        msg = "Service name is required"
+        raise ValueError(msg)
+    if not SERVICE_NAME_PATTERN.fullmatch(normalized):
+        msg = "Service name can only include letters, numbers, colon, underscore, and hyphen"
+        raise ValueError(msg)
+    return normalized
 
 
 class CredentialsManager:
@@ -40,7 +55,8 @@ class CredentialsManager:
             Path to the credentials file
 
         """
-        return self.base_path / f"{service}_credentials.json"
+        normalized_service = validate_service_name(service)
+        return self.base_path / f"{normalized_service}_credentials.json"
 
     def load_credentials(self, service: str) -> dict[str, Any] | None:
         """Load credentials for a service.
@@ -96,7 +112,8 @@ class CredentialsManager:
         if self.base_path.exists():
             for path in self.base_path.glob("*_credentials.json"):
                 service = path.stem.replace("_credentials", "")
-                services.append(service)
+                if SERVICE_NAME_PATTERN.fullmatch(service):
+                    services.append(service)
         return sorted(services)
 
     def get_api_key(self, service: str, key_name: str = "api_key") -> str | None:
