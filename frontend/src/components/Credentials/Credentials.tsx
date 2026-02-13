@@ -3,6 +3,8 @@ import {
   AlertTriangle,
   CheckCircle2,
   Copy,
+  Eye,
+  EyeOff,
   FlaskConical,
   Plus,
   RefreshCw,
@@ -78,6 +80,7 @@ export function Credentials() {
   const [isSaving, setIsSaving] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
+  const [isJsonVisible, setIsJsonVisible] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const latestCredentialsRequestRef = useRef(0);
   const selectedServiceRef = useRef('');
@@ -90,6 +93,10 @@ export function Credentials() {
 
   useEffect(() => {
     selectedServiceRef.current = selectedService;
+  }, [selectedService]);
+
+  useEffect(() => {
+    setIsJsonVisible(false);
   }, [selectedService]);
 
   const loadServices = useCallback(async () => {
@@ -406,11 +413,11 @@ export function Credentials() {
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,360px)_minmax(0,1fr)] gap-4">
-              <Card className="border border-border/60">
+              <Card className="border border-border/60 h-full flex flex-col">
                 <CardHeader className="pb-2">
                   <CardTitle className="text-base">Services</CardTitle>
                 </CardHeader>
-                <CardContent className="space-y-3">
+                <CardContent className="space-y-3 h-full min-h-0 flex flex-col">
                   <div className="flex gap-2">
                     <Input
                       value={newServiceName}
@@ -423,7 +430,7 @@ export function Credentials() {
                     </Button>
                   </div>
 
-                  <div className="space-y-1 max-h-[260px] overflow-auto pr-1">
+                  <div className="space-y-1 overflow-auto pr-1 flex-1 min-h-0">
                     {isLoadingServices ? (
                       <p className="text-sm text-muted-foreground">Loading services...</p>
                     ) : sortedServices.length === 0 ? (
@@ -484,17 +491,45 @@ export function Credentials() {
                   <div className="flex items-start gap-2 rounded-md border border-amber-300/70 bg-amber-50/80 p-2 text-xs text-amber-900 dark:border-amber-700/60 dark:bg-amber-900/20 dark:text-amber-200">
                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                     <p>
-                      Credentials are shown and copied in cleartext. Avoid screen sharing or
-                      copy/pasting secrets into unsecured tools.
+                      Credentials are hidden by default for safer screen sharing. Showing or copying
+                      exposes cleartext secrets.
                     </p>
                   </div>
-                  <Textarea
-                    value={jsonDraft}
-                    onChange={event => setJsonDraft(event.target.value)}
-                    disabled={!selectedService || isLoadingCredentials}
-                    className="font-mono min-h-[320px]"
-                    placeholder='{"api_key":"..."}'
-                  />
+                  <div className="flex justify-end">
+                    <Button
+                      variant="outline"
+                      onClick={() => setIsJsonVisible(previous => !previous)}
+                      disabled={!selectedService || isLoadingCredentials}
+                    >
+                      {isJsonVisible ? (
+                        <EyeOff className="h-4 w-4 mr-2" />
+                      ) : (
+                        <Eye className="h-4 w-4 mr-2" />
+                      )}
+                      {isJsonVisible ? 'Hide' : 'Show'}
+                    </Button>
+                  </div>
+                  <div className="relative">
+                    <Textarea
+                      value={jsonDraft}
+                      onChange={event => setJsonDraft(event.target.value)}
+                      disabled={!selectedService || isLoadingCredentials}
+                      className={cn(
+                        'font-mono min-h-[320px] transition-[filter] duration-150',
+                        selectedService &&
+                          !isJsonVisible &&
+                          'blur-sm pointer-events-none select-none'
+                      )}
+                      placeholder='{"api_key":"..."}'
+                    />
+                    {selectedService && !isJsonVisible ? (
+                      <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-md bg-background/10">
+                        <p className="rounded-md border bg-background/90 px-3 py-1 text-xs text-muted-foreground shadow-sm">
+                          Credentials hidden for screen sharing. Click Show to reveal.
+                        </p>
+                      </div>
+                    ) : null}
+                  </div>
 
                   <div className="flex flex-wrap gap-2">
                     <Button onClick={handleSave} disabled={!selectedService || isSaving}>
