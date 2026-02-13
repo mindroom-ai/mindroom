@@ -12,7 +12,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import uuid4
 
 from agno.run.agent import RunContentEvent, RunErrorEvent, ToolCallCompletedEvent, ToolCallStartedEvent
@@ -53,6 +53,7 @@ if TYPE_CHECKING:
 
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
+    from agno.models.response import ToolExecution
     from agno.run.agent import RunOutput, RunOutputEvent
     from agno.run.team import TeamRunOutputEvent
 
@@ -730,9 +731,9 @@ def _chunk_json(
     return chunk.model_dump_json()
 
 
-def _extract_tool_call_id(tool: object) -> str:
+def _extract_tool_call_id(tool: ToolExecution) -> str:
     """Extract the required tool call identifier for streaming tool events."""
-    tool_call_id = str(cast("Any", tool).tool_call_id).strip()
+    tool_call_id = str(tool.tool_call_id).strip()
     if not tool_call_id:
         msg = "Streaming tool events require a non-empty tool_call_id"
         raise ValueError(msg)
@@ -745,7 +746,7 @@ def _allocate_next_tool_id(tool_state: _ToolStreamState) -> str:
     return tool_id
 
 
-def _resolve_started_tool_id(tool: object, tool_state: _ToolStreamState) -> str:
+def _resolve_started_tool_id(tool: ToolExecution, tool_state: _ToolStreamState) -> str:
     tool_call_id = _extract_tool_call_id(tool)
 
     existing_tool_id = tool_state.tool_ids_by_call_id.get(tool_call_id)
@@ -757,7 +758,7 @@ def _resolve_started_tool_id(tool: object, tool_state: _ToolStreamState) -> str:
     return tool_id
 
 
-def _resolve_completed_tool_id(tool: object, tool_state: _ToolStreamState) -> str:
+def _resolve_completed_tool_id(tool: ToolExecution, tool_state: _ToolStreamState) -> str:
     tool_call_id = _extract_tool_call_id(tool)
 
     existing_tool_id = tool_state.tool_ids_by_call_id.pop(tool_call_id, None)
@@ -777,20 +778,27 @@ def _format_stream_tool_event(
 ) -> str | None:
     """Format tool events as inline text for the SSE stream with stable IDs."""
     if isinstance(event, (ToolCallStartedEvent, TeamToolCallStartedEvent)):
-        tool_msg, _ = format_tool_started_event(event.tool)
+        tool = event.tool
+        if tool is None:
+            return None
+        tool_msg, _ = format_tool_started_event(tool)
         if not tool_msg:
             return None
-        tool_id = _resolve_started_tool_id(event.tool, tool_state)
-        return _inject_tool_metadata(tool_msg, tool_id=tool_id, state="start")
-
-    if isinstance(event, (ToolCallCompletedEvent, TeamToolCallCompletedEvent)):
-        tool_msg, _ = format_tool_completed_event(event.tool)
+        tool_id = _resolve_started_tool_id(tool, tool_state)
+        state: Literal["start", "done"] = "start"
+    elif isinstance(event, (ToolCallCompletedEvent, TeamToolCallCompletedEvent)):
+        tool = event.tool
+        if tool is None:
+            return None
+        tool_msg, _ = format_tool_completed_event(tool)
         if not tool_msg:
             return None
-        tool_id = _resolve_completed_tool_id(event.tool, tool_state)
-        return _inject_tool_metadata(tool_msg, tool_id=tool_id, state="done")
+        tool_id = _resolve_completed_tool_id(tool, tool_state)
+        state = "done"
+    else:
+        return None
 
-    return None
+    return _inject_tool_metadata(tool_msg, tool_id=tool_id, state=state)
 
 
 def _extract_stream_text(event: AIStreamChunk, tool_state: _ToolStreamState) -> str | None:
