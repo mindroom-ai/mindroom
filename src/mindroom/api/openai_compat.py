@@ -12,7 +12,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 from uuid import uuid4
 
 from agno.run.agent import RunContentEvent, RunErrorEvent, ToolCallCompletedEvent, ToolCallStartedEvent
@@ -730,17 +730,13 @@ def _chunk_json(
     return chunk.model_dump_json()
 
 
-def _extract_tool_call_id(tool: object | None) -> str | None:
-    """Extract a tool call identifier when available."""
-    if tool is None:
-        return None
-
-    raw_tool_call_id = getattr(tool, "tool_call_id", None)
-    if raw_tool_call_id is None:
-        return None
-
-    tool_call_id = str(raw_tool_call_id).strip()
-    return tool_call_id or None
+def _extract_tool_call_id(tool: object) -> str:
+    """Extract the required tool call identifier for streaming tool events."""
+    tool_call_id = str(cast("Any", tool).tool_call_id).strip()
+    if not tool_call_id:
+        msg = "Streaming tool events require a non-empty tool_call_id"
+        raise ValueError(msg)
+    return tool_call_id
 
 
 def _allocate_next_tool_id(tool_state: _ToolStreamState) -> str:
@@ -749,10 +745,8 @@ def _allocate_next_tool_id(tool_state: _ToolStreamState) -> str:
     return tool_id
 
 
-def _resolve_started_tool_id(tool: object | None, tool_state: _ToolStreamState) -> str:
+def _resolve_started_tool_id(tool: object, tool_state: _ToolStreamState) -> str:
     tool_call_id = _extract_tool_call_id(tool)
-    if tool_call_id is None:
-        return _allocate_next_tool_id(tool_state)
 
     existing_tool_id = tool_state.tool_ids_by_call_id.get(tool_call_id)
     if existing_tool_id is not None:
@@ -763,10 +757,8 @@ def _resolve_started_tool_id(tool: object | None, tool_state: _ToolStreamState) 
     return tool_id
 
 
-def _resolve_completed_tool_id(tool: object | None, tool_state: _ToolStreamState) -> str:
+def _resolve_completed_tool_id(tool: object, tool_state: _ToolStreamState) -> str:
     tool_call_id = _extract_tool_call_id(tool)
-    if tool_call_id is None:
-        return _allocate_next_tool_id(tool_state)
 
     existing_tool_id = tool_state.tool_ids_by_call_id.pop(tool_call_id, None)
     if existing_tool_id is not None:
