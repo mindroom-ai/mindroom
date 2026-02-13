@@ -19,9 +19,20 @@ export interface MemoryConfig {
   };
 }
 
+export interface KnowledgeGitConfig {
+  repo_url: string;
+  branch?: string;
+  poll_interval_seconds?: number;
+  credentials_service?: string;
+  skip_hidden?: boolean;
+  include_patterns?: string[];
+  exclude_patterns?: string[];
+}
+
 export interface KnowledgeBaseConfig {
   path: string;
   watch: boolean;
+  git?: KnowledgeGitConfig;
 }
 
 export type LearningMode = 'always' | 'agentic';

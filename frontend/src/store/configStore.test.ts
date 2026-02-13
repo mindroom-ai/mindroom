@@ -553,6 +553,46 @@ describe('configStore', () => {
   });
 
   describe('knowledge bases', () => {
+    it('should preserve git settings when updating base path or watch', () => {
+      useConfigStore.setState({
+        config: {
+          memory: { embedder: { provider: 'openai', config: { model: 'test' } } },
+          knowledge_bases: {
+            docs: {
+              path: './docs',
+              watch: true,
+              git: {
+                repo_url: 'https://github.com/pipefunc/pipefunc',
+                branch: 'main',
+                include_patterns: ['docs/**'],
+              },
+            },
+          },
+          models: {},
+          agents: {},
+          defaults: {
+            markdown: true,
+          },
+          router: { model: 'default' },
+        } as Config,
+      });
+
+      const { updateKnowledgeBase } = useConfigStore.getState();
+      updateKnowledgeBase('docs', { path: './docs-sync', watch: false });
+
+      const state = useConfigStore.getState();
+      expect(state.config?.knowledge_bases?.docs).toEqual({
+        path: './docs-sync',
+        watch: false,
+        git: {
+          repo_url: 'https://github.com/pipefunc/pipefunc',
+          branch: 'main',
+          include_patterns: ['docs/**'],
+        },
+      });
+      expect(state.isDirty).toBe(true);
+    });
+
     it('should remove deleted knowledge base from all agent assignments', () => {
       useConfigStore.setState({
         config: {
