@@ -61,6 +61,50 @@ describe('Credentials', () => {
     });
   });
 
+  it('hides credentials by default and reveals them on demand', async () => {
+    (global.fetch as any)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ['github_private'],
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          service: 'github_private',
+          has_credentials: true,
+          key_names: ['token'],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          service: 'github_private',
+          credentials: { token: 'ghp_test' },
+        }),
+      });
+
+    render(<Credentials />);
+
+    const editor = screen.getByPlaceholderText('{"api_key":"..."}') as HTMLTextAreaElement;
+    await waitFor(() => {
+      expect(editor.value).toContain('"token": "ghp_test"');
+      expect(editor.className).toContain('blur-sm');
+      expect(
+        screen.getByText('Credentials hidden for screen sharing. Click Show to reveal.')
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show' }));
+
+    await waitFor(() => {
+      expect(editor.className).not.toContain('blur-sm');
+      expect(
+        screen.queryByText('Credentials hidden for screen sharing. Click Show to reveal.')
+      ).toBeNull();
+      expect(screen.getByRole('button', { name: 'Hide' })).toBeInTheDocument();
+    });
+  });
+
   it('saves credentials JSON for selected service', async () => {
     (global.fetch as any)
       .mockResolvedValueOnce({
