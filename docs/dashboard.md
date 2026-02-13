@@ -97,6 +97,11 @@ Manage file-backed RAG knowledge bases:
 - **Track index status** (`file_count` and `indexed_count`)
 - **Assign agents** to a specific knowledge base from the Agents tab
 
+Git-backed knowledge bases are supported, but Git settings are currently configured in `config.yaml` (`knowledge_bases.<id>.git`), not via dedicated dashboard controls yet.
+
+- The dashboard preserves existing `git` settings when you edit `path`/`watch`.
+- `/api/knowledge/bases/{base_id}/files` reflects the manager's filtered file set (for example `include_patterns`/`exclude_patterns`).
+
 ### Voice
 
 Configure voice message handling:

@@ -477,12 +477,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   updateKnowledgeBase: (baseName, baseConfig) => {
     set(state => {
       if (!state.config) return state;
+      const existingBaseConfig = state.config.knowledge_bases?.[baseName] || {};
       return {
         config: {
           ...state.config,
           knowledge_bases: {
             ...(state.config.knowledge_bases || {}),
             [baseName]: {
+              ...existingBaseConfig,
               ...baseConfig,
             },
           },

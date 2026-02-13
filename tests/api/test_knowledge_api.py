@@ -55,6 +55,47 @@ def test_knowledge_bases_list_initializes_managers_without_full_reindex(
     assert init_managers.await_args.kwargs["reindex_on_create"] is False
 
 
+def test_knowledge_files_list_uses_manager_filters_when_available(
+    test_client: TestClient,
+    tmp_path: Path,
+) -> None:
+    """File listing should reflect the manager-managed subset of files."""
+    config = _knowledge_config(tmp_path)
+    included_file = tmp_path / "docs" / "guide.md"
+    included_file.parent.mkdir(parents=True, exist_ok=True)
+    included_file.write_text("guide", encoding="utf-8")
+    excluded_file = tmp_path / "src" / "code.py"
+    excluded_file.parent.mkdir(parents=True, exist_ok=True)
+    excluded_file.write_text("print('x')", encoding="utf-8")
+
+    manager = MagicMock()
+    manager.list_files.return_value = [included_file]
+
+    with (
+        patch("mindroom.api.knowledge.Config.from_yaml", return_value=config),
+        patch(
+            "mindroom.api.knowledge.initialize_knowledge_managers",
+            new=AsyncMock(return_value={"research": manager}),
+        ) as init_managers,
+    ):
+        response = test_client.get("/api/knowledge/bases/research/files")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["file_count"] == 1
+    assert payload["files"] == [
+        {
+            "name": "guide.md",
+            "path": "docs/guide.md",
+            "size": included_file.stat().st_size,
+            "modified": payload["files"][0]["modified"],
+            "type": "md",
+        },
+    ]
+    init_managers.assert_awaited_once()
+    assert init_managers.await_args.kwargs["reindex_on_create"] is False
+
+
 def test_knowledge_upload_rolls_back_on_oversized_file(
     test_client: TestClient,
     tmp_path: Path,

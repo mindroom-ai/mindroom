@@ -126,6 +126,14 @@ class KnowledgeGitConfig(BaseModel):
         default=True,
         description="Skip hidden files/folders (paths with components starting with '.') during indexing",
     )
+    include_patterns: list[str] = Field(
+        default_factory=list,
+        description="Optional root-anchored glob patterns to include (e.g. 'content/post/*/index.md')",
+    )
+    exclude_patterns: list[str] = Field(
+        default_factory=list,
+        description="Optional root-anchored glob patterns to exclude after include filtering",
+    )
 
 
 class KnowledgeBaseConfig(BaseModel):

@@ -7,6 +7,7 @@ import hashlib
 import subprocess
 from contextlib import suppress
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlparse, urlunparse
@@ -74,6 +75,8 @@ def _settings_key(config: Config, storage_path: Path, base_id: str) -> tuple[str
         str(git_config.poll_interval_seconds) if git_config is not None else "",
         git_config.credentials_service or "" if git_config is not None else "",
         str(git_config.skip_hidden) if git_config is not None else "",
+        str(tuple(git_config.include_patterns)) if git_config is not None else "",
+        str(tuple(git_config.exclude_patterns)) if git_config is not None else "",
     )
 
 
@@ -130,6 +133,52 @@ def _authenticated_repo_url(repo_url: str, credentials_service: str | None) -> s
     hostname = parsed.netloc.split("@")[-1]
     auth_netloc = f"{quote(username, safe='')}:{quote(secret, safe='')}@{hostname}"
     return urlunparse(parsed._replace(netloc=auth_netloc))
+
+
+def _split_posix_parts(value: str) -> tuple[str, ...]:
+    normalized = value.replace("\\", "/").strip()
+    normalized = normalized.removeprefix("./")
+    normalized = normalized.strip("/")
+    if not normalized:
+        return ()
+    return tuple(part for part in normalized.split("/") if part and part != ".")
+
+
+def _matches_root_glob(relative_path: str, pattern: str) -> bool:
+    """Return True when relative path matches the root-anchored glob pattern."""
+    path_parts = _split_posix_parts(relative_path)
+    pattern_parts = _split_posix_parts(pattern)
+    if not pattern_parts:
+        return False
+
+    cache: dict[tuple[int, int], bool] = {}
+
+    def _match(path_index: int, pattern_index: int) -> bool:
+        key = (path_index, pattern_index)
+        if key in cache:
+            return cache[key]
+
+        if pattern_index == len(pattern_parts):
+            result = path_index == len(path_parts)
+        else:
+            pattern_part = pattern_parts[pattern_index]
+            if pattern_part == "**":
+                next_index = pattern_index
+                while next_index < len(pattern_parts) and pattern_parts[next_index] == "**":
+                    next_index += 1
+                if next_index == len(pattern_parts):
+                    result = True
+                else:
+                    result = any(_match(next_path, next_index) for next_path in range(path_index, len(path_parts) + 1))
+            elif path_index < len(path_parts) and fnmatchcase(path_parts[path_index], pattern_part):
+                result = _match(path_index + 1, pattern_index + 1)
+            else:
+                result = False
+
+        cache[key] = result
+        return result
+
+    return _match(0, 0)
 
 
 @dataclass
@@ -189,15 +238,25 @@ class KnowledgeManager:
             relative_path = file_path.relative_to(self.knowledge_path)
         except ValueError:
             return False
-        if self._skip_hidden_paths() and self._is_hidden_relative_path(relative_path):
-            return False
-        return file_path.is_file()
+        return file_path.is_file() and self._include_relative_path(relative_path.as_posix())
 
     def _include_relative_path(self, relative_path: str) -> bool:
         path_obj = Path(relative_path)
         if path_obj.is_absolute() or ".." in path_obj.parts:
             return False
-        return not (self._skip_hidden_paths() and self._is_hidden_relative_path(path_obj))
+        if self._skip_hidden_paths() and self._is_hidden_relative_path(path_obj):
+            return False
+
+        git_config = self._git_config()
+        if git_config is None:
+            return True
+
+        if git_config.include_patterns and not any(
+            _matches_root_glob(relative_path, pattern) for pattern in git_config.include_patterns
+        ):
+            return False
+
+        return not any(_matches_root_glob(relative_path, pattern) for pattern in git_config.exclude_patterns)
 
     def _run_git(self, args: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -373,7 +432,7 @@ class KnowledgeManager:
         return len(indexed_files)
 
     async def sync_git_repository(self) -> dict[str, Any]:
-        """Fetch and fast-forward one configured Git repository, then update the index."""
+        """Fetch and force-align one configured Git repository, then update the index."""
         git_config = self._git_config()
         if git_config is None:
             return {"updated": False, "changed_count": 0, "removed_count": 0}

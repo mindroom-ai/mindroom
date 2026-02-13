@@ -97,7 +97,12 @@ def _make_config(path: Path) -> Config:
     )
 
 
-def _make_git_config(path: Path) -> Config:
+def _make_git_config(
+    path: Path,
+    *,
+    include_patterns: list[str] | None = None,
+    exclude_patterns: list[str] | None = None,
+) -> Config:
     return Config(
         agents={},
         models={},
@@ -110,6 +115,8 @@ def _make_git_config(path: Path) -> Config:
                     branch="main",
                     poll_interval_seconds=30,
                     skip_hidden=True,
+                    include_patterns=include_patterns or [],
+                    exclude_patterns=exclude_patterns or [],
                 ),
             ),
         },
@@ -265,6 +272,46 @@ def test_list_files_skips_hidden_paths_when_git_skip_hidden_enabled(
 
     listed = [path.relative_to(manager.knowledge_path).as_posix() for path in manager.list_files()]
     assert listed == ["public/doc.md"]
+
+
+def test_list_files_respects_include_and_exclude_patterns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pattern filters should include only requested files and allow explicit exclusions."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.Knowledge", _DummyKnowledge)
+
+    manager = KnowledgeManager(
+        base_id="research",
+        config=_make_git_config(
+            tmp_path / "knowledge",
+            include_patterns=["content/post/*/index.md"],
+            exclude_patterns=["content/post/draft-*/index.md"],
+        ),
+        storage_path=tmp_path / "storage",
+    )
+
+    (manager.knowledge_path / "content" / "post" / "hello" / "index.md").parent.mkdir(parents=True, exist_ok=True)
+    (manager.knowledge_path / "content" / "post" / "hello" / "index.md").write_text("ok", encoding="utf-8")
+
+    (manager.knowledge_path / "content" / "post" / "hello" / "body.md").write_text("skip", encoding="utf-8")
+    (manager.knowledge_path / "content" / "post" / "nested" / "slug" / "index.md").parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    (manager.knowledge_path / "content" / "post" / "nested" / "slug" / "index.md").write_text("skip", encoding="utf-8")
+    (manager.knowledge_path / "foo" / "content" / "post" / "hello" / "index.md").parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    (manager.knowledge_path / "foo" / "content" / "post" / "hello" / "index.md").write_text("skip", encoding="utf-8")
+    (manager.knowledge_path / "content" / "post" / "draft-post" / "index.md").parent.mkdir(parents=True, exist_ok=True)
+    (manager.knowledge_path / "content" / "post" / "draft-post" / "index.md").write_text("skip", encoding="utf-8")
+
+    listed = [path.relative_to(manager.knowledge_path).as_posix() for path in manager.list_files()]
+    assert listed == ["content/post/hello/index.md"]
 
 
 @pytest.mark.asyncio
