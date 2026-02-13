@@ -95,7 +95,6 @@ endpoints:
       dropParams: ["stop", "frequency_penalty", "presence_penalty", "top_p"]
       headers:
         X-LibreChat-Conversation-Id: "{{LIBRECHAT_BODY_CONVERSATIONID}}"
-        X-Tool-Event-Format: "open-webui"
 ```
 
 ### Open WebUI
@@ -104,7 +103,6 @@ endpoints:
 2. Set API URL to `http://localhost:8765/v1`
 3. Set API Key to one of your `OPENAI_COMPAT_API_KEYS`
 4. Agents appear automatically in the model picker
-5. To render tool calls as collapsible `<details>` blocks, add a custom request header: `X-Tool-Event-Format: open-webui` in your connection settings
 
 ### Any OpenAI-compatible client
 
@@ -128,7 +126,7 @@ Teams are exposed as `team/<team_name>` models. Selecting `team/super_team` runs
 
 `stream: true` returns Server-Sent Events in the standard OpenAI format: role chunk, content chunks, finish chunk, `[DONE]`.
 
-By default, tool calls appear inline as text in the stream (not as native OpenAI `tool_calls` deltas). When the `X-Tool-Event-Format: open-webui` request header is set, tool calls are rendered as `<details>` HTML blocks that Open WebUI and LibreChat display as collapsible tool call cards.
+Tool calls appear inline as text in the stream (not as native OpenAI `tool_calls` deltas).
 
 ### Session continuity
 
@@ -169,6 +167,6 @@ The OpenAI-compatible API uses its own auth, separate from the dashboard's Supab
 ## Limitations
 
 - **Token usage is always zeros** — Agno doesn't expose token counts
-- **No native `tool_calls` format** — tool results appear inline in content text (or as `<details>` HTML with the `X-Tool-Event-Format: open-webui` header)
+- **No native `tool_calls` format** — tool results appear inline in content text
 - **No room memory** — only agent-scoped memory (no `room_id` in API requests)
 - **Scheduler tool unavailable** — scheduling requires Matrix context and is stripped from API agents
