@@ -350,3 +350,48 @@ def test_create_agent_shares_culture_manager_for_same_culture(
         if str(call.kwargs.get("db_file", "")).endswith("/culture/engineering.db")
     ]
     assert len(culture_db_calls) == 1
+
+
+@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.CultureManager")
+@patch("mindroom.agents.Agent")
+def test_create_agent_culture_uses_agent_model_when_default_missing(
+    mock_agent_class: MagicMock,
+    mock_culture_manager_class: MagicMock,
+    mock_storage: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """Culture manager should not require models.default when an agent model is configured."""
+    _CULTURE_MANAGER_CACHE.clear()
+    config = Config(
+        agents={
+            "agent_one": AgentConfig(display_name="Agent One", role="First", model="m1", learning=False),
+        },
+        cultures={
+            "engineering": CultureConfig(
+                description="Engineering best practices",
+                agents=["agent_one"],
+                mode="automatic",
+            ),
+        },
+        models={
+            "m1": ModelConfig(provider="openai", id="gpt-4o-mini"),
+        },
+    )
+
+    model = MagicMock()
+    model.id = "gpt-4o-mini"
+    with patch("mindroom.ai.get_model_instance", return_value=model) as mock_get_model_instance:
+        create_agent(
+            "agent_one",
+            config=config,
+            storage_path=tmp_path,
+            include_default_tools=False,
+            include_interactive_questions=False,
+        )
+
+    mock_get_model_instance.assert_called_once_with(config, "m1")
+    assert mock_agent_class.call_count == 1
+    assert mock_storage.call_count >= 2
+    assert mock_culture_manager_class.call_args is not None
+    assert mock_culture_manager_class.call_args.kwargs["model"] is model

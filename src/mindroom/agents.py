@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.knowledge.protocol import KnowledgeProtocol
+    from agno.models.base import Model
 
     from .config import AgentConfig, Config, CultureConfig, CultureMode, DefaultsConfig
 
@@ -38,7 +39,7 @@ DEFAULT_AGENT_TOOL_NAMES = ["scheduler"]
 class CachedCultureManager:
     """Cached culture manager with a signature for invalidation on config changes."""
 
-    signature: tuple[str, str, str]
+    signature: tuple[str, str]
     manager: CultureManager
 
 
@@ -159,35 +160,33 @@ def resolve_culture_settings(mode: CultureMode) -> CultureAgentSettings:
     )
 
 
-def _culture_signature(config: Config, culture_config: CultureConfig) -> tuple[str, str, str]:
-    default_model_config = config.models.get("default")
-    default_model_signature = repr(default_model_config.model_dump(exclude_none=True) if default_model_config else {})
-    return (culture_config.mode, culture_config.description, default_model_signature)
+def _culture_signature(culture_config: CultureConfig) -> tuple[str, str]:
+    return (culture_config.mode, culture_config.description)
 
 
 def resolve_agent_culture(
     agent_name: str,
     config: Config,
     storage_path: Path,
+    model: Model,
 ) -> tuple[CultureManager | None, CultureAgentSettings | None]:
     """Resolve shared culture manager and feature flags for an agent."""
     culture_assignment = config.get_agent_culture(agent_name)
     if culture_assignment is None:
         return None, None
 
-    from .ai import get_model_instance  # noqa: PLC0415
-
     culture_name, culture_config = culture_assignment
     settings = resolve_culture_settings(culture_config.mode)
     cache_key = (str(storage_path.resolve()), culture_name)
-    signature = _culture_signature(config, culture_config)
+    signature = _culture_signature(culture_config)
     cached_manager = _CULTURE_MANAGER_CACHE.get(cache_key)
     if cached_manager is not None and cached_manager.signature == signature:
+        cached_manager.manager.model = model
         return cached_manager.manager, settings
 
     culture_scope = culture_config.description.strip() or "Shared best practices and principles."
     culture_manager = CultureManager(
-        model=get_model_instance(config, "default"),
+        model=model,
         db=create_culture_storage(culture_name, storage_path),
         culture_capture_instructions=f"Culture '{culture_name}': {culture_scope}",
         add_knowledge=culture_config.mode != "manual",
@@ -324,7 +323,12 @@ def create_agent(  # noqa: C901, PLR0912, PLR0915
         instructions.append(agent_prompts.INTERACTIVE_QUESTION_PROMPT)
 
     knowledge_enabled = bool(agent_config.knowledge_bases) and knowledge is not None
-    culture_manager, culture_settings = resolve_agent_culture(agent_name, config, resolved_storage_path)
+    culture_manager, culture_settings = resolve_agent_culture(
+        agent_name,
+        config,
+        resolved_storage_path,
+        model,
+    )
 
     add_culture_to_context: bool | None = None
     update_cultural_knowledge = False
