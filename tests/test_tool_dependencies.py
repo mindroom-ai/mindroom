@@ -20,7 +20,6 @@ def test_all_tools_can_be_imported() -> None:
         # Check if tool requires configuration based on metadata
         metadata = TOOL_METADATA.get(tool_name)
         requires_config = metadata and metadata.status == ToolStatus.REQUIRES_CONFIG
-        is_coming_soon = metadata and metadata.status == ToolStatus.COMING_SOON
 
         try:
             tool_instance = get_tool_by_name(tool_name)
@@ -29,10 +28,7 @@ def test_all_tools_can_be_imported() -> None:
             successful.append(tool_name)
             print(f"✓ {tool_name}")
         except Exception as e:
-            if is_coming_soon:
-                # Skip coming soon tools - they're expected to fail
-                print(f"⏳ {tool_name}: Coming soon")
-            elif requires_config:
+            if requires_config:
                 config_required.append(tool_name)
                 # Build a helpful message from metadata
                 if metadata and metadata.config_fields:

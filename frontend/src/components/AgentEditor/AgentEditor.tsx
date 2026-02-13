@@ -68,7 +68,7 @@ export function AgentEditor() {
       else if (tool.status === 'available') {
         configured.push(tool);
       }
-      // Exclude everything else (requires_config, coming_soon)
+      // Exclude everything else (requires_config)
     });
 
     return {
