@@ -108,11 +108,35 @@ class MemoryConfig(BaseModel):
     llm: MemoryLLMConfig | None = Field(default=None, description="LLM configuration for memory")
 
 
+class KnowledgeGitConfig(BaseModel):
+    """Git repository synchronization settings for a knowledge base."""
+
+    repo_url: str = Field(description="Git repository URL used as the knowledge source")
+    branch: str = Field(default="main", description="Git branch to track")
+    poll_interval_seconds: int = Field(
+        default=300,
+        ge=5,
+        description="How often to poll the remote repository for updates",
+    )
+    credentials_service: str | None = Field(
+        default=None,
+        description="Optional CredentialsManager service name used for private HTTPS repos",
+    )
+    skip_hidden: bool = Field(
+        default=True,
+        description="Skip hidden files/folders (paths with components starting with '.') during indexing",
+    )
+
+
 class KnowledgeBaseConfig(BaseModel):
     """Knowledge base configuration."""
 
     path: str = Field(default="./knowledge_docs", description="Path to knowledge documents folder")
     watch: bool = Field(default=True, description="Watch folder for changes")
+    git: KnowledgeGitConfig | None = Field(
+        default=None,
+        description="Optional Git sync configuration for this knowledge base",
+    )
 
 
 class ModelConfig(BaseModel):

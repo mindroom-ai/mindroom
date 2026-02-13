@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import subprocess
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote, urlparse, urlunparse
 
 from agno.knowledge.embedder.ollama import OllamaEmbedder
 from agno.knowledge.embedder.openai import OpenAIEmbedder
@@ -15,13 +17,14 @@ from agno.knowledge.knowledge import Knowledge
 from agno.vectordb.chroma import ChromaDb
 from watchfiles import Change, awatch
 
+from .credentials import get_credentials_manager
 from .credentials_sync import get_api_key_for_provider, get_ollama_host
 from .logging_config import get_logger
 
 if TYPE_CHECKING:
     from agno.knowledge.embedder.base import Embedder
 
-    from .config import Config, KnowledgeBaseConfig
+    from .config import Config, KnowledgeBaseConfig, KnowledgeGitConfig
 
 logger = get_logger(__name__)
 
@@ -57,6 +60,7 @@ def _settings_key(config: Config, storage_path: Path, base_id: str) -> tuple[str
     embedder_config = config.memory.embedder.config
     base_config = _knowledge_base_config(config, base_id)
     knowledge_path = _resolve_knowledge_path(base_config.path)
+    git_config = base_config.git
     return (
         base_id,
         str(storage_path.resolve()),
@@ -65,6 +69,11 @@ def _settings_key(config: Config, storage_path: Path, base_id: str) -> tuple[str
         embedder_config.model,
         embedder_config.host or "",
         str(base_config.watch),
+        git_config.repo_url if git_config is not None else "",
+        git_config.branch if git_config is not None else "",
+        str(git_config.poll_interval_seconds) if git_config is not None else "",
+        git_config.credentials_service or "" if git_config is not None else "",
+        str(git_config.skip_hidden) if git_config is not None else "",
     )
 
 
@@ -87,6 +96,42 @@ def _create_embedder(config: Config) -> Embedder:
     raise ValueError(msg)
 
 
+def _authenticated_repo_url(repo_url: str, credentials_service: str | None) -> str:
+    """Inject HTTPS credentials from CredentialsManager into a repository URL."""
+    if not credentials_service:
+        return repo_url
+
+    credentials = get_credentials_manager().load_credentials(credentials_service) or {}
+    username = credentials.get("username")
+    token = credentials.get("token") or credentials.get("api_key")
+    password = credentials.get("password")
+
+    if not isinstance(username, str) and token and not password:
+        username = "x-access-token"
+
+    if not isinstance(username, str) or not username:
+        return repo_url
+
+    secret: str | None
+    if isinstance(password, str) and password:
+        secret = password
+    elif isinstance(token, str) and token:
+        secret = token
+    else:
+        secret = None
+
+    if secret is None:
+        return repo_url
+
+    parsed = urlparse(repo_url)
+    if parsed.scheme not in {"http", "https"}:
+        return repo_url
+
+    hostname = parsed.netloc.split("@")[-1]
+    auth_netloc = f"{quote(username, safe='')}:{quote(secret, safe='')}@{hostname}"
+    return urlunparse(parsed._replace(netloc=auth_netloc))
+
+
 @dataclass
 class KnowledgeManager:
     """Manage indexing and watching for one knowledge base folder."""
@@ -102,6 +147,9 @@ class KnowledgeManager:
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _watch_task: asyncio.Task[None] | None = field(default=None, init=False)
     _watch_stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+    _git_sync_task: asyncio.Task[None] | None = field(default=None, init=False)
+    _git_sync_stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+    _git_sync_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
 
     def __post_init__(self) -> None:
         """Initialize filesystem paths and the underlying vector database."""
@@ -126,11 +174,119 @@ class KnowledgeManager:
         """Return the agno Knowledge instance."""
         return self._knowledge
 
+    def _git_config(self) -> KnowledgeGitConfig | None:
+        return _knowledge_base_config(self.config, self.base_id).git
+
+    def _skip_hidden_paths(self) -> bool:
+        git_config = self._git_config()
+        return bool(git_config and git_config.skip_hidden)
+
+    def _is_hidden_relative_path(self, relative_path: Path) -> bool:
+        return any(part.startswith(".") for part in relative_path.parts)
+
+    def _include_file(self, file_path: Path) -> bool:
+        try:
+            relative_path = file_path.relative_to(self.knowledge_path)
+        except ValueError:
+            return False
+        if self._skip_hidden_paths() and self._is_hidden_relative_path(relative_path):
+            return False
+        return file_path.is_file()
+
+    def _include_relative_path(self, relative_path: str) -> bool:
+        path_obj = Path(relative_path)
+        if path_obj.is_absolute() or ".." in path_obj.parts:
+            return False
+        return not (self._skip_hidden_paths() and self._is_hidden_relative_path(path_obj))
+
+    def _run_git(self, args: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=str(cwd or self.knowledge_path),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    def _git_rev_parse(self, ref: str) -> str | None:
+        try:
+            result = self._run_git(["rev-parse", ref])
+        except subprocess.CalledProcessError:
+            return None
+        return result.stdout.strip() or None
+
+    def _git_list_tracked_files(self) -> set[str]:
+        result = self._run_git(["ls-files", "-z"])
+        raw_paths = [entry for entry in result.stdout.split("\x00") if entry]
+        return {path for path in raw_paths if self._include_relative_path(path)}
+
+    def _ensure_git_repository(self, git_config: KnowledgeGitConfig) -> None:
+        git_dir = self.knowledge_path / ".git"
+        if git_dir.is_dir():
+            current_remote = self._run_git(["remote", "get-url", "origin"]).stdout.strip()
+            expected_remote = _authenticated_repo_url(git_config.repo_url, git_config.credentials_service)
+            if current_remote != expected_remote:
+                self._run_git(["remote", "set-url", "origin", expected_remote])
+            self._run_git(["checkout", git_config.branch])
+            return
+
+        if self.knowledge_path.exists() and any(self.knowledge_path.iterdir()):
+            msg = (
+                f"Cannot clone knowledge git repository into non-empty path {self.knowledge_path}. "
+                "Clear the folder or use a dedicated path."
+            )
+            raise RuntimeError(msg)
+
+        self.knowledge_path.parent.mkdir(parents=True, exist_ok=True)
+        clone_url = _authenticated_repo_url(git_config.repo_url, git_config.credentials_service)
+        self._run_git(
+            [
+                "clone",
+                "--single-branch",
+                "--branch",
+                git_config.branch,
+                clone_url,
+                str(self.knowledge_path),
+            ],
+            cwd=self.knowledge_path.parent,
+        )
+
+    def _sync_git_repository_once(self, git_config: KnowledgeGitConfig) -> tuple[set[str], set[str], bool]:
+        self._ensure_git_repository(git_config)
+
+        before_head = self._git_rev_parse("HEAD")
+        before_files = self._git_list_tracked_files()
+
+        self._run_git(["fetch", "origin", git_config.branch])
+        remote_ref = f"origin/{git_config.branch}"
+        remote_head = self._git_rev_parse(remote_ref)
+        if remote_head is None:
+            msg = f"Could not resolve remote ref '{remote_ref}' for knowledge base '{self.base_id}'"
+            raise RuntimeError(msg)
+
+        if before_head == remote_head:
+            return set(), set(), False
+
+        self._run_git(["checkout", git_config.branch])
+        # Force-align the local checkout with remote to tolerate local dirty state.
+        self._run_git(["reset", "--hard", remote_ref])
+
+        after_files = self._git_list_tracked_files()
+        if before_head is None:
+            changed_paths = after_files
+        else:
+            diff_result = self._run_git(["diff", "--name-only", "--no-renames", f"{before_head}..HEAD"])
+            changed_paths = {path for path in diff_result.stdout.splitlines() if self._include_relative_path(path)}
+
+        removed_files = before_files - after_files
+        changed_files = {path for path in changed_paths if path in after_files} | (after_files - before_files)
+        return changed_files, removed_files, True
+
     def list_files(self) -> list[Path]:
         """List all files currently present in the knowledge folder."""
         if not self.knowledge_path.exists():
             return []
-        return sorted(path for path in self.knowledge_path.rglob("*") if path.is_file())
+        return sorted(path for path in self.knowledge_path.rglob("*") if self._include_file(path))
 
     def resolve_file_path(self, file_path: Path | str) -> Path:
         """Resolve a path and ensure it stays inside the knowledge folder."""
@@ -198,6 +354,9 @@ class KnowledgeManager:
 
     async def initialize(self) -> None:
         """Initialize and index all existing knowledge files."""
+        if self._git_config() is not None:
+            await self.sync_git_repository()
+
         indexed_count = await self.reindex_all()
         logger.info(
             "Knowledge base initialized",
@@ -213,8 +372,97 @@ class KnowledgeManager:
             self._indexed_files = indexed_files
         return len(indexed_files)
 
+    async def sync_git_repository(self) -> dict[str, Any]:
+        """Fetch and fast-forward one configured Git repository, then update the index."""
+        git_config = self._git_config()
+        if git_config is None:
+            return {"updated": False, "changed_count": 0, "removed_count": 0}
+
+        async with self._git_sync_lock:
+            changed_files, removed_files, updated = await asyncio.to_thread(
+                self._sync_git_repository_once,
+                git_config,
+            )
+
+        for relative_path in sorted(removed_files):
+            await self.remove_file(relative_path)
+
+        for relative_path in sorted(changed_files):
+            await self.index_file(relative_path, upsert=True)
+
+        if updated:
+            logger.info(
+                "Knowledge Git repository synchronized",
+                base_id=self.base_id,
+                repo_url=git_config.repo_url,
+                branch=git_config.branch,
+                changed_count=len(changed_files),
+                removed_count=len(removed_files),
+            )
+        return {
+            "updated": updated,
+            "changed_count": len(changed_files),
+            "removed_count": len(removed_files),
+        }
+
+    async def _git_sync_loop(self) -> None:
+        """Poll the configured Git repository and keep the knowledge folder up to date."""
+        git_config = self._git_config()
+        if git_config is None:
+            return
+
+        while not self._git_sync_stop_event.is_set():
+            try:
+                await self.sync_git_repository()
+            except Exception:
+                logger.exception(
+                    "Knowledge Git sync failed",
+                    base_id=self.base_id,
+                    repo_url=git_config.repo_url,
+                    branch=git_config.branch,
+                )
+
+            try:
+                await asyncio.wait_for(
+                    self._git_sync_stop_event.wait(),
+                    timeout=float(git_config.poll_interval_seconds),
+                )
+            except TimeoutError:
+                continue
+
+    async def _start_git_sync(self) -> None:
+        git_config = self._git_config()
+        if git_config is None:
+            return
+        if self._git_sync_task is not None and not self._git_sync_task.done():
+            return
+
+        self._git_sync_stop_event = asyncio.Event()
+        self._git_sync_task = asyncio.create_task(self._git_sync_loop())
+        logger.info(
+            "Knowledge Git sync started",
+            base_id=self.base_id,
+            repo_url=git_config.repo_url,
+            branch=git_config.branch,
+            poll_interval_seconds=git_config.poll_interval_seconds,
+        )
+
+    async def _stop_git_sync(self) -> None:
+        if self._git_sync_task is None:
+            return
+
+        self._git_sync_stop_event.set()
+        self._git_sync_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await self._git_sync_task
+
+        self._git_sync_task = None
+        logger.info("Knowledge Git sync stopped", base_id=self.base_id)
+
     async def start_watcher(self) -> None:
         """Start background file watching if enabled."""
+        await self._start_git_sync()
+
         base_config = _knowledge_base_config(self.config, self.base_id)
         if not base_config.watch:
             return
@@ -227,16 +475,16 @@ class KnowledgeManager:
 
     async def stop_watcher(self) -> None:
         """Stop the background file watcher."""
-        if self._watch_task is None:
-            return
+        await self._stop_git_sync()
 
-        self._watch_stop_event.set()
-        self._watch_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await self._watch_task
+        if self._watch_task is not None:
+            self._watch_stop_event.set()
+            self._watch_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._watch_task
 
-        self._watch_task = None
-        logger.info("Knowledge folder watcher stopped", base_id=self.base_id)
+            self._watch_task = None
+            logger.info("Knowledge folder watcher stopped", base_id=self.base_id)
 
     async def _index_file_locked(self, resolved_path: Path, *, upsert: bool) -> bool:
         """Index one file while holding the manager lock."""
@@ -276,6 +524,8 @@ class KnowledgeManager:
     async def index_file(self, file_path: Path | str, *, upsert: bool = True) -> bool:
         """Index or reindex a single file."""
         resolved_path = self.resolve_file_path(file_path)
+        if not self._include_file(resolved_path):
+            return False
         if not resolved_path.exists() or not resolved_path.is_file():
             return False
 
@@ -286,6 +536,8 @@ class KnowledgeManager:
         """Remove a file from the vector database index."""
         resolved_path = self.resolve_file_path(file_path)
         relative_path = self._relative_path(resolved_path)
+        if not self._include_relative_path(relative_path):
+            return False
 
         async with self._lock:
             removed = await asyncio.to_thread(
@@ -321,6 +573,8 @@ class KnowledgeManager:
         try:
             resolved_path = self.resolve_file_path(file_path)
         except ValueError:
+            return
+        if not self._include_relative_path(self._relative_path(resolved_path)):
             return
 
         if change in {Change.added, Change.modified}:

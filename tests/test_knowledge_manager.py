@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar
+from unittest.mock import AsyncMock, call
 
 import pytest
 
-from mindroom.config import Config, KnowledgeBaseConfig
+from mindroom.config import Config, KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.knowledge import (
     KnowledgeManager,
     get_knowledge_manager,
@@ -92,6 +93,25 @@ def _make_config(path: Path) -> Config:
         models={},
         knowledge_bases={
             "research": KnowledgeBaseConfig(path=str(path), watch=False),
+        },
+    )
+
+
+def _make_git_config(path: Path) -> Config:
+    return Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(
+                path=str(path),
+                watch=False,
+                git=KnowledgeGitConfig(
+                    repo_url="https://github.com/example/knowledge.git",
+                    branch="main",
+                    poll_interval_seconds=30,
+                    skip_hidden=True,
+                ),
+            ),
         },
     )
 
@@ -183,3 +203,94 @@ async def test_initialize_knowledge_managers_maintains_registry(
     assert get_knowledge_manager("legal") is None
 
     await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_sync_git_repository_updates_index_for_changed_and_deleted_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Git sync should remove deleted files and upsert changed files."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.Knowledge", _DummyKnowledge)
+
+    manager = KnowledgeManager(
+        base_id="research",
+        config=_make_git_config(tmp_path / "knowledge"),
+        storage_path=tmp_path / "storage",
+    )
+
+    monkeypatch.setattr(
+        manager,
+        "_sync_git_repository_once",
+        lambda _git_config: ({"docs/new.md", "docs/updated.md"}, {"docs/deleted.md"}, True),
+    )
+    manager.index_file = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    manager.remove_file = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    result = await manager.sync_git_repository()
+
+    assert result == {"updated": True, "changed_count": 2, "removed_count": 1}
+    manager.remove_file.assert_awaited_once_with("docs/deleted.md")
+    manager.index_file.assert_has_awaits(
+        [
+            call("docs/new.md", upsert=True),
+            call("docs/updated.md", upsert=True),
+        ],
+        any_order=False,
+    )
+
+
+def test_list_files_skips_hidden_paths_when_git_skip_hidden_enabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hidden files and folders are ignored for git-backed knowledge bases by default."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.Knowledge", _DummyKnowledge)
+
+    manager = KnowledgeManager(
+        base_id="research",
+        config=_make_git_config(tmp_path / "knowledge"),
+        storage_path=tmp_path / "storage",
+    )
+
+    (manager.knowledge_path / "public").mkdir(parents=True, exist_ok=True)
+    (manager.knowledge_path / "public" / "doc.md").write_text("ok", encoding="utf-8")
+    (manager.knowledge_path / ".hidden").mkdir(parents=True, exist_ok=True)
+    (manager.knowledge_path / ".hidden" / "secret.md").write_text("skip", encoding="utf-8")
+    (manager.knowledge_path / "public" / ".dotfile.md").write_text("skip", encoding="utf-8")
+
+    listed = [path.relative_to(manager.knowledge_path).as_posix() for path in manager.list_files()]
+    assert listed == ["public/doc.md"]
+
+
+@pytest.mark.asyncio
+async def test_start_watcher_starts_git_sync_even_when_file_watch_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Git polling should run even when filesystem watch is disabled."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.Knowledge", _DummyKnowledge)
+
+    manager = KnowledgeManager(
+        base_id="research",
+        config=_make_git_config(tmp_path / "knowledge"),
+        storage_path=tmp_path / "storage",
+    )
+
+    async def fake_git_sync_loop() -> None:
+        await manager._git_sync_stop_event.wait()
+
+    monkeypatch.setattr(manager, "_git_sync_loop", fake_git_sync_loop)
+
+    await manager.start_watcher()
+    assert manager._watch_task is None
+    assert manager._git_sync_task is not None
+
+    await manager.stop_watcher()
+    assert manager._git_sync_task is None
