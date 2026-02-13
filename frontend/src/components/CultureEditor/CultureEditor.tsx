@@ -15,8 +15,10 @@ import { Sparkles } from 'lucide-react';
 import { EditorPanel, EditorPanelEmptyState, FieldGroup } from '@/components/shared';
 import { useForm, Controller } from 'react-hook-form';
 import { Culture } from '@/types/config';
+import { useToast } from '@/components/ui/use-toast';
 
 export function CultureEditor() {
+  const { toast } = useToast();
   const {
     cultures,
     agents,
@@ -158,6 +160,14 @@ export function CultureEditor() {
               ) : (
                 agents.map(agent => {
                   const isChecked = field.value.includes(agent.id);
+                  const assignedCulture = cultures.find(culture =>
+                    culture.agents.includes(agent.id)
+                  );
+                  const assignedCultureLabel = !assignedCulture
+                    ? 'Currently in: none'
+                    : assignedCulture.id === selectedCulture.id
+                      ? 'Currently in: this culture'
+                      : `Currently in: ${assignedCulture.id}`;
                   return (
                     <div
                       key={agent.id}
@@ -167,9 +177,22 @@ export function CultureEditor() {
                         id={`culture-agent-${agent.id}`}
                         checked={isChecked}
                         onCheckedChange={checked => {
-                          const newAgents = checked
+                          const shouldAssign = checked === true;
+                          const previousCulture = cultures.find(
+                            culture =>
+                              culture.id !== selectedCulture.id && culture.agents.includes(agent.id)
+                          );
+                          const newAgents = shouldAssign
                             ? [...field.value, agent.id]
                             : field.value.filter(id => id !== agent.id);
+
+                          if (shouldAssign && !isChecked && previousCulture) {
+                            toast({
+                              title: 'Agent moved to culture',
+                              description: `${agent.display_name} moved from ${previousCulture.id} to ${selectedCulture.id}.`,
+                            });
+                          }
+
                           field.onChange(newAgents);
                           handleFieldChange('agents', newAgents);
                         }}
@@ -181,6 +204,9 @@ export function CultureEditor() {
                       >
                         <div className="font-medium text-sm">{agent.display_name}</div>
                         <div className="text-xs text-gray-500 dark:text-gray-400">{agent.role}</div>
+                        <div className="text-xs text-gray-500 dark:text-gray-400">
+                          {assignedCultureLabel}
+                        </div>
                       </label>
                     </div>
                   );
