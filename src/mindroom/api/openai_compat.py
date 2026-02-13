@@ -11,7 +11,6 @@ import json
 import os
 import re
 import time
-from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import uuid4
@@ -68,7 +67,6 @@ class _ToolStreamState:
 
     next_tool_id: int = 1
     tool_ids_by_call_id: dict[str, str] = field(default_factory=dict)
-    pending_ids_without_call_id: deque[str] = field(default_factory=deque)
 
 
 def _load_config() -> tuple[Config, Path]:
@@ -752,24 +750,27 @@ def _allocate_next_tool_id(tool_state: _ToolStreamState) -> str:
 
 
 def _resolve_started_tool_id(tool: object | None, tool_state: _ToolStreamState) -> str:
-    tool_id = _allocate_next_tool_id(tool_state)
     tool_call_id = _extract_tool_call_id(tool)
-    if tool_call_id is not None:
-        tool_state.tool_ids_by_call_id[tool_call_id] = tool_id
-    else:
-        tool_state.pending_ids_without_call_id.append(tool_id)
+    if tool_call_id is None:
+        return _allocate_next_tool_id(tool_state)
+
+    existing_tool_id = tool_state.tool_ids_by_call_id.get(tool_call_id)
+    if existing_tool_id is not None:
+        return existing_tool_id
+
+    tool_id = _allocate_next_tool_id(tool_state)
+    tool_state.tool_ids_by_call_id[tool_call_id] = tool_id
     return tool_id
 
 
 def _resolve_completed_tool_id(tool: object | None, tool_state: _ToolStreamState) -> str:
     tool_call_id = _extract_tool_call_id(tool)
-    if tool_call_id is not None:
-        existing_tool_id = tool_state.tool_ids_by_call_id.pop(tool_call_id, None)
-        if existing_tool_id is not None:
-            return existing_tool_id
+    if tool_call_id is None:
+        return _allocate_next_tool_id(tool_state)
 
-    if tool_state.pending_ids_without_call_id:
-        return tool_state.pending_ids_without_call_id.popleft()
+    existing_tool_id = tool_state.tool_ids_by_call_id.pop(tool_call_id, None)
+    if existing_tool_id is not None:
+        return existing_tool_id
 
     return _allocate_next_tool_id(tool_state)
 
