@@ -11,14 +11,17 @@ import { type ColumnDef, flexRender, getCoreRowModel, useReactTable } from '@tan
 import { API_ENDPOINTS } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { useConfigStore } from '@/store/configStore';
-import type { KnowledgeBaseConfig } from '@/types/config';
+import type { KnowledgeBaseConfig, KnowledgeGitConfig } from '@/types/config';
 import { useToast } from '@/components/ui/use-toast';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
-import { Plus, RefreshCw, Trash2, Upload } from 'lucide-react';
+import { Textarea } from '@/components/ui/textarea';
+import { FolderOpen, GitBranch, Plus, RefreshCw, Trash2, Upload } from 'lucide-react';
+
+type KnowledgeSourceType = 'local' | 'git';
 
 interface KnowledgeFile {
   name: string;
@@ -48,6 +51,13 @@ const DEFAULT_BASE_SETTINGS: KnowledgeBaseConfig = {
   watch: true,
 };
 
+const DEFAULT_GIT_SETTINGS: KnowledgeGitConfig = {
+  repo_url: '',
+  branch: 'main',
+  poll_interval_seconds: 300,
+  skip_hidden: true,
+};
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -62,6 +72,51 @@ function formatModifiedDate(value: string): string {
 
 function defaultPathForBase(baseName: string): string {
   return `./knowledge_docs/${baseName}`;
+}
+
+function sourceTypeForBase(config?: KnowledgeBaseConfig): KnowledgeSourceType {
+  return config?.git ? 'git' : 'local';
+}
+
+function defaultGitSettings(gitConfig?: KnowledgeGitConfig): KnowledgeGitConfig {
+  return {
+    ...DEFAULT_GIT_SETTINGS,
+    ...gitConfig,
+  };
+}
+
+function normalizeGitConfig(gitConfig: KnowledgeGitConfig): KnowledgeGitConfig {
+  const repoUrl = gitConfig.repo_url.trim();
+  return {
+    repo_url: repoUrl,
+    branch: gitConfig.branch?.trim() || 'main',
+    poll_interval_seconds:
+      typeof gitConfig.poll_interval_seconds === 'number' && gitConfig.poll_interval_seconds >= 5
+        ? gitConfig.poll_interval_seconds
+        : DEFAULT_GIT_SETTINGS.poll_interval_seconds,
+    credentials_service: gitConfig.credentials_service?.trim() || undefined,
+    skip_hidden: gitConfig.skip_hidden ?? true,
+    include_patterns:
+      gitConfig.include_patterns && gitConfig.include_patterns.length > 0
+        ? gitConfig.include_patterns
+        : undefined,
+    exclude_patterns:
+      gitConfig.exclude_patterns && gitConfig.exclude_patterns.length > 0
+        ? gitConfig.exclude_patterns
+        : undefined,
+  };
+}
+
+function parsePatternsFromTextarea(value: string): string[] | undefined {
+  const patterns = value
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean);
+  return patterns.length > 0 ? patterns : undefined;
+}
+
+function formatPatternsForTextarea(patterns?: string[]): string {
+  return patterns?.join('\n') ?? '';
 }
 
 function validateBaseName(baseName: string): string | null {
@@ -98,6 +153,10 @@ export function Knowledge() {
 
   const [selectedBase, setSelectedBase] = useState<string>('');
   const [newBaseName, setNewBaseName] = useState('');
+  const [newBaseSourceType, setNewBaseSourceType] = useState<KnowledgeSourceType>('local');
+  const [newBaseGitSettings, setNewBaseGitSettings] = useState<KnowledgeGitConfig>(() =>
+    defaultGitSettings()
+  );
   const [files, setFiles] = useState<KnowledgeFile[]>([]);
   const [status, setStatus] = useState<KnowledgeStatus | null>(null);
   const [settings, setSettings] = useState<KnowledgeBaseConfig>(DEFAULT_BASE_SETTINGS);
@@ -114,7 +173,7 @@ export function Knowledge() {
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const knowledgeBases = config?.knowledge_bases || {};
+  const knowledgeBases = useMemo(() => config?.knowledge_bases ?? {}, [config?.knowledge_bases]);
   const baseNames = useMemo(() => Object.keys(knowledgeBases).sort(), [knowledgeBases]);
 
   useEffect(() => {
@@ -145,6 +204,7 @@ export function Knowledge() {
     setSettings({
       path: selectedConfig.path,
       watch: selectedConfig.watch,
+      git: selectedConfig.git ? defaultGitSettings(selectedConfig.git) : undefined,
     });
   }, [knowledgeBases, selectedBase]);
 
@@ -195,7 +255,36 @@ export function Knowledge() {
     [selectedBase, updateKnowledgeBase]
   );
 
+  const settingsSourceType: KnowledgeSourceType = settings.git ? 'git' : 'local';
+
+  const updateGitSettings = useCallback(
+    (updates: Partial<KnowledgeGitConfig>) => {
+      if (!settings.git) {
+        return;
+      }
+      updateSettings({
+        git: {
+          ...settings.git,
+          ...updates,
+        },
+      });
+    },
+    [settings.git, updateSettings]
+  );
+
+  const updateNewBaseGitSettings = useCallback((updates: Partial<KnowledgeGitConfig>) => {
+    setNewBaseGitSettings(previous => ({
+      ...previous,
+      ...updates,
+    }));
+  }, []);
+
   const handleSaveSettings = useCallback(async () => {
+    if (settings.git && !settings.git.repo_url.trim()) {
+      setError('Repository URL is required when Git source is enabled');
+      return;
+    }
+
     setSavingSettings(true);
     setError(null);
     try {
@@ -216,7 +305,7 @@ export function Knowledge() {
     } finally {
       setSavingSettings(false);
     }
-  }, [loadData, saveConfig, selectedBase, toast]);
+  }, [loadData, saveConfig, selectedBase, settings.git, toast]);
 
   const handleCreateBase = useCallback(async () => {
     const baseName = newBaseName.trim();
@@ -235,17 +324,33 @@ export function Knowledge() {
     setError(null);
 
     try {
-      updateKnowledgeBase(baseName, {
+      if (newBaseSourceType === 'git' && !newBaseGitSettings.repo_url.trim()) {
+        setError('Repository URL is required for Git-based knowledge bases');
+        return;
+      }
+
+      const nextBaseConfig: KnowledgeBaseConfig = {
         path: defaultPathForBase(baseName),
         watch: true,
-      });
+      };
+
+      if (newBaseSourceType === 'git') {
+        nextBaseConfig.git = normalizeGitConfig(newBaseGitSettings);
+      }
+
+      updateKnowledgeBase(baseName, nextBaseConfig);
       await saveConfig();
       setSelectedBase(baseName);
       setNewBaseName('');
+      setNewBaseSourceType('local');
+      setNewBaseGitSettings(defaultGitSettings());
       await loadData(baseName);
       toast({
         title: 'Knowledge base created',
-        description: `Base '${baseName}' is ready for uploads.`,
+        description:
+          newBaseSourceType === 'git'
+            ? `Git base '${baseName}' is ready to sync.`
+            : `Base '${baseName}' is ready for uploads.`,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to create knowledge base';
@@ -258,7 +363,16 @@ export function Knowledge() {
     } finally {
       setCreatingBase(false);
     }
-  }, [baseNames, updateKnowledgeBase, loadData, newBaseName, saveConfig, toast]);
+  }, [
+    baseNames,
+    updateKnowledgeBase,
+    loadData,
+    newBaseName,
+    newBaseSourceType,
+    newBaseGitSettings,
+    saveConfig,
+    toast,
+  ]);
 
   const handleDeleteBase = useCallback(async () => {
     if (!selectedBase) {
@@ -470,6 +584,9 @@ export function Knowledge() {
     void uploadFiles(droppedFiles);
   };
 
+  const createBaseNamePreview = newBaseName.trim() || 'new_base_name';
+  const createBasePathPreview = defaultPathForBase(createBaseNamePreview);
+
   if (loading) {
     return (
       <div className="space-y-4">
@@ -506,6 +623,7 @@ export function Knowledge() {
                     {baseNames.map(baseName => {
                       const baseConfig = knowledgeBases[baseName];
                       const isActive = baseName === selectedBase;
+                      const baseSourceType = sourceTypeForBase(baseConfig);
                       return (
                         <button
                           key={baseName}
@@ -520,15 +638,38 @@ export function Knowledge() {
                           aria-pressed={isActive}
                         >
                           <div className="flex items-center justify-between gap-2">
-                            <span className="font-medium">{baseName}</span>
+                            <div className="flex items-center gap-2">
+                              <span className="font-medium">{baseName}</span>
+                              {baseSourceType === 'git' ? (
+                                <Badge variant="secondary" className="gap-1">
+                                  <GitBranch className="h-3 w-3" />
+                                  Git
+                                </Badge>
+                              ) : (
+                                <Badge variant="outline">Local</Badge>
+                              )}
+                            </div>
                             {isActive && <Badge variant="default">Active</Badge>}
                           </div>
-                          <p className="mt-1 truncate text-xs font-mono text-muted-foreground">
-                            {baseConfig?.path ?? defaultPathForBase(baseName)}
-                          </p>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            {baseConfig?.watch ? 'Watching for changes' : 'Manual reindex only'}
-                          </p>
+                          {baseSourceType === 'git' ? (
+                            <>
+                              <p className="mt-1 truncate text-xs font-mono text-muted-foreground">
+                                {baseConfig?.git?.repo_url || 'Repository URL not configured'}
+                              </p>
+                              <p className="mt-1 text-xs text-muted-foreground">
+                                Branch: {baseConfig?.git?.branch || 'main'}
+                              </p>
+                            </>
+                          ) : (
+                            <>
+                              <p className="mt-1 truncate text-xs font-mono text-muted-foreground">
+                                {baseConfig?.path ?? defaultPathForBase(baseName)}
+                              </p>
+                              <p className="mt-1 text-xs text-muted-foreground">
+                                {baseConfig?.watch ? 'Watching for changes' : 'Manual reindex only'}
+                              </p>
+                            </>
+                          )}
                         </button>
                       );
                     })}
@@ -551,20 +692,107 @@ export function Knowledge() {
               </Button>
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-3">
-              <Input
-                value={newBaseName}
-                onChange={event => setNewBaseName(event.target.value)}
-                placeholder="new_base_name"
-              />
-              <Button
-                variant="outline"
-                onClick={handleCreateBase}
-                disabled={creatingBase || isDirty}
-              >
-                <Plus className="h-4 w-4 mr-2" />
-                {creatingBase ? 'Creating...' : 'Add Base'}
-              </Button>
+            <div className="space-y-4 rounded-md border p-4">
+              <div className="space-y-1">
+                <p className="text-sm font-medium">Create Knowledge Base</p>
+                <p className="text-xs text-muted-foreground">
+                  Choose a source type first. Git bases can be configured in one step.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium" htmlFor="new-base-name">
+                  Base Name
+                </label>
+                <Input
+                  id="new-base-name"
+                  value={newBaseName}
+                  onChange={event => setNewBaseName(event.target.value)}
+                  placeholder="new_base_name"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <p className="text-sm font-medium">Source Type</p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <Button
+                    type="button"
+                    variant={newBaseSourceType === 'local' ? 'default' : 'outline'}
+                    aria-label="Create local source"
+                    onClick={() => setNewBaseSourceType('local')}
+                    disabled={creatingBase || isDirty}
+                    className="justify-start"
+                  >
+                    <FolderOpen className="h-4 w-4 mr-2" />
+                    Local Folder
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={newBaseSourceType === 'git' ? 'default' : 'outline'}
+                    aria-label="Create git source"
+                    onClick={() => setNewBaseSourceType('git')}
+                    disabled={creatingBase || isDirty}
+                    className="justify-start"
+                  >
+                    <GitBranch className="h-4 w-4 mr-2" />
+                    Git Repository
+                  </Button>
+                </div>
+              </div>
+
+              {newBaseSourceType === 'git' ? (
+                <div className="space-y-3 rounded-md border p-3">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium" htmlFor="new-base-git-repo-url">
+                      Repository URL
+                    </label>
+                    <Input
+                      id="new-base-git-repo-url"
+                      value={newBaseGitSettings.repo_url}
+                      onChange={event =>
+                        updateNewBaseGitSettings({
+                          repo_url: event.target.value,
+                        })
+                      }
+                      placeholder="https://github.com/org/repo"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium" htmlFor="new-base-git-branch">
+                      Branch
+                    </label>
+                    <Input
+                      id="new-base-git-branch"
+                      value={newBaseGitSettings.branch ?? 'main'}
+                      onChange={event =>
+                        updateNewBaseGitSettings({
+                          branch: event.target.value || 'main',
+                        })
+                      }
+                      placeholder="main"
+                    />
+                  </div>
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  Local base folder path: <code>{createBasePathPreview}</code>
+                </p>
+              )}
+
+              <div className="flex justify-end">
+                <Button
+                  variant="outline"
+                  onClick={handleCreateBase}
+                  disabled={creatingBase || isDirty}
+                >
+                  <Plus className="h-4 w-4 mr-2" />
+                  {creatingBase
+                    ? 'Creating...'
+                    : newBaseSourceType === 'git'
+                      ? 'Create Git Base'
+                      : 'Add Base'}
+                </Button>
+              </div>
             </div>
           </CardContent>
         </Card>
@@ -575,34 +803,215 @@ export function Knowledge() {
               <CardHeader className="pb-3">
                 <CardTitle className="text-base">Base Settings</CardTitle>
                 <CardDescription>
-                  Configure folder path and watcher behavior for <code>{selectedBase}</code>.
+                  Configure source and sync behavior for <code>{selectedBase}</code>.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="space-y-2">
-                  <label className="text-sm font-medium" htmlFor="knowledge-path">
-                    Folder Path
-                  </label>
-                  <Input
-                    id="knowledge-path"
-                    value={settings.path}
-                    onChange={event => updateSettings({ path: event.target.value })}
-                    placeholder={defaultPathForBase(selectedBase)}
-                  />
+                  <p className="text-sm font-medium">Source Type</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <Button
+                      type="button"
+                      variant={settingsSourceType === 'local' ? 'default' : 'outline'}
+                      aria-label="Settings local source"
+                      onClick={() => updateSettings({ git: undefined })}
+                      disabled={savingSettings}
+                      className="justify-start"
+                    >
+                      <FolderOpen className="h-4 w-4 mr-2" />
+                      Local Folder
+                    </Button>
+                    <Button
+                      type="button"
+                      variant={settingsSourceType === 'git' ? 'default' : 'outline'}
+                      aria-label="Settings git source"
+                      onClick={() =>
+                        updateSettings({
+                          git: defaultGitSettings(settings.git),
+                        })
+                      }
+                      disabled={savingSettings}
+                      className="justify-start"
+                    >
+                      <GitBranch className="h-4 w-4 mr-2" />
+                      Git Repository
+                    </Button>
+                  </div>
                 </div>
 
-                <div className="flex items-center justify-between rounded-md border p-3">
-                  <div className="space-y-1">
-                    <p className="text-sm font-medium">Watch Folder</p>
+                {settingsSourceType === 'local' ? (
+                  <>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium" htmlFor="knowledge-path">
+                        Folder Path
+                      </label>
+                      <Input
+                        id="knowledge-path"
+                        value={settings.path}
+                        onChange={event => updateSettings({ path: event.target.value })}
+                        placeholder={defaultPathForBase(selectedBase)}
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between rounded-md border p-3">
+                      <div className="space-y-1">
+                        <p className="text-sm font-medium">Watch Folder</p>
+                        <p className="text-xs text-muted-foreground">
+                          Automatically index file additions and updates.
+                        </p>
+                      </div>
+                      <Checkbox
+                        checked={settings.watch}
+                        onCheckedChange={checked => updateSettings({ watch: checked === true })}
+                      />
+                    </div>
+                  </>
+                ) : null}
+
+                {settingsSourceType === 'git' && settings.git ? (
+                  <div className="space-y-4 rounded-md border p-3">
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium" htmlFor="knowledge-git-repo-url">
+                        Repository URL
+                      </label>
+                      <Input
+                        id="knowledge-git-repo-url"
+                        value={settings.git.repo_url}
+                        onChange={event => updateGitSettings({ repo_url: event.target.value })}
+                        placeholder="https://github.com/org/repo"
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium" htmlFor="knowledge-git-branch">
+                        Branch
+                      </label>
+                      <Input
+                        id="knowledge-git-branch"
+                        value={settings.git.branch ?? 'main'}
+                        onChange={event =>
+                          updateGitSettings({
+                            branch: event.target.value || 'main',
+                          })
+                        }
+                        placeholder="main"
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <label
+                        className="text-sm font-medium"
+                        htmlFor="knowledge-git-poll-interval-seconds"
+                      >
+                        Poll Interval (seconds)
+                      </label>
+                      <Input
+                        id="knowledge-git-poll-interval-seconds"
+                        type="number"
+                        min={5}
+                        value={settings.git.poll_interval_seconds ?? 300}
+                        onChange={event => {
+                          const nextValue = Number.parseInt(event.target.value, 10);
+                          updateGitSettings({
+                            poll_interval_seconds:
+                              Number.isNaN(nextValue) || nextValue < 5 ? 5 : nextValue,
+                          });
+                        }}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Check for updates every X seconds.
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <label
+                        className="text-sm font-medium"
+                        htmlFor="knowledge-git-credentials-service"
+                      >
+                        Credentials Service (optional)
+                      </label>
+                      <Input
+                        id="knowledge-git-credentials-service"
+                        value={settings.git.credentials_service ?? ''}
+                        onChange={event =>
+                          updateGitSettings({
+                            credentials_service: event.target.value || undefined,
+                          })
+                        }
+                        placeholder="github-pat"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Service name in Credentials tab for private HTTPS repos.
+                      </p>
+                    </div>
+
+                    <div className="flex items-center justify-between rounded-md border p-3">
+                      <div className="space-y-1">
+                        <p className="text-sm font-medium">Skip Hidden Files</p>
+                        <p className="text-xs text-muted-foreground">
+                          Ignore dotfiles and hidden paths while indexing.
+                        </p>
+                      </div>
+                      <Checkbox
+                        aria-label="Skip Hidden Files"
+                        checked={settings.git.skip_hidden ?? true}
+                        onCheckedChange={checked =>
+                          updateGitSettings({ skip_hidden: checked === true })
+                        }
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <label
+                        className="text-sm font-medium"
+                        htmlFor="knowledge-git-include-patterns"
+                      >
+                        Include Patterns (optional)
+                      </label>
+                      <Textarea
+                        id="knowledge-git-include-patterns"
+                        value={formatPatternsForTextarea(settings.git.include_patterns)}
+                        onChange={event =>
+                          updateGitSettings({
+                            include_patterns: parsePatternsFromTextarea(event.target.value),
+                          })
+                        }
+                        placeholder="docs/**"
+                        className="min-h-[96px]"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Root-anchored glob patterns. Only matching files will be indexed.
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <label
+                        className="text-sm font-medium"
+                        htmlFor="knowledge-git-exclude-patterns"
+                      >
+                        Exclude Patterns (optional)
+                      </label>
+                      <Textarea
+                        id="knowledge-git-exclude-patterns"
+                        value={formatPatternsForTextarea(settings.git.exclude_patterns)}
+                        onChange={event =>
+                          updateGitSettings({
+                            exclude_patterns: parsePatternsFromTextarea(event.target.value),
+                          })
+                        }
+                        placeholder="docs/private/**"
+                        className="min-h-[96px]"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Root-anchored glob patterns to exclude after include filtering.
+                      </p>
+                    </div>
+
                     <p className="text-xs text-muted-foreground">
-                      Automatically index file additions and updates.
+                      Uploaded files remain supported and are combined with Git-synced content.
                     </p>
                   </div>
-                  <Checkbox
-                    checked={settings.watch}
-                    onCheckedChange={checked => updateSettings({ watch: checked === true })}
-                  />
-                </div>
+                ) : null}
 
                 <div className="flex justify-end">
                   <Button
