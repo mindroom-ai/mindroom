@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { useConfigStore } from '@/store/configStore';
 import { Sparkles, Bot, Settings2 } from 'lucide-react';
 import { ListPanel, ListItem } from '@/components/shared/ListPanel';
@@ -12,6 +13,14 @@ interface CultureListItem extends ListItem {
 
 export function CultureList() {
   const { cultures, selectedCultureId, selectCulture, createCulture } = useConfigStore();
+  const cultureItems: CultureListItem[] = useMemo(
+    () =>
+      cultures.map(culture => ({
+        ...culture,
+        display_name: culture.id,
+      })),
+    [cultures]
+  );
 
   const handleCreateCulture = (cultureName?: string) => {
     createCulture({
@@ -51,7 +60,7 @@ export function CultureList() {
     <ListPanel<CultureListItem>
       title="Cultures"
       icon={Sparkles}
-      items={cultures as CultureListItem[]}
+      items={cultureItems}
       selectedId={selectedCultureId || undefined}
       onItemSelect={selectCulture}
       onCreateItem={handleCreateCulture}
