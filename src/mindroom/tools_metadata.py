@@ -90,7 +90,6 @@ class ToolStatus(str, Enum):
     """Tool availability status."""
 
     AVAILABLE = "available"
-    COMING_SOON = "coming_soon"
     REQUIRES_CONFIG = "requires_config"
 
 
@@ -101,7 +100,6 @@ class SetupType(str, Enum):
     API_KEY = "api_key"  # Requires API key
     OAUTH = "oauth"  # OAuth flow
     SPECIAL = "special"  # Special setup (e.g., for Google)
-    COMING_SOON = "coming_soon"  # Not yet available
 
 
 @dataclass

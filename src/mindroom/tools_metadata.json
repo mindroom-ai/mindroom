@@ -1649,21 +1649,6 @@
     {
       "auth_provider": null,
       "category": "development",
-      "config_fields": null,
-      "dependencies": null,
-      "description": "File storage and sharing",
-      "display_name": "Dropbox",
-      "docs_url": null,
-      "helper_text": null,
-      "icon": "SiDropbox",
-      "icon_color": "text-blue-600",
-      "name": "dropbox",
-      "setup_type": "coming_soon",
-      "status": "coming_soon"
-    },
-    {
-      "auth_provider": null,
-      "category": "development",
       "config_fields": [
         {
           "default": null,
@@ -2394,21 +2379,6 @@
       "name": "github",
       "setup_type": "api_key",
       "status": "requires_config"
-    },
-    {
-      "auth_provider": null,
-      "category": "development",
-      "config_fields": null,
-      "dependencies": null,
-      "description": "Code and CI/CD management",
-      "display_name": "GitLab",
-      "docs_url": null,
-      "helper_text": null,
-      "icon": "SiGitlab",
-      "icon_color": "text-orange-600",
-      "name": "gitlab",
-      "setup_type": "coming_soon",
-      "status": "coming_soon"
     },
     {
       "auth_provider": null,
@@ -4606,21 +4576,6 @@
     {
       "auth_provider": null,
       "category": "email",
-      "config_fields": null,
-      "dependencies": null,
-      "description": "Email and calendar integration",
-      "display_name": "Microsoft Outlook",
-      "docs_url": null,
-      "helper_text": null,
-      "icon": "FaMicrosoft",
-      "icon_color": "text-blue-600",
-      "name": "outlook",
-      "setup_type": "coming_soon",
-      "status": "coming_soon"
-    },
-    {
-      "auth_provider": null,
-      "category": "email",
       "config_fields": [
         {
           "default": null,
@@ -4682,51 +4637,6 @@
     },
     {
       "auth_provider": null,
-      "category": "email",
-      "config_fields": null,
-      "dependencies": null,
-      "description": "Email and calendar access",
-      "display_name": "Yahoo Mail",
-      "docs_url": null,
-      "helper_text": null,
-      "icon": "FaYahoo",
-      "icon_color": "text-purple-600",
-      "name": "yahoo_mail",
-      "setup_type": "coming_soon",
-      "status": "coming_soon"
-    },
-    {
-      "auth_provider": null,
-      "category": "entertainment",
-      "config_fields": null,
-      "dependencies": null,
-      "description": "Library and playlist management",
-      "display_name": "Apple Music",
-      "docs_url": null,
-      "helper_text": null,
-      "icon": "SiApplemusic",
-      "icon_color": "text-gray-800",
-      "name": "apple_music",
-      "setup_type": "coming_soon",
-      "status": "coming_soon"
-    },
-    {
-      "auth_provider": null,
-      "category": "entertainment",
-      "config_fields": null,
-      "dependencies": null,
-      "description": "Watch history and content discovery",
-      "display_name": "HBO Max",
-      "docs_url": null,
-      "helper_text": null,
-      "icon": "SiHbo",
-      "icon_color": "text-purple-600",
-      "name": "hbo",
-      "setup_type": "coming_soon",
-      "status": "coming_soon"
-    },
-    {
-      "auth_provider": null,
       "category": "entertainment",
       "config_fields": [
         {
@@ -4751,21 +4661,6 @@
       "name": "imdb",
       "setup_type": "api_key",
       "status": "requires_config"
-    },
-    {
-      "auth_provider": null,
-      "category": "entertainment",
-      "config_fields": null,
-      "dependencies": null,
-      "description": "Track watch history and get recommendations",
-      "display_name": "Netflix",
-      "docs_url": null,
-      "helper_text": null,
-      "icon": "SiNetflix",
-      "icon_color": "text-red-600",
-      "name": "netflix",
-      "setup_type": "coming_soon",
-      "status": "coming_soon"
     },
     {
       "auth_provider": null,
@@ -4901,21 +4796,6 @@
       "name": "youtube",
       "setup_type": "none",
       "status": "available"
-    },
-    {
-      "auth_provider": null,
-      "category": "information",
-      "config_fields": null,
-      "dependencies": null,
-      "description": "Book tracking and recommendations",
-      "display_name": "Goodreads",
-      "docs_url": null,
-      "helper_text": null,
-      "icon": "SiGoodreads",
-      "icon_color": "text-amber-700",
-      "name": "goodreads",
-      "setup_type": "coming_soon",
-      "status": "coming_soon"
     },
     {
       "auth_provider": null,
@@ -9068,66 +8948,6 @@
     },
     {
       "auth_provider": null,
-      "category": "shopping",
-      "config_fields": null,
-      "dependencies": null,
-      "description": "Search products and track orders",
-      "display_name": "Amazon",
-      "docs_url": null,
-      "helper_text": null,
-      "icon": "SiAmazon",
-      "icon_color": "text-orange-500",
-      "name": "amazon",
-      "setup_type": "coming_soon",
-      "status": "coming_soon"
-    },
-    {
-      "auth_provider": null,
-      "category": "shopping",
-      "config_fields": null,
-      "dependencies": null,
-      "description": "Auction monitoring and bidding",
-      "display_name": "eBay",
-      "docs_url": null,
-      "helper_text": null,
-      "icon": "SiEbay",
-      "icon_color": "text-blue-500",
-      "name": "ebay",
-      "setup_type": "coming_soon",
-      "status": "coming_soon"
-    },
-    {
-      "auth_provider": null,
-      "category": "shopping",
-      "config_fields": null,
-      "dependencies": null,
-      "description": "Product search and availability",
-      "display_name": "Target",
-      "docs_url": null,
-      "helper_text": null,
-      "icon": "SiTarget",
-      "icon_color": "text-red-600",
-      "name": "target",
-      "setup_type": "coming_soon",
-      "status": "coming_soon"
-    },
-    {
-      "auth_provider": null,
-      "category": "shopping",
-      "config_fields": null,
-      "dependencies": null,
-      "description": "Product search and price tracking",
-      "display_name": "Walmart",
-      "docs_url": null,
-      "helper_text": null,
-      "icon": "SiWalmart",
-      "icon_color": "text-blue-500",
-      "name": "walmart",
-      "setup_type": "coming_soon",
-      "status": "coming_soon"
-    },
-    {
-      "auth_provider": null,
       "category": "smart_home",
       "config_fields": [
         {
@@ -9165,51 +8985,6 @@
       "name": "homeassistant",
       "setup_type": "special",
       "status": "requires_config"
-    },
-    {
-      "auth_provider": null,
-      "category": "social",
-      "config_fields": null,
-      "dependencies": null,
-      "description": "Access posts and pages",
-      "display_name": "Facebook",
-      "docs_url": null,
-      "helper_text": null,
-      "icon": "SiFacebook",
-      "icon_color": "text-blue-600",
-      "name": "facebook",
-      "setup_type": "coming_soon",
-      "status": "coming_soon"
-    },
-    {
-      "auth_provider": null,
-      "category": "social",
-      "config_fields": null,
-      "dependencies": null,
-      "description": "View posts and stories",
-      "display_name": "Instagram",
-      "docs_url": null,
-      "helper_text": null,
-      "icon": "SiInstagram",
-      "icon_color": "text-pink-600",
-      "name": "instagram",
-      "setup_type": "coming_soon",
-      "status": "coming_soon"
-    },
-    {
-      "auth_provider": null,
-      "category": "social",
-      "config_fields": null,
-      "dependencies": null,
-      "description": "Professional network access",
-      "display_name": "LinkedIn",
-      "docs_url": null,
-      "helper_text": null,
-      "icon": "SiLinkedin",
-      "icon_color": "text-blue-700",
-      "name": "linkedin",
-      "setup_type": "coming_soon",
-      "status": "coming_soon"
     },
     {
       "auth_provider": null,

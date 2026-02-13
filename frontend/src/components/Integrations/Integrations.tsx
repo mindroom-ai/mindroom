@@ -7,7 +7,6 @@ import {
   Loader2,
   Key,
   ExternalLink,
-  Star,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -56,9 +55,9 @@ export function Integrations() {
     icon?: any;
     iconColor?: string;
   } | null>(null);
-  const [filterMode, setFilterMode] = useState<
-    'all' | 'available' | 'unconfigured' | 'configured' | 'coming_soon'
-  >('all');
+  const [filterMode, setFilterMode] = useState<'all' | 'available' | 'unconfigured' | 'configured'>(
+    'all'
+  );
   const [searchTerm, setSearchTerm] = useState('');
   const { toast } = useToast();
 
@@ -151,11 +150,6 @@ export function Integrations() {
           setLoading(false);
         }
       }
-    } else if (integration.setup_type === 'coming_soon') {
-      toast({
-        title: 'Coming Soon',
-        description: `${integration.name} integration is in development and will be available soon.`,
-      });
     } else if (
       integration.setup_type === 'api_key' ||
       integration.setup_type === 'oauth' ||
@@ -243,16 +237,6 @@ export function Integrations() {
           loading={loading}
           onAction={() => handleIntegrationAction(integration)}
         />
-      );
-    }
-
-    // Default button rendering
-    if (integration.setup_type === 'coming_soon') {
-      return (
-        <Button disabled size="sm" variant="outline">
-          <Star className="h-4 w-4 mr-2" />
-          Coming Soon
-        </Button>
       );
     }
 
@@ -453,11 +437,6 @@ export function Integrations() {
               <CheckCircle2 className="h-3 w-3 mr-1" />
               Connected
             </Badge>
-          ) : integration.setup_type === 'coming_soon' ? (
-            <Badge className="bg-white/50 dark:bg-white/10 backdrop-blur-md border-white/20">
-              <Star className="h-3 w-3 mr-1" />
-              Coming Soon
-            </Badge>
           ) : (
             <Badge className="bg-amber-500/10 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300 backdrop-blur-md border-amber-500/20">
               <Circle className="h-3 w-3 mr-1" />
@@ -499,15 +478,10 @@ export function Integrations() {
         filtered = filtered.filter(i => i.status === 'available' || i.status === 'connected');
         break;
       case 'unconfigured':
-        filtered = filtered.filter(
-          i => i.status !== 'connected' && i.setup_type !== 'coming_soon' && i.setup_type !== 'none'
-        );
+        filtered = filtered.filter(i => i.status !== 'connected' && i.setup_type !== 'none');
         break;
       case 'configured':
         filtered = filtered.filter(i => i.status === 'connected');
-        break;
-      case 'coming_soon':
-        filtered = filtered.filter(i => i.setup_type === 'coming_soon');
         break;
       // 'all' - no filtering needed
     }
@@ -614,13 +588,10 @@ export function Integrations() {
                   { value: 'available', label: 'Available' },
                   { value: 'unconfigured', label: 'Unconfigured' },
                   { value: 'configured', label: 'Configured' },
-                  { value: 'coming_soon', label: 'Coming Soon' },
                 ]}
                 value={filterMode}
                 onChange={value =>
-                  setFilterMode(
-                    value as 'all' | 'available' | 'unconfigured' | 'configured' | 'coming_soon'
-                  )
+                  setFilterMode(value as 'all' | 'available' | 'unconfigured' | 'configured')
                 }
                 size="sm"
               />
