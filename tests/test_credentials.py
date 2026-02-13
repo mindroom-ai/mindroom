@@ -47,6 +47,19 @@ class TestCredentialsManager:
         ha_path = credentials_manager.get_credentials_path("homeassistant")
         assert ha_path == credentials_manager.base_path / "homeassistant_credentials.json"
 
+    @pytest.mark.parametrize(
+        "service",
+        ["", " ", "../etc", "bad/name", "bad name", "bad!name"],
+    )
+    def test_get_credentials_path_rejects_invalid_service_names(
+        self,
+        credentials_manager: CredentialsManager,
+        service: str,
+    ) -> None:
+        """Test that invalid service names are rejected."""
+        with pytest.raises(ValueError, match="Service name"):
+            credentials_manager.get_credentials_path(service)
+
     def test_save_and_load_credentials(self, credentials_manager: CredentialsManager) -> None:
         """Test saving and loading credentials."""
         test_creds = {

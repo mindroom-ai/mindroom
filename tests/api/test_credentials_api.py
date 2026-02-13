@@ -309,3 +309,15 @@ class TestCredentialsAPI:
             "openai",
             {"api_key": "new-key-from-ui", "_source": "ui"},
         )
+
+    def test_rejects_invalid_service_name(
+        self,
+        client: TestClient,
+        mock_credentials_manager: MagicMock,
+    ) -> None:
+        """Test that invalid service names are rejected server-side."""
+        response = client.get("/api/credentials/bad!service/status")
+
+        assert response.status_code == 400
+        assert "Service name can only include" in response.json()["detail"]
+        mock_credentials_manager.load_credentials.assert_not_called()
