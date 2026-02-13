@@ -15,6 +15,7 @@ import {
   Plug,
   Puzzle,
   Settings2,
+  Sparkles,
   type LucideIcon,
   Users,
 } from 'lucide-react';
@@ -23,6 +24,8 @@ import { AgentList } from '@/components/AgentList/AgentList';
 import { AgentEditor } from '@/components/AgentEditor/AgentEditor';
 import { TeamList } from '@/components/TeamList/TeamList';
 import { TeamEditor } from '@/components/TeamEditor/TeamEditor';
+import { CultureList } from '@/components/CultureList/CultureList';
+import { CultureEditor } from '@/components/CultureEditor/CultureEditor';
 import { RoomList } from '@/components/RoomList/RoomList';
 import { RoomEditor } from '@/components/RoomEditor/RoomEditor';
 import { ModelConfig } from '@/components/ModelConfig/ModelConfig';
@@ -61,6 +64,7 @@ const NAV_ITEMS: NavItem[] = [
   { value: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, group: 'Workspace' },
   { value: 'agents', label: 'Agents', icon: Bot, group: 'Workspace' },
   { value: 'teams', label: 'Teams', icon: Users, group: 'Workspace' },
+  { value: 'cultures', label: 'Culture', icon: Sparkles, group: 'Workspace' },
   { value: 'rooms', label: 'Rooms', icon: Home, group: 'Workspace' },
   { value: 'schedules', label: 'Schedules', icon: CalendarClock, group: 'Workspace' },
   { value: 'unconfigured-rooms', label: 'External', icon: DoorOpen, group: 'Workspace' },
@@ -80,8 +84,15 @@ const NAV_OVERFLOW_ENTER_PX = 1;
 const NAV_OVERFLOW_EXIT_BUFFER_PX = 24;
 
 function AppContent() {
-  const { loadConfig, syncStatus, error, selectedAgentId, selectedTeamId, selectedRoomId } =
-    useConfigStore();
+  const {
+    loadConfig,
+    syncStatus,
+    error,
+    selectedAgentId,
+    selectedTeamId,
+    selectedCultureId,
+    selectedRoomId,
+  } = useConfigStore();
   const navigate = useNavigate();
   const location = useLocation();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -406,6 +417,25 @@ function AppContent() {
                   }`}
                 >
                   <TeamEditor />
+                </div>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="cultures" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
+                <div
+                  className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
+                    selectedCultureId ? 'hidden lg:block' : 'block'
+                  }`}
+                >
+                  <CultureList />
+                </div>
+                <div
+                  className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
+                    selectedCultureId ? 'block' : 'hidden lg:block'
+                  }`}
+                >
+                  <CultureEditor />
                 </div>
               </div>
             </TabsContent>

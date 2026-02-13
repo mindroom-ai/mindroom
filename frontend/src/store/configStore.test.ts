@@ -11,8 +11,16 @@ describe('configStore', () => {
     useConfigStore.setState({
       config: null,
       agents: [],
+      teams: [],
+      cultures: [],
+      rooms: [],
       selectedAgentId: null,
+      selectedTeamId: null,
+      selectedCultureId: null,
+      selectedRoomId: null,
       isDirty: false,
+      isLoading: false,
+      error: null,
       syncStatus: 'disconnected',
     });
 
@@ -50,7 +58,7 @@ describe('configStore', () => {
       await loadConfig();
 
       const state = useConfigStore.getState();
-      expect(state.config).toEqual({ ...mockConfig, knowledge_bases: {} });
+      expect(state.config).toEqual({ ...mockConfig, knowledge_bases: {}, cultures: {} });
       expect(state.agents).toHaveLength(1);
       expect(state.agents[0].id).toBe('test');
       expect(state.agents[0].display_name).toBe('Test Agent');
@@ -239,6 +247,7 @@ describe('configStore', () => {
           ...mockConfig,
           agents: { test: agentWithoutId },
           teams: {}, // saveConfig adds empty teams if not present
+          cultures: {}, // saveConfig adds empty cultures if not present
         }),
       });
 
@@ -353,12 +362,23 @@ describe('configStore', () => {
     });
 
     it('should delete agent', () => {
+      useConfigStore.setState({
+        cultures: [
+          {
+            id: 'engineering',
+            description: 'Engineering standards',
+            agents: ['agent1', 'agent2'],
+            mode: 'automatic',
+          },
+        ],
+      });
       const { deleteAgent } = useConfigStore.getState();
       deleteAgent('agent1');
 
       const state = useConfigStore.getState();
       expect(state.agents).toHaveLength(1);
       expect(state.agents[0].id).toBe('agent2');
+      expect(state.cultures[0].agents).toEqual(['agent2']);
       expect(state.isDirty).toBe(true);
     });
   });
@@ -448,6 +468,77 @@ describe('configStore', () => {
       expect(state.teams).toHaveLength(1);
       expect(state.teams[0].id).toBe('team2');
       expect(state.selectedTeamId).toBe(null);
+      expect(state.isDirty).toBe(true);
+    });
+  });
+
+  describe('cultures', () => {
+    beforeEach(() => {
+      useConfigStore.setState({
+        cultures: [
+          {
+            id: 'engineering',
+            description: 'Engineering standards',
+            agents: ['agent1'],
+            mode: 'automatic',
+          },
+          {
+            id: 'support',
+            description: 'Support playbooks',
+            agents: ['agent2'],
+            mode: 'manual',
+          },
+        ],
+        selectedCultureId: 'engineering',
+      });
+    });
+
+    it('should select culture', () => {
+      const { selectCulture } = useConfigStore.getState();
+      selectCulture('support');
+
+      const state = useConfigStore.getState();
+      expect(state.selectedCultureId).toBe('support');
+    });
+
+    it('should update culture and enforce unique agent assignment', () => {
+      const { updateCulture } = useConfigStore.getState();
+      updateCulture('support', { agents: ['agent1', 'agent2'], mode: 'agentic' });
+
+      const state = useConfigStore.getState();
+      expect(state.cultures.find(culture => culture.id === 'support')?.mode).toBe('agentic');
+      expect(state.cultures.find(culture => culture.id === 'support')?.agents).toEqual([
+        'agent1',
+        'agent2',
+      ]);
+      expect(state.cultures.find(culture => culture.id === 'engineering')?.agents).toEqual([]);
+      expect(state.isDirty).toBe(true);
+    });
+
+    it('should create new culture', () => {
+      const { createCulture } = useConfigStore.getState();
+      createCulture({
+        description: 'Product knowledge',
+        agents: ['agent3'],
+        mode: 'automatic',
+      });
+
+      const state = useConfigStore.getState();
+      expect(state.cultures).toHaveLength(3);
+      const newCulture = state.cultures.find(culture => culture.id === 'product_knowledge');
+      expect(newCulture?.description).toBe('Product knowledge');
+      expect(state.selectedCultureId).toBe('product_knowledge');
+      expect(state.isDirty).toBe(true);
+    });
+
+    it('should delete culture', () => {
+      const { deleteCulture } = useConfigStore.getState();
+      deleteCulture('engineering');
+
+      const state = useConfigStore.getState();
+      expect(state.cultures).toHaveLength(1);
+      expect(state.cultures[0].id).toBe('support');
+      expect(state.selectedCultureId).toBe(null);
       expect(state.isDirty).toBe(true);
     });
   });
@@ -876,6 +967,15 @@ describe('configStore', () => {
             mode: 'coordinate',
           },
         ],
+        rooms: [
+          {
+            id: 'lobby',
+            display_name: 'Lobby',
+            description: '',
+            agents: ['agent1'],
+            model: 'default',
+          },
+        ],
       });
 
       (global.fetch as any).mockResolvedValueOnce({
@@ -889,7 +989,7 @@ describe('configStore', () => {
       expect(global.fetch).toHaveBeenCalledWith('/api/config/save', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(mockConfig),
+        body: JSON.stringify({ ...mockConfig, cultures: {} }),
       });
 
       const state = useConfigStore.getState();
