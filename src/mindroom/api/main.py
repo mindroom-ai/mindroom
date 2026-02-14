@@ -29,6 +29,7 @@ from mindroom.api.tools import router as tools_router
 from mindroom.config import Config
 from mindroom.constants import DEFAULT_AGENTS_CONFIG, DEFAULT_CONFIG_TEMPLATE, safe_replace
 from mindroom.credentials_sync import sync_env_to_credentials
+from mindroom.tool_dependencies import install_tool_extras
 
 # Load environment variables from .env file
 # Look for .env in the widget directory (parent of backend)
@@ -135,10 +136,15 @@ _supabase_auth = None
 if SUPABASE_URL and SUPABASE_ANON_KEY:
     try:
         from supabase import create_client
-
-        _supabase_auth = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
-    except Exception:
-        _supabase_auth = None
+    except ModuleNotFoundError:
+        if not install_tool_extras(["supabase"]):
+            msg = (
+                "SUPABASE_URL and SUPABASE_ANON_KEY are set but the 'supabase' package "
+                "could not be auto-installed. Install it with: pip install 'mindroom[supabase]'"
+            )
+            raise ImportError(msg) from None
+        from supabase import create_client
+    _supabase_auth = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
 
 async def verify_user(authorization: str | None = Header(None)) -> dict:
