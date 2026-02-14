@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 AgentLearningMode = Literal["always", "agentic"]
+CultureMode = Literal["automatic", "agentic", "manual"]
 
 
 class AgentConfig(BaseModel):
@@ -108,11 +109,43 @@ class MemoryConfig(BaseModel):
     llm: MemoryLLMConfig | None = Field(default=None, description="LLM configuration for memory")
 
 
+class KnowledgeGitConfig(BaseModel):
+    """Git repository synchronization settings for a knowledge base."""
+
+    repo_url: str = Field(description="Git repository URL used as the knowledge source")
+    branch: str = Field(default="main", description="Git branch to track")
+    poll_interval_seconds: int = Field(
+        default=300,
+        ge=5,
+        description="How often to poll the remote repository for updates",
+    )
+    credentials_service: str | None = Field(
+        default=None,
+        description="Optional CredentialsManager service name used for private HTTPS repos",
+    )
+    skip_hidden: bool = Field(
+        default=True,
+        description="Skip hidden files/folders (paths with components starting with '.') during indexing",
+    )
+    include_patterns: list[str] = Field(
+        default_factory=list,
+        description="Optional root-anchored glob patterns to include (e.g. 'content/post/*/index.md')",
+    )
+    exclude_patterns: list[str] = Field(
+        default_factory=list,
+        description="Optional root-anchored glob patterns to exclude after include filtering",
+    )
+
+
 class KnowledgeBaseConfig(BaseModel):
     """Knowledge base configuration."""
 
     path: str = Field(default="./knowledge_docs", description="Path to knowledge documents folder")
     watch: bool = Field(default=True, description="Watch folder for changes")
+    git: KnowledgeGitConfig | None = Field(
+        default=None,
+        description="Optional Git sync configuration for this knowledge base",
+    )
 
 
 class ModelConfig(BaseModel):
@@ -143,6 +176,33 @@ class TeamConfig(BaseModel):
     rooms: list[str] = Field(default_factory=list, description="List of room IDs or names to auto-join")
     model: str | None = Field(default="default", description="Default model for this team (optional)")
     mode: str = Field(default="coordinate", description="Team collaboration mode: coordinate or collaborate")
+
+
+class CultureConfig(BaseModel):
+    """Configuration for a shared culture."""
+
+    description: str = Field(default="", description="Description of shared principles and practices")
+    agents: list[str] = Field(default_factory=list, description="List of agent names assigned to this culture")
+    mode: CultureMode = Field(
+        default="automatic",
+        description="Culture update mode: automatic, agentic, or manual",
+    )
+
+    @field_validator("agents")
+    @classmethod
+    def validate_unique_agents(cls, agents: list[str]) -> list[str]:
+        """Ensure each agent is assigned at most once per culture."""
+        seen: set[str] = set()
+        duplicates: list[str] = []
+        for agent_name in agents:
+            if agent_name in seen and agent_name not in duplicates:
+                duplicates.append(agent_name)
+            seen.add(agent_name)
+
+        if duplicates:
+            msg = f"Duplicate agents are not allowed in a culture: {', '.join(duplicates)}"
+            raise ValueError(msg)
+        return agents
 
 
 class VoiceSTTConfig(BaseModel):
@@ -193,6 +253,7 @@ class Config(BaseModel):
 
     agents: dict[str, AgentConfig] = Field(default_factory=dict, description="Agent configurations")
     teams: dict[str, TeamConfig] = Field(default_factory=dict, description="Team configurations")
+    cultures: dict[str, CultureConfig] = Field(default_factory=dict, description="Culture configurations")
     room_models: dict[str, str] = Field(default_factory=dict, description="Room-specific model overrides")
     plugins: list[str] = Field(default_factory=list, description="Plugin paths")
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig, description="Default values")
@@ -228,6 +289,45 @@ class Config(BaseModel):
                 for agent_name, base_id in sorted(invalid_assignments, key=lambda item: (item[0], item[1]))
             )
             msg = f"Agents reference unknown knowledge bases: {formatted}"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_culture_assignments(self) -> Config:
+        """Ensure culture assignments reference known agents and remain one-to-one."""
+        unknown_assignments = [
+            (culture_name, agent_name)
+            for culture_name, culture_config in self.cultures.items()
+            for agent_name in culture_config.agents
+            if agent_name not in self.agents
+        ]
+        if unknown_assignments:
+            formatted = ", ".join(
+                f"{culture_name} -> {agent_name}"
+                for culture_name, agent_name in sorted(unknown_assignments, key=lambda item: (item[0], item[1]))
+            )
+            msg = f"Cultures reference unknown agents: {formatted}"
+            raise ValueError(msg)
+
+        agent_to_culture: dict[str, str] = {}
+        duplicate_assignments: list[tuple[str, str, str]] = []
+        for culture_name, culture_config in self.cultures.items():
+            for agent_name in culture_config.agents:
+                existing_culture = agent_to_culture.get(agent_name)
+                if existing_culture is not None and existing_culture != culture_name:
+                    duplicate_assignments.append((agent_name, existing_culture, culture_name))
+                    continue
+                agent_to_culture[agent_name] = culture_name
+
+        if duplicate_assignments:
+            formatted = ", ".join(
+                f"{agent_name} -> {culture_a}, {culture_b}"
+                for agent_name, culture_a, culture_b in sorted(
+                    duplicate_assignments,
+                    key=lambda item: (item[0], item[1], item[2]),
+                )
+            )
+            msg = f"Agents cannot belong to multiple cultures: {formatted}"
             raise ValueError(msg)
         return self
 
@@ -272,11 +372,13 @@ class Config(BaseModel):
             raise FileNotFoundError(msg)
 
         with path.open() as f:
-            data = yaml.safe_load(f)
+            data = yaml.safe_load(f) or {}
 
         # Handle None values for optional dictionaries
         if data.get("teams") is None:
             data["teams"] = {}
+        if data.get("cultures") is None:
+            data["cultures"] = {}
         if data.get("room_models") is None:
             data["room_models"] = {}
         if data.get("plugins") is None:
@@ -288,6 +390,13 @@ class Config(BaseModel):
         logger.info(f"Loaded agent configuration from {path}")
         logger.info(f"Found {len(config.agents)} agent configurations")
         return config
+
+    def get_agent_culture(self, agent_name: str) -> tuple[str, CultureConfig] | None:
+        """Get the configured culture assignment for an agent, if any."""
+        for culture_name, culture_config in self.cultures.items():
+            if agent_name in culture_config.agents:
+                return culture_name, culture_config
+        return None
 
     def get_agent(self, agent_name: str) -> AgentConfig:
         """Get an agent configuration by name.

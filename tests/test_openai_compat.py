@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -15,12 +14,9 @@ if TYPE_CHECKING:
 
 import pytest
 from agno.models.response import ToolExecution
-from agno.run.agent import RunContentEvent, RunOutput, RunPausedEvent, ToolCallCompletedEvent, ToolCallStartedEvent
+from agno.run.agent import RunContentEvent, RunOutput, RunPausedEvent
 from agno.run.base import RunStatus
 from agno.run.requirement import RunRequirement
-from agno.run.team import RunContentEvent as TeamContentEvent
-from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
-from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
 from fastapi import Request
 from fastapi.testclient import TestClient
 
@@ -31,11 +27,8 @@ from mindroom.api.openai_compat import (
     _derive_session_id,
     _extract_content_text,
     _is_error_response,
-    _tool_details_html,
-    _ToolDetailsTracker,
 )
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig, TeamConfig
-from mindroom.teams import TeamMode
 
 
 @pytest.fixture
@@ -222,6 +215,7 @@ class TestChatCompletions:
             )
 
             assert mock_ai.call_args.kwargs["include_default_tools"] is False
+            assert mock_ai.call_args.kwargs["include_interactive_questions"] is False
 
     def test_passes_knowledge_none(self, app_client: TestClient) -> None:
         """Passes knowledge=None when agent has no knowledge_bases."""
@@ -253,6 +247,77 @@ class TestChatCompletions:
             )
 
             assert mock_ai.call_args.kwargs["user_id"] == "user-123"
+
+    def test_explicit_session_id_header_is_stable_across_turns(self, app_client: TestClient) -> None:
+        """Repeated requests with the same X-Session-Id should reuse one derived session ID."""
+        observed_session_ids: list[str] = []
+
+        async def _capture(*args: object, **kwargs: object) -> str:  # noqa: ARG001
+            observed_session_ids.append(kwargs["session_id"])
+            return "Response"
+
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+            mock_ai.side_effect = _capture
+
+            app_client.post(
+                "/v1/chat/completions",
+                headers={"X-Session-Id": "shared-session"},
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Turn one"}],
+                },
+            )
+            app_client.post(
+                "/v1/chat/completions",
+                headers={"X-Session-Id": "shared-session"},
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Turn two"}],
+                },
+            )
+
+        assert len(observed_session_ids) == 2
+        assert observed_session_ids[0] == observed_session_ids[1]
+        assert observed_session_ids[0].endswith(":shared-session")
+
+    def test_explicit_session_id_header_is_namespaced_by_api_key(self, authed_client: TestClient) -> None:
+        """Same X-Session-Id with different API keys should map to different derived IDs."""
+        observed_session_ids: list[str] = []
+
+        async def _capture(*args: object, **kwargs: object) -> str:  # noqa: ARG001
+            observed_session_ids.append(kwargs["session_id"])
+            return "Response"
+
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+            mock_ai.side_effect = _capture
+
+            authed_client.post(
+                "/v1/chat/completions",
+                headers={
+                    "Authorization": "Bearer test-key-1",
+                    "X-Session-Id": "shared-session",
+                },
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Turn one"}],
+                },
+            )
+            authed_client.post(
+                "/v1/chat/completions",
+                headers={
+                    "Authorization": "Bearer test-key-2",
+                    "X-Session-Id": "shared-session",
+                },
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Turn two"}],
+                },
+            )
+
+        assert len(observed_session_ids) == 2
+        assert observed_session_ids[0] != observed_session_ids[1]
+        assert observed_session_ids[0].endswith(":shared-session")
+        assert observed_session_ids[1].endswith(":shared-session")
 
     def test_unknown_model_404(self, app_client: TestClient) -> None:
         """Unknown model returns 404 with OpenAI error format."""
@@ -411,6 +476,27 @@ class TestStreamingCompletion:
         # [DONE] terminator
         assert lines[4] == "data: [DONE]"
 
+    def test_streaming_passes_include_interactive_questions_false(self, app_client: TestClient) -> None:
+        """Streaming disables interactive question prompting for OpenAI compatibility."""
+        from agno.run.agent import RunContentEvent  # noqa: PLC0415
+
+        async def mock_stream(**_kw: object) -> AsyncIterator[RunContentEvent]:
+            yield RunContentEvent(content="ok")
+
+        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream) as mock_stream_fn:
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        assert mock_stream_fn.call_args.kwargs["include_default_tools"] is False
+        assert mock_stream_fn.call_args.kwargs["include_interactive_questions"] is False
+
     def test_streaming_consistent_id(self, app_client: TestClient) -> None:
         """All streaming chunks have the same completion ID."""
         from agno.run.agent import RunContentEvent  # noqa: PLC0415
@@ -483,26 +569,29 @@ class TestStreamingCompletion:
         assert error["message"] == "Agent execution failed"
 
     def test_streaming_tool_events(self, app_client: TestClient) -> None:
-        """Tool call events are formatted as inline text in stream."""
+        """Streaming emits start/done tool blocks with a stable per-stream tool id."""
+        from agno.models.response import ToolExecution  # noqa: PLC0415
         from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent  # noqa: PLC0415
 
-        mock_tool_started = MagicMock()
-        mock_tool_completed = MagicMock()
+        tool_started = ToolExecution(
+            tool_name="search",
+            tool_args={"query": "X"},
+            tool_call_id="tc-stream-1",
+        )
+        tool_completed = ToolExecution(
+            tool_name="search",
+            tool_args={"query": "X"},
+            tool_call_id="tc-stream-1",
+            result="3 results",
+        )
 
         async def mock_stream(**_kw: object) -> AsyncIterator[object]:
             yield RunContentEvent(content="Let me search. ")
-            yield ToolCallStartedEvent(tool=mock_tool_started)
-            yield ToolCallCompletedEvent(tool=mock_tool_completed)
+            yield ToolCallStartedEvent(tool=tool_started)
+            yield ToolCallCompletedEvent(tool=tool_completed)
             yield RunContentEvent(content="Found it!")
 
-        with (
-            patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream),
-            patch("mindroom.api.openai_compat.format_tool_started_event", return_value=("🔧 Searching...", None)),
-            patch(
-                "mindroom.api.openai_compat.extract_tool_completed_info",
-                return_value=("search", "3 results"),
-            ),
-        ):
+        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
             response = app_client.post(
                 "/v1/chat/completions",
                 json={
@@ -525,9 +614,75 @@ class TestStreamingCompletion:
             if "content" in delta:
                 contents.append(delta["content"])
 
-        assert "Let me search. " in contents
-        assert "🔧 Searching..." in contents
-        assert any("3 results" in c for c in contents)
+        full_content = "".join(contents)
+        assert "Let me search. " in full_content
+        assert '<tool id="1" state="start">search(query=X)</tool>' in full_content
+        assert '<tool id="1" state="done">search(query=X)\n3 results</tool>' in full_content
+        assert "Result:" not in full_content
+
+    def test_streaming_tool_ids_increment_for_multiple_calls(self, app_client: TestClient) -> None:
+        """Tool ids start at 1 and increment for each new started tool call in a stream."""
+        from agno.models.response import ToolExecution  # noqa: PLC0415
+        from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent  # noqa: PLC0415
+
+        first_started = ToolExecution(
+            tool_name="search",
+            tool_args={"query": "one"},
+            tool_call_id="tc-stream-1",
+        )
+        first_completed = ToolExecution(
+            tool_name="search",
+            tool_args={"query": "one"},
+            tool_call_id="tc-stream-1",
+            result="one-result",
+        )
+        second_started = ToolExecution(
+            tool_name="search",
+            tool_args={"query": "two"},
+            tool_call_id="tc-stream-2",
+        )
+        second_completed = ToolExecution(
+            tool_name="search",
+            tool_args={"query": "two"},
+            tool_call_id="tc-stream-2",
+            result="two-result",
+        )
+
+        async def mock_stream(**_kw: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="Start ")
+            yield ToolCallStartedEvent(tool=first_started)
+            yield ToolCallCompletedEvent(tool=first_completed)
+            yield ToolCallStartedEvent(tool=second_started)
+            yield ToolCallCompletedEvent(tool=second_completed)
+            yield RunContentEvent(content="End")
+
+        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Run two searches"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        lines = response.text.strip().split("\n\n")
+        contents: list[str] = []
+        for line in lines:
+            text = line.removeprefix("data: ")
+            if text == "[DONE]":
+                continue
+            chunk = json.loads(text)
+            delta = chunk["choices"][0]["delta"]
+            if "content" in delta:
+                contents.append(delta["content"])
+
+        full_content = "".join(contents)
+        assert '<tool id="1" state="start">search(query=one)</tool>' in full_content
+        assert '<tool id="1" state="done">search(query=one)\none-result</tool>' in full_content
+        assert '<tool id="2" state="start">search(query=two)</tool>' in full_content
+        assert '<tool id="2" state="done">search(query=two)\ntwo-result</tool>' in full_content
 
 
 # ---------------------------------------------------------------------------
@@ -800,7 +955,7 @@ class TestSessionIdDerivation:
         original_derive = _derive_session_id
 
         def capture_session_id(*args: object, **kwargs: object) -> str:
-            sid = original_derive(*args, **kwargs)  # type: ignore[arg-type]
+            sid = original_derive(*args, **kwargs)
             session_ids.append(sid)
             return sid
 
@@ -925,7 +1080,7 @@ class TestContentExtraction:
         content: list[dict] = [
             {"type": "text"},  # missing "text" key
             {"type": "text", "text": "Valid"},
-            "not a dict",  # type: ignore[list-item]
+            "not a dict",
         ]
         assert _extract_content_text(content) == "Valid"
 
@@ -1281,6 +1436,72 @@ class TestTeamCompletion:
                     content_parts.append(delta["content"])
         assert "".join(content_parts) == "Team response!"
 
+    def test_team_streaming_tool_events_emit_start_and_done_with_ids(
+        self,
+        team_app_client: TestClient,
+    ) -> None:
+        """Team streaming emits start/done tool blocks sharing the same stable id."""
+        from agno.models.response import ToolExecution  # noqa: PLC0415
+        from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
+        from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent  # noqa: PLC0415
+        from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        tool_started = ToolExecution(
+            tool_name="search",
+            tool_args={"query": "X"},
+            tool_call_id="tc-team-stream-1",
+        )
+        tool_completed = ToolExecution(
+            tool_name="search",
+            tool_args={"query": "X"},
+            tool_call_id="tc-team-stream-1",
+            result="3 results",
+        )
+
+        mock_team = MagicMock()
+        mock_agents = [MagicMock(name="GeneralAgent")]
+
+        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
+            yield TeamContentEvent(content="Team says: ")
+            yield TeamToolCallStartedEvent(tool=tool_started)
+            yield TeamToolCallCompletedEvent(tool=tool_completed)
+            yield TeamContentEvent(content="done.")
+
+        mock_team.arun = mock_stream_events
+
+        with patch(
+            "mindroom.api.openai_compat._build_team",
+            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+        ):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Search for X"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        lines = response.text.strip().split("\n\n")
+        contents: list[str] = []
+        for line in lines:
+            text = line.removeprefix("data: ")
+            if text == "[DONE]":
+                continue
+            chunk = json.loads(text)
+            delta = chunk["choices"][0]["delta"]
+            if "content" in delta:
+                contents.append(delta["content"])
+
+        full_content = "".join(contents)
+        assert "Team says: " in full_content
+        assert '<tool id="1" state="start">search(query=X)</tool>' in full_content
+        assert full_content.count('<tool id="1" state="done">search(query=X)\n3 results</tool>') == 1
+        assert "done." in full_content
+
     def test_team_streaming_first_event_error_returns_500(self, team_app_client: TestClient) -> None:
         """Team stream returns HTTP 500 when first event is an explicit run error."""
         from agno.run.team import RunErrorEvent as TeamRunErrorEvent  # noqa: PLC0415
@@ -1558,6 +1779,7 @@ class TestTeamCompletion:
             _build_team("team_with_kb", config)
 
             assert mock_create.call_args.kwargs["knowledge"] is mock_knowledge
+            assert mock_create.call_args.kwargs["include_interactive_questions"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -1801,175 +2023,10 @@ class TestKnowledgeIntegration:
         assert data["choices"][0]["message"]["content"] == "Response without knowledge"
 
 
-# ---------------------------------------------------------------------------
-# Tool details HTML rendering
-# ---------------------------------------------------------------------------
-
-
-class TestToolDetailsHtml:
-    """Tests for _tool_details_html()."""
-
-    def test_tool_details_html_basic(self) -> None:
-        """Output contains all expected HTML attributes and structure."""
-        result = _tool_details_html(
-            call_id="tc-42",
-            tool_name="web_search",
-            args_json='{"query": "hello"}',
-            result="3 results found",
-        )
-        assert 'type="tool_calls"' in result
-        assert 'done="true"' in result
-        assert 'id="tc-42"' in result
-        assert 'name="web_search"' in result
-        assert "arguments=" in result
-        assert "result=" in result
-        assert "<summary>Tool Executed</summary>" in result
-        assert "<details" in result
-        assert "</details>" in result
-
-    def test_tool_details_html_escaping(self) -> None:
-        """Arguments and results containing HTML special chars are escaped."""
-        result = _tool_details_html(
-            call_id="tc-esc",
-            tool_name="dangerous<tool>",
-            args_json='{"key": "<script>\\"alert&xss\\"</script>"}',
-            result='Result with <b>bold</b> & "quotes"',
-        )
-        # The raw dangerous characters should NOT appear unescaped in attribute values
-        assert "<script>" not in result
-        assert "&lt;script&gt;" in result
-        # Tool name should also be escaped
-        assert "dangerous<tool>" not in result
-        assert "dangerous&lt;tool&gt;" in result
-
-
-class TestToolDetailsTracker:
-    """Tests for _ToolDetailsTracker."""
-
-    @staticmethod
-    def _make_tool(
-        tool_name: str = "test_tool",
-        tool_args: dict | None = None,
-        tool_call_id: str = "tc-1",
-        result: str | None = None,
-    ) -> ToolExecution:
-        return ToolExecution(
-            tool_name=tool_name,
-            tool_args=tool_args or {},
-            tool_call_id=tool_call_id,
-            result=result,
-        )
-
-    def test_start_suppresses_inline_text(self) -> None:
-        """ToolCallStartedEvent returns empty string (suppressed), not None."""
-        tracker = _ToolDetailsTracker()
-        tool = self._make_tool()
-        event = ToolCallStartedEvent(tool=tool)
-        result = tracker.handle_event(event)
-        assert result == ""
-
-    def test_complete_emits_details_html(self) -> None:
-        """After start + complete, handle_event returns HTML with <details>."""
-        tracker = _ToolDetailsTracker()
-        tool_start = self._make_tool(tool_name="search", tool_args={"q": "test"})
-        tool_complete = self._make_tool(
-            tool_name="search",
-            tool_args={"q": "test"},
-            result="found it",
-        )
-        tracker.handle_event(ToolCallStartedEvent(tool=tool_start))
-        result = tracker.handle_event(ToolCallCompletedEvent(tool=tool_complete))
-        assert result is not None
-        assert "<details" in result
-        assert "search" in result
-
-    def test_parallel_calls_correlate(self) -> None:
-        """Two starts with different tool_call_ids correlate to their completes."""
-        tracker = _ToolDetailsTracker()
-
-        tool_a_start = self._make_tool(tool_name="search", tool_call_id="tc-a", tool_args={"q": "a"})
-        tool_b_start = self._make_tool(tool_name="calculate", tool_call_id="tc-b", tool_args={"x": "1"})
-
-        tracker.handle_event(ToolCallStartedEvent(tool=tool_a_start))
-        tracker.handle_event(ToolCallStartedEvent(tool=tool_b_start))
-
-        tool_a_complete = self._make_tool(
-            tool_name="search",
-            tool_call_id="tc-a",
-            tool_args={"q": "a"},
-            result="result_a",
-        )
-        tool_b_complete = self._make_tool(
-            tool_name="calculate",
-            tool_call_id="tc-b",
-            tool_args={"x": "1"},
-            result="result_b",
-        )
-
-        result_a = tracker.handle_event(ToolCallCompletedEvent(tool=tool_a_complete))
-        result_b = tracker.handle_event(ToolCallCompletedEvent(tool=tool_b_complete))
-
-        assert result_a is not None
-        assert "search" in result_a
-        assert result_b is not None
-        assert "calculate" in result_b
-
-    def test_complete_without_start_returns_none(self) -> None:
-        """Complete event without prior start returns None."""
-        tracker = _ToolDetailsTracker()
-        tool = self._make_tool(result="some result")
-        result = tracker.handle_event(ToolCallCompletedEvent(tool=tool))
-        assert result is None
-
-    def test_start_complete_without_tool_call_id(self) -> None:
-        """Start + complete both with tool_call_id=None still emits <details> HTML."""
-        tracker = _ToolDetailsTracker()
-        tool_start = ToolExecution(tool_name="my_tool", tool_args={"a": 1}, tool_call_id=None)
-        tool_complete = ToolExecution(tool_name="my_tool", tool_args={"a": 1}, tool_call_id=None, result="done")
-        start_result = tracker.handle_event(ToolCallStartedEvent(tool=tool_start))
-        assert start_result == ""
-        complete_result = tracker.handle_event(ToolCallCompletedEvent(tool=tool_complete))
-        assert complete_result is not None
-        assert "<details" in complete_result
-        assert "my_tool" in complete_result
-        assert "done" in complete_result
-
-    def test_non_serializable_args(self) -> None:
-        """Non-serializable tool_args (datetime, Path) don't crash."""
-        tracker = _ToolDetailsTracker()
-        tool_start = self._make_tool(
-            tool_args={"timestamp": datetime(2025, 1, 1, tzinfo=UTC), "path": Path("/var/data/test")},
-        )
-        tool_complete = self._make_tool(
-            tool_args={"timestamp": datetime(2025, 1, 1, tzinfo=UTC), "path": Path("/var/data/test")},
-            result="ok",
-        )
-        tracker.handle_event(ToolCallStartedEvent(tool=tool_start))
-        result = tracker.handle_event(ToolCallCompletedEvent(tool=tool_complete))
-        assert result is not None
-        assert "<details" in result
-
-    def test_unhandled_event_returns_none(self) -> None:
-        """A RunContentEvent or other unhandled event returns None."""
-        tracker = _ToolDetailsTracker()
-        result = tracker.handle_event(RunContentEvent(content="hello"))
-        assert result is None
-
-    def test_team_events_handled(self) -> None:
-        """Team tool events are handled the same as agent tool events."""
-        tracker = _ToolDetailsTracker()
-        tool_start = self._make_tool(tool_name="team_tool")
-        tool_complete = self._make_tool(tool_name="team_tool", result="team result")
-        tracker.handle_event(TeamToolCallStartedEvent(tool=tool_start))
-        result = tracker.handle_event(TeamToolCallCompletedEvent(tool=tool_complete))
-        assert result is not None
-        assert "<details" in result
-
-
 def _extract_sse_data_events(response: object) -> list[str]:
     """Extract SSE data payloads from a response."""
     events: list[str] = []
-    for block in response.text.strip().split("\n\n"):  # type: ignore[union-attr]
+    for block in response.text.strip().split("\n\n"):
         if not block.strip():
             continue
         data_lines = [line.removeprefix("data:").lstrip() for line in block.splitlines() if line.startswith("data:")]
@@ -1999,139 +2056,6 @@ def _extract_sse_chunks(response: object) -> list[dict]:
             continue
         chunks.append(json.loads(text))
     return chunks
-
-
-class TestToolDetailsIntegration:
-    """Integration tests for <details> HTML tool call rendering in streaming."""
-
-    def test_openwebui_header_triggers_details_html(self, app_client: TestClient) -> None:
-        """X-Tool-Event-Format: open-webui header produces <details> HTML for tool calls."""
-        tool_started = ToolExecution(
-            tool_name="web_search",
-            tool_args={"query": "test"},
-            tool_call_id="tc-int-1",
-        )
-        tool_completed = ToolExecution(
-            tool_name="web_search",
-            tool_args={"query": "test"},
-            tool_call_id="tc-int-1",
-            result="3 results",
-        )
-
-        async def mock_stream(**_kw: object) -> AsyncIterator[object]:
-            yield ToolCallStartedEvent(tool=tool_started)
-            yield RunContentEvent(content="Let me search. ")
-            yield ToolCallCompletedEvent(tool=tool_completed)
-            yield RunContentEvent(content="Found it!")
-
-        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
-            response = app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "general",
-                    "messages": [{"role": "user", "content": "Search for X"}],
-                    "stream": True,
-                },
-                headers={"X-Tool-Event-Format": "open-webui"},
-            )
-
-        assert response.status_code == 200
-        contents = _extract_sse_contents(response)
-        full_content = "".join(contents)
-        # Should contain <details> HTML from tool completion
-        assert "<details" in full_content
-        assert 'type="tool_calls"' in full_content
-        # Should NOT contain inline emoji tool text
-        assert "\U0001f527" not in full_content  # 🔧
-
-    def test_no_header_uses_inline_text(self, app_client: TestClient) -> None:
-        """Without X-Tool-Event-Format header, inline emoji text is used."""
-        tool_started = ToolExecution(tool_name="web_search", tool_args={"query": "test"}, tool_call_id="tc-inline-1")
-        tool_completed = ToolExecution(
-            tool_name="web_search",
-            tool_args={"query": "test"},
-            tool_call_id="tc-inline-1",
-            result="3 results",
-        )
-
-        async def mock_stream(**_kw: object) -> AsyncIterator[object]:
-            yield ToolCallStartedEvent(tool=tool_started)
-            yield ToolCallCompletedEvent(tool=tool_completed)
-            yield RunContentEvent(content="Done!")
-
-        with (
-            patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream),
-            patch(
-                "mindroom.api.openai_compat.format_tool_started_event",
-                return_value=("\U0001f527 Searching...", None),
-            ),
-            patch(
-                "mindroom.api.openai_compat.extract_tool_completed_info",
-                return_value=("search", "3 results"),
-            ),
-        ):
-            response = app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "general",
-                    "messages": [{"role": "user", "content": "Search for X"}],
-                    "stream": True,
-                },
-                # No X-Tool-Event-Format header
-            )
-
-        assert response.status_code == 200
-        contents = _extract_sse_contents(response)
-        full_content = "".join(contents)
-        # Should contain inline emoji text
-        assert "\U0001f527 Searching..." in contents
-        # Should NOT contain <details> tags
-        assert "<details" not in full_content
-
-    def test_team_streaming_with_tool_details(self, team_app_client: TestClient) -> None:
-        """Team streaming with X-Tool-Event-Format header produces <details> HTML."""
-        tool_started = ToolExecution(
-            tool_name="code_exec",
-            tool_args={"code": "print('hi')"},
-            tool_call_id="tc-team-1",
-        )
-        tool_completed = ToolExecution(
-            tool_name="code_exec",
-            tool_args={"code": "print('hi')"},
-            tool_call_id="tc-team-1",
-            result="hi",
-        )
-
-        mock_team = MagicMock()
-        mock_agents = [MagicMock(name="GeneralAgent")]
-
-        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
-            yield TeamToolCallStartedEvent(tool=tool_started)
-            yield TeamContentEvent(content="Running code. ")
-            yield TeamToolCallCompletedEvent(tool=tool_completed)
-            yield TeamContentEvent(content="Done!")
-
-        mock_team.arun = mock_stream_events
-
-        with patch(
-            "mindroom.api.openai_compat._build_team",
-            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
-        ):
-            response = team_app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "team/super_team",
-                    "messages": [{"role": "user", "content": "Run code"}],
-                    "stream": True,
-                },
-                headers={"X-Tool-Event-Format": "open-webui"},
-            )
-
-        assert response.status_code == 200
-        contents = _extract_sse_contents(response)
-        full_content = "".join(contents)
-        assert "<details" in full_content
-        assert 'type="tool_calls"' in full_content
 
 
 class TestStrictOpenAIToolCalling:

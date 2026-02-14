@@ -1,15 +1,42 @@
 import { create } from 'zustand';
-import { Config, Agent, Team, Room, ModelConfig, KnowledgeBaseConfig } from '@/types/config';
+import {
+  Config,
+  Agent,
+  Team,
+  Room,
+  ModelConfig,
+  KnowledgeBaseConfig,
+  Culture,
+} from '@/types/config';
 import * as configService from '@/services/configService';
+
+function unassignAgentsFromOtherCultures(
+  cultures: Culture[],
+  targetCultureId: string,
+  targetCultureAgents: string[]
+): Culture[] {
+  const assignedAgents = new Set(targetCultureAgents);
+  return cultures.map(culture => {
+    if (culture.id === targetCultureId) {
+      return culture;
+    }
+    return {
+      ...culture,
+      agents: culture.agents.filter(agentId => !assignedAgents.has(agentId)),
+    };
+  });
+}
 
 interface ConfigState {
   // State
   config: Config | null;
   agents: Agent[];
   teams: Team[];
+  cultures: Culture[];
   rooms: Room[];
   selectedAgentId: string | null;
   selectedTeamId: string | null;
+  selectedCultureId: string | null;
   selectedRoomId: string | null;
   isDirty: boolean;
   isLoading: boolean;
@@ -27,6 +54,10 @@ interface ConfigState {
   updateTeam: (teamId: string, updates: Partial<Team>) => void;
   createTeam: (team: Omit<Team, 'id'>) => void;
   deleteTeam: (teamId: string) => void;
+  selectCulture: (cultureId: string | null) => void;
+  updateCulture: (cultureId: string, updates: Partial<Culture>) => void;
+  createCulture: (culture: Omit<Culture, 'id'>) => void;
+  deleteCulture: (cultureId: string) => void;
   selectRoom: (roomId: string | null) => void;
   updateRoom: (roomId: string, updates: Partial<Room>) => void;
   createRoom: (room: Omit<Room, 'id'>) => void;
@@ -49,9 +80,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   config: null,
   agents: [],
   teams: [],
+  cultures: [],
   rooms: [],
   selectedAgentId: null,
   selectedTeamId: null,
+  selectedCultureId: null,
   selectedRoomId: null,
   isDirty: false,
   isLoading: false,
@@ -66,6 +99,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const normalizedConfig: Config = {
         ...config,
         knowledge_bases: config.knowledge_bases || {},
+        cultures: config.cultures || {},
       };
       const defaultLearning = config.defaults?.learning ?? true;
       const defaultLearningMode = config.defaults?.learning_mode ?? 'always';
@@ -81,6 +115,15 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         ? Object.entries(normalizedConfig.teams).map(([id, team]) => ({
             id,
             ...team,
+          }))
+        : [];
+      const cultures = normalizedConfig.cultures
+        ? Object.entries(normalizedConfig.cultures).map(([id, culture]) => ({
+            id,
+            ...culture,
+            agents: culture.agents ?? [],
+            mode: culture.mode ?? 'automatic',
+            description: culture.description ?? '',
           }))
         : [];
 
@@ -106,6 +149,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         config: normalizedConfig,
         agents,
         teams,
+        cultures,
         rooms,
         isLoading: false,
         syncStatus: 'synced',
@@ -122,7 +166,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
   // Save configuration to backend
   saveConfig: async () => {
-    const { config, agents, teams, rooms } = get();
+    const { config, agents, teams, cultures, rooms } = get();
     if (!config) return;
 
     set({ isLoading: true, error: null, syncStatus: 'syncing' });
@@ -146,6 +190,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         },
         {} as Record<string, Omit<Team, 'id'>>
       );
+      const culturesObject = cultures.reduce(
+        (acc, culture) => {
+          const { id, ...rest } = culture;
+          acc[id] = rest;
+          return acc;
+        },
+        {} as Record<string, Omit<Culture, 'id'>>
+      );
 
       // Extract room_models from rooms that have a model set
       const roomModels: Record<string, string> = {};
@@ -159,6 +211,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         ...config,
         agents: agentsObject,
         teams: teamsObject,
+        cultures: culturesObject,
         room_models: Object.keys(roomModels).length > 0 ? roomModels : undefined,
       };
 
@@ -213,6 +266,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   deleteAgent: agentId => {
     set(state => ({
       agents: state.agents.filter(agent => agent.id !== agentId),
+      cultures: state.cultures.map(culture => ({
+        ...culture,
+        agents: culture.agents.filter(id => id !== agentId),
+      })),
       selectedAgentId: state.selectedAgentId === agentId ? null : state.selectedAgentId,
       isDirty: true,
     }));
@@ -250,6 +307,80 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set(state => ({
       teams: state.teams.filter(team => team.id !== teamId),
       selectedTeamId: state.selectedTeamId === teamId ? null : state.selectedTeamId,
+      isDirty: true,
+    }));
+  },
+
+  // Select a culture for editing
+  selectCulture: cultureId => {
+    set({ selectedCultureId: cultureId });
+  },
+
+  // Update an existing culture
+  updateCulture: (cultureId, updates) => {
+    set(state => {
+      const updatedCultures = state.cultures.map(culture =>
+        culture.id === cultureId ? { ...culture, ...updates } : culture
+      );
+
+      if (updates.agents) {
+        const targetCulture = updatedCultures.find(culture => culture.id === cultureId);
+        if (!targetCulture) {
+          return { cultures: updatedCultures, isDirty: true };
+        }
+        return {
+          cultures: unassignAgentsFromOtherCultures(
+            updatedCultures,
+            cultureId,
+            targetCulture.agents
+          ),
+          isDirty: true,
+        };
+      }
+
+      return {
+        cultures: updatedCultures,
+        isDirty: true,
+      };
+    });
+  },
+
+  // Create a new culture
+  createCulture: cultureData => {
+    set(state => {
+      const baseId = (cultureData.description || 'new_culture').toLowerCase().replace(/\s+/g, '_');
+      let id = baseId;
+      let counter = 1;
+      while (state.cultures.some(culture => culture.id === id)) {
+        id = `${baseId}_${counter}`;
+        counter += 1;
+      }
+
+      const newCulture: Culture = {
+        id,
+        ...cultureData,
+        description: cultureData.description || '',
+        mode: cultureData.mode || 'automatic',
+        agents: cultureData.agents || [],
+      };
+      const nextCultures = unassignAgentsFromOtherCultures(
+        [...state.cultures, newCulture],
+        id,
+        newCulture.agents
+      );
+      return {
+        cultures: nextCultures,
+        selectedCultureId: id,
+        isDirty: true,
+      };
+    });
+  },
+
+  // Delete a culture
+  deleteCulture: cultureId => {
+    set(state => ({
+      cultures: state.cultures.filter(culture => culture.id !== cultureId),
+      selectedCultureId: state.selectedCultureId === cultureId ? null : state.selectedCultureId,
       isDirty: true,
     }));
   },
@@ -477,12 +608,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   updateKnowledgeBase: (baseName, baseConfig) => {
     set(state => {
       if (!state.config) return state;
+      const existingBaseConfig = state.config.knowledge_bases?.[baseName] || {};
       return {
         config: {
           ...state.config,
           knowledge_bases: {
             ...(state.config.knowledge_bases || {}),
             [baseName]: {
+              ...existingBaseConfig,
               ...baseConfig,
             },
           },

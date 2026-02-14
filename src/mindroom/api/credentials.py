@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from mindroom.credentials import get_credentials_manager
+from mindroom.credentials import get_credentials_manager, validate_service_name
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 
@@ -13,6 +13,13 @@ router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 def _filter_internal_keys(credentials: dict[str, Any]) -> dict[str, Any]:
     """Remove internal metadata keys (prefixed with _) from credentials."""
     return {k: v for k, v in credentials.items() if not k.startswith("_")}
+
+
+def _validated_service(service: str) -> str:
+    try:
+        return validate_service_name(service)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 class SetApiKeyRequest(BaseModel):
@@ -47,6 +54,7 @@ async def list_services() -> list[str]:
 @router.get("/{service}/status")
 async def get_credential_status(service: str) -> CredentialStatus:
     """Get the status of credentials for a service."""
+    service = _validated_service(service)
     manager = get_credentials_manager()
     credentials = manager.load_credentials(service)
 
@@ -64,6 +72,7 @@ async def get_credential_status(service: str) -> CredentialStatus:
 @router.post("/{service}")
 async def set_credentials(service: str, request: SetCredentialsRequest) -> dict[str, str]:
     """Set multiple credentials for a service."""
+    service = _validated_service(service)
     manager = get_credentials_manager()
 
     # Mark as UI-sourced and save
@@ -76,7 +85,9 @@ async def set_credentials(service: str, request: SetCredentialsRequest) -> dict[
 @router.post("/{service}/api-key")
 async def set_api_key(service: str, request: SetApiKeyRequest) -> dict[str, str]:
     """Set an API key for a service."""
-    if request.service != service:
+    service = _validated_service(service)
+    request_service = _validated_service(request.service)
+    if request_service != service:
         raise HTTPException(status_code=400, detail="Service mismatch in request")
 
     manager = get_credentials_manager()
@@ -95,6 +106,7 @@ async def get_api_key(
     include_value: bool = False,
 ) -> dict[str, Any]:
     """Get API key metadata for a service, and optionally the full key value."""
+    service = _validated_service(service)
     manager = get_credentials_manager()
     credentials = manager.load_credentials(service) or {}
     api_key = credentials.get(key_name)
@@ -119,6 +131,7 @@ async def get_api_key(
 @router.get("/{service}")
 async def get_credentials(service: str) -> dict[str, Any]:
     """Get credentials for a service (for editing)."""
+    service = _validated_service(service)
     manager = get_credentials_manager()
     credentials = manager.load_credentials(service)
 
@@ -131,6 +144,7 @@ async def get_credentials(service: str) -> dict[str, Any]:
 @router.delete("/{service}")
 async def delete_credentials(service: str) -> dict[str, str]:
     """Delete all credentials for a service."""
+    service = _validated_service(service)
     manager = get_credentials_manager()
     manager.delete_credentials(service)
 
@@ -140,6 +154,8 @@ async def delete_credentials(service: str) -> dict[str, str]:
 @router.post("/{service}/copy-from/{source_service}")
 async def copy_credentials(service: str, source_service: str) -> dict[str, str]:
     """Copy credentials from one service to another."""
+    service = _validated_service(service)
+    source_service = _validated_service(source_service)
     manager = get_credentials_manager()
     source_creds = manager.load_credentials(source_service)
 
@@ -157,6 +173,7 @@ async def copy_credentials(service: str, source_service: str) -> dict[str, str]:
 @router.post("/{service}/test")
 async def test_credentials(service: str) -> dict[str, Any]:
     """Test if credentials are valid for a service."""
+    service = _validated_service(service)
     # This is a placeholder - actual testing would depend on the service
     manager = get_credentials_manager()
     credentials = manager.load_credentials(service)

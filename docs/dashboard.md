@@ -41,7 +41,6 @@ Configure AI agents:
 - **Rooms** - Where the agent operates
 - **Learning** - Enable or disable Agno Learning per agent (enabled by default)
 - **Learning mode** - Choose `always` (automatic extraction) or `agentic` (tool-driven)
-- **History runs** - Conversation turns to include as context (1-20)
 
 ### Teams
 
@@ -96,6 +95,23 @@ Manage file-backed RAG knowledge bases:
 - **Reindex** a knowledge base on demand
 - **Track index status** (`file_count` and `indexed_count`)
 - **Assign agents** to a specific knowledge base from the Agents tab
+
+Git-backed knowledge bases are supported, but Git settings are currently configured in `config.yaml` (`knowledge_bases.<id>.git`), not via dedicated dashboard controls yet.
+
+- The dashboard preserves existing `git` settings when you edit `path`/`watch`.
+- `/api/knowledge/bases/{base_id}/files` reflects the manager's filtered file set (for example `include_patterns`/`exclude_patterns`).
+- Private HTTPS repo auth can be managed in the **Credentials** tab, then referenced by `knowledge_bases.<id>.git.credentials_service`.
+
+### Credentials
+
+Manage service credentials directly from the dashboard:
+
+- **List configured credential services** from `CredentialsManager`
+- **Create/select service names** (for example `github_private` or `model:sonnet`)
+- **Edit raw JSON credential payloads** and save via `/api/credentials/{service}`
+- **Test credentials existence** using `/api/credentials/{service}/test`
+- **Delete credential sets** using `/api/credentials/{service}`
+- **Reuse credentials for Git knowledge sync** by setting `knowledge_bases.<id>.git.credentials_service` to the same service name
 
 ### Voice
 

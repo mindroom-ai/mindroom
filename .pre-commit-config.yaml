@@ -22,13 +22,12 @@ repos:
 
   - repo: local
     hooks:
-      - id: mypy
-        name: mypy
-        entry: .venv/bin/mypy
+      - id: ty
+        name: ty
+        entry: .venv/bin/ty check
         language: system
         types: [python]
         files: ^(src/|tests/)
-        exclude: docs/source/conf.py
         pass_filenames: false
         args: [src, tests]
 
@@ -52,6 +51,13 @@ repos:
         language: system
         pass_filenames: false
         files: ^(docs/.*\.md|zensical\.toml)$
+
+      - id: check-tool-extras-sync
+        name: Check tool extras stay in sync with pyproject.toml
+        entry: python .github/scripts/check_tool_extras_sync.py
+        language: system
+        pass_filenames: false
+        files: ^(pyproject\.toml|src/mindroom/tools/.*\.py)$
 
   - repo: https://github.com/tox-dev/pyproject-fmt
     rev: "v2.6.0"

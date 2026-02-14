@@ -8,12 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import html
 import json
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import uuid4
 
@@ -55,13 +54,12 @@ from mindroom.logging_config import get_logger
 from mindroom.memory import build_memory_enhanced_prompt
 from mindroom.routing import suggest_agent
 from mindroom.teams import TeamMode, format_team_response
-from mindroom.tool_events import extract_tool_completed_info, format_tool_started_event
+from mindroom.tool_events import format_tool_completed_event, format_tool_started_event
 
 AUTO_MODEL_NAME = "auto"
 TEAM_MODEL_PREFIX = "team/"
 RESERVED_MODEL_NAMES = {AUTO_MODEL_NAME}
 TOOL_EVENT_FORMAT_OPENAI = "openai"
-TOOL_EVENT_FORMAT_OPEN_WEBUI = "open-webui"
 OPENAI_PENDING_RUN_TTL_SECONDS = 300
 
 if TYPE_CHECKING:
@@ -77,6 +75,14 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])
+
+
+@dataclass(slots=True)
+class _ToolStreamState:
+    """Track per-stream IDs so tool started/completed updates can be reconciled client-side."""
+
+    next_tool_id: int = 1
+    tool_ids_by_call_id: dict[str, str] = field(default_factory=dict)
 
 
 def _load_config() -> tuple[Config, Path]:
@@ -845,7 +851,6 @@ async def chat_completions(  # noqa: C901, PLR0911, PLR0912
                 config,
                 thread_history,
                 req.user,
-                tool_event_format=tool_event_format,
             )
         return await _non_stream_team_completion(
             team_name,
@@ -888,16 +893,7 @@ async def chat_completions(  # noqa: C901, PLR0911, PLR0912
         )
 
     handler = _stream_completion if req.stream else _non_stream_completion
-    return await handler(
-        agent_name,
-        prompt,
-        session_id,
-        config,
-        thread_history,
-        req.user,
-        knowledge,
-        **({"tool_event_format": tool_event_format} if req.stream else {}),
-    )
+    return await handler(agent_name, prompt, session_id, config, thread_history, req.user, knowledge)
 
 
 # ---------------------------------------------------------------------------
@@ -1099,7 +1095,7 @@ async def _strict_openai_validate_and_run(  # noqa: PLR0911
                 user_id=user,
                 **stream_kwargs,
             )
-            return result if stream else await result  # type: ignore[no-any-return]
+            return result if stream else await result
 
         if tool_results:
             return _error_response(400, "No pending tool run exists for these tool results", param="messages")
@@ -1108,7 +1104,7 @@ async def _strict_openai_validate_and_run(  # noqa: PLR0911
         full_prompt = build_prompt_with_thread_history(enhanced_prompt, thread_history)
         agent = _create_strict_openai_agent(agent_name, config, knowledge)
         result = agent.arun(full_prompt, session_id=session_id, user_id=user, **stream_kwargs)
-        return result if stream else await result  # type: ignore[no-any-return]
+        return result if stream else await result
     except Exception:
         logger.exception("Strict OpenAI run failed", model=agent_name, session_id=session_id)
         _clear_pending_openai_run(session_id)
@@ -1379,6 +1375,7 @@ async def _non_stream_completion(
         knowledge=knowledge,
         user_id=user,
         include_default_tools=False,
+        include_interactive_questions=False,
     )
 
     # Detect error responses from ai_response()
@@ -1425,79 +1422,83 @@ def _chunk_json(
     return chunk.model_dump_json()
 
 
-def _format_stream_tool_event(event: RunOutputEvent | TeamRunOutputEvent) -> str | None:
-    """Format a tool event as inline text for the SSE stream."""
+def _extract_tool_call_id(tool: ToolExecution) -> str:
+    """Extract the required tool call identifier for streaming tool events."""
+    tool_call_id = str(tool.tool_call_id).strip()
+    if not tool_call_id:
+        msg = "Streaming tool events require a non-empty tool_call_id"
+        raise ValueError(msg)
+    return tool_call_id
+
+
+def _allocate_next_tool_id(tool_state: _ToolStreamState) -> str:
+    tool_id = str(tool_state.next_tool_id)
+    tool_state.next_tool_id += 1
+    return tool_id
+
+
+def _resolve_started_tool_id(tool: ToolExecution, tool_state: _ToolStreamState) -> str:
+    tool_call_id = _extract_tool_call_id(tool)
+
+    existing_tool_id = tool_state.tool_ids_by_call_id.get(tool_call_id)
+    if existing_tool_id is not None:
+        return existing_tool_id
+
+    tool_id = _allocate_next_tool_id(tool_state)
+    tool_state.tool_ids_by_call_id[tool_call_id] = tool_id
+    return tool_id
+
+
+def _resolve_completed_tool_id(tool: ToolExecution, tool_state: _ToolStreamState) -> str:
+    tool_call_id = _extract_tool_call_id(tool)
+
+    existing_tool_id = tool_state.tool_ids_by_call_id.pop(tool_call_id, None)
+    if existing_tool_id is not None:
+        return existing_tool_id
+
+    return _allocate_next_tool_id(tool_state)
+
+
+def _inject_tool_metadata(tool_message: str, *, tool_id: str, state: Literal["start", "done"]) -> str:
+    return tool_message.replace("<tool>", f'<tool id="{tool_id}" state="{state}">', 1)
+
+
+def _format_stream_tool_event(
+    event: RunOutputEvent | TeamRunOutputEvent,
+    tool_state: _ToolStreamState,
+) -> str | None:
+    """Format tool events as inline text for the SSE stream with stable IDs."""
     if isinstance(event, (ToolCallStartedEvent, TeamToolCallStartedEvent)):
-        tool_msg, _ = format_tool_started_event(event.tool)
-        return tool_msg or None
-    if isinstance(event, (ToolCallCompletedEvent, TeamToolCallCompletedEvent)):
-        info = extract_tool_completed_info(event.tool)
-        if info:
-            _tool_name, result = info
-            return f"\nResult: {result}\n" if result else None
-    return None
-
-
-def _tool_details_html(call_id: str, tool_name: str, args_json: str, result: str) -> str:
-    """Format a completed tool call as Open WebUI <details> HTML."""
-    return (
-        f'<details type="tool_calls" done="true" id="{html.escape(call_id)}" '
-        f'name="{html.escape(tool_name)}" arguments="{html.escape(args_json)}" '
-        f'result="{html.escape(result)}">\n'
-        f"<summary>Tool Executed</summary>\n</details>\n"
-    )
-
-
-class _ToolDetailsTracker:
-    """Track tool calls and emit <details> HTML on completion."""
-
-    def __init__(self) -> None:
-        self._pending: dict[str, tuple[str, str, str]] = {}
-
-    def handle_event(self, event: object) -> str | None:
-        """Return <details> HTML on tool completion, '' to suppress inline text, None to ignore."""
-        if isinstance(event, (ToolCallStartedEvent, TeamToolCallStartedEvent)):
-            return self._on_start(event.tool)
-        if isinstance(event, (ToolCallCompletedEvent, TeamToolCallCompletedEvent)):
-            return self._on_complete(event.tool)
+        tool = event.tool
+        if tool is None:
+            return None
+        tool_msg, _ = format_tool_started_event(tool)
+        if not tool_msg:
+            return None
+        tool_id = _resolve_started_tool_id(tool, tool_state)
+        state: Literal["start", "done"] = "start"
+    elif isinstance(event, (ToolCallCompletedEvent, TeamToolCallCompletedEvent)):
+        tool = event.tool
+        if tool is None:
+            return None
+        tool_msg, _ = format_tool_completed_event(tool)
+        if not tool_msg:
+            return None
+        tool_id = _resolve_completed_tool_id(tool, tool_state)
+        state = "done"
+    else:
         return None
 
-    def _on_start(self, tool: ToolExecution | None) -> str:
-        if tool is None:
-            return ""
-        tool_name = tool.tool_name or "tool"
-        tool_args = {str(k): v for k, v in tool.tool_args.items()} if tool.tool_args else {}
-        args_json = json.dumps(tool_args, default=str)
-        call_id = f"call-{uuid4().hex[:8]}"
-        tool_call_id = tool.tool_call_id or call_id
-        self._pending[tool_call_id] = (call_id, tool_name, args_json)
-        return ""  # suppress inline text, emit nothing
-
-    def _on_complete(self, tool: ToolExecution | None) -> str | None:
-        if tool is None:
-            return None
-        result = str(tool.result or "")
-        tool_call_id = tool.tool_call_id
-        if tool_call_id:
-            pending = self._pending.pop(tool_call_id, None)
-        elif len(self._pending) == 1:
-            # No tool_call_id but exactly one pending — unambiguous match
-            pending = self._pending.pop(next(iter(self._pending)))
-        else:
-            pending = None
-        if pending is None:
-            return None
-        call_id, tool_name, args_json = pending
-        return _tool_details_html(call_id, tool_name, args_json, result)
+    return _inject_tool_metadata(tool_msg, tool_id=tool_id, state=state)
 
 
-def _extract_stream_text(event: AIStreamChunk) -> str | None:
+def _extract_stream_text(event: AIStreamChunk, tool_state: _ToolStreamState) -> str | None:
     """Extract text content from a stream event."""
     if isinstance(event, RunContentEvent) and event.content:
         return str(event.content)
     if isinstance(event, str):
         return event
-    return _format_stream_tool_event(event)
+    return _format_stream_tool_event(event, tool_state)
 
 
 async def _stream_completion(
@@ -1508,8 +1509,6 @@ async def _stream_completion(
     thread_history: list[dict[str, Any]] | None,
     user: str | None,
     knowledge: Knowledge | None = None,
-    *,
-    tool_event_format: str | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming chat completion via SSE."""
     stream: AsyncIterator[AIStreamChunk] = stream_agent_response(
@@ -1523,6 +1522,7 @@ async def _stream_completion(
         knowledge=knowledge,
         user_id=user,
         include_default_tools=False,
+        include_interactive_questions=False,
     )
 
     # Peek at first event to detect errors before committing to SSE
@@ -1538,15 +1538,13 @@ async def _stream_completion(
     created = int(time.time())
 
     async def event_generator() -> AsyncIterator[str]:
-        tracker = _ToolDetailsTracker() if tool_event_format == TOOL_EVENT_FORMAT_OPEN_WEBUI else None
+        tool_state = _ToolStreamState()
 
         # 1. Initial role announcement
         yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'role': 'assistant'})}\n\n"
 
         # 2. Yield the peeked first event
-        text = tracker.handle_event(first_event) if tracker is not None else None
-        if text is None:
-            text = _extract_stream_text(first_event)
+        text = _extract_stream_text(first_event, tool_state)
         if text:
             yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
 
@@ -1554,9 +1552,7 @@ async def _stream_completion(
         # Error strings after the first event are sent as content chunks
         # since we can't switch to an error HTTP status mid-stream.
         async for event in stream:
-            text = tracker.handle_event(event) if tracker is not None else None
-            if text is None:
-                text = _extract_stream_text(event)
+            text = _extract_stream_text(event, tool_state)
             if text:
                 yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
 
@@ -1599,6 +1595,7 @@ def _build_team(team_name: str, config: Config) -> tuple[list[Agent], Team | Non
                     storage_path=STORAGE_PATH_OBJ,
                     knowledge=_resolve_knowledge(member_name, config),
                     include_default_tools=False,
+                    include_interactive_questions=False,
                 ),
             )
         except Exception:
@@ -1677,8 +1674,6 @@ async def _stream_team_completion(
     config: Config,
     thread_history: list[dict[str, Any]] | None,
     user: str | None = None,
-    *,
-    tool_event_format: str | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
     agents, team, mode = _build_team(team_name, config)
@@ -1713,13 +1708,15 @@ async def _stream_team_completion(
             created=created,
             model_id=model_id,
             team_name=team_name,
-            tool_event_format=tool_event_format,
         ),
         media_type="text/event-stream",
     )
 
 
-def _extract_team_stream_text(event: RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str) -> str | None:
+def _extract_team_stream_text(
+    event: RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str,
+    tool_state: _ToolStreamState,
+) -> str | None:
     """Extract text content from a team stream event."""
     if isinstance(event, TeamContentEvent) and event.content:
         return str(event.content)
@@ -1729,7 +1726,7 @@ def _extract_team_stream_text(event: RunOutputEvent | TeamRunOutputEvent | TeamR
         return _format_team_output(event)
     if isinstance(event, str):
         return event
-    return _format_stream_tool_event(event)
+    return _format_stream_tool_event(event, tool_state)
 
 
 def _extract_team_stream_error(event: RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str) -> str | None:
@@ -1765,18 +1762,15 @@ async def _team_stream_event_generator(
     created: int,
     model_id: str,
     team_name: str,
-    tool_event_format: str | None = None,
 ) -> AsyncIterator[str]:
     """Yield SSE chunks for team streaming responses."""
-    tracker = _ToolDetailsTracker() if tool_event_format == TOOL_EVENT_FORMAT_OPEN_WEBUI else None
+    tool_state = _ToolStreamState()
 
     # 1. Role announcement
     yield f"data: {_chunk_json(completion_id, created, model_id, delta={'role': 'assistant'})}\n\n"
 
     # 2. First event
-    first_text = tracker.handle_event(first_event) if tracker is not None else None
-    if first_text is None:
-        first_text = _extract_team_stream_text(first_event)
+    first_text = _extract_team_stream_text(first_event, tool_state)
     if first_text:
         yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': first_text})}\n\n"
 
@@ -1789,9 +1783,7 @@ async def _team_stream_event_generator(
                 yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': 'Team execution failed.'})}\n\n"
                 break
 
-            text = tracker.handle_event(event) if tracker is not None else None
-            if text is None:
-                text = _extract_team_stream_text(event)
+            text = _extract_team_stream_text(event, tool_state)
             if text:
                 yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': text})}\n\n"
     except Exception:

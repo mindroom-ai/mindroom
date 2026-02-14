@@ -151,6 +151,7 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | :lucide-server: | `airflow` | Apache Airflow DAG file management | - |
 | :lucide-server: | `e2b` | Code execution sandbox | `api_key` |
 | :lucide-server: | `daytona` | Development environments | `api_key` |
+| :lucide-server: | `claude_agent` | Persistent Claude coding sessions with tool use and subagents | `api_key` (recommended) |
 | :lucide-server: | `composio` | API composition | `api_key` |
 | :lucide-server: | `google_bigquery` | Query Google BigQuery - list tables, schemas, run SQL | `dataset`, `project`, `location` |
 
@@ -184,6 +185,54 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 |------|------|-------------|-----------------|
 | :lucide-sliders-horizontal: | `custom_api` | Custom API calls | Varies |
 | :lucide-sliders-horizontal: | `config_manager` | MindRoom configuration management | - |
+
+## Claude Agent Sessions
+
+The `claude_agent` tool manages long-lived Claude coding sessions on the backend.
+This allows iterative coding workflows in the same session (including Claude-side tool usage and subagents).
+
+When using the OpenAI-compatible API, set `X-Session-Id` to keep tool sessions stable across requests.
+See [OpenAI API Compatibility](../openai-api.md#session-continuity).
+
+Add `claude_agent` to an agent's tools in `config.yaml`:
+
+```yaml
+agents:
+  code:
+    display_name: Code Agent
+    role: Coding assistant with persistent Claude sessions
+    model: general
+    tools:
+      - claude_agent
+```
+
+Configure credentials via the dashboard widget or by writing `mindroom_data/credentials/claude_agent_credentials.json`:
+
+```json
+{
+  "api_key": "sk-ant-or-proxy-key",
+  "model": "claude-sonnet-4-5",
+  "permission_mode": "default",
+  "continue_conversation": true,
+  "session_ttl_minutes": 60,
+  "max_sessions": 200
+}
+```
+
+To run through an Anthropic-compatible gateway (for example LiteLLM `/v1/messages`):
+
+```json
+{
+  "api_key": "sk-dummy",
+  "anthropic_base_url": "http://litellm.local",
+  "anthropic_auth_token": "sk-dummy",
+  "disable_experimental_betas": true
+}
+```
+
+Use the gateway host root for `anthropic_base_url` (no `/v1` suffix), because Claude clients append `/v1/messages`.
+Some Anthropic-compatible backends may reject Claude's `anthropic-beta` headers.
+Set `disable_experimental_betas` to `true` in that case.
 
 ## Enabling Tools
 

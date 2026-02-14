@@ -1,9 +1,12 @@
 # ruff: noqa: D100
+import importlib
 import os
 import shutil
 import threading
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 import yaml
 from dotenv import load_dotenv
@@ -27,17 +30,38 @@ from mindroom.api.tools import router as tools_router
 from mindroom.config import Config
 from mindroom.constants import DEFAULT_AGENTS_CONFIG, DEFAULT_CONFIG_TEMPLATE, safe_replace
 from mindroom.credentials_sync import sync_env_to_credentials
+from mindroom.tool_dependencies import auto_install_enabled, auto_install_tool_extra
+
+if TYPE_CHECKING:
+    from supabase import Client as SupabaseClient
 
 # Load environment variables from .env file
 # Look for .env in the widget directory (parent of backend)
 env_path = Path(__file__).parent.parent.parent / ".env"
 load_dotenv(env_path)
 
-app = FastAPI(title="MindRoom Widget Backend")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Manage application startup and shutdown."""
+    print(f"Loading config from: {CONFIG_PATH}")
+    print(f"Config exists: {CONFIG_PATH.exists()}")
+
+    # Sync API keys from environment to CredentialsManager
+    print("Syncing API keys from environment to CredentialsManager...")
+    sync_env_to_credentials()
+
+    yield
+
+    observer.stop()
+    observer.join()
+
+
+app = FastAPI(title="MindRoom Widget Backend", lifespan=lifespan)
 
 # Configure CORS for widget - allow multiple origins including port forwarding
 app.add_middleware(
-    CORSMiddleware,
+    CORSMiddleware,  # ty: ignore[invalid-argument-type]
     allow_origins=[
         "http://localhost:3003",  # Frontend dev server alternative port
         "http://localhost:5173",  # Vite dev server default
@@ -112,14 +136,30 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 ACCOUNT_ID = os.getenv("ACCOUNT_ID")  # optional: enforce instance ownership
 
-_supabase_auth = None
-if SUPABASE_URL and SUPABASE_ANON_KEY:
-    try:
-        from supabase import create_client
 
-        _supabase_auth = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
-    except Exception:
-        _supabase_auth = None
+def _init_supabase_auth(supabase_url: str | None, supabase_anon_key: str | None) -> "SupabaseClient | None":
+    """Initialize Supabase auth client when credentials are configured."""
+    if not supabase_url or not supabase_anon_key:
+        return None
+
+    try:
+        create_client = importlib.import_module("supabase").create_client
+    except ModuleNotFoundError:
+        disabled_hint = ""
+        if not auto_install_enabled():
+            disabled_hint = " Auto-install is disabled by MINDROOM_NO_AUTO_INSTALL_TOOLS."
+        if not auto_install_tool_extra("supabase"):
+            msg = (
+                "SUPABASE_URL and SUPABASE_ANON_KEY are set but the 'supabase' package is not available."
+                f"{disabled_hint} Install it with: pip install 'mindroom[supabase]'"
+            )
+            raise ImportError(msg) from None
+        create_client = importlib.import_module("supabase").create_client
+
+    return create_client(supabase_url, supabase_anon_key)
+
+
+_supabase_auth: "SupabaseClient | None" = _init_supabase_auth(SUPABASE_URL, SUPABASE_ANON_KEY)
 
 
 async def verify_user(authorization: str | None = Header(None)) -> dict:
@@ -206,24 +246,6 @@ app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify
 async def health_check() -> dict[str, str]:
     """Health check endpoint for testing."""
     return {"status": "healthy"}
-
-
-@app.on_event("startup")
-async def startup_event() -> None:
-    """Initialize the application."""
-    print(f"Loading config from: {CONFIG_PATH}")
-    print(f"Config exists: {CONFIG_PATH.exists()}")
-
-    # Sync API keys from environment to CredentialsManager
-    print("Syncing API keys from environment to CredentialsManager...")
-    sync_env_to_credentials()
-
-
-@app.on_event("shutdown")
-async def shutdown_event() -> None:
-    """Clean up on shutdown."""
-    observer.stop()
-    observer.join()
 
 
 @app.post("/api/config/load")

@@ -8,7 +8,18 @@ import pytest
 import pytest_asyncio
 from aioresponses import aioresponses
 
-__all__ = ["TEST_ACCESS_TOKEN", "TEST_PASSWORD", "aioresponse", "bypass_authorization"]
+__all__ = ["TEST_ACCESS_TOKEN", "TEST_PASSWORD", "FakeCredentialsManager", "aioresponse", "bypass_authorization"]
+
+
+class FakeCredentialsManager:
+    """Stub credentials manager for tests that need credential lookup."""
+
+    def __init__(self, credentials_by_service: dict[str, dict[str, object]]) -> None:
+        self._credentials_by_service = credentials_by_service
+
+    def load_credentials(self, service: str) -> dict[str, object]:
+        """Return stored credentials for *service*, or empty dict."""
+        return self._credentials_by_service.get(service, {})
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:

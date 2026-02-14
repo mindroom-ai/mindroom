@@ -9,12 +9,14 @@ import {
   Check,
   DoorOpen,
   Home,
+  KeyRound,
   LayoutDashboard,
   Menu,
   Mic,
   Plug,
   Puzzle,
   Settings2,
+  Sparkles,
   type LucideIcon,
   Users,
 } from 'lucide-react';
@@ -23,6 +25,8 @@ import { AgentList } from '@/components/AgentList/AgentList';
 import { AgentEditor } from '@/components/AgentEditor/AgentEditor';
 import { TeamList } from '@/components/TeamList/TeamList';
 import { TeamEditor } from '@/components/TeamEditor/TeamEditor';
+import { CultureList } from '@/components/CultureList/CultureList';
+import { CultureEditor } from '@/components/CultureEditor/CultureEditor';
 import { RoomList } from '@/components/RoomList/RoomList';
 import { RoomEditor } from '@/components/RoomEditor/RoomEditor';
 import { ModelConfig } from '@/components/ModelConfig/ModelConfig';
@@ -35,6 +39,7 @@ import { SyncStatus } from '@/components/SyncStatus/SyncStatus';
 import { Dashboard } from '@/components/Dashboard/Dashboard';
 import { Skills } from '@/components/Skills/Skills';
 import { Schedules } from '@/components/Schedules/Schedules';
+import { Credentials } from '@/components/Credentials/Credentials';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   Dialog,
@@ -61,12 +66,14 @@ const NAV_ITEMS: NavItem[] = [
   { value: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, group: 'Workspace' },
   { value: 'agents', label: 'Agents', icon: Bot, group: 'Workspace' },
   { value: 'teams', label: 'Teams', icon: Users, group: 'Workspace' },
+  { value: 'cultures', label: 'Culture', icon: Sparkles, group: 'Workspace' },
   { value: 'rooms', label: 'Rooms', icon: Home, group: 'Workspace' },
   { value: 'schedules', label: 'Schedules', icon: CalendarClock, group: 'Workspace' },
   { value: 'unconfigured-rooms', label: 'External', icon: DoorOpen, group: 'Workspace' },
   { value: 'models', label: 'Models', icon: Settings2, group: 'Configuration' },
   { value: 'memory', label: 'Memory', icon: Brain, group: 'Configuration' },
   { value: 'knowledge', label: 'Knowledge', icon: BookOpen, group: 'Configuration' },
+  { value: 'credentials', label: 'Credentials', icon: KeyRound, group: 'Configuration' },
   { value: 'voice', label: 'Voice', icon: Mic, group: 'Configuration' },
   { value: 'integrations', label: 'Tools', icon: Plug, group: 'Configuration' },
   { value: 'skills', label: 'Skills', icon: Puzzle, group: 'Configuration' },
@@ -80,8 +87,15 @@ const NAV_OVERFLOW_ENTER_PX = 1;
 const NAV_OVERFLOW_EXIT_BUFFER_PX = 24;
 
 function AppContent() {
-  const { loadConfig, syncStatus, error, selectedAgentId, selectedTeamId, selectedRoomId } =
-    useConfigStore();
+  const {
+    loadConfig,
+    syncStatus,
+    error,
+    selectedAgentId,
+    selectedTeamId,
+    selectedCultureId,
+    selectedRoomId,
+  } = useConfigStore();
   const navigate = useNavigate();
   const location = useLocation();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -410,6 +424,25 @@ function AppContent() {
               </div>
             </TabsContent>
 
+            <TabsContent value="cultures" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
+                <div
+                  className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
+                    selectedCultureId ? 'hidden lg:block' : 'block'
+                  }`}
+                >
+                  <CultureList />
+                </div>
+                <div
+                  className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
+                    selectedCultureId ? 'block' : 'hidden lg:block'
+                  }`}
+                >
+                  <CultureEditor />
+                </div>
+              </div>
+            </TabsContent>
+
             <TabsContent value="rooms" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
                 <div
@@ -459,6 +492,12 @@ function AppContent() {
             <TabsContent value="knowledge" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
               <div className="h-full overflow-hidden">
                 <Knowledge />
+              </div>
+            </TabsContent>
+
+            <TabsContent value="credentials" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
+              <div className="h-full overflow-hidden">
+                <Credentials />
               </div>
             </TabsContent>
 

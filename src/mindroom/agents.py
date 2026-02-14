@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from agno.agent import Agent
+from agno.culture.manager import CultureManager
 from agno.db.sqlite import SqliteDb
 from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
 
@@ -22,14 +24,35 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.knowledge.protocol import KnowledgeProtocol
+    from agno.models.base import Model
 
-    from .config import AgentConfig, Config, DefaultsConfig
+    from .config import AgentConfig, Config, CultureConfig, CultureMode, DefaultsConfig
 
 logger = get_logger(__name__)
 
 # Maximum length for instruction descriptions to include in agent summary
 MAX_INSTRUCTION_LENGTH = 100
 DEFAULT_AGENT_TOOL_NAMES = ["scheduler"]
+
+
+@dataclass
+class CachedCultureManager:
+    """Cached culture manager with a signature for invalidation on config changes."""
+
+    signature: tuple[str, str]
+    manager: CultureManager
+
+
+@dataclass(frozen=True)
+class CultureAgentSettings:
+    """Culture feature flags to apply to the Agent constructor."""
+
+    add_culture_to_context: bool
+    update_cultural_knowledge: bool
+    enable_agentic_culture: bool
+
+
+_CULTURE_MANAGER_CACHE: dict[tuple[str, str], CachedCultureManager] = {}
 
 
 def get_datetime_context(timezone_str: str) -> str:
@@ -109,13 +132,83 @@ def create_learning_storage(agent_name: str, storage_path: Path) -> SqliteDb:
     return SqliteDb(session_table=f"{agent_name}_learning_sessions", db_file=str(learning_dir / f"{agent_name}.db"))
 
 
-def create_agent(
+def create_culture_storage(culture_name: str, storage_path: Path) -> SqliteDb:
+    """Create persistent culture storage shared by all agents in a culture."""
+    culture_dir = storage_path / "culture"
+    culture_dir.mkdir(parents=True, exist_ok=True)
+    return SqliteDb(db_file=str(culture_dir / f"{culture_name}.db"))
+
+
+def resolve_culture_settings(mode: CultureMode) -> CultureAgentSettings:
+    """Map a culture mode to Agno culture feature flags."""
+    if mode == "automatic":
+        return CultureAgentSettings(
+            add_culture_to_context=True,
+            update_cultural_knowledge=True,
+            enable_agentic_culture=False,
+        )
+    if mode == "agentic":
+        return CultureAgentSettings(
+            add_culture_to_context=True,
+            update_cultural_knowledge=False,
+            enable_agentic_culture=True,
+        )
+    return CultureAgentSettings(
+        add_culture_to_context=True,
+        update_cultural_knowledge=False,
+        enable_agentic_culture=False,
+    )
+
+
+def _culture_signature(culture_config: CultureConfig) -> tuple[str, str]:
+    return (culture_config.mode, culture_config.description)
+
+
+def resolve_agent_culture(
+    agent_name: str,
+    config: Config,
+    storage_path: Path,
+    model: Model,
+) -> tuple[CultureManager | None, CultureAgentSettings | None]:
+    """Resolve shared culture manager and feature flags for an agent."""
+    culture_assignment = config.get_agent_culture(agent_name)
+    if culture_assignment is None:
+        return None, None
+
+    culture_name, culture_config = culture_assignment
+    settings = resolve_culture_settings(culture_config.mode)
+    cache_key = (str(storage_path.resolve()), culture_name)
+    signature = _culture_signature(culture_config)
+    cached_manager = _CULTURE_MANAGER_CACHE.get(cache_key)
+    if cached_manager is not None and cached_manager.signature == signature:
+        cached_manager.manager.model = model
+        return cached_manager.manager, settings
+
+    culture_scope = culture_config.description.strip() or "Shared best practices and principles."
+    culture_manager = CultureManager(
+        model=model,
+        db=create_culture_storage(culture_name, storage_path),
+        culture_capture_instructions=f"Culture '{culture_name}': {culture_scope}",
+        add_knowledge=culture_config.mode != "manual",
+        update_knowledge=culture_config.mode != "manual",
+        delete_knowledge=False,
+        clear_knowledge=False,
+    )
+    _CULTURE_MANAGER_CACHE[cache_key] = CachedCultureManager(
+        signature=signature,
+        manager=culture_manager,
+    )
+    return culture_manager, settings
+
+
+def create_agent(  # noqa: C901, PLR0912, PLR0915
     agent_name: str,
     config: Config,
     *,
     storage_path: Path | None = None,
     knowledge: KnowledgeProtocol | None = None,
     include_default_tools: bool = True,
+    include_interactive_questions: bool = True,
 ) -> Agent:
     """Create an agent instance from configuration.
 
@@ -128,6 +221,9 @@ def create_agent(
         include_default_tools: Whether to include DEFAULT_AGENT_TOOL_NAMES
             (e.g. "scheduler"). Set to False when creating agents outside
             of Matrix context where those tools are unavailable.
+        include_interactive_questions: Whether to include the interactive
+            question authoring prompt. Set to False for channels that do not
+            support Matrix reaction-based question flows.
 
     Returns:
         Configured Agent instance
@@ -223,12 +319,28 @@ def create_agent(
     if skills and skills.get_skill_names():
         instructions.append(agent_prompts.SKILLS_TOOL_USAGE_PROMPT)
 
-    instructions.append(agent_prompts.INTERACTIVE_QUESTION_PROMPT)
+    if include_interactive_questions:
+        instructions.append(agent_prompts.INTERACTIVE_QUESTION_PROMPT)
 
     knowledge_enabled = bool(agent_config.knowledge_bases) and knowledge is not None
+    culture_manager, culture_settings = resolve_agent_culture(
+        agent_name,
+        config,
+        resolved_storage_path,
+        model,
+    )
+
+    add_culture_to_context: bool | None = None
+    update_cultural_knowledge = False
+    enable_agentic_culture = False
+    if culture_settings is not None:
+        add_culture_to_context = culture_settings.add_culture_to_context
+        update_cultural_knowledge = culture_settings.update_cultural_knowledge
+        enable_agentic_culture = culture_settings.enable_agentic_culture
 
     agent = Agent(
         name=agent_config.display_name,
+        id=agent_name,
         role=role,
         model=model,
         tools=tools,
@@ -239,6 +351,10 @@ def create_agent(
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         knowledge=knowledge if knowledge_enabled else None,
         search_knowledge=knowledge_enabled,
+        culture_manager=culture_manager,
+        add_culture_to_context=add_culture_to_context,
+        update_cultural_knowledge=update_cultural_knowledge,
+        enable_agentic_culture=enable_agentic_culture,
     )
     logger.info(f"Created agent '{agent_name}' ({agent_config.display_name}) with {len(tools)} tools")
 

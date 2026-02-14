@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import functools
+import importlib
 from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
@@ -10,6 +12,8 @@ from loguru import logger
 
 from mindroom.config import Config
 from mindroom.plugins import load_plugins
+from mindroom.sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy
+from mindroom.tool_dependencies import auto_install_tool_extra, check_deps_installed
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -41,33 +45,81 @@ def register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable
     return decorator
 
 
-def get_tool_by_name(tool_name: str) -> Toolkit:
+def _build_tool_instance(
+    tool_name: str,
+    *,
+    disable_sandbox_proxy: bool = False,
+    credential_overrides: dict[str, object] | None = None,
+) -> Toolkit:
+    """Instantiate a tool from the registry, applying credentials and sandbox proxy."""
+    tool_class = TOOL_REGISTRY[tool_name]()
+    creds_manager = get_credentials_manager()
+    credentials = creds_manager.load_credentials(tool_name) or {}
+    if credential_overrides:
+        credentials = {**credentials, **credential_overrides}
+    metadata = TOOL_METADATA[tool_name]
+
+    init_kwargs = {}
+    if metadata.config_fields:
+        for field in metadata.config_fields:
+            if field.name in credentials:
+                init_kwargs[field.name] = credentials[field.name]
+
+    toolkit = tool_class(**init_kwargs)
+    if disable_sandbox_proxy:
+        return toolkit
+    return maybe_wrap_toolkit_for_sandbox_proxy(tool_name, toolkit)
+
+
+def get_tool_by_name(
+    tool_name: str,
+    *,
+    disable_sandbox_proxy: bool = False,
+    credential_overrides: dict[str, object] | None = None,
+) -> Toolkit:
     """Get a tool instance by its registered name."""
     if tool_name not in TOOL_REGISTRY:
         available = ", ".join(sorted(TOOL_REGISTRY.keys()))
         msg = f"Unknown tool: {tool_name}. Available tools: {available}"
         raise ValueError(msg)
 
+    build = functools.partial(
+        _build_tool_instance,
+        tool_name,
+        disable_sandbox_proxy=disable_sandbox_proxy,
+        credential_overrides=credential_overrides,
+    )
+
+    # Pre-check dependencies using find_spec (no side effects) before importing
+    metadata = TOOL_METADATA.get(tool_name)
+    deps = metadata.dependencies if metadata and metadata.dependencies else []
+    if deps and not check_deps_installed(deps):
+        if not auto_install_tool_extra(tool_name):
+            missing = ", ".join(deps)
+            logger.warning(f"Missing dependencies for tool '{tool_name}': {missing}")
+            logger.warning(f"Make sure the required dependencies are installed for {tool_name}")
+            msg = f"Missing dependencies for tool '{tool_name}': {missing}"
+            raise ImportError(msg)
+        logger.info(f"Auto-installed optional dependencies for tool '{tool_name}'")
+        importlib.invalidate_caches()
+
     try:
-        tool_factory = TOOL_REGISTRY[tool_name]
-        tool_class = tool_factory()
+        return build()
+    except ImportError as first_error:
+        # Safety net: deps may not be exhaustively listed in metadata
+        if not auto_install_tool_extra(tool_name):
+            logger.warning(f"Could not import tool '{tool_name}': {first_error}")
+            logger.warning(f"Make sure the required dependencies are installed for {tool_name}")
+            raise
 
-        creds_manager = get_credentials_manager()
-        credentials = creds_manager.load_credentials(tool_name) or {}
-        metadata = TOOL_METADATA[tool_name]
+        logger.info(f"Auto-installing optional dependencies for tool '{tool_name}'")
+        importlib.invalidate_caches()
 
-        init_kwargs = {}
-        if metadata.config_fields:
-            for field in metadata.config_fields:
-                if field.name in credentials:
-                    init_kwargs[field.name] = credentials[field.name]
-
-        return tool_class(**init_kwargs)
-
-    except ImportError as e:
-        logger.warning(f"Could not import tool '{tool_name}': {e}")
-        logger.warning(f"Make sure the required dependencies are installed for {tool_name}")
-        raise
+        try:
+            return build()
+        except ImportError as second_error:
+            logger.warning(f"Auto-install did not resolve dependencies for '{tool_name}': {second_error}")
+            raise second_error from first_error
 
 
 class ToolCategory(str, Enum):
@@ -90,7 +142,6 @@ class ToolStatus(str, Enum):
     """Tool availability status."""
 
     AVAILABLE = "available"
-    COMING_SOON = "coming_soon"
     REQUIRES_CONFIG = "requires_config"
 
 
@@ -101,7 +152,6 @@ class SetupType(str, Enum):
     API_KEY = "api_key"  # Requires API key
     OAUTH = "oauth"  # OAuth flow
     SPECIAL = "special"  # Special setup (e.g., for Google)
-    COMING_SOON = "coming_soon"  # Not yet available
 
 
 @dataclass

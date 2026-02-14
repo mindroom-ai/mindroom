@@ -19,12 +19,24 @@ export interface MemoryConfig {
   };
 }
 
+export interface KnowledgeGitConfig {
+  repo_url: string;
+  branch?: string;
+  poll_interval_seconds?: number;
+  credentials_service?: string;
+  skip_hidden?: boolean;
+  include_patterns?: string[];
+  exclude_patterns?: string[];
+}
+
 export interface KnowledgeBaseConfig {
   path: string;
   watch: boolean;
+  git?: KnowledgeGitConfig;
 }
 
 export type LearningMode = 'always' | 'agentic';
+export type CultureMode = 'automatic' | 'agentic' | 'manual';
 
 export interface Agent {
   id: string; // The key in the agents object
@@ -48,6 +60,13 @@ export interface Team {
   rooms: string[];
   mode: 'coordinate' | 'collaborate';
   model?: string; // Optional team-specific model
+}
+
+export interface Culture {
+  id: string; // The key in the cultures object
+  description: string;
+  agents: string[]; // List of agent IDs
+  mode: CultureMode;
 }
 
 export interface Room {
@@ -78,6 +97,7 @@ export interface VoiceConfig {
 export interface Config {
   memory: MemoryConfig;
   knowledge_bases?: Record<string, KnowledgeBaseConfig>;
+  cultures?: Record<string, Omit<Culture, 'id'>>; // Culture configurations
   models: Record<string, ModelConfig>;
   agents: Record<string, Omit<Agent, 'id'>>;
   defaults: {

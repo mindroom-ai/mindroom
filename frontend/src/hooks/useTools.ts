@@ -39,7 +39,7 @@ export function useTools() {
 // Helper function to map backend tool to frontend integration format
 export function mapToolToIntegration(tool: ToolInfo) {
   // Map backend status to frontend status
-  let status: 'connected' | 'not_connected' | 'available' | 'coming_soon';
+  let status: 'connected' | 'not_connected' | 'available';
   switch (tool.status) {
     case 'available':
       // For tools that require configuration, 'available' means they are configured
@@ -56,15 +56,12 @@ export function mapToolToIntegration(tool: ToolInfo) {
     case 'requires_config':
       status = 'not_connected';
       break;
-    case 'coming_soon':
-      status = 'coming_soon';
-      break;
     default:
       status = 'available';
   }
 
   // Map setup_type
-  let setup_type: 'oauth' | 'api_key' | 'special' | 'coming_soon' | 'none';
+  let setup_type: 'oauth' | 'api_key' | 'special' | 'none';
   switch (tool.setup_type) {
     case 'oauth':
       setup_type = 'oauth';
@@ -74,9 +71,6 @@ export function mapToolToIntegration(tool: ToolInfo) {
       break;
     case 'special':
       setup_type = 'special';
-      break;
-    case 'coming_soon':
-      setup_type = 'coming_soon';
       break;
     case 'none':
     default:

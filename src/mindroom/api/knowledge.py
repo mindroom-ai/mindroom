@@ -49,14 +49,19 @@ def _resolve_within_root(root: Path, relative_path: str) -> Path:
     return resolved
 
 
-def _list_file_info(root: Path) -> tuple[list[dict[str, Any]], int]:
+def _list_file_info(root: Path, file_paths: list[Path] | None = None) -> tuple[list[dict[str, Any]], int]:
     files: list[dict[str, Any]] = []
     total_size = 0
 
     if not root.is_dir():
         return files, total_size
 
-    for file_path in sorted(path for path in root.rglob("*") if path.is_file()):
+    paths = (
+        sorted(path for path in root.rglob("*") if path.is_file())
+        if file_paths is None
+        else sorted(path for path in file_paths if path.is_file())
+    )
+    for file_path in paths:
         stat = file_path.stat()
         total_size += stat.st_size
         file_type = file_path.suffix.lstrip(".").lower() if file_path.suffix else "file"
@@ -165,10 +170,11 @@ async def list_knowledge_bases() -> dict[str, Any]:
 
 @router.get("/bases/{base_id}/files")
 async def list_knowledge_files(base_id: str) -> dict[str, Any]:
-    """List all files currently present in one knowledge base folder."""
+    """List all managed files currently present in one knowledge base folder."""
     config = Config.from_yaml()
     root = _knowledge_root(config, base_id)
-    files, total_size = _list_file_info(root)
+    manager = await _ensure_manager(config, base_id)
+    files, total_size = _list_file_info(root, manager.list_files() if manager is not None else None)
 
     return {
         "base_id": base_id,

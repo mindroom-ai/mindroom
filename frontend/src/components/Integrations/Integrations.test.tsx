@@ -27,20 +27,6 @@ const mockTools = [
     docs_url: null,
     dependencies: null,
   },
-  {
-    name: 'news',
-    display_name: 'News',
-    description: 'Get latest news',
-    icon: '📰',
-    icon_color: null,
-    category: 'information',
-    status: 'coming_soon',
-    setup_type: 'coming_soon',
-    config_fields: null,
-    helper_text: null,
-    docs_url: null,
-    dependencies: null,
-  },
 ];
 
 vi.mock('@/hooks/useTools', () => ({
@@ -233,8 +219,6 @@ describe('Integrations', () => {
       // Backend tools
       expect(screen.getByText('Weather')).toBeInTheDocument();
       expect(screen.getByText('Get weather information')).toBeInTheDocument();
-      expect(screen.getByText('News')).toBeInTheDocument();
-      expect(screen.getByText('Get latest news')).toBeInTheDocument();
     });
   });
 
@@ -248,10 +232,6 @@ describe('Integrations', () => {
 
       // Connected integration
       expect(screen.getByText('Connected')).toBeInTheDocument(); // IMDb
-
-      // Coming soon - there might be multiple
-      const comingSoonBadges = screen.getAllByText('Coming Soon');
-      expect(comingSoonBadges.length).toBeGreaterThanOrEqual(1); // At least News
     });
   });
 
@@ -276,7 +256,7 @@ describe('Integrations', () => {
     render(<Integrations />);
 
     await waitFor(() => {
-      expect(screen.getByText('News')).toBeInTheDocument(); // Coming soon
+      expect(screen.getByText('Weather')).toBeInTheDocument();
     });
 
     // Click "Available" filter button
@@ -284,9 +264,7 @@ describe('Integrations', () => {
     fireEvent.click(availableButton);
 
     await waitFor(() => {
-      expect(screen.queryByText('News')).not.toBeInTheDocument(); // Coming soon should be hidden
       expect(screen.getByText('Google Services')).toBeInTheDocument(); // Available
-      // IMDb is connected, not just available, so it won't show with 'available' filter
     });
   });
 
@@ -350,38 +328,6 @@ describe('Integrations', () => {
       // Connected integration
       const disconnectButtons = screen.getAllByRole('button', { name: /Disconnect/ });
       expect(disconnectButtons.length).toBeGreaterThan(0);
-
-      // Coming soon
-      const comingSoonButtons = screen.getAllByRole('button', { name: /Coming Soon/ });
-      expect(comingSoonButtons.length).toBeGreaterThan(0);
-    });
-  });
-
-  it('should handle coming soon integrations', async () => {
-    render(<Integrations />);
-
-    await waitFor(() => {
-      // First click the "Coming Soon" filter to show only coming soon integrations
-      const filterButton = screen.getByRole('button', { name: 'Coming Soon' });
-      fireEvent.click(filterButton);
-    });
-
-    await waitFor(() => {
-      // Now look for the actual integration buttons (not the filter button)
-      // These buttons will have "Coming Soon" text with a star icon
-      const buttons = screen.getAllByRole('button');
-      const comingSoonIntegrationButtons = buttons.filter(
-        btn =>
-          btn.textContent?.includes('Coming Soon') &&
-          btn.querySelector('svg') && // Has an icon (Star icon)
-          !btn.closest('[class*="FilterSelector"]') // Not part of the filter selector
-      );
-
-      // At least one coming soon integration button should exist and be disabled
-      expect(comingSoonIntegrationButtons.length).toBeGreaterThan(0);
-      comingSoonIntegrationButtons.forEach(btn => {
-        expect(btn).toBeDisabled();
-      });
     });
   });
 

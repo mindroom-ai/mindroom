@@ -11,6 +11,7 @@ from mindroom.tool_events import (
     complete_pending_tool_block,
     extract_tool_completed_info,
     format_tool_combined,
+    format_tool_completed_event,
     format_tool_started,
 )
 
@@ -232,6 +233,25 @@ def test_extract_tool_completed_info_uses_tool_result() -> None:
     tool_name, result = info
     assert tool_name == "check"
     assert result == "actual output"
+
+
+def test_format_tool_completed_event_without_tool_returns_empty() -> None:
+    """None tool should return empty text and no trace."""
+    text, trace = format_tool_completed_event(None)
+    assert text == ""
+    assert trace is None
+
+
+def test_format_tool_completed_event_formats_combined_block() -> None:
+    """Completion event helper should render canonical combined <tool> block."""
+    tool = ToolExecution(tool_name="run_shell", tool_args={"cmd": "pwd"}, result="/app")
+    text, trace = format_tool_completed_event(tool)
+    assert text == "\n\n<tool>run_shell(cmd=pwd)\n/app</tool>\n"
+    assert trace is not None
+    assert trace.type == "tool_call_completed"
+    assert trace.tool_name == "run_shell"
+    assert trace.args_preview == "cmd=pwd"
+    assert trace.result_preview == "/app"
 
 
 # --- markdown_to_html: tool block handling ---

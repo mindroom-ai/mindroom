@@ -9,8 +9,8 @@ export interface Integration {
   category: string;
   icon: React.ReactNode;
   iconColor?: string | null;
-  status: 'connected' | 'not_connected' | 'available' | 'coming_soon';
-  setup_type: 'oauth' | 'api_key' | 'special' | 'coming_soon' | 'none';
+  status: 'connected' | 'not_connected' | 'available';
+  setup_type: 'oauth' | 'api_key' | 'special' | 'none';
   connected?: boolean;
   details?: any;
   docs_url?: string | null;

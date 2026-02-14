@@ -33,7 +33,7 @@ logger = get_logger(__name__)
 class ScopedMemoryReader(Protocol):
     """Minimal protocol for reading a memory by ID."""
 
-    async def get(self, memory_id: str) -> object:
+    async def get(self, memory_id: str) -> dict[str, Any] | None:
         """Return the memory payload for a given memory ID."""
 
 

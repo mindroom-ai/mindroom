@@ -37,7 +37,7 @@ def test_client(mock_credentials_manager: CredentialsManager) -> Generator[TestC
         mock_get.return_value = mock_credentials_manager
         client = TestClient(app)
         # Store the mock for use in tests
-        client.mock_manager = mock_credentials_manager  # type: ignore[attr-defined]
+        client.mock_manager = mock_credentials_manager
         yield client
 
 
@@ -281,3 +281,9 @@ class TestCredentialsAPI:
         assert creds is not None
         assert creds["api_key"] == "new"
         assert creds["other_field"] == "value"
+
+    def test_rejects_invalid_service_name(self, test_client: TestClient) -> None:
+        """Test that invalid service names are rejected by the API."""
+        response = test_client.get("/api/credentials/bad!service/status")
+        assert response.status_code == 400
+        assert "Service name can only include" in response.json()["detail"]

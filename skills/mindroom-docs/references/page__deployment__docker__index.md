@@ -18,7 +18,7 @@ docker run -d \
   -v ./config.yaml:/app/config.yaml:ro \
   -v ./mindroom_data:/app/mindroom_data \
   --env-file .env \
-  ghcr.io/basnijholt/mindroom-backend:latest
+  ghcr.io/mindroom-ai/mindroom-backend:latest
 ```
 
 ## Docker Compose
@@ -28,7 +28,7 @@ Create a `docker-compose.yml`:
 ```
 services:
   mindroom:
-    image: ghcr.io/basnijholt/mindroom-backend:latest
+    image: ghcr.io/mindroom-ai/mindroom-backend:latest
     container_name: mindroom
     restart: unless-stopped
     ports:
@@ -122,6 +122,12 @@ MindRoom stores data in the `mindroom_data` directory:
 - `matrix_state.yaml` - Matrix connection state
 - `encryption_keys/` - Matrix E2EE keys (if enabled)
 
+## Sandbox Proxy Isolation
+
+When configured, `shell`, `file`, and `python` tool calls can be proxied to a separate **sandbox-runner** sidecar container. The sidecar runs the same image but without access to secrets, credentials, or the primary data volume. This provides real process-level isolation for code-execution tools. Without proxy configuration, all tools execute locally in the backend process.
+
+See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) for full documentation including Docker Compose examples, Kubernetes sidecar setup, host-machine-with-container mode, credential leases, and environment variable reference.
+
 ## Full Stack with Frontend
 
 For a complete deployment including the dashboard:
@@ -129,7 +135,7 @@ For a complete deployment including the dashboard:
 ```
 services:
   backend:
-    image: ghcr.io/basnijholt/mindroom-backend:latest
+    image: ghcr.io/mindroom-ai/mindroom-backend:latest
     container_name: mindroom-backend
     restart: unless-stopped
     ports:
@@ -143,7 +149,7 @@ services:
       - STORAGE_PATH=/app/mindroom_data
 
   frontend:
-    image: ghcr.io/basnijholt/mindroom-frontend:latest
+    image: ghcr.io/mindroom-ai/mindroom-frontend:latest
     container_name: mindroom-frontend
     restart: unless-stopped
     ports:

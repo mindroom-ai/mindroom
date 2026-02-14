@@ -23,7 +23,7 @@ agents:
 
 Tools are organized by category:
 
-- **Development** - File operations, shell, Docker, GitHub, Jira, Python, Airflow, code execution sandboxes (E2B, Daytona)
+- **Development** - File operations, shell, Docker, GitHub, Jira, Python, Airflow, code execution sandboxes (E2B, Daytona), Claude Agent SDK
 - **Research** - Web search (DuckDuckGo, Tavily, Exa, SerpAPI), academic papers (arXiv, PubMed), Wikipedia, Hacker News, web scraping (Firecrawl, Crawl4AI, Jina)
 - **Communication** - Slack, Discord, Telegram, Twilio, WhatsApp, Webex
 - **Email** - Gmail, AWS SES, Resend, generic SMTP
@@ -77,6 +77,28 @@ agents:
       - slack
       - telegram
       - gmail
+```
+
+## Automatic Dependency Installation
+
+Each tool declares its Python dependencies as an optional extra in `pyproject.toml`. When an agent tries to use a tool whose dependencies aren't installed, MindRoom automatically installs them at runtime:
+
+1. **Pre-check** — uses `importlib.util.find_spec()` to detect missing packages without importing anything
+1. **Locked install** — runs `uv sync --locked --inexact --extra <tool>` to install exact pinned versions from `uv.lock`
+1. **Fallback** — if no lockfile is available, falls back to `uv pip install` or `pip install`
+
+This means you don't need to install all 100+ tool dependencies upfront — only the tools your agents actually use get installed.
+
+To disable auto-install, set the environment variable:
+
+```
+MINDROOM_NO_AUTO_INSTALL_TOOLS=1
+```
+
+To pre-install specific tool dependencies:
+
+```
+uv sync --extra gmail --extra slack --extra github
 ```
 
 See the full list in:

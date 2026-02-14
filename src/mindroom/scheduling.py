@@ -13,8 +13,8 @@ from zoneinfo import ZoneInfo
 import humanize
 import nio
 from agno.agent import Agent
-from cron_descriptor import get_description  # type: ignore[import-untyped]
-from croniter import croniter  # type: ignore[import-untyped]
+from cron_descriptor import get_description
+from croniter import croniter
 from pydantic import BaseModel, Field
 
 from .ai import get_model_instance

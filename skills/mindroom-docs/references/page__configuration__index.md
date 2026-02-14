@@ -58,6 +58,13 @@ teams:
     model: sonnet                  # Optional: Model for team coordination (default: "default")
     rooms: []                      # Optional: Rooms to auto-join
 
+# Culture configurations (optional)
+cultures:
+  engineering:
+    description: Follow clean code principles and write tests  # Shared principles
+    agents: [developer, reviewer]  # Agents assigned (each agent can belong to at most one culture)
+    mode: automatic                # automatic, agentic, or manual
+
 # Router configuration (optional)
 router:
   model: default                   # Optional: Model for routing (default: "default")
@@ -86,6 +93,14 @@ knowledge_bases:
   docs:
     path: ./knowledge_docs/default # Folder containing documents for this base
     watch: true                    # Reindex automatically when files change
+    git:                           # Optional: Sync this folder from a Git repository
+      repo_url: https://github.com/pipefunc/pipefunc
+      branch: main
+      poll_interval_seconds: 300
+      skip_hidden: true
+      include_patterns: ["docs/**"]  # Optional: root-anchored glob filters
+      exclude_patterns: []
+      credentials_service: github_private # Optional: service in CredentialsManager
 
 # Voice message handling (optional)
 voice:
@@ -116,11 +131,74 @@ plugins: []
 timezone: America/Los_Angeles      # Default: UTC
 ```
 
+## Git-backed Knowledge Bases
+
+Each knowledge base can optionally sync from Git by setting `knowledge_bases.<base_id>.git`.
+
+- One knowledge base maps to one local folder and optional one Git repo.
+- You can configure multiple knowledge bases, each with its own `git` settings.
+- Sync behavior is: `git fetch` then `git reset --hard origin/<branch>`.
+- Local uncommitted changes inside that checkout are discarded on sync.
+- Git polling runs even when `watch: false`; `watch` controls only local filesystem watching.
+- GitHub/GitLab webhooks are not part of this V1; updates are pull-based via polling.
+
+### Git Fields
+
+- `repo_url` (required): repository URL to clone/fetch.
+- `branch` (default `main`): branch to track.
+- `poll_interval_seconds` (default `300`, minimum `5`): polling interval.
+- `credentials_service` (optional): service name in CredentialsManager for private HTTPS repos.
+- `skip_hidden` (default `true`): skip files/folders with any path segment starting with `.`.
+- `include_patterns` (optional): root-anchored glob patterns to include (for example `docs/**` or `content/post/*/index.md`).
+- `exclude_patterns` (optional): root-anchored glob patterns excluded after include filtering.
+
+### Pattern Semantics
+
+- Patterns are matched from the repository root.
+- `*` matches one path segment, `**` matches zero or more segments.
+- If `include_patterns` is empty, all non-hidden files are eligible.
+- If `include_patterns` is set, a file must match at least one include pattern.
+- `exclude_patterns` are applied last and remove matching files.
+
+### Private Repository Authentication
+
+For private HTTPS repositories, set credentials under a service name and reference it via `credentials_service`.
+
+```
+curl -X POST http://localhost:8765/api/credentials/github_private \
+  -H "Content-Type: application/json" \
+  -d '{"credentials":{"username":"x-access-token","token":"ghp_your_token_here"}}'
+```
+
+You can also set credentials from the Dashboard **Credentials** tab. The service name must match `credentials_service`.
+
+Expected credential fields for Git HTTPS auth:
+
+- `username` + `token`
+- `username` + `password`
+- `api_key` (uses username `x-access-token` by default if no username is provided)
+
+### Example: Clone Pipefunc, Index Only `docs/`
+
+```
+knowledge_bases:
+  pipefunc_docs:
+    path: ./knowledge_docs/pipefunc
+    watch: false
+    git:
+      repo_url: https://github.com/pipefunc/pipefunc
+      branch: main
+      poll_interval_seconds: 300
+      include_patterns:
+        - "docs/**"
+```
+
 ## Sections
 
 - [Agents](https://docs.mindroom.chat/configuration/agents/index.md) - Configure individual AI agents
 - [Models](https://docs.mindroom.chat/configuration/models/index.md) - Configure AI model providers
 - [Teams](https://docs.mindroom.chat/configuration/teams/index.md) - Configure multi-agent collaboration
+- [Cultures](https://docs.mindroom.chat/configuration/cultures/index.md) - Configure shared agent cultures
 - [Router](https://docs.mindroom.chat/configuration/router/index.md) - Configure message routing
 - [Memory](https://docs.mindroom.chat/memory/index.md) - Configure memory providers and behavior
 - [Knowledge](https://docs.mindroom.chat/dashboard/#knowledge) - Configure file-backed knowledge bases

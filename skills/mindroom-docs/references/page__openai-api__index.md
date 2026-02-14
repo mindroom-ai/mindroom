@@ -89,9 +89,13 @@ endpoints:
       titleModel: "general"
       dropParams: ["stop", "frequency_penalty", "presence_penalty", "top_p"]
       headers:
+        # Highest-priority session key used by MindRoom
+        X-Session-Id: "{{LIBRECHAT_BODY_CONVERSATIONID}}"
+        # Backward-compatible fallback used by MindRoom
         X-LibreChat-Conversation-Id: "{{LIBRECHAT_BODY_CONVERSATIONID}}"
-        X-Tool-Event-Format: "open-webui"
 ```
+
+`X-Session-Id` is recommended when you want deterministic backend session continuity. This is especially important for tools that keep long-lived backend sessions. `X-LibreChat-Conversation-Id` alone is still enough to keep continuity if you already use it.
 
 ### Open WebUI
 
@@ -99,7 +103,6 @@ endpoints:
 1. Set API URL to `http://localhost:8765/v1`
 1. Set API Key to one of your `OPENAI_COMPAT_API_KEYS`
 1. Agents appear automatically in the model picker
-1. To render tool calls as collapsible `<details>` blocks, add a custom request header: `X-Tool-Event-Format: open-webui` in your connection settings
 
 ### Any OpenAI-compatible client
 
@@ -126,7 +129,6 @@ Teams are exposed as `team/<team_name>` models. Selecting `team/super_team` runs
 Tool rendering mode is controlled by `X-Tool-Event-Format`:
 
 - No header: tool events are emitted as inline content text
-- `open-webui`: tool events are rendered as `<details>` HTML blocks in content chunks
 - `openai`: strict OpenAI tool-calling mode (`delta.tool_calls` / `finish_reason: "tool_calls"`)
 
 Strict `openai` mode requirements:
@@ -144,7 +146,16 @@ Session IDs are derived from request headers:
 1. `X-LibreChat-Conversation-Id` header (automatic with LibreChat)
 1. Random UUID fallback
 
-Agent memory and conversation history persist across requests with the same session ID.
+Agent memory and conversation history persist across requests with the same session ID. For persistent backend tool sessions (for example a long-running coding session), prefer `X-Session-Id`.
+
+### Claude Agent tool sessions
+
+If an agent enables the `claude_agent` tool, the same `X-Session-Id` keeps the Claude backend session alive across turns. This lets a user continue one long coding flow instead of starting a fresh Claude process on every request. See [Claude Agent Sessions](https://docs.mindroom.chat/tools/builtin/#claude-agent-sessions) for configuration details.
+
+Parallel Claude sub-sessions are supported by using different `session_label` values in tool calls:
+
+- Same `session_label`: one shared Claude session (serialized by a per-session lock)
+- Different `session_label`: independent Claude sessions that can run concurrently
 
 In strict `openai` mode, MindRoom keeps paused tool-call state in-memory with a short TTL. Use a stable `X-Session-Id` across the initial request and continuation requests.
 

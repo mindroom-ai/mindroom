@@ -18,7 +18,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import Flow  # type: ignore[import-untyped]
+from google_auth_oauthlib.flow import Flow
 from pydantic import BaseModel
 
 from mindroom.credentials import CredentialsManager

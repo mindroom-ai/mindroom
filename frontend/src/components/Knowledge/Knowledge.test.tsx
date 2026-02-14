@@ -74,7 +74,10 @@ function setKnowledgeApiMock(payloadByBase: Record<string, KnowledgeApiPayloads>
   });
 }
 
-function mockStore(knowledgeBases: Record<string, KnowledgeBaseConfig>) {
+function mockStore(
+  knowledgeBases: Record<string, KnowledgeBaseConfig>,
+  options: { isDirty?: boolean } = {}
+) {
   const storeMock = useConfigStore as unknown as Mock;
   storeMock.mockReturnValue({
     config: {
@@ -83,7 +86,7 @@ function mockStore(knowledgeBases: Record<string, KnowledgeBaseConfig>) {
     updateKnowledgeBase: mockUpdateKnowledgeBase,
     deleteKnowledgeBase: mockDeleteKnowledgeBase,
     saveConfig: mockSaveConfig,
-    isDirty: false,
+    isDirty: options.isDirty ?? false,
   });
 }
 
@@ -219,5 +222,205 @@ describe('Knowledge', () => {
     });
     expect(screen.getByText('Active: beta')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Delete Active Base' })).not.toBeDisabled();
+  });
+
+  it('creates a git-based knowledge base in one step', async () => {
+    mockStore({});
+    setKnowledgeApiMock({
+      docs_git: {
+        status: {
+          base_id: 'docs_git',
+          folder_path: './knowledge_docs/docs_git',
+          watch: true,
+          file_count: 0,
+          indexed_count: 0,
+        },
+        files: {
+          base_id: 'docs_git',
+          files: [],
+          total_size: 0,
+          file_count: 0,
+        },
+      },
+    });
+
+    render(<Knowledge />);
+    await screen.findByText('Knowledge Bases');
+
+    fireEvent.change(screen.getByLabelText('Base Name'), { target: { value: 'docs_git' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create git source' }));
+    fireEvent.change(screen.getByLabelText('Repository URL'), {
+      target: { value: 'https://github.com/org/repo' },
+    });
+    fireEvent.change(screen.getByLabelText('Branch'), { target: { value: 'develop' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create Git Base' }));
+
+    await waitFor(() => {
+      expect(mockUpdateKnowledgeBase).toHaveBeenCalledWith(
+        'docs_git',
+        expect.objectContaining({
+          path: './knowledge_docs/docs_git',
+          watch: true,
+          git: expect.objectContaining({
+            repo_url: 'https://github.com/org/repo',
+            branch: 'develop',
+            poll_interval_seconds: 300,
+            skip_hidden: true,
+          }),
+        })
+      );
+      expect(mockSaveConfig).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('shows git badge and repo details on git knowledge base cards', async () => {
+    mockStore({
+      local_docs: { path: './knowledge_docs/local_docs', watch: true },
+      git_docs: {
+        path: './knowledge_docs/git_docs',
+        watch: true,
+        git: {
+          repo_url: 'https://github.com/org/git-docs',
+          branch: 'release',
+        },
+      },
+    });
+    setKnowledgeApiMock({});
+
+    render(<Knowledge />);
+    await screen.findByText('Knowledge Bases');
+
+    const gitCard = screen.getByRole('button', { name: /git_docs/i });
+    expect(gitCard).toHaveTextContent('Git');
+    expect(gitCard).toHaveTextContent('https://github.com/org/git-docs');
+    expect(gitCard).toHaveTextContent('Branch: release');
+  });
+
+  it('switches source type in settings and toggles git fields', async () => {
+    mockStore({
+      docs: { path: './knowledge_docs/docs', watch: true },
+    });
+    setKnowledgeApiMock({
+      docs: {
+        status: {
+          base_id: 'docs',
+          folder_path: './knowledge_docs/docs',
+          watch: true,
+          file_count: 0,
+          indexed_count: 0,
+        },
+        files: {
+          base_id: 'docs',
+          files: [],
+          total_size: 0,
+          file_count: 0,
+        },
+      },
+    });
+
+    render(<Knowledge />);
+    await screen.findByText('Active: docs');
+
+    expect(screen.getByLabelText('Folder Path')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Repository URL')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings git source' }));
+
+    expect(screen.getByLabelText('Repository URL')).toBeInTheDocument();
+    expect(screen.getByLabelText('Folder Path')).toBeInTheDocument();
+    expect(mockUpdateKnowledgeBase).toHaveBeenCalledWith(
+      'docs',
+      expect.objectContaining({
+        git: expect.objectContaining({
+          repo_url: '',
+          branch: 'main',
+          poll_interval_seconds: 300,
+          skip_hidden: true,
+        }),
+      })
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings local source' }));
+
+    expect(screen.queryByLabelText('Repository URL')).not.toBeInTheDocument();
+    expect(mockUpdateKnowledgeBase).toHaveBeenLastCalledWith(
+      'docs',
+      expect.objectContaining({ git: undefined })
+    );
+  });
+
+  it('saves updated git settings from base settings', async () => {
+    mockStore(
+      {
+        docs: {
+          path: './knowledge_docs/docs',
+          watch: true,
+          git: {
+            repo_url: 'https://github.com/org/repo',
+            branch: 'main',
+          },
+        },
+      },
+      { isDirty: true }
+    );
+    setKnowledgeApiMock({
+      docs: {
+        status: {
+          base_id: 'docs',
+          folder_path: './knowledge_docs/docs',
+          watch: true,
+          file_count: 0,
+          indexed_count: 0,
+        },
+        files: {
+          base_id: 'docs',
+          files: [],
+          total_size: 0,
+          file_count: 0,
+        },
+      },
+    });
+
+    render(<Knowledge />);
+    await screen.findByText('Active: docs');
+
+    fireEvent.change(screen.getByLabelText('Repository URL'), {
+      target: { value: '  https://github.com/org/repo-updated  ' },
+    });
+    fireEvent.change(screen.getByLabelText('Branch'), {
+      target: { value: '  release  ' },
+    });
+    fireEvent.change(screen.getByLabelText('Poll Interval (seconds)'), {
+      target: { value: '45' },
+    });
+    fireEvent.change(screen.getByLabelText('Credentials Service (optional)'), {
+      target: { value: '  github-private  ' },
+    });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Skip Hidden Files' }));
+    fireEvent.change(screen.getByLabelText('Include Patterns (optional)'), {
+      target: { value: 'docs/**\nknowledge/**' },
+    });
+    fireEvent.change(screen.getByLabelText('Exclude Patterns (optional)'), {
+      target: { value: 'docs/private/**' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Settings' }));
+    await waitFor(() => {
+      expect(mockSaveConfig).toHaveBeenCalledTimes(1);
+      expect(mockUpdateKnowledgeBase).toHaveBeenLastCalledWith(
+        'docs',
+        expect.objectContaining({
+          git: {
+            repo_url: 'https://github.com/org/repo-updated',
+            branch: 'release',
+            poll_interval_seconds: 45,
+            credentials_service: 'github-private',
+            skip_hidden: false,
+            include_patterns: ['docs/**', 'knowledge/**'],
+            exclude_patterns: ['docs/private/**'],
+          },
+        })
+      );
+    });
   });
 });
