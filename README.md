@@ -104,7 +104,6 @@ Writer: I'll compile everything into an executive summary...
 ### 🧠 Dual Memory System
 - **Agent Memory**: Each agent remembers conversations, preferences, and patterns across all platforms
 - **Room Memory**: Contextual knowledge that stays within specific rooms (work projects, personal notes)
-- Tags for sharing memories across related threads
 
 ### 🤝 Multi-Agent Collaboration
 ```
@@ -132,7 +131,7 @@ Gmail, GitHub, Spotify, Home Assistant, Google Drive, Reddit, weather services, 
 ### 📅 Automation & Scheduling
 - Daily check-ins from your mindfulness agent
 - Scheduled reports and summaries
-- Event-based triggers (coming soon)
+- Event-driven workflows (conditional requests converted to polling schedules)
 - Background tasks with human escalation
 
 ## Who This Is For

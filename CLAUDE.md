@@ -30,7 +30,7 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 | `config.py` | Pydantic models for YAML config parsing |
 | `routing.py` | Intelligent agent selection when no agent is mentioned |
 | `teams.py` | Multi-agent collaboration (coordinate vs collaborate modes) |
-| `memory/` | Mem0-inspired dual memory: agent, room, and team-scoped |
+| `memory/` | Mem0 dual memory: agent, room, and team-scoped |
 | `knowledge.py` | Knowledge base / RAG file indexing with watcher |
 | `skills.py` | Skill integration system (OpenClaw-compatible) |
 | `plugins.py` | Plugin loading and tool/skill extension |
@@ -40,6 +40,11 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 | `ai.py` | AI model instantiation, caching, and response generation |
 | `credentials.py` | Unified credential management (CredentialsManager) |
 | `matrix/` | Matrix protocol integration (client, users, rooms, presence) |
+| `commands.py` | Chat command parsing (`!help`, `!schedule`, `!skill`, etc.) |
+| `voice_handler.py` | Voice message download, transcription, and command recognition |
+| `sandbox_proxy.py` | Container sandbox proxy for isolating shell/python tools |
+| `streaming.py` | Response streaming via progressive message edits |
+| `agent_prompts.py` | Rich built-in prompts for named agents (code, research, etc.) |
 
 **Persistent state** lives under `mindroom_data/` (overridable via `STORAGE_PATH`):
 - `sessions/` – Per-agent SQLite event history for Agno conversations
@@ -119,7 +124,7 @@ timezone: America/Los_Angeles
 
 ### Memory System
 
-Mem0-inspired dual memory (`src/mindroom/memory/functions.py`):
+Mem0 dual memory (`src/mindroom/memory/functions.py`):
 - **Agent memory** (`agent_<name>`) – Personal preferences, coding style, tasks
 - **Team memory** – Shared context for team collaboration
 - **Room memory** (`room_<id>`) – Project-specific knowledge
@@ -150,6 +155,7 @@ Teams (`src/mindroom/teams.py`) let multiple agents work together:
 - **Explore the Codebase**: List existing files and read the `README.md` to understand the project's structure and purpose.
 - **READ THE SOURCE CODE**: This library has a `.venv` folder with all the dependencies installed. So read the source code when in doubt.
 - **Consult Documentation**: Review documentation capabilities! If you're unsure, never guess. Do a search online.
+- **Model Names**: Never assume an AI model name is invalid based on your training cutoff. Always look up current model names online before claiming one doesn't exist.
 
 ### Step 2: Environment & Dependencies
 
@@ -184,7 +190,7 @@ curl -s http://localhost:9292/v1/models | head -c 200
 - Add `extra_kwargs.base_url: http://localhost:9292/v1` for those models
 - For memory, prefer `provider: openai` and an embedding model that exists (e.g., `embeddinggemma:300m`)
 
-5) Run the backend with explicit env overrides (use Python 3.13)
+5) Run the backend with explicit env overrides (use Python 3.13; production Dockerfile uses 3.12)
 ```bash
 MATRIX_HOMESERVER=http://localhost:8008 \
 MATRIX_SSL_VERIFY=false \
@@ -236,7 +242,7 @@ cd cluster/k8s/platform
 helm upgrade --install platform . -f values.yaml --namespace mindroom-staging
 
 # Deploy instance - ALWAYS use the provisioner API:
-./scripts/mindroom-cli.sh provision 1
+./cluster/scripts/mindroom-cli.sh provision 1
 
 # The provisioner handles everything:
 # - Creates database records
@@ -259,9 +265,9 @@ cd saas-platform
 ./deploy.sh platform-backend   # Build, push, and deploy backend
 
 # Use the CLI helper for common operations
-./scripts/mindroom-cli.sh status
-./scripts/mindroom-cli.sh list
-./scripts/mindroom-cli.sh logs 1
+./cluster/scripts/mindroom-cli.sh status
+./cluster/scripts/mindroom-cli.sh list
+./cluster/scripts/mindroom-cli.sh logs 1
 ```
 
 ### Step 3: Development & Git

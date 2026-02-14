@@ -51,14 +51,16 @@ The `host` field is converted internally to `openai_base_url` or `ollama_base_ur
 
 Memories are stored in ChromaDB at `<storage_path>/chroma/` with collection name `mindroom_memories`.
 
-## Mem0 Tool (Optional)
+## Memory Tool (Optional)
 
-For explicit memory control, add the `mem0` tool to an agent:
+For explicit memory control, add the `memory` tool to an agent:
 
 ```yaml
 agents:
   assistant:
-    tools: [mem0]
+    tools: [memory]
 ```
 
 This provides functions: `add_memory`, `search_memory`, `get_all_memories`, `delete_all_memories`.
+
+Note: The `memory` tool is for the built-in agent memory system. The separate `mem0` tool is for Mem0's cloud service.

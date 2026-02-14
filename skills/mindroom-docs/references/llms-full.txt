@@ -520,7 +520,7 @@ MINDROOM_CONFIG_PATH=/path/to/config.yaml mindroom run
 You can also validate a specific file directly:
 
 ```
-mindroom validate --config /path/to/config.yaml
+mindroom validate --config /path/to/config.yaml  # or: -c
 ```
 
 ## Basic Structure
@@ -1177,7 +1177,7 @@ agents:
 
 Tools are organized by category:
 
-- **Development** - File operations, shell, Docker, GitHub, Jira, Python, Airflow, code execution sandboxes (E2B, Daytona), Claude Agent SDK
+- **Development** - File operations, shell, Docker, GitHub, Jira, Python, Airflow, code execution sandboxes (E2B, Daytona, or MindRoom's built-in [container sandbox proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md)), Claude Agent SDK
 - **Research** - Web search (DuckDuckGo, Tavily, Exa, SerpAPI), academic papers (arXiv, PubMed), Wikipedia, Hacker News, web scraping (Firecrawl, Crawl4AI, Jina)
 - **Communication** - Slack, Discord, Telegram, Twilio, WhatsApp, Webex
 - **Email** - Gmail, AWS SES, Resend, generic SMTP
@@ -1378,10 +1378,11 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 
 ## Calendar & Scheduling
 
-| Icon              | Tool              | Description                | Config Required |
-| ----------------- | ----------------- | -------------------------- | --------------- |
-| :lucide-calendar: | `google_calendar` | View and schedule meetings | Google OAuth    |
-| :lucide-calendar: | `cal_com`         | Cal.com scheduling         | `api_key`       |
+| Icon              | Tool              | Description                                          | Config Required |
+| ----------------- | ----------------- | ---------------------------------------------------- | --------------- |
+| :lucide-calendar: | `google_calendar` | View and schedule meetings                           | Google OAuth    |
+| :lucide-calendar: | `cal_com`         | Cal.com scheduling                                   | `api_key`       |
+| :lucide-calendar: | `scheduler`       | Schedule, edit, list, and cancel tasks and reminders | -               |
 
 ## Data & Business
 
@@ -1432,10 +1433,11 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 
 ## Memory & Storage
 
-| Icon              | Tool   | Description              | Config Required                |
-| ----------------- | ------ | ------------------------ | ------------------------------ |
-| :lucide-database: | `mem0` | Persistent memory system | `api_key` (optional for cloud) |
-| :lucide-database: | `zep`  | Conversation memory      | `api_key`                      |
+| Icon              | Tool     | Description                                          | Config Required                |
+| ----------------- | -------- | ---------------------------------------------------- | ------------------------------ |
+| :lucide-database: | `memory` | Explicitly store and search agent memories on demand | -                              |
+| :lucide-database: | `mem0`   | Persistent memory system                             | `api_key` (optional for cloud) |
+| :lucide-database: | `zep`    | Conversation memory                                  | `api_key`                      |
 
 ## Custom & Config
 
@@ -1915,17 +1917,19 @@ The `host` field is converted internally to `openai_base_url` or `ollama_base_ur
 
 Memories are stored in ChromaDB at `<storage_path>/chroma/` with collection name `mindroom_memories`.
 
-## Mem0 Tool (Optional)
+## Memory Tool (Optional)
 
-For explicit memory control, add the `mem0` tool to an agent:
+For explicit memory control, add the `memory` tool to an agent:
 
 ```
 agents:
   assistant:
-    tools: [mem0]
+    tools: [memory]
 ```
 
 This provides functions: `add_memory`, `search_memory`, `get_all_memories`, `delete_all_memories`.
+
+Note: The `memory` tool is for the built-in agent memory system. The separate `mem0` tool is for Mem0's cloud service.
 
 # Voice Messages
 
