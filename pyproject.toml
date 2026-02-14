@@ -33,6 +33,7 @@ dependencies = [
   "cartesia",                                          # for Cartesia tool
   "cerebras-cloud-sdk>=1.46",                          # for Cerebras model
   "chromadb>=1.0.15",
+  "claude-agent-sdk>=0.1.35",
   "composio-agno",                                     # for Composio tool
   "crawl4ai>=0.7.3",                                   # for Crawl4AI tool
   "cron-descriptor>=1.4.5",

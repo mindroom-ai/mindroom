@@ -340,6 +340,7 @@ def create_agent(  # noqa: C901, PLR0912, PLR0915
 
     agent = Agent(
         name=agent_config.display_name,
+        id=agent_name,
         role=role,
         model=model,
         tools=tools,
