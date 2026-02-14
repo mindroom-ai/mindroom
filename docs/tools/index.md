@@ -83,6 +83,29 @@ agents:
       - gmail
 ```
 
+## Automatic Dependency Installation
+
+Each tool declares its Python dependencies as an optional extra in `pyproject.toml`.
+When an agent tries to use a tool whose dependencies aren't installed, MindRoom automatically installs them at runtime:
+
+1. **Pre-check** — uses `importlib.util.find_spec()` to detect missing packages without importing anything
+2. **Locked install** — runs `uv sync --locked --inexact --extra <tool>` to install exact pinned versions from `uv.lock`
+3. **Fallback** — if no lockfile is available, falls back to `uv pip install` or `pip install`
+
+This means you don't need to install all 100+ tool dependencies upfront — only the tools your agents actually use get installed.
+
+To disable auto-install, set the environment variable:
+
+```bash
+MINDROOM_NO_AUTO_INSTALL_TOOLS=1
+```
+
+To pre-install specific tool dependencies:
+
+```bash
+uv sync --extra gmail --extra slack --extra github
+```
+
 See the full list in:
 
 - [Built-in Tools](builtin.md) - Complete list of available built-in tools with configuration details
