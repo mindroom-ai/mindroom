@@ -43,6 +43,7 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
 │ version   Show the current version of Mindroom.                                        │
 │ run       Run the mindroom multi-agent system.                                         │
+│ proxy     Run the tool-calling proxy for OpenAI-compatible UIs.                        │
 │ config    Manage MindRoom configuration files.                                         │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
