@@ -70,22 +70,6 @@ if TYPE_CHECKING:
             description="Continue the same Claude conversation context across queries in a session.",
         ),
         ConfigField(
-            name="resume",
-            label="Resume Session ID",
-            type="text",
-            required=False,
-            default=None,
-            description="Optional Claude session ID to resume.",
-        ),
-        ConfigField(
-            name="fork_session",
-            label="Fork Session",
-            type="boolean",
-            required=False,
-            default=False,
-            description="Fork from the resumed Claude session instead of continuing it directly.",
-        ),
-        ConfigField(
             name="allowed_tools",
             label="Allowed Tools",
             type="text",

@@ -256,8 +256,8 @@ def test_claude_agent_tool_registered_in_metadata() -> None:
 @pytest.mark.parametrize(
     ("method_name", "expected_params"),
     [
-        ("claude_start_session", ("session_label", "run_context", "agent")),
-        ("claude_send", ("prompt", "session_label", "run_context", "agent")),
+        ("claude_start_session", ("session_label", "resume", "fork_session", "run_context", "agent")),
+        ("claude_send", ("prompt", "session_label", "resume", "fork_session", "run_context", "agent")),
         ("claude_session_status", ("session_label", "run_context", "agent")),
         ("claude_interrupt", ("session_label", "run_context", "agent")),
         ("claude_end_session", ("session_label", "run_context", "agent")),
@@ -317,17 +317,21 @@ async def test_claude_send_sets_gateway_env_vars(fake_manager: claude_agent_modu
 async def test_claude_send_sets_session_control_options(
     fake_manager: claude_agent_module.ClaudeSessionManager,  # noqa: ARG001
 ) -> None:
-    """Claude session control fields should pass through to ClaudeAgentOptions."""
+    """Runtime session control fields should pass through to ClaudeAgentOptions."""
     tools = claude_agent_module.ClaudeAgentTools(
         api_key="sk-test",
         continue_conversation=True,
-        resume="session_resume_123",
-        fork_session=True,
     )
     run_context = RunContext(run_id="run-1", session_id="session-1")
     agent = SimpleNamespace(name="general")
 
-    await tools.claude_send("hello", run_context=run_context, agent=agent)
+    await tools.claude_send(
+        "hello",
+        resume="session_resume_123",
+        fork_session=True,
+        run_context=run_context,
+        agent=agent,
+    )
 
     options = _FakeClaudeSDKClient.instances[0].options
     assert options.continue_conversation is True
@@ -560,11 +564,11 @@ async def test_claude_send_error_does_not_deadlock(
 
 
 @pytest.mark.asyncio
-async def test_claude_send_error_includes_configured_session_hints(
+async def test_claude_send_error_includes_runtime_session_hints(
     fake_manager: claude_agent_module.ClaudeSessionManager,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Error output should include session configuration hints for LLM self-correction."""
+    """Error output should include runtime session hints for LLM self-correction."""
 
     class _FailingClaudeSDKClient(_FakeClaudeSDKClient):
         async def query(self, prompt: str, session_id: str = "default") -> None:  # noqa: ARG002
@@ -576,14 +580,21 @@ async def test_claude_send_error_includes_configured_session_hints(
     tools = claude_agent_module.ClaudeAgentTools(
         api_key="sk-test",
         continue_conversation=True,
-        resume="resume-xyz",
-        fork_session=True,
         cwd="/workspace/demo-cwd",
     )
     run_context = RunContext(run_id="run-1", session_id="session-1")
     agent = SimpleNamespace(name="general")
 
-    result = await asyncio.wait_for(tools.claude_send("hello", run_context=run_context, agent=agent), timeout=1)
+    result = await asyncio.wait_for(
+        tools.claude_send(
+            "hello",
+            resume="resume-xyz",
+            fork_session=True,
+            run_context=run_context,
+            agent=agent,
+        ),
+        timeout=1,
+    )
 
     assert "Claude session error: boom" in result
     assert "Session context:" in result
@@ -611,14 +622,17 @@ async def test_claude_start_session_error_includes_context(
     tools = claude_agent_module.ClaudeAgentTools(
         api_key="sk-test",
         continue_conversation=True,
-        resume="resume-xyz",
-        fork_session=False,
         cwd="/workspace/demo-cwd",
     )
     run_context = RunContext(run_id="run-1", session_id="session-1")
     agent = SimpleNamespace(name="general")
 
-    result = await tools.claude_start_session(run_context=run_context, agent=agent)
+    result = await tools.claude_start_session(
+        resume="resume-xyz",
+        fork_session=False,
+        run_context=run_context,
+        agent=agent,
+    )
 
     assert "Failed to start Claude session: connect failed" in result
     assert "Session context:" in result

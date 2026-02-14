@@ -140,7 +140,7 @@ Agent memory and conversation history persist across requests with the same sess
 
 ### Claude Agent tool sessions
 
-If an agent enables the `claude_agent` tool, the same `X-Session-Id` keeps the Claude backend session alive across turns. This lets a user continue one long coding flow instead of starting a fresh Claude process on every request. You can also control Claude-side session behavior via `tool_config.claude_agent` (`continue_conversation`, `resume`, `fork_session`).
+If an agent enables the `claude_agent` tool, the same `X-Session-Id` keeps the Claude backend session alive across turns. This lets a user continue one long coding flow instead of starting a fresh Claude process on every request. Static `tool_config.claude_agent` can set defaults like `continue_conversation`. `resume` and `fork_session` are runtime tool-call arguments (`claude_start_session` / `claude_send`), not static config.
 
 Parallel Claude sub-sessions are supported by using different `session_label` values in tool calls:
 

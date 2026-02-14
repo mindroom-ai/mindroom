@@ -1107,28 +1107,6 @@
         },
         {
           "default": null,
-          "description": "Optional Claude session ID to resume.",
-          "label": "Resume Session ID",
-          "name": "resume",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Fork from the resumed Claude session instead of continuing it directly.",
-          "label": "Fork Session",
-          "name": "fork_session",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": null,
           "description": "Comma-separated Claude Code tool names",
           "label": "Allowed Tools",
           "name": "allowed_tools",

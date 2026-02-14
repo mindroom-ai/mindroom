@@ -198,8 +198,6 @@ class ClaudeAgentTools(Toolkit):
         model: str | None = None,
         permission_mode: str | None = DEFAULT_PERMISSION_MODE,
         continue_conversation: bool = False,
-        resume: str | None = None,
-        fork_session: bool = False,
         allowed_tools: str | None = None,
         disallowed_tools: str | None = None,
         max_turns: int | None = None,
@@ -216,8 +214,6 @@ class ClaudeAgentTools(Toolkit):
         self.model = model
         self.permission_mode = _normalize_permission_mode(permission_mode)
         self.continue_conversation = continue_conversation
-        self.resume = resume
-        self.fork_session = fork_session
         self.allowed_tools = allowed_tools
         self.disallowed_tools = disallowed_tools
         self.max_turns = _parse_optional_int(max_turns, minimum=1)
@@ -241,7 +237,13 @@ class ClaudeAgentTools(Toolkit):
             ],
         )
 
-    def _build_options(self, stderr_callback: StdCallable[[str], None] | None = None) -> ClaudeAgentOptions:
+    def _build_options(
+        self,
+        stderr_callback: StdCallable[[str], None] | None = None,
+        *,
+        resume: str | None = None,
+        fork_session: bool = False,
+    ) -> ClaudeAgentOptions:
         env: dict[str, str] = {}
         if self.api_key:
             env["ANTHROPIC_API_KEY"] = self.api_key
@@ -257,8 +259,8 @@ class ClaudeAgentTools(Toolkit):
             model=self.model,
             permission_mode=self.permission_mode,
             continue_conversation=self.continue_conversation,
-            resume=self.resume,
-            fork_session=self.fork_session,
+            resume=resume,
+            fork_session=fork_session,
             allowed_tools=_parse_csv_list(self.allowed_tools),
             disallowed_tools=_parse_csv_list(self.disallowed_tools),
             max_turns=self.max_turns,
@@ -286,17 +288,19 @@ class ClaudeAgentTools(Toolkit):
         message: str,
         *,
         session_key: str,
+        resume: str | None,
+        fork_session: bool,
         stderr_lines: list[str],
     ) -> str:
         details = [
             "Session context:",
             f"- session_key: {session_key}",
             f"- continue_conversation: {self.continue_conversation}",
-            f"- resume: {self.resume or '(none)'}",
-            f"- fork_session: {self.fork_session}",
+            f"- resume: {resume or '(none)'}",
+            f"- fork_session: {fork_session}",
             f"- cwd: {self.cwd or '(default)'}",
         ]
-        if self.resume:
+        if resume:
             details.append("- note: `resume` must exist for the selected working-directory conversation context.")
         if stderr_lines:
             details.append("Recent Claude CLI stderr:")
@@ -332,10 +336,16 @@ class ClaudeAgentTools(Toolkit):
     async def claude_start_session(
         self,
         session_label: str | None = None,
+        resume: str | None = None,
+        fork_session: bool = False,
         run_context: RunContext | None = None,
         agent: Agent | None = None,
     ) -> str:
         """Start or reuse a persistent Claude coding session for this conversation."""
+        normalized_resume = resume.strip() if isinstance(resume, str) else None
+        if fork_session and not normalized_resume:
+            return "Invalid session options: `fork_session` requires a non-empty `resume` session ID."
+
         namespace = self._namespace(agent)
         self._ensure_namespace_config(namespace)
         session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)
@@ -344,14 +354,21 @@ class ClaudeAgentTools(Toolkit):
             session, created = await _SESSION_MANAGER.get_or_create(
                 session_key,
                 namespace,
-                self._build_options(stderr_callback),
+                self._build_options(stderr_callback, resume=normalized_resume, fork_session=fork_session),
             )
             if created:
                 session.stderr_lines = stderr_lines
+            elif normalized_resume or fork_session:
+                return (
+                    f"Session `{session_key}` already exists; runtime `resume`/`fork_session` apply only when creating "
+                    "a new session. Use a different `session_label` or call `claude_end_session` first."
+                )
         except Exception as exc:
             return self._format_session_error(
                 f"Failed to start Claude session: {exc}",
                 session_key=session_key,
+                resume=normalized_resume,
+                fork_session=fork_session,
                 stderr_lines=stderr_lines,
             )
         action = "Started" if created else "Reusing"
@@ -361,6 +378,8 @@ class ClaudeAgentTools(Toolkit):
         self,
         prompt: str,
         session_label: str | None = None,
+        resume: str | None = None,
+        fork_session: bool = False,
         run_context: RunContext | None = None,
         agent: Agent | None = None,
     ) -> str:
@@ -368,6 +387,9 @@ class ClaudeAgentTools(Toolkit):
         trimmed_prompt = prompt.strip()
         if not trimmed_prompt:
             return "Prompt is required."
+        normalized_resume = resume.strip() if isinstance(resume, str) else None
+        if fork_session and not normalized_resume:
+            return "Invalid session options: `fork_session` requires a non-empty `resume` session ID."
 
         namespace = self._namespace(agent)
         self._ensure_namespace_config(namespace)
@@ -378,14 +400,21 @@ class ClaudeAgentTools(Toolkit):
             session, created = await _SESSION_MANAGER.get_or_create(
                 session_key,
                 namespace,
-                self._build_options(stderr_callback),
+                self._build_options(stderr_callback, resume=normalized_resume, fork_session=fork_session),
             )
             if created:
                 session.stderr_lines = startup_stderr_lines
+            elif normalized_resume or fork_session:
+                return (
+                    f"Session `{session_key}` already exists; runtime `resume`/`fork_session` apply only when creating "
+                    "a new session. Use a different `session_label` or call `claude_end_session` first."
+                )
         except Exception as exc:
             return self._format_session_error(
                 f"Failed to start Claude session: {exc}",
                 session_key=session_key,
+                resume=normalized_resume,
+                fork_session=fork_session,
                 stderr_lines=startup_stderr_lines,
             )
 
@@ -402,12 +431,16 @@ class ClaudeAgentTools(Toolkit):
                 session_error = self._format_session_error(
                     f"Claude session error: {exc}",
                     session_key=session_key,
+                    resume=normalized_resume,
+                    fork_session=fork_session,
                     stderr_lines=session.stderr_lines,
                 )
             except Exception as exc:
                 session_error = self._format_session_error(
                     f"Unexpected Claude session error: {exc}",
                     session_key=session_key,
+                    resume=normalized_resume,
+                    fork_session=fork_session,
                     stderr_lines=session.stderr_lines,
                 )
 
@@ -415,13 +448,7 @@ class ClaudeAgentTools(Toolkit):
             await _SESSION_MANAGER.close(session_key)
             return session_error
 
-        lines = [response_text]
-        if result is not None and result.total_cost_usd is not None:
-            lines.append(f"[Claude session cost: ${result.total_cost_usd:.4f}]")
-        if tool_names:
-            unique_tools = ", ".join(sorted(set(tool_names)))
-            lines.append(f"[Claude tools used: {unique_tools}]")
-        return "\n\n".join(line for line in lines if line)
+        return self._format_response_output(response_text, tool_names, result)
 
     async def _collect_response(
         self,
@@ -451,6 +478,20 @@ class ClaudeAgentTools(Toolkit):
         if result is not None and result.is_error:
             return f"Claude reported an error: {response_text}", tool_names, result
         return response_text, tool_names, result
+
+    def _format_response_output(
+        self,
+        response_text: str,
+        tool_names: list[str],
+        result: ResultMessage | None,
+    ) -> str:
+        lines = [response_text]
+        if result is not None and result.total_cost_usd is not None:
+            lines.append(f"[Claude session cost: ${result.total_cost_usd:.4f}]")
+        if tool_names:
+            unique_tools = ", ".join(sorted(set(tool_names)))
+            lines.append(f"[Claude tools used: {unique_tools}]")
+        return "\n\n".join(line for line in lines if line)
 
     async def claude_session_status(
         self,

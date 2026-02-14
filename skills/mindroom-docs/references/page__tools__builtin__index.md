@@ -204,13 +204,11 @@ tool_config:
     model: "claude-sonnet-4-5"
     permission_mode: "default"
     continue_conversation: true
-    # optional: resume an existing Claude session id
-    # resume: "session_abc123"
-    # optional: fork from the resumed session
-    fork_session: false
     session_ttl_minutes: 60
     max_sessions: 200
 ```
+
+`resume` and `fork_session` are runtime arguments in tool calls (`claude_start_session` / `claude_send`), so they are intentionally not part of `tool_config`.
 
 To run through an Anthropic-compatible gateway (for example LiteLLM `/v1/messages`), set:
 
