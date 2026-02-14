@@ -11,7 +11,7 @@ PYPROJECT = REPO_ROOT / "pyproject.toml"
 TOOLS_DIR = REPO_ROOT / "src" / "mindroom" / "tools"
 
 # Groups that are not tool registrations (meta-groups, aggregates, etc.)
-IGNORED_GROUPS: set[str] = set()
+IGNORED_GROUPS: set[str] = {"supabase"}
 
 
 def _get_optional_groups() -> set[str]:

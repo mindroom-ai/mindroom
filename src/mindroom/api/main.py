@@ -135,10 +135,17 @@ _supabase_auth = None
 if SUPABASE_URL and SUPABASE_ANON_KEY:
     try:
         from supabase import create_client
+    except ModuleNotFoundError:
+        from mindroom.tool_dependencies import install_tool_extras
 
-        _supabase_auth = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
-    except Exception:
-        _supabase_auth = None
+        if not install_tool_extras(["supabase"]):
+            msg = (
+                "SUPABASE_URL and SUPABASE_ANON_KEY are set but the 'supabase' package "
+                "could not be auto-installed. Install it with: pip install 'mindroom[supabase]'"
+            )
+            raise ImportError(msg) from None
+        from supabase import create_client
+    _supabase_auth = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
 
 async def verify_user(authorization: str | None = Header(None)) -> dict:

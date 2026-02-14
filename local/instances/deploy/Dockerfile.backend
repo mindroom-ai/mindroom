@@ -24,7 +24,7 @@ COPY skills /app/skills
 ARG VERSION=0.0.0
 ENV SETUPTOOLS_SCM_PRETEND_VERSION=${VERSION}
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev
+    uv sync --locked --no-dev --all-extras
 
 # Final production stage
 FROM public.ecr.aws/docker/library/python:3.12-slim AS final
