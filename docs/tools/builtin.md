@@ -124,6 +124,7 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 |------|------|-------------|-----------------|
 | :lucide-calendar: | `google_calendar` | View and schedule meetings | Google OAuth |
 | :lucide-calendar: | `cal_com` | Cal.com scheduling | `api_key` |
+| :lucide-calendar: | `scheduler` | Schedule, edit, list, and cancel tasks and reminders | - |
 
 ## Data & Business
 
@@ -176,6 +177,7 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 
 | Icon | Tool | Description | Config Required |
 |------|------|-------------|-----------------|
+| :lucide-database: | `memory` | Explicitly store and search agent memories on demand | - |
 | :lucide-database: | `mem0` | Persistent memory system | `api_key` (optional for cloud) |
 | :lucide-database: | `zep` | Conversation memory | `api_key` |
 

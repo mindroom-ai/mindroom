@@ -78,10 +78,17 @@ For examples in any doc:
 - Are names and references realistic and current?
 - Do examples use current syntax (not deprecated options)?
 - Do setup snippets reference real files/flags/commands that exist in this repo/CLI?
+- Do NOT flag AI model names as invalid based on your training cutoff — look them up online first
 
 ### 6. Cross-Reference Consistency
 
 The same info appears in multiple places. Check for conflicts between README.md, `docs/`, and `CLAUDE.md`.
+
+Also verify that script paths and file references in CLAUDE.md and `docs/deployment/` match the actual filesystem layout.
+
+### 6b. Verify Deployment Docs
+
+Check `docs/deployment/` files against actual Dockerfiles, Helm charts, scripts, and environment variable defaults in `src/mindroom/constants.py`.
 
 ### 7. Self-Check This Prompt
 

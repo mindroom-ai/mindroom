@@ -19,7 +19,7 @@ MINDROOM_CONFIG_PATH=/path/to/config.yaml mindroom run
 You can also validate a specific file directly:
 
 ```bash
-mindroom validate --config /path/to/config.yaml
+mindroom validate --config /path/to/config.yaml  # or: -c
 ```
 
 ## Basic Structure
