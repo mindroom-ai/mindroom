@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agno.tools.websearch import WebSearchTools
+from typing import TYPE_CHECKING
 
 from mindroom.tools_metadata import (
     ConfigField,
@@ -12,32 +12,8 @@ from mindroom.tools_metadata import (
     register_tool_with_metadata,
 )
 
-
-class GoogleSearchTools(WebSearchTools):
-    """Convenience wrapper for WebSearchTools with Google as the backend."""
-
-    def __init__(
-        self,
-        enable_search: bool = True,
-        enable_news: bool = True,
-        modifier: str | None = None,
-        fixed_max_results: int | None = None,
-        proxy: str | None = None,
-        timeout: int | None = 10,
-        verify_ssl: bool = True,
-        **kwargs: object,
-    ) -> None:
-        super().__init__(
-            enable_search=enable_search,
-            enable_news=enable_news,
-            backend="google",
-            modifier=modifier,
-            fixed_max_results=fixed_max_results,
-            proxy=proxy,
-            timeout=timeout,
-            verify_ssl=verify_ssl,
-            **kwargs,
-        )
+if TYPE_CHECKING:
+    from agno.tools.websearch import WebSearchTools
 
 
 @register_tool_with_metadata(
@@ -103,6 +79,34 @@ class GoogleSearchTools(WebSearchTools):
     dependencies=["ddgs"],
     docs_url="https://docs.agno.com/tools/toolkits/search/websearch",
 )
-def googlesearch_tools() -> type[GoogleSearchTools]:
+def googlesearch_tools() -> type[WebSearchTools]:
     """Return Google Search tools for web search."""
+    from agno.tools.websearch import WebSearchTools
+
+    class GoogleSearchTools(WebSearchTools):
+        """Convenience wrapper for WebSearchTools with Google as the backend."""
+
+        def __init__(
+            self,
+            enable_search: bool = True,
+            enable_news: bool = True,
+            modifier: str | None = None,
+            fixed_max_results: int | None = None,
+            proxy: str | None = None,
+            timeout: int | None = 10,
+            verify_ssl: bool = True,
+            **kwargs: object,
+        ) -> None:
+            super().__init__(
+                enable_search=enable_search,
+                enable_news=enable_news,
+                backend="google",
+                modifier=modifier,
+                fixed_max_results=fixed_max_results,
+                proxy=proxy,
+                timeout=timeout,
+                verify_ssl=verify_ssl,
+                **kwargs,
+            )
+
     return GoogleSearchTools
