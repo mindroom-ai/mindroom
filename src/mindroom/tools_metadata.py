@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import importlib
 from dataclasses import asdict, dataclass
 from enum import Enum
@@ -11,6 +12,7 @@ from loguru import logger
 
 from mindroom.config import Config
 from mindroom.plugins import load_plugins
+from mindroom.sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy
 from mindroom.tool_dependencies import auto_install_tool_extra
 
 if TYPE_CHECKING:
@@ -43,31 +45,53 @@ def register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable
     return decorator
 
 
-def get_tool_by_name(tool_name: str) -> Toolkit:
+def _build_tool_instance(
+    tool_name: str,
+    *,
+    disable_sandbox_proxy: bool = False,
+    credential_overrides: dict[str, object] | None = None,
+) -> Toolkit:
+    """Instantiate a tool from the registry, applying credentials and sandbox proxy."""
+    tool_class = TOOL_REGISTRY[tool_name]()
+    creds_manager = get_credentials_manager()
+    credentials = creds_manager.load_credentials(tool_name) or {}
+    if credential_overrides:
+        credentials = {**credentials, **credential_overrides}
+    metadata = TOOL_METADATA[tool_name]
+
+    init_kwargs = {}
+    if metadata.config_fields:
+        for field in metadata.config_fields:
+            if field.name in credentials:
+                init_kwargs[field.name] = credentials[field.name]
+
+    toolkit = tool_class(**init_kwargs)
+    if disable_sandbox_proxy:
+        return toolkit
+    return maybe_wrap_toolkit_for_sandbox_proxy(tool_name, toolkit)
+
+
+def get_tool_by_name(
+    tool_name: str,
+    *,
+    disable_sandbox_proxy: bool = False,
+    credential_overrides: dict[str, object] | None = None,
+) -> Toolkit:
     """Get a tool instance by its registered name."""
     if tool_name not in TOOL_REGISTRY:
         available = ", ".join(sorted(TOOL_REGISTRY.keys()))
         msg = f"Unknown tool: {tool_name}. Available tools: {available}"
         raise ValueError(msg)
 
-    tool_factory = TOOL_REGISTRY[tool_name]
-
-    def _build_tool_instance() -> Toolkit:
-        tool_class = tool_factory()
-        creds_manager = get_credentials_manager()
-        credentials = creds_manager.load_credentials(tool_name) or {}
-        metadata = TOOL_METADATA[tool_name]
-
-        init_kwargs = {}
-        if metadata.config_fields:
-            for field in metadata.config_fields:
-                if field.name in credentials:
-                    init_kwargs[field.name] = credentials[field.name]
-
-        return tool_class(**init_kwargs)
+    build = functools.partial(
+        _build_tool_instance,
+        tool_name,
+        disable_sandbox_proxy=disable_sandbox_proxy,
+        credential_overrides=credential_overrides,
+    )
 
     try:
-        return _build_tool_instance()
+        return build()
     except ImportError as first_error:
         if not auto_install_tool_extra(tool_name):
             logger.warning(f"Could not import tool '{tool_name}': {first_error}")
@@ -78,7 +102,7 @@ def get_tool_by_name(tool_name: str) -> Toolkit:
         importlib.invalidate_caches()
 
         try:
-            return _build_tool_instance()
+            return build()
         except ImportError as second_error:
             logger.warning(f"Auto-install did not resolve dependencies for '{tool_name}': {second_error}")
             raise second_error from first_error

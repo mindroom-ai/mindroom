@@ -291,7 +291,7 @@ def fake_anthropic_gateway() -> Iterator[dict[str, Any]]:
             self.end_headers()
             self.wfile.write(encoded)
 
-        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002, ANN401
             _ = (format, args)
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)

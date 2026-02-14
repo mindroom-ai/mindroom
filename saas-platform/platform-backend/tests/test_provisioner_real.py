@@ -112,6 +112,8 @@ class TestProvisionerCommandValidation:
         # Critical: Check we're not mixing up API keys
         assert "openrouter_key" in set_args or "openrouter" in str(set_args)
         assert "openai_key" in set_args or "openai" in str(set_args)
+        assert "sandbox_proxy_token" in set_args
+        assert set_args["sandbox_proxy_token"] != ""
 
         # Verify we're not passing wrong values
         # Skip check if both are empty (not set in env during tests)
@@ -261,6 +263,7 @@ class TestProvisionerContractValidation:
                 "supabaseAnonKey": "test-key",
                 "openrouter_key": "test-key",
                 "openai_key": "test-key",
+                "sandbox_proxy_token": "token",
             }
 
             # Verify all required chart values are provided

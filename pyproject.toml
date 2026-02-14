@@ -46,9 +46,8 @@ dependencies = [
   "pydantic>=2",
   "pyjwt>=2.8",
   "python-dotenv>=1",
+  "pyyaml>=6",
   "rich",
-  "spotipy>=2.25.1",
-  "streamlit",
   "structlog>=24.1",
   "supabase>=2.18.1",
   "tenacity>=9.1.2",
@@ -323,6 +322,7 @@ optional-dependencies.spider = [
 ]
 optional-dependencies.spotify = [
   "httpx>=0.27",
+  "spotipy>=2.25.1",
 ]
 optional-dependencies.sql = [
   "sqlalchemy",
