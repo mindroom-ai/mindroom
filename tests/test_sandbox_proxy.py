@@ -6,6 +6,7 @@ from typing import Any, Self
 
 import pytest
 
+import mindroom.sandbox_proxy as sandbox_proxy_module
 import mindroom.tools  # noqa: F401
 from mindroom.tools_metadata import get_tool_by_name
 from tests.conftest import FakeCredentialsManager
@@ -38,12 +39,13 @@ def test_proxy_wraps_tool_calls(monkeypatch: object) -> None:
             captured["headers"] = headers
             return _FakeResponse()
 
-    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_URL", "http://sandbox-runner:8765")
-    monkeypatch.setenv("MINDROOM_SANDBOX_EXECUTION_MODE", "selective")
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox-runner:8765")
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
+    monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "selective")
+    monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOOLS", "calculator")
-    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "test-token")
     monkeypatch.delenv("MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON", raising=False)
-    monkeypatch.delenv("MINDROOM_SANDBOX_RUNNER_MODE", raising=False)
+    sandbox_proxy_module._parse_credential_policy.cache_clear()
     monkeypatch.setattr("mindroom.sandbox_proxy.httpx.Client", _FakeClient)
 
     tool = get_tool_by_name("calculator")
@@ -70,10 +72,9 @@ def test_proxy_disabled_in_runner_mode(monkeypatch: object) -> None:
             msg = "Proxy client should not be used in runner mode."
             raise AssertionError(msg)
 
-    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_URL", "http://sandbox-runner:8765")
-    monkeypatch.setenv("MINDROOM_SANDBOX_EXECUTION_MODE", "all")
-    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOOLS", "calculator")
-    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_MODE", "true")
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox-runner:8765")
+    monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "all")
+    monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", True)
     monkeypatch.setattr("mindroom.sandbox_proxy.httpx.Client", _ForbiddenClient)
 
     tool = get_tool_by_name("calculator")
@@ -116,10 +117,12 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: object
 
     fake_credentials = FakeCredentialsManager({"openai": {"api_key": "sk-test", "_source": "ui"}})
 
-    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_URL", "http://sandbox-runner:8765")
-    monkeypatch.setenv("MINDROOM_SANDBOX_EXECUTION_MODE", "all")
-    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "test-token")
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox-runner:8765")
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
+    monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "all")
+    monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
     monkeypatch.setenv("MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON", '{"calculator.add":["openai"]}')
+    sandbox_proxy_module._parse_credential_policy.cache_clear()
     monkeypatch.setattr("mindroom.sandbox_proxy.get_credentials_manager", lambda: fake_credentials)
     monkeypatch.setattr("mindroom.sandbox_proxy.httpx.Client", _FakeClient)
 
@@ -157,9 +160,10 @@ def test_proxy_requires_shared_token(monkeypatch: object) -> None:
             msg = "Proxy client should not make requests without a shared token."
             raise AssertionError(msg)
 
-    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_URL", "http://sandbox-runner:8765")
-    monkeypatch.setenv("MINDROOM_SANDBOX_EXECUTION_MODE", "all")
-    monkeypatch.delenv("MINDROOM_SANDBOX_PROXY_TOKEN", raising=False)
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox-runner:8765")
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", None)
+    monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "all")
+    monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
     monkeypatch.setattr("mindroom.sandbox_proxy.httpx.Client", _FakeClient)
 
     tool = get_tool_by_name("calculator")

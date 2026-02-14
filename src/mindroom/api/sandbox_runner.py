@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import io
 import os
 import secrets
 import subprocess
 import sys
 import threading
 import time
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -32,6 +34,9 @@ SUBPROCESS_WORKER_ARG = "--sandbox-subprocess-worker"
 RUNNER_EXECUTION_MODE_ENV = "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"
 RUNNER_SUBPROCESS_TIMEOUT_ENV = "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS"
 
+# Sentinel written to stderr to delimit the JSON response from tool output.
+_RESPONSE_MARKER = "__SANDBOX_RESPONSE__"
+
 
 @dataclass
 class CredentialLease:
@@ -50,13 +55,18 @@ LEASES_LOCK = threading.Lock()
 
 
 class SandboxRunnerExecuteRequest(BaseModel):
-    """Tool call payload forwarded from a primary runtime to the sandbox runtime."""
+    """Tool call payload forwarded from a primary runtime to the sandbox runtime.
+
+    Also used internally for in-process and subprocess execution when
+    ``credential_overrides`` are resolved from a lease.
+    """
 
     tool_name: str
     function_name: str
     args: list[Any] = Field(default_factory=list)
     kwargs: dict[str, Any] = Field(default_factory=dict)
     lease_id: str | None = None
+    credential_overrides: dict[str, object] = Field(default_factory=dict)
 
 
 class SandboxRunnerLeaseRequest(BaseModel):
@@ -83,16 +93,6 @@ class SandboxRunnerExecuteResponse(BaseModel):
     ok: bool
     result: Any | None = None
     error: str | None = None
-
-
-class SandboxRunnerExecutionRequest(BaseModel):
-    """Internal execution request used for in-process and subprocess runners."""
-
-    tool_name: str
-    function_name: str
-    args: list[Any] = Field(default_factory=list)
-    kwargs: dict[str, Any] = Field(default_factory=dict)
-    credential_overrides: dict[str, object] = Field(default_factory=dict)
 
 
 async def _validate_runner_token(x_mindroom_sandbox_token: Annotated[str | None, Header()] = None) -> None:
@@ -182,8 +182,6 @@ def _consume_credential_lease(lease_id: str, *, tool_name: str, function_name: s
         lease.uses_remaining -= 1
         if lease.uses_remaining <= 0:
             LEASES_BY_ID.pop(lease_id, None)
-        else:
-            LEASES_BY_ID[lease_id] = lease
 
     return dict(lease.credential_overrides)
 
@@ -205,31 +203,34 @@ def _runner_subprocess_timeout_seconds() -> float:
     return max(1.0, timeout)
 
 
-async def _execute_request_inprocess(request: SandboxRunnerExecutionRequest) -> SandboxRunnerExecuteResponse:
+async def _execute_request_inprocess(request: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteResponse:
     toolkit, entrypoint = _resolve_entrypoint(
         tool_name=request.tool_name,
         function_name=request.function_name,
-        credential_overrides=request.credential_overrides,
+        credential_overrides=request.credential_overrides or None,
     )
 
     try:
         if toolkit.requires_connect:
-            connect_callable: Any = toolkit.connect
-            connect_result = connect_callable()
-            await _maybe_await(connect_result)
+            connect = getattr(toolkit, "connect", None)
+            close = getattr(toolkit, "close", None)
+            if connect is not None:
+                await _maybe_await(connect())
             try:
                 result = await _maybe_await(entrypoint(*request.args, **request.kwargs))
             finally:
-                close_callable: Any = toolkit.close
-                close_result = close_callable()
-                await _maybe_await(close_result)
+                if close is not None:
+                    await _maybe_await(close())
         else:
             result = await _maybe_await(entrypoint(*request.args, **request.kwargs))
-    except Exception:
+    except Exception as exc:
         logger.opt(exception=True).warning(
             f"Sandbox tool execution failed: {request.tool_name}.{request.function_name}",
         )
-        return SandboxRunnerExecuteResponse(ok=False, error="Sandbox tool execution failed.")
+        return SandboxRunnerExecuteResponse(
+            ok=False,
+            error=f"Sandbox tool execution failed: {type(exc).__name__}: {exc}",
+        )
 
     return SandboxRunnerExecuteResponse(ok=True, result=to_json_compatible(result))
 
@@ -238,7 +239,7 @@ def _subprocess_worker_command() -> list[str]:
     return [sys.executable, "-m", "mindroom.api.sandbox_runner", SUBPROCESS_WORKER_ARG]
 
 
-def _execute_request_subprocess_sync(request: SandboxRunnerExecutionRequest) -> SandboxRunnerExecuteResponse:
+def _execute_request_subprocess_sync(request: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteResponse:
     try:
         completed = subprocess.run(
             _subprocess_worker_command(),
@@ -253,23 +254,28 @@ def _execute_request_subprocess_sync(request: SandboxRunnerExecutionRequest) -> 
     except OSError as exc:
         return SandboxRunnerExecuteResponse(ok=False, error=f"Failed to start sandbox subprocess: {exc}")
 
-    stdout = completed.stdout.strip()
-    if stdout:
-        try:
-            payload = SandboxRunnerExecuteResponse.model_validate_json(stdout)
-        except ValidationError:
-            payload = None
-        if payload is not None:
-            return payload
+    # The worker writes the JSON response to stderr after a marker line so that
+    # tool stdout (e.g. print() inside python tools) does not corrupt the protocol.
+    stderr = completed.stderr or ""
+    marker_pos = stderr.rfind(_RESPONSE_MARKER)
+    if marker_pos != -1:
+        response_json = stderr[marker_pos + len(_RESPONSE_MARKER) :].strip()
+        if response_json:
+            try:
+                return SandboxRunnerExecuteResponse.model_validate_json(response_json)
+            except ValidationError:
+                pass
 
     if completed.returncode != 0:
-        error = completed.stderr.strip() or stdout or f"Sandbox subprocess exited with code {completed.returncode}."
+        error = (
+            stderr.strip() or completed.stdout.strip() or f"Sandbox subprocess exited with code {completed.returncode}."
+        )
         return SandboxRunnerExecuteResponse(ok=False, error=error)
 
     return SandboxRunnerExecuteResponse(ok=False, error="Sandbox subprocess returned an invalid response.")
 
 
-async def _execute_request_subprocess(request: SandboxRunnerExecutionRequest) -> SandboxRunnerExecuteResponse:
+async def _execute_request_subprocess(request: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteResponse:
     return await asyncio.to_thread(_execute_request_subprocess_sync, request)
 
 
@@ -277,26 +283,42 @@ def _run_subprocess_worker() -> int:
     payload = sys.stdin.read()
     if not payload.strip():
         print(
-            SandboxRunnerExecuteResponse(
+            _RESPONSE_MARKER
+            + SandboxRunnerExecuteResponse(
                 ok=False,
                 error="Sandbox subprocess received empty payload.",
             ).model_dump_json(),
+            file=sys.stderr,
         )
         return 1
 
     try:
-        request = SandboxRunnerExecutionRequest.model_validate_json(payload)
+        request = SandboxRunnerExecuteRequest.model_validate_json(payload)
     except ValidationError as exc:
         print(
-            SandboxRunnerExecuteResponse(
+            _RESPONSE_MARKER
+            + SandboxRunnerExecuteResponse(
                 ok=False,
                 error=f"Sandbox subprocess payload validation failed: {exc}",
             ).model_dump_json(),
+            file=sys.stderr,
         )
         return 1
 
-    response = asyncio.run(_execute_request_inprocess(request))
-    print(response.model_dump_json())
+    # Redirect stdout/stderr during tool execution so tool output doesn't
+    # interfere with the protocol marker we write to stderr afterwards.
+    captured_out = io.StringIO()
+    captured_err = io.StringIO()
+    with redirect_stdout(captured_out), redirect_stderr(captured_err):
+        response = asyncio.run(_execute_request_inprocess(request))
+
+    # Flush captured tool output to real stdout (informational only).
+    tool_stdout = captured_out.getvalue()
+    if tool_stdout:
+        sys.stdout.write(tool_stdout)
+
+    # Write the response JSON to stderr after the marker.
+    print(_RESPONSE_MARKER + response.model_dump_json(), file=sys.stderr)
     return 0
 
 
@@ -326,16 +348,10 @@ async def execute_tool_call(
             function_name=request.function_name,
         )
 
-    execution_request = SandboxRunnerExecutionRequest(
-        tool_name=request.tool_name,
-        function_name=request.function_name,
-        args=request.args,
-        kwargs=request.kwargs,
-        credential_overrides=credential_overrides,
-    )
+    request.credential_overrides = credential_overrides
     if _runner_uses_subprocess():
-        return await _execute_request_subprocess(execution_request)
-    return await _execute_request_inprocess(execution_request)
+        return await _execute_request_subprocess(request)
+    return await _execute_request_inprocess(request)
 
 
 if __name__ == "__main__":

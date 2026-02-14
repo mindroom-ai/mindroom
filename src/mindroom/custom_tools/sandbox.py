@@ -66,9 +66,9 @@ class SandboxTools(Toolkit):
 
         if self.workspace.exists():
             for entry in self.workspace.iterdir():
-                if entry.is_dir():
-                    shutil.rmtree(entry)
-                else:
+                if entry.is_symlink() or not entry.is_dir():
                     entry.unlink()
+                else:
+                    shutil.rmtree(entry)
         self.workspace.mkdir(parents=True, exist_ok=True)
         return f"Sandbox workspace reset: {self.workspace}"

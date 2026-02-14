@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from enum import Enum
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from loguru import logger
@@ -16,6 +15,7 @@ from mindroom.sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
     from agno.tools import Toolkit
 
@@ -40,7 +40,7 @@ def _apply_runtime_overrides(metadata: ToolMetadata, init_kwargs: dict[str, Any]
     if not MINDROOM_CONTAINER_SANDBOX or sandbox_runtime is None:
         return init_kwargs
 
-    workspace = Path(MINDROOM_SANDBOX_WORKSPACE).resolve()
+    workspace = MINDROOM_SANDBOX_WORKSPACE.resolve()
     workspace.mkdir(parents=True, exist_ok=True)
     overridden = dict(init_kwargs)
     if sandbox_runtime.bind_workspace_to_base_dir:
