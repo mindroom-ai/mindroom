@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import typing
 from contextlib import suppress
 from dataclasses import dataclass, field
 from time import monotonic
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import Any, Literal, Protocol, cast
 
 from agno.tools import Toolkit
 from claude_agent_sdk import (
@@ -19,17 +20,6 @@ from claude_agent_sdk import (
     ToolUseBlock,
 )
 
-if TYPE_CHECKING:
-    from collections.abc import Callable as StdCallable
-
-    from agno.agent import Agent
-    from agno.run.base import RunContext
-else:
-    Agent = Any
-    RunContext = Any
-    StdCallable = Any
-
-
 PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
 VALID_PERMISSION_MODES: tuple[PermissionMode, ...] = (
     "default",
@@ -41,6 +31,19 @@ DEFAULT_PERMISSION_MODE: PermissionMode = "default"
 DEFAULT_SESSION_TTL_MINUTES = 60
 DEFAULT_MAX_SESSIONS = 200
 MAX_STDERR_LINES = 12
+
+
+class Agent(Protocol):
+    """Minimal agent protocol needed by this tool."""
+
+    name: str
+    model: Any
+
+
+class RunContext(Protocol):
+    """Minimal run context protocol needed by this tool."""
+
+    session_id: str
 
 
 def _parse_csv_list(raw_value: str | None) -> list[str]:
@@ -239,8 +242,9 @@ class ClaudeAgentTools(Toolkit):
 
     def _build_options(
         self,
-        stderr_callback: StdCallable[[str], None] | None = None,
+        stderr_callback: typing.Callable[[str], None] | None = None,
         *,
+        model: str | None = None,
         resume: str | None = None,
         fork_session: bool = False,
     ) -> ClaudeAgentOptions:
@@ -256,7 +260,7 @@ class ClaudeAgentTools(Toolkit):
 
         return ClaudeAgentOptions(
             cwd=self.cwd,
-            model=self.model,
+            model=model,
             permission_mode=self.permission_mode,
             continue_conversation=self.continue_conversation,
             resume=resume,
@@ -270,7 +274,7 @@ class ClaudeAgentTools(Toolkit):
             stderr=stderr_callback,
         )
 
-    def _build_stderr_collector(self) -> tuple[list[str], StdCallable[[str], None]]:
+    def _build_stderr_collector(self) -> tuple[list[str], typing.Callable[[str], None]]:
         stderr_lines: list[str] = []
 
         def _on_stderr(line: str) -> None:
@@ -288,6 +292,7 @@ class ClaudeAgentTools(Toolkit):
         message: str,
         *,
         session_key: str,
+        model: str | None,
         resume: str | None,
         fork_session: bool,
         stderr_lines: list[str],
@@ -295,6 +300,7 @@ class ClaudeAgentTools(Toolkit):
         details = [
             "Session context:",
             f"- session_key: {session_key}",
+            f"- model: {model or '(sdk default)'}",
             f"- continue_conversation: {self.continue_conversation}",
             f"- resume: {resume or '(none)'}",
             f"- fork_session: {fork_session}",
@@ -333,6 +339,16 @@ class ClaudeAgentTools(Toolkit):
             return f"{agent_name}:{run_session}:{session_label.strip()}"
         return f"{agent_name}:{run_session}"
 
+    def _resolve_model(self, agent: Agent | None) -> str | None:
+        if self.model and self.model.strip():
+            return self.model.strip()
+
+        model_obj = getattr(agent, "model", None)
+        model_id = getattr(model_obj, "id", None)
+        if isinstance(model_id, str) and model_id.strip():
+            return model_id.strip()
+        return None
+
     async def claude_start_session(
         self,
         session_label: str | None = None,
@@ -347,6 +363,7 @@ class ClaudeAgentTools(Toolkit):
             return "Invalid session options: `fork_session` requires a non-empty `resume` session ID."
 
         namespace = self._namespace(agent)
+        resolved_model = self._resolve_model(agent)
         self._ensure_namespace_config(namespace)
         session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)
         stderr_lines, stderr_callback = self._build_stderr_collector()
@@ -354,7 +371,12 @@ class ClaudeAgentTools(Toolkit):
             session, created = await _SESSION_MANAGER.get_or_create(
                 session_key,
                 namespace,
-                self._build_options(stderr_callback, resume=normalized_resume, fork_session=fork_session),
+                self._build_options(
+                    stderr_callback,
+                    model=resolved_model,
+                    resume=normalized_resume,
+                    fork_session=fork_session,
+                ),
             )
             if created:
                 session.stderr_lines = stderr_lines
@@ -367,6 +389,7 @@ class ClaudeAgentTools(Toolkit):
             return self._format_session_error(
                 f"Failed to start Claude session: {exc}",
                 session_key=session_key,
+                model=resolved_model,
                 resume=normalized_resume,
                 fork_session=fork_session,
                 stderr_lines=stderr_lines,
@@ -392,6 +415,7 @@ class ClaudeAgentTools(Toolkit):
             return "Invalid session options: `fork_session` requires a non-empty `resume` session ID."
 
         namespace = self._namespace(agent)
+        resolved_model = self._resolve_model(agent)
         self._ensure_namespace_config(namespace)
         session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)
         startup_stderr_lines, stderr_callback = self._build_stderr_collector()
@@ -400,7 +424,12 @@ class ClaudeAgentTools(Toolkit):
             session, created = await _SESSION_MANAGER.get_or_create(
                 session_key,
                 namespace,
-                self._build_options(stderr_callback, resume=normalized_resume, fork_session=fork_session),
+                self._build_options(
+                    stderr_callback,
+                    model=resolved_model,
+                    resume=normalized_resume,
+                    fork_session=fork_session,
+                ),
             )
             if created:
                 session.stderr_lines = startup_stderr_lines
@@ -413,6 +442,7 @@ class ClaudeAgentTools(Toolkit):
             return self._format_session_error(
                 f"Failed to start Claude session: {exc}",
                 session_key=session_key,
+                model=resolved_model,
                 resume=normalized_resume,
                 fork_session=fork_session,
                 stderr_lines=startup_stderr_lines,
@@ -431,6 +461,7 @@ class ClaudeAgentTools(Toolkit):
                 session_error = self._format_session_error(
                     f"Claude session error: {exc}",
                     session_key=session_key,
+                    model=resolved_model,
                     resume=normalized_resume,
                     fork_session=fork_session,
                     stderr_lines=session.stderr_lines,
@@ -439,6 +470,7 @@ class ClaudeAgentTools(Toolkit):
                 session_error = self._format_session_error(
                     f"Unexpected Claude session error: {exc}",
                     session_key=session_key,
+                    model=resolved_model,
                     resume=normalized_resume,
                     fork_session=fork_session,
                     stderr_lines=session.stderr_lines,

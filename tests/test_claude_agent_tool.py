@@ -340,6 +340,36 @@ async def test_claude_send_sets_session_control_options(
 
 
 @pytest.mark.asyncio
+async def test_claude_send_uses_agent_model_when_tool_model_unset(
+    fake_manager: claude_agent_module.ClaudeSessionManager,  # noqa: ARG001
+) -> None:
+    """Agent model id should be used when tool-config model is not set."""
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = RunContext(run_id="run-1", session_id="session-1")
+    agent = SimpleNamespace(name="general", model=SimpleNamespace(id="claude-sonnet-4-5"))
+
+    await tools.claude_send("hello", run_context=run_context, agent=agent)
+
+    options = _FakeClaudeSDKClient.instances[0].options
+    assert options.model == "claude-sonnet-4-5"
+
+
+@pytest.mark.asyncio
+async def test_claude_send_tool_model_overrides_agent_model(
+    fake_manager: claude_agent_module.ClaudeSessionManager,  # noqa: ARG001
+) -> None:
+    """Explicit tool-config model should override the calling agent model id."""
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", model="claude-opus-4-6")
+    run_context = RunContext(run_id="run-1", session_id="session-1")
+    agent = SimpleNamespace(name="general", model=SimpleNamespace(id="claude-sonnet-4-5"))
+
+    await tools.claude_send("hello", run_context=run_context, agent=agent)
+
+    options = _FakeClaudeSDKClient.instances[0].options
+    assert options.model == "claude-opus-4-6"
+
+
+@pytest.mark.asyncio
 async def test_claude_send_with_different_session_labels_creates_multiple_sessions(
     fake_manager: claude_agent_module.ClaudeSessionManager,  # noqa: ARG001
 ) -> None:
