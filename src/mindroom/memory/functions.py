@@ -33,7 +33,7 @@ logger = get_logger(__name__)
 class ScopedMemoryReader(Protocol):
     """Minimal protocol for reading a memory by ID."""
 
-    async def get(self, memory_id: str) -> object:
+    async def get(self, memory_id: str) -> dict[str, Any] | None:
         """Return the memory payload for a given memory ID."""
 
 
@@ -71,7 +71,7 @@ async def _get_scoped_memory_by_id(
         return None
 
     allowed_user_ids = _get_allowed_memory_user_ids(caller_context, config)
-    memory_user_id = result.get("user_id")  # ty: ignore[invalid-argument-type]
+    memory_user_id = result.get("user_id")
     if memory_user_id not in allowed_user_ids:
         logger.warning(
             "Memory access denied",

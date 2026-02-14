@@ -9,7 +9,7 @@ import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import json5
 import yaml
@@ -477,7 +477,7 @@ def _parse_metadata(raw: object, *, path: str) -> dict[str, Any] | None:
     if raw is None or (isinstance(raw, str) and not raw.strip()):
         return {}
     if isinstance(raw, dict):
-        return raw  # ty: ignore[invalid-return-type]
+        return cast("dict[str, Any]", raw)
     if isinstance(raw, str):
         try:
             parsed = json5.loads(raw)
@@ -567,23 +567,24 @@ def _requirements_met(
 ) -> bool:
     if not isinstance(requires, dict):
         return True
+    reqs = cast("dict[str, Any]", requires)
 
-    env_requirements = _normalize_str_list(requires.get("env"))  # ty: ignore[invalid-argument-type]
+    env_requirements = _normalize_str_list(reqs.get("env"))
     if env_requirements and not _env_requirements_met(env_requirements, env_vars, credential_keys):
         return False
 
-    config_requirements = _normalize_str_list(requires.get("config"))  # ty: ignore[invalid-argument-type]
+    config_requirements = _normalize_str_list(reqs.get("config"))
     if config_requirements and not _config_requirements_met(config_requirements, config_data):
         return False
 
-    bin_requirements = _normalize_str_list(requires.get("bins"))  # ty: ignore[invalid-argument-type]
+    bin_requirements = _normalize_str_list(reqs.get("bins"))
     if bin_requirements:
         missing_bins = _missing_bins(bin_requirements)
         if missing_bins:
             logger.debug("Skill missing required binaries", skill=skill_name, bins=missing_bins)
             return False
 
-    any_bins_requirements = _normalize_str_list(requires.get("anyBins"))  # ty: ignore[invalid-argument-type]
+    any_bins_requirements = _normalize_str_list(reqs.get("anyBins"))
     if any_bins_requirements and not _any_bins_requirements_met(any_bins_requirements):
         logger.debug("Skill missing any required binaries", skill=skill_name, bins=any_bins_requirements)
         return False

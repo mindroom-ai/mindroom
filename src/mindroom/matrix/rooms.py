@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import nio
 
@@ -334,14 +334,14 @@ def _is_two_member_group_room(client: nio.AsyncClient, room_id: str) -> bool:
     return not room.topic
 
 
-def _has_is_direct_marker(state_events: list[dict[str, object]]) -> bool:
+def _has_is_direct_marker(state_events: list[dict[str, Any]]) -> bool:
     """Check ``m.room.member`` state events for the ``is_direct`` flag."""
     for event in state_events:
         if event.get("type") != "m.room.member":
             continue
 
         content = event.get("content")
-        if isinstance(content, dict) and content.get("is_direct") is True:  # ty: ignore[invalid-argument-type]
+        if isinstance(content, dict) and content.get("is_direct") is True:
             return True
 
     return False
