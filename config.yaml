@@ -372,48 +372,59 @@ memory:
       temperature: 0.1
     provider: openai
 models:
-  deepseek:
-    id: deepseek-ai/deepseek-chat:free
-    provider: openrouter
+  # --- Local (llama.local) ---
+  # llama-swap + llama.cpp, see https://github.com/basnijholt/dotfiles/blob/main/configs/nixos/hosts/pc/ai.nix
   default:
     extra_kwargs:
       base_url: http://llama.local/v1
     id: gpt-oss-low:20b
     provider: openai
   devstral:
-    id: devstral:24b
-    provider: ollama
-  gemini_flash:
-    id: gemini-2.5-flash
-    provider: google
-  glm45:
-    id: z-ai/glm-4.5-air:free
-    provider: openrouter
-  gpt4o:
-    id: gpt-4o
+    extra_kwargs:
+      base_url: http://llama.local/v1
+    id: devstral-2:24b-q8
     provider: openai
-  gpt5mini:
-    id: gpt-5-mini
+  glm47:
+    extra_kwargs:
+      base_url: http://llama.local/v1
+    id: glm-4.7-flash:q4
     provider: openai
-  gpt_oss:
-    id: openai/gpt-oss-120b
-    provider: openrouter
-  gpt_oss_120b:
-    id: openai/gpt-oss-120b
-    provider: openrouter
-  haiku:
-    id: claude-3-5-haiku-latest
-    provider: anthropic
+  # --- Local (ollama) ---
   ollama:
     host: http://192.168.1.143:11434
-    id: devstral:24b
+    id: devstral-2:24b-q8
     provider: ollama
+  # --- Anthropic ---
+  haiku:
+    id: claude-haiku-4-5-20251001
+    provider: anthropic
   opus:
     id: claude-opus-4-6-latest
     provider: anthropic
   sonnet:
     id: claude-sonnet-4-5-latest
     provider: anthropic
+  # --- OpenAI ---
+  gpt52:
+    id: gpt-5.2
+    provider: openai
+  gpt5mini:
+    id: gpt-5-mini
+    provider: openai
+  # --- Google ---
+  gemini_flash:
+    id: gemini-3-flash-preview
+    provider: google
+  # --- OpenRouter ---
+  deepseek:
+    id: deepseek/deepseek-v3.2
+    provider: openrouter
+  gpt_oss:
+    id: openai/gpt-oss-120b
+    provider: openrouter
+  gpt_oss_120b:
+    id: openai/gpt-oss-120b
+    provider: openrouter
 plugins: []
 room_models:
   research: haiku

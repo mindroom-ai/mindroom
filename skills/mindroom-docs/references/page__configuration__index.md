@@ -58,6 +58,13 @@ teams:
     model: sonnet                  # Optional: Model for team coordination (default: "default")
     rooms: []                      # Optional: Rooms to auto-join
 
+# Culture configurations (optional)
+cultures:
+  engineering:
+    description: Follow clean code principles and write tests  # Shared principles
+    agents: [developer, reviewer]  # Agents assigned (each agent can belong to at most one culture)
+    mode: automatic                # automatic, agentic, or manual
+
 # Router configuration (optional)
 router:
   model: default                   # Optional: Model for routing (default: "default")
@@ -191,6 +198,7 @@ knowledge_bases:
 - [Agents](https://docs.mindroom.chat/configuration/agents/index.md) - Configure individual AI agents
 - [Models](https://docs.mindroom.chat/configuration/models/index.md) - Configure AI model providers
 - [Teams](https://docs.mindroom.chat/configuration/teams/index.md) - Configure multi-agent collaboration
+- [Cultures](https://docs.mindroom.chat/configuration/cultures/index.md) - Configure shared agent cultures
 - [Router](https://docs.mindroom.chat/configuration/router/index.md) - Configure message routing
 - [Memory](https://docs.mindroom.chat/memory/index.md) - Configure memory providers and behavior
 - [Knowledge](https://docs.mindroom.chat/dashboard/#knowledge) - Configure file-backed knowledge bases

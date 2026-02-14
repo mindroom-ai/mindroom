@@ -95,19 +95,21 @@ mindroom run
 
 ## Features
 
-| Feature             | Description                                                       |
-| ------------------- | ----------------------------------------------------------------- |
-| **Agents**          | Single-specialty actors with specific tools and instructions      |
-| **Teams**           | Collaborative bundles of agents (coordinate or collaborate modes) |
-| **Router**          | Built-in traffic director that routes messages to the right agent |
-| **Memory**          | Mem0-inspired memory system with agent, room, and team scopes     |
-| **Knowledge Bases** | File-backed RAG indexing with per-agent base assignment           |
-| **Tools**           | 100+ integrations for external services                           |
-| **Skills**          | OpenClaw-compatible skills system for extended agent capabilities |
-| **Scheduling**      | Schedule tasks with cron expressions or natural language          |
-| **Voice**           | Speech-to-text transcription for voice messages                   |
-| **Authorization**   | Fine-grained user and room access control                         |
-| **Hot Reload**      | Config changes are detected and agents restart automatically      |
+| Feature                   | Description                                                       |
+| ------------------------- | ----------------------------------------------------------------- |
+| **Agents**                | Single-specialty actors with specific tools and instructions      |
+| **Teams**                 | Collaborative bundles of agents (coordinate or collaborate modes) |
+| **Router**                | Built-in traffic director that routes messages to the right agent |
+| **Memory**                | Mem0-inspired memory system with agent, room, and team scopes     |
+| **Knowledge Bases**       | File-backed RAG indexing with per-agent base assignment           |
+| **Tools**                 | 100+ integrations for external services                           |
+| **Skills**                | OpenClaw-compatible skills system for extended agent capabilities |
+| **Scheduling**            | Schedule tasks with cron expressions or natural language          |
+| **Voice**                 | Speech-to-text transcription for voice messages                   |
+| **Cultures**              | Shared evolving principles across groups of agents                |
+| **Authorization**         | Fine-grained user and room access control                         |
+| **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client       |
+| **Hot Reload**            | Config changes are detected and agents restart automatically      |
 
 ## Architecture
 
@@ -129,7 +131,7 @@ mindroom run
 - [Getting Started](https://docs.mindroom.chat/getting-started/index.md) - Installation and first steps
 - [Configuration](https://docs.mindroom.chat/configuration/index.md) - All configuration options
 - [Dashboard](https://docs.mindroom.chat/dashboard/index.md) - Web UI for configuration
-- [Knowledge Bases](https://docs.mindroom.chat/dashboard/#knowledge) - Manage file-backed RAG bases and indexing
+- [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/index.md) - Use agents from any OpenAI-compatible client
 - [Tools](https://docs.mindroom.chat/tools/index.md) - Available tool integrations
 - [Skills](https://docs.mindroom.chat/skills/index.md) - OpenClaw-compatible skills system
 - [Plugins](https://docs.mindroom.chat/plugins/index.md) - Extend with custom tools and skills
@@ -139,7 +141,9 @@ mindroom run
 - [Authorization](https://docs.mindroom.chat/authorization/index.md) - User and room access control
 - [Architecture](https://docs.mindroom.chat/architecture/index.md) - How it works under the hood
 - [Deployment](https://docs.mindroom.chat/deployment/index.md) - Docker and Kubernetes deployment
-- [Google Services OAuth Setup](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) - Configure Gmail/Calendar/Drive/Sheets integration
+- [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) - Isolate code-execution tools in a sandbox
+- [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) - Admin OAuth setup for Gmail/Calendar/Drive/Sheets
+- [Google Services OAuth (Individual)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) - Single-user OAuth setup
 - [CLI Reference](https://docs.mindroom.chat/cli/index.md) - Command-line interface
 
 ## License
@@ -337,7 +341,6 @@ Configure AI agents:
 - **Rooms** - Where the agent operates
 - **Learning** - Enable or disable Agno Learning per agent (enabled by default)
 - **Learning mode** - Choose `always` (automatic extraction) or `agentic` (tool-driven)
-- **History runs** - Conversation turns to include as context (1-20)
 
 ### Teams
 
@@ -560,6 +563,13 @@ teams:
     model: sonnet                  # Optional: Model for team coordination (default: "default")
     rooms: []                      # Optional: Rooms to auto-join
 
+# Culture configurations (optional)
+cultures:
+  engineering:
+    description: Follow clean code principles and write tests  # Shared principles
+    agents: [developer, reviewer]  # Agents assigned (each agent can belong to at most one culture)
+    mode: automatic                # automatic, agentic, or manual
+
 # Router configuration (optional)
 router:
   model: default                   # Optional: Model for routing (default: "default")
@@ -693,6 +703,7 @@ knowledge_bases:
 - [Agents](https://docs.mindroom.chat/configuration/agents/index.md) - Configure individual AI agents
 - [Models](https://docs.mindroom.chat/configuration/models/index.md) - Configure AI model providers
 - [Teams](https://docs.mindroom.chat/configuration/teams/index.md) - Configure multi-agent collaboration
+- [Cultures](https://docs.mindroom.chat/configuration/cultures/index.md) - Configure shared agent cultures
 - [Router](https://docs.mindroom.chat/configuration/router/index.md) - Configure message routing
 - [Memory](https://docs.mindroom.chat/memory/index.md) - Configure memory providers and behavior
 - [Knowledge](https://docs.mindroom.chat/dashboard/#knowledge) - Configure file-backed knowledge bases
@@ -1086,6 +1097,7 @@ The router exclusively handles all commands:
 - `!schedule <task>` - Schedule tasks and reminders
 - `!list_schedules` - List scheduled tasks
 - `!cancel_schedule <id>` - Cancel a scheduled task
+- `!edit_schedule <id> <task>` - Edit an existing scheduled task
 - `!widget [url]` - Add configuration widget to the room
 - `!config <operation>` - Manage configuration
 - `!skill <name> [args]` - Run a skill by name
@@ -1165,7 +1177,7 @@ agents:
 
 Tools are organized by category:
 
-- **Development** - File operations, shell, Docker, GitHub, Jira, Python, Airflow, code execution sandboxes (E2B, Daytona)
+- **Development** - File operations, shell, Docker, GitHub, Jira, Python, Airflow, code execution sandboxes (E2B, Daytona), Claude Agent SDK
 - **Research** - Web search (DuckDuckGo, Tavily, Exa, SerpAPI), academic papers (arXiv, PubMed), Wikipedia, Hacker News, web scraping (Firecrawl, Crawl4AI, Jina)
 - **Communication** - Slack, Discord, Telegram, Twilio, WhatsApp, Webex
 - **Email** - Gmail, AWS SES, Resend, generic SMTP
@@ -2111,6 +2123,14 @@ Conditional requests are converted to polling schedules:
 !schedule When Bitcoin drops below $40k, @crypto_agent notify me
 ```
 
+### Edit a Schedule
+
+```
+!edit_schedule <task-id> <new-task-description>
+```
+
+Edits an existing scheduled task by ID. The task description is re-parsed to update timing and content.
+
 ### List and Cancel Schedules
 
 ```
@@ -2119,7 +2139,7 @@ Conditional requests are converted to polling schedules:
 !cancel_schedule all             # Cancel all tasks in room
 ```
 
-Aliases: `!listschedules`, `!list-schedules`, `!cancelschedule`, `!cancel-schedule`
+Aliases: `!listschedules`, `!list-schedules`, `!cancelschedule`, `!cancel-schedule`, `!editschedule`, `!edit-schedule`
 
 ## Agent Mentions
 

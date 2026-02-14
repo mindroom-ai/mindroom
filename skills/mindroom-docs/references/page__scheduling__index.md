@@ -34,6 +34,14 @@ Conditional requests are converted to polling schedules:
 !schedule When Bitcoin drops below $40k, @crypto_agent notify me
 ```
 
+### Edit a Schedule
+
+```
+!edit_schedule <task-id> <new-task-description>
+```
+
+Edits an existing scheduled task by ID. The task description is re-parsed to update timing and content.
+
 ### List and Cancel Schedules
 
 ```
@@ -42,7 +50,7 @@ Conditional requests are converted to polling schedules:
 !cancel_schedule all             # Cancel all tasks in room
 ```
 
-Aliases: `!listschedules`, `!list-schedules`, `!cancelschedule`, `!cancel-schedule`
+Aliases: `!listschedules`, `!list-schedules`, `!cancelschedule`, `!cancel-schedule`, `!editschedule`, `!edit-schedule`
 
 ## Agent Mentions
 
