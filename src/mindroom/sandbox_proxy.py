@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import hmac
 import json
 import os
 from collections.abc import Mapping
@@ -10,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from mindroom.constants import env_flag
 from mindroom.credentials import get_credentials_manager
 
 if TYPE_CHECKING:
@@ -22,13 +25,6 @@ SANDBOX_PROXY_TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
 DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
 DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS = 60
 MAX_CREDENTIAL_LEASE_TTL_SECONDS = 3600
-
-
-def _env_flag(name: str) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return False
-    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def sandbox_proxy_url() -> str | None:
@@ -61,7 +57,9 @@ def sandbox_proxy_token_matches(provided_token: str | None) -> bool:
     expected_token = sandbox_proxy_token()
     if expected_token is None:
         return False
-    return provided_token == expected_token
+    if provided_token is None:
+        return False
+    return hmac.compare_digest(provided_token, expected_token)
 
 
 def to_json_compatible(value: object) -> object:
@@ -165,7 +163,7 @@ def _credential_lease_ttl_seconds() -> int:
 
 def sandbox_proxy_enabled_for_tool(tool_name: str) -> bool:
     """Return whether the given tool should execute through the sandbox proxy."""
-    if _env_flag("MINDROOM_SANDBOX_RUNNER_MODE"):
+    if env_flag("MINDROOM_SANDBOX_RUNNER_MODE"):
         return False
 
     url = sandbox_proxy_url()
@@ -249,42 +247,18 @@ def _decode_lease_response(payload: object) -> str:
     return lease_id
 
 
-def _create_credential_lease_sync(
-    *,
-    client: httpx.Client,
+def _build_lease_payload(
     tool_name: str,
     function_name: str,
     credential_overrides: dict[str, object],
-) -> str:
-    lease_payload: dict[str, object] = {
+) -> dict[str, object]:
+    return {
         "tool_name": tool_name,
         "function_name": function_name,
         "credential_overrides": to_json_compatible(credential_overrides),
         "ttl_seconds": _credential_lease_ttl_seconds(),
         "max_uses": 1,
     }
-    response = client.post(_build_proxy_lease_url(), json=lease_payload, headers=_build_proxy_headers())
-    response.raise_for_status()
-    return _decode_lease_response(response.json())
-
-
-async def _create_credential_lease_async(
-    *,
-    client: httpx.AsyncClient,
-    tool_name: str,
-    function_name: str,
-    credential_overrides: dict[str, object],
-) -> str:
-    lease_payload: dict[str, object] = {
-        "tool_name": tool_name,
-        "function_name": function_name,
-        "credential_overrides": to_json_compatible(credential_overrides),
-        "ttl_seconds": _credential_lease_ttl_seconds(),
-        "max_uses": 1,
-    }
-    response = await client.post(_build_proxy_lease_url(), json=lease_payload, headers=_build_proxy_headers())
-    response.raise_for_status()
-    return _decode_lease_response(response.json())
 
 
 def _call_proxy_sync(
@@ -295,43 +269,17 @@ def _call_proxy_sync(
     kwargs: dict[str, object],
 ) -> object:
     credential_overrides = _collect_shared_credential_overrides(tool_name, function_name)
+    headers = _build_proxy_headers()
     with httpx.Client(timeout=sandbox_proxy_timeout_seconds()) as client:
         lease_id: str | None = None
         if credential_overrides:
-            lease_id = _create_credential_lease_sync(
-                client=client,
-                tool_name=tool_name,
-                function_name=function_name,
-                credential_overrides=credential_overrides,
-            )
+            lease_payload = _build_lease_payload(tool_name, function_name, credential_overrides)
+            response = client.post(_build_proxy_lease_url(), json=lease_payload, headers=headers)
+            response.raise_for_status()
+            lease_id = _decode_lease_response(response.json())
 
         payload = _build_proxy_payload(tool_name, function_name, args, kwargs, lease_id=lease_id)
-        response = client.post(_build_proxy_execute_url(), json=payload, headers=_build_proxy_headers())
-        response.raise_for_status()
-        data = response.json()
-    return _decode_proxy_response(data)
-
-
-async def _call_proxy_async(
-    *,
-    tool_name: str,
-    function_name: str,
-    args: tuple[object, ...],
-    kwargs: dict[str, object],
-) -> object:
-    credential_overrides = _collect_shared_credential_overrides(tool_name, function_name)
-    async with httpx.AsyncClient(timeout=sandbox_proxy_timeout_seconds()) as client:
-        lease_id: str | None = None
-        if credential_overrides:
-            lease_id = await _create_credential_lease_async(
-                client=client,
-                tool_name=tool_name,
-                function_name=function_name,
-                credential_overrides=credential_overrides,
-            )
-
-        payload = _build_proxy_payload(tool_name, function_name, args, kwargs, lease_id=lease_id)
-        response = await client.post(_build_proxy_execute_url(), json=payload, headers=_build_proxy_headers())
+        response = client.post(_build_proxy_execute_url(), json=payload, headers=headers)
         response.raise_for_status()
         data = response.json()
     return _decode_proxy_response(data)
@@ -357,7 +305,8 @@ def _wrap_async_function(function: Function, tool_name: str, function_name: str)
     wrapped = function.model_copy(deep=False)
 
     async def proxy_entrypoint(*args: object, **kwargs: object) -> object:
-        return await _call_proxy_async(
+        return await asyncio.to_thread(
+            _call_proxy_sync,
             tool_name=tool_name,
             function_name=function_name,
             args=args,

@@ -6,23 +6,16 @@ from typing import TYPE_CHECKING
 
 import mindroom.tools  # noqa: F401
 import mindroom.tools_metadata as tools_metadata_module
+from tests.conftest import FakeCredentialsManager
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
-class _FakeCredentialsManager:
-    def __init__(self, credentials_by_service: dict[str, dict[str, object]]) -> None:
-        self._credentials_by_service = credentials_by_service
-
-    def load_credentials(self, service: str) -> dict[str, object]:
-        return self._credentials_by_service.get(service, {})
-
-
 def test_container_sandbox_overrides_local_execution_tools(tmp_path: Path, monkeypatch: object) -> None:
     """Container sandbox mode should force local execution tools into workspace."""
     workspace = tmp_path / "workspace"
-    fake_credentials = _FakeCredentialsManager(
+    fake_credentials = FakeCredentialsManager(
         {
             "file": {"base_dir": tmp_path / "file-creds"},
             "shell": {"base_dir": str(tmp_path / "shell-creds")},
@@ -51,7 +44,7 @@ def test_non_sandbox_uses_tool_credentials(tmp_path: Path, monkeypatch: object) 
     shell_base_dir = tmp_path / "shell-base"
     python_base_dir = tmp_path / "python-base"
 
-    fake_credentials = _FakeCredentialsManager(
+    fake_credentials = FakeCredentialsManager(
         {
             "file": {"base_dir": file_base_dir},
             "shell": {"base_dir": str(shell_base_dir)},
@@ -76,7 +69,7 @@ def test_credential_overrides_take_precedence(tmp_path: Path, monkeypatch: objec
     """Per-call credential overrides should override stored credentials."""
     stored_base_dir = tmp_path / "stored-base"
     override_base_dir = tmp_path / "override-base"
-    fake_credentials = _FakeCredentialsManager({"file": {"base_dir": stored_base_dir}})
+    fake_credentials = FakeCredentialsManager({"file": {"base_dir": stored_base_dir}})
 
     monkeypatch.setattr(tools_metadata_module, "MINDROOM_CONTAINER_SANDBOX", False)
     monkeypatch.setattr(tools_metadata_module, "get_credentials_manager", lambda: fake_credentials)

@@ -13,7 +13,7 @@ class SandboxTools(Toolkit):
     """Manage the persistent workspace used by in-container sandbox tooling."""
 
     def __init__(self) -> None:
-        self.workspace = MINDROOM_SANDBOX_WORKSPACE
+        self.workspace = MINDROOM_SANDBOX_WORKSPACE.resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
         super().__init__(
             name="sandbox",

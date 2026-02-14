@@ -8,14 +8,7 @@ import pytest
 
 import mindroom.tools  # noqa: F401
 from mindroom.tools_metadata import get_tool_by_name
-
-
-class _FakeCredentialsManager:
-    def __init__(self, credentials_by_service: dict[str, dict[str, object]]) -> None:
-        self._credentials_by_service = credentials_by_service
-
-    def load_credentials(self, service: str) -> dict[str, object]:
-        return self._credentials_by_service.get(service, {})
+from tests.conftest import FakeCredentialsManager
 
 
 def test_proxy_wraps_tool_calls(monkeypatch: object) -> None:
@@ -121,7 +114,7 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: object
                 return _FakeResponse({"lease_id": "lease-123", "expires_at": 123.0, "max_uses": 1})
             return _FakeResponse({"ok": True, "result": "proxied"})
 
-    fake_credentials = _FakeCredentialsManager({"openai": {"api_key": "sk-test", "_source": "ui"}})
+    fake_credentials = FakeCredentialsManager({"openai": {"api_key": "sk-test", "_source": "ui"}})
 
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_URL", "http://sandbox-runner:8765")
     monkeypatch.setenv("MINDROOM_SANDBOX_EXECUTION_MODE", "all")

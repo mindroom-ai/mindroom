@@ -13,7 +13,8 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
+from loguru import logger
 from pydantic import BaseModel, Field, ValidationError
 
 from mindroom.sandbox_proxy import sandbox_proxy_token, sandbox_proxy_token_matches, to_json_compatible
@@ -24,7 +25,6 @@ if TYPE_CHECKING:
 
     from agno.tools.toolkit import Toolkit
 
-router = APIRouter(prefix="/api/sandbox-runner", tags=["sandbox-runner"])
 MAX_LEASE_TTL_SECONDS = 3600
 DEFAULT_LEASE_TTL_SECONDS = 60
 DEFAULT_SUBPROCESS_TIMEOUT_SECONDS = 120.0
@@ -95,11 +95,18 @@ class SandboxRunnerExecutionRequest(BaseModel):
     credential_overrides: dict[str, object] = Field(default_factory=dict)
 
 
-def _validate_runner_token(provided_token: str | None) -> None:
+async def _validate_runner_token(x_mindroom_sandbox_token: Annotated[str | None, Header()] = None) -> None:
     if sandbox_proxy_token() is None:
         raise HTTPException(status_code=503, detail="Sandbox runner token is not configured.")
-    if not sandbox_proxy_token_matches(provided_token):
+    if not sandbox_proxy_token_matches(x_mindroom_sandbox_token):
         raise HTTPException(status_code=401, detail="Unauthorized sandbox runner request")
+
+
+router = APIRouter(
+    prefix="/api/sandbox-runner",
+    tags=["sandbox-runner"],
+    dependencies=[Depends(_validate_runner_token)],
+)
 
 
 async def _maybe_await(value: object) -> object:
@@ -218,8 +225,11 @@ async def _execute_request_inprocess(request: SandboxRunnerExecutionRequest) -> 
                 await _maybe_await(close_result)
         else:
             result = await _maybe_await(entrypoint(*request.args, **request.kwargs))
-    except Exception as exc:
-        return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
+    except Exception:
+        logger.opt(exception=True).warning(
+            f"Sandbox tool execution failed: {request.tool_name}.{request.function_name}",
+        )
+        return SandboxRunnerExecuteResponse(ok=False, error="Sandbox tool execution failed.")
 
     return SandboxRunnerExecuteResponse(ok=True, result=to_json_compatible(result))
 
@@ -293,10 +303,8 @@ def _run_subprocess_worker() -> int:
 @router.post("/leases", response_model=SandboxRunnerLeaseResponse)
 async def create_credential_lease(
     request: SandboxRunnerLeaseRequest,
-    x_mindroom_sandbox_token: Annotated[str | None, Header()] = None,
 ) -> SandboxRunnerLeaseResponse:
     """Create a short-lived, one-or-few-use credential lease."""
-    _validate_runner_token(x_mindroom_sandbox_token)
     lease = _create_credential_lease(request)
     return SandboxRunnerLeaseResponse(
         lease_id=lease.lease_id,
@@ -308,10 +316,8 @@ async def create_credential_lease(
 @router.post("/execute", response_model=SandboxRunnerExecuteResponse)
 async def execute_tool_call(
     request: SandboxRunnerExecuteRequest,
-    x_mindroom_sandbox_token: Annotated[str | None, Header()] = None,
 ) -> SandboxRunnerExecuteResponse:
     """Execute a tool function locally and return the serialized result."""
-    _validate_runner_token(x_mindroom_sandbox_token)
     credential_overrides: dict[str, object] = {}
     if request.lease_id is not None:
         credential_overrides = _consume_credential_lease(
