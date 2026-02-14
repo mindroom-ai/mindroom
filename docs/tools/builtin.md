@@ -12,7 +12,6 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 |------|------|-------------|-----------------|
 | :lucide-folder-cog: | `file` | Read, write, list, search, and manage local files | - |
 | :lucide-folder-cog: | `shell` | Execute shell commands | - |
-| :lucide-folder-cog: | `sandbox` | Inspect and reset the persistent in-container sandbox workspace | - |
 | :lucide-folder-cog: | `docker` | Manage Docker containers and images | - |
 | :lucide-folder-cog: | `python` | Execute Python code | - |
 | :lucide-folder-cog: | `sql` | Database query and management for SQL databases | `db_url` or connection params |

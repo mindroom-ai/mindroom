@@ -13,6 +13,7 @@ import threading
 import time
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -28,6 +29,8 @@ if TYPE_CHECKING:
 
     from agno.tools.toolkit import Toolkit
 
+    from mindroom.config import Config
+
 MAX_LEASE_TTL_SECONDS = 3600
 DEFAULT_LEASE_TTL_SECONDS = 60
 DEFAULT_SUBPROCESS_TIMEOUT_SECONDS = 120.0
@@ -37,6 +40,30 @@ RUNNER_SUBPROCESS_TIMEOUT_ENV = "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECO
 
 # Sentinel written to stderr to delimit the JSON response from tool output.
 _RESPONSE_MARKER = "__SANDBOX_RESPONSE__"
+
+
+def _load_config_from_env() -> tuple[Config | None, Path | None]:
+    """Read runner config path from environment variables."""
+    from mindroom.config import Config as _Config  # noqa: PLC0415
+
+    config_path_env = os.getenv("MINDROOM_CONFIG_PATH") or os.getenv("CONFIG_PATH")
+    config: _Config | None = None
+    config_path: Path | None = None
+    if config_path_env:
+        config_path = Path(config_path_env).expanduser()
+        if config_path.exists():
+            config = _Config.from_yaml(config_path)
+    return config, config_path
+
+
+def ensure_registry_loaded_with_config() -> None:
+    """Load config from env and ensure the tool registry is populated.
+
+    Used by both the FastAPI startup and the subprocess worker so that
+    plugin tools are registered even in fresh processes.
+    """
+    config, config_path = _load_config_from_env()
+    ensure_tool_registry_loaded(config, config_path=config_path)
 
 
 @dataclass
@@ -124,7 +151,7 @@ def _resolve_entrypoint(
     function_name: str,
     credential_overrides: dict[str, object] | None = None,
 ) -> tuple[Toolkit, Callable[..., object]]:
-    ensure_tool_registry_loaded()
+    ensure_registry_loaded_with_config()
     try:
         toolkit = get_tool_by_name(
             tool_name,
