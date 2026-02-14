@@ -290,16 +290,20 @@ def _load_config_quiet(path: Path) -> Config:
             structlog.reset_defaults()
 
 
-def _check_env_keys(config: Config) -> None:
-    """Warn about missing environment variables for configured providers."""
+def _find_missing_env_keys(config: Config) -> list[tuple[str, str]]:
+    """Return (provider, env_key) pairs for configured providers missing env vars."""
     providers_used: set[str] = {model.provider for model in config.models.values()}
-
     missing: list[tuple[str, str]] = []
     for provider in sorted(providers_used):
         env_key = PROVIDER_ENV_KEYS.get(provider)
         if env_key and not os.getenv(env_key):
             missing.append((provider, env_key))
+    return missing
 
+
+def _check_env_keys(config: Config) -> None:
+    """Warn about missing environment variables for configured providers."""
+    missing = _find_missing_env_keys(config)
     if missing:
         console.print("\n[yellow]Warning:[/yellow] Missing API key environment variables:\n")
         for provider, env_key in missing:

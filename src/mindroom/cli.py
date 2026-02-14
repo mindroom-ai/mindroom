@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 from mindroom.cli_config import (
     _check_env_keys,
     _config_search_locations,
+    _find_missing_env_keys,
     _format_validation_errors,
     _load_config_quiet,
     config_app,
@@ -30,7 +31,6 @@ from mindroom.constants import (
     DEFAULT_AGENTS_CONFIG,
     MATRIX_HOMESERVER,
     MATRIX_SSL_VERIFY,
-    PROVIDER_ENV_KEYS,
     STORAGE_PATH,
 )
 
@@ -205,18 +205,11 @@ def _check_config_valid(config_path: Path) -> tuple[Config | None, int, int, int
 
 def _check_api_keys(config: Config) -> tuple[int, int, int]:
     """Check API keys for configured providers. Returns (passed, failed, warnings)."""
-    providers_used: set[str] = {m.provider for m in config.models.values()}
-    missing: list[tuple[str, str]] = []
-    for provider in sorted(providers_used):
-        env_key = PROVIDER_ENV_KEYS.get(provider)
-        if env_key and not os.getenv(env_key):
-            missing.append((provider, env_key))
+    missing = _find_missing_env_keys(config)
     if missing:
-        w = 0
         for provider, env_key in missing:
             console.print(f"[yellow]![/yellow] Missing env: {env_key} (provider: {provider})")
-            w += 1
-        return 0, 0, w
+        return 0, 0, len(missing)
     console.print("[green]✓[/green] API keys set for all configured providers")
     return 1, 0, 0
 
@@ -232,7 +225,7 @@ def _check_matrix_homeserver() -> tuple[int, int, int]:
                 f"[red]✗[/red] Matrix homeserver returned {resp.status_code}: {MATRIX_HOMESERVER}",
             )
             return 0, 1, 0
-    except Exception as exc:
+    except httpx.HTTPError as exc:
         console.print(f"[red]✗[/red] Matrix homeserver unreachable: {MATRIX_HOMESERVER} ({exc})")
         return 0, 1, 0
     console.print(f"[green]✓[/green] Matrix homeserver: {MATRIX_HOMESERVER}")
