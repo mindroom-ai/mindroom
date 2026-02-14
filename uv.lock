@@ -3216,109 +3216,359 @@ wheels = [
 name = "mindroom"
 source = { editable = "." }
 dependencies = [
-    { name = "agentql" },
     { name = "agno", extra = ["anthropic", "google", "ollama", "openai"] },
     { name = "aiofiles" },
     { name = "aiohttp" },
     { name = "anthropic" },
-    { name = "apify-client", marker = "platform_machine != 'aarch64'" },
-    { name = "arxiv" },
-    { name = "atlassian-python-api" },
-    { name = "baidusearch" },
-    { name = "beautifulsoup4" },
-    { name = "boto3" },
-    { name = "browserbase" },
-    { name = "cartesia" },
     { name = "cerebras-cloud-sdk" },
     { name = "chromadb" },
-    { name = "claude-agent-sdk" },
-    { name = "composio-agno" },
-    { name = "crawl4ai" },
     { name = "cron-descriptor" },
     { name = "croniter" },
-    { name = "daytona" },
-    { name = "ddgs" },
     { name = "diskcache" },
-    { name = "docker" },
-    { name = "duckdb" },
-    { name = "e2b-code-interpreter" },
-    { name = "elevenlabs" },
-    { name = "exa-py" },
-    { name = "fal-client" },
     { name = "fastapi", extra = ["standard"] },
-    { name = "firecrawl-py" },
     { name = "google-api-python-client" },
     { name = "google-auth" },
     { name = "google-auth-httplib2" },
     { name = "google-auth-oauthlib" },
-    { name = "google-cloud-bigquery" },
     { name = "google-genai" },
-    { name = "google-maps-places" },
-    { name = "google-search-results" },
-    { name = "googlemaps" },
     { name = "groq" },
     { name = "httpx" },
     { name = "humanize" },
-    { name = "jira" },
     { name = "json5" },
-    { name = "linkup-sdk" },
     { name = "loguru" },
-    { name = "lumaai" },
-    { name = "lxml-html-clean" },
     { name = "markdown" },
-    { name = "matplotlib" },
     { name = "matrix-nio" },
     { name = "mcp", extra = ["cli"] },
     { name = "mem0ai" },
-    { name = "moviepy" },
-    { name = "neo4j" },
-    { name = "newspaper4k" },
-    { name = "notion-client" },
     { name = "openai" },
-    { name = "openbb" },
-    { name = "oxylabs" },
-    { name = "pandas" },
-    { name = "playwright" },
-    { name = "praw" },
-    { name = "psycopg-binary" },
-    { name = "py-trello" },
-    { name = "pycountry" },
     { name = "pydantic" },
-    { name = "pygithub" },
     { name = "pyjwt" },
-    { name = "pypdf" },
     { name = "python-dotenv" },
-    { name = "pytz" },
-    { name = "pyyaml" },
-    { name = "redshift-connector" },
-    { name = "replicate" },
-    { name = "reportlab" },
-    { name = "requests" },
-    { name = "resend" },
     { name = "rich" },
-    { name = "scrapegraph-py" },
-    { name = "slack-sdk" },
-    { name = "spider-client" },
     { name = "spotipy" },
-    { name = "sqlalchemy" },
     { name = "streamlit" },
     { name = "structlog" },
     { name = "supabase" },
-    { name = "tavily-python" },
     { name = "tenacity" },
-    { name = "todoist-api-python" },
-    { name = "trafilatura" },
-    { name = "tweepy" },
-    { name = "twilio" },
     { name = "typer" },
     { name = "uvicorn" },
     { name = "watchdog" },
     { name = "watchfiles" },
+]
+
+[package.optional-dependencies]
+agentql = [
+    { name = "agentql" },
+    { name = "playwright" },
+]
+apify = [
+    { name = "apify-client", marker = "platform_machine != 'aarch64'" },
+]
+arxiv = [
+    { name = "arxiv" },
+    { name = "pypdf" },
+]
+aws-lambda = [
+    { name = "boto3" },
+]
+aws-ses = [
+    { name = "boto3" },
+]
+baidusearch = [
+    { name = "baidusearch" },
+    { name = "pycountry" },
+]
+bitbucket = [
+    { name = "requests" },
+]
+brandfetch = [
+    { name = "httpx" },
+]
+brightdata = [
+    { name = "requests" },
+]
+browserbase = [
+    { name = "browserbase" },
+    { name = "playwright" },
+]
+cal-com = [
+    { name = "pytz" },
+    { name = "requests" },
+]
+calculator = [
+    { name = "agno", extra = ["anthropic", "google", "ollama", "openai"] },
+]
+cartesia = [
+    { name = "cartesia" },
+]
+claude-agent = [
+    { name = "claude-agent-sdk" },
+]
+clickup = [
+    { name = "requests" },
+]
+composio = [
+    { name = "composio-agno" },
+]
+config-manager = [
+    { name = "agno", extra = ["anthropic", "google", "ollama", "openai"] },
+    { name = "pydantic" },
+    { name = "pyyaml" },
+]
+confluence = [
+    { name = "atlassian-python-api" },
+]
+crawl4ai = [
+    { name = "crawl4ai" },
+]
+csv = [
+    { name = "duckdb" },
+]
+custom-api = [
+    { name = "requests" },
+]
+dalle = [
+    { name = "openai" },
+]
+daytona = [
+    { name = "daytona" },
+]
+desi-vocal = [
+    { name = "requests" },
+]
+discord = [
+    { name = "requests" },
+]
+docker = [
+    { name = "docker" },
+]
+duckdb = [
+    { name = "duckdb" },
+]
+duckduckgo = [
+    { name = "ddgs" },
+]
+e2b = [
+    { name = "e2b-code-interpreter" },
+]
+eleven-labs = [
+    { name = "elevenlabs" },
+]
+exa = [
+    { name = "exa-py" },
+]
+fal = [
+    { name = "fal-client" },
+]
+file = [
+    { name = "agno", extra = ["anthropic", "google", "ollama", "openai"] },
+]
+file-generation = [
+    { name = "reportlab" },
+]
+financial-datasets-api = [
+    { name = "requests" },
+]
+firecrawl = [
+    { name = "firecrawl-py" },
+]
+gemini = [
+    { name = "google-genai" },
+]
+giphy = [
+    { name = "httpx" },
+]
+github = [
+    { name = "pygithub" },
+]
+gmail = [
+    { name = "google-api-python-client" },
+    { name = "google-auth" },
+    { name = "google-auth-httplib2" },
+    { name = "google-auth-oauthlib" },
+]
+google-bigquery = [
+    { name = "google-cloud-bigquery" },
+]
+google-calendar = [
+    { name = "google-api-python-client" },
+    { name = "google-auth" },
+    { name = "google-auth-httplib2" },
+    { name = "google-auth-oauthlib" },
+]
+google-maps = [
+    { name = "google-maps-places" },
+    { name = "googlemaps" },
+]
+google-sheets = [
+    { name = "google-api-python-client" },
+    { name = "google-auth-httplib2" },
+    { name = "google-auth-oauthlib" },
+]
+googlesearch = [
+    { name = "ddgs" },
+]
+groq = [
+    { name = "groq" },
+]
+hackernews = [
+    { name = "httpx" },
+]
+homeassistant = [
+    { name = "httpx" },
+]
+jina = [
+    { name = "httpx" },
+    { name = "pydantic" },
+]
+jira = [
+    { name = "jira" },
+]
+linear = [
+    { name = "requests" },
+]
+linkup = [
+    { name = "linkup-sdk" },
+]
+lumalabs = [
+    { name = "lumaai" },
+]
+mem0 = [
+    { name = "mem0ai" },
+]
+modelslabs = [
+    { name = "requests" },
+]
+moviepy-video-tools = [
+    { name = "moviepy" },
+]
+neo4j = [
+    { name = "neo4j" },
+]
+newspaper4k = [
+    { name = "lxml-html-clean" },
+    { name = "newspaper4k" },
+]
+notion = [
+    { name = "notion-client" },
+]
+openai = [
+    { name = "openai" },
+]
+openbb = [
+    { name = "openbb" },
+]
+openweather = [
+    { name = "requests" },
+]
+oxylabs = [
+    { name = "oxylabs" },
+]
+pandas = [
+    { name = "pandas" },
+]
+postgres = [
+    { name = "psycopg-binary" },
+]
+pubmed = [
+    { name = "httpx" },
+]
+python = [
+    { name = "agno", extra = ["anthropic", "google", "ollama", "openai"] },
+]
+reddit = [
+    { name = "praw" },
+]
+redshift = [
+    { name = "redshift-connector" },
+]
+replicate = [
+    { name = "replicate" },
+]
+resend = [
+    { name = "resend" },
+]
+scheduler = [
+    { name = "agno", extra = ["anthropic", "google", "ollama", "openai"] },
+]
+scrapegraph = [
+    { name = "scrapegraph-py" },
+]
+serpapi = [
+    { name = "google-search-results" },
+]
+serper = [
+    { name = "requests" },
+]
+shopify = [
+    { name = "httpx" },
+]
+slack = [
+    { name = "slack-sdk" },
+]
+sleep = [
+    { name = "agno", extra = ["anthropic", "google", "ollama", "openai"] },
+]
+spider = [
+    { name = "spider-client" },
+]
+spotify = [
+    { name = "httpx" },
+]
+sql = [
+    { name = "sqlalchemy" },
+]
+tavily = [
+    { name = "tavily-python" },
+]
+telegram = [
+    { name = "httpx" },
+]
+todoist = [
+    { name = "todoist-api-python" },
+]
+trafilatura = [
+    { name = "trafilatura" },
+]
+trello = [
+    { name = "py-trello" },
+]
+twilio = [
+    { name = "twilio" },
+]
+visualization = [
+    { name = "matplotlib" },
+]
+webex = [
     { name = "webexpythonsdk" },
+]
+website = [
+    { name = "beautifulsoup4" },
+    { name = "httpx" },
+]
+whatsapp = [
+    { name = "httpx" },
+]
+wikipedia = [
     { name = "wikipedia" },
+]
+x = [
+    { name = "tweepy" },
+]
+yfinance = [
     { name = "yfinance" },
+]
+youtube = [
     { name = "youtube-transcript-api" },
+]
+zendesk = [
+    { name = "requests" },
+]
+zep = [
     { name = "zep-cloud" },
+]
+zoom = [
+    { name = "requests" },
 ]
 
 [package.dev-dependencies]
@@ -3344,110 +3594,163 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agentql" },
+    { name = "agentql", marker = "extra == 'agentql'" },
     { name = "agno", extras = ["anthropic", "google", "ollama", "openai"], specifier = ">=2.4.7" },
+    { name = "agno", extras = ["anthropic", "google", "ollama", "openai"], marker = "extra == 'calculator'", specifier = ">=2.4.7" },
+    { name = "agno", extras = ["anthropic", "google", "ollama", "openai"], marker = "extra == 'config-manager'", specifier = ">=2.4.7" },
+    { name = "agno", extras = ["anthropic", "google", "ollama", "openai"], marker = "extra == 'file'", specifier = ">=2.4.7" },
+    { name = "agno", extras = ["anthropic", "google", "ollama", "openai"], marker = "extra == 'python'", specifier = ">=2.4.7" },
+    { name = "agno", extras = ["anthropic", "google", "ollama", "openai"], marker = "extra == 'scheduler'", specifier = ">=2.4.7" },
+    { name = "agno", extras = ["anthropic", "google", "ollama", "openai"], marker = "extra == 'sleep'", specifier = ">=2.4.7" },
     { name = "aiofiles" },
     { name = "aiohttp" },
     { name = "anthropic", specifier = ">=0.70" },
-    { name = "apify-client", marker = "platform_machine != 'aarch64'", specifier = ">=1.12.2" },
-    { name = "arxiv" },
-    { name = "atlassian-python-api" },
-    { name = "baidusearch" },
-    { name = "beautifulsoup4" },
-    { name = "boto3", specifier = ">=1.40.8" },
-    { name = "browserbase" },
-    { name = "cartesia" },
+    { name = "apify-client", marker = "platform_machine != 'aarch64' and extra == 'apify'", specifier = ">=1.12.2" },
+    { name = "arxiv", marker = "extra == 'arxiv'" },
+    { name = "atlassian-python-api", marker = "extra == 'confluence'" },
+    { name = "baidusearch", marker = "extra == 'baidusearch'" },
+    { name = "beautifulsoup4", marker = "extra == 'website'" },
+    { name = "boto3", marker = "extra == 'aws-lambda'", specifier = ">=1.40.8" },
+    { name = "boto3", marker = "extra == 'aws-ses'", specifier = ">=1.40.8" },
+    { name = "browserbase", marker = "extra == 'browserbase'" },
+    { name = "cartesia", marker = "extra == 'cartesia'" },
     { name = "cerebras-cloud-sdk", specifier = ">=1.46" },
     { name = "chromadb", specifier = ">=1.0.15" },
-    { name = "claude-agent-sdk", specifier = ">=0.1.35" },
-    { name = "composio-agno" },
-    { name = "crawl4ai", specifier = ">=0.7.3" },
+    { name = "claude-agent-sdk", marker = "extra == 'claude-agent'", specifier = ">=0.1.35" },
+    { name = "composio-agno", marker = "extra == 'composio'" },
+    { name = "crawl4ai", marker = "extra == 'crawl4ai'", specifier = ">=0.7.3" },
     { name = "cron-descriptor", specifier = ">=1.4.5" },
     { name = "croniter", specifier = ">=6" },
-    { name = "daytona" },
-    { name = "ddgs" },
+    { name = "daytona", marker = "extra == 'daytona'" },
+    { name = "ddgs", marker = "extra == 'duckduckgo'" },
+    { name = "ddgs", marker = "extra == 'googlesearch'" },
     { name = "diskcache", specifier = ">=5.6.3" },
-    { name = "docker" },
-    { name = "duckdb" },
-    { name = "e2b-code-interpreter" },
-    { name = "elevenlabs" },
-    { name = "exa-py" },
-    { name = "fal-client" },
+    { name = "docker", marker = "extra == 'docker'" },
+    { name = "duckdb", marker = "extra == 'csv'" },
+    { name = "duckdb", marker = "extra == 'duckdb'" },
+    { name = "e2b-code-interpreter", marker = "extra == 'e2b'" },
+    { name = "elevenlabs", marker = "extra == 'eleven-labs'" },
+    { name = "exa-py", marker = "extra == 'exa'" },
+    { name = "fal-client", marker = "extra == 'fal'" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.116.1" },
-    { name = "firecrawl-py", specifier = ">=3" },
+    { name = "firecrawl-py", marker = "extra == 'firecrawl'", specifier = ">=3" },
     { name = "google-api-python-client", specifier = ">=2.178" },
+    { name = "google-api-python-client", marker = "extra == 'gmail'", specifier = ">=2.178" },
+    { name = "google-api-python-client", marker = "extra == 'google-calendar'", specifier = ">=2.178" },
+    { name = "google-api-python-client", marker = "extra == 'google-sheets'", specifier = ">=2.178" },
     { name = "google-auth", specifier = ">=2.40.3" },
+    { name = "google-auth", marker = "extra == 'gmail'", specifier = ">=2.40.3" },
+    { name = "google-auth", marker = "extra == 'google-calendar'", specifier = ">=2.40.3" },
     { name = "google-auth-httplib2", specifier = ">=0.2" },
+    { name = "google-auth-httplib2", marker = "extra == 'gmail'", specifier = ">=0.2" },
+    { name = "google-auth-httplib2", marker = "extra == 'google-calendar'", specifier = ">=0.2" },
+    { name = "google-auth-httplib2", marker = "extra == 'google-sheets'", specifier = ">=0.2" },
     { name = "google-auth-oauthlib", specifier = ">=1.2.2" },
-    { name = "google-cloud-bigquery" },
+    { name = "google-auth-oauthlib", marker = "extra == 'gmail'", specifier = ">=1.2.2" },
+    { name = "google-auth-oauthlib", marker = "extra == 'google-calendar'", specifier = ">=1.2.2" },
+    { name = "google-auth-oauthlib", marker = "extra == 'google-sheets'", specifier = ">=1.2.2" },
+    { name = "google-cloud-bigquery", marker = "extra == 'google-bigquery'" },
     { name = "google-genai" },
-    { name = "google-maps-places" },
-    { name = "google-search-results", specifier = ">=2.4.2" },
-    { name = "googlemaps" },
+    { name = "google-genai", marker = "extra == 'gemini'" },
+    { name = "google-maps-places", marker = "extra == 'google-maps'" },
+    { name = "google-search-results", marker = "extra == 'serpapi'", specifier = ">=2.4.2" },
+    { name = "googlemaps", marker = "extra == 'google-maps'" },
     { name = "groq", specifier = ">=0.31" },
+    { name = "groq", marker = "extra == 'groq'", specifier = ">=0.31" },
     { name = "httpx", specifier = ">=0.27" },
+    { name = "httpx", marker = "extra == 'brandfetch'", specifier = ">=0.27" },
+    { name = "httpx", marker = "extra == 'giphy'", specifier = ">=0.27" },
+    { name = "httpx", marker = "extra == 'hackernews'", specifier = ">=0.27" },
+    { name = "httpx", marker = "extra == 'homeassistant'", specifier = ">=0.27" },
+    { name = "httpx", marker = "extra == 'jina'", specifier = ">=0.27" },
+    { name = "httpx", marker = "extra == 'pubmed'", specifier = ">=0.27" },
+    { name = "httpx", marker = "extra == 'shopify'", specifier = ">=0.27" },
+    { name = "httpx", marker = "extra == 'spotify'", specifier = ">=0.27" },
+    { name = "httpx", marker = "extra == 'telegram'", specifier = ">=0.27" },
+    { name = "httpx", marker = "extra == 'website'", specifier = ">=0.27" },
+    { name = "httpx", marker = "extra == 'whatsapp'", specifier = ">=0.27" },
     { name = "humanize", specifier = ">=4.12.3" },
-    { name = "jira", specifier = ">=3.10.5" },
+    { name = "jira", marker = "extra == 'jira'", specifier = ">=3.10.5" },
     { name = "json5", specifier = ">=0.13" },
-    { name = "linkup-sdk", specifier = ">=0.2.8" },
+    { name = "linkup-sdk", marker = "extra == 'linkup'", specifier = ">=0.2.8" },
     { name = "loguru", specifier = ">=0.7.3" },
-    { name = "lumaai" },
-    { name = "lxml-html-clean" },
+    { name = "lumaai", marker = "extra == 'lumalabs'" },
+    { name = "lxml-html-clean", marker = "extra == 'newspaper4k'" },
     { name = "markdown", specifier = ">=3.7" },
-    { name = "matplotlib" },
+    { name = "matplotlib", marker = "extra == 'visualization'" },
     { name = "matrix-nio", specifier = ">=0.24" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.12.4" },
     { name = "mem0ai", specifier = ">=0.1.115" },
-    { name = "moviepy" },
-    { name = "neo4j" },
-    { name = "newspaper4k" },
-    { name = "notion-client" },
+    { name = "mem0ai", marker = "extra == 'mem0'", specifier = ">=0.1.115" },
+    { name = "moviepy", marker = "extra == 'moviepy-video-tools'" },
+    { name = "neo4j", marker = "extra == 'neo4j'" },
+    { name = "newspaper4k", marker = "extra == 'newspaper4k'" },
+    { name = "notion-client", marker = "extra == 'notion'" },
     { name = "openai" },
-    { name = "openbb" },
-    { name = "oxylabs" },
-    { name = "pandas", specifier = ">=2.2" },
-    { name = "playwright" },
-    { name = "praw" },
-    { name = "psycopg-binary" },
-    { name = "py-trello" },
-    { name = "pycountry" },
+    { name = "openai", marker = "extra == 'dalle'" },
+    { name = "openai", marker = "extra == 'openai'" },
+    { name = "openbb", marker = "extra == 'openbb'" },
+    { name = "oxylabs", marker = "extra == 'oxylabs'" },
+    { name = "pandas", marker = "extra == 'pandas'", specifier = ">=2.2" },
+    { name = "playwright", marker = "extra == 'agentql'" },
+    { name = "playwright", marker = "extra == 'browserbase'" },
+    { name = "praw", marker = "extra == 'reddit'" },
+    { name = "psycopg-binary", marker = "extra == 'postgres'" },
+    { name = "py-trello", marker = "extra == 'trello'" },
+    { name = "pycountry", marker = "extra == 'baidusearch'" },
     { name = "pydantic", specifier = ">=2" },
-    { name = "pygithub", specifier = ">=2.5" },
+    { name = "pydantic", marker = "extra == 'config-manager'", specifier = ">=2" },
+    { name = "pydantic", marker = "extra == 'jina'", specifier = ">=2" },
+    { name = "pygithub", marker = "extra == 'github'", specifier = ">=2.5" },
     { name = "pyjwt", specifier = ">=2.8" },
-    { name = "pypdf" },
+    { name = "pypdf", marker = "extra == 'arxiv'" },
     { name = "python-dotenv", specifier = ">=1" },
-    { name = "pytz" },
-    { name = "pyyaml", specifier = ">=6" },
-    { name = "redshift-connector" },
-    { name = "replicate", specifier = ">=1.0.7" },
-    { name = "reportlab" },
-    { name = "requests" },
-    { name = "resend" },
+    { name = "pytz", marker = "extra == 'cal-com'" },
+    { name = "pyyaml", marker = "extra == 'config-manager'", specifier = ">=6" },
+    { name = "redshift-connector", marker = "extra == 'redshift'" },
+    { name = "replicate", marker = "extra == 'replicate'", specifier = ">=1.0.7" },
+    { name = "reportlab", marker = "extra == 'file-generation'" },
+    { name = "requests", marker = "extra == 'bitbucket'" },
+    { name = "requests", marker = "extra == 'brightdata'" },
+    { name = "requests", marker = "extra == 'cal-com'" },
+    { name = "requests", marker = "extra == 'clickup'" },
+    { name = "requests", marker = "extra == 'custom-api'" },
+    { name = "requests", marker = "extra == 'desi-vocal'" },
+    { name = "requests", marker = "extra == 'discord'" },
+    { name = "requests", marker = "extra == 'financial-datasets-api'" },
+    { name = "requests", marker = "extra == 'linear'" },
+    { name = "requests", marker = "extra == 'modelslabs'" },
+    { name = "requests", marker = "extra == 'openweather'" },
+    { name = "requests", marker = "extra == 'serper'" },
+    { name = "requests", marker = "extra == 'zendesk'" },
+    { name = "requests", marker = "extra == 'zoom'" },
+    { name = "resend", marker = "extra == 'resend'" },
     { name = "rich" },
-    { name = "scrapegraph-py" },
-    { name = "slack-sdk" },
-    { name = "spider-client" },
+    { name = "scrapegraph-py", marker = "extra == 'scrapegraph'" },
+    { name = "slack-sdk", marker = "extra == 'slack'" },
+    { name = "spider-client", marker = "extra == 'spider'" },
     { name = "spotipy", specifier = ">=2.25.1" },
-    { name = "sqlalchemy" },
+    { name = "sqlalchemy", marker = "extra == 'sql'" },
     { name = "streamlit" },
     { name = "structlog", specifier = ">=24.1" },
     { name = "supabase", specifier = ">=2.18.1" },
-    { name = "tavily-python" },
+    { name = "tavily-python", marker = "extra == 'tavily'" },
     { name = "tenacity", specifier = ">=9.1.2" },
-    { name = "todoist-api-python" },
-    { name = "trafilatura" },
-    { name = "tweepy" },
-    { name = "twilio" },
+    { name = "todoist-api-python", marker = "extra == 'todoist'" },
+    { name = "trafilatura", marker = "extra == 'trafilatura'" },
+    { name = "tweepy", marker = "extra == 'x'" },
+    { name = "twilio", marker = "extra == 'twilio'" },
     { name = "typer", specifier = ">=0.16" },
     { name = "uvicorn", specifier = ">=0.35" },
     { name = "watchdog", specifier = ">=6" },
     { name = "watchfiles", specifier = ">=1" },
-    { name = "webexpythonsdk" },
-    { name = "wikipedia" },
-    { name = "yfinance" },
-    { name = "youtube-transcript-api" },
-    { name = "zep-cloud", specifier = ">=3.3" },
+    { name = "webexpythonsdk", marker = "extra == 'webex'" },
+    { name = "wikipedia", marker = "extra == 'wikipedia'" },
+    { name = "yfinance", marker = "extra == 'yfinance'" },
+    { name = "youtube-transcript-api", marker = "extra == 'youtube'" },
+    { name = "zep-cloud", marker = "extra == 'zep'", specifier = ">=3.3" },
 ]
+provides-extras = ["agentql", "airflow", "apify", "arxiv", "aws-lambda", "aws-ses", "baidusearch", "bitbucket", "brandfetch", "bravesearch", "brightdata", "browserbase", "cal-com", "calculator", "cartesia", "claude-agent", "clickup", "composio", "config-manager", "confluence", "crawl4ai", "csv", "custom-api", "dalle", "daytona", "desi-vocal", "discord", "docker", "duckdb", "duckduckgo", "e2b", "eleven-labs", "email", "exa", "fal", "file", "file-generation", "financial-datasets-api", "firecrawl", "gemini", "giphy", "github", "gmail", "google-bigquery", "google-calendar", "google-maps", "google-sheets", "googlesearch", "groq", "hackernews", "homeassistant", "imdb", "jina", "jira", "linear", "linkup", "lumalabs", "mem0", "memory", "modelslabs", "moviepy-video-tools", "neo4j", "newspaper4k", "notion", "openai", "openbb", "openweather", "oxylabs", "pandas", "postgres", "pubmed", "python", "reasoning", "reddit", "redshift", "replicate", "resend", "scheduler", "scrapegraph", "searxng", "serpapi", "serper", "shell", "shopify", "slack", "sleep", "spider", "spotify", "sql", "tavily", "telegram", "todoist", "trafilatura", "trello", "twilio", "unsplash", "visualization", "web-browser-tools", "webex", "website", "whatsapp", "wikipedia", "x", "yfinance", "youtube", "zendesk", "zep", "zoom"]
 
 [package.metadata.requires-dev]
 dev = [

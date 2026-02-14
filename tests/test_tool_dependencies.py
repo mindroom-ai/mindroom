@@ -7,7 +7,42 @@ from pathlib import Path
 
 import pytest
 
-from mindroom.tools_metadata import TOOL_METADATA, TOOL_REGISTRY, ToolStatus, get_tool_by_name
+from mindroom.tools_metadata import (
+    TOOL_METADATA,
+    TOOL_REGISTRY,
+    SetupType,
+    ToolCategory,
+    ToolMetadata,
+    ToolStatus,
+    get_tool_by_name,
+)
+
+
+def _dependency_name(spec: str) -> str:
+    part = spec.split(";", 1)[0].strip()
+    if "@" in part and "git+" in part:
+        part = part.split("@", 1)[0].strip()
+    if "[" in part:
+        part = part.split("[", 1)[0].strip()
+    else:
+        for sep in [">=", "<=", "==", ">", "<", "~=", "!="]:
+            if sep in part:
+                part = part.split(sep, 1)[0].strip()
+                break
+    return part.lower().replace("_", "-")
+
+
+def _normalize_tool_dep_name(name: str) -> str:
+    aliases = {
+        "e2b_code_interpreter": "e2b-code-interpreter",
+        "exa_py": "exa-py",
+        "lxml_html_clean": "lxml-html-clean",
+        "pygithub": "pygithub",
+        "yaml": "pyyaml",
+        "youtube_transcript_api": "youtube-transcript-api",
+    }
+    normalized = aliases.get(name.lower(), name.lower())
+    return normalized.replace("_", "-")
 
 
 def test_all_tools_can_be_imported() -> None:
@@ -55,125 +90,56 @@ def test_all_tools_can_be_imported() -> None:
         pytest.fail(error_msg)
 
 
-def test_all_tool_dependencies_in_pyproject() -> None:  # noqa: C901, PLR0912, PLR0915
-    """Test that all tool dependencies are declared in pyproject.toml."""
-    # Load pyproject.toml
+def test_all_tool_dependencies_in_pyproject() -> None:  # noqa: C901
+    """Test that each tool dependency is provided by base deps or the tool's optional group."""
     pyproject_path = Path(__file__).parent.parent / "pyproject.toml"
     with pyproject_path.open("rb") as f:
         pyproject = tomllib.load(f)
 
-    project_dependencies = pyproject.get("project", {}).get("dependencies", [])
+    project_section = pyproject.get("project", {})
+    base_dependencies = project_section.get("dependencies", [])
+    optional_dependencies = project_section.get("optional-dependencies", {})
 
-    # Extract package names from dependencies (handle version specifiers)
-    installed_packages = set()
-    for dep in project_dependencies:
-        # Parse package name from strings like "package>=1.0" or "package[extra]>=1.0"
-        if "[" in dep:
-            pkg_name = dep.split("[")[0]
-        else:
-            # Remove version specifiers
-            for sep in [">=", "<=", "==", ">", "<", "~=", "!="]:
-                if sep in dep:
-                    pkg_name = dep.split(sep)[0]
-                    break
-            else:
-                pkg_name = dep
-        installed_packages.add(pkg_name.strip().lower())
+    base_dependency_names = {_dependency_name(spec) for spec in base_dependencies}
+    optional_dependency_names: dict[str, set[str]] = {}
+    for extra_name, extra_specs in optional_dependencies.items():
+        optional_dependency_names[extra_name] = {_dependency_name(spec) for spec in extra_specs}
 
-    # Also check agno extras
-    agno_line = next((dep for dep in project_dependencies if dep.startswith("agno[")), None)
-    agno_extras = set()
-    if agno_line:
-        # Parse extras from "agno[extra1,extra2,...]>=version"
-        extras_str = agno_line[agno_line.index("[") + 1 : agno_line.index("]")]
-        agno_extras = {e.strip() for e in extras_str.split(",")}
+    missing_optional_groups = sorted(tool_name for tool_name in TOOL_METADATA if tool_name not in optional_dependencies)
+    if missing_optional_groups:
+        pytest.fail(
+            "Missing optional dependency groups for tools:\n"
+            + "\n".join(f"  - {tool_name}" for tool_name in missing_optional_groups),
+        )
 
-    # Dependencies with known version conflicts that can't be added to pyproject.toml
-    # brave-search requires tenacity<9.0.0 but we require tenacity>=9.1.2
     known_conflicts = {"brave-search"}
+    missing_dependencies: dict[str, list[str]] = {}
 
-    # Check each tool's dependencies
-    missing_deps = {}
-    agno_managed_deps = {}
-
-    for tool_name, metadata in TOOL_METADATA.items():
+    for tool_name, metadata in sorted(TOOL_METADATA.items()):
         if not metadata.dependencies:
             continue
 
-        tool_missing = []
-        tool_agno_managed = []
-
+        extra_names = optional_dependency_names.get(tool_name, set())
+        tool_missing: list[str] = []
         for dep in metadata.dependencies:
-            dep_lower = dep.lower().replace("-", "_").replace("_", "-")
-
-            # Check various package name formats
-            possible_names = {
-                dep_lower,
-                dep_lower.replace("-", "_"),
-                dep_lower.replace("_", "-"),
-            }
-
-            # Special cases for package name mappings
-            package_mappings = {
-                "docker": ["docker", "docker-py"],
-                "pypdf": ["pypdf", "pypdf2"],
-                "pycountry": ["pycountry"],
-                "duckdb": ["duckdb"],
-                "newspaper3k": ["newspaper3k", "newspaper"],
-                "tavily-python": ["tavily-python", "tavily"],
-                "google-api-python-client": ["google-api-python-client", "google_api_python_client"],
-                "google-auth": ["google-auth", "google_auth"],
-                "google-auth-oauthlib": ["google-auth-oauthlib", "google_auth_oauthlib"],
-                "google-auth-httplib2": ["google-auth-httplib2", "google_auth_httplib2"],
-                "yaml": ["pyyaml", "yaml"],  # yaml module is provided by pyyaml package
-            }
-
-            # Check if it's in the mappings
-            if dep_lower in package_mappings:
-                possible_names.update(package_mappings[dep_lower])
-
-            # Check if dependency is in pyproject.toml
-            found = any(name in installed_packages for name in possible_names)
-
-            # Check if it's managed by agno extras
-            agno_managed = False
-            agno_dep_mappings = {
-                "arxiv": "arxiv",
-                "pypdf": "arxiv",  # pypdf is part of arxiv extra
-                "wikipedia": "wikipedia",
-                "yfinance": "yfinance",
-                "newspaper3k": "newspaper",
-                "duckdb": "duckdb",
-                "docker": "docker",
-                "duckduckgo-search": "ddg",
-            }
-
-            if dep_lower in agno_dep_mappings and agno_dep_mappings[dep_lower] in agno_extras:
-                agno_managed = True
-
-            if not found and not agno_managed and dep_lower not in known_conflicts:
-                tool_missing.append(dep)
-            elif agno_managed:
-                tool_agno_managed.append(dep)
+            normalized = _normalize_tool_dep_name(dep)
+            if normalized in known_conflicts:
+                continue
+            if normalized in base_dependency_names:
+                continue
+            if normalized in extra_names:
+                continue
+            tool_missing.append(dep)
 
         if tool_missing:
-            missing_deps[tool_name] = tool_missing
-        if tool_agno_managed:
-            agno_managed_deps[tool_name] = tool_agno_managed
+            missing_dependencies[tool_name] = tool_missing
 
-    # Report findings
-    if agno_managed_deps:
-        print("\nDependencies managed by agno extras:")
-        for tool, deps in sorted(agno_managed_deps.items()):
-            print(f"  {tool}: {', '.join(deps)}")
-
-    if missing_deps:
-        error_msg = "\nThe following tools have dependencies not in pyproject.toml:\n"
-        for tool, deps in sorted(missing_deps.items()):
+    if missing_dependencies:
+        error_msg = "\nThe following tool dependencies are missing from base deps and tool extras:\n"
+        for tool, deps in sorted(missing_dependencies.items()):
             error_msg += f"  {tool}: {', '.join(deps)}\n"
         pytest.fail(error_msg)
-    else:
-        print("\n✓ All tool dependencies are properly declared in pyproject.toml")
+    print("\n✓ All tool dependencies are covered by base or per-tool optional dependencies")
 
 
 def test_no_unused_dependencies() -> None:  # noqa: C901, PLR0912
@@ -288,3 +254,81 @@ def test_tools_requiring_config_metadata() -> None:
         for tool_name, issue in inconsistent_tools:
             error_msg += f"  {tool_name}: {issue}\n"
         pytest.fail(error_msg)
+
+
+def test_get_tool_by_name_retries_after_auto_install(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tool loading should retry once after auto-install succeeds."""
+    tool_name = "test_auto_install_tool"
+    calls = {"count": 0}
+
+    class DummyToolkit:
+        name = "dummy"
+
+    class DummyCredentialsManager:
+        def load_credentials(self, _tool_name: str) -> dict[str, str]:
+            return {}
+
+    def flaky_factory() -> type[DummyToolkit]:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            msg = "missing dependency"
+            raise ImportError(msg)
+        return DummyToolkit
+
+    TOOL_REGISTRY[tool_name] = flaky_factory
+    TOOL_METADATA[tool_name] = ToolMetadata(
+        name=tool_name,
+        display_name="Auto Install Test Tool",
+        description="Temporary test tool",
+        category=ToolCategory.DEVELOPMENT,
+        status=ToolStatus.AVAILABLE,
+        setup_type=SetupType.NONE,
+        config_fields=[],
+        dependencies=[],
+    )
+
+    monkeypatch.setattr("mindroom.tools_metadata.auto_install_tool_extra", lambda name: name == tool_name)
+    monkeypatch.setattr("mindroom.tools_metadata.get_credentials_manager", lambda: DummyCredentialsManager())
+
+    try:
+        tool = get_tool_by_name(tool_name)
+        assert isinstance(tool, DummyToolkit)
+        assert calls["count"] == 2
+    finally:
+        TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_METADATA.pop(tool_name, None)
+
+
+def test_get_tool_by_name_raises_when_auto_install_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tool loading should raise ImportError when auto-install cannot help."""
+    tool_name = "test_auto_install_failure_tool"
+
+    class DummyCredentialsManager:
+        def load_credentials(self, _tool_name: str) -> dict[str, str]:
+            return {}
+
+    def failing_factory() -> type:
+        msg = "dependency missing forever"
+        raise ImportError(msg)
+
+    TOOL_REGISTRY[tool_name] = failing_factory
+    TOOL_METADATA[tool_name] = ToolMetadata(
+        name=tool_name,
+        display_name="Auto Install Failure Tool",
+        description="Temporary failing tool",
+        category=ToolCategory.DEVELOPMENT,
+        status=ToolStatus.AVAILABLE,
+        setup_type=SetupType.NONE,
+        config_fields=[],
+        dependencies=[],
+    )
+
+    monkeypatch.setattr("mindroom.tools_metadata.auto_install_tool_extra", lambda _name: False)
+    monkeypatch.setattr("mindroom.tools_metadata.get_credentials_manager", lambda: DummyCredentialsManager())
+
+    try:
+        with pytest.raises(ImportError, match="dependency missing forever"):
+            get_tool_by_name(tool_name)
+    finally:
+        TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_METADATA.pop(tool_name, None)

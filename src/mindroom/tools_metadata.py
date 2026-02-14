@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
@@ -10,6 +11,7 @@ from loguru import logger
 
 from mindroom.config import Config
 from mindroom.plugins import load_plugins
+from mindroom.tool_dependencies import auto_install_tool_extra
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -48,10 +50,10 @@ def get_tool_by_name(tool_name: str) -> Toolkit:
         msg = f"Unknown tool: {tool_name}. Available tools: {available}"
         raise ValueError(msg)
 
-    try:
-        tool_factory = TOOL_REGISTRY[tool_name]
-        tool_class = tool_factory()
+    tool_factory = TOOL_REGISTRY[tool_name]
 
+    def _build_tool_instance() -> Toolkit:
+        tool_class = tool_factory()
         creds_manager = get_credentials_manager()
         credentials = creds_manager.load_credentials(tool_name) or {}
         metadata = TOOL_METADATA[tool_name]
@@ -64,10 +66,22 @@ def get_tool_by_name(tool_name: str) -> Toolkit:
 
         return tool_class(**init_kwargs)
 
-    except ImportError as e:
-        logger.warning(f"Could not import tool '{tool_name}': {e}")
-        logger.warning(f"Make sure the required dependencies are installed for {tool_name}")
-        raise
+    try:
+        return _build_tool_instance()
+    except ImportError as first_error:
+        if not auto_install_tool_extra(tool_name):
+            logger.warning(f"Could not import tool '{tool_name}': {first_error}")
+            logger.warning(f"Make sure the required dependencies are installed for {tool_name}")
+            raise
+
+        logger.info(f"Auto-installing optional dependencies for tool '{tool_name}'")
+        importlib.invalidate_caches()
+
+        try:
+            return _build_tool_instance()
+        except ImportError as second_error:
+            logger.warning(f"Auto-install did not resolve dependencies for '{tool_name}': {second_error}")
+            raise second_error from first_error
 
 
 class ToolCategory(str, Enum):

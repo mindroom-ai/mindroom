@@ -18,115 +18,372 @@ classifiers = [
 ]
 dynamic = [ "version" ]
 dependencies = [
-  "agentql",                                           # for AgentQL tool
   "agno[anthropic,google,ollama,openai]>=2.4.7",
-  "aiofiles",                                          # for voice message handling
-  "aiohttp",                                           # for voice message STT API calls
+  "aiofiles",
+  "aiohttp",
   "anthropic>=0.70",
-  "apify-client>=1.12.2; platform_machine!='aarch64'", # for Apify tool (no manylinux aarch64 wheels for impit dep)
-  "arxiv",                                             # for Arxiv tool
-  "atlassian-python-api",                              # for Confluence tool
-  "baidusearch",                                       # for BaiduSearch tool
-  "beautifulsoup4",                                    # for Website tool
-  "boto3>=1.40.8",                                     # for AWS Lambda and AWS SES tools
-  "browserbase",                                       # for Browserbase tool
-  "cartesia",                                          # for Cartesia tool
-  "cerebras-cloud-sdk>=1.46",                          # for Cerebras model
+  "cerebras-cloud-sdk>=1.46",
   "chromadb>=1.0.15",
-  "claude-agent-sdk>=0.1.35",
-  "composio-agno",                                     # for Composio tool
-  "crawl4ai>=0.7.3",                                   # for Crawl4AI tool
   "cron-descriptor>=1.4.5",
   "croniter>=6",
-  "daytona",                                           # for Daytona tool
-  "ddgs",                                              # for DuckDuckGo tool
   "diskcache>=5.6.3",
-  "docker",                                            # for Docker tool
-  "duckdb",                                            # for DuckDB tool
-  "e2b-code-interpreter",                              # for E2B tool
-  "elevenlabs",                                        # for ElevenLabs tool
-  "exa-py",                                            # for Exa tool
-  "fal-client",                                        # for Fal tool
-  "fastapi[standard]>=0.116.1",                        # for widget API and future API endpoints
-  "firecrawl-py>=3",                                   # for Firecrawl tool
-  "google-api-python-client>=2.178",                   # for Google Calendar, Google Sheets, Gmail tools, widget API
-  "google-auth>=2.40.3",                               # for Google Calendar, Google Sheets, Gmail tools, widget API
-  "google-auth-httplib2>=0.2",                         # for Google Calendar, Google Sheets, Gmail tools, widget API
-  "google-auth-oauthlib>=1.2.2",                       # for Google Calendar, Google Sheets, Gmail tools, widget API OAuth flow
-  "google-cloud-bigquery",                             # for Google BigQuery tool
-  "google-genai",                                      # for Gemini model
-  "google-maps-places",                                # for Google Maps tool
-  "google-search-results>=2.4.2",                      # for SerpApi tool
-  "googlemaps",                                        # for Google Maps tool
-  "groq>=0.31",                                        # for Groq model
-  "httpx>=0.27",                                       # for Jina, Telegram, Searxng tools, widget API
+  "fastapi[standard]>=0.116.1",
+  "google-api-python-client>=2.178",
+  "google-auth>=2.40.3",
+  "google-auth-httplib2>=0.2",
+  "google-auth-oauthlib>=1.2.2",
+  "google-genai",
+  "groq>=0.31",
+  "httpx>=0.27",
   "humanize>=4.12.3",
-  "jira>=3.10.5",                                      # for Jira tool
   "json5>=0.13",
-  "linkup-sdk>=0.2.8",                                 # for Linkup tool
   "loguru>=0.7.3",
-  "lumaai",                                            # for LumaLabs tool
-  "lxml-html-clean",                                   # for Newspaper4K tools
-  "markdown>=3.7",                                     # for HTML formatting in Matrix messages
-  "matplotlib",                                        # for Visualization tool
+  "markdown>=3.7",
   "matrix-nio>=0.24",
-  "mcp[cli]>=1.12.4",                                  # for MCP tool
-  "mem0ai>=0.1.115",                                   # for Mem0 tool
-  "moviepy",                                           # for MoviePy tool
-  "neo4j",                                             # for Neo4j tool
-  "newspaper4k",                                       # for Newspaper4K tool
-  "notion-client",                                     # for Notion tool
-  "openai",                                            # for OpenAI and DALL-E tools, Morph model
-  "openbb",                                            # for OpenBB tool
-  "oxylabs",                                           # for Oxylabs tool
-  "pandas>=2.2",                                       # for Pandas tool
-  "playwright",                                        # for AgentQL and Browserbase tools
-  "praw",                                              # for Reddit tool
-  "psycopg-binary",                                    # for Postgres tool
-  "py-trello",                                         # for Trello tool
-  "pycountry",                                         # for BaiduSearch and GoogleSearch tools
+  "mcp[cli]>=1.12.4",
+  "mem0ai>=0.1.115",
+  "openai",
   "pydantic>=2",
-  "pygithub>=2.5",                                     # for GitHub tool
-  "pyjwt>=2.8",                                        # for widget API (Google OAuth token decoding)
-  "pypdf",                                             # for Arxiv tool
+  "pyjwt>=2.8",
   "python-dotenv>=1",
-  "pytz",                                              # for Cal.com tool
-  "pyyaml>=6",
-  "redshift-connector",                                # for Redshift tool
-  "replicate>=1.0.7",                                  # for Replicate tool
-  "reportlab",                                         # for FileGeneration tool (PDF)
-  "requests",                                          # for ClickUp, Cal.com, Zendesk, OpenWeather, ModelsLabs, API tools
-  "resend",                                            # for Resend tool
-  "rich",                                              # for CLI output
-  "scrapegraph-py",                                    # for ScrapeGraph tool
-  "slack-sdk",                                         # for Slack tool
-  "spider-client",                                     # for Spider tool
-  "spotipy>=2.25.1",                                   # for Spotify tool, widget API Spotify integration
-  "sqlalchemy",                                        # for SQL tool
-  "streamlit",                                         # for Streamlit components
-  "structlog>=24.1",                                   # for structured logging
+  "rich",
+  "spotipy>=2.25.1",
+  "streamlit",
+  "structlog>=24.1",
   "supabase>=2.18.1",
-  "tavily-python",                                     # for Tavily tool
   "tenacity>=9.1.2",
-  "todoist-api-python",                                # for Todoist tool
-  "trafilatura",                                       # for Trafilatura tool
-  "tweepy",                                            # for X/Twitter tool
-  "twilio",                                            # for Twilio tool
   "typer>=0.16",
-  "uvicorn>=0.35",                                     # for running FastAPI server (widget API)
-  "watchdog>=6",                                       # for file watching (widget API)
-  "watchfiles>=1",                                     # for knowledge folder watching
-  "webexpythonsdk",                                    # for Webex tool
-  "wikipedia",                                         # for Wikipedia tool
-  "yfinance",                                          # for YFinance tool
-  "youtube-transcript-api",                            # for YouTube tool
-  "zep-cloud>=3.3",                                    # for Zep tool
+  "uvicorn>=0.35",
+  "watchdog>=6",
+  "watchfiles>=1",
 ]
 
+optional-dependencies.agentql = [
+  "agentql",
+  "playwright",
+]
+optional-dependencies.airflow = [  ]
+optional-dependencies.apify = [
+  "apify-client>=1.12.2; platform_machine!='aarch64'",
+]
+optional-dependencies.arxiv = [
+  "arxiv",
+  "pypdf",
+]
+optional-dependencies.aws_lambda = [
+  "boto3>=1.40.8",
+]
+optional-dependencies.aws_ses = [
+  "boto3>=1.40.8",
+]
+optional-dependencies.baidusearch = [
+  "baidusearch",
+  "pycountry",
+]
+optional-dependencies.bitbucket = [
+  "requests",
+]
+optional-dependencies.brandfetch = [
+  "httpx>=0.27",
+]
+optional-dependencies.bravesearch = [  ]
+optional-dependencies.brightdata = [
+  "requests",
+]
+optional-dependencies.browserbase = [
+  "browserbase",
+  "playwright",
+]
+optional-dependencies.cal_com = [
+  "pytz",
+  "requests",
+]
+optional-dependencies.calculator = [
+  "agno[anthropic,google,ollama,openai]>=2.4.7",
+]
+optional-dependencies.cartesia = [
+  "cartesia",
+]
+optional-dependencies.claude_agent = [
+  "claude-agent-sdk>=0.1.35",
+]
+optional-dependencies.clickup = [
+  "requests",
+]
+optional-dependencies.composio = [
+  "composio-agno",
+]
+optional-dependencies.config_manager = [
+  "agno[anthropic,google,ollama,openai]>=2.4.7",
+  "pydantic>=2",
+  "pyyaml>=6",
+]
+optional-dependencies.confluence = [
+  "atlassian-python-api",
+]
+optional-dependencies.crawl4ai = [
+  "crawl4ai>=0.7.3",
+]
+optional-dependencies.csv = [
+  "duckdb",
+]
+optional-dependencies.custom_api = [
+  "requests",
+]
+optional-dependencies.dalle = [
+  "openai",
+]
+optional-dependencies.daytona = [
+  "daytona",
+]
+optional-dependencies.desi_vocal = [
+  "requests",
+]
+optional-dependencies.discord = [
+  "requests",
+]
+optional-dependencies.docker = [
+  "docker",
+]
+optional-dependencies.duckdb = [
+  "duckdb",
+]
+optional-dependencies.duckduckgo = [
+  "ddgs",
+]
+optional-dependencies.e2b = [
+  "e2b-code-interpreter",
+]
+optional-dependencies.eleven_labs = [
+  "elevenlabs",
+]
+optional-dependencies.email = [  ]
+optional-dependencies.exa = [
+  "exa-py",
+]
+optional-dependencies.fal = [
+  "fal-client",
+]
+optional-dependencies.file = [
+  "agno[anthropic,google,ollama,openai]>=2.4.7",
+]
+optional-dependencies.file_generation = [
+  "reportlab",
+]
+optional-dependencies.financial_datasets_api = [
+  "requests",
+]
+optional-dependencies.firecrawl = [
+  "firecrawl-py>=3",
+]
+optional-dependencies.gemini = [
+  "google-genai",
+]
+optional-dependencies.giphy = [
+  "httpx>=0.27",
+]
+optional-dependencies.github = [
+  "pygithub>=2.5",
+]
+optional-dependencies.gmail = [
+  "google-api-python-client>=2.178",
+  "google-auth>=2.40.3",
+  "google-auth-httplib2>=0.2",
+  "google-auth-oauthlib>=1.2.2",
+]
+optional-dependencies.google_bigquery = [
+  "google-cloud-bigquery",
+]
+optional-dependencies.google_calendar = [
+  "google-api-python-client>=2.178",
+  "google-auth>=2.40.3",
+  "google-auth-httplib2>=0.2",
+  "google-auth-oauthlib>=1.2.2",
+]
+optional-dependencies.google_maps = [
+  "google-maps-places",
+  "googlemaps",
+]
+optional-dependencies.google_sheets = [
+  "google-api-python-client>=2.178",
+  "google-auth-httplib2>=0.2",
+  "google-auth-oauthlib>=1.2.2",
+]
+optional-dependencies.googlesearch = [
+  "ddgs",
+]
+optional-dependencies.groq = [
+  "groq>=0.31",
+]
+optional-dependencies.hackernews = [
+  "httpx>=0.27",
+]
+optional-dependencies.homeassistant = [
+  "httpx>=0.27",
+]
+optional-dependencies.imdb = [  ]
+optional-dependencies.jina = [
+  "httpx>=0.27",
+  "pydantic>=2",
+]
+optional-dependencies.jira = [
+  "jira>=3.10.5",
+]
+optional-dependencies.linear = [
+  "requests",
+]
+optional-dependencies.linkup = [
+  "linkup-sdk>=0.2.8",
+]
+optional-dependencies.lumalabs = [
+  "lumaai",
+]
+optional-dependencies.mem0 = [
+  "mem0ai>=0.1.115",
+]
+optional-dependencies.memory = [  ]
+optional-dependencies.modelslabs = [
+  "requests",
+]
+optional-dependencies.moviepy_video_tools = [
+  "moviepy",
+]
+optional-dependencies.neo4j = [
+  "neo4j",
+]
+optional-dependencies.newspaper4k = [
+  "lxml-html-clean",
+  "newspaper4k",
+]
+optional-dependencies.notion = [
+  "notion-client",
+]
+optional-dependencies.openai = [
+  "openai",
+]
+optional-dependencies.openbb = [
+  "openbb",
+]
+optional-dependencies.openweather = [
+  "requests",
+]
+optional-dependencies.oxylabs = [
+  "oxylabs",
+]
+optional-dependencies.pandas = [
+  "pandas>=2.2",
+]
+optional-dependencies.postgres = [
+  "psycopg-binary",
+]
+optional-dependencies.pubmed = [
+  "httpx>=0.27",
+]
+optional-dependencies.python = [
+  "agno[anthropic,google,ollama,openai]>=2.4.7",
+]
+optional-dependencies.reasoning = [  ]
+optional-dependencies.reddit = [
+  "praw",
+]
+optional-dependencies.redshift = [
+  "redshift-connector",
+]
+optional-dependencies.replicate = [
+  "replicate>=1.0.7",
+]
+optional-dependencies.resend = [
+  "resend",
+]
+optional-dependencies.scheduler = [
+  "agno[anthropic,google,ollama,openai]>=2.4.7",
+]
+optional-dependencies.scrapegraph = [
+  "scrapegraph-py",
+]
+optional-dependencies.searxng = [  ]
+optional-dependencies.serpapi = [
+  "google-search-results>=2.4.2",
+]
+optional-dependencies.serper = [
+  "requests",
+]
+optional-dependencies.shell = [  ]
+optional-dependencies.shopify = [
+  "httpx>=0.27",
+]
+optional-dependencies.slack = [
+  "slack-sdk",
+]
+optional-dependencies.sleep = [
+  "agno[anthropic,google,ollama,openai]>=2.4.7",
+]
+optional-dependencies.spider = [
+  "spider-client",
+]
+optional-dependencies.spotify = [
+  "httpx>=0.27",
+]
+optional-dependencies.sql = [
+  "sqlalchemy",
+]
+optional-dependencies.tavily = [
+  "tavily-python",
+]
+optional-dependencies.telegram = [
+  "httpx>=0.27",
+]
+optional-dependencies.todoist = [
+  "todoist-api-python",
+]
+optional-dependencies.trafilatura = [
+  "trafilatura",
+]
+optional-dependencies.trello = [
+  "py-trello",
+]
+optional-dependencies.twilio = [
+  "twilio",
+]
+optional-dependencies.unsplash = [  ]
+optional-dependencies.visualization = [
+  "matplotlib",
+]
+optional-dependencies.web_browser_tools = [  ]
+optional-dependencies.webex = [
+  "webexpythonsdk",
+]
+optional-dependencies.website = [
+  "beautifulsoup4",
+  "httpx>=0.27",
+]
+optional-dependencies.whatsapp = [
+  "httpx>=0.27",
+]
+optional-dependencies.wikipedia = [
+  "wikipedia",
+]
+optional-dependencies.x = [
+  "tweepy",
+]
+optional-dependencies.yfinance = [
+  "yfinance",
+]
+optional-dependencies.youtube = [
+  "youtube-transcript-api",
+]
+optional-dependencies.zendesk = [
+  "requests",
+]
+optional-dependencies.zep = [
+  "zep-cloud>=3.3",
+]
+optional-dependencies.zoom = [
+  "requests",
+]
 urls.documentation = "https://github.com/mindroom-ai/mindroom"
 urls.homepage = "https://github.com/mindroom-ai/mindroom"
 urls.repository = "https://github.com/mindroom-ai/mindroom"
-
 scripts.mindroom = "mindroom.cli:main"
 
 [dependency-groups]
