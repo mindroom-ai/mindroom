@@ -45,10 +45,6 @@ services:
     environment:
       - STORAGE_PATH=/app/mindroom_data
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - MINDROOM_SANDBOX_PROXY_URL=http://sandbox-runner:8766
-      - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN}
-      - MINDROOM_SANDBOX_EXECUTION_MODE=selective
-      - MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
       - MATRIX_HOMESERVER=${MATRIX_HOMESERVER}
       # Optional: for self-signed certificates
       # - MATRIX_SSL_VERIFY=false
@@ -132,7 +128,7 @@ MindRoom stores data in the `mindroom_data` directory:
 
 ## Sandbox Proxy Isolation
 
-In Docker and Kubernetes deployments, `shell`, `file`, and `python` tool calls are proxied to a separate **sandbox-runner** sidecar container. The sidecar runs the same image but without access to secrets, credentials, or the primary data volume. This provides real process-level isolation for code-execution tools.
+When configured, `shell`, `file`, and `python` tool calls can be proxied to a separate **sandbox-runner** sidecar container. The sidecar runs the same image but without access to secrets, credentials, or the primary data volume. This provides real process-level isolation for code-execution tools. Without proxy configuration, all tools execute locally in the backend process.
 
 See [Sandbox Proxy Isolation](sandbox-proxy.md) for full documentation including Docker Compose examples, Kubernetes sidecar setup, host-machine-with-container mode, credential leases, and environment variable reference.
 
