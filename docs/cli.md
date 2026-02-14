@@ -43,6 +43,7 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
 │ version   Show the current version of Mindroom.                                        │
 │ run       Run the mindroom multi-agent system.                                         │
+│ doctor    Check your environment for common issues.                                    │
 │ config    Manage MindRoom configuration files.                                         │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
