@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -15,6 +16,12 @@ if TYPE_CHECKING:
     import pytest
 
 runner = CliRunner()
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
 
 
 # ---------------------------------------------------------------------------
@@ -222,10 +229,11 @@ class TestRunApiFlags:
         """Run --help lists the new API server flags."""
         result = runner.invoke(app, ["run", "--help"])
         assert result.exit_code == 0
-        assert "--api" in result.output
-        assert "--no-api" in result.output
-        assert "--api-port" in result.output
-        assert "--api-host" in result.output
+        output = _strip_ansi(result.output)
+        assert "--api" in output
+        assert "--no-api" in output
+        assert "--api-port" in output
+        assert "--api-host" in output
 
     def test_run_passes_api_defaults(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Run passes api=True, port=8765, host=0.0.0.0 by default."""
