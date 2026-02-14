@@ -99,11 +99,11 @@ async def _download_audio(
             logger.error(f"Download failed: {response}")
             return None
         if isinstance(event, nio.RoomMessageAudio):
-            return response.body  # type: ignore[no-any-return]
+            return response.body
 
         assert isinstance(event, nio.RoomEncryptedAudio)
         # Decrypt the audio
-        return crypto.attachments.decrypt_attachment(  # type: ignore[no-any-return]
+        return crypto.attachments.decrypt_attachment(
             response.body,
             event.source["content"]["file"]["key"]["k"],
             event.source["content"]["file"]["hashes"]["sha256"],
@@ -169,7 +169,7 @@ async def _transcribe_audio(audio_data: bytes, config: Config) -> str | None:
                     return None
 
                 result = await response.json()
-                return result.get("text", "").strip()  # type: ignore[no-any-return]
+                return result.get("text", "").strip()
 
         finally:
             # Clean up temporary file
@@ -253,7 +253,7 @@ Output the formatted message only, no explanation:"""
 
         # Extract the content from the response
         if response and response.content:
-            return response.content.strip()  # type: ignore[no-any-return]
+            return response.content.strip()
 
     except Exception as e:
         logger.exception("Error processing transcription")

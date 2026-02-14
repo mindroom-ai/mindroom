@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Literal
 
-from croniter import CroniterError, croniter  # type: ignore[import-untyped]
+from croniter import CroniterError, croniter
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 

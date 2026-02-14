@@ -477,7 +477,7 @@ def _parse_metadata(raw: object, *, path: str) -> dict[str, Any] | None:
     if raw is None or (isinstance(raw, str) and not raw.strip()):
         return {}
     if isinstance(raw, dict):
-        return raw
+        return raw  # ty: ignore[invalid-return-type]
     if isinstance(raw, str):
         try:
             parsed = json5.loads(raw)
@@ -568,22 +568,22 @@ def _requirements_met(
     if not isinstance(requires, dict):
         return True
 
-    env_requirements = _normalize_str_list(requires.get("env"))
+    env_requirements = _normalize_str_list(requires.get("env"))  # ty: ignore[invalid-argument-type]
     if env_requirements and not _env_requirements_met(env_requirements, env_vars, credential_keys):
         return False
 
-    config_requirements = _normalize_str_list(requires.get("config"))
+    config_requirements = _normalize_str_list(requires.get("config"))  # ty: ignore[invalid-argument-type]
     if config_requirements and not _config_requirements_met(config_requirements, config_data):
         return False
 
-    bin_requirements = _normalize_str_list(requires.get("bins"))
+    bin_requirements = _normalize_str_list(requires.get("bins"))  # ty: ignore[invalid-argument-type]
     if bin_requirements:
         missing_bins = _missing_bins(bin_requirements)
         if missing_bins:
             logger.debug("Skill missing required binaries", skill=skill_name, bins=missing_bins)
             return False
 
-    any_bins_requirements = _normalize_str_list(requires.get("anyBins"))
+    any_bins_requirements = _normalize_str_list(requires.get("anyBins"))  # ty: ignore[invalid-argument-type]
     if any_bins_requirements and not _any_bins_requirements_met(any_bins_requirements):
         logger.debug("Skill missing any required binaries", skill=skill_name, bins=any_bins_requirements)
         return False

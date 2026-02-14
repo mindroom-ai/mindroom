@@ -37,7 +37,7 @@ app = FastAPI(title="MindRoom Widget Backend")
 
 # Configure CORS for widget - allow multiple origins including port forwarding
 app.add_middleware(
-    CORSMiddleware,
+    CORSMiddleware,  # ty: ignore[invalid-argument-type]
     allow_origins=[
         "http://localhost:3003",  # Frontend dev server alternative port
         "http://localhost:5173",  # Vite dev server default

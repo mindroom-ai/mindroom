@@ -134,7 +134,6 @@ dev = [
   "markdown-code-runner>=2.4",
   "markdown-gfm-admonition",
   "matty>=0.3",
-  "mypy>=1.17",
   "pre-commit>=4.2",
   "pre-commit-uv>=4.1.4",
   "pytest>=8.4.1",
@@ -146,11 +145,7 @@ dev = [
   "pytest-xdist>=3.8",
   "requests>=2.32.4",
   "ruff>=0.12.5",
-  "types-aiofiles>=24.1.0.20250809",
-  "types-markdown>=3.7",
-  "types-pytz>=2025.2.0.20250809",
-  "types-pyyaml>=6.0.12.20250516",
-  "types-requests>=2.32.4.20250611",
+  "ty>=0.0.17",
   "zensical",
 ]
 
@@ -230,60 +225,26 @@ exclude_lines = [
   "if __name__ == .__main__.:",
 ]
 
-[tool.mypy]
-python_version = "3.12"
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = true
-disallow_incomplete_defs = true
-check_untyped_defs = true
-disallow_untyped_decorators = false
-warn_redundant_casts = true
-warn_unused_ignores = true
-warn_no_return = true
-strict_equality = true
-files = [ "src", "tests" ]
-exclude = [
-  # This test imports modules via the 'src.' prefix which confuses mypy's module discovery.
-  # Keeping it excluded avoids duplicate module errors when running mypy on tests.
-  "tests/test_gemini_integration.py",
-]
+[tool.ty.environment]
+python-version = "3.12"
 
-[[tool.mypy.overrides]]
-module = "nio.*"
-ignore_missing_imports = true
+[tool.ty.src]
+include = [ "src", "tests" ]
 
-[[tool.mypy.overrides]]
-module = "mem0.*"
-ignore_missing_imports = true
+[tool.ty.rules]
+deprecated = "ignore"
 
-[[tool.mypy.overrides]]
-module = "diskcache.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "agno.*"
-ignore_missing_imports = true
-
-# Tests: enable strict typing with reasonable exceptions for test mocks
-
-[[tool.mypy.overrides]]
-module = "tests.*"
-ignore_missing_imports = true
-disable_error_code = [
-  "no-untyped-def",     # Test functions often don't need full typing
-  "arg-type",           # Mock objects often have incompatible types
-  "assignment",         # Test fixtures often use mocks instead of real types
-  "attr-defined",       # Mocks dynamically add attributes
-  "unused-ignore",      # Some type ignores are needed conditionally
-  "dict-item",          # Test configs use dicts instead of dataclasses
-  "list-item",          # Test data often uses simplified types
-  "union-attr",         # Test error handling checks multiple types
-  "var-annotated",      # Test variables don't always need annotations
-  "return-value",       # Mock return values may differ from real types
-  "no-any-return",      # Mock functions may return Any
-  "operator",           # Test assertions may check optional types
-  "index",              # Tests check various response types
-  "type-var",           # Tests may use complex type variables
-  "comparison-overlap", # Tests may check impossible conditions for coverage
-]
+# Tests: suppress rules that fire on mock patterns (method-assign, attr-defined, etc.)
+[[tool.ty.overrides]]
+include = [ "tests/**" ]
+[tool.ty.overrides.rules]
+invalid-argument-type = "ignore"
+unresolved-attribute = "ignore"
+unsupported-operator = "ignore"
+invalid-assignment = "ignore"
+not-subscriptable = "ignore"
+call-non-callable = "ignore"
+too-many-positional-arguments = "ignore"
+no-matching-overload = "ignore"
+not-iterable = "ignore"
+unused-type-ignore-comment = "ignore"

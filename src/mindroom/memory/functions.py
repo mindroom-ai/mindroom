@@ -71,7 +71,7 @@ async def _get_scoped_memory_by_id(
         return None
 
     allowed_user_ids = _get_allowed_memory_user_ids(caller_context, config)
-    memory_user_id = result.get("user_id")
+    memory_user_id = result.get("user_id")  # ty: ignore[invalid-argument-type]
     if memory_user_id not in allowed_user_ids:
         logger.warning(
             "Memory access denied",

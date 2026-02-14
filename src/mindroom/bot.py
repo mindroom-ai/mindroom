@@ -729,14 +729,14 @@ class AgentBot:
 
         # Register event callbacks - wrap them to run as background tasks
         # This ensures the sync loop is never blocked, allowing stop reactions to work
-        self.client.add_event_callback(_create_task_wrapper(self._on_invite), nio.InviteEvent)
-        self.client.add_event_callback(_create_task_wrapper(self._on_message), nio.RoomMessageText)
-        self.client.add_event_callback(_create_task_wrapper(self._on_reaction), nio.ReactionEvent)
+        self.client.add_event_callback(_create_task_wrapper(self._on_invite), nio.InviteEvent)  # ty: ignore[invalid-argument-type]
+        self.client.add_event_callback(_create_task_wrapper(self._on_message), nio.RoomMessageText)  # ty: ignore[invalid-argument-type]
+        self.client.add_event_callback(_create_task_wrapper(self._on_reaction), nio.ReactionEvent)  # ty: ignore[invalid-argument-type]
 
         # Register voice message callbacks (only for router agent to avoid duplicates)
         if self.agent_name == ROUTER_AGENT_NAME:
-            self.client.add_event_callback(_create_task_wrapper(self._on_voice_message), nio.RoomMessageAudio)
-            self.client.add_event_callback(_create_task_wrapper(self._on_voice_message), nio.RoomEncryptedAudio)
+            self.client.add_event_callback(_create_task_wrapper(self._on_voice_message), nio.RoomMessageAudio)  # ty: ignore[invalid-argument-type]
+            self.client.add_event_callback(_create_task_wrapper(self._on_voice_message), nio.RoomEncryptedAudio)  # ty: ignore[invalid-argument-type]
 
         self.running = True
 
@@ -1163,7 +1163,7 @@ class AgentBot:
 
         self.logger.info("Processing voice message", event_id=event.event_id, sender=event.sender)
 
-        transcribed_message = await voice_handler.handle_voice_message(self.client, room, event, self.config)
+        transcribed_message = await voice_handler.handle_voice_message(self.client, room, event, self.config)  # ty: ignore[invalid-argument-type]
 
         if transcribed_message:
             event_info = EventInfo.from_event(event.source)
@@ -1282,7 +1282,7 @@ class AgentBot:
         async def generate_team_response(message_id: str | None) -> None:
             if use_streaming and not existing_event_id:
                 # Show typing indicator while team generates streaming response
-                async with typing_indicator(self.client, room_id):
+                async with typing_indicator(self.client, room_id):  # ty: ignore[invalid-argument-type]
                     with scheduling_tool_context(scheduler_context):
                         response_stream = team_response_stream(
                             agent_ids=team_agents,
@@ -1294,7 +1294,7 @@ class AgentBot:
                         )
 
                         event_id, accumulated = await send_streaming_response(
-                            self.client,
+                            self.client,  # ty: ignore[invalid-argument-type]
                             room_id,
                             reply_to_event_id,
                             thread_id,
@@ -1317,7 +1317,7 @@ class AgentBot:
                 )
             else:
                 # Show typing indicator while team generates non-streaming response
-                async with typing_indicator(self.client, room_id):
+                async with typing_indicator(self.client, room_id):  # ty: ignore[invalid-argument-type]
                     with scheduling_tool_context(scheduler_context):
                         response_text = await team_response(
                             agent_names=agent_names,
@@ -1492,7 +1492,7 @@ class AgentBot:
 
         try:
             # Show typing indicator while generating response
-            async with typing_indicator(self.client, room_id):
+            async with typing_indicator(self.client, room_id):  # ty: ignore[invalid-argument-type]
                 with scheduling_tool_context(scheduler_context):
                     response_text = await ai_response(
                         agent_name=self.agent_name,
@@ -1536,7 +1536,7 @@ class AgentBot:
                 response.option_map,
                 self.agent_name,
             )
-            await interactive.add_reaction_buttons(self.client, room_id, event_id, response.options_list)
+            await interactive.add_reaction_buttons(self.client, room_id, event_id, response.options_list)  # ty: ignore[invalid-argument-type]
 
         return event_id
 
@@ -2204,13 +2204,13 @@ class AgentBot:
                     # Store in Matrix state for persistence
                     if pending_change:
                         await config_confirmation.store_pending_change_in_matrix(
-                            self.client,
+                            self.client,  # ty: ignore[invalid-argument-type]
                             event_id,
                             pending_change,
                         )
 
                     # Add reaction buttons
-                    await config_confirmation.add_confirmation_reactions(self.client, room.room_id, event_id)
+                    await config_confirmation.add_confirmation_reactions(self.client, room.room_id, event_id)  # ty: ignore[invalid-argument-type]
 
                 self.response_tracker.mark_responded(event.event_id)
                 return  # Exit early since we've handled the response
@@ -2253,7 +2253,7 @@ class AgentBot:
                         thread_history = []
                         if event_info.thread_id:
                             thread_history = await fetch_thread_history(
-                                self.client,
+                                self.client,  # ty: ignore[invalid-argument-type]
                                 room.room_id,
                                 event_info.thread_id,
                             )
@@ -2297,7 +2297,7 @@ class TeamBot(AgentBot):
     team_model: str | None = field(default=None)
 
     @cached_property
-    def agent(self) -> Agent | None:  # type: ignore[override]
+    def agent(self) -> Agent | None:
         """Teams don't have individual agents, return None."""
         return None
 
@@ -2534,7 +2534,7 @@ class MultiAgentOrchestrator:
             if entity_name in all_new_entities:
                 # Create temporary user object (will be updated by ensure_user_account)
                 temp_user = _create_temp_user(entity_name, new_config)
-                bot = create_bot_for_entity(entity_name, temp_user, new_config, self.storage_path)  # type: ignore[assignment]
+                bot = create_bot_for_entity(entity_name, temp_user, new_config, self.storage_path)
                 if bot:
                     bot.orchestrator = self
                     self.agent_bots[entity_name] = bot
@@ -2553,7 +2553,7 @@ class MultiAgentOrchestrator:
         # Create new entities
         for entity_name in new_entities:
             temp_user = _create_temp_user(entity_name, new_config)
-            bot = create_bot_for_entity(entity_name, temp_user, new_config, self.storage_path)  # type: ignore[assignment]
+            bot = create_bot_for_entity(entity_name, temp_user, new_config, self.storage_path)
             if bot:
                 bot.orchestrator = self
                 self.agent_bots[entity_name] = bot

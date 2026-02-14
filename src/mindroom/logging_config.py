@@ -128,8 +128,8 @@ def setup_logging(level: str = "INFO") -> None:
                 },
             },
             "filters": {
-                "nio_validation": {
-                    "()": NioValidationFilter,
+                "nio_validation": {  # ty: ignore[missing-typed-dict-key]
+                    "()": NioValidationFilter,  # ty: ignore[invalid-key]
                 },
             },
             "handlers": {
@@ -204,4 +204,4 @@ def get_logger(name: str = __name__) -> structlog.stdlib.BoundLogger:
         Configured structlog logger
 
     """
-    return structlog.get_logger(name)  # type: ignore[no-any-return]
+    return structlog.get_logger(name)

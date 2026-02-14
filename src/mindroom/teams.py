@@ -433,7 +433,7 @@ def _get_agents_from_orchestrator(
             agent = agent_bot.agent
             # Remove interactive question prompts to prevent emoji conflicts in team responses
             if isinstance(agent.instructions, list):
-                agent.instructions = [
+                agent.instructions = [  # ty: ignore[invalid-assignment]
                     instr for instr in agent.instructions if instr != agent_prompts.INTERACTIVE_QUESTION_PROMPT
                 ]
             agents.append(agent)

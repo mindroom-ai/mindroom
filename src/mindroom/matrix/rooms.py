@@ -341,7 +341,7 @@ def _has_is_direct_marker(state_events: list[dict[str, object]]) -> bool:
             continue
 
         content = event.get("content")
-        if isinstance(content, dict) and content.get("is_direct") is True:
+        if isinstance(content, dict) and content.get("is_direct") is True:  # ty: ignore[invalid-argument-type]
             return True
 
     return False
