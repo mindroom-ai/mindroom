@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from mindroom.tool_dependencies import _PIP_TO_IMPORT, _pip_name_to_import, check_deps_installed
 from mindroom.tools_metadata import (
     TOOL_METADATA,
     TOOL_REGISTRY,
@@ -332,3 +333,55 @@ def test_get_tool_by_name_raises_when_auto_install_fails(monkeypatch: pytest.Mon
     finally:
         TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
+
+
+def test_check_deps_installed_with_installed_packages() -> None:
+    """check_deps_installed returns True for packages that are installed."""
+    assert check_deps_installed(["pytest", "loguru"])
+
+
+def test_check_deps_installed_with_missing_package() -> None:
+    """check_deps_installed returns False when any dependency is missing."""
+    assert not check_deps_installed(["pytest", "nonexistent_package_xyz_123"])
+
+
+def test_check_deps_installed_empty_list() -> None:
+    """check_deps_installed returns True for an empty dependency list."""
+    assert check_deps_installed([])
+
+
+@pytest.mark.parametrize(
+    ("pip_name", "expected_import"),
+    [
+        ("beautifulsoup4", "bs4"),
+        ("pyyaml", "yaml"),
+        ("pygithub", "github"),
+        ("google-api-python-client", "googleapiclient"),
+        ("e2b-code-interpreter", "e2b"),
+        ("exa-py", "exa_py"),
+        ("google-auth", "google.auth"),
+    ],
+)
+def test_pip_to_import_mapping(pip_name: str, expected_import: str) -> None:
+    """_pip_name_to_import correctly maps known special cases."""
+    assert _pip_name_to_import(pip_name) == expected_import
+
+
+def test_pip_to_import_passthrough() -> None:
+    """_pip_name_to_import falls back to replacing dashes with underscores."""
+    assert _pip_name_to_import("some-normal-package") == "some_normal_package"
+
+
+def test_pip_to_import_strips_version_specifier() -> None:
+    """_pip_name_to_import strips version specifiers before lookup."""
+    assert _pip_name_to_import("pyyaml>=6.0") == "yaml"
+    assert _pip_name_to_import("requests>=2.0") == "requests"
+
+
+def test_pip_to_import_mapping_completeness() -> None:
+    """Every entry in _PIP_TO_IMPORT should have a key that differs from the naive transform."""
+    for pip_name, import_name in _PIP_TO_IMPORT.items():
+        naive = pip_name.replace("-", "_")
+        assert naive != import_name, (
+            f"Mapping entry '{pip_name}' -> '{import_name}' is redundant (naive transform already gives '{naive}')"
+        )

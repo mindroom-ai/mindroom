@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.metadata as importlib_metadata
+import importlib.util
 import os
 import shutil
 import subprocess
@@ -13,6 +14,48 @@ from pathlib import Path
 
 _PACKAGE_NAME = "mindroom"
 _RECEIPT_NAME = "uv-receipt.toml"
+
+# Packages where the pip install name differs from the Python import name.
+# Only includes cases where replacing dashes with underscores is insufficient.
+_PIP_TO_IMPORT: dict[str, str] = {
+    "atlassian-python-api": "atlassian",
+    "beautifulsoup4": "bs4",
+    "e2b-code-interpreter": "e2b",
+    "firecrawl-py": "firecrawl",
+    "google-api-python-client": "googleapiclient",
+    "google-auth": "google.auth",
+    "google-cloud-bigquery": "google.cloud.bigquery",
+    "google-genai": "google.genai",
+    "google-maps-places": "google.maps",
+    "google-search-results": "serpapi",
+    "psycopg-binary": "psycopg",
+    "py-trello": "trello",
+    "pygithub": "github",
+    "pyyaml": "yaml",
+    "spider-client": "spider",
+}
+
+
+def _pip_name_to_import(pip_name: str) -> str:
+    """Convert a pip package name to its top-level import module name."""
+    normalized = pip_name.strip().lower().replace("_", "-")
+    # Strip version specifiers
+    for sep in (">=", "<=", "==", ">", "<", "~=", "!="):
+        if sep in normalized:
+            normalized = normalized.split(sep, 1)[0].strip()
+            break
+    if normalized in _PIP_TO_IMPORT:
+        return _PIP_TO_IMPORT[normalized]
+    return normalized.replace("-", "_")
+
+
+def check_deps_installed(dependencies: list[str]) -> bool:
+    """Check if all dependencies are importable using find_spec (no side effects)."""
+    for dep in dependencies:
+        module_name = _pip_name_to_import(dep)
+        if importlib.util.find_spec(module_name) is None:
+            return False
+    return True
 
 
 def auto_install_enabled() -> bool:

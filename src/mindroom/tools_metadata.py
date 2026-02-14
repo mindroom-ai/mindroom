@@ -13,7 +13,7 @@ from loguru import logger
 from mindroom.config import Config
 from mindroom.plugins import load_plugins
 from mindroom.sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy
-from mindroom.tool_dependencies import auto_install_tool_extra
+from mindroom.tool_dependencies import auto_install_tool_extra, check_deps_installed
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -90,9 +90,23 @@ def get_tool_by_name(
         credential_overrides=credential_overrides,
     )
 
+    # Pre-check dependencies using find_spec (no side effects) before importing
+    metadata = TOOL_METADATA.get(tool_name)
+    deps = metadata.dependencies if metadata and metadata.dependencies else []
+    if deps and not check_deps_installed(deps):
+        if not auto_install_tool_extra(tool_name):
+            missing = ", ".join(deps)
+            logger.warning(f"Missing dependencies for tool '{tool_name}': {missing}")
+            logger.warning(f"Make sure the required dependencies are installed for {tool_name}")
+            msg = f"Missing dependencies for tool '{tool_name}': {missing}"
+            raise ImportError(msg)
+        logger.info(f"Auto-installed optional dependencies for tool '{tool_name}'")
+        importlib.invalidate_caches()
+
     try:
         return build()
     except ImportError as first_error:
+        # Safety net: deps may not be exhaustively listed in metadata
         if not auto_install_tool_extra(tool_name):
             logger.warning(f"Could not import tool '{tool_name}': {first_error}")
             logger.warning(f"Make sure the required dependencies are installed for {tool_name}")

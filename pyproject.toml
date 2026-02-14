@@ -450,6 +450,9 @@ lint.ignore = [
   "TD002",   # Missing author in TODO; try: `# TODO(<author_name>): ...`
   "TD003",   # Missing issue link on the line following this TODO
 ]
+lint.per-file-ignores.".github/scripts/*" = [
+  "INP001", # Part of an implicit namespace package (standalone scripts)
+]
 lint.per-file-ignores."src/mindroom/tools/*" = [
   "PLC0415", #`import` should be at the top-level of a file"
 ]
