@@ -122,15 +122,14 @@ async def _upload_text_as_mxc(
     if room_encrypted:
         # Encrypt the content for E2EE room
         try:
-            encrypted_data = crypto.attachments.encrypt_attachment(text_bytes)
-            upload_data = encrypted_data["data"]
+            upload_data, encryption_keys = crypto.attachments.encrypt_attachment(text_bytes)
 
             # Store encryption info for the file
             file_info = {
                 "url": "",  # Will be set after upload
-                "key": encrypted_data["key"],
-                "iv": encrypted_data["iv"],
-                "hashes": encrypted_data["hashes"],
+                "key": encryption_keys["key"],
+                "iv": encryption_keys["iv"],
+                "hashes": encryption_keys["hashes"],
                 "v": "v2",
                 "mimetype": "text/plain",
                 "size": len(text_bytes),
