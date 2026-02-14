@@ -26,6 +26,7 @@ from .browserbase import browserbase_tools
 from .cal_com import cal_com_tools
 from .calculator import calculator_tools
 from .cartesia import cartesia_tools
+from .claude_agent import claude_agent_tools
 from .clickup import clickup_tools
 from .composio import composio_tools
 from .config_manager import config_manager_tools
@@ -136,6 +137,7 @@ __all__ = [
     "cal_com_tools",
     "calculator_tools",
     "cartesia_tools",
+    "claude_agent_tools",
     "clickup_tools",
     "composio_tools",
     "config_manager_tools",

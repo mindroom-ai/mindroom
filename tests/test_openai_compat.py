@@ -241,6 +241,77 @@ class TestChatCompletions:
 
             assert mock_ai.call_args.kwargs["user_id"] == "user-123"
 
+    def test_explicit_session_id_header_is_stable_across_turns(self, app_client: TestClient) -> None:
+        """Repeated requests with the same X-Session-Id should reuse one derived session ID."""
+        observed_session_ids: list[str] = []
+
+        async def _capture(*args: object, **kwargs: object) -> str:  # noqa: ARG001
+            observed_session_ids.append(kwargs["session_id"])
+            return "Response"
+
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+            mock_ai.side_effect = _capture
+
+            app_client.post(
+                "/v1/chat/completions",
+                headers={"X-Session-Id": "shared-session"},
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Turn one"}],
+                },
+            )
+            app_client.post(
+                "/v1/chat/completions",
+                headers={"X-Session-Id": "shared-session"},
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Turn two"}],
+                },
+            )
+
+        assert len(observed_session_ids) == 2
+        assert observed_session_ids[0] == observed_session_ids[1]
+        assert observed_session_ids[0].endswith(":shared-session")
+
+    def test_explicit_session_id_header_is_namespaced_by_api_key(self, authed_client: TestClient) -> None:
+        """Same X-Session-Id with different API keys should map to different derived IDs."""
+        observed_session_ids: list[str] = []
+
+        async def _capture(*args: object, **kwargs: object) -> str:  # noqa: ARG001
+            observed_session_ids.append(kwargs["session_id"])
+            return "Response"
+
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+            mock_ai.side_effect = _capture
+
+            authed_client.post(
+                "/v1/chat/completions",
+                headers={
+                    "Authorization": "Bearer test-key-1",
+                    "X-Session-Id": "shared-session",
+                },
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Turn one"}],
+                },
+            )
+            authed_client.post(
+                "/v1/chat/completions",
+                headers={
+                    "Authorization": "Bearer test-key-2",
+                    "X-Session-Id": "shared-session",
+                },
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Turn two"}],
+                },
+            )
+
+        assert len(observed_session_ids) == 2
+        assert observed_session_ids[0] != observed_session_ids[1]
+        assert observed_session_ids[0].endswith(":shared-session")
+        assert observed_session_ids[1].endswith(":shared-session")
+
     def test_unknown_model_404(self, app_client: TestClient) -> None:
         """Unknown model returns 404 with OpenAI error format."""
         response = app_client.post(

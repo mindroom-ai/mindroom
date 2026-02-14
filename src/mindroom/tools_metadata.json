@@ -1019,6 +1019,211 @@
       "config_fields": [
         {
           "default": null,
+          "description": null,
+          "label": "Anthropic API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Optional Anthropic-compatible gateway URL. Use host root (for example http://litellm.local), not a /v1 suffix.",
+          "label": "Anthropic Base URL",
+          "name": "anthropic_base_url",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Optional bearer token for Anthropic-compatible gateways.",
+          "label": "Anthropic Auth Token",
+          "name": "anthropic_auth_token",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Set CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 for Anthropic-compatible gateway compatibility.",
+          "label": "Disable Experimental Betas",
+          "name": "disable_experimental_betas",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": null,
+          "label": "Working Directory",
+          "name": "cwd",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": null,
+          "label": "Claude Model",
+          "name": "model",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "default",
+          "description": "default, acceptEdits, plan, or bypassPermissions",
+          "label": "Permission Mode",
+          "name": "permission_mode",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Continue the same Claude conversation context across queries in a session.",
+          "label": "Continue Conversation",
+          "name": "continue_conversation",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Optional Claude session ID to resume.",
+          "label": "Resume Session ID",
+          "name": "resume",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Fork from the resumed Claude session instead of continuing it directly.",
+          "label": "Fork Session",
+          "name": "fork_session",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Comma-separated Claude Code tool names",
+          "label": "Allowed Tools",
+          "name": "allowed_tools",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Comma-separated Claude Code tool names",
+          "label": "Disallowed Tools",
+          "name": "disallowed_tools",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": null,
+          "label": "Max Turns",
+          "name": "max_turns",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": null,
+          "label": "System Prompt",
+          "name": "system_prompt",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": null,
+          "label": "CLI Path",
+          "name": "cli_path",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": 60,
+          "description": null,
+          "label": "Session TTL Minutes",
+          "name": "session_ttl_minutes",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": 200,
+          "description": null,
+          "label": "Max Sessions",
+          "name": "max_sessions",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "claude-agent-sdk"
+      ],
+      "description": "Run persistent Claude coding sessions with tool-use and subagents",
+      "display_name": "Claude Agent SDK",
+      "docs_url": "https://platform.claude.com/docs/en/agent-sdk/python",
+      "helper_text": null,
+      "icon": "Bot",
+      "icon_color": "text-orange-500",
+      "name": "claude_agent",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "auth_provider": null,
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
           "description": "Path to the configuration file (uses default if not specified)",
           "label": "Configuration Path",
           "name": "config_path",

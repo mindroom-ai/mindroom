@@ -94,8 +94,15 @@ endpoints:
       titleModel: "general"
       dropParams: ["stop", "frequency_penalty", "presence_penalty", "top_p"]
       headers:
+        # Highest-priority session key used by MindRoom
+        X-Session-Id: "{{LIBRECHAT_BODY_CONVERSATIONID}}"
+        # Backward-compatible fallback used by MindRoom
         X-LibreChat-Conversation-Id: "{{LIBRECHAT_BODY_CONVERSATIONID}}"
 ```
+
+`X-Session-Id` is recommended when you want deterministic backend session continuity.
+This is especially important for tools that keep long-lived backend sessions.
+`X-LibreChat-Conversation-Id` alone is still enough to keep continuity if you already use it.
 
 ### Open WebUI
 
@@ -137,6 +144,21 @@ Session IDs are derived from request headers:
 3. Random UUID fallback
 
 Agent memory and conversation history persist across requests with the same session ID.
+For persistent backend tool sessions (for example a long-running coding session), prefer `X-Session-Id`.
+
+### Claude Agent tool sessions
+
+If an agent enables the `claude_agent` tool, the same `X-Session-Id` keeps the Claude backend session alive across turns.
+This lets a user continue one long coding flow instead of starting a fresh Claude process on every request.
+You can also control Claude-side session behavior via `tool_config.claude_agent` (`continue_conversation`, `resume`, `fork_session`).
+
+Parallel Claude sub-sessions are supported by using different `session_label` values in tool calls:
+
+- Same `session_label`: one shared Claude session (serialized by a per-session lock)
+- Different `session_label`: independent Claude sessions that can run concurrently
+
+If the `claude_agent` tool runs through an Anthropic-compatible gateway and requests fail on `anthropic-beta` headers,
+enable `disable_experimental_betas: true` in `tool_config.claude_agent`.
 
 ### Knowledge bases
 
