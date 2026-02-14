@@ -326,7 +326,7 @@ class TestConsolidatedConfigManager:
         """Test manage_agent with invalid operation."""
         cm = ConfigManagerTools()
         result = cm.manage_agent(
-            operation="invalid",  # type: ignore[arg-type]
+            operation="invalid",
             agent_name="test",
         )
         assert "Error: Unknown operation" in result

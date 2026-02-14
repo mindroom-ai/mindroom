@@ -19,7 +19,7 @@ class TestDynamicConfigUpdate:
         """Test that when config is updated, all existing bots get the new config."""
         # Create initial config with just one agent
         initial_config = Config(
-            agents={  # type: ignore[arg-type]
+            agents={
                 "general": {
                     "display_name": "GeneralAgent",
                     "role": "General assistant",
@@ -27,7 +27,7 @@ class TestDynamicConfigUpdate:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},  # type: ignore[arg-type]
+            models={"default": {"provider": "test", "id": "test-model"}},
         )
 
         # Create orchestrator and set initial config
@@ -42,7 +42,7 @@ class TestDynamicConfigUpdate:
 
         # Create updated config with a new agent
         updated_config = Config(
-            agents={  # type: ignore[arg-type]
+            agents={
                 "general": {
                     "display_name": "GeneralAgent",
                     "role": "General assistant",
@@ -56,7 +56,7 @@ class TestDynamicConfigUpdate:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},  # type: ignore[arg-type]
+            models={"default": {"provider": "test", "id": "test-model"}},
         )
 
         # Mock the from_yaml method to return our updated config
@@ -95,7 +95,7 @@ class TestDynamicConfigUpdate:
         """Test that scheduling commands work correctly with dynamically added agents."""
         # Update config to add callagent
         updated_config = Config(
-            agents={  # type: ignore[arg-type]
+            agents={
                 "email_assistant": {
                     "display_name": "EmailAssistant",
                     "role": "Email assistant",
@@ -109,7 +109,7 @@ class TestDynamicConfigUpdate:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},  # type: ignore[arg-type]
+            models={"default": {"provider": "test", "id": "test-model"}},
         )
 
         # Test that parse_workflow_schedule correctly recognizes the new agent

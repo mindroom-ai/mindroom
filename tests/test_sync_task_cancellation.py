@@ -219,7 +219,7 @@ async def test_new_agent_not_started_twice() -> None:
         orchestrator = MultiAgentOrchestrator(storage_path=MagicMock())
 
         old_config = Config(
-            agents={  # type: ignore[arg-type]
+            agents={
                 "general": {
                     "display_name": "GeneralAgent",
                     "role": "General assistant",
@@ -227,7 +227,7 @@ async def test_new_agent_not_started_twice() -> None:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},  # type: ignore[arg-type]
+            models={"default": {"provider": "test", "id": "test-model"}},
         )
         orchestrator.config = old_config
 
@@ -241,7 +241,7 @@ async def test_new_agent_not_started_twice() -> None:
 
         # --- new config adds "coach" ---
         new_config = Config(
-            agents={  # type: ignore[arg-type]
+            agents={
                 "general": {
                     "display_name": "GeneralAgent",
                     "role": "General assistant",
@@ -255,7 +255,7 @@ async def test_new_agent_not_started_twice() -> None:
                     "rooms": ["lobby", "personal"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},  # type: ignore[arg-type]
+            models={"default": {"provider": "test", "id": "test-model"}},
         )
         mock_from_yaml.return_value = new_config
 

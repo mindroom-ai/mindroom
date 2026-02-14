@@ -21,7 +21,7 @@ class TestScheduledTaskRestoration:
         """Test that only the router agent restores scheduled tasks."""
         # Create a mock config with multiple agents
         config = Config(
-            agents={  # type: ignore[arg-type]
+            agents={
                 "general": {
                     "display_name": "GeneralAgent",
                     "role": "General assistant",
@@ -35,7 +35,7 @@ class TestScheduledTaskRestoration:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},  # type: ignore[arg-type]
+            models={"default": {"provider": "test", "id": "test-model"}},
         )
 
         # Test with RouterAgent
@@ -69,7 +69,7 @@ class TestScheduledTaskRestoration:
     async def test_non_router_agents_dont_restore_tasks(self) -> None:
         """Test that non-router agents don't restore scheduled tasks."""
         config = Config(
-            agents={  # type: ignore[arg-type]
+            agents={
                 "general": {
                     "display_name": "GeneralAgent",
                     "role": "General assistant",
@@ -77,7 +77,7 @@ class TestScheduledTaskRestoration:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},  # type: ignore[arg-type]
+            models={"default": {"provider": "test", "id": "test-model"}},
         )
 
         # Test with regular agent (not router)
@@ -111,7 +111,7 @@ class TestScheduledTaskRestoration:
     async def test_multiple_agents_only_router_restores(self) -> None:
         """Test that when multiple agents join a room, only router restores tasks."""
         config = Config(
-            agents={  # type: ignore[arg-type]
+            agents={
                 "general": {
                     "display_name": "GeneralAgent",
                     "role": "General assistant",
@@ -125,7 +125,7 @@ class TestScheduledTaskRestoration:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},  # type: ignore[arg-type]
+            models={"default": {"provider": "test", "id": "test-model"}},
         )
 
         agents_to_test = [
