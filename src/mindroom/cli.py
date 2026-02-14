@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
+import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+import httpx
 import typer
 import yaml
 from pydantic import ValidationError
 
 from mindroom import __version__
+
+if TYPE_CHECKING:
+    from mindroom.config import Config
 from mindroom.cli_config import (
     _check_env_keys,
     _config_search_locations,
@@ -19,7 +26,13 @@ from mindroom.cli_config import (
     config_app,
     console,
 )
-from mindroom.constants import DEFAULT_AGENTS_CONFIG, STORAGE_PATH
+from mindroom.constants import (
+    DEFAULT_AGENTS_CONFIG,
+    MATRIX_HOMESERVER,
+    MATRIX_SSL_VERIFY,
+    PROVIDER_ENV_KEYS,
+    STORAGE_PATH,
+)
 
 app = typer.Typer(
     help="MindRoom - AI agents that live in Matrix\n\nQuick start:\n  mindroom config init   Create a starter config\n  mindroom run           Start the system",
@@ -102,6 +115,143 @@ async def _run(log_level: str, storage_path: Path) -> None:
             _print_connection_error(exc)
             raise typer.Exit(1) from None
         raise
+
+
+@app.command()
+def doctor() -> None:
+    """Check your environment for common issues.
+
+    Runs connectivity, configuration, and credential checks in a single pass
+    so you can fix everything before running `mindroom run`.
+    """
+    console.print("[bold]MindRoom Doctor[/bold]\n")
+
+    passed = 0
+    failed = 0
+    warnings = 0
+
+    config_path = Path(DEFAULT_AGENTS_CONFIG)
+
+    # 1. Config file exists
+    p, f, w = _check_config_exists(config_path)
+    passed += p
+    failed += f
+    warnings += w
+
+    # 2-3. Config validity + API keys (skip if file missing)
+    if config_path.exists():
+        config, p, f, w = _check_config_valid(config_path)
+        passed += p
+        failed += f
+        warnings += w
+        if config is not None:
+            p, f, w = _check_api_keys(config)
+            passed += p
+            failed += f
+            warnings += w
+
+    # 4. Matrix homeserver reachable
+    p, f, w = _check_matrix_homeserver()
+    passed += p
+    failed += f
+    warnings += w
+
+    # 5. Storage directory writable
+    p, f, w = _check_storage_writable()
+    passed += p
+    failed += f
+    warnings += w
+
+    # Summary
+    console.print(f"\n{passed} passed, {failed} failed, {warnings} warning{'s' if warnings != 1 else ''}")
+
+    if failed > 0:
+        raise typer.Exit(1)
+
+
+def _check_config_exists(config_path: Path) -> tuple[int, int, int]:
+    """Check config file exists. Returns (passed, failed, warnings)."""
+    if config_path.exists():
+        console.print(f"[green]✓[/green] Config file: {config_path}")
+        return 1, 0, 0
+    console.print(f"[red]✗[/red] Config file not found: {config_path}")
+    return 0, 1, 0
+
+
+def _check_config_valid(config_path: Path) -> tuple[Config | None, int, int, int]:
+    """Validate config file. Returns (config_or_none, passed, failed, warnings)."""
+    try:
+        config = _load_config_quiet(config_path)
+    except ValidationError as exc:
+        n = len(exc.errors())
+        console.print(f"[red]✗[/red] Config invalid ({n} validation error{'s' if n != 1 else ''})")
+        return None, 0, 1, 0
+    except (yaml.YAMLError, OSError) as exc:
+        console.print(f"[red]✗[/red] Config invalid: {exc}")
+        return None, 0, 1, 0
+    agents = len(config.agents)
+    teams = len(config.teams)
+    models = len(config.models)
+    rooms = len(config.get_all_configured_rooms())
+    console.print(
+        f"[green]✓[/green] Config valid"
+        f" ({agents} agent{'s' if agents != 1 else ''},"
+        f" {teams} team{'s' if teams != 1 else ''},"
+        f" {models} model{'s' if models != 1 else ''},"
+        f" {rooms} room{'s' if rooms != 1 else ''})",
+    )
+    return config, 1, 0, 0
+
+
+def _check_api_keys(config: Config) -> tuple[int, int, int]:
+    """Check API keys for configured providers. Returns (passed, failed, warnings)."""
+    providers_used: set[str] = {m.provider for m in config.models.values()}
+    missing: list[tuple[str, str]] = []
+    for provider in sorted(providers_used):
+        env_key = PROVIDER_ENV_KEYS.get(provider)
+        if env_key and not os.getenv(env_key):
+            missing.append((provider, env_key))
+    if missing:
+        w = 0
+        for provider, env_key in missing:
+            console.print(f"[yellow]![/yellow] Missing env: {env_key} (provider: {provider})")
+            w += 1
+        return 0, 0, w
+    console.print("[green]✓[/green] API keys set for all configured providers")
+    return 1, 0, 0
+
+
+def _check_matrix_homeserver() -> tuple[int, int, int]:
+    """Check Matrix homeserver reachability. Returns (passed, failed, warnings)."""
+    url = f"{MATRIX_HOMESERVER}/_matrix/client/versions"
+    verify: bool = MATRIX_SSL_VERIFY
+    try:
+        resp = httpx.get(url, timeout=5, verify=verify)
+        if not resp.is_success:
+            console.print(
+                f"[red]✗[/red] Matrix homeserver returned {resp.status_code}: {MATRIX_HOMESERVER}",
+            )
+            return 0, 1, 0
+    except Exception as exc:
+        console.print(f"[red]✗[/red] Matrix homeserver unreachable: {MATRIX_HOMESERVER} ({exc})")
+        return 0, 1, 0
+    console.print(f"[green]✓[/green] Matrix homeserver: {MATRIX_HOMESERVER}")
+    return 1, 0, 0
+
+
+def _check_storage_writable() -> tuple[int, int, int]:
+    """Check storage directory is writable. Returns (passed, failed, warnings)."""
+    storage = Path(STORAGE_PATH)
+    try:
+        storage.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=storage)
+        os.close(fd)
+        Path(tmp).unlink()
+    except OSError as exc:
+        console.print(f"[red]✗[/red] Storage not writable: {storage} ({exc})")
+        return 0, 1, 0
+    console.print(f"[green]✓[/green] Storage writable: {storage}/")
+    return 1, 0, 0
 
 
 # ---------------------------------------------------------------------------
