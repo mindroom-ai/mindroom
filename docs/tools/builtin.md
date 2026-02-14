@@ -194,7 +194,7 @@ This allows iterative coding workflows in the same session (including Claude-sid
 When using the OpenAI-compatible API, set `X-Session-Id` to keep tool sessions stable across requests.
 See [OpenAI API Compatibility](../openai-api.md#session-continuity).
 
-Example tool config in `config.yaml`:
+Add `claude_agent` to an agent's tools in `config.yaml`:
 
 ```yaml
 agents:
@@ -204,34 +204,35 @@ agents:
     model: general
     tools:
       - claude_agent
-tool_config:
-  claude_agent:
-    api_key: "sk-ant-or-proxy-key"
-    model: "claude-sonnet-4-5"
-    permission_mode: "default"
-    continue_conversation: true
-    session_ttl_minutes: 60
-    max_sessions: 200
 ```
 
-`resume` and `fork_session` are runtime arguments in tool calls (`claude_start_session` / `claude_send`), so they are intentionally not part of `tool_config`.
+Configure credentials via the dashboard widget or by writing `mindroom_data/credentials/claude_agent_credentials.json`:
 
-To run through an Anthropic-compatible gateway (for example LiteLLM `/v1/messages`), set:
+```json
+{
+  "api_key": "sk-ant-or-proxy-key",
+  "model": "claude-sonnet-4-5",
+  "permission_mode": "default",
+  "continue_conversation": true,
+  "session_ttl_minutes": 60,
+  "max_sessions": 200
+}
+```
 
-```yaml
-tool_config:
-  claude_agent:
-    api_key: "sk-dummy"
-    anthropic_base_url: "http://litellm.local"
-    # optional bearer-style token for gateways that require it
-    anthropic_auth_token: "sk-dummy"
-    # useful when a gateway rejects anthropic-beta headers
-    disable_experimental_betas: true
+To run through an Anthropic-compatible gateway (for example LiteLLM `/v1/messages`):
+
+```json
+{
+  "api_key": "sk-dummy",
+  "anthropic_base_url": "http://litellm.local",
+  "anthropic_auth_token": "sk-dummy",
+  "disable_experimental_betas": true
+}
 ```
 
 Use the gateway host root for `anthropic_base_url` (no `/v1` suffix), because Claude clients append `/v1/messages`.
 Some Anthropic-compatible backends may reject Claude's `anthropic-beta` headers.
-Set `disable_experimental_betas: true` in that case.
+Set `disable_experimental_betas` to `true` in that case.
 
 ## Enabling Tools
 

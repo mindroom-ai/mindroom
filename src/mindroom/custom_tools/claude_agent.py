@@ -43,6 +43,13 @@ class Agent(Protocol):
 
 
 @runtime_checkable
+class AgentWithId(Protocol):
+    """Agent protocol that exposes a stable id field."""
+
+    id: str | None
+
+
+@runtime_checkable
 class AgentWithModel(Protocol):
     """Agent protocol that exposes a model object."""
 
@@ -183,7 +190,10 @@ class ClaudeSessionManager:
     def _collect_expired_locked(self) -> list[ClaudeSessionState]:
         now = monotonic()
         expired_keys = [
-            key for key, session in self._sessions.items() if now - session.last_used_at > session.ttl_seconds
+            key
+            for key, session in self._sessions.items()
+            # Never expire an in-flight session; it will be re-evaluated once idle.
+            if now - session.last_used_at > session.ttl_seconds and not session.lock.locked()
         ]
         return [self._sessions.pop(key) for key in expired_keys]
 
@@ -194,7 +204,11 @@ class ClaudeSessionManager:
             namespace_sessions = [key for key, session in self._sessions.items() if session.namespace == namespace]
             if len(namespace_sessions) < max_sessions:
                 break
-            oldest_key = min(namespace_sessions, key=lambda key: self._sessions[key].last_used_at)
+            evictable_sessions = [key for key in namespace_sessions if not self._sessions[key].lock.locked()]
+            if not evictable_sessions:
+                # Avoid stalling new requests on active session locks.
+                break
+            oldest_key = min(evictable_sessions, key=lambda key: self._sessions[key].last_used_at)
             evicted.append(self._sessions.pop(oldest_key))
         return evicted
 
@@ -340,6 +354,10 @@ class ClaudeAgentTools(Toolkit):
         return "\n".join([message, *details])
 
     def _namespace(self, agent: Agent | None) -> str:
+        if isinstance(agent, AgentWithId):
+            agent_id = agent.id
+            if agent_id and agent_id.strip():
+                return agent_id.strip()
         if not isinstance(agent, Agent):
             return "mindroom"
         agent_name = agent.name
@@ -454,7 +472,7 @@ class ClaudeAgentTools(Toolkit):
         )
         if isinstance(result, str):
             return result
-        session, created, session_key, _resolved_model = result
+        _session, created, session_key, _resolved_model = result
         action = "Started" if created else "Reusing"
         return f"{action} Claude session `{session_key}`."
 

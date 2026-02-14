@@ -128,6 +128,28 @@ class _TimeJumpFakeClaudeSDKClient(_FakeClaudeSDKClient):
 
 
 @dataclass
+class _BlockingPromptFakeClaudeSDKClient(_FakeClaudeSDKClient):
+    """Fake client that blocks only for a configured prompt value."""
+
+    instances: ClassVar[list[_BlockingPromptFakeClaudeSDKClient]] = []
+    blocked_prompt: ClassVar[str] = "hold"
+    blocked_query_started: ClassVar[asyncio.Event | None] = None
+    release_blocked_query: ClassVar[asyncio.Event | None] = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        _BlockingPromptFakeClaudeSDKClient.instances.append(self)
+
+    async def query(self, prompt: str, session_id: str = "default") -> None:  # noqa: ARG002
+        self.queries.append(prompt)
+        if prompt == type(self).blocked_prompt:
+            if type(self).blocked_query_started is not None:
+                type(self).blocked_query_started.set()
+            if type(self).release_blocked_query is not None:
+                await type(self).release_blocked_query.wait()
+
+
+@dataclass
 class _GatewayProbeClaudeSDKClient:
     """Gateway probe client that sends Anthropic-compatible requests to a local stub server."""
 
@@ -426,6 +448,65 @@ async def test_claude_send_with_different_session_labels_creates_multiple_sessio
     await tools.claude_send("second", session_label="b", run_context=run_context, agent=agent)
 
     assert len(_FakeClaudeSDKClient.instances) == 2
+
+
+@pytest.mark.asyncio
+async def test_claude_send_namespaces_sessions_by_agent_id(
+    fake_manager: claude_agent_module.ClaudeSessionManager,
+) -> None:
+    """Agents with the same display name but different IDs should not share sessions."""
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = RunContext(run_id="run-1", session_id="session-1")
+    alpha = SimpleNamespace(name="General", id="alpha")
+    beta = SimpleNamespace(name="General", id="beta")
+
+    await tools.claude_send("alpha", run_context=run_context, agent=alpha)
+    await tools.claude_send("beta", run_context=run_context, agent=beta)
+
+    assert len(_FakeClaudeSDKClient.instances) == 2
+    assert "alpha:session-1" in fake_manager._sessions
+    assert "beta:session-1" in fake_manager._sessions
+
+
+@pytest.mark.asyncio
+async def test_claude_send_does_not_expire_active_session_during_cleanup(
+    fake_manager: claude_agent_module.ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TTL cleanup should skip active sessions that are currently processing a query."""
+    clock = {"now": 0.0}
+
+    def _fake_monotonic() -> float:
+        return clock["now"]
+
+    _BlockingPromptFakeClaudeSDKClient.instances = []
+    _BlockingPromptFakeClaudeSDKClient.blocked_prompt = "hold"
+    _BlockingPromptFakeClaudeSDKClient.blocked_query_started = asyncio.Event()
+    _BlockingPromptFakeClaudeSDKClient.release_blocked_query = asyncio.Event()
+    monkeypatch.setattr(claude_agent_module, "monotonic", _fake_monotonic)
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _BlockingPromptFakeClaudeSDKClient)
+
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", session_ttl_minutes=1)
+    run_context = RunContext(run_id="run-1", session_id="session-1")
+    agent = SimpleNamespace(name="general")
+
+    first_send = asyncio.create_task(
+        tools.claude_send("hold", session_label="a", run_context=run_context, agent=agent),
+    )
+    try:
+        await asyncio.wait_for(_BlockingPromptFakeClaudeSDKClient.blocked_query_started.wait(), timeout=1)
+
+        # Simulate long-running in-flight work that exceeds TTL.
+        clock["now"] = 61.0
+
+        second_result = await asyncio.wait_for(
+            tools.claude_send("quick", session_label="b", run_context=run_context, agent=agent),
+            timeout=1,
+        )
+        assert "Echo: quick" in second_result
+    finally:
+        _BlockingPromptFakeClaudeSDKClient.release_blocked_query.set()
+        await asyncio.wait_for(first_send, timeout=1)
 
 
 @pytest.mark.asyncio
