@@ -3,20 +3,21 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 from pathlib import Path
 
 import typer
+import yaml
 from pydantic import ValidationError
-from rich.console import Console
 
 from mindroom import __version__
 from mindroom.cli_config import (
     _check_env_keys,
+    _config_search_locations,
     _format_validation_errors,
     _load_config_quiet,
     config_app,
+    console,
 )
 from mindroom.constants import DEFAULT_AGENTS_CONFIG, STORAGE_PATH
 
@@ -27,7 +28,6 @@ app = typer.Typer(
     pretty_exceptions_show_locals=False,
 )
 app.add_typer(config_app, name="config")
-console = Console()
 
 
 @app.command()
@@ -68,7 +68,7 @@ async def _run(log_level: str, storage_path: Path) -> None:
     # Check config exists before starting
     config_path = Path(DEFAULT_AGENTS_CONFIG)
     if not config_path.exists():
-        _print_missing_config_error(config_path)
+        _print_missing_config_error()
         raise typer.Exit(1)
 
     # Validate config early so users get a clear message instead of a traceback
@@ -77,7 +77,7 @@ async def _run(log_level: str, storage_path: Path) -> None:
     except ValidationError as exc:
         _format_validation_errors(exc, config_path)
         raise typer.Exit(1) from None
-    except Exception as exc:
+    except (yaml.YAMLError, OSError) as exc:
         console.print(f"[red]Error:[/red] Could not load configuration: {exc}")
         console.print("\n  [cyan]mindroom config validate[/cyan]  Check your config")
         raise typer.Exit(1) from None
@@ -109,27 +109,27 @@ async def _run(log_level: str, storage_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _print_missing_config_error(config_path: Path) -> None:
+def _print_missing_config_error() -> None:
     console.print("[red]Error:[/red] No config.yaml found.\n")
     console.print("MindRoom needs a configuration file to know which agents to run.\n")
     console.print("Quick start:")
     console.print("  [cyan]mindroom config init[/cyan]    Create a starter config")
     console.print("  [cyan]mindroom config edit[/cyan]    Edit your config\n")
     console.print("Config search locations:")
-    console.print(f"  1. {config_path.resolve()}")
-    env_path = os.getenv("MINDROOM_CONFIG_PATH") or os.getenv("CONFIG_PATH")
-    if env_path:
-        console.print(f"  2. {env_path} (from environment)")
+    for loc in _config_search_locations():
+        status = "[green]exists[/green]" if loc.exists() else "[dim]not found[/dim]"
+        console.print(f"  - {loc} ({status})")
     console.print("\nLearn more: https://github.com/mindroom-ai/mindroom")
 
 
 def _print_connection_error(exc: BaseException) -> None:
-    homeserver = os.getenv("MATRIX_HOMESERVER", "http://localhost:8008")
+    from mindroom.constants import MATRIX_HOMESERVER  # noqa: PLC0415
+
     console.print("[red]Error:[/red] Could not connect to the Matrix homeserver.\n")
     console.print(f"  Details: {exc}\n")
     console.print("Check that:")
     console.print("  1. Your Matrix homeserver is running")
-    console.print(f"  2. MATRIX_HOMESERVER is set correctly (current: {homeserver})")
+    console.print(f"  2. MATRIX_HOMESERVER is set correctly (current: {MATRIX_HOMESERVER})")
     console.print("  3. The server is reachable from this machine")
 
 

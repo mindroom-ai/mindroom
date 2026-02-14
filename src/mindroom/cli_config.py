@@ -8,16 +8,16 @@ import platform
 import shlex
 import shutil
 import subprocess
-from importlib import resources
 from pathlib import Path
 
 import typer
+import yaml
 from pydantic import ValidationError
 from rich.console import Console
 from rich.syntax import Syntax
 
 from mindroom.config import Config
-from mindroom.constants import DEFAULT_AGENTS_CONFIG
+from mindroom.constants import DEFAULT_AGENTS_CONFIG, PROVIDER_ENV_KEYS
 
 console = Console()
 
@@ -205,10 +205,10 @@ def config_edit(
 
 @config_app.command("validate")
 def config_validate(
-    config_path: Path = typer.Option(  # noqa: B008
-        Path(DEFAULT_AGENTS_CONFIG),
-        "--config",
-        "-c",
+    path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--path",
+        "-p",
         help="Path to the configuration file to validate.",
     ),
 ) -> None:
@@ -217,6 +217,7 @@ def config_validate(
     Parses the YAML config using Pydantic and reports errors in a friendly format.
     Also checks whether required API keys are set as environment variables.
     """
+    config_path = _resolve_config_path(path)
     console.print(f"Validating configuration: [bold]{config_path}[/bold]\n")
 
     if not config_path.exists():
@@ -227,9 +228,9 @@ def config_validate(
     try:
         config = _load_config_quiet(config_path)
     except ValidationError as exc:
-        _format_validation_errors(exc)
+        _format_validation_errors(exc, config_path)
         raise typer.Exit(1) from None
-    except Exception as e:
+    except (yaml.YAMLError, OSError) as e:
         console.print(f"[red]Error:[/red] Could not load configuration: {e}")
         raise typer.Exit(1) from None
 
@@ -245,7 +246,7 @@ def config_validate(
 
 
 @config_app.command("path")
-def config_path(
+def config_path_cmd(
     path: Path | None = CONFIG_PATH_OPTION,
 ) -> None:
     """Show the resolved config file path and search locations."""
@@ -266,46 +267,36 @@ def config_path(
 
 
 def _load_config_quiet(path: Path) -> Config:
-    """Load config while suppressing internal log output.
+    """Load config while temporarily suppressing structlog output.
 
     structlog's default PrintLogger bypasses stdlib log levels, so we
-    temporarily route it through stdlib with the root level at WARNING.
+    route it through stdlib with the root level at WARNING for the
+    duration of the load then reset so later callers (e.g. the bot)
+    can configure structlog themselves.
     """
-    _suppress_structlog()
-    return Config.from_yaml(path)
-
-
-def _suppress_structlog() -> None:
-    """Configure structlog to be silent at INFO level (CLI context only)."""
     import structlog  # noqa: PLC0415
 
-    if structlog.is_configured():
-        return
-    # Route structlog through stdlib so log-level filtering works
-    logging.basicConfig(format="%(message)s", level=logging.WARNING)
-    structlog.configure(
-        wrapper_class=structlog.stdlib.BoundLogger,
-        logger_factory=structlog.stdlib.LoggerFactory(),
-    )
-
-
-_PROVIDER_ENV_KEYS: dict[str, str] = {
-    "anthropic": "ANTHROPIC_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "google": "GOOGLE_API_KEY",
-    "openrouter": "OPENROUTER_API_KEY",
-}
+    was_configured = structlog.is_configured()
+    if not was_configured:
+        logging.basicConfig(format="%(message)s", level=logging.WARNING)
+        structlog.configure(
+            wrapper_class=structlog.stdlib.BoundLogger,
+            logger_factory=structlog.stdlib.LoggerFactory(),
+        )
+    try:
+        return Config.from_yaml(path)
+    finally:
+        if not was_configured:
+            structlog.reset_defaults()
 
 
 def _check_env_keys(config: Config) -> None:
     """Warn about missing environment variables for configured providers."""
-    providers_used: set[str] = set()
-    for model in config.models.values():
-        providers_used.add(model.provider)
+    providers_used: set[str] = {model.provider for model in config.models.values()}
 
     missing: list[tuple[str, str]] = []
     for provider in sorted(providers_used):
-        env_key = _PROVIDER_ENV_KEYS.get(provider)
+        env_key = PROVIDER_ENV_KEYS.get(provider)
         if env_key and not os.getenv(env_key):
             missing.append((provider, env_key))
 
@@ -317,17 +308,8 @@ def _check_env_keys(config: Config) -> None:
 
 
 def _full_template() -> str:
-    """Load the bundled config template."""
-    try:
-        template_file = resources.files("mindroom") / "config_template.yaml"
-        return template_file.read_text(encoding="utf-8")
-    except (FileNotFoundError, TypeError):
-        # Fallback: read from source tree
-        fallback = Path(__file__).parent / "config_template.yaml"
-        if fallback.exists():
-            return fallback.read_text(encoding="utf-8")
-        # Last resort: return inline minimal template
-        return _minimal_template()
+    """Load the bundled config template from the package directory."""
+    return (Path(__file__).parent / "config_template.yaml").read_text(encoding="utf-8")
 
 
 def _minimal_template() -> str:

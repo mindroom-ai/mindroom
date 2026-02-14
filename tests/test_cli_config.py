@@ -128,14 +128,14 @@ class TestConfigValidate:
             "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
             "router:\n  model: default\n",
         )
-        result = runner.invoke(app, ["config", "validate", "--config", str(cfg)])
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
         assert result.exit_code == 0
         assert "valid" in result.output.lower()
 
     def test_validate_missing_file(self, tmp_path: Path) -> None:
         """Config validate exits 1 when file is missing."""
         missing = tmp_path / "nonexistent.yaml"
-        result = runner.invoke(app, ["config", "validate", "--config", str(missing)])
+        result = runner.invoke(app, ["config", "validate", "--path", str(missing)])
         assert result.exit_code == 1
         assert "not found" in result.output.lower()
 
@@ -143,7 +143,7 @@ class TestConfigValidate:
         """Config validate shows friendly errors for invalid config."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text("agents: not_a_dict\n")
-        result = runner.invoke(app, ["config", "validate", "--config", str(cfg)])
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
         assert result.exit_code == 1
         assert "Issues found" in result.output
 
