@@ -373,6 +373,7 @@ memory:
     provider: openai
 models:
   # --- Local (llama.local) ---
+  # llama-swap + llama.cpp, see https://github.com/basnijholt/dotfiles/blob/main/configs/nixos/hosts/pc/ai.nix
   default:
     extra_kwargs:
       base_url: http://llama.local/v1
