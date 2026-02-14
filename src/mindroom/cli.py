@@ -12,7 +12,12 @@ from pydantic import ValidationError
 from rich.console import Console
 
 from mindroom import __version__
-from mindroom.cli_config import _check_env_keys, _load_config_quiet, config_app
+from mindroom.cli_config import (
+    _check_env_keys,
+    _format_validation_errors,
+    _load_config_quiet,
+    config_app,
+)
 from mindroom.constants import DEFAULT_AGENTS_CONFIG, STORAGE_PATH
 
 app = typer.Typer(
@@ -70,7 +75,7 @@ async def _run(log_level: str, storage_path: Path) -> None:
     try:
         config = _load_config_quiet(config_path)
     except ValidationError as exc:
-        _print_validation_error(exc, config_path)
+        _format_validation_errors(exc, config_path)
         raise typer.Exit(1) from None
     except Exception as exc:
         console.print(f"[red]Error:[/red] Could not load configuration: {exc}")
@@ -116,17 +121,6 @@ def _print_missing_config_error(config_path: Path) -> None:
     if env_path:
         console.print(f"  2. {env_path} (from environment)")
     console.print("\nLearn more: https://github.com/mindroom-ai/mindroom")
-
-
-def _print_validation_error(exc: ValidationError, config_path: Path) -> None:
-    console.print(f"[red]Error:[/red] Invalid configuration in {config_path}\n")
-    console.print("Issues found:")
-    for error in exc.errors():
-        loc = " -> ".join(str(x) for x in error["loc"])
-        console.print(f"  [red]*[/red] {loc}: {error['msg']}")
-    console.print("\nFix these issues:")
-    console.print("  [cyan]mindroom config edit[/cyan]      Edit your config")
-    console.print("  [cyan]mindroom config validate[/cyan]  Check config after editing")
 
 
 def _print_connection_error(exc: BaseException) -> None:

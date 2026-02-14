@@ -72,9 +72,12 @@ def _get_editor() -> str:
     return "vi"
 
 
-def _format_validation_errors(exc: ValidationError) -> None:
+def _format_validation_errors(exc: ValidationError, config_path: Path | None = None) -> None:
     """Print Pydantic validation errors in a user-friendly format."""
-    console.print("[red]Error:[/red] Invalid configuration\n")
+    if config_path:
+        console.print(f"[red]Error:[/red] Invalid configuration in {config_path}\n")
+    else:
+        console.print("[red]Error:[/red] Invalid configuration\n")
     console.print("Issues found:")
     for error in exc.errors():
         loc = " -> ".join(str(x) for x in error["loc"])
