@@ -270,3 +270,7 @@ doc-serve:
 # Update auto-generated documentation
 doc-update:
     uv run python docs/run_markdown_code_runner.py
+
+# Regenerate skill reference files (mindroom-docs)
+generate-skill-refs:
+    uv run python .github/scripts/generate_skill_references.py

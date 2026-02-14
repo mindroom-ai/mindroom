@@ -81,7 +81,11 @@ agents:
 | `learning_mode` | string | `"always"` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call |
 | `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents |
 
+Skills are opt-in: a skill is only loaded when its name appears in an agent's `skills` list. `metadata.openclaw.always: true` bypasses eligibility requirements, but it does not auto-attach the skill to agents.
+
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
+
+All per-agent settings above that show a default value inherit from the `defaults` section. Per-agent values override them.
 
 All per-agent settings above that show a default value inherit from the `defaults` section. Per-agent values override them.
 
