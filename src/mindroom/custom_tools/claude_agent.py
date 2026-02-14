@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import typing
 from contextlib import suppress
 from dataclasses import dataclass, field
 from time import monotonic
-from typing import Any, Literal, Protocol, cast
+from typing import Any, ClassVar, Literal, Protocol, cast, runtime_checkable
 
 from agno.tools import Toolkit
 from claude_agent_sdk import (
@@ -30,14 +31,29 @@ VALID_PERMISSION_MODES: tuple[PermissionMode, ...] = (
 DEFAULT_PERMISSION_MODE: PermissionMode = "default"
 DEFAULT_SESSION_TTL_MINUTES = 60
 DEFAULT_MAX_SESSIONS = 200
+_DEFAULT_LIMITS = (DEFAULT_SESSION_TTL_MINUTES * 60, DEFAULT_MAX_SESSIONS)
 MAX_STDERR_LINES = 12
 
 
+@runtime_checkable
 class Agent(Protocol):
     """Minimal agent protocol needed by this tool."""
 
-    name: str
-    model: Any
+    name: str | None
+
+
+@runtime_checkable
+class AgentWithModel(Protocol):
+    """Agent protocol that exposes a model object."""
+
+    model: Any | None
+
+
+@runtime_checkable
+class ModelWithId(Protocol):
+    """Model protocol that exposes an id field."""
+
+    id: str | None
 
 
 class RunContext(Protocol):
@@ -85,7 +101,9 @@ class ClaudeSessionState:
     last_used_at: float = field(default_factory=monotonic)
     ttl_seconds: int = DEFAULT_SESSION_TTL_MINUTES * 60
     claude_session_id: str | None = None
-    stderr_lines: list[str] = field(default_factory=list)
+    stderr_lines: collections.deque[str] = field(
+        default_factory=lambda: collections.deque(maxlen=MAX_STDERR_LINES),
+    )
 
 
 class ClaudeSessionManager:
@@ -114,27 +132,31 @@ class ClaudeSessionManager:
         options: ClaudeAgentOptions,
     ) -> tuple[ClaudeSessionState, bool]:
         """Get an existing session or create a new one for the given key."""
-        async with self._lock:
-            await self._cleanup_expired_locked()
+        stale: list[ClaudeSessionState] = []
+        try:
+            async with self._lock:
+                stale.extend(self._collect_expired_locked())
 
-            existing = self._sessions.get(session_key)
-            if existing is not None:
-                existing.last_used_at = monotonic()
-                existing.ttl_seconds = self._namespace_ttl_seconds(namespace)
-                return existing, False
+                existing = self._sessions.get(session_key)
+                if existing is not None:
+                    existing.last_used_at = monotonic()
+                    existing.ttl_seconds = self._namespace_ttl_seconds(namespace)
+                    return existing, False
 
-            await self._evict_if_needed_locked(namespace)
+                stale.extend(self._evict_if_needed_locked(namespace))
 
-            client = ClaudeSDKClient(options=options)
-            await client.connect()
-            session = ClaudeSessionState(
-                key=session_key,
-                namespace=namespace,
-                client=client,
-                ttl_seconds=self._namespace_ttl_seconds(namespace),
-            )
-            self._sessions[session_key] = session
-            return session, True
+                client = ClaudeSDKClient(options=options)
+                await client.connect()
+                session = ClaudeSessionState(
+                    key=session_key,
+                    namespace=namespace,
+                    client=client,
+                    ttl_seconds=self._namespace_ttl_seconds(namespace),
+                )
+                self._sessions[session_key] = session
+                return session, True
+        finally:
+            await self._disconnect_many(stale)
 
     async def close(self, session_key: str) -> bool:
         """Close and remove a session by key."""
@@ -147,49 +169,55 @@ class ClaudeSessionManager:
 
     async def get(self, session_key: str) -> ClaudeSessionState | None:
         """Get a session by key, cleaning up expired sessions first."""
-        async with self._lock:
-            await self._cleanup_expired_locked()
-            session = self._sessions.get(session_key)
-            if session is not None:
-                session.last_used_at = monotonic()
-            return session
+        stale: list[ClaudeSessionState] = []
+        try:
+            async with self._lock:
+                stale.extend(self._collect_expired_locked())
+                session = self._sessions.get(session_key)
+                if session is not None:
+                    session.last_used_at = monotonic()
+                return session
+        finally:
+            await self._disconnect_many(stale)
 
-    async def _cleanup_expired_locked(self) -> None:
+    def _collect_expired_locked(self) -> list[ClaudeSessionState]:
         now = monotonic()
         expired_keys = [
             key for key, session in self._sessions.items() if now - session.last_used_at > session.ttl_seconds
         ]
-        for key in expired_keys:
-            session = self._sessions.pop(key)
-            await self._disconnect(session)
+        return [self._sessions.pop(key) for key in expired_keys]
 
-    async def _evict_if_needed_locked(self, namespace: str) -> None:
+    def _evict_if_needed_locked(self, namespace: str) -> list[ClaudeSessionState]:
+        evicted: list[ClaudeSessionState] = []
         max_sessions = self._namespace_max_sessions(namespace)
         while True:
             namespace_sessions = [key for key, session in self._sessions.items() if session.namespace == namespace]
             if len(namespace_sessions) < max_sessions:
                 break
             oldest_key = min(namespace_sessions, key=lambda key: self._sessions[key].last_used_at)
-            session = self._sessions.pop(oldest_key)
-            await self._disconnect(session)
+            evicted.append(self._sessions.pop(oldest_key))
+        return evicted
 
     def _namespace_ttl_seconds(self, namespace: str) -> int:
-        return self._namespace_limits.get(namespace, (DEFAULT_SESSION_TTL_MINUTES * 60, DEFAULT_MAX_SESSIONS))[0]
+        return self._namespace_limits.get(namespace, _DEFAULT_LIMITS)[0]
 
     def _namespace_max_sessions(self, namespace: str) -> int:
-        return self._namespace_limits.get(namespace, (DEFAULT_SESSION_TTL_MINUTES * 60, DEFAULT_MAX_SESSIONS))[1]
+        return self._namespace_limits.get(namespace, _DEFAULT_LIMITS)[1]
 
     async def _disconnect(self, session: ClaudeSessionState) -> None:
         async with session.lock:
             with suppress(Exception):
                 await session.client.disconnect()
 
-
-_SESSION_MANAGER = ClaudeSessionManager()
+    async def _disconnect_many(self, sessions: list[ClaudeSessionState]) -> None:
+        for session in sessions:
+            await self._disconnect(session)
 
 
 class ClaudeAgentTools(Toolkit):
     """Tools that let MindRoom agents run persistent Claude coding sessions."""
+
+    _session_manager: ClassVar[ClaudeSessionManager] = ClaudeSessionManager()
 
     def __init__(
         self,
@@ -274,18 +302,16 @@ class ClaudeAgentTools(Toolkit):
             stderr=stderr_callback,
         )
 
-    def _build_stderr_collector(self) -> tuple[list[str], typing.Callable[[str], None]]:
-        stderr_lines: list[str] = []
-
+    @staticmethod
+    def _build_stderr_callback(
+        target: collections.deque[str],
+    ) -> typing.Callable[[str], None]:
         def _on_stderr(line: str) -> None:
             cleaned = line.strip()
-            if not cleaned:
-                return
-            if len(stderr_lines) >= MAX_STDERR_LINES:
-                stderr_lines.pop(0)
-            stderr_lines.append(cleaned)
+            if cleaned:
+                target.append(cleaned)
 
-        return stderr_lines, _on_stderr
+        return _on_stderr
 
     def _format_session_error(
         self,
@@ -295,7 +321,7 @@ class ClaudeAgentTools(Toolkit):
         model: str | None,
         resume: str | None,
         fork_session: bool,
-        stderr_lines: list[str],
+        stderr_lines: collections.deque[str] | list[str],
     ) -> str:
         details = [
             "Session context:",
@@ -310,17 +336,19 @@ class ClaudeAgentTools(Toolkit):
             details.append("- note: `resume` must exist for the selected working-directory conversation context.")
         if stderr_lines:
             details.append("Recent Claude CLI stderr:")
-            details.extend(f"- {line}" for line in stderr_lines[-5:])
+            details.extend(f"- {line}" for line in list(stderr_lines)[-5:])
         return "\n".join([message, *details])
 
     def _namespace(self, agent: Agent | None) -> str:
-        agent_name = getattr(agent, "name", None)
-        if isinstance(agent_name, str) and agent_name.strip():
+        if not isinstance(agent, Agent):
+            return "mindroom"
+        agent_name = agent.name
+        if agent_name and agent_name.strip():
             return agent_name.strip()
         return "mindroom"
 
     def _ensure_namespace_config(self, namespace: str) -> None:
-        _SESSION_MANAGER.configure_namespace(
+        self._session_manager.configure_namespace(
             namespace=namespace,
             ttl_minutes=self.session_ttl_minutes,
             max_sessions=self.max_sessions,
@@ -343,21 +371,30 @@ class ClaudeAgentTools(Toolkit):
         if self.model and self.model.strip():
             return self.model.strip()
 
-        model_obj = getattr(agent, "model", None)
-        model_id = getattr(model_obj, "id", None)
-        if isinstance(model_id, str) and model_id.strip():
+        if not isinstance(agent, AgentWithModel):
+            return None
+        model_obj = agent.model
+        if not isinstance(model_obj, ModelWithId):
+            return None
+        model_id = model_obj.id
+        if model_id and model_id.strip():
             return model_id.strip()
         return None
 
-    async def claude_start_session(
+    async def _get_or_create_session(
         self,
-        session_label: str | None = None,
-        resume: str | None = None,
-        fork_session: bool = False,
-        run_context: RunContext | None = None,
-        agent: Agent | None = None,
-    ) -> str:
-        """Start or reuse a persistent Claude coding session for this conversation."""
+        *,
+        session_label: str | None,
+        resume: str | None,
+        fork_session: bool,
+        run_context: RunContext | None,
+        agent: Agent | None,
+    ) -> tuple[ClaudeSessionState, bool, str, str | None] | str:
+        """Shared session acquisition logic.
+
+        Returns ``(session, created, session_key, resolved_model)`` on success,
+        or an error string on failure.
+        """
         normalized_resume = resume.strip() if isinstance(resume, str) else None
         if fork_session and not normalized_resume:
             return "Invalid session options: `fork_session` requires a non-empty `resume` session ID."
@@ -366,9 +403,12 @@ class ClaudeAgentTools(Toolkit):
         resolved_model = self._resolve_model(agent)
         self._ensure_namespace_config(namespace)
         session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)
-        stderr_lines, stderr_callback = self._build_stderr_collector()
+
+        stderr_lines: collections.deque[str] = collections.deque(maxlen=MAX_STDERR_LINES)
+        stderr_callback = self._build_stderr_callback(stderr_lines)
+
         try:
-            session, created = await _SESSION_MANAGER.get_or_create(
+            session, created = await self._session_manager.get_or_create(
                 session_key,
                 namespace,
                 self._build_options(
@@ -394,6 +434,27 @@ class ClaudeAgentTools(Toolkit):
                 fork_session=fork_session,
                 stderr_lines=stderr_lines,
             )
+        return session, created, session_key, resolved_model
+
+    async def claude_start_session(
+        self,
+        session_label: str | None = None,
+        resume: str | None = None,
+        fork_session: bool = False,
+        run_context: RunContext | None = None,
+        agent: Agent | None = None,
+    ) -> str:
+        """Start or reuse a persistent Claude coding session for this conversation."""
+        result = await self._get_or_create_session(
+            session_label=session_label,
+            resume=resume,
+            fork_session=fork_session,
+            run_context=run_context,
+            agent=agent,
+        )
+        if isinstance(result, str):
+            return result
+        session, created, session_key, _resolved_model = result
         action = "Started" if created else "Reusing"
         return f"{action} Claude session `{session_key}`."
 
@@ -410,53 +471,28 @@ class ClaudeAgentTools(Toolkit):
         trimmed_prompt = prompt.strip()
         if not trimmed_prompt:
             return "Prompt is required."
+
+        acquire_result = await self._get_or_create_session(
+            session_label=session_label,
+            resume=resume,
+            fork_session=fork_session,
+            run_context=run_context,
+            agent=agent,
+        )
+        if isinstance(acquire_result, str):
+            return acquire_result
+        session, _created, session_key, resolved_model = acquire_result
+
         normalized_resume = resume.strip() if isinstance(resume, str) else None
-        if fork_session and not normalized_resume:
-            return "Invalid session options: `fork_session` requires a non-empty `resume` session ID."
-
-        namespace = self._namespace(agent)
-        resolved_model = self._resolve_model(agent)
-        self._ensure_namespace_config(namespace)
-        session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)
-        startup_stderr_lines, stderr_callback = self._build_stderr_collector()
-
-        try:
-            session, created = await _SESSION_MANAGER.get_or_create(
-                session_key,
-                namespace,
-                self._build_options(
-                    stderr_callback,
-                    model=resolved_model,
-                    resume=normalized_resume,
-                    fork_session=fork_session,
-                ),
-            )
-            if created:
-                session.stderr_lines = startup_stderr_lines
-            elif normalized_resume or fork_session:
-                return (
-                    f"Session `{session_key}` already exists; runtime `resume`/`fork_session` apply only when creating "
-                    "a new session. Use a different `session_label` or call `claude_end_session` first."
-                )
-        except Exception as exc:
-            return self._format_session_error(
-                f"Failed to start Claude session: {exc}",
-                session_key=session_key,
-                model=resolved_model,
-                resume=normalized_resume,
-                fork_session=fork_session,
-                stderr_lines=startup_stderr_lines,
-            )
-
         response_text = ""
         tool_names: list[str] = []
-        result: ResultMessage | None = None
+        msg_result: ResultMessage | None = None
         session_error: str | None = None
         async with session.lock:
             session.last_used_at = monotonic()
             try:
                 await session.client.query(trimmed_prompt)
-                response_text, tool_names, result = await self._collect_response(session)
+                response_text, tool_names, msg_result = await self._collect_response(session)
             except ClaudeSDKError as exc:
                 session_error = self._format_session_error(
                     f"Claude session error: {exc}",
@@ -466,21 +502,12 @@ class ClaudeAgentTools(Toolkit):
                     fork_session=fork_session,
                     stderr_lines=session.stderr_lines,
                 )
-            except Exception as exc:
-                session_error = self._format_session_error(
-                    f"Unexpected Claude session error: {exc}",
-                    session_key=session_key,
-                    model=resolved_model,
-                    resume=normalized_resume,
-                    fork_session=fork_session,
-                    stderr_lines=session.stderr_lines,
-                )
 
         if session_error is not None:
-            await _SESSION_MANAGER.close(session_key)
+            await self._session_manager.close(session_key)
             return session_error
 
-        return self._format_response_output(response_text, tool_names, result)
+        return self._format_response_output(response_text, tool_names, msg_result)
 
     async def _collect_response(
         self,
@@ -533,7 +560,7 @@ class ClaudeAgentTools(Toolkit):
     ) -> str:
         """Show status information for the current persistent Claude session."""
         session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)
-        session = await _SESSION_MANAGER.get(session_key)
+        session = await self._session_manager.get(session_key)
         if session is None:
             return f"No active Claude session for `{session_key}`."
 
@@ -556,7 +583,7 @@ class ClaudeAgentTools(Toolkit):
     ) -> str:
         """Send an interrupt signal to an active Claude session."""
         session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)
-        session = await _SESSION_MANAGER.get(session_key)
+        session = await self._session_manager.get(session_key)
         if session is None:
             return f"No active Claude session for `{session_key}`."
 
@@ -575,7 +602,7 @@ class ClaudeAgentTools(Toolkit):
     ) -> str:
         """Close and remove an active Claude session."""
         session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)
-        removed = await _SESSION_MANAGER.close(session_key)
+        removed = await self._session_manager.close(session_key)
         if not removed:
             return f"No active Claude session for `{session_key}`."
         return f"Closed Claude session `{session_key}`."

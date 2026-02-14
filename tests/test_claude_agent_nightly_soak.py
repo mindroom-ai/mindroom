@@ -99,7 +99,7 @@ async def test_claude_agent_nightly_soak_loop(monkeypatch: pytest.MonkeyPatch) -
     _NightlySoakSDKClient.forced_failures = 0
 
     manager = claude_agent_module.ClaudeSessionManager()
-    monkeypatch.setattr(claude_agent_module, "_SESSION_MANAGER", manager)
+    monkeypatch.setattr(claude_agent_module.ClaudeAgentTools, "_session_manager", manager)
     monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _NightlySoakSDKClient)
 
     tools = claude_agent_module.ClaudeAgentTools(

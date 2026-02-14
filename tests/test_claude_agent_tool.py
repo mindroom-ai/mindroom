@@ -165,7 +165,7 @@ def fake_manager(monkeypatch: pytest.MonkeyPatch) -> claude_agent_module.ClaudeS
     """Use an isolated in-memory manager and fake SDK client for each test."""
     _FakeClaudeSDKClient.instances = []
     manager = claude_agent_module.ClaudeSessionManager()
-    monkeypatch.setattr(claude_agent_module, "_SESSION_MANAGER", manager)
+    monkeypatch.setattr(claude_agent_module.ClaudeAgentTools, "_session_manager", manager)
     monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _FakeClaudeSDKClient)
     return manager
 
