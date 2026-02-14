@@ -37,7 +37,7 @@ def test_client(mock_credentials_manager: CredentialsManager) -> Generator[TestC
         mock_get.return_value = mock_credentials_manager
         client = TestClient(app)
         # Store the mock for use in tests
-        client.mock_manager = mock_credentials_manager  # type: ignore[attr-defined]
+        client.mock_manager = mock_credentials_manager
         yield client
 
 

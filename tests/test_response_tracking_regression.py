@@ -168,7 +168,7 @@ class TestResponseTrackingRegression:
         mock_room.users = {mock_router_agent.user_id: MagicMock()}
 
         # Mock the necessary methods for _on_message flow
-        bot._extract_message_context = AsyncMock()  # type: ignore[method-assign]
+        bot._extract_message_context = AsyncMock()
         mock_context = MagicMock()
         mock_context.am_i_mentioned = False
         mock_context.is_thread = False
@@ -179,7 +179,7 @@ class TestResponseTrackingRegression:
 
         # Mock the _send_response to track the call
         original_send_response = bot._send_response
-        bot._send_response = AsyncMock(side_effect=original_send_response)  # type: ignore[method-assign]
+        bot._send_response = AsyncMock(side_effect=original_send_response)
 
         # Mock constants to make router handle commands
         with patch("mindroom.constants.ROUTER_AGENT_NAME", "router"):
