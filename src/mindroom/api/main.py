@@ -6,7 +6,7 @@ import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any
 
 import yaml
 from dotenv import load_dotenv
@@ -31,6 +31,9 @@ from mindroom.config import Config
 from mindroom.constants import DEFAULT_AGENTS_CONFIG, DEFAULT_CONFIG_TEMPLATE, safe_replace
 from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.tool_dependencies import auto_install_enabled, auto_install_tool_extra
+
+if TYPE_CHECKING:
+    from supabase import Client as SupabaseClient
 
 # Load environment variables from .env file
 # Look for .env in the widget directory (parent of backend)
@@ -134,7 +137,7 @@ SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 ACCOUNT_ID = os.getenv("ACCOUNT_ID")  # optional: enforce instance ownership
 
 
-def _init_supabase_auth(supabase_url: str | None, supabase_anon_key: str | None) -> object | None:
+def _init_supabase_auth(supabase_url: str | None, supabase_anon_key: str | None) -> "SupabaseClient | None":
     """Initialize Supabase auth client when credentials are configured."""
     if not supabase_url or not supabase_anon_key:
         return None
@@ -156,7 +159,7 @@ def _init_supabase_auth(supabase_url: str | None, supabase_anon_key: str | None)
     return create_client(supabase_url, supabase_anon_key)
 
 
-_supabase_auth = _init_supabase_auth(SUPABASE_URL, SUPABASE_ANON_KEY)
+_supabase_auth: "SupabaseClient | None" = _init_supabase_auth(SUPABASE_URL, SUPABASE_ANON_KEY)
 
 
 async def verify_user(authorization: str | None = Header(None)) -> dict:
@@ -172,9 +175,8 @@ async def verify_user(authorization: str | None = Header(None)) -> dict:
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
 
     token = authorization.removeprefix("Bearer ").strip()
-    supabase_auth = cast("Any", _supabase_auth)
     try:
-        user = supabase_auth.auth.get_user(token)
+        user = _supabase_auth.auth.get_user(token)
     except Exception as err:
         raise HTTPException(status_code=401, detail="Invalid token") from err
 
