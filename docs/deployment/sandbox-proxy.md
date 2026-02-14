@@ -35,7 +35,7 @@ Add a `sandbox-runner` service alongside the backend. Both use the same image; t
 ```yaml
 services:
   backend:
-    image: ghcr.io/basnijholt/mindroom-backend:latest
+    image: ghcr.io/mindroom-ai/mindroom-backend:latest
     env_file: .env
     volumes:
       - ./config.yaml:/app/config.yaml:ro
@@ -47,22 +47,32 @@ services:
       - MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
 
   sandbox-runner:
-    image: ghcr.io/basnijholt/mindroom-backend:latest
+    image: ghcr.io/mindroom-ai/mindroom-backend:latest
     command: ["/app/run-sandbox-runner.sh"]
+    user: "1000:1000"
     volumes:
       - sandbox-workspace:/app/workspace
     environment:
       - MINDROOM_SANDBOX_RUNNER_MODE=true
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN}
+      - STORAGE_PATH=/app/workspace/.mindroom
 
 volumes:
   sandbox-workspace:
 ```
 
+> [!IMPORTANT]
+> The `sandbox-workspace` Docker volume is created as root by default. The runner runs as UID 1000, so you must fix ownership after first creating the volume:
+> ```bash
+> docker run --rm -v sandbox-workspace:/workspace busybox chown -R 1000:1000 /workspace
+> ```
+> Alternatively, omit the `user:` directive to run as root (less secure).
+
 Key differences from the primary backend:
 - **No `env_file`** — runner has no API keys, no Matrix credentials
 - **No data volume** — runner cannot access `mindroom_data/`
 - **Scratch workspace** — a dedicated volume for file operations
+- **`STORAGE_PATH`** — pointed at a writable location inside the workspace so the tool registry can initialize without access to the primary data volume
 
 ### Kubernetes (pod sidecar)
 
@@ -82,7 +92,8 @@ docker run -d \
   -p 8766:8766 \
   -e MINDROOM_SANDBOX_RUNNER_MODE=true \
   -e MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token \
-  ghcr.io/basnijholt/mindroom-backend:latest \
+  -e STORAGE_PATH=/app/workspace/.mindroom \
+  ghcr.io/mindroom-ai/mindroom-backend:latest \
   /app/run-sandbox-runner.sh
 
 # 2. Start MindRoom on the host with proxy config
@@ -114,7 +125,8 @@ This gives you the convenience of running MindRoom natively while keeping code-e
 >   -e MINDROOM_CONFIG_PATH=/app/config.yaml \
 >   -e MINDROOM_SANDBOX_RUNNER_MODE=true \
 >   -e MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token \
->   ghcr.io/basnijholt/mindroom-backend:latest \
+>   -e STORAGE_PATH=/app/workspace/.mindroom \
+>   ghcr.io/mindroom-ai/mindroom-backend:latest \
 >   /app/run-sandbox-runner.sh
 > ```
 
@@ -140,6 +152,7 @@ This gives you the convenience of running MindRoom natively while keeping code-e
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Shared auth token (must match primary) | _(required)_ |
 | `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE` | `inprocess` or `subprocess` | `inprocess` |
 | `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Subprocess timeout | `120` |
+| `STORAGE_PATH` | Writable directory for tool registry init (e.g., `/app/workspace/.mindroom`) | `mindroom_data` _(will fail if not writable)_ |
 | `MINDROOM_CONFIG_PATH` | Path to config.yaml (for plugin tool registration) | _(optional)_ |
 
 ## Execution modes

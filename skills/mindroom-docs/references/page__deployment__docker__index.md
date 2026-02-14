@@ -18,7 +18,7 @@ docker run -d \
   -v ./config.yaml:/app/config.yaml:ro \
   -v ./mindroom_data:/app/mindroom_data \
   --env-file .env \
-  ghcr.io/basnijholt/mindroom-backend:latest
+  ghcr.io/mindroom-ai/mindroom-backend:latest
 ```
 
 ## Docker Compose
@@ -28,7 +28,7 @@ Create a `docker-compose.yml`:
 ```
 services:
   mindroom:
-    image: ghcr.io/basnijholt/mindroom-backend:latest
+    image: ghcr.io/mindroom-ai/mindroom-backend:latest
     container_name: mindroom
     restart: unless-stopped
     ports:
@@ -135,7 +135,7 @@ For a complete deployment including the dashboard:
 ```
 services:
   backend:
-    image: ghcr.io/basnijholt/mindroom-backend:latest
+    image: ghcr.io/mindroom-ai/mindroom-backend:latest
     container_name: mindroom-backend
     restart: unless-stopped
     ports:
@@ -149,7 +149,7 @@ services:
       - STORAGE_PATH=/app/mindroom_data
 
   frontend:
-    image: ghcr.io/basnijholt/mindroom-frontend:latest
+    image: ghcr.io/mindroom-ai/mindroom-frontend:latest
     container_name: mindroom-frontend
     restart: unless-stopped
     ports:
