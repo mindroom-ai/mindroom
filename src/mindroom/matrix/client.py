@@ -65,7 +65,12 @@ def create_matrix_client(
         # Ensure the directory exists
         Path(store_path).mkdir(parents=True, exist_ok=True)
 
-    client = nio.AsyncClient(homeserver, user_id, store_path=store_path, ssl=ssl_context)
+    client = nio.AsyncClient(
+        homeserver,
+        user_id or "",
+        store_path=store_path,
+        ssl=ssl_context,  # ty: ignore[invalid-argument-type]  # nio accepts SSLContext but types say bool
+    )
 
     # Manually set user_id due to matrix-nio bug where constructor parameter doesn't work
     # See: https://github.com/matrix-nio/matrix-nio/issues/492

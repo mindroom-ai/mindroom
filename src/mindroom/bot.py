@@ -106,7 +106,7 @@ from .thread_utils import (
 from .tools_metadata import get_tool_by_name
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
     import structlog
     from agno.agent import Agent
@@ -125,7 +125,9 @@ __all__ = ["AgentBot", "MultiAgentOrchestrator", "MultiKnowledgeVectorDb"]
 SYNC_TIMEOUT_MS = 30000
 
 
-def _create_task_wrapper(callback: object) -> object:
+def _create_task_wrapper(
+    callback: Callable[..., Awaitable[None]],
+) -> Callable[..., Awaitable[None]]:
     """Create a wrapper that runs the callback as a background task.
 
     This ensures the sync loop is never blocked by event processing,
@@ -137,7 +139,7 @@ def _create_task_wrapper(callback: object) -> object:
         # Create the task but don't await it - let it run in background
         async def error_handler() -> None:
             try:
-                await callback(*args, **kwargs)  # type: ignore[operator]
+                await callback(*args, **kwargs)
             except asyncio.CancelledError:
                 # Task was cancelled, this is expected during shutdown
                 pass
@@ -729,7 +731,7 @@ class AgentBot:
 
         # Register event callbacks - wrap them to run as background tasks
         # This ensures the sync loop is never blocked, allowing stop reactions to work
-        self.client.add_event_callback(_create_task_wrapper(self._on_invite), nio.InviteEvent)
+        self.client.add_event_callback(_create_task_wrapper(self._on_invite), nio.InviteEvent)  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
         self.client.add_event_callback(_create_task_wrapper(self._on_message), nio.RoomMessageText)
         self.client.add_event_callback(_create_task_wrapper(self._on_reaction), nio.ReactionEvent)
 
@@ -1141,6 +1143,7 @@ class AgentBot:
         event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
     ) -> None:
         """Handle voice message events for transcription and processing."""
+        assert self.client is not None
         # Only process if voice handler is enabled
         if not self.config.voice.enabled:
             return
@@ -1279,10 +1282,12 @@ class AgentBot:
             raise RuntimeError(msg)
 
         # Create async function for team response generation that takes message_id as parameter
+        client = self.client
+
         async def generate_team_response(message_id: str | None) -> None:
             if use_streaming and not existing_event_id:
                 # Show typing indicator while team generates streaming response
-                async with typing_indicator(self.client, room_id):
+                async with typing_indicator(client, room_id):
                     with scheduling_tool_context(scheduler_context):
                         response_stream = team_response_stream(
                             agent_ids=team_agents,
@@ -1294,7 +1299,7 @@ class AgentBot:
                         )
 
                         event_id, accumulated = await send_streaming_response(
-                            self.client,
+                            client,
                             room_id,
                             reply_to_event_id,
                             thread_id,
@@ -1317,7 +1322,7 @@ class AgentBot:
                 )
             else:
                 # Show typing indicator while team generates non-streaming response
-                async with typing_indicator(self.client, room_id):
+                async with typing_indicator(client, room_id):
                     with scheduling_tool_context(scheduler_context):
                         response_text = await team_response(
                             agent_names=agent_names,
@@ -1478,6 +1483,7 @@ class AgentBot:
         user_id: str | None = None,
     ) -> str | None:
         """Process a message and send a response (non-streaming)."""
+        assert self.client is not None
         if not prompt.strip():
             return None
 
@@ -2081,13 +2087,13 @@ class AgentBot:
         self.logger.info("Successfully regenerated response for edited message")
 
     async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:  # noqa: C901, PLR0912, PLR0915
+        assert self.client is not None
         self.logger.info("Handling command", command_type=command.type.value)
 
         event_info = EventInfo.from_event(event.source)
 
         # Widget command modifies room state, so it doesn't need a thread
         if command.type == CommandType.WIDGET:
-            assert self.client is not None
             url = command.args.get("url")
             response_text = await handle_widget_command(client=self.client, room_id=room.room_id, url=url)
             # Send response in thread if in thread, otherwise in main room
@@ -2297,7 +2303,7 @@ class TeamBot(AgentBot):
     team_model: str | None = field(default=None)
 
     @cached_property
-    def agent(self) -> Agent | None:  # type: ignore[override]
+    def agent(self) -> Agent | None:
         """Teams don't have individual agents, return None."""
         return None
 
@@ -2534,7 +2540,7 @@ class MultiAgentOrchestrator:
             if entity_name in all_new_entities:
                 # Create temporary user object (will be updated by ensure_user_account)
                 temp_user = _create_temp_user(entity_name, new_config)
-                bot = create_bot_for_entity(entity_name, temp_user, new_config, self.storage_path)  # type: ignore[assignment]
+                bot = create_bot_for_entity(entity_name, temp_user, new_config, self.storage_path)
                 if bot:
                     bot.orchestrator = self
                     self.agent_bots[entity_name] = bot
@@ -2553,7 +2559,7 @@ class MultiAgentOrchestrator:
         # Create new entities
         for entity_name in new_entities:
             temp_user = _create_temp_user(entity_name, new_config)
-            bot = create_bot_for_entity(entity_name, temp_user, new_config, self.storage_path)  # type: ignore[assignment]
+            bot = create_bot_for_entity(entity_name, temp_user, new_config, self.storage_path)
             if bot:
                 bot.orchestrator = self
                 self.agent_bots[entity_name] = bot

@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
-from spotipy import Spotify, SpotifyOAuth  # type: ignore[import-untyped]
+from spotipy import Spotify, SpotifyOAuth
 
 from mindroom.credentials import CredentialsManager
 from mindroom.tools_metadata import ensure_tool_registry_loaded, export_tools_metadata
