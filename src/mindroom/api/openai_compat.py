@@ -32,7 +32,7 @@ from agno.run.team import TeamRunOutput
 from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
 from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
 from agno.team import Team
-from agno.tools.function import Function
+from agno.tools.function import Function, FunctionCall
 from agno.tools.toolkit import Toolkit
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -53,6 +53,7 @@ from mindroom.knowledge_utils import resolve_agent_knowledge
 from mindroom.logging_config import get_logger
 from mindroom.memory import build_memory_enhanced_prompt
 from mindroom.routing import suggest_agent
+from mindroom.sandbox_proxy import to_json_compatible
 from mindroom.teams import TeamMode, format_team_response
 from mindroom.tool_events import format_tool_completed_event, format_tool_started_event
 
@@ -240,6 +241,24 @@ class OpenAIErrorResponse(BaseModel):
     """OpenAI-compatible error wrapper."""
 
     error: OpenAIError
+
+
+# --- Tool execution models ---
+
+
+class ToolExecuteRequest(BaseModel):
+    """Request body for POST /v1/tools/execute."""
+
+    agent: str
+    tool_name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolExecuteResponse(BaseModel):
+    """Response body for POST /v1/tools/execute."""
+
+    tool_call_id: str
+    result: Any
 
 
 @dataclass
@@ -719,8 +738,115 @@ def _resolve_knowledge(agent_name: str, config: Config) -> Knowledge | None:
 
 
 # ---------------------------------------------------------------------------
+# Helpers - tool execution
+# ---------------------------------------------------------------------------
+
+
+def _find_function_on_agent(agent: Agent, function_name: str) -> Function | None:
+    """Find a Function by name from an agent's tool list."""
+    for tool in agent.tools or []:
+        if isinstance(tool, Toolkit):
+            fn = tool.functions.get(function_name)
+            if fn is not None:
+                return fn
+        elif isinstance(tool, Function) and tool.name == function_name:
+            return tool
+    return None
+
+
+def _list_agent_tool_names(agent: Agent) -> list[str]:
+    """List all available tool function names on an agent."""
+    names: list[str] = []
+    for tool in agent.tools or []:
+        if isinstance(tool, Toolkit):
+            names.extend(tool.functions.keys())
+        elif isinstance(tool, Function):
+            names.append(tool.name)
+    return names
+
+
+async def _resolve_tool_agent(agent_name: str) -> tuple[Agent, Config] | JSONResponse:
+    """Create an agent for tool execution, returning error response on failure."""
+    config, _ = _load_config()
+
+    if agent_name not in config.agents or agent_name == ROUTER_AGENT_NAME:
+        return _error_response(404, f"Agent '{agent_name}' not found", param="agent", code="model_not_found")
+
+    try:
+        await _ensure_knowledge_initialized(config)
+    except Exception:
+        logger.warning("Knowledge initialization failed, proceeding without knowledge", exc_info=True)
+
+    try:
+        knowledge = _resolve_knowledge(agent_name, config)
+    except Exception:
+        knowledge = None
+
+    agent = create_agent(
+        agent_name,
+        config,
+        storage_path=STORAGE_PATH_OBJ,
+        knowledge=knowledge,
+        include_default_tools=False,
+    )
+    return agent, config
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+
+@router.post("/tools/execute", response_model=None)
+async def execute_tool(
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    """Execute a tool function server-side and return the result.
+
+    Used by the proxy to run tools on behalf of clients during strict
+    OpenAI tool-calling mode.
+    """
+    auth_error = _verify_api_key(authorization)
+    if auth_error:
+        return auth_error
+
+    try:
+        body = ToolExecuteRequest(**json.loads(await request.body()))
+    except (json.JSONDecodeError, ValidationError):
+        return _error_response(400, "Invalid request body")
+
+    resolved = await _resolve_tool_agent(body.agent)
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    agent, _ = resolved
+
+    fn = _find_function_on_agent(agent, body.tool_name)
+    if fn is None:
+        available = ", ".join(sorted(_list_agent_tool_names(agent))) or "(none)"
+        return _error_response(
+            404,
+            f"Tool '{body.tool_name}' not found on agent '{body.agent}'. Available: {available}",
+            param="tool_name",
+        )
+
+    call = FunctionCall(function=fn, arguments=body.arguments)
+    try:
+        result = await call.aexecute()
+    except Exception:
+        logger.exception("Tool execution failed", agent=body.agent, tool=body.tool_name)
+        result = None
+
+    if result is None or result.status == "failure":
+        error_detail = (result.error if result else None) or body.tool_name
+        return _error_response(500, f"Tool execution failed: {error_detail}", error_type="server_error")
+
+    tool_call_id = f"call_{uuid4().hex[:24]}"
+    response = ToolExecuteResponse(
+        tool_call_id=tool_call_id,
+        result=to_json_compatible(result.result),
+    )
+    return JSONResponse(content=response.model_dump())
 
 
 @router.get("/models")

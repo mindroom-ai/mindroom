@@ -2690,3 +2690,178 @@ class TestStrictOpenAIToolCalling:
 
         assert response.status_code == 400
         assert "external tool execution" in response.json()["error"]["message"]
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/tools/execute
+# ---------------------------------------------------------------------------
+
+
+class TestToolExecute:
+    """Tests for POST /v1/tools/execute endpoint."""
+
+    def test_execute_happy_path(self, app_client: TestClient) -> None:
+        """Successful tool execution returns result with tool_call_id."""
+        mock_fn = MagicMock()
+        mock_fn.name = "web_search"
+        mock_fn.entrypoint = AsyncMock(return_value="3 results found")
+
+        mock_agent = MagicMock()
+        mock_agent.tools = [mock_fn]
+
+        mock_exec_result = MagicMock()
+        mock_exec_result.status = "success"
+        mock_exec_result.result = "3 results found"
+
+        with (
+            patch("mindroom.api.openai_compat.create_agent", return_value=mock_agent),
+            patch("mindroom.api.openai_compat._find_function_on_agent", return_value=mock_fn),
+            patch("mindroom.api.openai_compat.FunctionCall") as mock_fc_cls,
+        ):
+            mock_fc = MagicMock()
+            mock_fc.aexecute = AsyncMock(return_value=mock_exec_result)
+            mock_fc_cls.return_value = mock_fc
+
+            response = app_client.post(
+                "/v1/tools/execute",
+                json={
+                    "agent": "general",
+                    "tool_name": "web_search",
+                    "arguments": {"query": "test"},
+                },
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["tool_call_id"].startswith("call_")
+        assert data["result"] == "3 results found"
+
+    def test_execute_unknown_agent(self, app_client: TestClient) -> None:
+        """Unknown agent returns 404."""
+        response = app_client.post(
+            "/v1/tools/execute",
+            json={
+                "agent": "nonexistent",
+                "tool_name": "search",
+                "arguments": {},
+            },
+        )
+        assert response.status_code == 404
+        assert "nonexistent" in response.json()["error"]["message"]
+
+    def test_execute_unknown_tool(self, app_client: TestClient) -> None:
+        """Unknown tool on a valid agent returns 404."""
+        mock_agent = MagicMock()
+        mock_agent.tools = []
+
+        with patch("mindroom.api.openai_compat.create_agent", return_value=mock_agent):
+            response = app_client.post(
+                "/v1/tools/execute",
+                json={
+                    "agent": "general",
+                    "tool_name": "nonexistent_tool",
+                    "arguments": {},
+                },
+            )
+
+        assert response.status_code == 404
+        assert "nonexistent_tool" in response.json()["error"]["message"]
+
+    def test_execute_auth_required(self, authed_client: TestClient) -> None:
+        """Auth is checked on tool execution endpoint."""
+        response = authed_client.post(
+            "/v1/tools/execute",
+            json={
+                "agent": "general",
+                "tool_name": "search",
+                "arguments": {},
+            },
+        )
+        assert response.status_code == 401
+
+    def test_execute_auth_accepted(self, authed_client: TestClient) -> None:
+        """Valid auth allows tool execution."""
+        mock_fn = MagicMock()
+        mock_fn.name = "web_search"
+
+        mock_agent = MagicMock()
+        mock_agent.tools = [mock_fn]
+
+        mock_exec_result = MagicMock()
+        mock_exec_result.status = "success"
+        mock_exec_result.result = "done"
+
+        with (
+            patch("mindroom.api.openai_compat.create_agent", return_value=mock_agent),
+            patch("mindroom.api.openai_compat._find_function_on_agent", return_value=mock_fn),
+            patch("mindroom.api.openai_compat.FunctionCall") as mock_fc_cls,
+        ):
+            mock_fc = MagicMock()
+            mock_fc.aexecute = AsyncMock(return_value=mock_exec_result)
+            mock_fc_cls.return_value = mock_fc
+
+            response = authed_client.post(
+                "/v1/tools/execute",
+                json={
+                    "agent": "general",
+                    "tool_name": "web_search",
+                    "arguments": {},
+                },
+                headers={"Authorization": "Bearer test-key-1"},
+            )
+
+        assert response.status_code == 200
+
+    def test_execute_invalid_body(self, app_client: TestClient) -> None:
+        """Invalid request body returns 400."""
+        response = app_client.post(
+            "/v1/tools/execute",
+            content=b"not json",
+            headers={"Content-Type": "application/json"},
+        )
+        assert response.status_code == 400
+
+    def test_execute_tool_failure(self, app_client: TestClient) -> None:
+        """Tool execution failure returns 500."""
+        mock_fn = MagicMock()
+        mock_fn.name = "web_search"
+
+        mock_agent = MagicMock()
+        mock_agent.tools = [mock_fn]
+
+        mock_exec_result = MagicMock()
+        mock_exec_result.status = "failure"
+        mock_exec_result.error = "Connection timeout"
+
+        with (
+            patch("mindroom.api.openai_compat.create_agent", return_value=mock_agent),
+            patch("mindroom.api.openai_compat._find_function_on_agent", return_value=mock_fn),
+            patch("mindroom.api.openai_compat.FunctionCall") as mock_fc_cls,
+        ):
+            mock_fc = MagicMock()
+            mock_fc.aexecute = AsyncMock(return_value=mock_exec_result)
+            mock_fc_cls.return_value = mock_fc
+
+            response = app_client.post(
+                "/v1/tools/execute",
+                json={
+                    "agent": "general",
+                    "tool_name": "web_search",
+                    "arguments": {},
+                },
+            )
+
+        assert response.status_code == 500
+        assert "Connection timeout" in response.json()["error"]["message"]
+
+    def test_execute_router_agent_rejected(self, app_client: TestClient) -> None:
+        """Router agent cannot be used for tool execution."""
+        response = app_client.post(
+            "/v1/tools/execute",
+            json={
+                "agent": "router",
+                "tool_name": "search",
+                "arguments": {},
+            },
+        )
+        assert response.status_code == 404
