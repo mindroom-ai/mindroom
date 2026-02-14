@@ -48,7 +48,7 @@ docker run -d \
   -v ./config.yaml:/app/config.yaml:ro \
   -v ./mindroom_data:/app/mindroom_data \
   --env-file .env \
-  ghcr.io/basnijholt/mindroom-backend:latest
+  ghcr.io/mindroom-ai/mindroom-backend:latest
 ```
 
 See the [Docker deployment guide](https://docs.mindroom.chat/deployment/docker/index.md) for full setup including the frontend.

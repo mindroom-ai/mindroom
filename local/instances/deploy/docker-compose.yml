@@ -45,12 +45,14 @@ services:
       dockerfile: deploy/Dockerfile.backend
     container_name: ${INSTANCE_NAME:-mindroom}-sandbox-runner
     restart: always
+    user: "${UID:-1000}:${GID:-1000}"
     command: ["/app/run-sandbox-runner.sh"]
     volumes:
       - sandbox-workspace:/app/workspace
     environment:
       - MINDROOM_SANDBOX_RUNNER_MODE=true
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN:-sandbox-secret}
+      - STORAGE_PATH=/app/workspace/.mindroom
     networks:
       - mindroom-network
 
