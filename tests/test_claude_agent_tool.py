@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import suppress
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
@@ -81,6 +82,49 @@ class _SlowFakeClaudeSDKClient(_FakeClaudeSDKClient):
         await asyncio.sleep(0.03)
         await super().query(prompt, session_id=session_id)
         type(self).active_queries -= 1
+
+
+@dataclass
+class _InterruptibleFakeClaudeSDKClient(_FakeClaudeSDKClient):
+    """Fake client whose query blocks until interrupt is called."""
+
+    instances: ClassVar[list[_InterruptibleFakeClaudeSDKClient]] = []
+    created_event: ClassVar[asyncio.Event | None] = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.query_started = asyncio.Event()
+        self._release_query = asyncio.Event()
+        _InterruptibleFakeClaudeSDKClient.instances.append(self)
+        if _InterruptibleFakeClaudeSDKClient.created_event is not None:
+            _InterruptibleFakeClaudeSDKClient.created_event.set()
+
+    async def query(self, prompt: str, session_id: str = "default") -> None:  # noqa: ARG002
+        self.queries.append(prompt)
+        self.query_started.set()
+        await self._release_query.wait()
+
+    async def interrupt(self) -> None:
+        self.interrupted = True
+        self._release_query.set()
+
+
+@dataclass
+class _TimeJumpFakeClaudeSDKClient(_FakeClaudeSDKClient):
+    """Fake client that advances a shared monotonic clock while querying."""
+
+    instances: ClassVar[list[_TimeJumpFakeClaudeSDKClient]] = []
+    jump_seconds: ClassVar[float] = 0.0
+    clock: ClassVar[dict[str, float] | None] = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        _TimeJumpFakeClaudeSDKClient.instances.append(self)
+
+    async def query(self, prompt: str, session_id: str = "default") -> None:
+        await super().query(prompt, session_id=session_id)
+        if type(self).clock is not None:
+            type(self).clock["now"] += type(self).jump_seconds
 
 
 @dataclass
@@ -411,6 +455,78 @@ async def test_claude_send_same_session_is_serialized_by_lock(
     assert "Echo: two" in first or "Echo: two" in second
     assert len(_SlowFakeClaudeSDKClient.instances) == 1
     assert _SlowFakeClaudeSDKClient.max_concurrent_queries == 1
+
+
+@pytest.mark.asyncio
+async def test_claude_interrupt_does_not_block_while_send_is_running(
+    fake_manager: claude_agent_module.ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Interrupt should be able to cancel an in-flight query for the same session."""
+    _InterruptibleFakeClaudeSDKClient.instances = []
+    _InterruptibleFakeClaudeSDKClient.created_event = asyncio.Event()
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _InterruptibleFakeClaudeSDKClient)
+
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = RunContext(run_id="run-1", session_id="session-1")
+    agent = SimpleNamespace(name="general")
+
+    send_task = asyncio.create_task(tools.claude_send("blocking", run_context=run_context, agent=agent))
+    try:
+        await asyncio.wait_for(_InterruptibleFakeClaudeSDKClient.created_event.wait(), timeout=1)
+        client = _InterruptibleFakeClaudeSDKClient.instances[0]
+        await asyncio.wait_for(client.query_started.wait(), timeout=1)
+
+        interrupt_result = await asyncio.wait_for(
+            tools.claude_interrupt(run_context=run_context, agent=agent),
+            timeout=1,
+        )
+        send_result = await asyncio.wait_for(send_task, timeout=1)
+    finally:
+        if _InterruptibleFakeClaudeSDKClient.instances:
+            _InterruptibleFakeClaudeSDKClient.instances[0]._release_query.set()
+        if not send_task.done():
+            send_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await send_task
+
+    assert "Interrupt sent" in interrupt_result
+    assert "Echo: blocking" in send_result
+    assert _InterruptibleFakeClaudeSDKClient.instances[0].interrupted is True
+
+
+@pytest.mark.asyncio
+async def test_claude_send_refreshes_last_used_after_long_query(
+    fake_manager: claude_agent_module.ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Long-running turns should not be treated as idle time for TTL expiry."""
+    clock = {"now": 0.0}
+
+    def _fake_monotonic() -> float:
+        return clock["now"]
+
+    _TimeJumpFakeClaudeSDKClient.instances = []
+    _TimeJumpFakeClaudeSDKClient.jump_seconds = 0.0
+    _TimeJumpFakeClaudeSDKClient.clock = clock
+    monkeypatch.setattr(claude_agent_module, "monotonic", _fake_monotonic)
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _TimeJumpFakeClaudeSDKClient)
+
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = RunContext(run_id="run-1", session_id="session-1")
+    agent = SimpleNamespace(name="general")
+
+    await tools.claude_send("short", run_context=run_context, agent=agent)
+
+    _TimeJumpFakeClaudeSDKClient.jump_seconds = 70.0
+    await tools.claude_send("long", run_context=run_context, agent=agent)
+
+    _TimeJumpFakeClaudeSDKClient.jump_seconds = 0.0
+    result = await tools.claude_send("after-long", run_context=run_context, agent=agent)
+
+    assert "Echo: after-long" in result
+    assert len(_TimeJumpFakeClaudeSDKClient.instances) == 1
+    assert _TimeJumpFakeClaudeSDKClient.instances[0].queries == ["short", "long", "after-long"]
 
 
 @pytest.mark.asyncio

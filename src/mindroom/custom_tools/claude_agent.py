@@ -493,6 +493,7 @@ class ClaudeAgentTools(Toolkit):
             try:
                 await session.client.query(trimmed_prompt)
                 response_text, tool_names, msg_result = await self._collect_response(session)
+                session.last_used_at = monotonic()
             except ClaudeSDKError as exc:
                 session_error = self._format_session_error(
                     f"Claude session error: {exc}",
@@ -587,11 +588,11 @@ class ClaudeAgentTools(Toolkit):
         if session is None:
             return f"No active Claude session for `{session_key}`."
 
-        async with session.lock:
-            try:
-                await session.client.interrupt()
-            except ClaudeSDKError as exc:
-                return f"Failed to interrupt Claude session: {exc}"
+        try:
+            await session.client.interrupt()
+            session.last_used_at = monotonic()
+        except ClaudeSDKError as exc:
+            return f"Failed to interrupt Claude session: {exc}"
         return f"Interrupt sent to Claude session `{session_key}`."
 
     async def claude_end_session(
