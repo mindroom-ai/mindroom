@@ -244,6 +244,7 @@ def _call_proxy_sync(
 
 def _wrap_sync_function(function: Function, tool_name: str, function_name: str) -> Function:
     wrapped = function.model_copy(deep=False)
+    assert function.entrypoint is not None
 
     @functools.wraps(function.entrypoint)
     def proxy_entrypoint(*args: object, **kwargs: object) -> object:
@@ -260,6 +261,7 @@ def _wrap_sync_function(function: Function, tool_name: str, function_name: str) 
 
 def _wrap_async_function(function: Function, tool_name: str, function_name: str) -> Function:
     wrapped = function.model_copy(deep=False)
+    assert function.entrypoint is not None
 
     @functools.wraps(function.entrypoint)
     async def proxy_entrypoint(*args: object, **kwargs: object) -> object:
