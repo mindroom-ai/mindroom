@@ -117,6 +117,8 @@ spec:
               key: sandbox_proxy_token
         - name: MINDROOM_CONFIG_PATH
           value: "/app/config.yaml"
+        - name: STORAGE_PATH
+          value: "/app/workspace/.mindroom"
         volumeMounts:
         - name: config
           mountPath: /app/config.yaml
