@@ -4,5 +4,6 @@ from .gmail import GmailTools
 from .google_calendar import GoogleCalendarTools
 from .google_sheets import GoogleSheetsTools
 from .homeassistant import HomeAssistantTools
+from .sandbox import SandboxTools
 
-__all__ = ["GmailTools", "GoogleCalendarTools", "GoogleSheetsTools", "HomeAssistantTools"]
+__all__ = ["GmailTools", "GoogleCalendarTools", "GoogleSheetsTools", "HomeAssistantTools", "SandboxTools"]

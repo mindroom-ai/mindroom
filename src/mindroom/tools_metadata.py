@@ -4,16 +4,18 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from enum import Enum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from loguru import logger
 
 from mindroom.config import Config
+from mindroom.constants import MINDROOM_CONTAINER_SANDBOX, MINDROOM_SANDBOX_WORKSPACE
 from mindroom.plugins import load_plugins
+from mindroom.sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from agno.tools import Toolkit
 
@@ -21,6 +23,23 @@ from mindroom.credentials import get_credentials_manager
 
 # Registry mapping tool names to their factory functions
 TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
+LOCAL_EXECUTION_TOOLS = {"file", "shell", "python"}
+
+
+def _apply_runtime_overrides(tool_name: str, init_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Apply deployment/runtime-driven tool defaults."""
+    if not MINDROOM_CONTAINER_SANDBOX or tool_name not in LOCAL_EXECUTION_TOOLS:
+        return init_kwargs
+
+    workspace = Path(MINDROOM_SANDBOX_WORKSPACE).resolve()
+    workspace.mkdir(parents=True, exist_ok=True)
+    overridden = dict(init_kwargs)
+    overridden["base_dir"] = workspace
+    if tool_name == "python":
+        overridden["restrict_to_base_dir"] = True
+    if tool_name == "file":
+        overridden.setdefault("expose_base_directory", False)
+    return overridden
 
 
 def register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable[[], type[Toolkit]]]:
@@ -41,7 +60,12 @@ def register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable
     return decorator
 
 
-def get_tool_by_name(tool_name: str) -> Toolkit:
+def get_tool_by_name(
+    tool_name: str,
+    *,
+    disable_sandbox_proxy: bool = False,
+    credential_overrides: dict[str, object] | None = None,
+) -> Toolkit:
     """Get a tool instance by its registered name."""
     if tool_name not in TOOL_REGISTRY:
         available = ", ".join(sorted(TOOL_REGISTRY.keys()))
@@ -54,6 +78,8 @@ def get_tool_by_name(tool_name: str) -> Toolkit:
 
         creds_manager = get_credentials_manager()
         credentials = creds_manager.load_credentials(tool_name) or {}
+        if credential_overrides:
+            credentials = {**credentials, **credential_overrides}
         metadata = TOOL_METADATA[tool_name]
 
         init_kwargs = {}
@@ -62,7 +88,11 @@ def get_tool_by_name(tool_name: str) -> Toolkit:
                 if field.name in credentials:
                     init_kwargs[field.name] = credentials[field.name]
 
-        return tool_class(**init_kwargs)
+        init_kwargs = _apply_runtime_overrides(tool_name, init_kwargs)
+        toolkit = tool_class(**init_kwargs)
+        if disable_sandbox_proxy:
+            return toolkit
+        return maybe_wrap_toolkit_for_sandbox_proxy(tool_name, toolkit)
 
     except ImportError as e:
         logger.warning(f"Could not import tool '{tool_name}': {e}")

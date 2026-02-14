@@ -52,6 +52,20 @@ MATRIX_SERVER_NAME = os.getenv("MATRIX_SERVER_NAME", None)
 MATRIX_SSL_VERIFY = os.getenv("MATRIX_SSL_VERIFY", "true").lower() != "false"
 
 
+def env_flag(name: str, *, default: bool = False) -> bool:
+    """Read a boolean environment flag."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+MINDROOM_CONTAINER_SANDBOX = env_flag("MINDROOM_CONTAINER_SANDBOX", default=env_flag("DOCKER_CONTAINER"))
+MINDROOM_SANDBOX_WORKSPACE = Path(
+    os.getenv("MINDROOM_SANDBOX_WORKSPACE", str(STORAGE_PATH_OBJ / "workspace")),
+).expanduser()
+
+
 def safe_replace(tmp_path: Path, target_path: Path) -> None:
     """Replace *target_path* with *tmp_path*, with a fallback for bind mounts.
 

@@ -21,6 +21,7 @@ from mindroom.api.integrations import router as integrations_router
 from mindroom.api.knowledge import router as knowledge_router
 from mindroom.api.matrix_operations import router as matrix_router
 from mindroom.api.openai_compat import router as openai_compat_router
+from mindroom.api.sandbox_runner import router as sandbox_runner_router
 from mindroom.api.schedules import router as schedules_router
 from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
@@ -200,6 +201,7 @@ app.include_router(knowledge_router, dependencies=[Depends(verify_user)])
 app.include_router(skills_router, dependencies=[Depends(verify_user)])
 app.include_router(tools_router, dependencies=[Depends(verify_user)])
 app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify_user
+app.include_router(sandbox_runner_router)  # Uses dedicated sandbox token auth
 
 
 @app.get("/api/health")

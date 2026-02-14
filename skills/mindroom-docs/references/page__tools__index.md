@@ -23,7 +23,7 @@ agents:
 
 Tools are organized by category:
 
-- **Development** - File operations, shell, Docker, GitHub, Jira, Python, Airflow, code execution sandboxes (E2B, Daytona)
+- **Development** - File operations, shell, persistent sandbox workspace controls, Docker, GitHub, Jira, Python, Airflow, code execution sandboxes (E2B, Daytona)
 - **Research** - Web search (DuckDuckGo, Tavily, Exa, SerpAPI), academic papers (arXiv, PubMed), Wikipedia, Hacker News, web scraping (Firecrawl, Crawl4AI, Jina)
 - **Communication** - Slack, Discord, Telegram, Twilio, WhatsApp, Webex
 - **Email** - Gmail, AWS SES, Resend, generic SMTP

@@ -16,6 +16,8 @@ services:
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - STORAGE_PATH=/app/mindroom_data
+      - MINDROOM_CONTAINER_SANDBOX=true
+      - MINDROOM_SANDBOX_WORKSPACE=/app/mindroom_data/workspace
       - HOME=/app
       - MEM0_DIR=/app/mindroom_data/memory/mem0  # Used by mem0
       - GOOGLE_REDIRECT_URI=https://${INSTANCE_DOMAIN}/api/google/callback

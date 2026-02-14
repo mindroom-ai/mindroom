@@ -100,6 +100,7 @@ agents:
     tools:
     - file
     - shell
+    - sandbox
   data_analyst:
     display_name: DataAnalystAgent
     instructions:
@@ -293,6 +294,7 @@ agents:
     skills: []
     tools:
     - shell
+    - sandbox
   sleepy_paws:
     display_name: Sleepy Paws 🐾
     instructions:
