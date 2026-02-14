@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 from mindroom.tools_metadata import (
     ConfigField,
-    SandboxRuntimeConfig,
     SetupType,
     ToolCategory,
     ToolStatus,
@@ -58,10 +57,6 @@ if TYPE_CHECKING:
     ],
     dependencies=["agno"],
     docs_url="https://docs.agno.com/tools/toolkits/local/python",
-    sandbox_runtime=SandboxRuntimeConfig(
-        bind_workspace_to_base_dir=True,
-        force_restrict_to_base_dir=True,
-    ),
 )
 def python_tools() -> type[PythonTools]:
     """Return Python tools for code execution and file management."""

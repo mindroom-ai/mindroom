@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 from mindroom.tools_metadata import (
     ConfigField,
-    SandboxRuntimeConfig,
     SetupType,
     ToolCategory,
     ToolStatus,
@@ -121,10 +120,6 @@ if TYPE_CHECKING:
     ],
     dependencies=["agno"],  # From agno requirements
     docs_url="https://docs.agno.com/tools/toolkits/local/file",
-    sandbox_runtime=SandboxRuntimeConfig(
-        bind_workspace_to_base_dir=True,
-        default_expose_base_directory=False,
-    ),
 )
 def file_tools() -> type[FileTools]:
     """Return file tools for local file operations."""

@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, Literal
 from loguru import logger
 
 from mindroom.config import Config
-from mindroom.constants import MINDROOM_CONTAINER_SANDBOX, MINDROOM_SANDBOX_WORKSPACE
 from mindroom.plugins import load_plugins
 from mindroom.sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy
 
@@ -23,33 +22,6 @@ from mindroom.credentials import get_credentials_manager
 
 # Registry mapping tool names to their factory functions
 TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
-
-
-@dataclass
-class SandboxRuntimeConfig:
-    """Sandbox-only runtime overrides for local execution tools."""
-
-    bind_workspace_to_base_dir: bool = False
-    force_restrict_to_base_dir: bool = False
-    default_expose_base_directory: bool | None = None
-
-
-def _apply_runtime_overrides(metadata: ToolMetadata, init_kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Apply deployment/runtime-driven tool defaults."""
-    sandbox_runtime = metadata.sandbox_runtime
-    if not MINDROOM_CONTAINER_SANDBOX or sandbox_runtime is None:
-        return init_kwargs
-
-    workspace = MINDROOM_SANDBOX_WORKSPACE.resolve()
-    workspace.mkdir(parents=True, exist_ok=True)
-    overridden = dict(init_kwargs)
-    if sandbox_runtime.bind_workspace_to_base_dir:
-        overridden["base_dir"] = workspace
-    if sandbox_runtime.force_restrict_to_base_dir:
-        overridden["restrict_to_base_dir"] = True
-    if sandbox_runtime.default_expose_base_directory is not None:
-        overridden.setdefault("expose_base_directory", sandbox_runtime.default_expose_base_directory)
-    return overridden
 
 
 def register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable[[], type[Toolkit]]]:
@@ -98,7 +70,6 @@ def get_tool_by_name(
                 if field.name in credentials:
                     init_kwargs[field.name] = credentials[field.name]
 
-        init_kwargs = _apply_runtime_overrides(metadata, init_kwargs)
         toolkit = tool_class(**init_kwargs)
         if disable_sandbox_proxy:
             return toolkit
@@ -174,7 +145,6 @@ class ToolMetadata:
     auth_provider: str | None = None  # Name of integration that provides auth (e.g., "google")
     docs_url: str | None = None  # Documentation URL
     helper_text: str | None = None  # Additional help text for setup
-    sandbox_runtime: SandboxRuntimeConfig | None = None  # Optional sandbox runtime overrides
     factory: Callable | None = None  # Factory function to create tool instance
 
 
@@ -197,7 +167,6 @@ def register_tool_with_metadata(
     auth_provider: str | None = None,
     docs_url: str | None = None,
     helper_text: str | None = None,
-    sandbox_runtime: SandboxRuntimeConfig | None = None,
 ) -> Callable[[Callable[[], type]], Callable[[], type]]:
     """Decorator to register a tool with metadata.
 
@@ -218,7 +187,6 @@ def register_tool_with_metadata(
         auth_provider: Name of integration that provides authentication
         docs_url: Link to documentation
         helper_text: Additional setup instructions
-        sandbox_runtime: Optional sandbox runtime overrides for local execution
 
     Returns:
         Decorator function
@@ -241,7 +209,6 @@ def register_tool_with_metadata(
             auth_provider=auth_provider,
             docs_url=docs_url,
             helper_text=helper_text,
-            sandbox_runtime=sandbox_runtime,
             factory=func,
         )
 
@@ -288,7 +255,6 @@ def export_tools_metadata() -> list[dict[str, Any]]:
         tool_dict["category"] = metadata.category.value
         tool_dict["status"] = metadata.status.value
         tool_dict["setup_type"] = metadata.setup_type.value
-        tool_dict.pop("sandbox_runtime", None)
         tool_dict.pop("factory", None)
         tools.append(tool_dict)
 

@@ -19,7 +19,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from loguru import logger
 from pydantic import BaseModel, Field, ValidationError
 
-from mindroom.sandbox_proxy import sandbox_proxy_token, sandbox_proxy_token_matches, to_json_compatible
+import mindroom.sandbox_proxy as _sandbox_proxy
+from mindroom.sandbox_proxy import sandbox_proxy_token_matches, to_json_compatible
 from mindroom.tools_metadata import ensure_tool_registry_loaded, get_tool_by_name
 
 if TYPE_CHECKING:
@@ -45,11 +46,13 @@ class CredentialLease:
     lease_id: str
     tool_name: str
     function_name: str
-    credential_overrides: dict[str, object]
+    credential_overrides: dict[str, Any]
     expires_at: float
     uses_remaining: int
 
 
+# NOTE: In-process dict — leases are not shared across multiple uvicorn workers.
+# The sandbox runner must be deployed with a single worker for lease correctness.
 LEASES_BY_ID: dict[str, CredentialLease] = {}
 LEASES_LOCK = threading.Lock()
 
@@ -66,7 +69,7 @@ class SandboxRunnerExecuteRequest(BaseModel):
     args: list[Any] = Field(default_factory=list)
     kwargs: dict[str, Any] = Field(default_factory=dict)
     lease_id: str | None = None
-    credential_overrides: dict[str, object] = Field(default_factory=dict)
+    credential_overrides: dict[str, Any] = Field(default_factory=dict)
 
 
 class SandboxRunnerLeaseRequest(BaseModel):
@@ -74,7 +77,7 @@ class SandboxRunnerLeaseRequest(BaseModel):
 
     tool_name: str
     function_name: str
-    credential_overrides: dict[str, object] = Field(default_factory=dict)
+    credential_overrides: dict[str, Any] = Field(default_factory=dict)
     ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS
     max_uses: int = 1
 
@@ -96,7 +99,7 @@ class SandboxRunnerExecuteResponse(BaseModel):
 
 
 async def _validate_runner_token(x_mindroom_sandbox_token: Annotated[str | None, Header()] = None) -> None:
-    if sandbox_proxy_token() is None:
+    if _sandbox_proxy._PROXY_TOKEN is None:
         raise HTTPException(status_code=503, detail="Sandbox runner token is not configured.")
     if not sandbox_proxy_token_matches(x_mindroom_sandbox_token):
         raise HTTPException(status_code=401, detail="Unauthorized sandbox runner request")
@@ -312,10 +315,13 @@ def _run_subprocess_worker() -> int:
     with redirect_stdout(captured_out), redirect_stderr(captured_err):
         response = asyncio.run(_execute_request_inprocess(request))
 
-    # Flush captured tool output to real stdout (informational only).
+    # Flush captured tool output to real stdout/stderr (informational only).
     tool_stdout = captured_out.getvalue()
     if tool_stdout:
         sys.stdout.write(tool_stdout)
+    tool_stderr = captured_err.getvalue()
+    if tool_stderr:
+        sys.stdout.write(tool_stderr)
 
     # Write the response JSON to stderr after the marker.
     print(_RESPONSE_MARKER + response.model_dump_json(), file=sys.stderr)

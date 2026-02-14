@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import functools
 import hmac
 import json
 import os
@@ -71,22 +70,23 @@ def _read_credential_lease_ttl() -> int:
     return max(1, min(MAX_CREDENTIAL_LEASE_TTL_SECONDS, ttl_seconds))
 
 
+def _read_proxy_tools(execution_mode: str | None) -> set[str] | None:
+    default = "" if execution_mode in {"selective", "sandbox_selective"} else "*"
+    raw_value = os.getenv("MINDROOM_SANDBOX_PROXY_TOOLS", default).strip()
+    if raw_value == "*":
+        return None
+    if not raw_value:
+        return set()
+    return {part.strip() for part in raw_value.split(",") if part.strip()}
+
+
 # Parsed once at module load — these don't change at runtime.
 _PROXY_URL = _read_proxy_url()
 _PROXY_TOKEN = _read_proxy_token()
 _PROXY_TIMEOUT = _read_proxy_timeout()
 _EXECUTION_MODE = _read_execution_mode()
 _CREDENTIAL_LEASE_TTL = _read_credential_lease_ttl()
-
-
-def sandbox_proxy_url() -> str | None:
-    """Return the sandbox runner base URL, if configured."""
-    return _PROXY_URL
-
-
-def sandbox_proxy_token() -> str | None:
-    """Return the shared token used between proxy caller and runner."""
-    return _PROXY_TOKEN
+_PROXY_TOOLS = _read_proxy_tools(_EXECUTION_MODE)
 
 
 def sandbox_proxy_token_matches(provided_token: str | None) -> bool:
@@ -109,21 +109,7 @@ def to_json_compatible(value: object) -> object:
     return str(value)
 
 
-def _parse_proxy_tools_spec(*, default: str) -> set[str] | None:
-    """Parse MINDROOM_SANDBOX_PROXY_TOOLS into a set of tool names.
-
-    Returns None when all tools should be proxied.
-    """
-    raw_value = os.getenv("MINDROOM_SANDBOX_PROXY_TOOLS", default).strip()
-    if raw_value == "*":
-        return None
-    if not raw_value:
-        return set()
-    return {part.strip() for part in raw_value.split(",") if part.strip()}
-
-
-@functools.lru_cache(maxsize=1)
-def _parse_credential_policy() -> dict[str, tuple[str, ...]]:
+def _read_credential_policy() -> dict[str, tuple[str, ...]]:
     raw_policy = os.getenv("MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON", "").strip()
     if not raw_policy:
         return {}
@@ -149,8 +135,11 @@ def _parse_credential_policy() -> dict[str, tuple[str, ...]]:
     return policy
 
 
+_CREDENTIAL_POLICY = _read_credential_policy()
+
+
 def _credential_services_for_call(tool_name: str, function_name: str) -> list[str]:
-    policy = _parse_credential_policy()
+    policy = _CREDENTIAL_POLICY
     selectors = ("*", tool_name, f"{tool_name}.{function_name}")
     services: list[str] = []
     for selector in selectors:
@@ -191,12 +180,8 @@ def sandbox_proxy_enabled_for_tool(tool_name: str) -> bool:
         return False
     if _EXECUTION_MODE in {"all", "sandbox_all"}:
         return True
-    if _EXECUTION_MODE in {"selective", "sandbox_selective"}:
-        configured_tools = _parse_proxy_tools_spec(default="")
-    else:
-        configured_tools = _parse_proxy_tools_spec(default="*")
 
-    return configured_tools is None or tool_name in configured_tools
+    return _PROXY_TOOLS is None or tool_name in _PROXY_TOOLS
 
 
 def _call_proxy_sync(
@@ -209,10 +194,11 @@ def _call_proxy_sync(
     if _PROXY_TOKEN is None:
         msg = "MINDROOM_SANDBOX_PROXY_TOKEN must be set when sandbox proxying is enabled."
         raise RuntimeError(msg)
+    if _PROXY_URL is None:
+        msg = "MINDROOM_SANDBOX_PROXY_URL must be set when sandbox proxying is enabled."
+        raise RuntimeError(msg)
     headers = {SANDBOX_PROXY_TOKEN_HEADER: _PROXY_TOKEN}
-
-    # _PROXY_URL is guaranteed non-None here (checked by sandbox_proxy_enabled_for_tool).
-    base_url: str = _PROXY_URL  # type: ignore[assignment]
+    base_url = _PROXY_URL
 
     credential_overrides = _collect_shared_credential_overrides(tool_name, function_name)
     with httpx.Client(timeout=_PROXY_TIMEOUT) as client:

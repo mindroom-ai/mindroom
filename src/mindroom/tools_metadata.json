@@ -3966,23 +3966,6 @@
     {
       "auth_provider": null,
       "category": "development",
-      "config_fields": null,
-      "dependencies": [
-        "agno"
-      ],
-      "description": "Inspect and reset the persistent in-container sandbox workspace",
-      "display_name": "Sandbox Workspace",
-      "docs_url": "https://github.com/mindroom-ai/mindroom",
-      "helper_text": null,
-      "icon": "Shield",
-      "icon_color": "text-amber-500",
-      "name": "sandbox",
-      "setup_type": "none",
-      "status": "available"
-    },
-    {
-      "auth_provider": null,
-      "category": "development",
       "config_fields": [
         {
           "default": null,

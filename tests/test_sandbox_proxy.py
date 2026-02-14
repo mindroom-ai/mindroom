@@ -12,7 +12,7 @@ from mindroom.tools_metadata import get_tool_by_name
 from tests.conftest import FakeCredentialsManager
 
 
-def test_proxy_wraps_tool_calls(monkeypatch: object) -> None:
+def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tool entrypoints should call the sandbox runner API when proxy mode is enabled."""
     captured: dict[str, Any] = {}
 
@@ -42,10 +42,9 @@ def test_proxy_wraps_tool_calls(monkeypatch: object) -> None:
     monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox-runner:8765")
     monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
     monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "selective")
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOOLS", {"calculator"})
     monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
-    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOOLS", "calculator")
-    monkeypatch.delenv("MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON", raising=False)
-    sandbox_proxy_module._parse_credential_policy.cache_clear()
+    monkeypatch.setattr(sandbox_proxy_module, "_CREDENTIAL_POLICY", {})
     monkeypatch.setattr("mindroom.sandbox_proxy.httpx.Client", _FakeClient)
 
     tool = get_tool_by_name("calculator")
@@ -64,7 +63,7 @@ def test_proxy_wraps_tool_calls(monkeypatch: object) -> None:
     assert captured["headers"] == {"x-mindroom-sandbox-token": "test-token"}
 
 
-def test_proxy_disabled_in_runner_mode(monkeypatch: object) -> None:
+def test_proxy_disabled_in_runner_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     """Runner mode must execute tools locally to avoid proxy recursion."""
 
     class _ForbiddenClient:
@@ -84,7 +83,7 @@ def test_proxy_disabled_in_runner_mode(monkeypatch: object) -> None:
     assert '"result": 3' in result
 
 
-def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: object) -> None:
+def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest.MonkeyPatch) -> None:
     """Proxy should create and consume a lease when credential sharing policy allows it."""
     captured_calls: list[tuple[str, dict[str, Any]]] = []
 
@@ -121,8 +120,7 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: object
     monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
     monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "all")
     monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
-    monkeypatch.setenv("MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON", '{"calculator.add":["openai"]}')
-    sandbox_proxy_module._parse_credential_policy.cache_clear()
+    monkeypatch.setattr(sandbox_proxy_module, "_CREDENTIAL_POLICY", {"calculator.add": ("openai",)})
     monkeypatch.setattr("mindroom.sandbox_proxy.get_credentials_manager", lambda: fake_credentials)
     monkeypatch.setattr("mindroom.sandbox_proxy.httpx.Client", _FakeClient)
 
@@ -143,7 +141,7 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: object
     assert execute_payload["lease_id"] == "lease-123"
 
 
-def test_proxy_requires_shared_token(monkeypatch: object) -> None:
+def test_proxy_requires_shared_token(monkeypatch: pytest.MonkeyPatch) -> None:
     """Proxy mode should fail closed when no shared token is configured."""
 
     class _FakeClient:

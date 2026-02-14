@@ -41,8 +41,10 @@ services:
     environment:
       - STORAGE_PATH=/app/mindroom_data
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - MINDROOM_CONTAINER_SANDBOX=true
-      - MINDROOM_SANDBOX_WORKSPACE=/app/mindroom_data/workspace
+      - MINDROOM_SANDBOX_PROXY_URL=http://sandbox-runner:8766
+      - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN}
+      - MINDROOM_SANDBOX_EXECUTION_MODE=selective
+      - MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
       - MATRIX_HOMESERVER=${MATRIX_HOMESERVER}
       # Optional: for self-signed certificates
       # - MATRIX_SSL_VERIFY=false
@@ -60,19 +62,17 @@ docker compose up -d
 
 Key environment variables (set in `.env` or pass directly):
 
-| Variable                     | Description                                                                             | Default                               |
-| ---------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------- |
-| `MATRIX_HOMESERVER`          | Matrix server URL                                                                       | `http://localhost:8008`               |
-| `MATRIX_SSL_VERIFY`          | Verify SSL certificates                                                                 | `true`                                |
-| `MATRIX_SERVER_NAME`         | Server name for federation (optional)                                                   | -                                     |
-| `STORAGE_PATH`               | Data storage directory                                                                  | `mindroom_data`                       |
-| `LOG_LEVEL`                  | Logging level                                                                           | `INFO`                                |
-| `MINDROOM_CONFIG_PATH`       | Path to config.yaml (alternative: `CONFIG_PATH`)                                        | Package default                       |
-| `MINDROOM_ENABLE_STREAMING`  | Enable streaming responses                                                              | `true`                                |
-| `MINDROOM_CONTAINER_SANDBOX` | Force local execution tools (`shell`, `file`, `python`) into sandbox workspace defaults | `false` (auto-`true` in Docker image) |
-| `MINDROOM_SANDBOX_WORKSPACE` | Persistent workspace directory for container sandbox tools                              | `${STORAGE_PATH}/workspace`           |
-| `ANTHROPIC_API_KEY`          | Anthropic API key (if using Claude models)                                              | -                                     |
-| `OPENAI_API_KEY`             | OpenAI API key (if using OpenAI models)                                                 | -                                     |
+| Variable                    | Description                                      | Default                 |
+| --------------------------- | ------------------------------------------------ | ----------------------- |
+| `MATRIX_HOMESERVER`         | Matrix server URL                                | `http://localhost:8008` |
+| `MATRIX_SSL_VERIFY`         | Verify SSL certificates                          | `true`                  |
+| `MATRIX_SERVER_NAME`        | Server name for federation (optional)            | -                       |
+| `STORAGE_PATH`              | Data storage directory                           | `mindroom_data`         |
+| `LOG_LEVEL`                 | Logging level                                    | `INFO`                  |
+| `MINDROOM_CONFIG_PATH`      | Path to config.yaml (alternative: `CONFIG_PATH`) | Package default         |
+| `MINDROOM_ENABLE_STREAMING` | Enable streaming responses                       | `true`                  |
+| `ANTHROPIC_API_KEY`         | Anthropic API key (if using Claude models)       | -                       |
+| `OPENAI_API_KEY`            | OpenAI API key (if using OpenAI models)          | -                       |
 
 ## Building from Source
 
@@ -125,17 +125,12 @@ MindRoom stores data in the `mindroom_data` directory:
 - `logs/` - Application logs
 - `matrix_state.yaml` - Matrix connection state
 - `encryption_keys/` - Matrix E2EE keys (if enabled)
-- `workspace/` - Persistent sandbox workspace for `shell`/`python`/`file` tools when container sandbox mode is enabled
 
-## Workspace Reset Tool
+## Sandbox Proxy Isolation
 
-In container sandbox mode you can grant agents the `sandbox` tool. It can inspect and fully reset the persistent workspace from a tool call.
+In Docker and Kubernetes deployments, `shell`, `file`, and `python` tool calls are proxied to a separate **sandbox-runner** sidecar container. The sidecar runs the same image but without access to secrets, credentials, or the primary data volume. This provides real process-level isolation for code-execution tools.
 
-```
-agents:
-  code:
-    tools: [file, shell, sandbox]
-```
+See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) for full documentation including Docker Compose examples, Kubernetes sidecar setup, host-machine-with-container mode, credential leases, and environment variable reference.
 
 ## Full Stack with Frontend
 

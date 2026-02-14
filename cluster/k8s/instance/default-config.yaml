@@ -99,7 +99,6 @@ agents:
     tools:
     - file
     - shell
-    - sandbox
   data_analyst:
     display_name: DataAnalystAgent
     instructions:
@@ -291,7 +290,6 @@ agents:
     skills: []
     tools:
     - shell
-    - sandbox
   summary:
     display_name: SummaryAgent
     instructions:

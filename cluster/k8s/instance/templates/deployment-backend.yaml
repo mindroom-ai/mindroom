@@ -51,10 +51,17 @@ spec:
           value: "/app/config.yaml"
         - name: LOG_LEVEL
           value: "INFO"
-        - name: MINDROOM_CONTAINER_SANDBOX
-          value: "true"
-        - name: MINDROOM_SANDBOX_WORKSPACE
-          value: "{{ .Values.storagePath }}/workspace"
+        - name: MINDROOM_SANDBOX_PROXY_URL
+          value: "http://localhost:8766"
+        - name: MINDROOM_SANDBOX_PROXY_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: mindroom-api-keys-{{ .Values.customer }}
+              key: sandbox_proxy_token
+        - name: MINDROOM_SANDBOX_EXECUTION_MODE
+          value: "selective"
+        - name: MINDROOM_SANDBOX_PROXY_TOOLS
+          value: "shell,file,python"
         - name: MATRIX_HOMESERVER
           value: "http://synapse-{{ .Values.customer }}:8008"
         - name: MATRIX_SERVER_NAME
@@ -94,6 +101,41 @@ spec:
           capabilities:
             drop:
               - ALL
+      - name: sandbox-runner
+        image: {{ .Values.mindroom_backend_image | default "git.nijho.lt/basnijholt/mindroom-backend:latest" }}
+        imagePullPolicy: Always
+        command: ["/app/run-sandbox-runner.sh"]
+        ports:
+        - containerPort: 8766
+        env:
+        - name: MINDROOM_SANDBOX_RUNNER_MODE
+          value: "true"
+        - name: MINDROOM_SANDBOX_PROXY_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: mindroom-api-keys-{{ .Values.customer }}
+              key: sandbox_proxy_token
+        - name: MINDROOM_CONFIG_PATH
+          value: "/app/config.yaml"
+        volumeMounts:
+        - name: config
+          mountPath: /app/config.yaml
+          subPath: config.yaml
+          readOnly: true
+        - name: sandbox-workspace
+          mountPath: /app/workspace
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
       imagePullSecrets:
       - name: gitea-registry
       volumes:
@@ -107,3 +149,5 @@ spec:
         secret:
           secretName: mindroom-api-keys-{{ .Values.customer }}
           defaultMode: 0400
+      - name: sandbox-workspace
+        emptyDir: {}

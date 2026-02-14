@@ -50,23 +50,22 @@ COPY --from=builder /app /app
 # Copy additional files needed by MindRoom
 COPY config.yaml /app/
 COPY run-backend.sh /app/
+COPY run-sandbox-runner.sh /app/
 COPY scripts /app/scripts/
 COPY tools /app/tools/
 COPY avatars /app/avatars/
 
-# Make startup script executable
-RUN chmod +x /app/run-backend.sh
+# Make startup scripts executable
+RUN chmod +x /app/run-backend.sh /app/run-sandbox-runner.sh
 
 # Create necessary directories
-RUN mkdir -p /app/logs /app/mindroom_data /app/mindroom_data/workspace
+RUN mkdir -p /app/logs /app/mindroom_data
 
 # Create non-root user and set ownership
 RUN useradd -u 1000 -U -m mindroom && chown -R 1000:1000 /app
 
 # Set environment variable to indicate Docker mode
 ENV DOCKER_CONTAINER=1
-ENV MINDROOM_CONTAINER_SANDBOX=1
-ENV MINDROOM_SANDBOX_WORKSPACE=/app/mindroom_data/workspace
 
 # Run as non-root user
 USER 1000:1000

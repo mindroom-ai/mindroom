@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 from mindroom.tools_metadata import (
     ConfigField,
-    SandboxRuntimeConfig,
     SetupType,
     ToolCategory,
     ToolStatus,
@@ -51,7 +50,6 @@ if TYPE_CHECKING:
     ],
     dependencies=[],
     docs_url="https://docs.agno.com/tools/toolkits/local/shell",
-    sandbox_runtime=SandboxRuntimeConfig(bind_workspace_to_base_dir=True),
 )
 def shell_tools() -> type[ShellTools]:
     """Return shell tools for command execution."""

@@ -40,17 +40,6 @@ MEMORY_DIR = STORAGE_PATH_OBJ / "memory"
 CREDENTIALS_DIR = STORAGE_PATH_OBJ / "credentials"
 ENCRYPTION_KEYS_DIR = STORAGE_PATH_OBJ / "encryption_keys"
 
-# Other constants
-VOICE_PREFIX = "🎤 "
-ENABLE_STREAMING = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() != "false"
-ENABLE_AI_CACHE = os.getenv("ENABLE_AI_CACHE", "true").lower() != "false"
-
-# Matrix
-MATRIX_HOMESERVER = os.getenv("MATRIX_HOMESERVER", "http://localhost:8008")
-# (for federation setups where hostname != server_name)
-MATRIX_SERVER_NAME = os.getenv("MATRIX_SERVER_NAME", None)
-MATRIX_SSL_VERIFY = os.getenv("MATRIX_SSL_VERIFY", "true").lower() != "false"
-
 
 def env_flag(name: str, *, default: bool = False) -> bool:
     """Read a boolean environment flag."""
@@ -60,10 +49,16 @@ def env_flag(name: str, *, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-MINDROOM_CONTAINER_SANDBOX = env_flag("MINDROOM_CONTAINER_SANDBOX", default=env_flag("DOCKER_CONTAINER"))
-MINDROOM_SANDBOX_WORKSPACE = Path(
-    os.getenv("MINDROOM_SANDBOX_WORKSPACE", str(STORAGE_PATH_OBJ / "workspace")),
-).expanduser()
+# Other constants
+VOICE_PREFIX = "🎤 "
+ENABLE_STREAMING = env_flag("MINDROOM_ENABLE_STREAMING", default=True)
+ENABLE_AI_CACHE = env_flag("ENABLE_AI_CACHE", default=True)
+
+# Matrix
+MATRIX_HOMESERVER = os.getenv("MATRIX_HOMESERVER", "http://localhost:8008")
+# (for federation setups where hostname != server_name)
+MATRIX_SERVER_NAME = os.getenv("MATRIX_SERVER_NAME", None)
+MATRIX_SSL_VERIFY = env_flag("MATRIX_SSL_VERIFY", default=True)
 
 
 def safe_replace(tmp_path: Path, target_path: Path) -> None:
