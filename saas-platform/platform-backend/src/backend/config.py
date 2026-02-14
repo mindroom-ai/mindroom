@@ -85,6 +85,7 @@ ANTHROPIC_API_KEY = _get_secret("ANTHROPIC_API_KEY", "")
 GOOGLE_API_KEY = _get_secret("GOOGLE_API_KEY", "")
 OPENROUTER_API_KEY = _get_secret("OPENROUTER_API_KEY", "")
 DEEPSEEK_API_KEY = _get_secret("DEEPSEEK_API_KEY", "")
+SANDBOX_PROXY_TOKEN = _get_secret("SANDBOX_PROXY_TOKEN", "")
 
 # Gitea registry token
 GITEA_TOKEN = _get_secret("GITEA_TOKEN", "")
