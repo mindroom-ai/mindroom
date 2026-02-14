@@ -3260,9 +3260,6 @@ cal-com = [
     { name = "pytz" },
     { name = "requests" },
 ]
-calculator = [
-    { name = "agno", extra = ["anthropic", "google", "ollama", "openai"] },
-]
 cartesia = [
     { name = "cartesia" },
 ]
@@ -3276,7 +3273,6 @@ composio = [
     { name = "composio-agno" },
 ]
 config-manager = [
-    { name = "agno", extra = ["anthropic", "google", "ollama", "openai"] },
     { name = "pydantic" },
     { name = "pyyaml" },
 ]
@@ -3324,9 +3320,6 @@ exa = [
 ]
 fal = [
     { name = "fal-client" },
-]
-file = [
-    { name = "agno", extra = ["anthropic", "google", "ollama", "openai"] },
 ]
 file-generation = [
     { name = "reportlab" },
@@ -3438,9 +3431,6 @@ postgres = [
 pubmed = [
     { name = "httpx" },
 ]
-python = [
-    { name = "agno", extra = ["anthropic", "google", "ollama", "openai"] },
-]
 reddit = [
     { name = "praw" },
 ]
@@ -3452,9 +3442,6 @@ replicate = [
 ]
 resend = [
     { name = "resend" },
-]
-scheduler = [
-    { name = "agno", extra = ["anthropic", "google", "ollama", "openai"] },
 ]
 scrapegraph = [
     { name = "scrapegraph-py" },
@@ -3470,9 +3457,6 @@ shopify = [
 ]
 slack = [
     { name = "slack-sdk" },
-]
-sleep = [
-    { name = "agno", extra = ["anthropic", "google", "ollama", "openai"] },
 ]
 spider = [
     { name = "spider-client" },
@@ -3562,12 +3546,6 @@ dev = [
 requires-dist = [
     { name = "agentql", marker = "extra == 'agentql'" },
     { name = "agno", extras = ["anthropic", "google", "ollama", "openai"], specifier = "==2.4.7" },
-    { name = "agno", extras = ["anthropic", "google", "ollama", "openai"], marker = "extra == 'calculator'", specifier = "==2.4.7" },
-    { name = "agno", extras = ["anthropic", "google", "ollama", "openai"], marker = "extra == 'config-manager'", specifier = "==2.4.7" },
-    { name = "agno", extras = ["anthropic", "google", "ollama", "openai"], marker = "extra == 'file'", specifier = "==2.4.7" },
-    { name = "agno", extras = ["anthropic", "google", "ollama", "openai"], marker = "extra == 'python'", specifier = "==2.4.7" },
-    { name = "agno", extras = ["anthropic", "google", "ollama", "openai"], marker = "extra == 'scheduler'", specifier = "==2.4.7" },
-    { name = "agno", extras = ["anthropic", "google", "ollama", "openai"], marker = "extra == 'sleep'", specifier = "==2.4.7" },
     { name = "aiofiles" },
     { name = "aiohttp" },
     { name = "anthropic", specifier = ">=0.70" },

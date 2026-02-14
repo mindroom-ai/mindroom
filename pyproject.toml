@@ -97,9 +97,7 @@ optional-dependencies.cal_com = [
   "pytz",
   "requests",
 ]
-optional-dependencies.calculator = [
-  "agno[anthropic,google,ollama,openai]==2.4.7",
-]
+optional-dependencies.calculator = [  ]
 optional-dependencies.cartesia = [
   "cartesia",
 ]
@@ -113,7 +111,6 @@ optional-dependencies.composio = [
   "composio-agno",
 ]
 optional-dependencies.config_manager = [
-  "agno[anthropic,google,ollama,openai]==2.4.7",
   "pydantic>=2",
   "pyyaml>=6",
 ]
@@ -163,9 +160,7 @@ optional-dependencies.exa = [
 optional-dependencies.fal = [
   "fal-client",
 ]
-optional-dependencies.file = [
-  "agno[anthropic,google,ollama,openai]==2.4.7",
-]
+optional-dependencies.file = [  ]
 optional-dependencies.file_generation = [
   "reportlab",
 ]
@@ -278,9 +273,7 @@ optional-dependencies.postgres = [
 optional-dependencies.pubmed = [
   "httpx>=0.27",
 ]
-optional-dependencies.python = [
-  "agno[anthropic,google,ollama,openai]==2.4.7",
-]
+optional-dependencies.python = [  ]
 optional-dependencies.reasoning = [  ]
 optional-dependencies.reddit = [
   "praw",
@@ -294,9 +287,7 @@ optional-dependencies.replicate = [
 optional-dependencies.resend = [
   "resend",
 ]
-optional-dependencies.scheduler = [
-  "agno[anthropic,google,ollama,openai]==2.4.7",
-]
+optional-dependencies.scheduler = [  ]
 optional-dependencies.scrapegraph = [
   "scrapegraph-py",
 ]
@@ -314,9 +305,7 @@ optional-dependencies.shopify = [
 optional-dependencies.slack = [
   "slack-sdk",
 ]
-optional-dependencies.sleep = [
-  "agno[anthropic,google,ollama,openai]==2.4.7",
-]
+optional-dependencies.sleep = [  ]
 optional-dependencies.spider = [
   "spider-client",
 ]
