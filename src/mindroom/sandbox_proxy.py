@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import hmac
 import json
 import os
@@ -244,6 +245,7 @@ def _call_proxy_sync(
 def _wrap_sync_function(function: Function, tool_name: str, function_name: str) -> Function:
     wrapped = function.model_copy(deep=False)
 
+    @functools.wraps(function.entrypoint)
     def proxy_entrypoint(*args: object, **kwargs: object) -> object:
         return _call_proxy_sync(
             tool_name=tool_name,
@@ -252,7 +254,6 @@ def _wrap_sync_function(function: Function, tool_name: str, function_name: str) 
             kwargs=dict(kwargs),
         )
 
-    proxy_entrypoint.__name__ = function_name
     wrapped.entrypoint = proxy_entrypoint
     return wrapped
 
@@ -260,6 +261,7 @@ def _wrap_sync_function(function: Function, tool_name: str, function_name: str) 
 def _wrap_async_function(function: Function, tool_name: str, function_name: str) -> Function:
     wrapped = function.model_copy(deep=False)
 
+    @functools.wraps(function.entrypoint)
     async def proxy_entrypoint(*args: object, **kwargs: object) -> object:
         return await asyncio.to_thread(
             _call_proxy_sync,
@@ -269,7 +271,6 @@ def _wrap_async_function(function: Function, tool_name: str, function_name: str)
             kwargs=dict(kwargs),
         )
 
-    proxy_entrypoint.__name__ = function_name
     wrapped.entrypoint = proxy_entrypoint
     return wrapped
 
