@@ -31,7 +31,7 @@ def mock_router_bot() -> AgentBot:
         bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
     bot.client = AsyncMock()
     bot.logger = MagicMock()
-    bot._send_response = AsyncMock()  # type: ignore[method-assign]
+    bot._send_response = AsyncMock()
     bot.response_tracker = MagicMock()
     bot.response_tracker.has_responded.return_value = False
     return bot
@@ -55,8 +55,8 @@ async def test_voice_message_in_main_room_creates_thread(mock_router_bot: AgentB
         await bot._on_voice_message(room, voice_event)
 
         # Verify _send_response was called with correct threading
-        bot._send_response.assert_called_once()  # type: ignore[attr-defined]
-        call_kwargs = bot._send_response.call_args[1]  # type: ignore[attr-defined]
+        bot._send_response.assert_called_once()
+        call_kwargs = bot._send_response.call_args[1]
 
         # Should reply to voice message
         assert call_kwargs["reply_to_event_id"] == "$voice123"
@@ -91,8 +91,8 @@ async def test_voice_message_in_thread_continues_thread(mock_router_bot: AgentBo
         await bot._on_voice_message(room, voice_event)
 
         # Verify _send_response was called with correct threading
-        bot._send_response.assert_called_once()  # type: ignore[attr-defined]
-        call_kwargs = bot._send_response.call_args[1]  # type: ignore[attr-defined]
+        bot._send_response.assert_called_once()
+        call_kwargs = bot._send_response.call_args[1]
 
         # Should reply to voice message
         assert call_kwargs["reply_to_event_id"] == "$voice456"

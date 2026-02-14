@@ -72,11 +72,11 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         # Set a proper user_id based on agent_name if we have agent_name
         if hasattr(bot_self, "agent_name"):
             if bot_self.agent_name == "helper":
-                bot_self.agent_user.user_id = "@mindroom_helper:localhost"  # type: ignore[attr-defined]
+                bot_self.agent_user.user_id = "@mindroom_helper:localhost"
             elif bot_self.agent_name == "calculator":
-                bot_self.agent_user.user_id = "@mindroom_calculator:localhost"  # type: ignore[attr-defined]
+                bot_self.agent_user.user_id = "@mindroom_calculator:localhost"
             elif bot_self.agent_name == "router":
-                bot_self.agent_user.user_id = "@mindroom_router:localhost"  # type: ignore[attr-defined]
+                bot_self.agent_user.user_id = "@mindroom_router:localhost"
         elif hasattr(bot_self, "agent_user") and hasattr(bot_self.agent_user, "agent_name"):
             # Alternative: get agent_name from agent_user
             agent_user = bot_self.agent_user
@@ -185,14 +185,14 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
             ) -> object:
                 # Update the agent_user with proper user_id
                 if entity_name == "helper":
-                    agent_user.user_id = "@mindroom_helper:localhost"  # type: ignore[attr-defined]
+                    agent_user.user_id = "@mindroom_helper:localhost"
                 elif entity_name == "calculator":
-                    agent_user.user_id = "@mindroom_calculator:localhost"  # type: ignore[attr-defined]
+                    agent_user.user_id = "@mindroom_calculator:localhost"
                 elif entity_name == "router":
-                    agent_user.user_id = "@mindroom_router:localhost"  # type: ignore[attr-defined]
+                    agent_user.user_id = "@mindroom_router:localhost"
 
                 # Create the actual bot with config
-                return AgentBot(agent_user, Path(str(storage_path)), config, rooms=[test_room_id])  # type: ignore[arg-type]
+                return AgentBot(agent_user, Path(str(storage_path)), config, rooms=[test_room_id])
 
             mock_create_bot.side_effect = create_bot_side_effect
             await orchestrator.initialize()

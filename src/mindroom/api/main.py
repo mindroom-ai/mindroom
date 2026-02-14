@@ -2,6 +2,8 @@
 import os
 import shutil
 import threading
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -33,7 +35,24 @@ from mindroom.credentials_sync import sync_env_to_credentials
 env_path = Path(__file__).parent.parent.parent / ".env"
 load_dotenv(env_path)
 
-app = FastAPI(title="MindRoom Widget Backend")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Manage application startup and shutdown."""
+    print(f"Loading config from: {CONFIG_PATH}")
+    print(f"Config exists: {CONFIG_PATH.exists()}")
+
+    # Sync API keys from environment to CredentialsManager
+    print("Syncing API keys from environment to CredentialsManager...")
+    sync_env_to_credentials()
+
+    yield
+
+    observer.stop()
+    observer.join()
+
+
+app = FastAPI(title="MindRoom Widget Backend", lifespan=lifespan)
 
 # Configure CORS for widget - allow multiple origins including port forwarding
 app.add_middleware(
@@ -206,24 +225,6 @@ app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify
 async def health_check() -> dict[str, str]:
     """Health check endpoint for testing."""
     return {"status": "healthy"}
-
-
-@app.on_event("startup")
-async def startup_event() -> None:
-    """Initialize the application."""
-    print(f"Loading config from: {CONFIG_PATH}")
-    print(f"Config exists: {CONFIG_PATH.exists()}")
-
-    # Sync API keys from environment to CredentialsManager
-    print("Syncing API keys from environment to CredentialsManager...")
-    sync_env_to_credentials()
-
-
-@app.on_event("shutdown")
-async def shutdown_event() -> None:
-    """Clean up on shutdown."""
-    observer.stop()
-    observer.join()
 
 
 @app.post("/api/config/load")

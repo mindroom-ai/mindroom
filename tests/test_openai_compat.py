@@ -948,7 +948,7 @@ class TestSessionIdDerivation:
         original_derive = _derive_session_id
 
         def capture_session_id(*args: object, **kwargs: object) -> str:
-            sid = original_derive(*args, **kwargs)  # type: ignore[arg-type]
+            sid = original_derive(*args, **kwargs)
             session_ids.append(sid)
             return sid
 
@@ -1073,7 +1073,7 @@ class TestContentExtraction:
         content: list[dict] = [
             {"type": "text"},  # missing "text" key
             {"type": "text", "text": "Valid"},
-            "not a dict",  # type: ignore[list-item]
+            "not a dict",
         ]
         assert _extract_content_text(content) == "Valid"
 

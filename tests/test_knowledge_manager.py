@@ -233,8 +233,8 @@ async def test_sync_git_repository_updates_index_for_changed_and_deleted_files(
         "_sync_git_repository_once",
         lambda _git_config: ({"docs/new.md", "docs/updated.md"}, {"docs/deleted.md"}, True),
     )
-    manager.index_file = AsyncMock(return_value=True)  # type: ignore[method-assign]
-    manager.remove_file = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    manager.index_file = AsyncMock(return_value=True)
+    manager.remove_file = AsyncMock(return_value=True)
 
     result = await manager.sync_git_repository()
 

@@ -36,7 +36,7 @@ def verify_tool_configfields(tool_name: str, tool_class: type) -> None:  # noqa:
 
     """
     # Get the actual parameters from agno
-    sig = inspect.signature(tool_class.__init__)  # type: ignore[misc]
+    sig = inspect.signature(tool_class.__init__)
     agno_params = {}
 
     for name, param in sig.parameters.items():
