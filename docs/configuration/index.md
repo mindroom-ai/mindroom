@@ -62,6 +62,13 @@ teams:
     model: sonnet                  # Optional: Model for team coordination (default: "default")
     rooms: []                      # Optional: Rooms to auto-join
 
+# Culture configurations (optional)
+cultures:
+  engineering:
+    description: Follow clean code principles and write tests  # Shared principles
+    agents: [developer, reviewer]  # Agents assigned (each agent can belong to at most one culture)
+    mode: automatic                # automatic, agentic, or manual
+
 # Router configuration (optional)
 router:
   model: default                   # Optional: Model for routing (default: "default")
@@ -195,6 +202,7 @@ knowledge_bases:
 - [Agents](agents.md) - Configure individual AI agents
 - [Models](models.md) - Configure AI model providers
 - [Teams](teams.md) - Configure multi-agent collaboration
+- [Cultures](cultures.md) - Configure shared agent cultures
 - [Router](router.md) - Configure message routing
 - [Memory](../memory.md) - Configure memory providers and behavior
 - [Knowledge](../dashboard.md#knowledge) - Configure file-backed knowledge bases

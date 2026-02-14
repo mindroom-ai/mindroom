@@ -36,13 +36,20 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 | `plugins.py` | Plugin loading and tool/skill extension |
 | `scheduling.py` | Cron and natural-language task scheduling |
 | `tools/` | 100+ tool integrations |
+| `tool_dependencies.py` | Auto-install per-tool optional dependencies at runtime |
+| `ai.py` | AI model instantiation, caching, and response generation |
+| `credentials.py` | Unified credential management (CredentialsManager) |
 | `matrix/` | Matrix protocol integration (client, users, rooms, presence) |
 
 **Persistent state** lives under `mindroom_data/` (overridable via `STORAGE_PATH`):
 - `sessions/` – Per-agent SQLite event history for Agno conversations
+- `learning/` – Per-agent Agno Learning preference data
 - `memory/` – Mem0 vector store for agent/room/team memories
+- `chroma/` – ChromaDB storage backing the memory system
 - `tracking/` – Response tracking to avoid duplicate replies
 - `credentials/` – JSON secrets synchronized from `.env`
+- `encryption_keys/` – Matrix E2E encryption keys
+- `culture/` – Shared culture state
 
 ### SaaS Platform (`saas-platform/`)
 - **Platform Backend**: Modular FastAPI app with routes in `backend/routes/`
@@ -98,6 +105,12 @@ teams:
     role: Collaborative engineering assistant
     agents: [code]
     mode: collaborate
+
+cultures:
+  engineering:
+    description: Follow clean code principles and write tests
+    agents: [code]
+    mode: automatic
 
 timezone: America/Los_Angeles
 ```

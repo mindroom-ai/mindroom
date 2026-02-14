@@ -105,7 +105,9 @@ mindroom run
 | **Skills** | OpenClaw-compatible skills system for extended agent capabilities |
 | **Scheduling** | Schedule tasks with cron expressions or natural language |
 | **Voice** | Speech-to-text transcription for voice messages |
+| **Cultures** | Shared evolving principles across groups of agents |
 | **Authorization** | Fine-grained user and room access control |
+| **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client |
 | **Hot Reload** | Config changes are detected and agents restart automatically |
 
 ## Architecture
@@ -128,7 +130,7 @@ mindroom run
 - [Getting Started](getting-started.md) - Installation and first steps
 - [Configuration](configuration/index.md) - All configuration options
 - [Dashboard](dashboard.md) - Web UI for configuration
-- [Knowledge Bases](dashboard.md#knowledge) - Manage file-backed RAG bases and indexing
+- [OpenAI-Compatible API](openai-api.md) - Use agents from any OpenAI-compatible client
 - [Tools](tools/index.md) - Available tool integrations
 - [Skills](skills.md) - OpenClaw-compatible skills system
 - [Plugins](plugins.md) - Extend with custom tools and skills
@@ -138,7 +140,9 @@ mindroom run
 - [Authorization](authorization.md) - User and room access control
 - [Architecture](architecture/index.md) - How it works under the hood
 - [Deployment](deployment/index.md) - Docker and Kubernetes deployment
-- [Google Services OAuth Setup](deployment/google-services-oauth.md) - Configure Gmail/Calendar/Drive/Sheets integration
+- [Sandbox Proxy](deployment/sandbox-proxy.md) - Isolate code-execution tools in a sandbox
+- [Google Services OAuth](deployment/google-services-oauth.md) - Admin OAuth setup for Gmail/Calendar/Drive/Sheets
+- [Google Services OAuth (Individual)](deployment/google-services-user-oauth.md) - Single-user OAuth setup
 - [CLI Reference](cli.md) - Command-line interface
 
 ## License

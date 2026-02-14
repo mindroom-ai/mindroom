@@ -89,19 +89,21 @@ mindroom run
 
 ## Features
 
-| Feature             | Description                                                       |
-| ------------------- | ----------------------------------------------------------------- |
-| **Agents**          | Single-specialty actors with specific tools and instructions      |
-| **Teams**           | Collaborative bundles of agents (coordinate or collaborate modes) |
-| **Router**          | Built-in traffic director that routes messages to the right agent |
-| **Memory**          | Mem0-inspired memory system with agent, room, and team scopes     |
-| **Knowledge Bases** | File-backed RAG indexing with per-agent base assignment           |
-| **Tools**           | 100+ integrations for external services                           |
-| **Skills**          | OpenClaw-compatible skills system for extended agent capabilities |
-| **Scheduling**      | Schedule tasks with cron expressions or natural language          |
-| **Voice**           | Speech-to-text transcription for voice messages                   |
-| **Authorization**   | Fine-grained user and room access control                         |
-| **Hot Reload**      | Config changes are detected and agents restart automatically      |
+| Feature                   | Description                                                       |
+| ------------------------- | ----------------------------------------------------------------- |
+| **Agents**                | Single-specialty actors with specific tools and instructions      |
+| **Teams**                 | Collaborative bundles of agents (coordinate or collaborate modes) |
+| **Router**                | Built-in traffic director that routes messages to the right agent |
+| **Memory**                | Mem0-inspired memory system with agent, room, and team scopes     |
+| **Knowledge Bases**       | File-backed RAG indexing with per-agent base assignment           |
+| **Tools**                 | 100+ integrations for external services                           |
+| **Skills**                | OpenClaw-compatible skills system for extended agent capabilities |
+| **Scheduling**            | Schedule tasks with cron expressions or natural language          |
+| **Voice**                 | Speech-to-text transcription for voice messages                   |
+| **Cultures**              | Shared evolving principles across groups of agents                |
+| **Authorization**         | Fine-grained user and room access control                         |
+| **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client       |
+| **Hot Reload**            | Config changes are detected and agents restart automatically      |
 
 ## Architecture
 
@@ -123,7 +125,7 @@ mindroom run
 - [Getting Started](https://docs.mindroom.chat/getting-started/index.md) - Installation and first steps
 - [Configuration](https://docs.mindroom.chat/configuration/index.md) - All configuration options
 - [Dashboard](https://docs.mindroom.chat/dashboard/index.md) - Web UI for configuration
-- [Knowledge Bases](https://docs.mindroom.chat/dashboard/#knowledge) - Manage file-backed RAG bases and indexing
+- [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/index.md) - Use agents from any OpenAI-compatible client
 - [Tools](https://docs.mindroom.chat/tools/index.md) - Available tool integrations
 - [Skills](https://docs.mindroom.chat/skills/index.md) - OpenClaw-compatible skills system
 - [Plugins](https://docs.mindroom.chat/plugins/index.md) - Extend with custom tools and skills
@@ -133,7 +135,9 @@ mindroom run
 - [Authorization](https://docs.mindroom.chat/authorization/index.md) - User and room access control
 - [Architecture](https://docs.mindroom.chat/architecture/index.md) - How it works under the hood
 - [Deployment](https://docs.mindroom.chat/deployment/index.md) - Docker and Kubernetes deployment
-- [Google Services OAuth Setup](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) - Configure Gmail/Calendar/Drive/Sheets integration
+- [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) - Isolate code-execution tools in a sandbox
+- [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) - Admin OAuth setup for Gmail/Calendar/Drive/Sheets
+- [Google Services OAuth (Individual)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) - Single-user OAuth setup
 - [CLI Reference](https://docs.mindroom.chat/cli/index.md) - Command-line interface
 
 ## License
