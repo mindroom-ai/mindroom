@@ -10,6 +10,7 @@ from loguru import logger
 
 from mindroom.config import Config
 from mindroom.plugins import load_plugins
+from mindroom.sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -41,7 +42,12 @@ def register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable
     return decorator
 
 
-def get_tool_by_name(tool_name: str) -> Toolkit:
+def get_tool_by_name(
+    tool_name: str,
+    *,
+    disable_sandbox_proxy: bool = False,
+    credential_overrides: dict[str, object] | None = None,
+) -> Toolkit:
     """Get a tool instance by its registered name."""
     if tool_name not in TOOL_REGISTRY:
         available = ", ".join(sorted(TOOL_REGISTRY.keys()))
@@ -54,6 +60,8 @@ def get_tool_by_name(tool_name: str) -> Toolkit:
 
         creds_manager = get_credentials_manager()
         credentials = creds_manager.load_credentials(tool_name) or {}
+        if credential_overrides:
+            credentials = {**credentials, **credential_overrides}
         metadata = TOOL_METADATA[tool_name]
 
         init_kwargs = {}
@@ -62,7 +70,10 @@ def get_tool_by_name(tool_name: str) -> Toolkit:
                 if field.name in credentials:
                     init_kwargs[field.name] = credentials[field.name]
 
-        return tool_class(**init_kwargs)
+        toolkit = tool_class(**init_kwargs)
+        if disable_sandbox_proxy:
+            return toolkit
+        return maybe_wrap_toolkit_for_sandbox_proxy(tool_name, toolkit)
 
     except ImportError as e:
         logger.warning(f"Could not import tool '{tool_name}': {e}")

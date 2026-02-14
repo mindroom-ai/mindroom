@@ -1,19 +1,21 @@
 """Instance provisioning and management routes."""
 
 import hmac
+import secrets
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from backend.config import (
     ANTHROPIC_API_KEY,
+    DEEPSEEK_API_KEY,
     GITEA_TOKEN,
     GITEA_USER,
     GOOGLE_API_KEY,
-    DEEPSEEK_API_KEY,
     OPENAI_API_KEY,
     OPENROUTER_API_KEY,
     PLATFORM_DOMAIN,
     PROVISIONER_API_KEY,
+    SANDBOX_PROXY_TOKEN,
     SUPABASE_ANON_KEY,
     SUPABASE_SERVICE_KEY,
     SUPABASE_URL,
@@ -187,6 +189,9 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         if not success:
             logger.warning("Failed to create image pull secret, deployment may fail")
 
+    # Keep this non-empty so shell/file/python proxying doesn't fail at runtime.
+    sandbox_proxy_token = SANDBOX_PROXY_TOKEN or secrets.token_hex(32)
+
     try:
         # Use upgrade --install to handle both new and re-provisioning cases
         code, stdout, stderr = await run_helm(
@@ -220,6 +225,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
                 f"openrouter_key={OPENROUTER_API_KEY}",
                 "--set",
                 f"deepseek_key={DEEPSEEK_API_KEY}",
+                "--set",
+                f"sandbox_proxy_token={sandbox_proxy_token}",
                 "--set",
                 "mindroom_image=git.nijho.lt/basnijholt/mindroom-frontend:latest",
             ],

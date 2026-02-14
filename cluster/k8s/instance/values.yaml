@@ -15,6 +15,7 @@ anthropic_key: ""
 google_key: ""
 openrouter_key: ""
 deepseek_key: ""
+sandbox_proxy_token: ""
 
 # Supabase (shared auth)
 supabaseUrl: ""
