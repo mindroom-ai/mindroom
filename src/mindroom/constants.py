@@ -61,6 +61,20 @@ MATRIX_SERVER_NAME = os.getenv("MATRIX_SERVER_NAME", None)
 MATRIX_SSL_VERIFY = env_flag("MATRIX_SSL_VERIFY", default=True)
 
 
+# Canonical mapping from provider name to the environment variable it requires.
+# Other modules derive their own views from this single source of truth.
+PROVIDER_ENV_KEYS: dict[str, str] = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "google": "GOOGLE_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "cerebras": "CEREBRAS_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "ollama": "OLLAMA_HOST",
+}
+
+
 def safe_replace(tmp_path: Path, target_path: Path) -> None:
     """Replace *target_path* with *tmp_path*, with a fallback for bind mounts.
 
