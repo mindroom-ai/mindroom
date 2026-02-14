@@ -191,7 +191,7 @@ MATRIX_SSL_VERIFY=false \
 OPENAI_BASE_URL=http://localhost:9292/v1 \
 OPENAI_API_KEY=sk-test \
 UV_PYTHON=3.13 \
-just start-backend-dev
+uv run mindroom run
 ```
 
 6) Wait for API health, then for rooms to appear (room creation uses AI topics)
@@ -394,7 +394,7 @@ matty thread-reply "test_room" t1 "@mindroom_research find information about X"
 
 ```bash
 # Run the stack
-uv run mindroom run --storage-path mindroom_data  # or use ./run-backend.sh
+uv run mindroom run --storage-path mindroom_data
 
 # Update credentials
 # Edit .env and restart; sync step mirrors keys to credentials vault

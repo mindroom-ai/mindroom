@@ -161,7 +161,7 @@ uv sync --all-extras
 
 ```bash
 # Terminal 1: Start backend (agents + API)
-./run-backend.sh
+uv run mindroom run
 
 # Terminal 2: Start frontend (optional, for web UI)
 ./run-frontend.sh

@@ -244,7 +244,7 @@ start-frontend-dev:
 
 # Start core MindRoom backend (dev)
 start-backend-dev:
-    ./run-backend.sh
+    uv run mindroom run
 
 # SaaS Platform app dev
 # Start SaaS platform frontend (dev)
