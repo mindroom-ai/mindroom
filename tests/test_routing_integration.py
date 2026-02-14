@@ -125,12 +125,12 @@ class TestRoutingIntegration:
         await news_bot._on_message(mock_room, user_message)
 
         # Only research bot should respond (streaming makes 2 calls)
-        assert research_bot.client.room_send.call_count >= 1  # type: ignore[union-attr]  # At least initial message
-        assert news_bot.client.room_send.call_count == 0  # type: ignore[union-attr]
+        assert research_bot.client.room_send.call_count >= 1  # At least initial message
+        assert news_bot.client.room_send.call_count == 0
 
         # Router should NOT have been called at all
         assert mock_suggest_agent.call_count == 0
 
         # Verify the response was sent
-        last_call = research_bot.client.room_send.call_args_list[-1]  # type: ignore[union-attr]
+        last_call = research_bot.client.room_send.call_args_list[-1]
         assert "body" in last_call[1]["content"]

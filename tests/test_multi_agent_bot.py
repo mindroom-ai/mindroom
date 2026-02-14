@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 class MockConfig:
     """Mock configuration for testing."""
 
-    agents: dict[str, Any] = None  # type: ignore[assignment]
+    agents: dict[str, Any] = None
 
     def __post_init__(self) -> None:
         """Initialize agents dictionary if not provided."""
@@ -960,7 +960,7 @@ class TestMultiAgentOrchestrator:
                 # Create a mock that tracks the call
                 mock_start = AsyncMock()
                 # Replace start with our mock
-                bot.start = mock_start  # type: ignore[method-assign]
+                bot.start = mock_start
                 start_mocks.append(mock_start)
                 bot.running = False
 
@@ -1003,7 +1003,7 @@ class TestMultiAgentOrchestrator:
             for bot in orchestrator.agent_bots.values():
                 bot.client = AsyncMock()
                 bot.running = True
-                bot.ensure_user_account = AsyncMock()  # type: ignore[method-assign]
+                bot.ensure_user_account = AsyncMock()
 
             await orchestrator.stop()
 

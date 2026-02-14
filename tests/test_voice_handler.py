@@ -99,7 +99,7 @@ class TestVoiceHandler:
                 return True
             if obj is response and cls is nio.DownloadError:
                 return False  # Not an error
-            return isinstance.__wrapped__(obj, cls)  # type: ignore[attr-defined]
+            return isinstance.__wrapped__(obj, cls)
 
         with patch("mindroom.voice_handler.isinstance", side_effect=mock_isinstance_check):
             result = await voice_handler._download_audio(client, event)

@@ -32,7 +32,7 @@ def mock_home_bot() -> AgentBot:
         bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
     bot.client = AsyncMock()
     bot.logger = MagicMock()
-    bot._generate_response = AsyncMock()  # type: ignore[method-assign]
+    bot._generate_response = AsyncMock()
     bot.response_tracker = MagicMock()
     bot.response_tracker.has_responded.return_value = False
     return bot

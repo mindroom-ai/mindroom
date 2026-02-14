@@ -233,19 +233,24 @@ python-version = "3.12"
 include = [ "src", "tests" ]
 
 [tool.ty.rules]
-deprecated = "ignore"
+deprecated = "ignore" # FastAPI on_event deprecation; refactor to lifespan separately
 
-# Tests: suppress rules that fire on mock patterns (method-assign, attr-defined, etc.)
+[tool.ty.terminal]
+error-on-warning = true
+
 [[tool.ty.overrides]]
-include = [ "tests/**" ]
+include = [ "tests/" ]
+
 [tool.ty.overrides.rules]
-invalid-argument-type = "ignore"
-unresolved-attribute = "ignore"
-unsupported-operator = "ignore"
-invalid-assignment = "ignore"
-not-subscriptable = "ignore"
+# Mock patterns cause many false positives in tests (e.g., mock.call_args
+# returns _Call | None, attribute access on MagicMock, passing mocks as
+# typed arguments).
 call-non-callable = "ignore"
-too-many-positional-arguments = "ignore"
+invalid-argument-type = "ignore"
+invalid-assignment = "ignore"
 no-matching-overload = "ignore"
 not-iterable = "ignore"
-unused-type-ignore-comment = "ignore"
+not-subscriptable = "ignore"
+too-many-positional-arguments = "ignore"
+unresolved-attribute = "ignore"
+unsupported-operator = "ignore"

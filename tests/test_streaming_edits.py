@@ -83,7 +83,7 @@ class TestStreamingEdits:
         # Mock successful room_send response
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
-        bot.client.room_send.return_value = mock_send_response  # type: ignore[union-attr]
+        bot.client.room_send.return_value = mock_send_response
 
         # Mock AI response
         mock_ai_response.return_value = "I can help with that!"
@@ -106,11 +106,11 @@ class TestStreamingEdits:
 
         # Process initial message - bot should respond
         await bot._on_message(mock_room, initial_event)
-        assert bot.client.room_send.call_count == 2  # type: ignore[union-attr]  # thinking + final
+        assert bot.client.room_send.call_count == 2  # thinking + final
         assert mock_ai_response.call_count == 1
 
         # Reset mocks
-        bot.client.room_send.reset_mock()  # type: ignore[union-attr]
+        bot.client.room_send.reset_mock()
         mock_ai_response.reset_mock()
 
         # Edit event 1 - simulating streaming update
@@ -136,7 +136,7 @@ class TestStreamingEdits:
         # Process edit - bot SHOULD regenerate its response
         await bot._on_message(mock_room, edit_event1)
         # Bot should regenerate: 1 call for thinking message (non-streaming, editing existing)
-        assert bot.client.room_send.call_count == 1  # type: ignore[union-attr]  # thinking message only
+        assert bot.client.room_send.call_count == 1  # thinking message only
         assert mock_ai_response.call_count == 1  # AI should be called again for regeneration
 
         # Edit event 2 - another streaming update
@@ -160,12 +160,12 @@ class TestStreamingEdits:
         }
 
         # Reset mocks again
-        bot.client.room_send.reset_mock()  # type: ignore[union-attr]
+        bot.client.room_send.reset_mock()
         mock_ai_response.reset_mock()
 
         # Process second edit - bot should regenerate again
         await bot._on_message(mock_room, edit_event2)
-        assert bot.client.room_send.call_count == 1  # type: ignore[union-attr]  # thinking message only
+        assert bot.client.room_send.call_count == 1  # thinking message only
         assert mock_ai_response.call_count == 1  # AI should be called again
 
     @pytest.mark.asyncio
@@ -183,7 +183,7 @@ class TestStreamingEdits:
         # Mock successful room_send response
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
-        bot.client.room_send.return_value = mock_send_response  # type: ignore[union-attr]
+        bot.client.room_send.return_value = mock_send_response
 
         # Mock AI response
         mock_ai_response.return_value = "Here's the answer!"
@@ -209,7 +209,7 @@ class TestStreamingEdits:
 
         # Process new message - bot SHOULD respond
         await bot._on_message(mock_room, new_event)
-        assert bot.client.room_send.call_count == 2  # type: ignore[union-attr]  # thinking + final
+        assert bot.client.room_send.call_count == 2  # thinking + final
         assert mock_ai_response.call_count == 1
 
     @pytest.mark.asyncio
@@ -227,7 +227,7 @@ class TestStreamingEdits:
         # Mock successful room_send response
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
-        bot.client.room_send.return_value = mock_send_response  # type: ignore[union-attr]
+        bot.client.room_send.return_value = mock_send_response
 
         # Mock AI response
         mock_ai_response.return_value = "I can help with that!"
@@ -249,7 +249,7 @@ class TestStreamingEdits:
 
         # Process initial message - calculator should NOT respond (not mentioned)
         await bot._on_message(mock_room, initial_event)
-        assert bot.client.room_send.call_count == 0  # type: ignore[union-attr]
+        assert bot.client.room_send.call_count == 0
         assert mock_ai_response.call_count == 0
 
         # Edit from agent that NOW mentions calculator (with in-progress marker)
@@ -277,7 +277,7 @@ class TestStreamingEdits:
             # Make extract_agent_name return 'helper' for the sender
             mock_extract.return_value = "helper"
             await bot._on_message(mock_room, edit_event)
-        assert bot.client.room_send.call_count == 0  # type: ignore[union-attr]
+        assert bot.client.room_send.call_count == 0
         assert mock_ai_response.call_count == 0
 
     @pytest.mark.asyncio
@@ -299,7 +299,7 @@ class TestStreamingEdits:
         # Mock successful room_send response
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
-        bot.client.room_send.return_value = mock_send_response  # type: ignore[union-attr]
+        bot.client.room_send.return_value = mock_send_response
 
         # Mock AI response
         mock_ai_response.return_value = "I can help with that!"
@@ -321,7 +321,7 @@ class TestStreamingEdits:
 
         # Process initial message - calculator should NOT respond (not mentioned)
         await bot._on_message(mock_room, initial_event)
-        assert bot.client.room_send.call_count == 0  # type: ignore[union-attr]
+        assert bot.client.room_send.call_count == 0
         assert mock_ai_response.call_count == 0
 
         # Edit from user that NOW mentions calculator
@@ -346,5 +346,5 @@ class TestStreamingEdits:
 
         # Process edit - calculator should NOT respond (bot ignores all edits)
         await bot._on_message(mock_room, edit_event)
-        assert bot.client.room_send.call_count == 0  # type: ignore[union-attr]
+        assert bot.client.room_send.call_count == 0
         assert mock_ai_response.call_count == 0

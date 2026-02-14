@@ -47,8 +47,8 @@ def _make_bot(tmp_path: Path) -> AgentBot:
     bot.client.user_id = agent_user.user_id
     bot.client.rooms = {"!team:localhost": MagicMock(room_id="!team:localhost")}
     bot.orchestrator = MagicMock(config=config)
-    bot._send_response = AsyncMock(return_value="$team_response")  # type: ignore[method-assign]
-    bot._handle_interactive_question = AsyncMock()  # type: ignore[method-assign]
+    bot._send_response = AsyncMock(return_value="$team_response")
+    bot._handle_interactive_question = AsyncMock()
     return bot
 
 
@@ -69,7 +69,7 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
         assert get_scheduling_tool_context() is not None
         return "team non-streaming response"
 
-    bot._run_cancellable_response = AsyncMock(side_effect=fake_run_cancellable_response)  # type: ignore[method-assign]
+    bot._run_cancellable_response = AsyncMock(side_effect=fake_run_cancellable_response)
 
     with (
         patch("mindroom.bot.should_use_streaming", new=AsyncMock(return_value=False)),
@@ -110,7 +110,7 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
         assert get_scheduling_tool_context() is not None
         yield "stream chunk"
 
-    bot._run_cancellable_response = AsyncMock(side_effect=fake_run_cancellable_response)  # type: ignore[method-assign]
+    bot._run_cancellable_response = AsyncMock(side_effect=fake_run_cancellable_response)
 
     with (
         patch("mindroom.bot.should_use_streaming", new=AsyncMock(return_value=True)),
