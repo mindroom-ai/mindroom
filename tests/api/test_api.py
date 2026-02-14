@@ -1,10 +1,65 @@
 """Tests for the widget backend API endpoints."""
 
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
+import pytest
 import yaml
 from fastapi.testclient import TestClient
+
+from mindroom.api import main
+
+
+def test_init_supabase_auth_returns_none_without_credentials() -> None:
+    """Supabase auth should stay disabled when credentials are incomplete."""
+    assert main._init_supabase_auth(None, None) is None
+    assert main._init_supabase_auth("https://supabase.test", None) is None
+    assert main._init_supabase_auth(None, "anon-key") is None
+
+
+def test_init_supabase_auth_raises_when_auto_install_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing supabase dependency should error with disable hint when auto-install is off."""
+    install_calls: list[str] = []
+
+    def _missing_supabase(_name: str) -> NoReturn:
+        module_name = "supabase"
+        raise ModuleNotFoundError(module_name)
+
+    def _auto_install(extra_name: str) -> bool:
+        install_calls.append(extra_name)
+        return False
+
+    monkeypatch.setattr(main.importlib, "import_module", _missing_supabase)
+    monkeypatch.setattr(main, "auto_install_enabled", lambda: False)
+    monkeypatch.setattr(main, "auto_install_tool_extra", _auto_install)
+
+    with pytest.raises(ImportError, match="MINDROOM_NO_AUTO_INSTALL_TOOLS"):
+        main._init_supabase_auth("https://supabase.test", "anon-key")
+
+    assert install_calls == ["supabase"]
+
+
+def test_init_supabase_auth_raises_when_auto_install_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing dependency should error with install hint when auto-install attempt fails."""
+    install_calls: list[str] = []
+
+    def _missing_supabase(_name: str) -> NoReturn:
+        module_name = "supabase"
+        raise ModuleNotFoundError(module_name)
+
+    def _auto_install(extra_name: str) -> bool:
+        install_calls.append(extra_name)
+        return False
+
+    monkeypatch.setattr(main.importlib, "import_module", _missing_supabase)
+    monkeypatch.setattr(main, "auto_install_enabled", lambda: True)
+    monkeypatch.setattr(main, "auto_install_tool_extra", _auto_install)
+
+    with pytest.raises(ImportError, match=r"mindroom\[supabase\]") as err:
+        main._init_supabase_auth("https://supabase.test", "anon-key")
+
+    assert install_calls == ["supabase"]
+    assert "MINDROOM_NO_AUTO_INSTALL_TOOLS" not in str(err.value)
 
 
 def test_health_check(test_client: TestClient) -> None:

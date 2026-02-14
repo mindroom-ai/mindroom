@@ -1,11 +1,12 @@
 # ruff: noqa: D100
+import importlib
 import os
 import shutil
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 import yaml
 from dotenv import load_dotenv
@@ -29,7 +30,7 @@ from mindroom.api.tools import router as tools_router
 from mindroom.config import Config
 from mindroom.constants import DEFAULT_AGENTS_CONFIG, DEFAULT_CONFIG_TEMPLATE, safe_replace
 from mindroom.credentials_sync import sync_env_to_credentials
-from mindroom.tool_dependencies import install_tool_extras
+from mindroom.tool_dependencies import auto_install_enabled, auto_install_tool_extra
 
 # Load environment variables from .env file
 # Look for .env in the widget directory (parent of backend)
@@ -132,19 +133,30 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 ACCOUNT_ID = os.getenv("ACCOUNT_ID")  # optional: enforce instance ownership
 
-_supabase_auth = None
-if SUPABASE_URL and SUPABASE_ANON_KEY:
+
+def _init_supabase_auth(supabase_url: str | None, supabase_anon_key: str | None) -> object | None:
+    """Initialize Supabase auth client when credentials are configured."""
+    if not supabase_url or not supabase_anon_key:
+        return None
+
     try:
-        from supabase import create_client
+        create_client = importlib.import_module("supabase").create_client
     except ModuleNotFoundError:
-        if not install_tool_extras(["supabase"]):
+        disabled_hint = ""
+        if not auto_install_enabled():
+            disabled_hint = " Auto-install is disabled by MINDROOM_NO_AUTO_INSTALL_TOOLS."
+        if not auto_install_tool_extra("supabase"):
             msg = (
-                "SUPABASE_URL and SUPABASE_ANON_KEY are set but the 'supabase' package "
-                "could not be auto-installed. Install it with: pip install 'mindroom[supabase]'"
+                "SUPABASE_URL and SUPABASE_ANON_KEY are set but the 'supabase' package is not available."
+                f"{disabled_hint} Install it with: pip install 'mindroom[supabase]'"
             )
             raise ImportError(msg) from None
-        from supabase import create_client
-    _supabase_auth = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+        create_client = importlib.import_module("supabase").create_client
+
+    return create_client(supabase_url, supabase_anon_key)
+
+
+_supabase_auth = _init_supabase_auth(SUPABASE_URL, SUPABASE_ANON_KEY)
 
 
 async def verify_user(authorization: str | None = Header(None)) -> dict:
@@ -160,8 +172,9 @@ async def verify_user(authorization: str | None = Header(None)) -> dict:
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
 
     token = authorization.removeprefix("Bearer ").strip()
+    supabase_auth = cast("Any", _supabase_auth)
     try:
-        user = _supabase_auth.auth.get_user(token)
+        user = supabase_auth.auth.get_user(token)
     except Exception as err:
         raise HTTPException(status_code=401, detail="Invalid token") from err
 
