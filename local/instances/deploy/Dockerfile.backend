@@ -49,14 +49,13 @@ COPY --from=builder /app /app
 
 # Copy additional files needed by MindRoom
 COPY config.yaml /app/
-COPY run-backend.sh /app/
 COPY run-sandbox-runner.sh /app/
 COPY scripts /app/scripts/
 COPY tools /app/tools/
 COPY avatars /app/avatars/
 
 # Make startup scripts executable
-RUN chmod +x /app/run-backend.sh /app/run-sandbox-runner.sh
+RUN chmod +x /app/run-sandbox-runner.sh
 
 # Create necessary directories
 RUN mkdir -p /app/logs /app/mindroom_data
@@ -72,4 +71,4 @@ USER 1000:1000
 
 EXPOSE 8765
 # Run the app
-CMD ["/app/run-backend.sh"]
+CMD ["uv", "run", "mindroom", "run"]

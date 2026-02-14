@@ -52,6 +52,21 @@ def run(
         "-s",
         help="Base directory for persistent MindRoom data (state, sessions, tracking)",
     ),
+    api: bool = typer.Option(
+        True,
+        "--api/--no-api",
+        help="Start the dashboard API server alongside the bot",
+    ),
+    api_port: int = typer.Option(
+        8765,
+        "--api-port",
+        help="Port for the dashboard API server",
+    ),
+    api_host: str = typer.Option(
+        "0.0.0.0",  # noqa: S104
+        "--api-host",
+        help="Host for the dashboard API server",
+    ),
 ) -> None:
     """Run the mindroom multi-agent system.
 
@@ -59,11 +74,27 @@ def run(
     - Creates all necessary user and agent accounts
     - Creates all rooms defined in config.yaml
     - Manages agent room memberships
+    - Starts the dashboard API server (disable with --no-api)
     """
-    asyncio.run(_run(log_level=log_level.upper(), storage_path=storage_path))
+    asyncio.run(
+        _run(
+            log_level=log_level.upper(),
+            storage_path=storage_path,
+            api=api,
+            api_port=api_port,
+            api_host=api_host,
+        ),
+    )
 
 
-async def _run(log_level: str, storage_path: Path) -> None:
+async def _run(
+    log_level: str,
+    storage_path: Path,
+    *,
+    api: bool,
+    api_port: int,
+    api_host: str,
+) -> None:
     """Run the multi-agent system with friendly error handling."""
     # Check config exists before starting
     config_path = Path(DEFAULT_AGENTS_CONFIG)
@@ -86,12 +117,20 @@ async def _run(log_level: str, storage_path: Path) -> None:
     _check_env_keys(config)
 
     console.print(f"Starting Mindroom (log level: {log_level})...")
+    if api:
+        console.print(f"Dashboard API: http://{api_host}:{api_port}")
     console.print("Press Ctrl+C to stop\n")
 
     try:
         from mindroom.bot import main as bot_main  # noqa: PLC0415  # lazy: heavy import
 
-        await bot_main(log_level=log_level, storage_path=storage_path)
+        await bot_main(
+            log_level=log_level,
+            storage_path=storage_path,
+            api=api,
+            api_port=api_port,
+            api_host=api_host,
+        )
     except KeyboardInterrupt:
         console.print("\nStopped")
     except ConnectionError as exc:
