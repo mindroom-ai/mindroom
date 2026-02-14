@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from rich.console import Console
 
 from mindroom import __version__
-from mindroom.cli_config import config_app
+from mindroom.cli_config import _check_env_keys, _load_config_quiet, config_app
 from mindroom.constants import DEFAULT_AGENTS_CONFIG, STORAGE_PATH
 
 app = typer.Typer(
@@ -68,8 +68,6 @@ async def _run(log_level: str, storage_path: Path) -> None:
 
     # Validate config early so users get a clear message instead of a traceback
     try:
-        from mindroom.cli_config import _load_config_quiet  # noqa: PLC0415
-
         config = _load_config_quiet(config_path)
     except ValidationError as exc:
         _print_validation_error(exc, config_path)
@@ -80,7 +78,7 @@ async def _run(log_level: str, storage_path: Path) -> None:
         raise typer.Exit(1) from None
 
     # Check for missing API keys
-    _check_provider_env_keys(config)
+    _check_env_keys(config)
 
     console.print(f"Starting Mindroom (log level: {log_level})...")
     console.print("Press Ctrl+C to stop\n")
@@ -104,13 +102,6 @@ async def _run(log_level: str, storage_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Friendly error output helpers
 # ---------------------------------------------------------------------------
-
-_PROVIDER_ENV_KEYS: dict[str, str] = {
-    "anthropic": "ANTHROPIC_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "google": "GOOGLE_API_KEY",
-    "openrouter": "OPENROUTER_API_KEY",
-}
 
 
 def _print_missing_config_error(config_path: Path) -> None:
@@ -139,37 +130,13 @@ def _print_validation_error(exc: ValidationError, config_path: Path) -> None:
 
 
 def _print_connection_error(exc: BaseException) -> None:
+    homeserver = os.getenv("MATRIX_HOMESERVER", "http://localhost:8008")
     console.print("[red]Error:[/red] Could not connect to the Matrix homeserver.\n")
     console.print(f"  Details: {exc}\n")
     console.print("Check that:")
     console.print("  1. Your Matrix homeserver is running")
-    console.print("  2. MATRIX_HOMESERVER is set correctly (current: $MATRIX_HOMESERVER)")
+    console.print(f"  2. MATRIX_HOMESERVER is set correctly (current: {homeserver})")
     console.print("  3. The server is reachable from this machine")
-
-
-def _check_provider_env_keys(config: object) -> None:
-    """Warn (non-fatal) about missing API key env vars for configured providers."""
-    # config is already a Config instance from the early validation
-    from mindroom.config import Config  # noqa: PLC0415
-
-    if not isinstance(config, Config):
-        return
-
-    providers_used: set[str] = set()
-    for model in config.models.values():
-        providers_used.add(model.provider)
-
-    missing: list[tuple[str, str]] = []
-    for provider in sorted(providers_used):
-        env_key = _PROVIDER_ENV_KEYS.get(provider)
-        if env_key and not os.getenv(env_key):
-            missing.append((provider, env_key))
-
-    if missing:
-        console.print("[yellow]Warning:[/yellow] Missing API key environment variables:\n")
-        for provider, env_key in missing:
-            console.print(f"  [yellow]*[/yellow] {provider}: Set {env_key}")
-        console.print("\nYou can set these in a .env file or export them in your shell.\n")
 
 
 def main() -> None:
