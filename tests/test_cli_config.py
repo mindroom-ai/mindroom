@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from typer.testing import CliRunner
 
@@ -208,3 +208,71 @@ class TestVersionAndHelp:
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
         assert "config" in result.output
+
+
+# ---------------------------------------------------------------------------
+# run command: API server flags
+# ---------------------------------------------------------------------------
+
+
+class TestRunApiFlags:
+    """Tests for --api/--no-api, --api-port, --api-host flags."""
+
+    def test_run_help_shows_api_flags(self) -> None:
+        """Run --help lists the new API server flags."""
+        result = runner.invoke(app, ["run", "--help"])
+        assert result.exit_code == 0
+        assert "--api" in result.output
+        assert "--no-api" in result.output
+        assert "--api-port" in result.output
+        assert "--api-host" in result.output
+
+    def test_run_passes_api_defaults(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Run passes api=True, port=8765, host=0.0.0.0 by default."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        mock_main = AsyncMock()
+        with patch("mindroom.bot.main", mock_main):
+            result = runner.invoke(app, ["run"])
+        assert result.exit_code == 0
+        mock_main.assert_awaited_once()
+        kwargs = mock_main.call_args
+        assert kwargs.kwargs["api"] is True
+        assert kwargs.kwargs["api_port"] == 8765
+        assert kwargs.kwargs["api_host"] == "0.0.0.0"  # noqa: S104
+
+    def test_run_no_api_flag(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Run --no-api passes api=False to bot main."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        mock_main = AsyncMock()
+        with patch("mindroom.bot.main", mock_main):
+            result = runner.invoke(app, ["run", "--no-api"])
+        assert result.exit_code == 0
+        assert mock_main.call_args.kwargs["api"] is False
+
+    def test_run_custom_port_and_host(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Run --api-port and --api-host are forwarded to bot main."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        mock_main = AsyncMock()
+        with patch("mindroom.bot.main", mock_main):
+            result = runner.invoke(app, ["run", "--api-port", "9000", "--api-host", "127.0.0.1"])
+        assert result.exit_code == 0
+        assert mock_main.call_args.kwargs["api_port"] == 9000
+        assert mock_main.call_args.kwargs["api_host"] == "127.0.0.1"

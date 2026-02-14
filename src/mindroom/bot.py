@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import nio
+import uvicorn
 from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
 
 from . import config_confirmation, interactive, voice_handler
@@ -2970,13 +2971,11 @@ async def _watch_skills_task(orchestrator: MultiAgentOrchestrator) -> None:
             logger.info("Skills changed; cache cleared")
 
 
-async def _run_api_server(host: str, port: int) -> None:
+async def _run_api_server(host: str, port: int, log_level: str) -> None:
     """Run the dashboard API server as an asyncio task."""
-    import uvicorn  # noqa: PLC0415
+    from mindroom.api.main import app as api_app  # noqa: PLC0415  # avoid heavy import at module level
 
-    from mindroom.api.main import app as api_app  # noqa: PLC0415
-
-    config = uvicorn.Config(api_app, host=host, port=port, log_level="info")
+    config = uvicorn.Config(api_app, host=host, port=port, log_level=log_level.lower())
     server = uvicorn.Server(config)
     await server.serve()
 
@@ -3031,7 +3030,7 @@ async def main(
         # Optionally start the dashboard API server
         if api:
             logger.info("Starting dashboard API server on %s:%d", api_host, api_port)
-            api_task = asyncio.create_task(_run_api_server(api_host, api_port))
+            api_task = asyncio.create_task(_run_api_server(api_host, api_port, log_level))
             tasks.add(api_task)
 
         # Wait for any task to complete (or fail)
