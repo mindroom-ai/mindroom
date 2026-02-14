@@ -18,7 +18,7 @@ classifiers = [
 ]
 dynamic = [ "version" ]
 dependencies = [
-  "agno[anthropic,google,ollama,openai]>=2.4.7",
+  "agno[anthropic,google,ollama,openai]==2.4.7",
   "aiofiles",
   "aiohttp",
   "anthropic>=0.70",
@@ -98,7 +98,7 @@ optional-dependencies.cal_com = [
   "requests",
 ]
 optional-dependencies.calculator = [
-  "agno[anthropic,google,ollama,openai]>=2.4.7",
+  "agno[anthropic,google,ollama,openai]==2.4.7",
 ]
 optional-dependencies.cartesia = [
   "cartesia",
@@ -113,7 +113,7 @@ optional-dependencies.composio = [
   "composio-agno",
 ]
 optional-dependencies.config_manager = [
-  "agno[anthropic,google,ollama,openai]>=2.4.7",
+  "agno[anthropic,google,ollama,openai]==2.4.7",
   "pydantic>=2",
   "pyyaml>=6",
 ]
@@ -164,7 +164,7 @@ optional-dependencies.fal = [
   "fal-client",
 ]
 optional-dependencies.file = [
-  "agno[anthropic,google,ollama,openai]>=2.4.7",
+  "agno[anthropic,google,ollama,openai]==2.4.7",
 ]
 optional-dependencies.file_generation = [
   "reportlab",
@@ -279,7 +279,7 @@ optional-dependencies.pubmed = [
   "httpx>=0.27",
 ]
 optional-dependencies.python = [
-  "agno[anthropic,google,ollama,openai]>=2.4.7",
+  "agno[anthropic,google,ollama,openai]==2.4.7",
 ]
 optional-dependencies.reasoning = [  ]
 optional-dependencies.reddit = [
@@ -295,7 +295,7 @@ optional-dependencies.resend = [
   "resend",
 ]
 optional-dependencies.scheduler = [
-  "agno[anthropic,google,ollama,openai]>=2.4.7",
+  "agno[anthropic,google,ollama,openai]==2.4.7",
 ]
 optional-dependencies.scrapegraph = [
   "scrapegraph-py",
@@ -315,7 +315,7 @@ optional-dependencies.slack = [
   "slack-sdk",
 ]
 optional-dependencies.sleep = [
-  "agno[anthropic,google,ollama,openai]>=2.4.7",
+  "agno[anthropic,google,ollama,openai]==2.4.7",
 ]
 optional-dependencies.spider = [
   "spider-client",
