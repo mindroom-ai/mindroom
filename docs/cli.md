@@ -29,8 +29,10 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 
  Usage: root [OPTIONS] COMMAND [ARGS]...
 
- Mindroom: Multi-agent Matrix bot system
+ MindRoom - AI agents that live in Matrix
 
+ Quick start:   mindroom config init   Create a starter config   mindroom run
+ Start the system
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --install-completion          Install completion for the current shell.                │
@@ -39,9 +41,9 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │ --help                        Show this message and exit.                              │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ version    Show the current version of Mindroom.                                       │
-│ validate   Validate the configuration file.                                            │
-│ run        Run the mindroom multi-agent system.                                        │
+│ version   Show the current version of Mindroom.                                        │
+│ run       Run the mindroom multi-agent system.                                         │
+│ config    Manage MindRoom configuration files.                                         │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
