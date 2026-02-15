@@ -100,6 +100,7 @@ from .thread_utils import (
     get_all_mentioned_agents_in_thread,
     get_available_agents_in_room,
     get_configured_agents_for_room,
+    has_multiple_non_agent_users_in_room,
     has_user_responded_after_message,
     is_authorized_sender,
     should_agent_respond,
@@ -899,7 +900,7 @@ class AgentBot:
         else:
             self.logger.error("Failed to join room", room_id=room.room_id)
 
-    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:  # noqa: C901, PLR0911, PLR0912
+    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:  # noqa: C901, PLR0911, PLR0912, PLR0915
         self.logger.info("Received message", event_id=event.event_id, room_id=room.room_id, sender=event.sender)
         assert self.client is not None
         if event.body.endswith(IN_PROGRESS_MARKER):
@@ -971,13 +972,16 @@ class AgentBot:
             # 2. No agents are already in the thread
             # 3. There's more than one agent available (routing makes sense)
             if not context.mentioned_agents and not agents_in_thread:
-                available_agents = get_available_agents_in_room(room, self.config)
-                if len(available_agents) == 1:
-                    # Skip routing in single-agent rooms - the agent will handle it directly
-                    self.logger.info("Skipping routing: only one agent present")
+                if has_multiple_non_agent_users_in_room(room, self.config):
+                    self.logger.info("Skipping routing: multiple non-agent users present (mention required)")
                 else:
-                    # Multiple agents available - perform AI routing
-                    await self._handle_ai_routing(room, event, context.thread_history)
+                    available_agents = get_available_agents_in_room(room, self.config)
+                    if len(available_agents) == 1:
+                        # Skip routing in single-agent rooms - the agent will handle it directly
+                        self.logger.info("Skipping routing: only one agent present")
+                    else:
+                        # Multiple agents available - perform AI routing
+                        await self._handle_ai_routing(room, event, context.thread_history)
             # Router's job is done after routing/command handling/voice transcription
             return
 

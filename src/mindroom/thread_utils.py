@@ -178,6 +178,25 @@ def get_available_agent_matrix_ids_in_room(room: nio.MatrixRoom, config: Config)
     return sorted(agent_ids, key=lambda x: x.full_id)
 
 
+def has_multiple_non_agent_users_in_room(room: nio.MatrixRoom, config: Config) -> bool:
+    """Return True when more than one non-agent user is present in the room."""
+    non_agent_members: set[str] = set()
+
+    for member_id in room.users:
+        if not isinstance(member_id, str):
+            continue
+        if not member_id.startswith("@") or ":" not in member_id:
+            continue
+        if extract_agent_name(member_id, config):
+            continue
+
+        non_agent_members.add(member_id)
+        if len(non_agent_members) > 1:
+            return True
+
+    return False
+
+
 def get_configured_agents_for_room(room_id: str, config: Config) -> list[MatrixID]:
     """Get list of agent MatrixIDs configured for a specific room.
 
@@ -295,6 +314,10 @@ def should_agent_respond(
     # Never respond if other agents are mentioned but not this one
     # (User explicitly wants a different agent)
     if mentioned_agents:
+        return False
+
+    # In rooms with multiple non-agent users, require explicit mentions.
+    if has_multiple_non_agent_users_in_room(room, config):
         return False
 
     # Non-thread messages: allow a single available agent to respond automatically
