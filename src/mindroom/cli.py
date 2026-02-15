@@ -315,6 +315,45 @@ def _print_connection_error(exc: BaseException) -> None:
     console.print("  3. The server is reachable from this machine")
 
 
+@app.command()
+def proxy(
+    upstream: str = typer.Option(
+        "http://localhost:8765",
+        "--upstream",
+        "-u",
+        help="MindRoom backend URL",
+    ),
+    port: int = typer.Option(
+        8766,
+        "--port",
+        "-p",
+        help="Port to listen on",
+    ),
+    host: str = typer.Option(
+        "0.0.0.0",  # noqa: S104
+        "--host",
+        help="Host to bind to",
+    ),
+) -> None:
+    """Run the tool-calling proxy for OpenAI-compatible UIs.
+
+    The proxy sits between a chat UI and MindRoom, automatically
+    executing tool calls server-side so the UI sees standard responses.
+    """
+    import uvicorn  # noqa: PLC0415
+
+    from mindroom.proxy import ProxyConfig, create_proxy_app  # noqa: PLC0415
+
+    proxy_config = ProxyConfig(upstream=upstream.rstrip("/"))
+    proxy_app = create_proxy_app(proxy_config)
+
+    console.print(f"Starting MindRoom proxy on [bold]{host}:{port}[/bold]")
+    console.print(f"Upstream: [bold]{proxy_config.upstream}[/bold]")
+    console.print(f"Point your UI at [bold]http://{host}:{port}/v1[/bold]")
+
+    uvicorn.run(proxy_app, host=host, port=port)
+
+
 def main() -> None:
     """Main entry point that shows help by default."""
     # Handle -h flag by replacing with --help

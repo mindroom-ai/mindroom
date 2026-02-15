@@ -126,7 +126,17 @@ Teams are exposed as `team/<team_name>` models. Selecting `team/super_team` runs
 
 `stream: true` returns Server-Sent Events in the standard OpenAI format: role chunk, content chunks, finish chunk, `[DONE]`.
 
-Tool calls appear inline as text in the stream (not as native OpenAI `tool_calls` deltas).
+Tool rendering mode is controlled by `X-Tool-Event-Format`:
+
+- No header: tool events are emitted as inline content text
+- `openai`: strict OpenAI tool-calling mode (`delta.tool_calls` / `finish_reason: "tool_calls"`)
+
+Strict `openai` mode requirements:
+
+- `X-Session-Id` header is required
+- only single-agent models are supported (`team/*` models are rejected)
+- tool execution remains server-side; client returns `role="tool"` messages with `tool_call_id` + result content to continue the run
+- one active strict-mode stream is allowed per `X-Session-Id` (parallel stream requests for the same session return `409`)
 
 ### Session continuity
 
@@ -147,9 +157,73 @@ Parallel Claude sub-sessions are supported by using different `session_label` va
 - Same `session_label`: one shared Claude session (serialized by a per-session lock)
 - Different `session_label`: independent Claude sessions that can run concurrently
 
+In strict `openai` mode, MindRoom keeps paused tool-call state in-memory with a short TTL. Use a stable `X-Session-Id` across the initial request and continuation requests.
+
 ### Knowledge bases
 
 Agents with configured `knowledge_bases` in `config.yaml` get RAG support automatically. No additional API configuration needed.
+
+### Tool execution endpoint
+
+`POST /v1/tools/execute` runs a single tool function server-side and returns the result. This is used by the proxy (see below) but can also be called directly.
+
+```
+curl -X POST -H "Authorization: Bearer sk-my-key" \
+  -H "Content-Type: application/json" \
+  -d '{"agent":"general","tool_name":"web_search","arguments":{"query":"test"}}' \
+  http://localhost:8765/v1/tools/execute
+```
+
+Response:
+
+```
+{"tool_call_id": "call_abc123...", "result": "3 results found..."}
+```
+
+The endpoint uses the same API key auth as `/v1/chat/completions`.
+
+### Tool-calling proxy
+
+Chat UIs like LibreChat and Open WebUI don't auto-execute tools from API responses. The proxy handles the tool execution loop transparently: it intercepts `tool_calls`, calls `/v1/tools/execute`, and sends continuation requests until the agent produces a final response.
+
+```
+UI (LibreChat / Open WebUI)
+  ↕ standard OpenAI protocol
+Proxy (localhost:8766)
+  ↕ strict OpenAI mode
+MindRoom (localhost:8765)
+```
+
+#### Running the proxy
+
+```
+# Via CLI
+mindroom proxy --upstream http://localhost:8765 --port 8766
+
+# Via module
+python -m mindroom.proxy --upstream http://localhost:8765 --port 8766
+```
+
+Then point your UI at `http://localhost:8766/v1` instead of the MindRoom backend directly.
+
+#### What the user sees
+
+The proxy injects status messages as content chunks so the user sees tool activity in real-time:
+
+```
+🔧 Running web_search...
+✅ web_search done
+
+Here are the search results...
+```
+
+#### Options
+
+| Flag         | Default                 | Description          |
+| ------------ | ----------------------- | -------------------- |
+| `--upstream` | `http://localhost:8765` | MindRoom backend URL |
+| `--port`     | `8766`                  | Proxy listen port    |
+| `--host`     | `0.0.0.0`               | Proxy bind address   |
 
 ## What's ignored
 
@@ -176,6 +250,7 @@ The OpenAI-compatible API uses its own auth, separate from the dashboard's Supab
 ## Limitations
 
 - **Token usage is always zeros** — Agno doesn't expose token counts
-- **No native `tool_calls` format** — tool results appear inline in content text
+- **Strict `openai` mode state is process-local** — paused tool-call state is in-memory (single-process or sticky routing recommended)
+- **Strict `openai` mode cleanup is request-driven** — stale paused runs/locks are pruned on incoming requests (not by a background task)
 - **No room memory** — only agent-scoped memory (no `room_id` in API requests)
 - **Scheduler tool unavailable** — scheduling requires Matrix context and is stripped from API agents
