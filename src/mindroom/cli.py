@@ -417,7 +417,7 @@ def _check_matrix_homeserver() -> tuple[int, int, int]:
         console.print(f"[green]✓[/green] Matrix homeserver: {MATRIX_HOMESERVER}")
         return 1, 0, 0
     if valid is False:
-        console.print(f"[red]✗[/red] Matrix homeserver returned {detail}: {MATRIX_HOMESERVER}")
+        console.print(f"[red]✗[/red] Matrix homeserver {detail}: {MATRIX_HOMESERVER}")
         return 0, 1, 0
     console.print(f"[red]✗[/red] Matrix homeserver unreachable: {MATRIX_HOMESERVER} ({detail})")
     return 0, 1, 0
