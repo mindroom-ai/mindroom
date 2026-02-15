@@ -7,8 +7,6 @@ credentials stored in MindRoom's unified credentials location.
 from typing import Any
 
 from agno.tools.googlecalendar import GoogleCalendarTools as AgnoGoogleCalendarTools
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
 from loguru import logger
 
 from mindroom.credentials import get_credentials_manager
@@ -30,6 +28,8 @@ class GoogleCalendarTools(AgnoGoogleCalendarTools):
 
         if token_data:
             try:
+                from google.oauth2.credentials import Credentials
+
                 # Create Google Credentials object from stored data
                 creds = Credentials(
                     token=token_data.get("token"),
@@ -64,6 +64,9 @@ class GoogleCalendarTools(AgnoGoogleCalendarTools):
 
         if token_data:
             try:
+                from google.auth.transport.requests import Request
+                from google.oauth2.credentials import Credentials
+
                 self.creds = Credentials(
                     token=token_data.get("token"),
                     refresh_token=token_data.get("refresh_token"),

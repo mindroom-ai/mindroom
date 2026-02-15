@@ -36,7 +36,7 @@ class TestGmailTools:
     """Test suite for custom Gmail tools wrapper."""
 
     @patch("mindroom.custom_tools.gmail.get_credentials_manager")
-    @patch("mindroom.custom_tools.gmail.Credentials")
+    @patch("google.oauth2.credentials.Credentials")
     def test_initialization_with_stored_credentials(
         self,
         mock_credentials_class: Mock,
@@ -100,7 +100,7 @@ class TestGmailTools:
 
     @patch("mindroom.custom_tools.gmail.get_credentials_manager")
     @patch("mindroom.custom_tools.gmail.logger")
-    @patch("mindroom.custom_tools.gmail.Credentials")
+    @patch("google.oauth2.credentials.Credentials")
     def test_initialization_with_invalid_credentials(
         self,
         mock_credentials_class: Mock,
@@ -128,7 +128,7 @@ class TestGmailTools:
             mock_parent_init.assert_called_once_with(creds=None)
 
     @patch("mindroom.custom_tools.gmail.get_credentials_manager")
-    @patch("mindroom.custom_tools.gmail.Request")
+    @patch("google.auth.transport.requests.Request")
     def test_auth_with_valid_credentials(
         self,
         mock_request_class: Mock,  # noqa: ARG002
@@ -153,8 +153,8 @@ class TestGmailTools:
             assert mock_get_manager.call_count == 1  # Only from __init__
 
     @patch("mindroom.custom_tools.gmail.get_credentials_manager")
-    @patch("mindroom.custom_tools.gmail.Request")
-    @patch("mindroom.custom_tools.gmail.Credentials")
+    @patch("google.auth.transport.requests.Request")
+    @patch("google.oauth2.credentials.Credentials")
     def test_auth_with_expired_credentials(
         self,
         mock_credentials_class: Mock,
@@ -244,7 +244,7 @@ class TestGmailTools:
             gmail_tools.creds = None
 
             # Mock Credentials to raise an exception
-            with patch("mindroom.custom_tools.gmail.Credentials") as mock_creds:
+            with patch("google.oauth2.credentials.Credentials") as mock_creds:
                 mock_creds.side_effect = Exception("Test error")
 
                 # Should raise the exception

@@ -8,20 +8,24 @@ This module provides a single, comprehensive Google OAuth integration supporting
 Replaces the previous fragmented gmail_config.py, google_auth.py, and google_setup_wizard.py
 """
 
+from __future__ import annotations
+
 import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import jwt
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
-from google.auth.transport.requests import Request as GoogleRequest
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import Flow
 from pydantic import BaseModel
 
 from mindroom.credentials import CredentialsManager
+
+if TYPE_CHECKING:
+    from google.auth.transport.requests import Request as GoogleRequest
+    from google.oauth2.credentials import Credentials
+    from google_auth_oauthlib.flow import Flow
 
 router = APIRouter(prefix="/api/google", tags=["google-integration"])
 
@@ -52,6 +56,32 @@ ENV_PATH = Path(__file__).parent.parent.parent.parent.parent / ".env"
 # Get configuration from environment
 BACKEND_PORT = os.getenv("BACKEND_PORT", "8765")
 REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", f"http://localhost:{BACKEND_PORT}/api/google/callback")
+
+
+def _ensure_google_packages() -> tuple[type[GoogleRequest], type[Credentials], type[Flow]]:
+    """Lazily import Google auth packages, auto-installing if needed."""
+    try:
+        from google.auth.transport.requests import Request as _GoogleRequest
+        from google.oauth2.credentials import Credentials as _Credentials
+        from google_auth_oauthlib.flow import Flow as _Flow
+    except ModuleNotFoundError:
+        from mindroom.tool_dependencies import auto_install_enabled, auto_install_tool_extra
+
+        disabled_hint = ""
+        if not auto_install_enabled():
+            disabled_hint = " Auto-install is disabled by MINDROOM_NO_AUTO_INSTALL_TOOLS."
+        if not auto_install_tool_extra("gmail"):
+            msg = (
+                "Google OAuth endpoints require the google-auth packages, but they are not installed."
+                f"{disabled_hint} Install them with: pip install 'mindroom[gmail]'"
+            )
+            raise ImportError(msg) from None
+
+        from google.auth.transport.requests import Request as _GoogleRequest
+        from google.oauth2.credentials import Credentials as _Credentials
+        from google_auth_oauthlib.flow import Flow as _Flow
+
+    return _GoogleRequest, _Credentials, _Flow
 
 
 class GoogleStatus(BaseModel):
@@ -96,8 +126,10 @@ def get_google_credentials() -> Credentials | None:
     if not token_data:
         return None
 
+    google_request_cls, credentials_cls, _ = _ensure_google_packages()
+
     try:
-        creds = Credentials(
+        creds = credentials_cls(
             token=token_data.get("token"),
             refresh_token=token_data.get("refresh_token"),
             token_uri=token_data.get("token_uri"),
@@ -108,7 +140,7 @@ def get_google_credentials() -> Credentials | None:
 
         # Refresh token if expired
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(GoogleRequest())
+            creds.refresh(google_request_cls())
             # Save refreshed credentials
             save_credentials(creds)
     except Exception:
@@ -237,10 +269,12 @@ async def connect() -> GoogleAuthUrl:
         )
 
     try:
+        _, _, flow_cls = _ensure_google_packages()
+
         # Create OAuth flow with all scopes
         # Use current environment variable for redirect URI to support multiple deployments
         current_redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", REDIRECT_URI)
-        flow = Flow.from_client_config(oauth_config, scopes=SCOPES, redirect_uri=current_redirect_uri)
+        flow = flow_cls.from_client_config(oauth_config, scopes=SCOPES, redirect_uri=current_redirect_uri)
 
         # Generate authorization URL
         auth_url, _ = flow.authorization_url(
@@ -250,6 +284,8 @@ async def connect() -> GoogleAuthUrl:
         )
 
         return GoogleAuthUrl(auth_url=auth_url)
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to start Google OAuth: {e!s}") from e
 
@@ -267,10 +303,12 @@ async def callback(request: Request) -> RedirectResponse:
         raise HTTPException(status_code=503, detail="OAuth not configured")
 
     try:
+        _, _, flow_cls = _ensure_google_packages()
+
         # Create OAuth flow and exchange code for tokens
         # Use current environment variable for redirect URI to support multiple deployments
         current_redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", REDIRECT_URI)
-        flow = Flow.from_client_config(oauth_config, scopes=SCOPES, redirect_uri=current_redirect_uri)
+        flow = flow_cls.from_client_config(oauth_config, scopes=SCOPES, redirect_uri=current_redirect_uri)
         flow.fetch_token(code=code)
 
         # Save credentials

@@ -26,10 +26,6 @@ dependencies = [
   "croniter>=6",
   "diskcache>=5.6.3",
   "fastapi[standard]>=0.116.1",
-  "google-api-python-client>=2.178",
-  "google-auth>=2.40.3",
-  "google-auth-httplib2>=0.2",
-  "google-auth-oauthlib>=1.2.2",
   "google-genai",
   "groq>=0.31",
   "httpx>=0.27",
@@ -441,6 +437,12 @@ lint.ignore = [
 ]
 lint.per-file-ignores.".github/scripts/*" = [
   "INP001", # Part of an implicit namespace package (standalone scripts)
+]
+lint.per-file-ignores."src/mindroom/api/google_integration.py" = [
+  "PLC0415", #`import` should be at the top-level of a file
+]
+lint.per-file-ignores."src/mindroom/custom_tools/*" = [
+  "PLC0415", #`import` should be at the top-level of a file
 ]
 lint.per-file-ignores."src/mindroom/tools/*" = [
   "PLC0415", #`import` should be at the top-level of a file"
