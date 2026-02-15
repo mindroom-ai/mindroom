@@ -527,12 +527,11 @@ mindroom config validate --path /path/to/config.yaml
 
 ### Core
 
-| Variable                    | Description                                    | Default                                     |
-| --------------------------- | ---------------------------------------------- | ------------------------------------------- |
-| `MINDROOM_CONFIG_PATH`      | Path to `config.yaml`                          | `./config.yaml` → `~/.mindroom/config.yaml` |
-| `MINDROOM_STORAGE_PATH`     | Data storage directory                         | `mindroom_data/` next to config             |
-| `MINDROOM_CONFIG_TEMPLATE`  | Template to seed config from (for containers)  | Same as config path                         |
-| `MINDROOM_ENABLE_STREAMING` | Stream responses via progressive message edits | `true`                                      |
+| Variable                   | Description                                   | Default                                     |
+| -------------------------- | --------------------------------------------- | ------------------------------------------- |
+| `MINDROOM_CONFIG_PATH`     | Path to `config.yaml`                         | `./config.yaml` → `~/.mindroom/config.yaml` |
+| `MINDROOM_STORAGE_PATH`    | Data storage directory                        | `mindroom_data/` next to config             |
+| `MINDROOM_CONFIG_TEMPLATE` | Template to seed config from (for containers) | Same as config path                         |
 
 ### Matrix
 
@@ -615,6 +614,7 @@ router:
 # Default settings for all agents (optional)
 defaults:
   markdown: true                   # Default: true
+  enable_streaming: true           # Default: true (stream responses via message edits)
   show_stop_button: false          # Default: false (global only, cannot be overridden per-agent)
   learning: true                   # Default: true
   learning_mode: always            # Default: always (or agentic)
@@ -2497,12 +2497,13 @@ MindRoom uses `matrix-nio` for Matrix communication with SSL context handling an
 
 ### Environment Variables
 
-| Variable                    | Default                 | Description                              |
-| --------------------------- | ----------------------- | ---------------------------------------- |
-| `MATRIX_HOMESERVER`         | `http://localhost:8008` | Matrix homeserver URL                    |
-| `MATRIX_SERVER_NAME`        | (from homeserver)       | Federation server name                   |
-| `MATRIX_SSL_VERIFY`         | `true`                  | Set to `false` for dev/self-signed certs |
-| `MINDROOM_ENABLE_STREAMING` | `true`                  | Enable message streaming via edits       |
+| Variable             | Default                 | Description                              |
+| -------------------- | ----------------------- | ---------------------------------------- |
+| `MATRIX_HOMESERVER`  | `http://localhost:8008` | Matrix homeserver URL                    |
+| `MATRIX_SERVER_NAME` | (from homeserver)       | Federation server name                   |
+| `MATRIX_SSL_VERIFY`  | `true`                  | Set to `false` for dev/self-signed certs |
+
+Streaming behavior is configured in `config.yaml` with `defaults.enable_streaming` (default: `true`).
 
 ## Agent Users
 
@@ -3155,17 +3156,18 @@ docker compose up -d
 
 Key environment variables (set in `.env` or pass directly):
 
-| Variable                    | Description                                | Default                 |
-| --------------------------- | ------------------------------------------ | ----------------------- |
-| `MATRIX_HOMESERVER`         | Matrix server URL                          | `http://localhost:8008` |
-| `MATRIX_SSL_VERIFY`         | Verify SSL certificates                    | `true`                  |
-| `MATRIX_SERVER_NAME`        | Server name for federation (optional)      | -                       |
-| `MINDROOM_STORAGE_PATH`     | Data storage directory                     | Relative to config file |
-| `LOG_LEVEL`                 | Logging level                              | `INFO`                  |
-| `MINDROOM_CONFIG_PATH`      | Path to config.yaml                        | `./config.yaml`         |
-| `MINDROOM_ENABLE_STREAMING` | Enable streaming responses                 | `true`                  |
-| `ANTHROPIC_API_KEY`         | Anthropic API key (if using Claude models) | -                       |
-| `OPENAI_API_KEY`            | OpenAI API key (if using OpenAI models)    | -                       |
+| Variable                | Description                                | Default                 |
+| ----------------------- | ------------------------------------------ | ----------------------- |
+| `MATRIX_HOMESERVER`     | Matrix server URL                          | `http://localhost:8008` |
+| `MATRIX_SSL_VERIFY`     | Verify SSL certificates                    | `true`                  |
+| `MATRIX_SERVER_NAME`    | Server name for federation (optional)      | -                       |
+| `MINDROOM_STORAGE_PATH` | Data storage directory                     | Relative to config file |
+| `LOG_LEVEL`             | Logging level                              | `INFO`                  |
+| `MINDROOM_CONFIG_PATH`  | Path to config.yaml                        | `./config.yaml`         |
+| `ANTHROPIC_API_KEY`     | Anthropic API key (if using Claude models) | -                       |
+| `OPENAI_API_KEY`        | OpenAI API key (if using OpenAI models)    | -                       |
+
+Streaming responses are configured in `config.yaml` via `defaults.enable_streaming` (default: `true`).
 
 ## Building from Source
 

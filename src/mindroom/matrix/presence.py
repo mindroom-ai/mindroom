@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import nio
 
-from mindroom.constants import ENABLE_STREAMING, ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -139,6 +139,8 @@ async def should_use_streaming(
     client: nio.AsyncClient,
     room_id: str,
     requester_user_id: str | None = None,
+    *,
+    enable_streaming: bool,
 ) -> bool:
     """Determine if streaming should be used based on user presence.
 
@@ -150,13 +152,14 @@ async def should_use_streaming(
         client: The Matrix client
         room_id: The room where the interaction is happening
         requester_user_id: The user who sent the message (optional)
+        enable_streaming: Whether streaming is enabled in config
 
     Returns:
         True if streaming should be used, False otherwise
 
     """
     # Check if streaming is globally disabled
-    if not ENABLE_STREAMING:
+    if not enable_streaming:
         return False
 
     # If no requester specified, we can't check presence, default to streaming
