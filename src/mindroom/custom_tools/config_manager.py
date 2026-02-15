@@ -12,7 +12,7 @@ from agno.tools import Toolkit
 
 from mindroom.commands import get_command_help
 from mindroom.config import AgentConfig, AgentLearningMode, Config, TeamConfig
-from mindroom.constants import DEFAULT_AGENTS_CONFIG
+from mindroom.constants import CONFIG_PATH
 from mindroom.logging_config import get_logger
 from mindroom.tools_metadata import TOOL_METADATA, ToolCategory, ToolStatus
 
@@ -47,7 +47,7 @@ class ConfigManagerTools(Toolkit):
             config_path: Optional path to configuration file
 
         """
-        self.config_path = config_path or DEFAULT_AGENTS_CONFIG
+        self.config_path = config_path or CONFIG_PATH
         self._mindroom_docs: str | None = None
         self._help_text: str | None = None
 

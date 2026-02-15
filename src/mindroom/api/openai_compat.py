@@ -35,7 +35,7 @@ from mindroom.ai import (
     stream_agent_response,
 )
 from mindroom.config import Config
-from mindroom.constants import DEFAULT_AGENTS_CONFIG, ROUTER_AGENT_NAME, STORAGE_PATH_OBJ
+from mindroom.constants import CONFIG_PATH, ROUTER_AGENT_NAME, STORAGE_PATH_OBJ
 from mindroom.knowledge import get_knowledge_manager, initialize_knowledge_managers
 from mindroom.knowledge_utils import resolve_agent_knowledge
 from mindroom.logging_config import get_logger
@@ -76,7 +76,7 @@ def _load_config() -> tuple[Config, Path]:
     Loads directly from Config.from_yaml rather than sharing with main.py's
     loader to avoid circular imports (main.py imports this router).
     """
-    return Config.from_yaml(DEFAULT_AGENTS_CONFIG), DEFAULT_AGENTS_CONFIG
+    return Config.from_yaml(CONFIG_PATH), CONFIG_PATH
 
 
 # ---------------------------------------------------------------------------

@@ -27,7 +27,7 @@ from mindroom.api.schedules import router as schedules_router
 from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
 from mindroom.config import Config
-from mindroom.constants import DEFAULT_AGENTS_CONFIG, DEFAULT_CONFIG_TEMPLATE, safe_replace
+from mindroom.constants import CONFIG_PATH, CONFIG_TEMPLATE_PATH, safe_replace
 from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.tool_dependencies import auto_install_enabled, auto_install_tool_extra
 
@@ -82,10 +82,6 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"],
 )
-
-# Resolve configurable config paths
-CONFIG_PATH = DEFAULT_AGENTS_CONFIG
-CONFIG_TEMPLATE_PATH = DEFAULT_CONFIG_TEMPLATE
 
 
 def load_runtime_config() -> tuple[Config, Path]:

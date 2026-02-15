@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from .constants import DEFAULT_AGENTS_CONFIG, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, safe_replace
+from .constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, safe_replace
 from .logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -365,7 +365,7 @@ class Config(BaseModel):
     @classmethod
     def from_yaml(cls, config_path: Path | None = None) -> Config:
         """Create a Config instance from YAML data."""
-        path = config_path or DEFAULT_AGENTS_CONFIG
+        path = config_path or CONFIG_PATH
 
         if not path.exists():
             msg = f"Agent configuration file not found: {path}"
@@ -499,10 +499,10 @@ class Config(BaseModel):
         """Save the config to a YAML file, excluding None values.
 
         Args:
-            config_path: Path to save the config to. If None, uses DEFAULT_AGENTS_CONFIG.
+            config_path: Path to save the config to. If None, uses CONFIG_PATH.
 
         """
-        path = config_path or DEFAULT_AGENTS_CONFIG
+        path = config_path or CONFIG_PATH
         config_dict = self.model_dump(exclude_none=True)
         path_obj = Path(path)
         path_obj.parent.mkdir(parents=True, exist_ok=True)

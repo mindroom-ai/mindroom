@@ -17,7 +17,7 @@ from rich.console import Console
 from rich.syntax import Syntax
 
 from mindroom.config import Config
-from mindroom.constants import DEFAULT_AGENTS_CONFIG, config_search_locations, env_key_for_provider
+from mindroom.constants import CONFIG_PATH, config_search_locations, env_key_for_provider
 
 console = Console()
 
@@ -40,7 +40,7 @@ def _resolve_config_path(path: Path | None) -> Path:
     """Resolve the config file path from explicit argument or default."""
     if path is not None:
         return path.expanduser().resolve()
-    return Path(DEFAULT_AGENTS_CONFIG).resolve()
+    return Path(CONFIG_PATH).resolve()
 
 
 def _get_editor() -> str:

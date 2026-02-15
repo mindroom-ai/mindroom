@@ -10,7 +10,7 @@ from importlib import util
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .constants import DEFAULT_AGENTS_CONFIG
+from .constants import CONFIG_PATH
 from .logging_config import get_logger
 from .skills import set_plugin_skill_roots
 
@@ -83,7 +83,7 @@ def _resolve_plugin_root(plugin_path: str, config_path: Path | None) -> Path:
     if path.is_absolute():
         return path
 
-    base = (config_path or DEFAULT_AGENTS_CONFIG).expanduser().resolve()
+    base = (config_path or CONFIG_PATH).expanduser().resolve()
     relative = (base.parent / path).resolve()
     if relative.exists():
         return relative

@@ -10,7 +10,7 @@ import yaml
 from pydantic import ValidationError
 
 from .config import Config
-from .constants import DEFAULT_AGENTS_CONFIG
+from .constants import CONFIG_PATH
 from .logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -165,7 +165,7 @@ async def handle_config_command(args_text: str, config_path: Path | None = None)
 
     """
     operation, args = parse_config_args(args_text)
-    path = config_path or DEFAULT_AGENTS_CONFIG
+    path = config_path or CONFIG_PATH
 
     # Load current config
     config = Config.from_yaml(path)
@@ -292,7 +292,7 @@ async def apply_config_change(
         Success or error message
 
     """
-    path = config_file_path or DEFAULT_AGENTS_CONFIG
+    path = config_file_path or CONFIG_PATH
 
     try:
         # Load the current configuration

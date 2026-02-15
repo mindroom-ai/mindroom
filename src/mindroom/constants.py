@@ -59,23 +59,23 @@ def find_config() -> Path:
     return _CONFIG_SEARCH_PATHS[0]  # default to ./config.yaml for creation
 
 
-DEFAULT_AGENTS_CONFIG = find_config()
+CONFIG_PATH = find_config()
 
 # Also load .env from the config directory so that API keys placed next to the
 # config file (e.g. ~/.mindroom/.env) are picked up even when CWD is elsewhere.
 # override=False (the default) means real env vars and CWD .env take precedence.
-_config_dotenv = DEFAULT_AGENTS_CONFIG.parent / ".env"
+_config_dotenv = CONFIG_PATH.parent / ".env"
 if _config_dotenv.is_file():
     load_dotenv(_config_dotenv)
 
 # Optional template path used to seed the writable config file if it does not
-# exist yet. Defaults to the same location as DEFAULT_AGENTS_CONFIG so the
+# exist yet. Defaults to the same location as CONFIG_PATH so the
 # behaviour is unchanged when no overrides are provided.
 _CONFIG_TEMPLATE_ENV = os.getenv("MINDROOM_CONFIG_TEMPLATE")
-DEFAULT_CONFIG_TEMPLATE = Path(_CONFIG_TEMPLATE_ENV).expanduser() if _CONFIG_TEMPLATE_ENV else DEFAULT_AGENTS_CONFIG
+CONFIG_TEMPLATE_PATH = Path(_CONFIG_TEMPLATE_ENV).expanduser() if _CONFIG_TEMPLATE_ENV else CONFIG_PATH
 
 _STORAGE_PATH_ENV = os.getenv("MINDROOM_STORAGE_PATH")
-STORAGE_PATH = _STORAGE_PATH_ENV or str(DEFAULT_AGENTS_CONFIG.parent / "mindroom_data")
+STORAGE_PATH = _STORAGE_PATH_ENV or str(CONFIG_PATH.parent / "mindroom_data")
 STORAGE_PATH_OBJ = Path(STORAGE_PATH)
 
 # Specific files and directories
