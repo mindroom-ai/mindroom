@@ -518,6 +518,126 @@ class TestThreadingBehavior:
         mock_fetch.assert_awaited_once_with(bot.client, room.room_id, "$thread_root:localhost")
 
     @pytest.mark.asyncio
+    async def test_extract_context_preserves_plain_replies_across_thread_reentries(self, bot: AgentBot) -> None:
+        """Plain replies should remain in context even when chain re-enters threaded events."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "Newest plain reply from non-thread client",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$p2:localhost"}},
+                },
+                "event_id": "$incoming:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567896,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        bot.client.room_get_event = AsyncMock(
+            side_effect=[
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "Second plain reply",
+                            "msgtype": "m.text",
+                            "m.relates_to": {"m.in_reply_to": {"event_id": "$t2:localhost"}},
+                        },
+                        "event_id": "$p2:localhost",
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 1234567895,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "Thread reply after plain interleave",
+                            "msgtype": "m.text",
+                            "m.relates_to": {
+                                "rel_type": "m.thread",
+                                "event_id": "$root:localhost",
+                                "m.in_reply_to": {"event_id": "$p1:localhost"},
+                            },
+                        },
+                        "event_id": "$t2:localhost",
+                        "sender": "@mindroom_general:localhost",
+                        "origin_server_ts": 1234567894,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "First plain interleaved reply",
+                            "msgtype": "m.text",
+                            "m.relates_to": {"m.in_reply_to": {"event_id": "$t1:localhost"}},
+                        },
+                        "event_id": "$p1:localhost",
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 1234567893,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "First threaded reply",
+                            "msgtype": "m.text",
+                            "m.relates_to": {
+                                "rel_type": "m.thread",
+                                "event_id": "$root:localhost",
+                                "m.in_reply_to": {"event_id": "$root:localhost"},
+                            },
+                        },
+                        "event_id": "$t1:localhost",
+                        "sender": "@mindroom_general:localhost",
+                        "origin_server_ts": 1234567892,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {"body": "Thread root", "msgtype": "m.text"},
+                        "event_id": "$root:localhost",
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 1234567891,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+            ],
+        )
+
+        thread_history = [
+            {"event_id": "$root:localhost", "body": "Thread root"},
+            {"event_id": "$t1:localhost", "body": "First threaded reply"},
+            {"event_id": "$t2:localhost", "body": "Thread reply after plain interleave"},
+        ]
+        with patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=thread_history)) as mock_fetch:
+            context = await bot._extract_message_context(room, event)
+
+        assert context.is_thread is True
+        assert context.thread_id == "$root:localhost"
+        assert [msg["event_id"] for msg in context.thread_history] == [
+            "$root:localhost",
+            "$t1:localhost",
+            "$t2:localhost",
+            "$p1:localhost",
+            "$p2:localhost",
+        ]
+        mock_fetch.assert_awaited_once_with(bot.client, room.room_id, "$root:localhost")
+
+    @pytest.mark.asyncio
     async def test_command_as_reply_doesnt_cause_thread_error(self, tmp_path: Path) -> None:
         """Test that commands sent as replies don't cause threading errors."""
         # Create a router bot to handle commands
