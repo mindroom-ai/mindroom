@@ -34,8 +34,6 @@ from mindroom.tool_dependencies import auto_install_enabled, auto_install_tool_e
 if TYPE_CHECKING:
     from supabase import Client as SupabaseClient
 
-# .env is already loaded by mindroom.constants (CWD + config directory).
-
 
 async def _watch_config(stop_event: asyncio.Event) -> None:
     """Watch config.yaml for changes using watchfiles."""
