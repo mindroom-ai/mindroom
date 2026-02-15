@@ -344,7 +344,7 @@ class TestDoctor:
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_CONFIG)
         storage = tmp_path / "storage"
-        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
         monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(storage))
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
