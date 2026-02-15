@@ -1225,16 +1225,17 @@ class AgentBot:
         self,
         room_id: str,
         reply_to_event_id: str,
-    ) -> tuple[str, list[dict[str, Any]], bool]:
+    ) -> tuple[str, list[dict[str, Any]], bool, bool]:
         """Resolve reply-chain context for clients that don't send thread relations.
 
         Returns:
-            Tuple of (conversation_root_id, context_history, points_to_thread)
+            Tuple of (conversation_root_id, context_history, points_to_thread, is_full_thread_history)
 
         """
         assert self.client is not None
 
         chain_history: list[dict[str, Any]] = []
+        thread_root_id: str | None = None
         current_event_id = reply_to_event_id
         seen_event_ids: set[str] = set()
 
@@ -1254,18 +1255,16 @@ class AgentBot:
             target_event = response.event
             target_info = EventInfo.from_event(target_event.source)
 
-            # If any replied-to event is already in a thread, switch to that full thread context.
             if target_info.thread_id:
-                # Keep resolved plain-reply context and let callers merge with thread history.
-                chain_history.reverse()
-                return target_info.thread_id, chain_history, True
+                # Continue traversing because interleaved plain replies may appear before earlier thread events.
+                thread_root_id = thread_root_id or target_info.thread_id
 
             # Some clients reply directly to the thread root without rel_type=m.thread.
             # Detect this by checking whether the replied-to event already has thread messages.
-            if not target_info.reply_to_event_id and not chain_history:
+            if not target_info.reply_to_event_id and not chain_history and not thread_root_id:
                 thread_history = await fetch_thread_history(self.client, room_id, current_event_id)
                 if any(msg.get("event_id") != current_event_id for msg in thread_history):
-                    return current_event_id, thread_history, True
+                    return current_event_id, thread_history, True, True
 
             chain_history.append(AgentBot._event_to_history_message(target_event))
 
@@ -1278,12 +1277,14 @@ class AgentBot:
             current_event_id = next_event_id
 
         if not chain_history:
-            return reply_to_event_id, [], False
+            return reply_to_event_id, [], False, False
 
         # Fetches walk from newest->oldest, but consumers expect chronological history.
         chain_history.reverse()
+        if thread_root_id:
+            return thread_root_id, chain_history, True, False
         root_event_id = str(chain_history[0].get("event_id", reply_to_event_id))
-        return root_event_id, chain_history, False
+        return root_event_id, chain_history, False, False
 
     async def _derive_conversation_context(
         self,
@@ -1300,13 +1301,17 @@ class AgentBot:
         if not event_info.reply_to_event_id:
             return False, None, []
 
-        context_root_id, chain_history, points_to_thread = await self._resolve_reply_chain_context(
+        (
+            context_root_id,
+            chain_history,
+            points_to_thread,
+            is_full_thread_history,
+        ) = await self._resolve_reply_chain_context(
             room_id,
             event_info.reply_to_event_id,
         )
         if points_to_thread:
-            # Root-direct lookup already returned full thread history, starting at the thread root.
-            if chain_history and chain_history[0].get("event_id") == context_root_id:
+            if is_full_thread_history:
                 return True, context_root_id, chain_history
 
             thread_history = await fetch_thread_history(self.client, room_id, context_root_id)
