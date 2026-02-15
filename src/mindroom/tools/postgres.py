@@ -21,6 +21,14 @@ if TYPE_CHECKING:
     icon_color="text-blue-700",
     config_fields=[
         ConfigField(
+            name="connection",
+            label="Connection",
+            type="text",
+            required=False,
+            default=None,
+            description="Programmatic only: pass an existing psycopg connection object (not usable from UI).",
+        ),
+        ConfigField(
             name="host",
             label="Host",
             type="url",
