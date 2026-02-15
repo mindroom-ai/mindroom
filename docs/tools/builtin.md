@@ -34,7 +34,6 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | :lucide-search: | `duckduckgo` | DuckDuckGo web search | - |
 | :lucide-search: | `googlesearch` | Google search via WebSearch backend | - |
 | :lucide-search: | `baidusearch` | Baidu search | - |
-| :lucide-search: | `bravesearch` | Brave Search web search API | `api_key` |
 | :lucide-search: | `tavily` | Real-time web search API | `api_key` |
 | :lucide-search: | `exa` | AI-powered web search and research | `api_key` |
 | :lucide-search: | `serpapi` | Search API aggregator | `api_key` |
