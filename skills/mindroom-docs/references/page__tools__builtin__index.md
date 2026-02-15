@@ -30,7 +30,6 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | :lucide-search: | `duckduckgo`   | DuckDuckGo web search               | -               |
 | :lucide-search: | `googlesearch` | Google search via WebSearch backend | -               |
 | :lucide-search: | `baidusearch`  | Baidu search                        | -               |
-| :lucide-search: | `bravesearch`  | Brave Search web search API         | `api_key`       |
 | :lucide-search: | `tavily`       | Real-time web search API            | `api_key`       |
 | :lucide-search: | `exa`          | AI-powered web search and research  | `api_key`       |
 | :lucide-search: | `serpapi`      | Search API aggregator               | `api_key`       |
@@ -116,10 +115,11 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 
 ## Calendar & Scheduling
 
-| Icon              | Tool              | Description                | Config Required |
-| ----------------- | ----------------- | -------------------------- | --------------- |
-| :lucide-calendar: | `google_calendar` | View and schedule meetings | Google OAuth    |
-| :lucide-calendar: | `cal_com`         | Cal.com scheduling         | `api_key`       |
+| Icon              | Tool              | Description                                          | Config Required |
+| ----------------- | ----------------- | ---------------------------------------------------- | --------------- |
+| :lucide-calendar: | `google_calendar` | View and schedule meetings                           | Google OAuth    |
+| :lucide-calendar: | `cal_com`         | Cal.com scheduling                                   | `api_key`       |
+| :lucide-calendar: | `scheduler`       | Schedule, edit, list, and cancel tasks and reminders | -               |
 
 ## Data & Business
 
@@ -170,10 +170,11 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 
 ## Memory & Storage
 
-| Icon              | Tool   | Description              | Config Required                |
-| ----------------- | ------ | ------------------------ | ------------------------------ |
-| :lucide-database: | `mem0` | Persistent memory system | `api_key` (optional for cloud) |
-| :lucide-database: | `zep`  | Conversation memory      | `api_key`                      |
+| Icon              | Tool     | Description                                          | Config Required                |
+| ----------------- | -------- | ---------------------------------------------------- | ------------------------------ |
+| :lucide-database: | `memory` | Explicitly store and search agent memories on demand | -                              |
+| :lucide-database: | `mem0`   | Persistent memory system                             | `api_key` (optional for cloud) |
+| :lucide-database: | `zep`    | Conversation memory                                  | `api_key`                      |
 
 ## Custom & Config
 

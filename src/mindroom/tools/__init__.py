@@ -20,7 +20,6 @@ from .aws_ses import aws_ses_tools
 from .baidusearch import baidusearch_tools
 from .bitbucket import bitbucket_tools
 from .brandfetch import brandfetch_tools
-from .bravesearch import bravesearch_tools
 from .brightdata import brightdata_tools
 from .browserbase import browserbase_tools
 from .cal_com import cal_com_tools
@@ -131,7 +130,6 @@ __all__ = [
     "baidusearch_tools",
     "bitbucket_tools",
     "brandfetch_tools",
-    "bravesearch_tools",
     "brightdata_tools",
     "browserbase_tools",
     "cal_com_tools",

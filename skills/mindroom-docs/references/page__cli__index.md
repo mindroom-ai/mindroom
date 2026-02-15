@@ -13,8 +13,10 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 ```
  Usage: root [OPTIONS] COMMAND [ARGS]...
 
- Mindroom: Multi-agent Matrix bot system
+ MindRoom - AI agents that live in Matrix
 
+ Quick start:   mindroom config init   Create a starter config   mindroom run
+ Start the system
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --install-completion          Install completion for the current shell.                │
@@ -23,9 +25,10 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │ --help                        Show this message and exit.                              │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ version    Show the current version of Mindroom.                                       │
-│ validate   Validate the configuration file.                                            │
-│ run        Run the mindroom multi-agent system.                                        │
+│ version   Show the current version of Mindroom.                                        │
+│ run       Run the mindroom multi-agent system.                                         │
+│ doctor    Check your environment for common issues.                                    │
+│ config    Manage MindRoom configuration files.                                         │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -55,15 +58,23 @@ Start MindRoom with your configuration.
 
  This command starts the multi-agent bot system which automatically: - Creates all
  necessary user and agent accounts - Creates all rooms defined in config.yaml - Manages
- agent room memberships
+ agent room memberships - Starts the dashboard API server (disable with --no-api)
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --log-level     -l      TEXT  Set the logging level (DEBUG, INFO, WARNING, ERROR)      │
-│                               [default: INFO]                                          │
-│ --storage-path  -s      PATH  Base directory for persistent MindRoom data (state,      │
-│                               sessions, tracking)                                      │
-│                               [default: mindroom_data]                                 │
-│ --help                        Show this message and exit.                              │
+│ --log-level     -l              TEXT     Set the logging level (DEBUG, INFO, WARNING,  │
+│                                          ERROR)                                        │
+│                                          [default: INFO]                               │
+│ --storage-path  -s              PATH     Base directory for persistent MindRoom data   │
+│                                          (state, sessions, tracking)                   │
+│                                          [default: mindroom_data]                      │
+│ --api               --no-api             Start the dashboard API server alongside the  │
+│                                          bot                                           │
+│                                          [default: api]                                │
+│ --api-port                      INTEGER  Port for the dashboard API server             │
+│                                          [default: 8765]                               │
+│ --api-host                      TEXT     Host for the dashboard API server             │
+│                                          [default: 0.0.0.0]                            │
+│ --help                                   Show this message and exit.                   │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 

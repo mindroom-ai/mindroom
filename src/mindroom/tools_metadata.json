@@ -1215,7 +1215,7 @@
       "dependencies": [
         "agno",
         "pydantic",
-        "yaml"
+        "pyyaml"
       ],
       "description": "Build and manage MindRoom agents with expert knowledge of the system",
       "display_name": "Config Manager",
@@ -3668,6 +3668,17 @@
       "config_fields": [
         {
           "default": null,
+          "description": "Programmatic only: pass an existing psycopg connection object (not usable from UI).",
+          "label": "Connection",
+          "name": "connection",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
           "description": "PostgreSQL server hostname",
           "label": "Host",
           "name": "host",
@@ -3734,7 +3745,7 @@
         }
       ],
       "dependencies": [
-        "psycopg-binary"
+        "psycopg"
       ],
       "description": "Query PostgreSQL databases - list tables, describe schemas, run SQL queries, and export data",
       "display_name": "PostgreSQL",
@@ -6626,68 +6637,6 @@
       "icon": "FaPalette",
       "icon_color": "text-blue-500",
       "name": "brandfetch",
-      "setup_type": "api_key",
-      "status": "requires_config"
-    },
-    {
-      "auth_provider": null,
-      "category": "research",
-      "config_fields": [
-        {
-          "default": null,
-          "description": "API key from Brave Search",
-          "label": "API Key",
-          "name": "api_key",
-          "options": null,
-          "placeholder": "Brave Search API key",
-          "required": true,
-          "type": "password",
-          "validation": null
-        },
-        {
-          "default": null,
-          "description": null,
-          "label": "Fixed Max Results",
-          "name": "fixed_max_results",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "number",
-          "validation": null
-        },
-        {
-          "default": null,
-          "description": null,
-          "label": "Fixed Language",
-          "name": "fixed_language",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": null,
-          "label": "All",
-          "name": "all",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        }
-      ],
-      "dependencies": [
-        "brave-search"
-      ],
-      "description": "Search the web using Brave Search API",
-      "display_name": "Brave Search",
-      "docs_url": "https://docs.agno.com/tools/toolkits/search/bravesearch",
-      "helper_text": "Get a free API key from [Brave Search API](https://brave.com/search/api/)",
-      "icon": "SiBrave",
-      "icon_color": "text-orange-500",
-      "name": "bravesearch",
       "setup_type": "api_key",
       "status": "requires_config"
     },

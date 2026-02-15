@@ -18,7 +18,7 @@ from agno.models.openrouter import OpenRouter
 from agno.run.agent import RunContentEvent, RunErrorEvent, RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
 
 from .agents import create_agent
-from .constants import ENABLE_AI_CACHE
+from .constants import ENABLE_AI_CACHE, PROVIDER_ENV_KEYS
 from .credentials import get_credentials_manager
 from .credentials_sync import get_api_key_for_provider, get_ollama_host
 from .error_handling import get_user_friendly_error_message
@@ -83,17 +83,7 @@ def _set_api_key_env_var(provider: str) -> None:
         provider: Provider name (e.g., 'openai', 'anthropic')
 
     """
-    # Map provider names to environment variable names
-    env_vars = {
-        "openai": "OPENAI_API_KEY",
-        "anthropic": "ANTHROPIC_API_KEY",
-        "openrouter": "OPENROUTER_API_KEY",
-        "gemini": "GOOGLE_API_KEY",
-        "google": "GOOGLE_API_KEY",
-        "cerebras": "CEREBRAS_API_KEY",
-        "deepseek": "DEEPSEEK_API_KEY",
-        "groq": "GROQ_API_KEY",
-    }
+    env_vars = {**PROVIDER_ENV_KEYS, "gemini": PROVIDER_ENV_KEYS["google"]}
 
     if provider not in env_vars:
         return

@@ -1,5 +1,16 @@
 # mindroom
 
+[![PyPI](https://img.shields.io/pypi/v/mindroom)](https://pypi.org/project/mindroom/)
+[![Python](https://img.shields.io/pypi/pyversions/mindroom)](https://pypi.org/project/mindroom/)
+[![Tests](https://img.shields.io/github/actions/workflow/status/mindroom-ai/mindroom/pytest.yml?label=tests)](https://github.com/mindroom-ai/mindroom/actions/workflows/pytest.yml)
+[![Build](https://img.shields.io/github/actions/workflow/status/mindroom-ai/mindroom/build-mindroom.yml?label=build)](https://github.com/mindroom-ai/mindroom/actions/workflows/build-mindroom.yml)
+[![Docs](https://img.shields.io/badge/docs-mindroom.chat-blue)](https://docs.mindroom.chat)
+[![License](https://img.shields.io/github/license/mindroom-ai/mindroom)](https://github.com/mindroom-ai/mindroom/blob/main/LICENSE)
+[![Downloads](https://img.shields.io/pypi/dm/mindroom)](https://pypi.org/project/mindroom/)
+[![GitHub](https://img.shields.io/badge/github-mindroom--ai%2Fmindroom-blue?logo=github)](https://github.com/mindroom-ai/mindroom)
+
+<img src="https://raw.githubusercontent.com/mindroom-ai/mindroom/main/frontend/public/brain-logo.svg" alt="MindRoom Logo" align="right" style="width: 150px;" />
+
 **Your AI is trapped in apps. We set it free.**
 
 AI agents that learn who you are shouldn't forget everything when you switch apps. MindRoom agents follow you everywhere—Slack, Telegram, Discord, WhatsApp—with persistent memory intact.
@@ -104,7 +115,6 @@ Writer: I'll compile everything into an executive summary...
 ### 🧠 Dual Memory System
 - **Agent Memory**: Each agent remembers conversations, preferences, and patterns across all platforms
 - **Room Memory**: Contextual knowledge that stays within specific rooms (work projects, personal notes)
-- Tags for sharing memories across related threads
 
 ### 🤝 Multi-Agent Collaboration
 ```
@@ -132,7 +142,7 @@ Gmail, GitHub, Spotify, Home Assistant, Google Drive, Reddit, weather services, 
 ### 📅 Automation & Scheduling
 - Daily check-ins from your mindfulness agent
 - Scheduled reports and summaries
-- Event-based and conditional triggers
+- Event-driven workflows (conditional requests converted to polling schedules)
 - Background tasks with human escalation
 
 ## Who This Is For
@@ -161,7 +171,7 @@ uv sync --all-extras
 
 ```bash
 # Terminal 1: Start backend (agents + API)
-./run-backend.sh
+uv run mindroom run
 
 # Terminal 2: Start frontend (optional, for web UI)
 ./run-frontend.sh

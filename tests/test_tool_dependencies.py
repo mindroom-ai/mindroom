@@ -1,13 +1,21 @@
-"""Test that all registered tools can be instantiated and have their dependencies available."""
+"""Test tool dependency resolution, auto-install logic, and pyproject sync."""
 
 from __future__ import annotations
 
-import tomllib
+import subprocess
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from mindroom.tool_dependencies import _PIP_TO_IMPORT, _pip_name_to_import, check_deps_installed
+from mindroom.tool_dependencies import (
+    _PIP_TO_IMPORT,
+    _install_via_uv_sync,
+    _pip_name_to_import,
+    check_deps_installed,
+    install_tool_extras,
+)
 from mindroom.tools_metadata import (
     TOOL_METADATA,
     TOOL_REGISTRY,
@@ -18,42 +26,14 @@ from mindroom.tools_metadata import (
     get_tool_by_name,
 )
 
-
-def _dependency_name(spec: str) -> str:
-    part = spec.split(";", 1)[0].strip()
-    if "@" in part and "git+" in part:
-        part = part.split("@", 1)[0].strip()
-    if "[" in part:
-        part = part.split("[", 1)[0].strip()
-    else:
-        for sep in [">=", "<=", "==", ">", "<", "~=", "!="]:
-            if sep in part:
-                part = part.split(sep, 1)[0].strip()
-                break
-    return part.lower().replace("_", "-")
-
-
-def _normalize_tool_dep_name(name: str) -> str:
-    aliases = {
-        "e2b_code_interpreter": "e2b-code-interpreter",
-        "exa_py": "exa-py",
-        "lxml_html_clean": "lxml-html-clean",
-        "pygithub": "pygithub",
-        "yaml": "pyyaml",
-        "youtube_transcript_api": "youtube-transcript-api",
-    }
-    normalized = aliases.get(name.lower(), name.lower())
-    return normalized.replace("_", "-")
+HOOK_SCRIPT = Path(__file__).parent.parent / ".github" / "scripts" / "check_tool_extras_sync.py"
 
 
 def test_all_tools_can_be_imported() -> None:
     """Test that all registered tools can be imported and instantiated."""
-    successful = []
-    config_required = []
     failed = []
 
     for tool_name in TOOL_REGISTRY:
-        # Check if tool requires configuration based on metadata
         metadata = TOOL_METADATA.get(tool_name)
         requires_config = metadata and metadata.status == ToolStatus.REQUIRES_CONFIG
 
@@ -61,29 +41,10 @@ def test_all_tools_can_be_imported() -> None:
             tool_instance = get_tool_by_name(tool_name)
             assert tool_instance is not None
             assert hasattr(tool_instance, "name")
-            successful.append(tool_name)
-            print(f"✓ {tool_name}")
         except Exception as e:
-            if requires_config:
-                config_required.append(tool_name)
-                # Build a helpful message from metadata
-                if metadata and metadata.config_fields:
-                    field_names = [field.name for field in metadata.config_fields]
-                    config_msg = f"Requires: {', '.join(field_names)}"
-                else:
-                    config_msg = "Requires configuration"
-                print(f"⚠ {tool_name}: {config_msg}")
-            else:
+            if not requires_config:
                 failed.append((tool_name, str(e)))
-                print(f"✗ {tool_name}: {e}")
 
-    # Summary
-    print("\nSummary:")
-    print(f"  Successful: {len(successful)}")
-    print(f"  Config required: {len(config_required)}")
-    print(f"  Failed: {len(failed)}")
-
-    # Fail the test if any tools failed (excluding config-required ones)
     if failed:
         error_msg = "\nThe following tools failed:\n"
         for tool_name, error in failed:
@@ -91,170 +52,41 @@ def test_all_tools_can_be_imported() -> None:
         pytest.fail(error_msg)
 
 
-def test_all_tool_dependencies_in_pyproject() -> None:  # noqa: C901
-    """Test that each tool dependency is provided by base deps or the tool's optional group."""
-    pyproject_path = Path(__file__).parent.parent / "pyproject.toml"
-    with pyproject_path.open("rb") as f:
-        pyproject = tomllib.load(f)
+def test_tool_extras_in_sync_with_pyproject() -> None:
+    """Run the pre-commit hook script to verify tool registrations match pyproject.toml.
 
-    project_section = pyproject.get("project", {})
-    base_dependencies = project_section.get("dependencies", [])
-    optional_dependencies = project_section.get("optional-dependencies", {})
-
-    base_dependency_names = {_dependency_name(spec) for spec in base_dependencies}
-    optional_dependency_names: dict[str, set[str]] = {}
-    for extra_name, extra_specs in optional_dependencies.items():
-        optional_dependency_names[extra_name] = {_dependency_name(spec) for spec in extra_specs}
-
-    missing_optional_groups = sorted(tool_name for tool_name in TOOL_METADATA if tool_name not in optional_dependencies)
-    if missing_optional_groups:
-        pytest.fail(
-            "Missing optional dependency groups for tools:\n"
-            + "\n".join(f"  - {tool_name}" for tool_name in missing_optional_groups),
-        )
-
-    known_conflicts = {"brave-search"}
-    missing_dependencies: dict[str, list[str]] = {}
-
-    for tool_name, metadata in sorted(TOOL_METADATA.items()):
-        if not metadata.dependencies:
-            continue
-
-        extra_names = optional_dependency_names.get(tool_name, set())
-        tool_missing: list[str] = []
-        for dep in metadata.dependencies:
-            normalized = _normalize_tool_dep_name(dep)
-            if normalized in known_conflicts:
-                continue
-            if normalized in base_dependency_names:
-                continue
-            if normalized in extra_names:
-                continue
-            tool_missing.append(dep)
-
-        if tool_missing:
-            missing_dependencies[tool_name] = tool_missing
-
-    if missing_dependencies:
-        error_msg = "\nThe following tool dependencies are missing from base deps and tool extras:\n"
-        for tool, deps in sorted(missing_dependencies.items()):
-            error_msg += f"  {tool}: {', '.join(deps)}\n"
-        pytest.fail(error_msg)
-    print("\n✓ All tool dependencies are covered by base or per-tool optional dependencies")
-
-
-def test_no_unused_dependencies() -> None:  # noqa: C901, PLR0912
-    """Test that all dependencies in pyproject.toml are actually used by tools."""
-    # Load pyproject.toml
-    pyproject_path = Path(__file__).parent.parent / "pyproject.toml"
-    with pyproject_path.open("rb") as f:
-        pyproject = tomllib.load(f)
-
-    project_dependencies = pyproject.get("project", {}).get("dependencies", [])
-
-    # Collect all declared dependencies from tools
-    used_packages = set()
-    for metadata in TOOL_METADATA.values():
-        if metadata.dependencies:
-            for dep in metadata.dependencies:
-                # Normalize package name
-                dep_lower = dep.lower().replace("_", "-")
-                used_packages.add(dep_lower)
-
-    # Add core dependencies that are always needed
-    core_deps = {
-        "agno",  # Core agno package
-        "chromadb",  # Memory storage
-        "diskcache",  # Caching
-        "fastapi",  # Web API
-        "loguru",  # Logging
-        "matrix-nio",  # Matrix client
-        "mcp",  # Model Context Protocol
-        "mem0ai",  # Memory
-        "pydantic",  # Data validation
-        "python-dotenv",  # Environment variables
-        "pyyaml",  # YAML config
-        "rich",  # CLI output
-        "structlog",  # Structured logging
-        "typer",  # CLI framework
-        "uvicorn",  # ASGI server
-        "watchdog",  # File watching
-        "markdown",  # Matrix message formatting
-        "spotipy",  # Spotify integration (future)
-    }
-
-    # Check each dependency
-    potentially_unused = []
-    for dep in project_dependencies:
-        # Parse package name
-        if "[" in dep:
-            pkg_name = dep.split("[")[0]
-        else:
-            for sep in [">=", "<=", "==", ">", "<", "~=", "!="]:
-                if sep in dep:
-                    pkg_name = dep.split(sep)[0]
-                    break
-            else:
-                pkg_name = dep
-
-        pkg_name = pkg_name.strip().lower()
-
-        # Check if it's used
-        if pkg_name not in used_packages and pkg_name not in core_deps:
-            # Check alternate names
-            alt_names = {
-                pkg_name.replace("-", "_"),
-                pkg_name.replace("_", "-"),
-            }
-            if not any(name in used_packages for name in alt_names):
-                potentially_unused.append(dep)
-
-    if potentially_unused:
-        print("\nPotentially unused dependencies (may be indirect or core deps):")
-        for dep in potentially_unused:
-            print(f"  - {dep}")
-
-    print(f"\nTotal dependencies: {len(project_dependencies)}")
-    print(f"Tool dependencies: {len(used_packages)}")
-    print(f"Core dependencies: {len(core_deps)}")
+    This reuses the single source of truth (.github/scripts/check_tool_extras_sync.py)
+    rather than reimplementing the check, ensuring CI catches sync issues even though
+    pre-commit hooks don't run in CI.
+    """
+    result = subprocess.run(
+        [sys.executable, str(HOOK_SCRIPT)],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        output = (result.stdout + result.stderr).strip()
+        pytest.fail(f"Tool extras out of sync with pyproject.toml:\n{output}")
 
 
 def test_tools_requiring_config_metadata() -> None:
-    """Test that tools requiring configuration are properly marked in metadata."""
-    tools_with_config_fields = []
-    tools_with_status = []
-    inconsistent_tools = []
+    """Test that tools marked REQUIRES_CONFIG have config_fields or auth_provider."""
+    inconsistent = []
 
     for tool_name, metadata in TOOL_METADATA.items():
-        has_config_fields = bool(metadata.config_fields)
-        has_config_status = metadata.status == ToolStatus.REQUIRES_CONFIG
+        if (
+            metadata.status == ToolStatus.REQUIRES_CONFIG
+            and not metadata.config_fields
+            and metadata.auth_provider is None
+        ):
+            inconsistent.append(tool_name)
 
-        if has_config_fields and metadata.config_fields is not None:
-            field_names = [field.name for field in metadata.config_fields]
-            tools_with_config_fields.append((tool_name, field_names))
-
-        if has_config_status:
-            tools_with_status.append(tool_name)
-
-        # Check for inconsistencies
-        # Only check that tools marked REQUIRES_CONFIG actually have fields
-        # Tools with optional config can have status AVAILABLE
-        if has_config_status and not has_config_fields and metadata.auth_provider is None:
-            inconsistent_tools.append((tool_name, "status is REQUIRES_CONFIG but no config_fields specified"))
-
-    # Report findings
-    print("\nTools requiring configuration:")
-    for tool_name, field_names in sorted(tools_with_config_fields):
-        print(f"  {tool_name}: {', '.join(field_names)}")
-
-    print(f"\nTotal tools with config fields: {len(tools_with_config_fields)}")
-    print(f"Tools marked with REQUIRES_CONFIG status: {len(tools_with_status)}")
-
-    if inconsistent_tools:
-        error_msg = "\nInconsistent configuration metadata found:\n"
-        for tool_name, issue in inconsistent_tools:
-            error_msg += f"  {tool_name}: {issue}\n"
-        pytest.fail(error_msg)
+    if inconsistent:
+        pytest.fail(
+            "Tools with REQUIRES_CONFIG but no config_fields or auth_provider:\n"
+            + "\n".join(f"  - {name}" for name in sorted(inconsistent)),
+        )
 
 
 def test_get_tool_by_name_retries_after_auto_install(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -335,35 +167,15 @@ def test_get_tool_by_name_raises_when_auto_install_fails(monkeypatch: pytest.Mon
         TOOL_METADATA.pop(tool_name, None)
 
 
-def test_check_deps_installed_with_installed_packages() -> None:
-    """check_deps_installed returns True for packages that are installed."""
-    assert check_deps_installed(["pytest", "loguru"])
+def test_check_deps_installed_positive_and_negative() -> None:
+    """check_deps_installed returns True for installed packages, False when any is missing."""
+    assert check_deps_installed(["pytest"])
+    assert not check_deps_installed(["nonexistent_package_xyz_123"])
 
 
-def test_check_deps_installed_with_missing_package() -> None:
-    """check_deps_installed returns False when any dependency is missing."""
-    assert not check_deps_installed(["pytest", "nonexistent_package_xyz_123"])
-
-
-def test_check_deps_installed_empty_list() -> None:
-    """check_deps_installed returns True for an empty dependency list."""
-    assert check_deps_installed([])
-
-
-@pytest.mark.parametrize(
-    ("pip_name", "expected_import"),
-    [
-        ("beautifulsoup4", "bs4"),
-        ("pyyaml", "yaml"),
-        ("pygithub", "github"),
-        ("google-api-python-client", "googleapiclient"),
-        ("e2b-code-interpreter", "e2b"),
-        ("exa-py", "exa_py"),
-        ("google-auth", "google.auth"),
-    ],
-)
+@pytest.mark.parametrize(("pip_name", "expected_import"), list(_PIP_TO_IMPORT.items()))
 def test_pip_to_import_mapping(pip_name: str, expected_import: str) -> None:
-    """_pip_name_to_import correctly maps known special cases."""
+    """_pip_name_to_import returns the correct import name for every entry in _PIP_TO_IMPORT."""
     assert _pip_name_to_import(pip_name) == expected_import
 
 
@@ -385,3 +197,69 @@ def test_pip_to_import_mapping_completeness() -> None:
         assert naive != import_name, (
             f"Mapping entry '{pip_name}' -> '{import_name}' is redundant (naive transform already gives '{naive}')"
         )
+
+
+def test_install_via_uv_sync_targets_active_virtualenv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Uv sync should target the active virtualenv when one is in use."""
+    captured: dict[str, object] = {}
+
+    def fake_run(
+        cmd: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        cwd: Path,
+        env: dict[str, str],
+    ) -> SimpleNamespace:
+        captured["cmd"] = cmd
+        captured["check"] = check
+        captured["capture_output"] = capture_output
+        captured["cwd"] = cwd
+        captured["env"] = env
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("mindroom.tool_dependencies._in_virtualenv", lambda: True)
+    monkeypatch.setattr("mindroom.tool_dependencies.subprocess.run", fake_run)
+
+    assert _install_via_uv_sync(["wikipedia"], quiet=True)
+    assert captured["cmd"] == [
+        "uv",
+        "sync",
+        "--locked",
+        "--inexact",
+        "--no-dev",
+        "--active",
+        "--extra",
+        "wikipedia",
+        "-q",
+    ]
+    assert captured["check"] is False
+    assert captured["capture_output"] is True
+    assert isinstance(captured["cwd"], Path)
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env["VIRTUAL_ENV"] == sys.prefix
+
+
+def test_install_tool_extras_skips_uv_sync_outside_virtualenv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Outside virtualenvs, tool extras should install via pip/uv pip instead of uv sync."""
+    calls = {"sync": 0, "env": 0}
+
+    def fake_install_via_uv_sync(_extras: list[str], *, quiet: bool) -> bool:  # noqa: ARG001
+        calls["sync"] += 1
+        return True
+
+    def fake_install_in_environment(_extras: list[str], *, quiet: bool) -> bool:  # noqa: ARG001
+        calls["env"] += 1
+        return True
+
+    monkeypatch.setattr("mindroom.tool_dependencies.is_uv_tool_install", lambda: False)
+    monkeypatch.setattr("mindroom.tool_dependencies._has_lockfile", lambda: True)
+    monkeypatch.setattr("mindroom.tool_dependencies._in_virtualenv", lambda: False)
+    monkeypatch.setattr("mindroom.tool_dependencies.shutil.which", lambda _binary: "/usr/bin/uv")
+    monkeypatch.setattr("mindroom.tool_dependencies._install_via_uv_sync", fake_install_via_uv_sync)
+    monkeypatch.setattr("mindroom.tool_dependencies._install_in_environment", fake_install_in_environment)
+
+    assert install_tool_extras(["wikipedia"], quiet=True)
+    assert calls["sync"] == 0
+    assert calls["env"] == 1

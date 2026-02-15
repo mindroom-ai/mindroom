@@ -10,22 +10,14 @@ while still picking up .env changes for keys that were never manually set.
 import os
 from pathlib import Path
 
+from .constants import PROVIDER_ENV_KEYS
 from .credentials import get_credentials_manager
 from .logging_config import get_logger
 
 logger = get_logger(__name__)
 
-# Mapping of environment variables to service names
-ENV_TO_SERVICE_MAP = {
-    "OPENAI_API_KEY": "openai",
-    "ANTHROPIC_API_KEY": "anthropic",
-    "GOOGLE_API_KEY": "google",  # Also used for Gemini
-    "OPENROUTER_API_KEY": "openrouter",
-    "DEEPSEEK_API_KEY": "deepseek",
-    "CEREBRAS_API_KEY": "cerebras",
-    "GROQ_API_KEY": "groq",
-    "OLLAMA_HOST": "ollama",  # Special case: host instead of API key
-}
+# Reverse view: env-var → provider (derived from the canonical mapping).
+ENV_TO_SERVICE_MAP = {v: k for k, v in PROVIDER_ENV_KEYS.items()}
 
 
 def _get_secret(name: str) -> str | None:

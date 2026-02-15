@@ -27,7 +27,7 @@ agents:
 
 Tools are organized by category:
 
-- **Development** - File operations, shell, Docker, GitHub, Jira, Python, Airflow, code execution sandboxes (E2B, Daytona), Claude Agent SDK
+- **Development** - File operations, shell, Docker, GitHub, Jira, Python, Airflow, code execution sandboxes (E2B, Daytona, or MindRoom's built-in [container sandbox proxy](../deployment/sandbox-proxy.md)), Claude Agent SDK
 - **Research** - Web search (DuckDuckGo, Tavily, Exa, SerpAPI), academic papers (arXiv, PubMed), Wikipedia, Hacker News, web scraping (Firecrawl, Crawl4AI, Jina)
 - **Communication** - Slack, Discord, Telegram, Twilio, WhatsApp, Webex
 - **Email** - Gmail, AWS SES, Resend, generic SMTP

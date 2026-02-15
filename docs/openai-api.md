@@ -42,10 +42,10 @@ Without either of these, the API returns 401 on all requests.
 ### 2. Start the backend
 
 ```bash
-# API only (OpenAI-compatible endpoints)
-uv run uvicorn mindroom.api.main:app --host 0.0.0.0 --port 8765
-
 # Full backend (Matrix bot + API server)
+uv run mindroom run
+
+# Or via just
 just start-backend-dev
 ```
 

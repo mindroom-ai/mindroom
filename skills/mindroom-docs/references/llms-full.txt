@@ -520,7 +520,7 @@ MINDROOM_CONFIG_PATH=/path/to/config.yaml mindroom run
 You can also validate a specific file directly:
 
 ```
-mindroom validate --config /path/to/config.yaml
+mindroom validate --config /path/to/config.yaml  # or: -c
 ```
 
 ## Basic Structure
@@ -1177,7 +1177,7 @@ agents:
 
 Tools are organized by category:
 
-- **Development** - File operations, shell, Docker, GitHub, Jira, Python, Airflow, code execution sandboxes (E2B, Daytona), Claude Agent SDK
+- **Development** - File operations, shell, Docker, GitHub, Jira, Python, Airflow, code execution sandboxes (E2B, Daytona, or MindRoom's built-in [container sandbox proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md)), Claude Agent SDK
 - **Research** - Web search (DuckDuckGo, Tavily, Exa, SerpAPI), academic papers (arXiv, PubMed), Wikipedia, Hacker News, web scraping (Firecrawl, Crawl4AI, Jina)
 - **Communication** - Slack, Discord, Telegram, Twilio, WhatsApp, Webex
 - **Email** - Gmail, AWS SES, Resend, generic SMTP
@@ -1292,7 +1292,6 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | :lucide-search: | `duckduckgo`   | DuckDuckGo web search               | -               |
 | :lucide-search: | `googlesearch` | Google search via WebSearch backend | -               |
 | :lucide-search: | `baidusearch`  | Baidu search                        | -               |
-| :lucide-search: | `bravesearch`  | Brave Search web search API         | `api_key`       |
 | :lucide-search: | `tavily`       | Real-time web search API            | `api_key`       |
 | :lucide-search: | `exa`          | AI-powered web search and research  | `api_key`       |
 | :lucide-search: | `serpapi`      | Search API aggregator               | `api_key`       |
@@ -1378,10 +1377,11 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 
 ## Calendar & Scheduling
 
-| Icon              | Tool              | Description                | Config Required |
-| ----------------- | ----------------- | -------------------------- | --------------- |
-| :lucide-calendar: | `google_calendar` | View and schedule meetings | Google OAuth    |
-| :lucide-calendar: | `cal_com`         | Cal.com scheduling         | `api_key`       |
+| Icon              | Tool              | Description                                          | Config Required |
+| ----------------- | ----------------- | ---------------------------------------------------- | --------------- |
+| :lucide-calendar: | `google_calendar` | View and schedule meetings                           | Google OAuth    |
+| :lucide-calendar: | `cal_com`         | Cal.com scheduling                                   | `api_key`       |
+| :lucide-calendar: | `scheduler`       | Schedule, edit, list, and cancel tasks and reminders | -               |
 
 ## Data & Business
 
@@ -1432,10 +1432,11 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 
 ## Memory & Storage
 
-| Icon              | Tool   | Description              | Config Required                |
-| ----------------- | ------ | ------------------------ | ------------------------------ |
-| :lucide-database: | `mem0` | Persistent memory system | `api_key` (optional for cloud) |
-| :lucide-database: | `zep`  | Conversation memory      | `api_key`                      |
+| Icon              | Tool     | Description                                          | Config Required                |
+| ----------------- | -------- | ---------------------------------------------------- | ------------------------------ |
+| :lucide-database: | `memory` | Explicitly store and search agent memories on demand | -                              |
+| :lucide-database: | `mem0`   | Persistent memory system                             | `api_key` (optional for cloud) |
+| :lucide-database: | `zep`    | Conversation memory                                  | `api_key`                      |
 
 ## Custom & Config
 
@@ -1915,17 +1916,19 @@ The `host` field is converted internally to `openai_base_url` or `ollama_base_ur
 
 Memories are stored in ChromaDB at `<storage_path>/chroma/` with collection name `mindroom_memories`.
 
-## Mem0 Tool (Optional)
+## Memory Tool (Optional)
 
-For explicit memory control, add the `mem0` tool to an agent:
+For explicit memory control, add the `memory` tool to an agent:
 
 ```
 agents:
   assistant:
-    tools: [mem0]
+    tools: [memory]
 ```
 
 This provides functions: `add_memory`, `search_memory`, `get_all_memories`, `delete_all_memories`.
+
+Note: The `memory` tool is for the built-in agent memory system. The separate `mem0` tool is for Mem0's cloud service.
 
 # Voice Messages
 
@@ -2248,10 +2251,10 @@ Without either of these, the API returns 401 on all requests.
 ### 2. Start the backend
 
 ```
-# API only (OpenAI-compatible endpoints)
-uv run uvicorn mindroom.api.main:app --host 0.0.0.0 --port 8765
-
 # Full backend (Matrix bot + API server)
+uv run mindroom run
+
+# Or via just
 just start-backend-dev
 ```
 
@@ -3392,8 +3395,10 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 ```
  Usage: root [OPTIONS] COMMAND [ARGS]...
 
- Mindroom: Multi-agent Matrix bot system
+ MindRoom - AI agents that live in Matrix
 
+ Quick start:   mindroom config init   Create a starter config   mindroom run
+ Start the system
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --install-completion          Install completion for the current shell.                │
@@ -3402,9 +3407,10 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │ --help                        Show this message and exit.                              │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ version    Show the current version of Mindroom.                                       │
-│ validate   Validate the configuration file.                                            │
-│ run        Run the mindroom multi-agent system.                                        │
+│ version   Show the current version of Mindroom.                                        │
+│ run       Run the mindroom multi-agent system.                                         │
+│ doctor    Check your environment for common issues.                                    │
+│ config    Manage MindRoom configuration files.                                         │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -3434,15 +3440,23 @@ Start MindRoom with your configuration.
 
  This command starts the multi-agent bot system which automatically: - Creates all
  necessary user and agent accounts - Creates all rooms defined in config.yaml - Manages
- agent room memberships
+ agent room memberships - Starts the dashboard API server (disable with --no-api)
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --log-level     -l      TEXT  Set the logging level (DEBUG, INFO, WARNING, ERROR)      │
-│                               [default: INFO]                                          │
-│ --storage-path  -s      PATH  Base directory for persistent MindRoom data (state,      │
-│                               sessions, tracking)                                      │
-│                               [default: mindroom_data]                                 │
-│ --help                        Show this message and exit.                              │
+│ --log-level     -l              TEXT     Set the logging level (DEBUG, INFO, WARNING,  │
+│                                          ERROR)                                        │
+│                                          [default: INFO]                               │
+│ --storage-path  -s              PATH     Base directory for persistent MindRoom data   │
+│                                          (state, sessions, tracking)                   │
+│                                          [default: mindroom_data]                      │
+│ --api               --no-api             Start the dashboard API server alongside the  │
+│                                          bot                                           │
+│                                          [default: api]                                │
+│ --api-port                      INTEGER  Port for the dashboard API server             │
+│                                          [default: 8765]                               │
+│ --api-host                      TEXT     Host for the dashboard API server             │
+│                                          [default: 0.0.0.0]                            │
+│ --help                                   Show this message and exit.                   │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
