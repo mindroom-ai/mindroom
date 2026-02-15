@@ -127,28 +127,17 @@ async def create_agent_user(
     server_name = extract_server_name_from_homeserver(homeserver)
     user_id = MatrixID.from_username(matrix_username, server_name).full_id
 
-    # Try to register/verify the user
-    try:
-        await register_user(
-            homeserver=homeserver,
-            username=matrix_username,
-            password=password,
-            display_name=agent_display_name,
-        )
-        # Only save credentials after successful registration
-        if registration_needed:
-            save_agent_credentials(agent_name, matrix_username, password)
-            logger.info(f"Saved credentials for agent {agent_name} after successful registration")
-    except ValueError as e:
-        # If user already exists, that's fine
-        error_msg = str(e) if e else ""
-        logger.debug(f"ValueError when registering {matrix_username}: {error_msg}")
-        if "already exists" not in error_msg and "RegisterErrorResponse" not in error_msg:
-            raise
-        # Save credentials if the user already exists (registration succeeded in the past)
-        if registration_needed and "already exists" in error_msg:
-            save_agent_credentials(agent_name, matrix_username, password)
-            logger.info(f"Saved credentials for agent {agent_name} (user already exists)")
+    await register_user(
+        homeserver=homeserver,
+        username=matrix_username,
+        password=password,
+        display_name=agent_display_name,
+    )
+
+    # Save credentials only after registration/verification succeeds.
+    if registration_needed:
+        save_agent_credentials(agent_name, matrix_username, password)
+        logger.info(f"Saved credentials for agent {agent_name} after successful registration")
 
     return AgentMatrixUser(
         agent_name=agent_name,
