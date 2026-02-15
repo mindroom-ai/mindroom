@@ -8,6 +8,7 @@ import pytest
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.config import Config
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.scheduling import CronSchedule, ScheduledWorkflow, parse_workflow_schedule
 
 
@@ -154,3 +155,56 @@ class TestDynamicConfigUpdate:
                 assert "@email_assistant" in result.message
                 assert "@callagent" in result.message
                 assert result.description == "Monitor for urgent emails and send text notification"
+
+    @pytest.mark.asyncio
+    async def test_defaults_streaming_toggle_updates_existing_bots_without_restart(self) -> None:
+        """Changing defaults.enable_streaming should update existing bots on config reload."""
+        initial_config = Config(
+            agents={
+                "general": {
+                    "display_name": "GeneralAgent",
+                    "role": "General assistant",
+                    "model": "default",
+                    "rooms": ["lobby"],
+                },
+            },
+            models={"default": {"provider": "test", "id": "test-model"}},
+            defaults={"enable_streaming": True},
+        )
+        updated_config = Config(
+            agents={
+                "general": {
+                    "display_name": "GeneralAgent",
+                    "role": "General assistant",
+                    "model": "default",
+                    "rooms": ["lobby"],
+                },
+            },
+            models={"default": {"provider": "test", "id": "test-model"}},
+            defaults={"enable_streaming": False},
+        )
+
+        orchestrator = MultiAgentOrchestrator(storage_path=MagicMock())
+        orchestrator.config = initial_config
+
+        mock_bot = MagicMock(spec=AgentBot)
+        mock_bot.config = initial_config
+        mock_bot.enable_streaming = True
+        orchestrator.agent_bots["general"] = mock_bot
+        router_bot = MagicMock(spec=AgentBot)
+        router_bot.config = initial_config
+        router_bot.enable_streaming = True
+        orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
+
+        with (
+            patch.object(Config, "from_yaml", return_value=updated_config),
+            patch("mindroom.bot._identify_entities_to_restart", return_value=set()),
+        ):
+            updated = await orchestrator.update_config()
+
+        # No entities restarted, but existing bots still receive new defaults.
+        assert updated is False
+        assert mock_bot.config == updated_config
+        assert mock_bot.enable_streaming is False
+        assert router_bot.config == updated_config
+        assert router_bot.enable_streaming is False

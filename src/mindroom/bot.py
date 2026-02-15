@@ -27,7 +27,7 @@ from .commands import (
 )
 from .config import Config
 from .config_commands import handle_config_command
-from .constants import CONFIG_PATH, ENABLE_STREAMING, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, VOICE_PREFIX
+from .constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, VOICE_PREFIX
 from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
 from .knowledge import initialize_knowledge_managers, shutdown_knowledge_managers
@@ -513,7 +513,7 @@ def create_bot_for_entity(
         Bot instance or None if entity not found in config
 
     """
-    enable_streaming = ENABLE_STREAMING
+    enable_streaming = config.defaults.enable_streaming
 
     if entity_name == ROUTER_AGENT_NAME:
         all_room_aliases = config.get_all_configured_rooms()
@@ -533,7 +533,7 @@ def create_bot_for_entity(
             team_agents=team_matrix_ids,
             team_mode=team_config.mode,
             team_model=team_config.model,
-            enable_streaming=True,
+            enable_streaming=enable_streaming,
         )
 
     if entity_name in config.agents:
@@ -1260,10 +1260,11 @@ class AgentBot:
         model_name = select_model_for_team(self.agent_name, room_id, self.config)
 
         # Decide streaming based on presence
-        use_streaming = self.enable_streaming and await should_use_streaming(
+        use_streaming = await should_use_streaming(
             self.client,
             room_id,
             requester_user_id=requester_user_id,
+            enable_streaming=self.enable_streaming,
         )
 
         # Convert mode string to TeamMode enum
@@ -1779,11 +1780,12 @@ class AgentBot:
         session_id = create_session_id(room_id, thread_id)
 
         # Dynamically determine whether to use streaming based on user presence
-        # Only check presence if streaming is globally enabled
-        use_streaming = self.enable_streaming
-        if use_streaming:
-            # Check if the user is online to decide whether to stream
-            use_streaming = await should_use_streaming(self.client, room_id, requester_user_id=user_id)
+        use_streaming = await should_use_streaming(
+            self.client,
+            room_id,
+            requester_user_id=user_id,
+            enable_streaming=self.enable_streaming,
+        )
 
         # Create async function for generation that takes message_id as parameter
         async def generate(message_id: str | None) -> None:
@@ -2525,6 +2527,7 @@ class MultiAgentOrchestrator:
         for entity_name, bot in self.agent_bots.items():
             if entity_name not in entities_to_restart:
                 bot.config = new_config
+                bot.enable_streaming = new_config.defaults.enable_streaming
                 await bot._set_presence_with_model_info()
                 logger.debug(f"Updated config for {entity_name}")
 

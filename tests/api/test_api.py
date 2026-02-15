@@ -231,6 +231,7 @@ def test_save_config(test_client: TestClient, temp_config_file: Path) -> None:
     assert "new_agent" in saved_config["agents"]
     assert saved_config["defaults"] == {
         "markdown": True,
+        "enable_streaming": True,
         "show_stop_button": False,
         "learning": True,
         "learning_mode": "always",
