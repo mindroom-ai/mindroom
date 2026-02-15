@@ -155,6 +155,11 @@ voice:
   intelligence:
     model: default                 # Model for command recognition
 
+# Internal MindRoom user account (optional)
+mindroom_user:
+  username: mindroom_user          # Default username localpart
+  display_name: MindRoomUser       # Default display name
+
 # Authorization (optional)
 authorization:
   global_users: []                 # Users with access to all rooms

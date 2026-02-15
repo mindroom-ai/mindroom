@@ -186,7 +186,15 @@ async def register_user(
             return user_id
         if isinstance(response, nio.ErrorResponse) and response.status_code == "M_USER_IN_USE":
             logger.info(f"User {user_id} already exists")
-            return user_id
+            # Keep display name in sync when account already exists.
+            login_response = await client.login(password)
+            if isinstance(login_response, nio.LoginResponse):
+                display_response = await client.set_displayname(display_name)
+                if isinstance(display_response, nio.ErrorResponse):
+                    logger.warning(f"Failed to set display name for existing user: {display_response}")
+                return user_id
+            msg = f"User {user_id} already exists but login failed with provided password: {login_response}"
+            raise ValueError(msg)
         msg = f"Failed to register user {username}: {response}"
         raise ValueError(msg)
 

@@ -324,6 +324,9 @@ agents:
       - lobby
 router:
   model: default
+mindroom_user:
+  username: mindroom_user
+  display_name: MindRoomUser
 defaults:
   markdown: true
 """

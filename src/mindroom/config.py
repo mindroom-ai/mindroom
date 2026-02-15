@@ -252,6 +252,39 @@ class AuthorizationConfig(BaseModel):
     )
 
 
+class MindRoomUserConfig(BaseModel):
+    """Configuration for the internal MindRoom user account."""
+
+    username: str = Field(
+        default="mindroom_user",
+        description="Matrix username localpart for the internal user account (without @ or domain)",
+    )
+    display_name: str = Field(
+        default="MindRoomUser",
+        description="Display name for the internal user account",
+    )
+
+    @field_validator("username")
+    @classmethod
+    def validate_username(cls, username: str) -> str:
+        """Validate and normalize Matrix localpart for the internal user."""
+        normalized = username.strip().removeprefix("@")
+
+        if not normalized:
+            msg = "mindroom_user.username cannot be empty"
+            raise ValueError(msg)
+
+        if "@" in normalized:
+            msg = "mindroom_user.username must contain at most one leading @"
+            raise ValueError(msg)
+
+        if ":" in normalized:
+            msg = "mindroom_user.username must be a Matrix localpart (without domain)"
+            raise ValueError(msg)
+
+        return normalized
+
+
 class Config(BaseModel):
     """Complete configuration from YAML."""
 
@@ -272,6 +305,10 @@ class Config(BaseModel):
     timezone: str = Field(
         default="UTC",
         description="Timezone for displaying scheduled tasks (e.g., 'America/New_York')",
+    )
+    mindroom_user: MindRoomUserConfig = Field(
+        default_factory=MindRoomUserConfig,
+        description="Configuration for the internal MindRoom user account",
     )
     authorization: AuthorizationConfig = Field(
         default_factory=AuthorizationConfig,
@@ -365,6 +402,12 @@ class Config(BaseModel):
         for team_name in self.teams:
             mapping[team_name] = MatrixID.from_agent(team_name, self.domain)
         return mapping
+
+    def get_mindroom_user_id(self) -> str:
+        """Get the full Matrix user ID for the configured internal user."""
+        from .matrix.identity import MatrixID  # noqa: PLC0415
+
+        return MatrixID.from_username(self.mindroom_user.username, self.domain).full_id
 
     @classmethod
     def from_yaml(cls, config_path: Path | None = None) -> Config:
@@ -477,6 +520,7 @@ class Config(BaseModel):
             Set of bot usernames (without domain) that should be in this room
 
         """
+        from .matrix.identity import agent_username_localpart  # noqa: PLC0415
         from .matrix.rooms import resolve_room_aliases  # noqa: PLC0415
 
         configured_bots = set()
@@ -485,17 +529,17 @@ class Config(BaseModel):
         for agent_name, agent_config in self.agents.items():
             resolved_rooms = set(resolve_room_aliases(agent_config.rooms))
             if room_id in resolved_rooms:
-                configured_bots.add(f"mindroom_{agent_name}")
+                configured_bots.add(agent_username_localpart(agent_name))
 
         # Check which teams should be in this room
         for team_name, team_config in self.teams.items():
             resolved_rooms = set(resolve_room_aliases(team_config.rooms))
             if room_id in resolved_rooms:
-                configured_bots.add(f"mindroom_{team_name}")
+                configured_bots.add(agent_username_localpart(team_name))
 
         # Router should be in any room that has any configured agents/teams
         if configured_bots:  # If any bots are configured for this room
-            configured_bots.add(f"mindroom_{ROUTER_AGENT_NAME}")
+            configured_bots.add(agent_username_localpart(ROUTER_AGENT_NAME))
 
         return configured_bots
 

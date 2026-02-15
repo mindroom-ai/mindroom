@@ -23,6 +23,7 @@ main() entry
 │ ─────────────────│
 │ 1. Create "user" │
 │    Matrix account│
+│    (mindroom_user)│
 │ 2. Parse config  │
 │    (Pydantic)    │
 │ 3. Load plugins  │

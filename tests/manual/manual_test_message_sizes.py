@@ -13,14 +13,17 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
+from mindroom.config import Config
 from mindroom.matrix.client import get_joined_rooms, get_room_name, matrix_client, send_message
+
+DEFAULT_INTERNAL_USERNAME = Config().mindroom_user.username
 
 
 async def test_message_sizes() -> None:  # noqa: PLR0915
     """Test messages of different sizes."""
     # Get credentials from environment
     homeserver = os.getenv("MATRIX_HOMESERVER", "https://m-test-3.mindroom.chat")
-    username = os.getenv("MATRIX_USERNAME", "mindroom_user")
+    username = os.getenv("MATRIX_USERNAME", DEFAULT_INTERNAL_USERNAME)
     password = os.getenv("MATRIX_PASSWORD", "user_secure_password")
 
     # Construct full user ID

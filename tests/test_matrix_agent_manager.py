@@ -26,6 +26,8 @@ from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 if TYPE_CHECKING:
     from pathlib import Path
 
+DEFAULT_INTERNAL_USERNAME = Config().mindroom_user.username
+
 
 @pytest.fixture
 def temp_matrix_users_file(tmp_path: Path) -> Path:
@@ -34,7 +36,7 @@ def temp_matrix_users_file(tmp_path: Path) -> Path:
     initial_data = {
         "accounts": {
             "bot": {"username": "mindroom_bot", "password": "bot_password_123"},
-            "user": {"username": "mindroom_user", "password": "user_password_123"},
+            "user": {"username": DEFAULT_INTERNAL_USERNAME, "password": "user_password_123"},
         },
         "rooms": {},
     }
@@ -84,7 +86,7 @@ class TestMatrixUserManagement:
         assert "bot" in state.accounts
         assert state.accounts["bot"].username == "mindroom_bot"
         assert "user" in state.accounts
-        assert state.accounts["user"].username == "mindroom_user"
+        assert state.accounts["user"].username == DEFAULT_INTERNAL_USERNAME
 
     @patch("mindroom.matrix.state.MATRIX_STATE_FILE")
     def test_load_matrix_users_no_file(self, mock_file: MagicMock) -> None:
@@ -178,6 +180,8 @@ class TestMatrixRegistration:
         mock_response = MagicMock(spec=nio.ErrorResponse)
         mock_response.status_code = "M_USER_IN_USE"
         mock_client.register.return_value = mock_response
+        mock_client.login.return_value = MagicMock(spec=nio.LoginResponse)
+        mock_client.set_displayname.return_value = AsyncMock()
 
         with patch("mindroom.matrix.client.matrix_client") as mock_matrix_client:
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
@@ -186,6 +190,23 @@ class TestMatrixRegistration:
 
             assert user_id == "@existing_user:localhost"
             mock_matrix_client.assert_called_once()
+            mock_client.login.assert_called_once_with("test_pass")
+            mock_client.set_displayname.assert_called_once_with("Existing User")
+
+    @pytest.mark.asyncio
+    async def test_register_user_already_exists_login_failure(self) -> None:
+        """Test registration failure when user exists but provided password is invalid."""
+        mock_client = AsyncMock()
+        mock_response = MagicMock(spec=nio.ErrorResponse)
+        mock_response.status_code = "M_USER_IN_USE"
+        mock_client.register.return_value = mock_response
+        mock_client.login.return_value = MagicMock(spec=nio.LoginError)
+
+        with patch("mindroom.matrix.client.matrix_client") as mock_matrix_client:
+            mock_matrix_client.return_value.__aenter__.return_value = mock_client
+
+            with pytest.raises(ValueError, match="already exists but login failed"):
+                await register_user("http://localhost:8008", "existing_user", "wrong_pass", "Existing User")
 
     @pytest.mark.asyncio
     async def test_register_user_failure(self) -> None:

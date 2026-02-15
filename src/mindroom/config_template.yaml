@@ -24,6 +24,11 @@ agents:
 router:
   model: default
 
+# Internal MindRoom user account (optional)
+mindroom_user:
+  username: mindroom_user
+  display_name: MindRoomUser
+
 # Default settings for all agents
 defaults:
   markdown: true
