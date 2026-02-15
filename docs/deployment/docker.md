@@ -43,7 +43,7 @@ services:
     env_file:
       - .env
     environment:
-      - STORAGE_PATH=/app/mindroom_data
+      - MINDROOM_STORAGE_PATH=/app/mindroom_data
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - MATRIX_HOMESERVER=${MATRIX_HOMESERVER}
       # Optional: for self-signed certificates
@@ -150,7 +150,7 @@ services:
     env_file:
       - .env
     environment:
-      - STORAGE_PATH=/app/mindroom_data
+      - MINDROOM_STORAGE_PATH=/app/mindroom_data
 
   frontend:
     image: ghcr.io/mindroom-ai/mindroom-frontend:latest

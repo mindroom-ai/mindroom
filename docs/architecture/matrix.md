@@ -35,7 +35,7 @@ Each agent gets its own Matrix user with the `mindroom_` prefix:
 @mindroom_router:example.com  (built-in routing agent)
 ```
 
-Users are automatically created during orchestrator startup and credentials are persisted in `{STORAGE_PATH}/matrix_state.yaml` (default: `mindroom_data/matrix_state.yaml`).
+Users are automatically created during orchestrator startup and credentials are persisted in `mindroom_data/matrix_state.yaml`.
 
 ## Room Management
 

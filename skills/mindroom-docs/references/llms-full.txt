@@ -841,7 +841,7 @@ Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `con
 
 All per-agent settings above that show a default value inherit from the `defaults` section. Per-agent values override them.
 
-Learning data is persisted to `STORAGE_PATH/learning/<agent>.db` (default: `mindroom_data/learning/<agent>.db`), so it survives container restarts when `mindroom_data` is mounted.
+Learning data is persisted to `mindroom_data/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted.
 
 ## Rich Prompt Agents
 
@@ -2513,7 +2513,7 @@ Each agent gets its own Matrix user with the `mindroom_` prefix:
 @mindroom_router:example.com  (built-in routing agent)
 ```
 
-Users are automatically created during orchestrator startup and credentials are persisted in `{STORAGE_PATH}/matrix_state.yaml` (default: `mindroom_data/matrix_state.yaml`).
+Users are automatically created during orchestrator startup and credentials are persisted in `mindroom_data/matrix_state.yaml`.
 
 ## Room Management
 
@@ -3136,7 +3136,7 @@ services:
     env_file:
       - .env
     environment:
-      - STORAGE_PATH=/app/mindroom_data
+      - MINDROOM_STORAGE_PATH=/app/mindroom_data
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - MATRIX_HOMESERVER=${MATRIX_HOMESERVER}
       # Optional: for self-signed certificates
@@ -3243,7 +3243,7 @@ services:
     env_file:
       - .env
     environment:
-      - STORAGE_PATH=/app/mindroom_data
+      - MINDROOM_STORAGE_PATH=/app/mindroom_data
 
   frontend:
     image: ghcr.io/mindroom-ai/mindroom-frontend:latest

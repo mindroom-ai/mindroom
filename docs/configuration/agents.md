@@ -85,7 +85,7 @@ Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `con
 
 All per-agent settings above that show a default value inherit from the `defaults` section. Per-agent values override them.
 
-Learning data is persisted to `STORAGE_PATH/learning/<agent>.db` (default: `mindroom_data/learning/<agent>.db`), so it survives container restarts when `mindroom_data` is mounted.
+Learning data is persisted to `mindroom_data/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted.
 
 ## Rich Prompt Agents
 
