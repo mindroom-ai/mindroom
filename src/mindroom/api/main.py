@@ -1,12 +1,11 @@
 # ruff: noqa: D100
 import asyncio
-import contextlib
 import importlib
 import os
 import shutil
 import threading
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -68,7 +67,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     stop_event.set()
     watch_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
+    with suppress(asyncio.CancelledError):
         await watch_task
 
 
