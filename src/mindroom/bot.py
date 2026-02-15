@@ -2376,20 +2376,18 @@ class MultiAgentOrchestrator:
     _sync_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     knowledge_managers: dict[str, KnowledgeManager] = field(default_factory=dict, init=False)
 
-    async def _ensure_user_account(self, config: Config | None = None) -> None:
+    async def _ensure_user_account(self, config: Config) -> None:
         """Ensure a user account exists, creating one if necessary.
 
         This reuses the same create_agent_user function that agents use,
         treating the user as a special "agent" named "user".
         """
-        active_config = config or self.config or Config()
-
         # The user account is just another "agent" from the perspective of account management
         user_account = await create_agent_user(
             MATRIX_HOMESERVER,
             INTERNAL_USER_AGENT_NAME,
-            active_config.mindroom_user.display_name,
-            username=active_config.mindroom_user.username,
+            config.mindroom_user.display_name,
+            username=config.mindroom_user.username,
         )
         logger.info(f"User account ready: {user_account.user_id}")
 

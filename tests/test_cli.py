@@ -119,7 +119,7 @@ class TestUserAccountManagement:
             patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
         ):
             orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
-            await orchestrator._ensure_user_account()
+            await orchestrator._ensure_user_account(Config())
 
             # Check that user was created
             state = MatrixState.load()
@@ -165,7 +165,7 @@ class TestUserAccountManagement:
                 patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
             ):
                 orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
-                await orchestrator._ensure_user_account()
+                await orchestrator._ensure_user_account(Config())
 
                 # Should use existing account
                 result_config = MatrixState.load()
@@ -213,7 +213,7 @@ class TestUserAccountManagement:
                 patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
             ):
                 orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
-                await orchestrator._ensure_user_account()
+                await orchestrator._ensure_user_account(Config())
 
                 # Should have kept the existing account credentials
                 # (create_agent_user doesn't regenerate passwords on login failure)

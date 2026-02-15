@@ -145,13 +145,6 @@ async def create_agent_user(
         # Generate new credentials
         matrix_username = preferred_username or agent_username_localpart(agent_name)
         password = f"{agent_name}_secure_password"  # _{os.urandom(8).hex()}"
-        if existing_creds and preferred_username and existing_creds["username"] != preferred_username:
-            logger.info(
-                "Existing username differs from configured username; using configured username",
-                agent_name=agent_name,
-                existing_username=existing_creds["username"],
-                configured_username=preferred_username,
-            )
         logger.info(f"Generated new credentials for agent {agent_name}")
         registration_needed = True
 
