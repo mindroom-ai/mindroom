@@ -114,8 +114,7 @@ Start MindRoom with your configuration.
 │                                          [default: INFO]                               │
 │ --storage-path  -s              PATH     Base directory for persistent MindRoom data   │
 │                                          (state, sessions, tracking)                   │
-│                                          [default:                                     │
-│                                          /home/runner/work/mindroom/mindroom/mindroom… │
+│                                          [default: mindroom_data]                      │
 │ --api               --no-api             Start the dashboard API server alongside the  │
 │                                          bot                                           │
 │                                          [default: api]                                │
