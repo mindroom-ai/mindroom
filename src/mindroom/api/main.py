@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
 import yaml
-from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -34,11 +33,6 @@ from mindroom.tool_dependencies import auto_install_enabled, auto_install_tool_e
 
 if TYPE_CHECKING:
     from supabase import Client as SupabaseClient
-
-# Load environment variables from .env file
-# Look for .env in the widget directory (parent of backend)
-env_path = Path(__file__).parent.parent.parent / ".env"
-load_dotenv(env_path)
 
 
 async def _watch_config(stop_event: asyncio.Event) -> None:
