@@ -1,5 +1,16 @@
 # mindroom
 
+[![PyPI](https://img.shields.io/pypi/v/mindroom)](https://pypi.org/project/mindroom/)
+[![Python](https://img.shields.io/pypi/pyversions/mindroom)](https://pypi.org/project/mindroom/)
+[![Tests](https://img.shields.io/github/actions/workflow/status/mindroom-ai/mindroom/pytest.yml?label=tests)](https://github.com/mindroom-ai/mindroom/actions/workflows/pytest.yml)
+[![Build](https://img.shields.io/github/actions/workflow/status/mindroom-ai/mindroom/build-mindroom.yml?label=build)](https://github.com/mindroom-ai/mindroom/actions/workflows/build-mindroom.yml)
+[![Docs](https://img.shields.io/badge/docs-mindroom.chat-blue)](https://docs.mindroom.chat)
+[![License](https://img.shields.io/github/license/mindroom-ai/mindroom)](https://github.com/mindroom-ai/mindroom/blob/main/LICENSE)
+[![Downloads](https://img.shields.io/pypi/dm/mindroom)](https://pypi.org/project/mindroom/)
+[![GitHub](https://img.shields.io/badge/github-mindroom--ai%2Fmindroom-blue?logo=github)](https://github.com/mindroom-ai/mindroom)
+
+<img src="https://raw.githubusercontent.com/mindroom-ai/mindroom/main/frontend/public/brain-logo.svg" alt="MindRoom Logo" align="right" style="width: 150px;" />
+
 **Your AI is trapped in apps. We set it free.**
 
 AI agents that learn who you are shouldn't forget everything when you switch apps. MindRoom agents follow you everywhere—Slack, Telegram, Discord, WhatsApp—with persistent memory intact.
