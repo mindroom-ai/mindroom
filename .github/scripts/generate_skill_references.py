@@ -1,4 +1,3 @@
-# ruff: noqa: INP001
 """Generate reference files for the bundled mindroom-docs skill."""
 
 from __future__ import annotations
