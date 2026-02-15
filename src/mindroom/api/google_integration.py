@@ -60,13 +60,13 @@ REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", f"http://localhost:{BACKEND_PORT
 
 def _ensure_google_packages() -> tuple[type[GoogleRequest], type[Credentials], type[Flow]]:
     """Lazily import Google auth packages, auto-installing if needed."""
-    try:
-        from google.auth.transport.requests import Request as _GoogleRequest
-        from google.oauth2.credentials import Credentials as _Credentials
-        from google_auth_oauthlib.flow import Flow as _Flow
-    except ModuleNotFoundError:
-        from mindroom.tool_dependencies import auto_install_enabled, auto_install_tool_extra
+    import importlib
 
+    from mindroom.tool_dependencies import auto_install_enabled, auto_install_tool_extra, check_deps_installed
+
+    google_deps = ["google-auth", "google-auth-oauthlib"]
+
+    if not check_deps_installed(google_deps):
         disabled_hint = ""
         if not auto_install_enabled():
             disabled_hint = " Auto-install is disabled by MINDROOM_NO_AUTO_INSTALL_TOOLS."
@@ -75,11 +75,12 @@ def _ensure_google_packages() -> tuple[type[GoogleRequest], type[Credentials], t
                 "Google OAuth endpoints require the google-auth packages, but they are not installed."
                 f"{disabled_hint} Install them with: pip install 'mindroom[gmail]'"
             )
-            raise ImportError(msg) from None
+            raise ImportError(msg)
+        importlib.invalidate_caches()
 
-        from google.auth.transport.requests import Request as _GoogleRequest
-        from google.oauth2.credentials import Credentials as _Credentials
-        from google_auth_oauthlib.flow import Flow as _Flow
+    from google.auth.transport.requests import Request as _GoogleRequest
+    from google.oauth2.credentials import Credentials as _Credentials
+    from google_auth_oauthlib.flow import Flow as _Flow
 
     return _GoogleRequest, _Credentials, _Flow
 
