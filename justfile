@@ -208,7 +208,11 @@ test-backend *args:
 
 # Tool dependency auto-install smoke test in a fresh virtual environment
 test-tool-auto-install *args:
-    uv run python scripts/testing/tool_auto_install_smoke.py {{args}}
+    uv run python scripts/testing/tool_auto_install_smoke.py --mode runtime-auto-install {{args}}
+
+# Tool extra install isolation test (fresh virtualenv per tool extra)
+test-tool-extra-install *args:
+    uv run python scripts/testing/tool_auto_install_smoke.py --mode extra-install {{args}}
 
 #############################
 # Developer-friendly aliases
