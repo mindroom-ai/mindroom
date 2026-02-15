@@ -61,6 +61,13 @@ def find_config() -> Path:
 
 DEFAULT_AGENTS_CONFIG = find_config()
 
+# Also load .env from the config directory so that API keys placed next to the
+# config file (e.g. ~/.mindroom/.env) are picked up even when CWD is elsewhere.
+# override=False (the default) means real env vars and CWD .env take precedence.
+_config_dotenv = DEFAULT_AGENTS_CONFIG.parent / ".env"
+if _config_dotenv.is_file():
+    load_dotenv(_config_dotenv)
+
 # Optional template path used to seed the writable config file if it does not
 # exist yet. Defaults to the same location as DEFAULT_AGENTS_CONFIG so the
 # behaviour is unchanged when no overrides are provided.
