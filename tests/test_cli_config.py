@@ -335,6 +335,9 @@ class TestDoctor:
         assert "✗" not in result.output
         assert "5 passed" in result.output
         assert "0 failed" in result.output
+        assert "Providers:" in result.output
+        assert "anthropic (1 model)" in result.output
+        assert "API key valid" in result.output
 
     def test_missing_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor reports failure when config file is missing."""
@@ -371,7 +374,7 @@ class TestDoctor:
 
         result = runner.invoke(app, ["doctor"])
         assert result.exit_code == 0
-        assert "Missing env: ANTHROPIC_API_KEY" in result.output
+        assert "ANTHROPIC_API_KEY not set" in result.output
         assert "1 warning" in result.output
 
     def test_homeserver_unreachable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -402,13 +405,89 @@ class TestDoctor:
         assert "Storage not writable" in result.output
 
     def test_skips_config_checks_when_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Doctor skips config-validation and API-key checks when config is missing."""
+        """Doctor skips config-validation and provider checks when config is missing."""
         monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", tmp_path / "missing.yaml")
         monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(tmp_path / "storage"))
         _patch_homeserver_ok(monkeypatch)
 
         result = runner.invoke(app, ["doctor"])
-        # Config-dependent checks should not appear
         assert "Config valid" not in result.output
-        assert "API keys" not in result.output
-        assert "Missing env:" not in result.output
+        assert "Providers:" not in result.output
+        assert "API key" not in result.output
+
+    def test_invalid_api_key_is_failure(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Doctor reports failure when an API key is rejected by the provider."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(_VALID_CONFIG)
+        storage = tmp_path / "storage"
+        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(storage))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-invalid")
+        monkeypatch.setattr("mindroom.cli.MATRIX_HOMESERVER", "http://localhost:8008")
+
+        def _mock_get(url: str, **_kw: object) -> httpx.Response:
+            if "/_matrix/" in str(url):
+                return httpx.Response(200, json={"versions": ["v1.1"]})
+            return httpx.Response(401, json={"error": "invalid"})
+
+        monkeypatch.setattr("mindroom.cli.httpx.get", _mock_get)
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 1
+        assert "API key invalid" in result.output
+
+    def test_provider_summary_multiple_providers(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Doctor shows provider summary with correct model counts."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n"
+            "  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "  fast:\n    provider: anthropic\n    id: claude-haiku-3-5-latest\n"
+            "  gpt:\n    provider: openai\n    id: gpt-4o\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        storage = tmp_path / "storage"
+        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(storage))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0
+        assert "anthropic (2 models)" in result.output
+        assert "openai (1 model)" in result.output
+
+    def test_custom_base_url_validation(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Doctor validates against custom base_url when configured."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n"
+            "  default:\n"
+            "    provider: openai\n"
+            "    id: local-model\n"
+            "    extra_kwargs:\n"
+            "      base_url: http://localhost:9292/v1\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        storage = tmp_path / "storage"
+        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(storage))
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-local")
+        monkeypatch.setattr("mindroom.cli.MATRIX_HOMESERVER", "http://localhost:8008")
+
+        called_urls: list[str] = []
+
+        def _mock_get(url: str, **_kw: object) -> httpx.Response:
+            called_urls.append(str(url))
+            return httpx.Response(200, json={})
+
+        monkeypatch.setattr("mindroom.cli.httpx.get", _mock_get)
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0
+        assert "API key valid" in result.output
+        # Should validate against the custom base_url, not api.openai.com
+        assert any("localhost:9292" in u for u in called_urls)
