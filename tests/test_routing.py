@@ -16,7 +16,7 @@ from mindroom.routing import AgentSuggestion, suggest_agent_for_message
 from mindroom.thread_utils import (
     extract_agent_name,
     has_any_agent_mentions_in_thread,
-    has_multiple_non_agent_users_in_room,
+    has_multiple_non_agent_users_in_thread,
 )
 
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
@@ -266,25 +266,30 @@ class TestThreadUtils:
         assert extract_agent_name("@mindroom_user:localhost", self.config) is None
         assert extract_agent_name("@regular_user:localhost", self.config) is None
 
-    def test_has_multiple_non_agent_users_in_room_true(self) -> None:
-        """Detect more than one non-agent user in a room."""
-        room = MagicMock()
-        room.users = {
-            "@mindroom_calculator:localhost": None,
-            "@alice:localhost": None,
-            "@bob:localhost": None,
-        }
-        assert has_multiple_non_agent_users_in_room(room, self.config) is True
+    def test_has_multiple_non_agent_users_in_thread_true(self) -> None:
+        """Detect more than one non-agent user posting in a thread."""
+        history = [
+            {"sender": "@alice:localhost", "body": "hello"},
+            {"sender": "@bob:localhost", "body": "hi"},
+        ]
+        assert has_multiple_non_agent_users_in_thread(history, self.config) is True
 
-    def test_has_multiple_non_agent_users_in_room_false(self) -> None:
-        """Do not trigger when there is only one non-agent user."""
-        room = MagicMock()
-        room.users = {
-            "@mindroom_calculator:localhost": None,
-            "@mindroom_general:localhost": None,
-            "@alice:localhost": None,
-        }
-        assert has_multiple_non_agent_users_in_room(room, self.config) is False
+    def test_has_multiple_non_agent_users_in_thread_false(self) -> None:
+        """Do not trigger when only one non-agent user has posted."""
+        history = [
+            {"sender": "@alice:localhost", "body": "hello"},
+            {"sender": "@mindroom_calculator:localhost", "body": "result"},
+        ]
+        assert has_multiple_non_agent_users_in_thread(history, self.config) is False
+
+    def test_has_multiple_non_agent_users_in_thread_ignores_agents(self) -> None:
+        """Agent senders should not count toward the non-agent tally."""
+        history = [
+            {"sender": "@alice:localhost", "body": "help"},
+            {"sender": "@mindroom_calculator:localhost", "body": "sure"},
+            {"sender": "@mindroom_general:localhost", "body": "me too"},
+        ]
+        assert has_multiple_non_agent_users_in_thread(history, self.config) is False
 
 
 class TestAgentDescription:

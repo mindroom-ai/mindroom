@@ -1105,8 +1105,8 @@ class TestRouterSkipsSingleAgent:
         assert "Skipping routing: only one agent present" not in info_calls
 
     @pytest.mark.asyncio
-    async def test_router_requires_mention_with_multiple_non_agent_users(self) -> None:
-        """Router should not auto-route in rooms with multiple non-agent users."""
+    async def test_router_requires_mention_with_multiple_non_agent_users_in_thread(self) -> None:
+        """Router should not auto-route when multiple non-agent users posted in the thread."""
         agent_user = AgentMatrixUser(
             agent_name=ROUTER_AGENT_NAME,
             user_id="@mindroom_router:localhost",
@@ -1139,9 +1139,12 @@ class TestRouterSkipsSingleAgent:
         mock_context = MagicMock()
         mock_context.am_i_mentioned = False
         mock_context.mentioned_agents = []
-        mock_context.is_thread = False
-        mock_context.thread_id = None
-        mock_context.thread_history = []
+        mock_context.is_thread = True
+        mock_context.thread_id = "$thread1"
+        mock_context.thread_history = [
+            {"sender": "@alice:localhost", "body": "Can someone help?"},
+            {"sender": "@bob:localhost", "body": "I have the same question"},
+        ]
         bot._extract_message_context = AsyncMock(return_value=mock_context)
 
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
@@ -1173,7 +1176,7 @@ class TestRouterSkipsSingleAgent:
 
         bot._handle_ai_routing.assert_not_called()
         info_calls = [call[0][0] for call in bot.logger.info.call_args_list]
-        assert "Skipping routing: multiple non-agent users present (mention required)" in info_calls
+        assert "Skipping routing: multiple non-agent users in thread (mention required)" in info_calls
 
     @pytest.mark.asyncio
     async def test_router_handles_command_even_with_single_agent(self) -> None:

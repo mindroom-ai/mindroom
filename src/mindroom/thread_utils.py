@@ -178,13 +178,14 @@ def get_available_agent_matrix_ids_in_room(room: nio.MatrixRoom, config: Config)
     return sorted(agent_ids, key=lambda x: x.full_id)
 
 
-def has_multiple_non_agent_users_in_room(room: nio.MatrixRoom, config: Config) -> bool:
-    """Return True when more than one non-agent user is present in the room."""
-    non_agent_count = 0
-    for member_id in room.users:
-        if not extract_agent_name(member_id, config):
-            non_agent_count += 1
-            if non_agent_count > 1:
+def has_multiple_non_agent_users_in_thread(thread_history: list[dict[str, Any]], config: Config) -> bool:
+    """Return True when more than one non-agent user has posted in the thread."""
+    non_agent_senders: set[str] = set()
+    for msg in thread_history:
+        sender: str = msg.get("sender", "")
+        if sender and not extract_agent_name(sender, config):
+            non_agent_senders.add(sender)
+            if len(non_agent_senders) > 1:
                 return True
     return False
 
@@ -308,13 +309,11 @@ def should_agent_respond(
     if mentioned_agents:
         return False
 
-    multi_non_agent_room = has_multiple_non_agent_users_in_room(room, config)
-
-    # Non-thread messages: allow a single available agent to respond automatically
+    # Non-thread messages: allow a single available agent to respond automatically.
     # This applies to both DM and regular rooms. Router is excluded from availability.
     if not is_thread:
         available_agents = get_available_agents_in_room(room, config)
-        return not multi_non_agent_room and len(available_agents) == 1
+        return len(available_agents) == 1
 
     agent_matrix_id = config.ids[agent_name]
 
@@ -323,8 +322,8 @@ def should_agent_respond(
     if agents_in_thread:
         return len(agents_in_thread) == 1 and agents_in_thread[0] == agent_matrix_id
 
-    # No agents in thread yet: in multi-human rooms, require explicit mention.
-    if multi_non_agent_room:
+    # No agents in thread yet: if multiple humans posted, require explicit mention.
+    if has_multiple_non_agent_users_in_thread(thread_history, config):
         return False
 
     # Otherwise, respond if we're the only available agent.
