@@ -2527,6 +2527,7 @@ class MultiAgentOrchestrator:
         for entity_name, bot in self.agent_bots.items():
             if entity_name not in entities_to_restart:
                 bot.config = new_config
+                bot.enable_streaming = new_config.defaults.enable_streaming
                 await bot._set_presence_with_model_info()
                 logger.debug(f"Updated config for {entity_name}")
 
