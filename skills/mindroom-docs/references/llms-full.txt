@@ -509,19 +509,57 @@ MindRoom is configured through a `config.yaml` file. This section covers all con
 
 ## Configuration File
 
-The configuration file defaults to `./config.yaml`. To use a different path:
+MindRoom searches for the configuration file in this order (first match wins):
 
-```
-MINDROOM_CONFIG_PATH=/path/to/config.yaml mindroom run
-```
+1. `MINDROOM_CONFIG_PATH` environment variable (if set)
+1. `./config.yaml` (current working directory)
+1. `~/.mindroom/config.yaml` (home directory)
 
-(`CONFIG_PATH` is also supported for compatibility.)
+Data storage (`mindroom_data/`) is placed next to the config file by default.
 
 You can also validate a specific file directly:
 
 ```
-mindroom validate --config /path/to/config.yaml  # or: -c
+mindroom config validate --path /path/to/config.yaml
 ```
+
+## Environment Variables
+
+### Core
+
+| Variable                    | Description                                    | Default                                     |
+| --------------------------- | ---------------------------------------------- | ------------------------------------------- |
+| `MINDROOM_CONFIG_PATH`      | Path to `config.yaml`                          | `./config.yaml` → `~/.mindroom/config.yaml` |
+| `MINDROOM_STORAGE_PATH`     | Data storage directory                         | `mindroom_data/` next to config             |
+| `MINDROOM_CONFIG_TEMPLATE`  | Template to seed config from (for containers)  | Same as config path                         |
+| `MINDROOM_ENABLE_STREAMING` | Stream responses via progressive message edits | `true`                                      |
+
+### Matrix
+
+| Variable             | Description                | Default                     |
+| -------------------- | -------------------------- | --------------------------- |
+| `MATRIX_HOMESERVER`  | Matrix homeserver URL      | `http://localhost:8008`     |
+| `MATRIX_SERVER_NAME` | Server name for federation | *(derived from homeserver)* |
+| `MATRIX_SSL_VERIFY`  | Verify SSL certificates    | `true`                      |
+
+### API Keys
+
+Set the API key for each provider you use in `config.yaml`:
+
+| Variable             | Provider                     |
+| -------------------- | ---------------------------- |
+| `ANTHROPIC_API_KEY`  | Anthropic (Claude)           |
+| `OPENAI_API_KEY`     | OpenAI                       |
+| `GOOGLE_API_KEY`     | Google (Gemini)              |
+| `OPENROUTER_API_KEY` | OpenRouter                   |
+| `DEEPSEEK_API_KEY`   | DeepSeek                     |
+| `CEREBRAS_API_KEY`   | Cerebras                     |
+| `GROQ_API_KEY`       | Groq                         |
+| `OLLAMA_HOST`        | Ollama (host URL, not a key) |
+
+### Sandbox Proxy
+
+See [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) for the full list of `MINDROOM_SANDBOX_*` variables.
 
 ## Basic Structure
 
@@ -3448,8 +3486,7 @@ Start MindRoom with your configuration.
 │                                          [default: INFO]                               │
 │ --storage-path  -s              PATH     Base directory for persistent MindRoom data   │
 │                                          (state, sessions, tracking)                   │
-│                                          [default:                                     │
-│                                          /home/runner/work/mindroom/mindroom/mindroom… │
+│                                          [default: mindroom_data]                      │
 │ --api               --no-api             Start the dashboard API server alongside the  │
 │                                          bot                                           │
 │                                          [default: api]                                │
