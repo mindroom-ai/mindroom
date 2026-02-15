@@ -1228,9 +1228,7 @@ class AgentBot:
         current_event_id = reply_to_event_id
         seen_event_ids: set[str] = set()
 
-        for _ in range(12):
-            if current_event_id in seen_event_ids:
-                break
+        while current_event_id not in seen_event_ids:
             seen_event_ids.add(current_event_id)
 
             response = await self.client.room_get_event(room_id, current_event_id)

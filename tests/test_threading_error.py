@@ -329,6 +329,59 @@ class TestThreadingBehavior:
         mock_fetch.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_extract_context_long_reply_chain_keeps_true_root(self, bot: AgentBot) -> None:
+        """Long reply chains should keep a stable root instead of drifting."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "14th message in reply-only chain",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$msg13:localhost"}},
+                },
+                "event_id": "$msg14:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567894,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        responses: list[nio.RoomGetEventResponse] = []
+        for i in range(13, 0, -1):
+            content = {"body": f"Message {i}", "msgtype": "m.text"}
+            if i > 1:
+                content["m.relates_to"] = {"m.in_reply_to": {"event_id": f"$msg{i - 1}:localhost"}}
+
+            responses.append(
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": content,
+                        "event_id": f"$msg{i}:localhost",
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 1234567880 + i,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+            )
+
+        bot.client.room_get_event = AsyncMock(side_effect=responses)
+
+        with patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch:
+            context = await bot._extract_message_context(room, event)
+
+        assert context.is_thread is True
+        assert context.thread_id == "$msg1:localhost"
+        assert len(context.thread_history) == 13
+        assert context.thread_history[0]["event_id"] == "$msg1:localhost"
+        assert context.thread_history[-1]["event_id"] == "$msg13:localhost"
+        mock_fetch.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_command_as_reply_doesnt_cause_thread_error(self, tmp_path: Path) -> None:
         """Test that commands sent as replies don't cause threading errors."""
         # Create a router bot to handle commands
