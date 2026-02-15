@@ -4,14 +4,17 @@ This module provides a wrapper around Agno's GoogleCalendarTools that properly h
 credentials stored in MindRoom's unified credentials location.
 """
 
+from __future__ import annotations
+
 from typing import Any
 
 from agno.tools.googlecalendar import GoogleCalendarTools as AgnoGoogleCalendarTools
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
 from loguru import logger
 
 from mindroom.credentials import get_credentials_manager
+from mindroom.tool_dependencies import ensure_tool_deps
+
+_GOOGLE_DEPS = ["google-auth", "google-auth-oauthlib"]
 
 
 class GoogleCalendarTools(AgnoGoogleCalendarTools):
@@ -30,6 +33,9 @@ class GoogleCalendarTools(AgnoGoogleCalendarTools):
 
         if token_data:
             try:
+                ensure_tool_deps(_GOOGLE_DEPS, "google_calendar")
+                from google.oauth2.credentials import Credentials  # noqa: PLC0415
+
                 # Create Google Credentials object from stored data
                 creds = Credentials(
                     token=token_data.get("token"),
@@ -64,6 +70,10 @@ class GoogleCalendarTools(AgnoGoogleCalendarTools):
 
         if token_data:
             try:
+                ensure_tool_deps(_GOOGLE_DEPS, "google_calendar")
+                from google.auth.transport.requests import Request  # noqa: PLC0415
+                from google.oauth2.credentials import Credentials  # noqa: PLC0415
+
                 self.creds = Credentials(
                     token=token_data.get("token"),
                     refresh_token=token_data.get("refresh_token"),
