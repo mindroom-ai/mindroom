@@ -10,6 +10,7 @@ Replaces the previous fragmented gmail_config.py, google_auth.py, and google_set
 
 from __future__ import annotations
 
+import importlib
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -21,6 +22,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from mindroom.credentials import CredentialsManager
+from mindroom.tool_dependencies import auto_install_enabled, auto_install_tool_extra, check_deps_installed
 
 if TYPE_CHECKING:
     from google.auth.transport.requests import Request as GoogleRequest
@@ -60,10 +62,6 @@ REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", f"http://localhost:{BACKEND_PORT
 
 def _ensure_google_packages() -> tuple[type[GoogleRequest], type[Credentials], type[Flow]]:
     """Lazily import Google auth packages, auto-installing if needed."""
-    import importlib
-
-    from mindroom.tool_dependencies import auto_install_enabled, auto_install_tool_extra, check_deps_installed
-
     google_deps = ["google-auth", "google-auth-oauthlib"]
 
     if not check_deps_installed(google_deps):
@@ -78,9 +76,9 @@ def _ensure_google_packages() -> tuple[type[GoogleRequest], type[Credentials], t
             raise ImportError(msg)
         importlib.invalidate_caches()
 
-    from google.auth.transport.requests import Request as _GoogleRequest
-    from google.oauth2.credentials import Credentials as _Credentials
-    from google_auth_oauthlib.flow import Flow as _Flow
+    from google.auth.transport.requests import Request as _GoogleRequest  # noqa: PLC0415
+    from google.oauth2.credentials import Credentials as _Credentials  # noqa: PLC0415
+    from google_auth_oauthlib.flow import Flow as _Flow  # noqa: PLC0415
 
     return _GoogleRequest, _Credentials, _Flow
 

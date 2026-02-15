@@ -28,7 +28,7 @@ class GoogleSheetsTools(AgnoGoogleSheetsTools):
 
         if token_data:
             try:
-                from google.oauth2.credentials import Credentials
+                from google.oauth2.credentials import Credentials  # noqa: PLC0415
 
                 # Create Google Credentials object from stored data
                 creds = Credentials(
@@ -64,8 +64,8 @@ class GoogleSheetsTools(AgnoGoogleSheetsTools):
 
         if token_data:
             try:
-                from google.auth.transport.requests import Request
-                from google.oauth2.credentials import Credentials
+                from google.auth.transport.requests import Request  # noqa: PLC0415
+                from google.oauth2.credentials import Credentials  # noqa: PLC0415
 
                 self.creds = Credentials(
                     token=token_data.get("token"),

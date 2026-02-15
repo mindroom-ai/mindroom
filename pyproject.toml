@@ -438,12 +438,6 @@ lint.ignore = [
 lint.per-file-ignores.".github/scripts/*" = [
   "INP001", # Part of an implicit namespace package (standalone scripts)
 ]
-lint.per-file-ignores."src/mindroom/api/google_integration.py" = [
-  "PLC0415", #`import` should be at the top-level of a file
-]
-lint.per-file-ignores."src/mindroom/custom_tools/*" = [
-  "PLC0415", #`import` should be at the top-level of a file
-]
 lint.per-file-ignores."src/mindroom/tools/*" = [
   "PLC0415", #`import` should be at the top-level of a file"
 ]
