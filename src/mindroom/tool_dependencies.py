@@ -174,3 +174,20 @@ def auto_install_tool_extra(tool_name: str) -> bool:
     if tool_name not in available_tool_extras():
         return False
     return install_tool_extras([tool_name], quiet=True)
+
+
+def ensure_tool_deps(dependencies: list[str], tool_extra: str) -> None:
+    """Ensure dependencies are installed, auto-installing via tool extra if needed.
+
+    Uses find_spec to check availability (no side effects), then auto-installs
+    and invalidates import caches if necessary.
+
+    Raises ImportError if dependencies cannot be satisfied.
+    """
+    if check_deps_installed(dependencies):
+        return
+    if not auto_install_tool_extra(tool_extra):
+        missing = ", ".join(dependencies)
+        msg = f"Missing dependencies: {missing}. Install with: pip install 'mindroom[{tool_extra}]'"
+        raise ImportError(msg)
+    importlib.invalidate_caches()

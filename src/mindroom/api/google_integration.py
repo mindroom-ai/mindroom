@@ -10,7 +10,6 @@ Replaces the previous fragmented gmail_config.py, google_auth.py, and google_set
 
 from __future__ import annotations
 
-import importlib
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -22,7 +21,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from mindroom.credentials import CredentialsManager
-from mindroom.tool_dependencies import auto_install_enabled, auto_install_tool_extra, check_deps_installed
+from mindroom.tool_dependencies import ensure_tool_deps
 
 if TYPE_CHECKING:
     from google.auth.transport.requests import Request as GoogleRequest
@@ -60,21 +59,12 @@ BACKEND_PORT = os.getenv("BACKEND_PORT", "8765")
 REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", f"http://localhost:{BACKEND_PORT}/api/google/callback")
 
 
+_GOOGLE_DEPS = ["google-auth", "google-auth-oauthlib"]
+
+
 def _ensure_google_packages() -> tuple[type[GoogleRequest], type[Credentials], type[Flow]]:
     """Lazily import Google auth packages, auto-installing if needed."""
-    google_deps = ["google-auth", "google-auth-oauthlib"]
-
-    if not check_deps_installed(google_deps):
-        disabled_hint = ""
-        if not auto_install_enabled():
-            disabled_hint = " Auto-install is disabled by MINDROOM_NO_AUTO_INSTALL_TOOLS."
-        if not auto_install_tool_extra("gmail"):
-            msg = (
-                "Google OAuth endpoints require the google-auth packages, but they are not installed."
-                f"{disabled_hint} Install them with: pip install 'mindroom[gmail]'"
-            )
-            raise ImportError(msg)
-        importlib.invalidate_caches()
+    ensure_tool_deps(_GOOGLE_DEPS, "gmail")
 
     from google.auth.transport.requests import Request as _GoogleRequest  # noqa: PLC0415
     from google.oauth2.credentials import Credentials as _Credentials  # noqa: PLC0415
