@@ -1211,15 +1211,13 @@ class AgentBot:
     ) -> list[dict[str, Any]]:
         """Merge thread history with plain-reply chain history without duplicates."""
         merged_history = list(thread_history)
-        seen_event_ids = {event_id for msg in thread_history if isinstance((event_id := msg.get("event_id")), str)}
+        seen_event_ids = {msg["event_id"] for msg in thread_history if isinstance(msg.get("event_id"), str)}
 
         for message in chain_history:
             event_id = message.get("event_id")
             if isinstance(event_id, str) and event_id in seen_event_ids:
                 continue
             merged_history.append(message)
-            if isinstance(event_id, str):
-                seen_event_ids.add(event_id)
 
         return merged_history
 
@@ -1307,7 +1305,7 @@ class AgentBot:
             event_info.reply_to_event_id,
         )
         if points_to_thread:
-            # Root-direct lookup may already have fetched full thread history.
+            # Root-direct lookup already returned full thread history, starting at the thread root.
             if chain_history and chain_history[0].get("event_id") == context_root_id:
                 return True, context_root_id, chain_history
 
