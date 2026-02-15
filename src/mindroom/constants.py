@@ -20,9 +20,39 @@ ROUTER_AGENT_NAME = "router"
 # variable so deployments can place the writable configuration file on a
 # persistent volume instead of the package directory (which may be read-only).
 _CONFIG_PATH_ENV = os.getenv("MINDROOM_CONFIG_PATH") or os.getenv("CONFIG_PATH")
-DEFAULT_AGENTS_CONFIG = (
-    Path(_CONFIG_PATH_ENV).expanduser() if _CONFIG_PATH_ENV else Path(__file__).parent.parent.parent / "config.yaml"
-)
+
+# Search order: env var > ./config.yaml > ~/.mindroom/config.yaml
+_CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config.yaml"]
+
+
+def config_search_locations() -> list[Path]:
+    """Return the ordered list of locations where MindRoom looks for config.
+
+    This is the single source of truth for config file discovery.
+    """
+    seen: set[Path] = set()
+    locations: list[Path] = []
+    if _CONFIG_PATH_ENV:
+        resolved = Path(_CONFIG_PATH_ENV).expanduser().resolve()
+        seen.add(resolved)
+        locations.append(resolved)
+    for p in _CONFIG_SEARCH_PATHS:
+        resolved = p.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            locations.append(resolved)
+    return locations
+
+
+def find_config() -> Path:
+    """Find the first existing config file, or fall back to ./config.yaml."""
+    for path in config_search_locations():
+        if path.exists():
+            return path
+    return _CONFIG_SEARCH_PATHS[0]  # default to ./config.yaml for creation
+
+
+DEFAULT_AGENTS_CONFIG = find_config()
 
 # Optional template path used to seed the writable config file if it does not
 # exist yet. Defaults to the same location as DEFAULT_AGENTS_CONFIG so the

@@ -17,7 +17,7 @@ from rich.console import Console
 from rich.syntax import Syntax
 
 from mindroom.config import Config
-from mindroom.constants import DEFAULT_AGENTS_CONFIG, env_key_for_provider
+from mindroom.constants import DEFAULT_AGENTS_CONFIG, config_search_locations, env_key_for_provider
 
 console = Console()
 
@@ -41,15 +41,6 @@ def _resolve_config_path(path: Path | None) -> Path:
     if path is not None:
         return path.expanduser().resolve()
     return Path(DEFAULT_AGENTS_CONFIG).resolve()
-
-
-def _config_search_locations() -> list[Path]:
-    """Return the ordered list of locations where MindRoom looks for config."""
-    locations = [Path("config.yaml").resolve()]
-    env_path = os.getenv("MINDROOM_CONFIG_PATH") or os.getenv("CONFIG_PATH")
-    if env_path:
-        locations.append(Path(env_path).expanduser().resolve())
-    return locations
 
 
 def _get_editor() -> str:
@@ -148,7 +139,7 @@ def config_show(
         console.print(f"[yellow]No config file found at:[/yellow] {config_file}")
         console.print("\nRun [cyan]mindroom config init[/cyan] to create one.")
         console.print("\nSearch locations:")
-        for loc in _config_search_locations():
+        for loc in config_search_locations():
             status = "[green]exists[/green]" if loc.exists() else "[dim]not found[/dim]"
             console.print(f"  - {loc} ({status})")
         raise typer.Exit(1)
@@ -256,7 +247,7 @@ def config_path_cmd(
     console.print(f"Resolved config path: {resolved} ({status})")
 
     console.print("\nSearch locations:")
-    for loc in _config_search_locations():
+    for loc in config_search_locations():
         loc_status = "[green]exists[/green]" if loc.exists() else "[dim]not found[/dim]"
         console.print(f"  - {loc} ({loc_status})")
 
