@@ -46,7 +46,7 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 | `streaming.py` | Response streaming via progressive message edits |
 | `agent_prompts.py` | Rich built-in prompts for named agents (code, research, etc.) |
 
-**Persistent state** lives under `mindroom_data/` (overridable via `STORAGE_PATH`):
+**Persistent state** lives under `mindroom_data/` (next to `config.yaml`, overridable via `MINDROOM_STORAGE_PATH`):
 - `sessions/` – Per-agent SQLite event history for Agno conversations
 - `learning/` – Per-agent Agno Learning preference data
 - `chroma/` – ChromaDB storage backing the memory system

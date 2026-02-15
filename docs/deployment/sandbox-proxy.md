@@ -55,7 +55,7 @@ services:
     environment:
       - MINDROOM_SANDBOX_RUNNER_MODE=true
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN}
-      - STORAGE_PATH=/app/workspace/.mindroom
+      - MINDROOM_STORAGE_PATH=/app/workspace/.mindroom
 
 volumes:
   sandbox-workspace:
@@ -72,7 +72,7 @@ Key differences from the primary backend:
 - **No `env_file`** — runner has no API keys, no Matrix credentials
 - **No data volume** — runner cannot access `mindroom_data/`
 - **Scratch workspace** — a dedicated volume for file operations
-- **`STORAGE_PATH`** — pointed at a writable location inside the workspace so the tool registry can initialize without access to the primary data volume
+- **`MINDROOM_STORAGE_PATH`** — pointed at a writable location inside the workspace so the tool registry can initialize without access to the primary data volume
 
 ### Kubernetes (pod sidecar)
 
@@ -92,7 +92,7 @@ docker run -d \
   -p 8766:8766 \
   -e MINDROOM_SANDBOX_RUNNER_MODE=true \
   -e MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token \
-  -e STORAGE_PATH=/app/workspace/.mindroom \
+  -e MINDROOM_STORAGE_PATH=/app/workspace/.mindroom \
   ghcr.io/mindroom-ai/mindroom-backend:latest \
   /app/run-sandbox-runner.sh
 
@@ -125,7 +125,7 @@ This gives you the convenience of running MindRoom natively while keeping code-e
 >   -e MINDROOM_CONFIG_PATH=/app/config.yaml \
 >   -e MINDROOM_SANDBOX_RUNNER_MODE=true \
 >   -e MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token \
->   -e STORAGE_PATH=/app/workspace/.mindroom \
+>   -e MINDROOM_STORAGE_PATH=/app/workspace/.mindroom \
 >   ghcr.io/mindroom-ai/mindroom-backend:latest \
 >   /app/run-sandbox-runner.sh
 > ```
@@ -152,7 +152,7 @@ This gives you the convenience of running MindRoom natively while keeping code-e
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Shared auth token (must match primary) | _(required)_ |
 | `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE` | `inprocess` or `subprocess` | `inprocess` |
 | `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Subprocess timeout | `120` |
-| `STORAGE_PATH` | Writable directory for tool registry init (e.g., `/app/workspace/.mindroom`) | `mindroom_data` _(will fail if not writable)_ |
+| `MINDROOM_STORAGE_PATH` | Writable directory for tool registry init (e.g., `/app/workspace/.mindroom`) | `mindroom_data` next to config _(will fail if not writable)_ |
 | `MINDROOM_CONFIG_PATH` | Path to config.yaml (for plugin tool registration) | _(optional)_ |
 
 ## Execution modes

@@ -43,7 +43,7 @@ services:
     env_file:
       - .env
     environment:
-      - STORAGE_PATH=/app/mindroom_data
+      - MINDROOM_STORAGE_PATH=/app/mindroom_data
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - MATRIX_HOMESERVER=${MATRIX_HOMESERVER}
       # Optional: for self-signed certificates
@@ -67,9 +67,9 @@ Key environment variables (set in `.env` or pass directly):
 | `MATRIX_HOMESERVER` | Matrix server URL | `http://localhost:8008` |
 | `MATRIX_SSL_VERIFY` | Verify SSL certificates | `true` |
 | `MATRIX_SERVER_NAME` | Server name for federation (optional) | - |
-| `STORAGE_PATH` | Data storage directory | `mindroom_data` |
+| `MINDROOM_STORAGE_PATH` | Data storage directory | Relative to config file |
 | `LOG_LEVEL` | Logging level | `INFO` |
-| `MINDROOM_CONFIG_PATH` | Path to config.yaml (alternative: `CONFIG_PATH`) | Package default |
+| `MINDROOM_CONFIG_PATH` | Path to config.yaml | `./config.yaml` |
 | `MINDROOM_ENABLE_STREAMING` | Enable streaming responses | `true` |
 | `ANTHROPIC_API_KEY` | Anthropic API key (if using Claude models) | - |
 | `OPENAI_API_KEY` | OpenAI API key (if using OpenAI models) | - |
@@ -150,7 +150,7 @@ services:
     env_file:
       - .env
     environment:
-      - STORAGE_PATH=/app/mindroom_data
+      - MINDROOM_STORAGE_PATH=/app/mindroom_data
 
   frontend:
     image: ghcr.io/mindroom-ai/mindroom-frontend:latest

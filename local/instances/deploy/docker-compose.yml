@@ -15,7 +15,7 @@ services:
       - ${DATA_DIR}/logs:/app/logs
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - STORAGE_PATH=/app/mindroom_data
+      - MINDROOM_STORAGE_PATH=/app/mindroom_data
       - MINDROOM_SANDBOX_PROXY_URL=http://sandbox-runner:8766
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN:-sandbox-secret}
       - MINDROOM_SANDBOX_EXECUTION_MODE=selective
@@ -52,7 +52,7 @@ services:
     environment:
       - MINDROOM_SANDBOX_RUNNER_MODE=true
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN:-sandbox-secret}
-      - STORAGE_PATH=/app/workspace/.mindroom
+      - MINDROOM_STORAGE_PATH=/app/workspace/.mindroom
     networks:
       - mindroom-network
 

@@ -13,7 +13,6 @@ import threading
 import time
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -26,6 +25,7 @@ from mindroom.tools_metadata import ensure_tool_registry_loaded, get_tool_by_nam
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
     from agno.tools.toolkit import Toolkit
 
@@ -42,17 +42,15 @@ RUNNER_SUBPROCESS_TIMEOUT_ENV = "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECO
 _RESPONSE_MARKER = "__SANDBOX_RESPONSE__"
 
 
-def _load_config_from_env() -> tuple[Config | None, Path | None]:
+def _load_config_from_env() -> tuple[Config | None, Path]:
     """Read runner config path from environment variables."""
     from mindroom.config import Config as _Config  # noqa: PLC0415
+    from mindroom.constants import find_config  # noqa: PLC0415
 
-    config_path_env = os.getenv("MINDROOM_CONFIG_PATH") or os.getenv("CONFIG_PATH")
+    config_path = find_config()
     config: _Config | None = None
-    config_path: Path | None = None
-    if config_path_env:
-        config_path = Path(config_path_env).expanduser()
-        if config_path.exists():
-            config = _Config.from_yaml(config_path)
+    if config_path.exists():
+        config = _Config.from_yaml(config_path)
     return config, config_path
 
 

@@ -43,7 +43,7 @@ spec:
           value: {{ .Values.accountId | quote }}
         - name: CUSTOMER_ID
           value: {{ .Values.customer | quote }}
-        - name: STORAGE_PATH
+        - name: MINDROOM_STORAGE_PATH
           value: {{ .Values.storagePath }}
         - name: MINDROOM_CONFIG_PATH
           value: "{{ .Values.storagePath }}/config/config.yaml"
@@ -117,7 +117,7 @@ spec:
               key: sandbox_proxy_token
         - name: MINDROOM_CONFIG_PATH
           value: "/app/config.yaml"
-        - name: STORAGE_PATH
+        - name: MINDROOM_STORAGE_PATH
           value: "/app/workspace/.mindroom"
         volumeMounts:
         - name: config

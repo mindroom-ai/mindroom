@@ -53,7 +53,7 @@ class TokenUsage:
 
 def get_storage_path() -> Path:
     """Get the path for token usage storage."""
-    storage_path = Path(os.getenv("STORAGE_PATH", "./mindroom_data"))
+    storage_path = Path(os.getenv("MINDROOM_STORAGE_PATH", "./mindroom_data"))
     return storage_path / "token_usage.jsonl"
 
 

@@ -19,18 +19,56 @@ ROUTER_AGENT_NAME = "router"
 # Default path to agents configuration file. Allow overriding via environment
 # variable so deployments can place the writable configuration file on a
 # persistent volume instead of the package directory (which may be read-only).
-_CONFIG_PATH_ENV = os.getenv("MINDROOM_CONFIG_PATH") or os.getenv("CONFIG_PATH")
-DEFAULT_AGENTS_CONFIG = (
-    Path(_CONFIG_PATH_ENV).expanduser() if _CONFIG_PATH_ENV else Path(__file__).parent.parent.parent / "config.yaml"
-)
+_CONFIG_PATH_ENV = os.getenv("MINDROOM_CONFIG_PATH")
+
+# Search order: env var > ./config.yaml > ~/.mindroom/config.yaml
+_CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config.yaml"]
+
+
+def config_search_locations() -> list[Path]:
+    """Return the ordered list of locations where MindRoom looks for config.
+
+    This is the single source of truth for config file discovery.
+    """
+    seen: set[Path] = set()
+    locations: list[Path] = []
+    if _CONFIG_PATH_ENV:
+        resolved = Path(_CONFIG_PATH_ENV).expanduser().resolve()
+        seen.add(resolved)
+        locations.append(resolved)
+    for p in _CONFIG_SEARCH_PATHS:
+        resolved = p.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            locations.append(resolved)
+    return locations
+
+
+def find_config() -> Path:
+    """Find the first existing config file, or fall back to ./config.yaml.
+
+    Returns the original (possibly relative) path, not a resolved one,
+    so that derived paths like STORAGE_PATH stay relative and display
+    cleanly in CLI help text.
+    """
+    if _CONFIG_PATH_ENV:
+        return Path(_CONFIG_PATH_ENV).expanduser()
+    for path in _CONFIG_SEARCH_PATHS:
+        if path.exists():
+            return path
+    return _CONFIG_SEARCH_PATHS[0]  # default to ./config.yaml for creation
+
+
+DEFAULT_AGENTS_CONFIG = find_config()
 
 # Optional template path used to seed the writable config file if it does not
 # exist yet. Defaults to the same location as DEFAULT_AGENTS_CONFIG so the
 # behaviour is unchanged when no overrides are provided.
-_CONFIG_TEMPLATE_ENV = os.getenv("MINDROOM_CONFIG_TEMPLATE") or os.getenv("CONFIG_TEMPLATE_PATH")
+_CONFIG_TEMPLATE_ENV = os.getenv("MINDROOM_CONFIG_TEMPLATE")
 DEFAULT_CONFIG_TEMPLATE = Path(_CONFIG_TEMPLATE_ENV).expanduser() if _CONFIG_TEMPLATE_ENV else DEFAULT_AGENTS_CONFIG
 
-STORAGE_PATH = os.getenv("STORAGE_PATH", "mindroom_data")
+_STORAGE_PATH_ENV = os.getenv("MINDROOM_STORAGE_PATH")
+STORAGE_PATH = _STORAGE_PATH_ENV or str(DEFAULT_AGENTS_CONFIG.parent / "mindroom_data")
 STORAGE_PATH_OBJ = Path(STORAGE_PATH)
 
 # Specific files and directories
@@ -52,7 +90,7 @@ def env_flag(name: str, *, default: bool = False) -> bool:
 # Other constants
 VOICE_PREFIX = "🎤 "
 ENABLE_STREAMING = env_flag("MINDROOM_ENABLE_STREAMING", default=True)
-ENABLE_AI_CACHE = env_flag("ENABLE_AI_CACHE", default=True)
+ENABLE_AI_CACHE = env_flag("MINDROOM_ENABLE_AI_CACHE", default=True)
 
 # Matrix
 MATRIX_HOMESERVER = os.getenv("MATRIX_HOMESERVER", "http://localhost:8008")

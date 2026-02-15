@@ -509,19 +509,57 @@ MindRoom is configured through a `config.yaml` file. This section covers all con
 
 ## Configuration File
 
-The configuration file defaults to `./config.yaml`. To use a different path:
+MindRoom searches for the configuration file in this order (first match wins):
 
-```
-MINDROOM_CONFIG_PATH=/path/to/config.yaml mindroom run
-```
+1. `MINDROOM_CONFIG_PATH` environment variable (if set)
+1. `./config.yaml` (current working directory)
+1. `~/.mindroom/config.yaml` (home directory)
 
-(`CONFIG_PATH` is also supported for compatibility.)
+Data storage (`mindroom_data/`) is placed next to the config file by default.
 
 You can also validate a specific file directly:
 
 ```
-mindroom validate --config /path/to/config.yaml  # or: -c
+mindroom config validate --path /path/to/config.yaml
 ```
+
+## Environment Variables
+
+### Core
+
+| Variable                    | Description                                    | Default                                     |
+| --------------------------- | ---------------------------------------------- | ------------------------------------------- |
+| `MINDROOM_CONFIG_PATH`      | Path to `config.yaml`                          | `./config.yaml` → `~/.mindroom/config.yaml` |
+| `MINDROOM_STORAGE_PATH`     | Data storage directory                         | `mindroom_data/` next to config             |
+| `MINDROOM_CONFIG_TEMPLATE`  | Template to seed config from (for containers)  | Same as config path                         |
+| `MINDROOM_ENABLE_STREAMING` | Stream responses via progressive message edits | `true`                                      |
+
+### Matrix
+
+| Variable             | Description                | Default                     |
+| -------------------- | -------------------------- | --------------------------- |
+| `MATRIX_HOMESERVER`  | Matrix homeserver URL      | `http://localhost:8008`     |
+| `MATRIX_SERVER_NAME` | Server name for federation | *(derived from homeserver)* |
+| `MATRIX_SSL_VERIFY`  | Verify SSL certificates    | `true`                      |
+
+### API Keys
+
+Set the API key for each provider you use in `config.yaml`:
+
+| Variable             | Provider                     |
+| -------------------- | ---------------------------- |
+| `ANTHROPIC_API_KEY`  | Anthropic (Claude)           |
+| `OPENAI_API_KEY`     | OpenAI                       |
+| `GOOGLE_API_KEY`     | Google (Gemini)              |
+| `OPENROUTER_API_KEY` | OpenRouter                   |
+| `DEEPSEEK_API_KEY`   | DeepSeek                     |
+| `CEREBRAS_API_KEY`   | Cerebras                     |
+| `GROQ_API_KEY`       | Groq                         |
+| `OLLAMA_HOST`        | Ollama (host URL, not a key) |
+
+### Sandbox Proxy
+
+See [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) for the full list of `MINDROOM_SANDBOX_*` variables.
 
 ## Basic Structure
 
@@ -803,7 +841,7 @@ Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `con
 
 All per-agent settings above that show a default value inherit from the `defaults` section. Per-agent values override them.
 
-Learning data is persisted to `STORAGE_PATH/learning/<agent>.db` (default: `mindroom_data/learning/<agent>.db`), so it survives container restarts when `mindroom_data` is mounted.
+Learning data is persisted to `mindroom_data/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted.
 
 ## Rich Prompt Agents
 
@@ -2475,7 +2513,7 @@ Each agent gets its own Matrix user with the `mindroom_` prefix:
 @mindroom_router:example.com  (built-in routing agent)
 ```
 
-Users are automatically created during orchestrator startup and credentials are persisted in `{STORAGE_PATH}/matrix_state.yaml` (default: `mindroom_data/matrix_state.yaml`).
+Users are automatically created during orchestrator startup and credentials are persisted in `mindroom_data/matrix_state.yaml`.
 
 ## Room Management
 
@@ -3098,7 +3136,7 @@ services:
     env_file:
       - .env
     environment:
-      - STORAGE_PATH=/app/mindroom_data
+      - MINDROOM_STORAGE_PATH=/app/mindroom_data
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - MATRIX_HOMESERVER=${MATRIX_HOMESERVER}
       # Optional: for self-signed certificates
@@ -3117,17 +3155,17 @@ docker compose up -d
 
 Key environment variables (set in `.env` or pass directly):
 
-| Variable                    | Description                                      | Default                 |
-| --------------------------- | ------------------------------------------------ | ----------------------- |
-| `MATRIX_HOMESERVER`         | Matrix server URL                                | `http://localhost:8008` |
-| `MATRIX_SSL_VERIFY`         | Verify SSL certificates                          | `true`                  |
-| `MATRIX_SERVER_NAME`        | Server name for federation (optional)            | -                       |
-| `STORAGE_PATH`              | Data storage directory                           | `mindroom_data`         |
-| `LOG_LEVEL`                 | Logging level                                    | `INFO`                  |
-| `MINDROOM_CONFIG_PATH`      | Path to config.yaml (alternative: `CONFIG_PATH`) | Package default         |
-| `MINDROOM_ENABLE_STREAMING` | Enable streaming responses                       | `true`                  |
-| `ANTHROPIC_API_KEY`         | Anthropic API key (if using Claude models)       | -                       |
-| `OPENAI_API_KEY`            | OpenAI API key (if using OpenAI models)          | -                       |
+| Variable                    | Description                                | Default                 |
+| --------------------------- | ------------------------------------------ | ----------------------- |
+| `MATRIX_HOMESERVER`         | Matrix server URL                          | `http://localhost:8008` |
+| `MATRIX_SSL_VERIFY`         | Verify SSL certificates                    | `true`                  |
+| `MATRIX_SERVER_NAME`        | Server name for federation (optional)      | -                       |
+| `MINDROOM_STORAGE_PATH`     | Data storage directory                     | Relative to config file |
+| `LOG_LEVEL`                 | Logging level                              | `INFO`                  |
+| `MINDROOM_CONFIG_PATH`      | Path to config.yaml                        | `./config.yaml`         |
+| `MINDROOM_ENABLE_STREAMING` | Enable streaming responses                 | `true`                  |
+| `ANTHROPIC_API_KEY`         | Anthropic API key (if using Claude models) | -                       |
+| `OPENAI_API_KEY`            | OpenAI API key (if using OpenAI models)    | -                       |
 
 ## Building from Source
 
@@ -3205,7 +3243,7 @@ services:
     env_file:
       - .env
     environment:
-      - STORAGE_PATH=/app/mindroom_data
+      - MINDROOM_STORAGE_PATH=/app/mindroom_data
 
   frontend:
     image: ghcr.io/mindroom-ai/mindroom-frontend:latest
