@@ -23,6 +23,9 @@ _PIP_TO_IMPORT: dict[str, str] = {
     "beautifulsoup4": "bs4",
     "e2b-code-interpreter": "e2b",
     "firecrawl-py": "firecrawl",
+    "linkup-sdk": "linkup",
+    "mem0ai": "mem0",
+    "newspaper4k": "newspaper",
     "google-api-python-client": "googleapiclient",
     "google-auth": "google.auth",
     "google-cloud-bigquery": "google.cloud.bigquery",
@@ -33,6 +36,7 @@ _PIP_TO_IMPORT: dict[str, str] = {
     "py-trello": "trello",
     "pygithub": "github",
     "pyyaml": "yaml",
+    "tavily-python": "tavily",
     "spider-client": "spider",
 }
 
@@ -134,11 +138,16 @@ def _install_cmd() -> list[str]:
 def _install_via_uv_sync(extras: list[str], *, quiet: bool) -> bool:
     """Install extras using ``uv sync --locked --inexact`` for pinned versions from uv.lock."""
     cmd = ["uv", "sync", "--locked", "--inexact", "--no-dev"]
+    env = os.environ.copy()
+    if _in_virtualenv():
+        # Ensure uv targets the interpreter that is currently running MindRoom.
+        cmd.append("--active")
+        env["VIRTUAL_ENV"] = sys.prefix
     for extra in extras:
         cmd.extend(["--extra", extra])
     if quiet:
         cmd.append("-q")
-    result = subprocess.run(cmd, check=False, capture_output=quiet, cwd=_PROJECT_ROOT)
+    result = subprocess.run(cmd, check=False, capture_output=quiet, cwd=_PROJECT_ROOT, env=env)
     return result.returncode == 0
 
 
@@ -162,7 +171,7 @@ def install_tool_extras(extras: list[str], *, quiet: bool = False) -> bool:
         current_extras = _get_current_uv_tool_extras()
         merged = sorted(set(current_extras) | set(extras))
         return _install_via_uv_tool(merged, quiet=quiet)
-    if _has_lockfile() and shutil.which("uv"):
+    if _has_lockfile() and shutil.which("uv") and _in_virtualenv():
         return _install_via_uv_sync(extras, quiet=quiet)
     return _install_in_environment(extras, quiet=quiet)
 

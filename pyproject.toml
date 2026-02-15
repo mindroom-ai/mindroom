@@ -259,7 +259,7 @@ optional-dependencies.pandas = [
   "pandas>=2.2",
 ]
 optional-dependencies.postgres = [
-  "psycopg-binary",
+  "psycopg[binary]",
 ]
 optional-dependencies.pubmed = [
   "httpx>=0.27",
