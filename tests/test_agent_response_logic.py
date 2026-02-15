@@ -401,12 +401,12 @@ class TestAgentResponseLogic:
         assert should_respond is True  # Single agent takes ownership when only users have spoken
 
     def test_multiple_non_agent_users_require_mentions(self) -> None:
-        """Automatic replies are disabled when multiple non-agent users are in the room."""
+        """Require mention to start in multi-human rooms, but allow thread continuity."""
         room = create_mock_room("!room:localhost", ["calculator"], self.config)
         room.users["@alice:localhost"] = None
         room.users["@bob:localhost"] = None
 
-        should_respond = should_agent_respond(
+        main_room_should_respond = should_agent_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=False,
@@ -414,7 +414,7 @@ class TestAgentResponseLogic:
             thread_history=[],
             config=self.config,
         )
-        assert should_respond is False
+        assert main_room_should_respond is False
 
         mentioned_should_respond = should_agent_respond(
             agent_name="calculator",
@@ -426,7 +426,17 @@ class TestAgentResponseLogic:
         )
         assert mentioned_should_respond is True
 
-        thread_history = [
+        empty_thread_should_respond = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=False,
+            is_thread=True,
+            room=room,
+            thread_history=[{"sender": "@alice:localhost", "body": "Can someone help?"}],
+            config=self.config,
+        )
+        assert empty_thread_should_respond is False
+
+        owned_thread_history = [
             {"sender": self.agent_id("calculator"), "body": "Sure, I can help."},
             {"sender": "@alice:localhost", "body": "Can you continue?"},
         ]
@@ -435,10 +445,10 @@ class TestAgentResponseLogic:
             am_i_mentioned=False,
             is_thread=True,
             room=room,
-            thread_history=thread_history,
+            thread_history=owned_thread_history,
             config=self.config,
         )
-        assert thread_should_respond is False
+        assert thread_should_respond is True
 
     def test_agent_stops_when_user_mentions_other_agent(self) -> None:
         """Test that an agent stops responding when user mentions a different agent.

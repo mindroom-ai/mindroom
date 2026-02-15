@@ -316,26 +316,25 @@ def should_agent_respond(
     if mentioned_agents:
         return False
 
-    # In rooms with multiple non-agent users, require explicit mentions.
-    if has_multiple_non_agent_users_in_room(room, config):
-        return False
+    multi_non_agent_room = has_multiple_non_agent_users_in_room(room, config)
 
     # Non-thread messages: allow a single available agent to respond automatically
     # This applies to both DM and regular rooms. Router is excluded from availability.
     if not is_thread:
         available_agents = get_available_agents_in_room(room, config)
-        return len(available_agents) == 1
+        return not multi_non_agent_room and len(available_agents) == 1
 
     agent_matrix_id = config.ids[agent_name]
 
-    # For threads, check if agents have already participated
-    if is_thread:
-        agents_in_thread = get_agents_in_thread(thread_history, config)
-        if agents_in_thread:
-            # Continue only if we're the single agent
-            return len(agents_in_thread) == 1 and agents_in_thread[0] == agent_matrix_id
+    # For threads, continue only if we're the single participating agent.
+    agents_in_thread = get_agents_in_thread(thread_history, config)
+    if agents_in_thread:
+        return len(agents_in_thread) == 1 and agents_in_thread[0] == agent_matrix_id
 
-    # No agents in thread yet OR DM room without thread
-    # Respond if we're the only agent available
+    # No agents in thread yet: in multi-human rooms, require explicit mention.
+    if multi_non_agent_room:
+        return False
+
+    # Otherwise, respond if we're the only available agent.
     available_agents = get_available_agents_in_room(room, config)
     return len(available_agents) == 1
