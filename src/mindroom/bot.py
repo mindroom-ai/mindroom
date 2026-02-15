@@ -100,9 +100,9 @@ from .thread_utils import (
     get_all_mentioned_agents_in_thread,
     get_available_agents_in_room,
     get_configured_agents_for_room,
-    has_multiple_non_agent_users_in_room,
     has_user_responded_after_message,
     is_authorized_sender,
+    requires_explicit_mention_for_auto_response,
     should_agent_respond,
 )
 from .tools_metadata import get_tool_by_name
@@ -972,7 +972,7 @@ class AgentBot:
             # 2. No agents are already in the thread
             # 3. There's more than one agent available (routing makes sense)
             if not context.mentioned_agents and not agents_in_thread:
-                if has_multiple_non_agent_users_in_room(room, self.config):
+                if requires_explicit_mention_for_auto_response(room, self.config):
                     self.logger.info("Skipping routing: multiple non-agent users present (mention required)")
                 else:
                     available_agents = get_available_agents_in_room(room, self.config)

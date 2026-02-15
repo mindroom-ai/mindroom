@@ -178,8 +178,8 @@ def get_available_agent_matrix_ids_in_room(room: nio.MatrixRoom, config: Config)
     return sorted(agent_ids, key=lambda x: x.full_id)
 
 
-def has_multiple_non_agent_users_in_room(room: nio.MatrixRoom, config: Config) -> bool:
-    """Return True when more than one non-agent user is present in the room."""
+def requires_explicit_mention_for_auto_response(room: nio.MatrixRoom, config: Config) -> bool:
+    """Return whether unmentioned auto-responses should be disabled for this room."""
     non_agent_members: set[str] = set()
 
     for member_id in room.users:
@@ -316,13 +316,13 @@ def should_agent_respond(
     if mentioned_agents:
         return False
 
-    multi_non_agent_room = has_multiple_non_agent_users_in_room(room, config)
+    requires_mention = requires_explicit_mention_for_auto_response(room, config)
 
     # Non-thread messages: allow a single available agent to respond automatically
     # This applies to both DM and regular rooms. Router is excluded from availability.
     if not is_thread:
         available_agents = get_available_agents_in_room(room, config)
-        return not multi_non_agent_room and len(available_agents) == 1
+        return not requires_mention and len(available_agents) == 1
 
     agent_matrix_id = config.ids[agent_name]
 
@@ -332,7 +332,7 @@ def should_agent_respond(
         return len(agents_in_thread) == 1 and agents_in_thread[0] == agent_matrix_id
 
     # No agents in thread yet: in multi-human rooms, require explicit mention.
-    if multi_non_agent_room:
+    if requires_mention:
         return False
 
     # Otherwise, respond if we're the only available agent.
