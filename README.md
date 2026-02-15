@@ -9,7 +9,7 @@
 [![Downloads](https://img.shields.io/pypi/dm/mindroom)](https://pypi.org/project/mindroom/)
 [![GitHub](https://img.shields.io/badge/github-mindroom--ai%2Fmindroom-blue?logo=github)](https://github.com/mindroom-ai/mindroom)
 
-<img src="https://raw.githubusercontent.com/mindroom-ai/mindroom/main/frontend/public/logo.svg" alt="MindRoom Logo" align="right" width="150" />
+<img src="https://raw.githubusercontent.com/mindroom-ai/mindroom/main/frontend/public/logo-text.svg" alt="MindRoom Logo" align="right" width="150" />
 
 **Your AI is trapped in apps. We set it free.**
 
