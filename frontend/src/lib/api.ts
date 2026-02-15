@@ -21,28 +21,6 @@ export const API_ENDPOINTS = {
     roomModels: `${API_BASE_URL}/api/config/room-models`,
   },
 
-  // Google setup
-  google: {
-    status: `${API_BASE_URL}/api/auth/google/status`,
-    connect: `${API_BASE_URL}/api/auth/google/connect`,
-    disconnect: `${API_BASE_URL}/api/auth/google/disconnect`,
-    callback: `${API_BASE_URL}/api/auth/google/callback`,
-    setup: {
-      checkPrerequisites: `${API_BASE_URL}/api/setup/google/check-prerequisites`,
-      createProject: `${API_BASE_URL}/api/setup/google/create-project`,
-      enableApis: `${API_BASE_URL}/api/setup/google/enable-apis`,
-      startOauth: `${API_BASE_URL}/api/setup/google/start-oauth-setup`,
-      complete: `${API_BASE_URL}/api/setup/google/complete-setup`,
-      quickScript: `${API_BASE_URL}/api/setup/google/quick-setup-script`,
-    },
-  },
-
-  // Simple mode
-  simple: {
-    status: `${API_BASE_URL}/api/simple/mode/status`,
-    toggle: `${API_BASE_URL}/api/simple/mode/toggle`,
-  },
-
   // Matrix operations
   matrix: {
     agentsRooms: `${API_BASE_URL}/api/matrix/agents/rooms`,
@@ -83,8 +61,6 @@ export const API_ENDPOINTS = {
   // Other endpoints
   tools: `${API_BASE_URL}/api/tools`,
   rooms: `${API_BASE_URL}/api/rooms`,
-  testModel: `${API_BASE_URL}/api/test/model`,
-  encryptKey: `${API_BASE_URL}/api/keys/encrypt`,
 };
 
 export async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
