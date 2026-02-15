@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Annotated, Any
 import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 from watchfiles import awatch
 
 # Import routers
@@ -191,12 +190,6 @@ async def verify_user(authorization: str | None = Header(None)) -> dict:
         raise HTTPException(status_code=403, detail="Forbidden")
 
     return {"user_id": user.user.id, "email": user.user.email}
-
-
-class TestModelRequest(BaseModel):
-    """Request model for testing AI model connections."""
-
-    modelId: str  # noqa: N815
 
 
 def load_config_from_file() -> None:
@@ -482,18 +475,6 @@ async def update_room_models(room_models: dict[str, str]) -> dict[str, bool]:
         return {"success": True}
 
 
-@app.post("/api/test/model")
-async def test_model(request: TestModelRequest) -> dict[str, Any]:
-    """Test a model connection."""
-    # TODO: Implement actual model testing
-    # For now, just return success for demonstration
-    model_id = request.modelId
-    with config_lock:
-        if model_id in config.get("models", {}):
-            return {"success": True, "message": f"Model {model_id} is configured"}
-        return {"success": False, "message": f"Model {model_id} not found"}
-
-
 @app.get("/api/rooms")
 async def get_available_rooms() -> list[str]:
     """Get list of available rooms."""
@@ -505,20 +486,6 @@ async def get_available_rooms() -> list[str]:
             rooms.update(agent_rooms)
 
     return sorted(rooms)
-
-
-@app.post("/api/keys/encrypt")
-async def encrypt_api_key(data: dict[str, str]) -> dict[str, str]:
-    """Encrypt an API key for storage."""
-    # TODO: Implement actual encryption
-    # For now, just return a placeholder
-    provider = data.get("provider", "")
-    key = data.get("key", "")
-
-    # In production, this would encrypt the key
-    encrypted = f"encrypted_{provider}_{len(key)}"
-
-    return {"encryptedKey": encrypted}
 
 
 if __name__ == "__main__":
