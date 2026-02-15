@@ -3183,8 +3183,6 @@ name = "mindroom"
 source = { editable = "." }
 dependencies = [
     { name = "agno", extra = ["anthropic", "google", "ollama", "openai"] },
-    { name = "aiofiles" },
-    { name = "aiohttp" },
     { name = "anthropic" },
     { name = "cerebras-cloud-sdk" },
     { name = "chromadb" },
@@ -3548,8 +3546,6 @@ dev = [
 requires-dist = [
     { name = "agentql", marker = "extra == 'agentql'" },
     { name = "agno", extras = ["anthropic", "google", "ollama", "openai"], specifier = "==2.4.7" },
-    { name = "aiofiles" },
-    { name = "aiohttp" },
     { name = "anthropic", specifier = ">=0.70" },
     { name = "apify-client", marker = "platform_machine != 'aarch64' and extra == 'apify'", specifier = ">=1.12.2" },
     { name = "arxiv", marker = "extra == 'arxiv'" },

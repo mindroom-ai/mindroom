@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import os
-import ssl
 import tempfile
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import aiofiles
-import aiohttp
+import httpx
 import nio
 from agno.agent import Agent
 from nio import crypto
@@ -145,30 +143,18 @@ async def _transcribe_audio(audio_data: bytes, config: Config) -> str | None:
             api_key = config.voice.stt.api_key or os.getenv("OPENAI_API_KEY")
             headers = {"Authorization": f"Bearer {api_key}"}
 
-            # Prepare multipart form data
-            async with aiofiles.open(tmp_path, "rb") as audio_file:
-                audio_content = await audio_file.read()
+            # Read audio file and prepare multipart form data
+            audio_content = Path(tmp_path).read_bytes()
+            files = {"file": ("audio.ogg", audio_content, "audio/ogg")}
+            form_data = {"model": config.voice.stt.model}
 
-            data = aiohttp.FormData()
-            data.add_field("file", audio_content, filename="audio.ogg", content_type="audio/ogg")
-            data.add_field("model", config.voice.stt.model)
-
-            # Make the API request (with SSL verification disabled if needed)
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-
-            connector = aiohttp.TCPConnector(ssl=ssl_context)
-            async with (
-                aiohttp.ClientSession(connector=connector) as session,
-                session.post(url, headers=headers, data=data) as response,
-            ):
-                if response.status != 200:
-                    error_text = await response.text()
-                    logger.error(f"STT API error: {response.status} - {error_text}")
+            async with httpx.AsyncClient(verify=False) as client:  # noqa: S501
+                response = await client.post(url, headers=headers, files=files, data=form_data)
+                if response.status_code != 200:
+                    logger.error(f"STT API error: {response.status_code} - {response.text}")
                     return None
 
-                result = await response.json()
+                result = response.json()
                 return result.get("text", "").strip()
 
         finally:
