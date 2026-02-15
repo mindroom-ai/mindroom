@@ -112,7 +112,6 @@ def test_all_tool_dependencies_in_pyproject() -> None:  # noqa: C901
             + "\n".join(f"  - {tool_name}" for tool_name in missing_optional_groups),
         )
 
-    known_conflicts = {"brave-search"}
     missing_dependencies: dict[str, list[str]] = {}
 
     for tool_name, metadata in sorted(TOOL_METADATA.items()):
@@ -123,8 +122,6 @@ def test_all_tool_dependencies_in_pyproject() -> None:  # noqa: C901
         tool_missing: list[str] = []
         for dep in metadata.dependencies:
             normalized = _normalize_tool_dep_name(dep)
-            if normalized in known_conflicts:
-                continue
             if normalized in base_dependency_names:
                 continue
             if normalized in extra_names:
