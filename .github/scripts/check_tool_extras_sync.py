@@ -19,11 +19,6 @@ TOOLS_DIR = REPO_ROOT / "src" / "mindroom" / "tools"
 # Groups that are not tool registrations (meta-groups, aggregates, etc.)
 IGNORED_GROUPS: set[str] = {"supabase"}
 
-# Tools whose declared dependencies conflict with the project's pinned versions
-# and therefore cannot be added to pyproject.toml optional-dependencies.
-# brave-search: requires tenacity<9 but project pins tenacity>=9.1.2
-KNOWN_CONFLICTS: set[str] = {"brave-search"}
-
 
 def _normalize_dep(spec: str) -> str:
     """Strip version specifiers, extras, and env markers to get the bare package name."""
@@ -148,8 +143,6 @@ def _check_deps_complete(
         pyproject_pkgs = group_packages.get(tool_name, set())
         for dep in declared_deps:
             normalized = _normalize_dep(dep)
-            if normalized in KNOWN_CONFLICTS:
-                continue
             if normalized not in pyproject_pkgs and normalized not in base_packages:
                 ok = False
                 print(
