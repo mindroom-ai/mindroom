@@ -49,16 +49,16 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 **Persistent state** lives under `mindroom_data/` (overridable via `STORAGE_PATH`):
 - `sessions/` – Per-agent SQLite event history for Agno conversations
 - `learning/` – Per-agent Agno Learning preference data
-- `memory/` – Mem0 vector store for agent/room/team memories
 - `chroma/` – ChromaDB storage backing the memory system
+- `knowledge_db/` – Knowledge base vector stores for file-backed RAG
 - `tracking/` – Response tracking to avoid duplicate replies
 - `credentials/` – JSON secrets synchronized from `.env`
 - `encryption_keys/` – Matrix E2E encryption keys
 - `culture/` – Shared culture state
 
 ### SaaS Platform (`saas-platform/`)
-- **Platform Backend**: Modular FastAPI app with routes in `backend/routes/`
-- **Platform Frontend**: Next.js 15 with centralized API client in `lib/api.ts`
+- **Platform Backend**: Modular FastAPI app with routes in `saas-platform/platform-backend/src/backend/routes/`
+- **Platform Frontend**: Next.js 15 with centralized API client in `saas-platform/platform-frontend/src/lib/api.ts`
 - **Authentication**: SSO via HttpOnly cookies across subdomains
 - **Deployment**: Kubernetes with Helm charts, dual-mode support (platform/standalone)
 - **Database**: Supabase with comprehensive RLS policies
@@ -89,6 +89,7 @@ agents:
     instructions:
       - Always read files before modifying them.
     rooms: [lobby, dev]
+    knowledge_bases: [engineering_docs]
 
 defaults:
   markdown: true
@@ -116,6 +117,22 @@ cultures:
     description: Follow clean code principles and write tests
     agents: [code]
     mode: automatic
+
+knowledge_bases:
+  engineering_docs:
+    path: ./knowledge_docs
+    watch: true
+
+voice:
+  enabled: false
+  stt:
+    provider: openai
+    model: whisper-1
+
+authorization:
+  global_users: []
+  room_permissions: {}
+  default_room_access: false
 
 timezone: America/Los_Angeles
 ```
@@ -225,7 +242,7 @@ uv run --python 3.13 matty thread "Lobby" t1
 ```bash
 # Platform Backend
 cd saas-platform/platform-backend
-uvicorn main:app --reload --host 0.0.0.0 --port 8765
+uv run uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 # Platform Frontend
 cd saas-platform/platform-frontend
@@ -238,8 +255,7 @@ bun install && bun run dev
 export KUBECONFIG=./cluster/terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml
 
 # Deploy platform
-cd cluster/k8s/platform
-helm upgrade --install platform . -f values.yaml --namespace mindroom-staging
+helm upgrade --install platform ./cluster/k8s/platform -f cluster/k8s/platform/values.yaml --namespace mindroom-staging
 
 # Deploy instance - ALWAYS use the provisioner API:
 ./cluster/scripts/mindroom-cli.sh provision 1
@@ -256,13 +272,11 @@ helm upgrade --install platform . -f values.yaml --namespace mindroom-staging
 #   -f values-with-secrets.yaml  # Never commit this file!
 
 # Quick redeploy of MindRoom backend (updates all instances)
-cd saas-platform
-./redeploy-mindroom-backend.sh
+./saas-platform/redeploy-mindroom-backend.sh
 
 # Deploy platform frontend or backend
-cd saas-platform
-./deploy.sh platform-frontend  # Build, push, and deploy frontend
-./deploy.sh platform-backend   # Build, push, and deploy backend
+./saas-platform/deploy.sh platform-frontend  # Build, push, and deploy frontend
+./saas-platform/deploy.sh platform-backend   # Build, push, and deploy backend
 
 # Use the CLI helper for common operations
 ./cluster/scripts/mindroom-cli.sh status
@@ -310,8 +324,8 @@ just test-backend                 # Run pytest for core
 just test-saas-backend            # Run pytest for SaaS backend
 
 # Deployment
-just redeploy-mindroom-backend    # Build, push, restart all instances
-just deploy target=platform-backend  # One-off rollout
+just cluster-helm-template        # Render platform chart manifests
+just cluster-helm-lint            # Lint platform chart
 ```
 
 ## 3. Critical "Don'ts"

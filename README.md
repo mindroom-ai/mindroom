@@ -257,6 +257,35 @@ export ANTHROPIC_API_KEY=your-key-here
 # export MINDROOM_CONFIG_PATH=/path/to/config.yaml
 ```
 
+### Optional Advanced Configuration
+
+```yaml
+knowledge_bases:
+  engineering_docs:
+    path: ./knowledge_docs
+    watch: true
+
+agents:
+  assistant:
+    display_name: Assistant
+    role: A helpful AI assistant
+    model: default
+    rooms: [lobby]
+    knowledge_bases: [engineering_docs]
+
+voice:
+  enabled: true
+  stt:
+    provider: openai
+    model: whisper-1
+
+authorization:
+  global_users: ["@alice:example.com"]
+  room_permissions:
+    "!exampleRoomId:example.com": ["@bob:example.com"]
+  default_room_access: false
+```
+
 ## Deployment Options
 
 ### 🏠 Self-Hosted
@@ -316,7 +345,7 @@ We believe AI should be:
 
 ## Contributing
 
-We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+We welcome contributions! See [CLAUDE.md](CLAUDE.md) for the current development workflow and quality checks.
 
 From the developer of 10+ successful open source projects with thousands of users. MindRoom represents 1000+ commits of production-ready code, not a weekend experiment.
 
