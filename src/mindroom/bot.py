@@ -1183,32 +1183,24 @@ class AgentBot:
             # Mark as responded to avoid reprocessing
             self.response_tracker.mark_responded(event.event_id)
 
+    _MAX_REPLY_CHAIN_DEPTH = 50
+
     @staticmethod
-    def _event_to_history_message(event: nio.Event, fallback_event_id: str) -> dict[str, Any]:
+    def _event_to_history_message(event: nio.Event) -> dict[str, Any]:
         """Convert a Matrix event to normalized history message structure."""
-        source = event.source if isinstance(event.source, dict) else {}
-        content_data = source.get("content", {})
-        content = content_data if isinstance(content_data, dict) else {}
+        content = event.source.get("content", {})
+        if not isinstance(content, dict):
+            content = {}
 
-        body_value = content.get("body")
-        if not isinstance(body_value, str):
-            event_body = getattr(event, "body", "")
-            body_value = str(event_body) if event_body else ""
-
-        event_id = getattr(event, "event_id", None)
-        normalized_event_id = event_id if isinstance(event_id, str) else fallback_event_id
-
-        sender_value = getattr(event, "sender", "")
-        sender = sender_value if isinstance(sender_value, str) else ""
-
-        timestamp_value = getattr(event, "server_timestamp", 0)
-        timestamp = timestamp_value if isinstance(timestamp_value, int) else 0
+        body = content.get("body", "")
+        if not isinstance(body, str):
+            body = getattr(event, "body", "") or ""
 
         return {
-            "sender": sender,
-            "body": body_value,
-            "timestamp": timestamp,
-            "event_id": normalized_event_id,
+            "sender": event.sender,
+            "body": body,
+            "timestamp": event.server_timestamp,
+            "event_id": event.event_id,
             "content": content,
         }
 
@@ -1229,7 +1221,7 @@ class AgentBot:
         current_event_id = reply_to_event_id
         seen_event_ids: set[str] = set()
 
-        while current_event_id not in seen_event_ids:
+        while current_event_id not in seen_event_ids and len(seen_event_ids) < self._MAX_REPLY_CHAIN_DEPTH:
             seen_event_ids.add(current_event_id)
 
             response = await self.client.room_get_event(room_id, current_event_id)
@@ -1249,7 +1241,7 @@ class AgentBot:
             if target_info.thread_id:
                 return target_info.thread_id, [], True
 
-            chain_history.append(AgentBot._event_to_history_message(target_event, current_event_id))
+            chain_history.append(AgentBot._event_to_history_message(target_event))
 
             next_event_id = target_info.reply_to_event_id
             if not next_event_id and target_info.safe_thread_root and target_info.safe_thread_root != current_event_id:
@@ -1282,8 +1274,7 @@ class AgentBot:
         if not event_info.reply_to_event_id:
             return False, None, []
 
-        context_root_id, chain_history, points_to_thread = await AgentBot._resolve_reply_chain_context(
-            self,
+        context_root_id, chain_history, points_to_thread = await self._resolve_reply_chain_context(
             room_id,
             event_info.reply_to_event_id,
         )
@@ -1310,8 +1301,7 @@ class AgentBot:
             self.logger.info("Mentioned", event_id=event.event_id, room_name=room.name)
 
         event_info = EventInfo.from_event(event.source)
-        is_thread, thread_id, thread_history = await AgentBot._derive_conversation_context(
-            self,
+        is_thread, thread_id, thread_history = await self._derive_conversation_context(
             room.room_id,
             event_info,
         )
@@ -2092,13 +2082,8 @@ class AgentBot:
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
 
-        # If no thread exists, create one with the original message as root
-        thread_event_id = event_info.thread_id
-        if not thread_event_id and event_info.reply_to_event_id:
-            thread_event_id, _, _ = await self._resolve_reply_chain_context(
-                room.room_id,
-                event_info.reply_to_event_id,
-            )
+        # Resolve thread from explicit thread relation or reply chain
+        _, thread_event_id, _ = await self._derive_conversation_context(room.room_id, event_info)
         if not thread_event_id:
             thread_event_id = event.event_id
 

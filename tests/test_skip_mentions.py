@@ -107,6 +107,7 @@ async def test_extract_context_with_skip_mentions() -> None:
     bot.agent_name = "email_agent"
     bot.client = AsyncMock()
     bot.logger = AsyncMock()
+    bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
 
     # Create room
     room = nio.MatrixRoom(room_id="!test:server", own_user_id="@bot:server")
@@ -129,16 +130,12 @@ async def test_extract_context_with_skip_mentions() -> None:
         },
     )
 
-    # Mock fetch_thread_history to return empty
-    with patch("mindroom.bot.fetch_thread_history") as mock_fetch:
-        mock_fetch.return_value = []
+    # Extract context - should not detect mentions
+    context = await AgentBot._extract_message_context(bot, room, event_with_skip)
 
-        # Extract context - should not detect mentions
-        context = await AgentBot._extract_message_context(bot, room, event_with_skip)
-
-        # Verify mentions were ignored
-        assert context.am_i_mentioned is False
-        assert context.mentioned_agents == []
+    # Verify mentions were ignored
+    assert context.am_i_mentioned is False
+    assert context.mentioned_agents == []
 
     # Now test without skip_mentions - should detect mentions
     event_without_skip = nio.RoomMessageText.from_dict(
@@ -160,11 +157,9 @@ async def test_extract_context_with_skip_mentions() -> None:
     # Mock check_agent_mentioned to return that we're mentioned
     with patch("mindroom.bot.check_agent_mentioned") as mock_check:
         mock_check.return_value = (["email_agent"], True)
-        with patch("mindroom.bot.fetch_thread_history") as mock_fetch:
-            mock_fetch.return_value = []
 
-            context = await AgentBot._extract_message_context(bot, room, event_without_skip)
+        context = await AgentBot._extract_message_context(bot, room, event_without_skip)
 
-            # Verify mentions were detected
-            assert context.am_i_mentioned is True
-            assert "email_agent" in context.mentioned_agents
+        # Verify mentions were detected
+        assert context.am_i_mentioned is True
+        assert "email_agent" in context.mentioned_agents
