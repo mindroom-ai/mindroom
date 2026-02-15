@@ -26,7 +26,7 @@ from mindroom.cli_config import (
     console,
 )
 from mindroom.constants import (
-    DEFAULT_AGENTS_CONFIG,
+    CONFIG_PATH,
     MATRIX_HOMESERVER,
     MATRIX_SSL_VERIFY,
     STORAGE_PATH,
@@ -110,7 +110,7 @@ async def _run(
 ) -> None:
     """Run the multi-agent system with friendly error handling."""
     # Check config exists before starting
-    config_path = Path(DEFAULT_AGENTS_CONFIG)
+    config_path = Path(CONFIG_PATH)
     if not config_path.exists():
         _print_missing_config_error()
         raise typer.Exit(1)
@@ -169,7 +169,7 @@ def doctor() -> None:
     failed = 0
     warnings = 0
 
-    config_path = Path(DEFAULT_AGENTS_CONFIG)
+    config_path = Path(CONFIG_PATH)
 
     # 1. Config file exists
     p, f, w = _check_config_exists(config_path)

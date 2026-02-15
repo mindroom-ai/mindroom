@@ -181,7 +181,7 @@ class TestRunErrorHandling:
 
     def test_run_missing_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Run shows friendly error when config is missing."""
-        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", tmp_path / "no_such_config.yaml")
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", tmp_path / "no_such_config.yaml")
         result = runner.invoke(app, ["run"])
         assert result.exit_code == 1
         assert "No config.yaml found" in result.output
@@ -191,7 +191,7 @@ class TestRunErrorHandling:
         """Run shows friendly error when config is invalid."""
         bad_cfg = tmp_path / "config.yaml"
         bad_cfg.write_text("agents: not_a_dict\n")
-        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", bad_cfg)
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", bad_cfg)
         result = runner.invoke(app, ["run"])
         assert result.exit_code == 1
         assert "Invalid configuration" in result.output
@@ -244,7 +244,7 @@ class TestRunApiFlags:
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n",
         )
-        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
         mock_main = AsyncMock()
         with patch("mindroom.bot.main", mock_main):
             result = runner.invoke(app, ["run"])
@@ -263,7 +263,7 @@ class TestRunApiFlags:
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n",
         )
-        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
         mock_main = AsyncMock()
         with patch("mindroom.bot.main", mock_main):
             result = runner.invoke(app, ["run", "--no-api"])
@@ -278,7 +278,7 @@ class TestRunApiFlags:
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n",
         )
-        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
         mock_main = AsyncMock()
         with patch("mindroom.bot.main", mock_main):
             result = runner.invoke(app, ["run", "--api-port", "9000", "--api-host", "127.0.0.1"])
@@ -324,7 +324,7 @@ class TestDoctor:
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_CONFIG)
         storage = tmp_path / "storage"
-        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
         monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(storage))
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
@@ -341,7 +341,7 @@ class TestDoctor:
 
     def test_missing_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor reports failure when config file is missing."""
-        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", tmp_path / "missing.yaml")
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", tmp_path / "missing.yaml")
         monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(tmp_path / "storage"))
         _patch_homeserver_ok(monkeypatch)
 
@@ -354,7 +354,7 @@ class TestDoctor:
         cfg = tmp_path / "config.yaml"
         cfg.write_text("agents: not_a_dict\n")
         storage = tmp_path / "storage"
-        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
         monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(storage))
         _patch_homeserver_ok(monkeypatch)
 
@@ -367,7 +367,7 @@ class TestDoctor:
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_CONFIG)
         storage = tmp_path / "storage"
-        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
         monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(storage))
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         _patch_homeserver_ok(monkeypatch)
@@ -382,7 +382,7 @@ class TestDoctor:
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_CONFIG)
         storage = tmp_path / "storage"
-        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
         monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(storage))
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         _patch_homeserver_fail(monkeypatch)
@@ -395,7 +395,7 @@ class TestDoctor:
         """Doctor reports failure when storage directory is not writable."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_CONFIG)
-        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
         monkeypatch.setattr("mindroom.cli.STORAGE_PATH", "/proc/fake_mindroom_storage")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
@@ -406,7 +406,7 @@ class TestDoctor:
 
     def test_skips_config_checks_when_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor skips config-validation and provider checks when config is missing."""
-        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", tmp_path / "missing.yaml")
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", tmp_path / "missing.yaml")
         monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(tmp_path / "storage"))
         _patch_homeserver_ok(monkeypatch)
 
@@ -420,7 +420,7 @@ class TestDoctor:
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_CONFIG)
         storage = tmp_path / "storage"
-        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
         monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(storage))
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-invalid")
         monkeypatch.setattr("mindroom.cli.MATRIX_HOMESERVER", "http://localhost:8008")
@@ -448,7 +448,7 @@ class TestDoctor:
             "router:\n  model: default\n",
         )
         storage = tmp_path / "storage"
-        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
         monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(storage))
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
@@ -473,7 +473,7 @@ class TestDoctor:
             "router:\n  model: default\n",
         )
         storage = tmp_path / "storage"
-        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
         monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(storage))
         monkeypatch.setenv("OPENAI_API_KEY", "sk-local")
         monkeypatch.setattr("mindroom.cli.MATRIX_HOMESERVER", "http://localhost:8008")
