@@ -45,7 +45,7 @@ class HomeAssistantIntegrationProvider implements IntegrationProvider {
   async loadStatus(): Promise<Partial<Integration>> {
     try {
       const response = await fetch('/api/homeassistant/status', {
-        headers: { ...getAuthHeaders() },
+        headers: getAuthHeaders(),
       });
       if (response.ok) {
         const data = await response.json();
@@ -74,7 +74,7 @@ class HomeAssistantIntegrationProvider implements IntegrationProvider {
   private async checkConnection(): Promise<boolean> {
     try {
       const response = await fetch('/api/homeassistant/status', {
-        headers: { ...getAuthHeaders() },
+        headers: getAuthHeaders(),
       });
       if (response.ok) {
         const data = await response.json();

@@ -118,13 +118,16 @@ def config_init(
 
     # Also create a .env file next to the config if one doesn't exist
     env_path = target.parent / ".env"
+    env_created = False
     if not env_path.exists():
         env_path.write_text(_env_template(), encoding="utf-8")
         console.print(f"[green]Env file created:[/green] {env_path}")
+        env_created = True
 
     console.print(f"[green]Config created:[/green] {target}")
     console.print("\nNext steps:")
-    console.print(f"  [cyan]Edit {env_path.name}[/cyan]            Set your API keys and Matrix homeserver")
+    if env_created:
+        console.print(f"  [cyan]Edit {env_path.name}[/cyan]            Set your API keys and Matrix homeserver")
     console.print("  [cyan]mindroom config edit[/cyan]      Customize your config")
     console.print("  [cyan]mindroom config validate[/cyan]  Verify it's valid")
     console.print("  [cyan]mindroom run[/cyan]              Start the system")
@@ -327,7 +330,7 @@ MATRIX_HOMESERVER=https://matrix.example.com
 # MATRIX_SSL_VERIFY=false
 
 # AI provider API keys (at least one required)
-ANTHROPIC_API_KEY=
+# ANTHROPIC_API_KEY=your-key-here
 # OPENAI_API_KEY=
 # GOOGLE_API_KEY=
 

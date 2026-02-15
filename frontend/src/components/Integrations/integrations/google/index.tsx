@@ -45,7 +45,7 @@ class GoogleIntegrationProvider implements IntegrationProvider {
   async loadStatus(): Promise<Partial<Integration>> {
     try {
       const response = await fetch('/api/google/status', {
-        headers: { ...getAuthHeaders() },
+        headers: getAuthHeaders(),
       });
       if (response.ok) {
         const data = await response.json();
@@ -68,7 +68,7 @@ class GoogleIntegrationProvider implements IntegrationProvider {
   private async checkConnection(): Promise<boolean> {
     try {
       const response = await fetch('/api/google/status', {
-        headers: { ...getAuthHeaders() },
+        headers: getAuthHeaders(),
       });
       if (response.ok) {
         const data = await response.json();
