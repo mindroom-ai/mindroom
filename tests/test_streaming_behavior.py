@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -75,7 +75,13 @@ class TestStreamingBehavior:
         """Test complete flow of one agent streaming and mentioning another."""
 
         # Configure streaming - helper will stream, calculator won't
-        def side_effect(client: Any, room_id: str, requester_user_id: str | None = None) -> bool:  # noqa: ARG001, ANN401
+        def side_effect(
+            client: object,
+            room_id: str,
+            requester_user_id: str | None = None,
+            enable_streaming: bool = True,
+        ) -> bool:
+            _ = (client, room_id, enable_streaming)
             # Helper streams when mentioned by user
             return requester_user_id == "@user:localhost"
 

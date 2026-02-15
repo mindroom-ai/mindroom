@@ -1017,13 +1017,12 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator streaming
     @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
     @patch("mindroom.config.Config.from_yaml")
-    @patch("mindroom.bot.ENABLE_STREAMING", False)
-    async def test_orchestrator_streaming_env_var(
+    async def test_orchestrator_streaming_default_config(
         self,
         mock_load_config: MagicMock,
         tmp_path: Path,
     ) -> None:
-        """Test that orchestrator respects ENABLE_STREAMING constant."""
+        """Test that orchestrator respects defaults.enable_streaming."""
         # Mock config with just 2 agents
         mock_config = MagicMock()
         mock_config.agents = {
@@ -1031,6 +1030,7 @@ class TestMultiAgentOrchestrator:
             "general": MagicMock(display_name="GeneralAgent", rooms=["lobby"]),
         }
         mock_config.teams = {}
+        mock_config.defaults.enable_streaming = False
         mock_config.get_all_configured_rooms.return_value = ["lobby"]
         mock_load_config.return_value = mock_config
 

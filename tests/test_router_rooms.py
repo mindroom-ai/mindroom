@@ -74,6 +74,33 @@ async def test_router_gets_all_configured_rooms(
     assert set(router_bot.rooms) == expected_rooms
 
 
+def test_team_bot_uses_defaults_streaming_setting(
+    config_with_rooms: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Team bots should inherit defaults.enable_streaming from config."""
+
+    # Mock resolve_room_aliases to return the same aliases (no resolution)
+    def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:
+        return list(aliases)
+
+    monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
+    config_with_rooms.defaults.enable_streaming = False
+
+    team_user = AgentMatrixUser(
+        agent_name="team1",
+        user_id="@mindroom_team1:localhost",
+        display_name="Team 1",
+        password=TEST_PASSWORD,
+    )
+
+    team_bot = create_bot_for_entity("team1", team_user, config_with_rooms, tmp_path)
+
+    assert team_bot is not None
+    assert team_bot.enable_streaming is False
+
+
 @pytest.mark.asyncio
 async def test_router_joins_rooms_on_start(
     config_with_rooms: Config,

@@ -22,12 +22,11 @@ mindroom config validate --path /path/to/config.yaml
 
 ### Core
 
-| Variable                    | Description                                    | Default                                     |
-| --------------------------- | ---------------------------------------------- | ------------------------------------------- |
-| `MINDROOM_CONFIG_PATH`      | Path to `config.yaml`                          | `./config.yaml` → `~/.mindroom/config.yaml` |
-| `MINDROOM_STORAGE_PATH`     | Data storage directory                         | `mindroom_data/` next to config             |
-| `MINDROOM_CONFIG_TEMPLATE`  | Template to seed config from (for containers)  | Same as config path                         |
-| `MINDROOM_ENABLE_STREAMING` | Stream responses via progressive message edits | `true`                                      |
+| Variable                   | Description                                   | Default                                     |
+| -------------------------- | --------------------------------------------- | ------------------------------------------- |
+| `MINDROOM_CONFIG_PATH`     | Path to `config.yaml`                         | `./config.yaml` → `~/.mindroom/config.yaml` |
+| `MINDROOM_STORAGE_PATH`    | Data storage directory                        | `mindroom_data/` next to config             |
+| `MINDROOM_CONFIG_TEMPLATE` | Template to seed config from (for containers) | Same as config path                         |
 
 ### Matrix
 
@@ -110,6 +109,7 @@ router:
 # Default settings for all agents (optional)
 defaults:
   markdown: true                   # Default: true
+  enable_streaming: true           # Default: true (stream responses via message edits)
   show_stop_button: false          # Default: false (global only, cannot be overridden per-agent)
   learning: true                   # Default: true
   learning_mode: always            # Default: always (or agentic)

@@ -15,12 +15,13 @@ MindRoom uses `matrix-nio` for Matrix communication with SSL context handling an
 
 ### Environment Variables
 
-| Variable                    | Default                 | Description                              |
-| --------------------------- | ----------------------- | ---------------------------------------- |
-| `MATRIX_HOMESERVER`         | `http://localhost:8008` | Matrix homeserver URL                    |
-| `MATRIX_SERVER_NAME`        | (from homeserver)       | Federation server name                   |
-| `MATRIX_SSL_VERIFY`         | `true`                  | Set to `false` for dev/self-signed certs |
-| `MINDROOM_ENABLE_STREAMING` | `true`                  | Enable message streaming via edits       |
+| Variable             | Default                 | Description                              |
+| -------------------- | ----------------------- | ---------------------------------------- |
+| `MATRIX_HOMESERVER`  | `http://localhost:8008` | Matrix homeserver URL                    |
+| `MATRIX_SERVER_NAME` | (from homeserver)       | Federation server name                   |
+| `MATRIX_SSL_VERIFY`  | `true`                  | Set to `false` for dev/self-signed certs |
+
+Streaming behavior is configured in `config.yaml` with `defaults.enable_streaming` (default: `true`).
 
 ## Agent Users
 

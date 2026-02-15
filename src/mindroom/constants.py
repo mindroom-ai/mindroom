@@ -96,7 +96,6 @@ def env_flag(name: str, *, default: bool = False) -> bool:
 
 # Other constants
 VOICE_PREFIX = "🎤 "
-ENABLE_STREAMING = env_flag("MINDROOM_ENABLE_STREAMING", default=True)
 ENABLE_AI_CACHE = env_flag("MINDROOM_ENABLE_AI_CACHE", default=True)
 
 # Matrix

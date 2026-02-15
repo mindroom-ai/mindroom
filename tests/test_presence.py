@@ -230,11 +230,15 @@ class TestShouldUseStreaming:
 
     @pytest.mark.asyncio
     async def test_streaming_disabled_globally(self) -> None:
-        """Test that streaming is disabled when ENABLE_STREAMING is False."""
+        """Test that streaming is disabled when enable_streaming is False."""
         mock_client = AsyncMock()
 
-        with patch("mindroom.matrix.presence.ENABLE_STREAMING", False):
-            result = await should_use_streaming(mock_client, "!room:example.com", "@user:example.com")
+        result = await should_use_streaming(
+            mock_client,
+            "!room:example.com",
+            "@user:example.com",
+            enable_streaming=False,
+        )
 
         assert result is False
         mock_client.get_presence.assert_not_called()
@@ -244,8 +248,12 @@ class TestShouldUseStreaming:
         """Test defaulting to streaming when no requester specified."""
         mock_client = AsyncMock()
 
-        with patch("mindroom.matrix.presence.ENABLE_STREAMING", True):
-            result = await should_use_streaming(mock_client, "!room:example.com", None)
+        result = await should_use_streaming(
+            mock_client,
+            "!room:example.com",
+            None,
+            enable_streaming=True,
+        )
 
         assert result is True
         mock_client.get_presence.assert_not_called()
@@ -255,11 +263,13 @@ class TestShouldUseStreaming:
         """Test enabling streaming when user is online."""
         mock_client = AsyncMock()
 
-        with (
-            patch("mindroom.matrix.presence.ENABLE_STREAMING", True),
-            patch("mindroom.matrix.presence.is_user_online", return_value=True) as mock_is_online,
-        ):
-            result = await should_use_streaming(mock_client, "!room:example.com", "@user:example.com")
+        with patch("mindroom.matrix.presence.is_user_online", return_value=True) as mock_is_online:
+            result = await should_use_streaming(
+                mock_client,
+                "!room:example.com",
+                "@user:example.com",
+                enable_streaming=True,
+            )
 
         assert result is True
         mock_is_online.assert_called_once_with(mock_client, "@user:example.com")
@@ -269,11 +279,13 @@ class TestShouldUseStreaming:
         """Test disabling streaming when user is offline."""
         mock_client = AsyncMock()
 
-        with (
-            patch("mindroom.matrix.presence.ENABLE_STREAMING", True),
-            patch("mindroom.matrix.presence.is_user_online", return_value=False) as mock_is_online,
-        ):
-            result = await should_use_streaming(mock_client, "!room:example.com", "@user:example.com")
+        with patch("mindroom.matrix.presence.is_user_online", return_value=False) as mock_is_online:
+            result = await should_use_streaming(
+                mock_client,
+                "!room:example.com",
+                "@user:example.com",
+                enable_streaming=True,
+            )
 
         assert result is False
         mock_is_online.assert_called_once_with(mock_client, "@user:example.com")

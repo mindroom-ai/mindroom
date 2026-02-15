@@ -72,6 +72,10 @@ class DefaultsConfig(BaseModel):
     """Default configuration values for agents."""
 
     markdown: bool = Field(default=True, description="Default markdown setting")
+    enable_streaming: bool = Field(
+        default=True,
+        description="Enable streaming responses via progressive message edits",
+    )
     show_stop_button: bool = Field(default=False, description="Whether to automatically show stop button on messages")
     learning: bool = Field(default=True, description="Default Agno Learning setting")
     learning_mode: AgentLearningMode = Field(default="always", description="Default Agno Learning mode")
