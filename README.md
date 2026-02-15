@@ -193,7 +193,9 @@ You: @mindroom_research @mindroom_analyst What are the latest AI breakthroughs?
 ## How Agents Work
 
 ### Agent Response Rules
-Agents ONLY respond in threads (not main room). Within threads:
+Agents respond using Matrix thread relations to keep conversations organized.
+If your client does not support thread UI, plain replies still work: MindRoom
+resolves the reply chain and continues the correct conversation thread.
 
 1. **Mentioned agents always respond** - Tag them to get their attention
 2. **Single agent continues** - One agent in thread? It keeps responding

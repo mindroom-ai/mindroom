@@ -213,6 +213,175 @@ class TestThreadingBehavior:
         assert initial_content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$thread_msg:localhost"
 
     @pytest.mark.asyncio
+    async def test_extract_context_maps_plain_reply_to_existing_thread(self, bot: AgentBot) -> None:
+        """Plain replies to thread messages should resolve to the original thread root."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "Follow-up from a non-thread client",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_msg:localhost"}},
+                },
+                "event_id": "$reply_plain:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567891,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        bot.client.room_get_event = AsyncMock(
+            return_value=nio.RoomGetEventResponse.from_dict(
+                {
+                    "content": {
+                        "body": "Agent answer in thread",
+                        "msgtype": "m.text",
+                        "m.relates_to": {
+                            "rel_type": "m.thread",
+                            "event_id": "$thread_root:localhost",
+                        },
+                    },
+                    "event_id": "$thread_msg:localhost",
+                    "sender": "@mindroom_general:localhost",
+                    "origin_server_ts": 1234567890,
+                    "room_id": "!test:localhost",
+                    "type": "m.room.message",
+                },
+            ),
+        )
+
+        expected_history = [
+            {"event_id": "$thread_root:localhost", "body": "Root"},
+            {"event_id": "$thread_msg:localhost", "body": "Agent answer in thread"},
+        ]
+        with patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=expected_history)) as mock_fetch:
+            context = await bot._extract_message_context(room, event)
+
+        assert context.is_thread is True
+        assert context.thread_id == "$thread_root:localhost"
+        assert context.thread_history == expected_history
+        mock_fetch.assert_awaited_once_with(bot.client, room.room_id, "$thread_root:localhost")
+
+    @pytest.mark.asyncio
+    async def test_extract_context_builds_reply_chain_history_without_threads(self, bot: AgentBot) -> None:
+        """Reply-only chains should still keep linear conversation context."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "Third message in a reply-only chain",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$msg2:localhost"}},
+                },
+                "event_id": "$msg3:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567893,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        bot.client.room_get_event = AsyncMock(
+            side_effect=[
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "Second message",
+                            "msgtype": "m.text",
+                            "m.relates_to": {"m.in_reply_to": {"event_id": "$msg1:localhost"}},
+                        },
+                        "event_id": "$msg2:localhost",
+                        "sender": "@mindroom_general:localhost",
+                        "origin_server_ts": 1234567892,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "First message",
+                            "msgtype": "m.text",
+                        },
+                        "event_id": "$msg1:localhost",
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 1234567891,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+            ],
+        )
+
+        with patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch:
+            context = await bot._extract_message_context(room, event)
+
+        assert context.is_thread is True
+        assert context.thread_id == "$msg1:localhost"
+        assert [msg["event_id"] for msg in context.thread_history] == ["$msg1:localhost", "$msg2:localhost"]
+        mock_fetch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_extract_context_long_reply_chain_keeps_true_root(self, bot: AgentBot) -> None:
+        """Long reply chains should keep a stable root instead of drifting."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "14th message in reply-only chain",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$msg13:localhost"}},
+                },
+                "event_id": "$msg14:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567894,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        responses: list[nio.RoomGetEventResponse] = []
+        for i in range(13, 0, -1):
+            content = {"body": f"Message {i}", "msgtype": "m.text"}
+            if i > 1:
+                content["m.relates_to"] = {"m.in_reply_to": {"event_id": f"$msg{i - 1}:localhost"}}
+
+            responses.append(
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": content,
+                        "event_id": f"$msg{i}:localhost",
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 1234567880 + i,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+            )
+
+        bot.client.room_get_event = AsyncMock(side_effect=responses)
+
+        with patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch:
+            context = await bot._extract_message_context(room, event)
+
+        assert context.is_thread is True
+        assert context.thread_id == "$msg1:localhost"
+        assert len(context.thread_history) == 13
+        assert context.thread_history[0]["event_id"] == "$msg1:localhost"
+        assert context.thread_history[-1]["event_id"] == "$msg13:localhost"
+        mock_fetch.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_command_as_reply_doesnt_cause_thread_error(self, tmp_path: Path) -> None:
         """Test that commands sent as replies don't cause threading errors."""
         # Create a router bot to handle commands
@@ -415,6 +584,182 @@ class TestThreadingBehavior:
             assert content["m.relates_to"]["rel_type"] == "m.thread"
             assert content["m.relates_to"]["event_id"] == "$thread_root:localhost"
             assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$cmd_thread:localhost"
+
+    @pytest.mark.asyncio
+    async def test_command_reply_to_thread_message_uses_existing_thread_root(self, tmp_path: Path) -> None:
+        """Plain replies to a threaded message should keep command replies in that thread."""
+        agent_user = AgentMatrixUser(
+            user_id="@mindroom_router:localhost",
+            password=TEST_PASSWORD,
+            display_name="Router",
+            agent_name="router",
+        )
+
+        config = Config(
+            agents={"router": AgentConfig(display_name="Router", rooms=["!test:localhost"])},
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        )
+
+        bot = AgentBot(
+            agent_user=agent_user,
+            storage_path=tmp_path,
+            rooms=["!test:localhost"],
+            enable_streaming=False,
+            config=config,
+        )
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.current_config = config
+        bot.orchestrator = mock_orchestrator
+
+        bot.client = AsyncMock(spec=nio.AsyncClient)
+        bot.client.rooms = {}
+        bot.client.user_id = "@mindroom_router:localhost"
+        bot.client.homeserver = "http://localhost:8008"
+
+        bot.response_tracker = MagicMock()
+        bot.response_tracker.has_responded.return_value = False
+
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)
+        room.name = "Test Room"
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "!help",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_msg:localhost"}},
+                },
+                "event_id": "$cmd_reply_plain:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        bot.client.room_get_event = AsyncMock(
+            return_value=nio.RoomGetEventResponse.from_dict(
+                {
+                    "content": {
+                        "body": "Agent thread message",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
+                    },
+                    "event_id": "$thread_msg:localhost",
+                    "sender": "@mindroom_general:localhost",
+                    "origin_server_ts": 1234567890,
+                    "room_id": "!test:localhost",
+                    "type": "m.room.message",
+                },
+            ),
+        )
+
+        bot.client.room_send = AsyncMock(
+            return_value=nio.RoomSendResponse.from_dict(
+                {"event_id": "$response:localhost"},
+                room_id="!test:localhost",
+            ),
+        )
+
+        with patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=[])):
+            await bot._on_message(room, event)
+
+        bot.client.room_send.assert_called_once()
+        content = bot.client.room_send.call_args.kwargs["content"]
+        assert content["m.relates_to"]["rel_type"] == "m.thread"
+        assert content["m.relates_to"]["event_id"] == "$thread_root:localhost"
+        assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$cmd_reply_plain:localhost"
+
+    @pytest.mark.asyncio
+    async def test_router_routing_reply_to_thread_message_uses_existing_thread_root(self, tmp_path: Path) -> None:
+        """Router routing should resolve plain replies back to the real thread root."""
+        agent_user = AgentMatrixUser(
+            user_id="@mindroom_router:localhost",
+            password=TEST_PASSWORD,
+            display_name="Router",
+            agent_name="router",
+        )
+
+        config = Config(
+            agents={
+                "general": AgentConfig(display_name="General", rooms=["!test:localhost"]),
+            },
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        )
+
+        bot = AgentBot(
+            agent_user=agent_user,
+            storage_path=tmp_path,
+            rooms=["!test:localhost"],
+            enable_streaming=False,
+            config=config,
+        )
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.current_config = config
+        bot.orchestrator = mock_orchestrator
+
+        bot.client = AsyncMock(spec=nio.AsyncClient)
+        bot.client.rooms = {}
+        bot.client.user_id = "@mindroom_router:localhost"
+        bot.client.homeserver = "http://localhost:8008"
+
+        bot.response_tracker = MagicMock()
+        bot.response_tracker.has_responded.return_value = False
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "Can someone help with this?",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_msg:localhost"}},
+                },
+                "event_id": "$plain_reply:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        bot.client.room_get_event = AsyncMock(
+            return_value=nio.RoomGetEventResponse.from_dict(
+                {
+                    "content": {
+                        "body": "Earlier message in thread",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
+                    },
+                    "event_id": "$thread_msg:localhost",
+                    "sender": "@mindroom_general:localhost",
+                    "origin_server_ts": 1234567889,
+                    "room_id": "!test:localhost",
+                    "type": "m.room.message",
+                },
+            ),
+        )
+
+        with (
+            patch("mindroom.bot.suggest_agent_for_message", AsyncMock(return_value="general")),
+            patch("mindroom.bot.get_latest_thread_event_id_if_needed", AsyncMock(return_value="$latest:localhost")),
+            patch("mindroom.bot.send_message", AsyncMock(return_value="$router_response:localhost")) as mock_send,
+        ):
+            await bot._handle_ai_routing(room, event, thread_history=[])
+
+        mock_send.assert_awaited_once()
+        content = mock_send.call_args.args[2]
+        assert content["m.relates_to"]["rel_type"] == "m.thread"
+        assert content["m.relates_to"]["event_id"] == "$thread_root:localhost"
+        assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$plain_reply:localhost"
 
     @pytest.mark.asyncio
     async def test_message_with_multiple_relations_handled_correctly(self, bot: AgentBot) -> None:

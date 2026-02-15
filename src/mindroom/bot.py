@@ -220,7 +220,7 @@ def _generate_welcome_message(room_id: str, config: Config) -> str:
         "💬 **How to interact:**\n"
         "• Mention an agent with @ to get their attention (e.g., @mindroom_assistant)\n"
         "• Use `!help` to see available commands\n"
-        "• Agents respond in threads to keep conversations organized\n"
+        "• Agents respond in threads; plain replies still continue the same conversation\n"
         "• Multiple agents can collaborate when you mention them together\n"
         "• 🎤 Voice messages are automatically transcribed and work perfectly!\n\n"
         "⚡ **Quick commands:**\n"
@@ -1171,16 +1171,127 @@ class AgentBot:
 
         if transcribed_message:
             event_info = EventInfo.from_event(event.source)
+            _, thread_id, _ = await self._derive_conversation_context(room.room_id, event_info)
             response_event_id = await self._send_response(
                 room_id=room.room_id,
                 reply_to_event_id=event.event_id,
                 response_text=transcribed_message,
-                thread_id=event_info.thread_id,
+                thread_id=thread_id,
             )
             self.response_tracker.mark_responded(event.event_id, response_event_id)
         else:
             # Mark as responded to avoid reprocessing
             self.response_tracker.mark_responded(event.event_id)
+
+    @staticmethod
+    def _event_to_history_message(event: nio.Event, fallback_event_id: str) -> dict[str, Any]:
+        """Convert a Matrix event to normalized history message structure."""
+        source = event.source if isinstance(event.source, dict) else {}
+        content_data = source.get("content", {})
+        content = content_data if isinstance(content_data, dict) else {}
+
+        body_value = content.get("body")
+        if not isinstance(body_value, str):
+            event_body = getattr(event, "body", "")
+            body_value = str(event_body) if event_body else ""
+
+        event_id = getattr(event, "event_id", None)
+        normalized_event_id = event_id if isinstance(event_id, str) else fallback_event_id
+
+        sender_value = getattr(event, "sender", "")
+        sender = sender_value if isinstance(sender_value, str) else ""
+
+        timestamp_value = getattr(event, "server_timestamp", 0)
+        timestamp = timestamp_value if isinstance(timestamp_value, int) else 0
+
+        return {
+            "sender": sender,
+            "body": body_value,
+            "timestamp": timestamp,
+            "event_id": normalized_event_id,
+            "content": content,
+        }
+
+    async def _resolve_reply_chain_context(
+        self,
+        room_id: str,
+        reply_to_event_id: str,
+    ) -> tuple[str, list[dict[str, Any]], bool]:
+        """Resolve reply-chain context for clients that don't send thread relations.
+
+        Returns:
+            Tuple of (conversation_root_id, chain_history, points_to_thread)
+
+        """
+        assert self.client is not None
+
+        chain_history: list[dict[str, Any]] = []
+        current_event_id = reply_to_event_id
+        seen_event_ids: set[str] = set()
+
+        while current_event_id not in seen_event_ids:
+            seen_event_ids.add(current_event_id)
+
+            response = await self.client.room_get_event(room_id, current_event_id)
+            if not isinstance(response, nio.RoomGetEventResponse):
+                self.logger.debug(
+                    "Failed to resolve reply event for context",
+                    room_id=room_id,
+                    event_id=current_event_id,
+                    error=str(response),
+                )
+                break
+
+            target_event = response.event
+            target_info = EventInfo.from_event(target_event.source)
+
+            # If any replied-to event is already in a thread, switch to that full thread context.
+            if target_info.thread_id:
+                return target_info.thread_id, [], True
+
+            chain_history.append(AgentBot._event_to_history_message(target_event, current_event_id))
+
+            next_event_id = target_info.reply_to_event_id
+            if not next_event_id and target_info.safe_thread_root and target_info.safe_thread_root != current_event_id:
+                next_event_id = target_info.safe_thread_root
+
+            if not next_event_id:
+                break
+            current_event_id = next_event_id
+
+        if not chain_history:
+            return reply_to_event_id, [], False
+
+        # Fetches walk from newest->oldest, but consumers expect chronological history.
+        chain_history.reverse()
+        root_event_id = str(chain_history[0].get("event_id", reply_to_event_id))
+        return root_event_id, chain_history, False
+
+    async def _derive_conversation_context(
+        self,
+        room_id: str,
+        event_info: EventInfo,
+    ) -> tuple[bool, str | None, list[dict[str, Any]]]:
+        """Derive conversation context from threads or reply chains."""
+        assert self.client is not None
+
+        if event_info.thread_id:
+            thread_history = await fetch_thread_history(self.client, room_id, event_info.thread_id)
+            return True, event_info.thread_id, thread_history
+
+        if not event_info.reply_to_event_id:
+            return False, None, []
+
+        context_root_id, chain_history, points_to_thread = await AgentBot._resolve_reply_chain_context(
+            self,
+            room_id,
+            event_info.reply_to_event_id,
+        )
+        if points_to_thread:
+            thread_history = await fetch_thread_history(self.client, room_id, context_root_id)
+            return True, context_root_id, thread_history
+
+        return True, context_root_id, chain_history
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         assert self.client is not None
@@ -1199,15 +1310,16 @@ class AgentBot:
             self.logger.info("Mentioned", event_id=event.event_id, room_name=room.name)
 
         event_info = EventInfo.from_event(event.source)
-
-        thread_history = []
-        if event_info.thread_id:
-            thread_history = await fetch_thread_history(self.client, room.room_id, event_info.thread_id)
+        is_thread, thread_id, thread_history = await AgentBot._derive_conversation_context(
+            self,
+            room.room_id,
+            event_info,
+        )
 
         return MessageContext(
             am_i_mentioned=am_i_mentioned,
-            is_thread=event_info.is_thread,
-            thread_id=event_info.thread_id,
+            is_thread=is_thread,
+            thread_id=thread_id,
             thread_history=thread_history,
             mentioned_agents=mentioned_agents,
         )
@@ -1982,9 +2094,13 @@ class AgentBot:
 
         # If no thread exists, create one with the original message as root
         thread_event_id = event_info.thread_id
+        if not thread_event_id and event_info.reply_to_event_id:
+            thread_event_id, _, _ = await self._resolve_reply_chain_context(
+                room.room_id,
+                event_info.reply_to_event_id,
+            )
         if not thread_event_id:
-            # Check if the current event can be a thread root
-            thread_event_id = event_info.safe_thread_root or event.event_id
+            thread_event_id = event.event_id
 
         # Get latest thread event for MSC3440 compliance when no specific reply
         # Note: We use event.event_id as reply_to for routing suggestions
@@ -2092,18 +2208,19 @@ class AgentBot:
         self.logger.info("Handling command", command_type=command.type.value)
 
         event_info = EventInfo.from_event(event.source)
+        _, thread_id, thread_history = await self._derive_conversation_context(room.room_id, event_info)
 
         # Widget command modifies room state, so it doesn't need a thread
         if command.type == CommandType.WIDGET:
             url = command.args.get("url")
             response_text = await handle_widget_command(client=self.client, room_id=room.room_id, url=url)
             # Send response in thread if in thread, otherwise in main room
-            await self._send_response(room.room_id, event.event_id, response_text, event_info.thread_id)
+            await self._send_response(room.room_id, event.event_id, response_text, thread_id)
             return
 
         # For commands that need thread context, use the existing thread or the event will start a new one
         # The _send_response method will automatically create a thread if needed
-        effective_thread_id = event_info.thread_id or event_info.safe_thread_root or event.event_id
+        effective_thread_id = thread_id or event.event_id
 
         response_text = ""
 
@@ -2188,7 +2305,7 @@ class AgentBot:
                     room.room_id,
                     event.event_id,
                     response_text,
-                    event_info.thread_id,
+                    effective_thread_id,
                     reply_to_event=event,
                     skip_mentions=True,
                 )
@@ -2198,7 +2315,7 @@ class AgentBot:
                     config_confirmation.register_pending_change(
                         event_id=event_id,
                         room_id=room.room_id,
-                        thread_id=event_info.thread_id,
+                        thread_id=effective_thread_id,
                         config_path=change_info["config_path"],
                         old_value=change_info["old_value"],
                         new_value=change_info["new_value"],
@@ -2257,13 +2374,6 @@ class AgentBot:
                             f"❌ Skill '{spec.name}' is configured to skip model invocation and has no tool dispatch."
                         )
                     else:
-                        thread_history = []
-                        if event_info.thread_id:
-                            thread_history = await fetch_thread_history(
-                                self.client,
-                                room.room_id,
-                                event_info.thread_id,
-                            )
                         prompt = _build_skill_command_prompt(spec.name, args_text)
                         event_id = await self._send_skill_command_response(
                             room_id=room.room_id,
@@ -2288,7 +2398,7 @@ class AgentBot:
                 room.room_id,
                 event.event_id,
                 response_text,
-                event_info.thread_id,
+                effective_thread_id,
                 reply_to_event=event,
                 skip_mentions=True,
             )

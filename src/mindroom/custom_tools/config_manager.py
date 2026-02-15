@@ -333,7 +333,7 @@ class ConfigManagerTools(Toolkit):
 - **Teams**: Groups of agents that collaborate
 - **Tools**: Integrations that give agents capabilities (80+ available)
 - **Memory**: Persistent conversation memory across sessions
-- **Threading**: Agents respond in threads for organized conversations
+- **Threading**: Agents respond with thread relations and preserve context for plain replies
 - **Routing**: Smart agent selection based on message content
 - **Commands**: Special !commands for configuration and control
 """

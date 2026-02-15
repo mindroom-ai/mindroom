@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 
 from mindroom.bot import AgentBot, TeamBot
@@ -151,6 +152,80 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
     args, kwargs = bot.client.room_send.call_args
     # kwargs contains content with formatted body
     assert "🤝 Team Response" in kwargs["content"]["formatted_body"]
+
+
+@pytest.mark.asyncio
+async def test_preformed_team_reply_chain_uses_existing_thread_root(config_with_team: Config, tmp_path: Path) -> None:
+    """TeamBot should continue the resolved thread when mention comes as a plain reply."""
+    team_user = AgentMatrixUser(
+        agent_name="t1",
+        user_id=config_with_team.ids["t1"].full_id,
+        display_name="Team One",
+        password="p",  # noqa: S106
+    )
+    team_matrix_ids = [
+        MatrixID.from_username("a1", config_with_team.domain),
+        MatrixID.from_username("a2", config_with_team.domain),
+    ]
+    bot = TeamBot(
+        agent_user=team_user,
+        storage_path=tmp_path,
+        config=config_with_team,
+        rooms=["!room:localhost"],
+        team_agents=team_matrix_ids,
+        team_mode="coordinate",
+        enable_streaming=False,
+    )
+    bot.client = AsyncMock()
+    bot.orchestrator = MagicMock()
+
+    team_user_id = config_with_team.ids["t1"].full_id
+    room = _mock_room("!room:localhost", [team_user_id, "@user:localhost"])
+    event = MagicMock()
+    event.sender = "@user:localhost"
+    event.body = "@t1 please continue"
+    event.event_id = "$evt_plain_reply"
+    event.source = {
+        "content": {
+            "body": event.body,
+            "m.mentions": {"user_ids": [team_user_id]},
+            "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_msg"}},
+        },
+    }
+
+    bot.client.room_get_event = AsyncMock(
+        return_value=nio.RoomGetEventResponse.from_dict(
+            {
+                "content": {
+                    "body": "Earlier team message",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+                },
+                "event_id": "$thread_msg",
+                "sender": "@mindroom_t1:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+            },
+        ),
+    )
+
+    with patch("mindroom.bot.fetch_thread_history", new=AsyncMock(return_value=[])):
+
+        async def fake_team_response(*_args: Any, **_kwargs: Any) -> str:  # noqa: ANN401
+            return "🤝 Team Response (a1, a2):\n\n**a1**: ok\n\n**a2**: ok"
+
+        with (
+            patch("mindroom.bot.team_response", new=fake_team_response),
+            patch("mindroom.bot.should_agent_respond", return_value=True),
+        ):
+            await bot._on_message(room, event)
+
+    assert bot.client.room_send.call_count >= 1
+    first_content = bot.client.room_send.call_args_list[0].kwargs["content"]
+    assert first_content["m.relates_to"]["rel_type"] == "m.thread"
+    assert first_content["m.relates_to"]["event_id"] == "$thread_root"
+    assert first_content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$evt_plain_reply"
 
 
 @pytest.mark.asyncio

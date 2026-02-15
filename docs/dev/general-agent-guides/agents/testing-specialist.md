@@ -11,7 +11,8 @@ Condensed from `.claude/agents/mindroom-tester.md`.
 
 ## CRITICAL Interaction Rules
 
-- Agents reply in threads only—check threads after every prompt.
+- Agents respond with thread relations. In non-thread clients, send plain
+  replies and verify responses stay in the same conversation thread.
 - Use explicit @mentions to invite the right agents.
 - Wait: singles ~30s, teams 45–60s+. Watch for streaming ellipses, then recheck.
 
