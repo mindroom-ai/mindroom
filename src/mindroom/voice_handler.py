@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import os
-import tempfile
 import uuid
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
@@ -125,41 +123,23 @@ async def _transcribe_audio(audio_data: bytes, config: Config) -> str | None:
 
     """
     try:
-        # Save audio to temporary file (required by most STT APIs)
-        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp_file:
-            tmp_file.write(audio_data)
-            tmp_path = tmp_file.name
+        stt_host = config.voice.stt.host
+        url = f"{stt_host}/v1/audio/transcriptions" if stt_host else "https://api.openai.com/v1/audio/transcriptions"
 
-        try:
-            # Use OpenAI-compatible API for transcription
-            stt_host = config.voice.stt.host
-            if stt_host:
-                # Self-hosted solution
-                url = f"{stt_host}/v1/audio/transcriptions"
-            else:
-                # OpenAI or compatible cloud service
-                url = "https://api.openai.com/v1/audio/transcriptions"
+        api_key = config.voice.stt.api_key or os.getenv("OPENAI_API_KEY")
+        headers = {"Authorization": f"Bearer {api_key}"}
 
-            api_key = config.voice.stt.api_key or os.getenv("OPENAI_API_KEY")
-            headers = {"Authorization": f"Bearer {api_key}"}
+        files = {"file": ("audio.ogg", audio_data, "audio/ogg")}
+        form_data = {"model": config.voice.stt.model}
 
-            # Read audio file and prepare multipart form data
-            audio_content = Path(tmp_path).read_bytes()
-            files = {"file": ("audio.ogg", audio_content, "audio/ogg")}
-            form_data = {"model": config.voice.stt.model}
+        async with httpx.AsyncClient(verify=False) as http_client:  # noqa: S501
+            response = await http_client.post(url, headers=headers, files=files, data=form_data)
+            if response.status_code != 200:
+                logger.error(f"STT API error: {response.status_code} - {response.text}")
+                return None
 
-            async with httpx.AsyncClient(verify=False) as client:  # noqa: S501
-                response = await client.post(url, headers=headers, files=files, data=form_data)
-                if response.status_code != 200:
-                    logger.error(f"STT API error: {response.status_code} - {response.text}")
-                    return None
-
-                result = response.json()
-                return result.get("text", "").strip()
-
-        finally:
-            # Clean up temporary file
-            Path(tmp_path).unlink()
+            result = response.json()
+            return result.get("text", "").strip()
 
     except Exception:
         logger.exception("Error transcribing audio")
