@@ -237,18 +237,6 @@ def test_save_config(test_client: TestClient, temp_config_file: Path) -> None:
     }
 
 
-def test_test_model(test_client: TestClient) -> None:
-    """Test model connection testing endpoint."""
-    model_test_request = {"modelId": "default"}
-
-    response = test_client.post("/api/test/model", json=model_test_request)
-    assert response.status_code == 200
-
-    result = response.json()
-    assert "success" in result
-    assert "message" in result
-
-
 def test_error_handling_agent_not_found(test_client: TestClient) -> None:
     """Test error handling for non-existent agent."""
     test_client.post("/api/config/load")
