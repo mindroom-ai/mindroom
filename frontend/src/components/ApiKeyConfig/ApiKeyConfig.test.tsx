@@ -42,7 +42,12 @@ describe('ApiKeyConfig', () => {
     render(<ApiKeyConfig service="openai" displayName="OpenAI" />);
 
     await waitFor(() => {
-      expect(global.fetch).toHaveBeenCalledWith('/api/credentials/openai/api-key?key_name=api_key');
+      expect(global.fetch).toHaveBeenCalledWith(
+        '/api/credentials/openai/api-key?key_name=api_key',
+        expect.objectContaining({
+          headers: expect.any(Object),
+        })
+      );
       expect(screen.getByText('Configured')).toBeInTheDocument();
       expect(screen.getByText('sk-...abc')).toBeInTheDocument();
     });
@@ -94,7 +99,7 @@ describe('ApiKeyConfig', () => {
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledWith('/api/credentials/openai/api-key', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: expect.objectContaining({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           service: 'openai',
           api_key: 'sk-test-key-123',
@@ -200,6 +205,7 @@ describe('ApiKeyConfig', () => {
       );
       expect(global.fetch).toHaveBeenCalledWith('/api/credentials/openai', {
         method: 'DELETE',
+        headers: expect.any(Object),
       });
       expect(mockToast).toHaveBeenCalledWith({
         title: 'Success',
@@ -232,6 +238,7 @@ describe('ApiKeyConfig', () => {
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledWith('/api/credentials/openai/test', {
         method: 'POST',
+        headers: expect.any(Object),
       });
       expect(mockToast).toHaveBeenCalledWith({
         title: 'Success',
@@ -250,7 +257,10 @@ describe('ApiKeyConfig', () => {
 
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledWith(
-        '/api/credentials/custom/api-key?key_name=custom_token'
+        '/api/credentials/custom/api-key?key_name=custom_token',
+        expect.objectContaining({
+          headers: expect.any(Object),
+        })
       );
     });
   });

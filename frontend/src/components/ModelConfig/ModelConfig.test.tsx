@@ -200,10 +200,11 @@ describe('ModelConfig', () => {
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
         '/api/credentials/model:anthropic-renamed/copy-from/model:anthropic',
-        { method: 'POST' }
+        { method: 'POST', headers: expect.any(Object) }
       );
       expect(fetchMock).toHaveBeenCalledWith('/api/credentials/model:anthropic', {
         method: 'DELETE',
+        headers: expect.any(Object),
       });
     });
   });
@@ -328,7 +329,7 @@ describe('ModelConfig', () => {
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
         '/api/credentials/model:openrouter/copy-from/model:openrouter_backup',
-        { method: 'POST' }
+        { method: 'POST', headers: expect.any(Object) }
       );
     });
   });
@@ -354,7 +355,10 @@ describe('ModelConfig', () => {
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
-        '/api/credentials/model:anthropic/api-key?key_name=api_key&include_value=true'
+        '/api/credentials/model:anthropic/api-key?key_name=api_key&include_value=true',
+        expect.objectContaining({
+          headers: expect.any(Object),
+        })
       );
       expect(writeTextMock).toHaveBeenCalledWith('sk-anthropic-real');
     });
@@ -381,9 +385,17 @@ describe('ModelConfig', () => {
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
-        '/api/credentials/model:anthropic/api-key?key_name=api_key&include_value=true'
+        '/api/credentials/model:anthropic/api-key?key_name=api_key&include_value=true',
+        expect.objectContaining({
+          headers: expect.any(Object),
+        })
       );
-      expect(fetchMock).toHaveBeenCalledWith('/api/credentials/model:anthropic');
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/credentials/model:anthropic',
+        expect.objectContaining({
+          headers: expect.any(Object),
+        })
+      );
       expect(writeTextMock).toHaveBeenCalledWith('sk-anthropic-legacy-real');
     });
   });
@@ -538,6 +550,7 @@ describe('ModelConfig', () => {
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith('/api/credentials/model:anthropic', {
         method: 'DELETE',
+        headers: expect.any(Object),
       });
     });
   });
