@@ -82,11 +82,6 @@ def save_agent_credentials(agent_name: str, username: str, password: str) -> Non
     logger.info(f"Saved credentials for agent {agent_name}")
 
 
-def default_username_for_agent(agent_name: str) -> str:
-    """Build the default Matrix username localpart for an agent-like entity."""
-    return agent_username_localpart(agent_name)
-
-
 async def create_agent_user(
     homeserver: str,
     agent_name: str,
@@ -116,7 +111,7 @@ async def create_agent_user(
         registration_needed = False
     else:
         # Generate new credentials
-        matrix_username = preferred_username or default_username_for_agent(agent_name)
+        matrix_username = preferred_username or agent_username_localpart(agent_name)
         password = f"{agent_name}_secure_password"  # _{os.urandom(8).hex()}"
         if existing_creds and preferred_username and existing_creds["username"] != preferred_username:
             logger.info(

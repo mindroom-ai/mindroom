@@ -205,7 +205,7 @@ class TestMatrixRegistration:
         with patch("mindroom.matrix.client.matrix_client") as mock_matrix_client:
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
-            with pytest.raises(ValueError, match="already exists but login failed"):
+            with pytest.raises(ValueError, match="Login failed for existing user"):
                 await register_user("http://localhost:8008", "existing_user", "wrong_pass", "Existing User")
 
     @pytest.mark.asyncio

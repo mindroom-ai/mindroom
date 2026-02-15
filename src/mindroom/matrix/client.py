@@ -193,7 +193,7 @@ async def register_user(
                 if isinstance(display_response, nio.ErrorResponse):
                     logger.warning(f"Failed to set display name for existing user: {display_response}")
                 return user_id
-            msg = f"User {user_id} already exists but login failed with provided password: {login_response}"
+            msg = f"Login failed for existing user {user_id} with provided password: {login_response}"
             raise ValueError(msg)
         msg = f"Failed to register user {username}: {response}"
         raise ValueError(msg)
