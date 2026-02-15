@@ -220,7 +220,7 @@ def _generate_welcome_message(room_id: str, config: Config) -> str:
         "💬 **How to interact:**\n"
         "• Mention an agent with @ to get their attention (e.g., @mindroom_assistant)\n"
         "• Use `!help` to see available commands\n"
-        "• Agents respond in threads to keep conversations organized\n"
+        "• Agents respond in threads; plain replies still continue the same conversation\n"
         "• Multiple agents can collaborate when you mention them together\n"
         "• 🎤 Voice messages are automatically transcribed and work perfectly!\n\n"
         "⚡ **Quick commands:**\n"

@@ -41,7 +41,9 @@ Rooms are auto-created via `ensure_room_exists()` and `ensure_all_rooms_exist()`
 
 ## Threading (MSC3440)
 
-Agents respond in threads following [MSC3440](https://github.com/matrix-org/matrix-spec-proposals/blob/main/proposals/3440-threading-via-relations.md). Thread messages use `m.relates_to` with `rel_type: m.thread`.
+MindRoom emits thread replies following [MSC3440](https://github.com/matrix-org/matrix-spec-proposals/blob/main/proposals/3440-threading-via-relations.md), using `m.relates_to` with `rel_type: m.thread`.
+
+For clients that send plain replies without thread metadata (`m.in_reply_to` but no `rel_type: m.thread`), MindRoom resolves the reply chain to the existing thread root and continues the same conversation.
 
 ```
 ├── User: @assistant help with this code
