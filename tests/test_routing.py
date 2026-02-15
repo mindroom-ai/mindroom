@@ -17,6 +17,7 @@ from mindroom.thread_utils import (
     extract_agent_name,
     has_any_agent_mentions_in_thread,
     has_multiple_non_agent_users_in_room,
+    should_allow_unmentioned_single_agent_auto_response,
 )
 
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
@@ -285,6 +286,33 @@ class TestThreadUtils:
             "@alice:localhost": None,
         }
         assert has_multiple_non_agent_users_in_room(room, self.config) is False
+
+    def test_should_allow_unmentioned_single_agent_auto_response_true(self) -> None:
+        """Allow auto-response when a single agent is available and no mention is required."""
+        assert (
+            should_allow_unmentioned_single_agent_auto_response(
+                has_multiple_non_agent_users=False,
+                available_agent_count=1,
+            )
+            is True
+        )
+
+    def test_should_allow_unmentioned_single_agent_auto_response_false(self) -> None:
+        """Disallow auto-response when mention is required or multiple agents are available."""
+        assert (
+            should_allow_unmentioned_single_agent_auto_response(
+                has_multiple_non_agent_users=True,
+                available_agent_count=1,
+            )
+            is False
+        )
+        assert (
+            should_allow_unmentioned_single_agent_auto_response(
+                has_multiple_non_agent_users=False,
+                available_agent_count=2,
+            )
+            is False
+        )
 
 
 class TestAgentDescription:
