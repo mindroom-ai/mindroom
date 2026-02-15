@@ -180,20 +180,12 @@ def get_available_agent_matrix_ids_in_room(room: nio.MatrixRoom, config: Config)
 
 def has_multiple_non_agent_users_in_room(room: nio.MatrixRoom, config: Config) -> bool:
     """Return True when more than one non-agent user is present in the room."""
-    non_agent_members: set[str] = set()
-
+    non_agent_count = 0
     for member_id in room.users:
-        if not isinstance(member_id, str):
-            continue
-        if not member_id.startswith("@") or ":" not in member_id:
-            continue
-        if extract_agent_name(member_id, config):
-            continue
-
-        non_agent_members.add(member_id)
-        if len(non_agent_members) > 1:
-            return True
-
+        if not extract_agent_name(member_id, config):
+            non_agent_count += 1
+            if non_agent_count > 1:
+                return True
     return False
 
 
