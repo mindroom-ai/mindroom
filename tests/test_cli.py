@@ -261,6 +261,28 @@ class TestUserAccountManagement:
             assert register_call_kwargs["device_name"] == "mindroom_agent"
             mock_client.set_displayname.assert_called_once_with("Alice Smith")
 
+    @pytest.mark.asyncio
+    async def test_ensure_user_account_rejects_changing_existing_username(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Internal username cannot be changed after initial account bootstrap."""
+        config_file = tmp_path / "matrix_state.yaml"
+        state = MatrixState()
+        state.add_account(INTERNAL_USER_ACCOUNT_KEY, DEFAULT_INTERNAL_USERNAME, "existing_password")
+
+        custom_config = Config(mindroom_user={"username": "alice", "display_name": "Alice Smith"})
+
+        with (
+            patch("mindroom.matrix.state.MATRIX_STATE_FILE", config_file),
+            patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
+        ):
+            state.save()
+            orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+
+            with pytest.raises(ValueError, match="cannot be changed"):
+                await orchestrator._ensure_user_account(custom_config)
+
 
 def test_mindroom_user_username_normalizes_single_leading_at() -> None:
     """Config should accept a single leading @ and normalize it to localpart form."""

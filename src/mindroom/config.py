@@ -257,7 +257,7 @@ class MindRoomUserConfig(BaseModel):
 
     username: str = Field(
         default="mindroom_user",
-        description="Matrix username localpart for the internal user account (without @ or domain)",
+        description="Matrix username localpart for the internal user account (without @ or domain); set before first startup",
     )
     display_name: str = Field(
         default="MindRoomUser",

@@ -245,6 +245,10 @@ models:
     provider: anthropic
     id: claude-sonnet-4-5-latest
 
+mindroom_user:
+  username: mindroom_user  # Set this before first run; username is immutable after bootstrap
+  display_name: MindRoomUser
+
 defaults:
   markdown: true
 ```
@@ -280,7 +284,7 @@ voice:
     model: whisper-1
 
 mindroom_user:
-  username: mindroom_user
+  username: mindroom_user  # Set this before first run; username is immutable after bootstrap
   display_name: MindRoomUser
 
 authorization:
@@ -289,6 +293,8 @@ authorization:
     "!exampleRoomId:example.com": ["@bob:example.com"]
   default_room_access: false
 ```
+
+`mindroom_user.username` can only be set before the internal user account is created. After first startup, change `mindroom_user.display_name` if you only want a different visible name.
 
 ## Deployment Options
 

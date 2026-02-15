@@ -28,7 +28,7 @@ authorization:
 
 # Optional: configure the internal MindRoom user identity
 mindroom_user:
-  username: mindroom_user
+  username: mindroom_user          # Set before first startup (cannot be changed later)
   display_name: MindRoomUser
 ```
 
@@ -39,6 +39,8 @@ mindroom_user:
 - `default_room_access: false`
 
 This means only MindRoom system users (agents, teams, router, and the configured internal user, default `@mindroom_user`) can interact with agents by default.
+
+`mindroom_user.username` is a one-time setting used to create the internal Matrix account. After the account exists, keep the same username and only change `mindroom_user.display_name` for visible name changes.
 
 ## Matrix ID Format
 

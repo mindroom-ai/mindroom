@@ -25,6 +25,8 @@ router:
   model: default
 
 # Internal MindRoom user account (optional)
+# Set username before first run; once the account is created, the username is fixed.
+# You can still change display_name later.
 mindroom_user:
   username: mindroom_user
   display_name: MindRoomUser

@@ -25,6 +25,32 @@ INTERNAL_USER_AGENT_NAME = "user"
 INTERNAL_USER_ACCOUNT_KEY = account_key_for_agent(INTERNAL_USER_AGENT_NAME)
 
 
+def ensure_internal_user_username_is_unchanged(
+    configured_username: str,
+    *,
+    existing_username: str | None = None,
+) -> None:
+    """Ensure the configured internal username does not change after bootstrap.
+
+    Matrix IDs are immutable. Changing ``mindroom_user.username`` would require
+    provisioning a different Matrix account, so we block that here and require
+    users to keep the original username once created.
+    """
+    persisted_username = existing_username
+    if persisted_username is None:
+        existing_creds = get_agent_credentials(INTERNAL_USER_AGENT_NAME)
+        if existing_creds:
+            persisted_username = existing_creds["username"]
+
+    if persisted_username and persisted_username != configured_username:
+        msg = (
+            "mindroom_user.username cannot be changed after first startup "
+            f"(existing: '{persisted_username}', configured: '{configured_username}'). "
+            "Keep the existing username and change mindroom_user.display_name instead."
+        )
+        raise ValueError(msg)
+
+
 def extract_domain_from_user_id(user_id: str) -> str:
     """Extract domain from a Matrix user ID like "@user:example.com"."""
     if not user_id.startswith("@") or ":" not in user_id:
@@ -103,6 +129,12 @@ async def create_agent_user(
     # Check if credentials already exist in matrix_state.yaml
     existing_creds = get_agent_credentials(agent_name)
     preferred_username = username
+
+    if agent_name == INTERNAL_USER_AGENT_NAME and preferred_username is not None:
+        ensure_internal_user_username_is_unchanged(
+            preferred_username,
+            existing_username=existing_creds["username"] if existing_creds else None,
+        )
 
     if existing_creds and (preferred_username is None or existing_creds["username"] == preferred_username):
         matrix_username = existing_creds["username"]

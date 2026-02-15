@@ -2410,10 +2410,10 @@ class MultiAgentOrchestrator:
 
         config = Config.from_yaml()
         load_plugins(config)
-        self.config = config
 
         # Ensure user account exists first
         await self._ensure_user_account(config)
+        self.config = config
         await self._configure_knowledge(config, start_watcher=False)
 
         # Create bots for all configured entities
@@ -2513,24 +2513,27 @@ class MultiAgentOrchestrator:
         load_plugins(new_config)
 
         if not self.config:
-            self.config = new_config
             await self._ensure_user_account(new_config)
+            self.config = new_config
             await self._configure_knowledge(new_config, start_watcher=self.running)
             return False
 
+        current_config = self.config
+
         # Identify what changed - we can keep using the existing helper functions
-        entities_to_restart = await _identify_entities_to_restart(self.config, new_config, self.agent_bots)
-        mindroom_user_changed = self.config.mindroom_user != new_config.mindroom_user
+        entities_to_restart = await _identify_entities_to_restart(current_config, new_config, self.agent_bots)
+        mindroom_user_changed = current_config.mindroom_user != new_config.mindroom_user
 
         # Also check for new entities that didn't exist before
         all_new_entities = set(new_config.agents.keys()) | set(new_config.teams.keys()) | {ROUTER_AGENT_NAME}
         existing_entities = set(self.agent_bots.keys())
         new_entities = all_new_entities - existing_entities - entities_to_restart
 
-        # Always update the orchestrator's config first
-        self.config = new_config
         if mindroom_user_changed:
             await self._ensure_user_account(new_config)
+
+        # Only apply the new config after all validation/account checks succeed.
+        self.config = new_config
         await self._configure_knowledge(new_config, start_watcher=self.running)
 
         # Always update config for ALL existing bots (even those being restarted will get new config when recreated)

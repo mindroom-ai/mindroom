@@ -658,8 +658,8 @@ voice:
 
 # Internal MindRoom user account (optional)
 mindroom_user:
-  username: mindroom_user          # Default username localpart
-  display_name: MindRoomUser       # Default display name
+  username: mindroom_user          # Set before first startup (localpart only)
+  display_name: MindRoomUser       # Can be changed later
 
 # Authorization (optional)
 authorization:
@@ -678,6 +678,12 @@ plugins: []
 # Timezone for scheduled tasks (optional)
 timezone: America/Los_Angeles      # Default: UTC
 ```
+
+## Internal User Username
+
+- Configure `mindroom_user.username` with the Matrix localpart you want before first startup.
+- After the account is created, `mindroom_user.username` is locked and cannot be changed in-place.
+- You can safely change `mindroom_user.display_name` at any time.
 
 ## Git-backed Knowledge Bases
 
@@ -2229,7 +2235,7 @@ authorization:
 
 # Optional: configure the internal MindRoom user identity
 mindroom_user:
-  username: mindroom_user
+  username: mindroom_user          # Set before first startup (cannot be changed later)
   display_name: MindRoomUser
 ```
 
@@ -2240,6 +2246,8 @@ mindroom_user:
 - `default_room_access: false`
 
 This means only MindRoom system users (agents, teams, router, and the configured internal user, default `@mindroom_user`) can interact with agents by default.
+
+`mindroom_user.username` is a one-time setting used to create the internal Matrix account. After the account exists, keep the same username and only change `mindroom_user.display_name` for visible name changes.
 
 ## Matrix ID Format
 
@@ -2690,6 +2698,7 @@ main() entry
 - **Entity order**: Router first, then agents, then teams
 - **Room setup** (`_setup_rooms_and_memberships`): Router creates rooms, invites agents/users, bots join
 - **Sync loops**: Each bot runs `_sync_forever_with_restart()` with automatic retry
+- **Internal user identity**: `mindroom_user.username` is bootstrap-only; only `display_name` should change later
 
 ## Hot Reload
 
