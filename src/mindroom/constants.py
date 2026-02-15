@@ -60,7 +60,20 @@ DEFAULT_AGENTS_CONFIG = find_config()
 _CONFIG_TEMPLATE_ENV = os.getenv("MINDROOM_CONFIG_TEMPLATE") or os.getenv("CONFIG_TEMPLATE_PATH")
 DEFAULT_CONFIG_TEMPLATE = Path(_CONFIG_TEMPLATE_ENV).expanduser() if _CONFIG_TEMPLATE_ENV else DEFAULT_AGENTS_CONFIG
 
-STORAGE_PATH = os.getenv("STORAGE_PATH", "mindroom_data")
+_STORAGE_PATH_ENV = os.getenv("STORAGE_PATH")
+
+
+def _default_storage_path() -> Path:
+    """Derive default storage path relative to the config file location.
+
+    Uses ``data/`` inside ``~/.mindroom/`` and ``mindroom_data/`` elsewhere.
+    """
+    config_dir = DEFAULT_AGENTS_CONFIG.parent.resolve()
+    dirname = "data" if config_dir == (Path.home() / ".mindroom").resolve() else "mindroom_data"
+    return config_dir / dirname
+
+
+STORAGE_PATH = _STORAGE_PATH_ENV if _STORAGE_PATH_ENV else str(_default_storage_path())
 STORAGE_PATH_OBJ = Path(STORAGE_PATH)
 
 # Specific files and directories
