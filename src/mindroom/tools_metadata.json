@@ -3668,17 +3668,6 @@
       "config_fields": [
         {
           "default": null,
-          "description": "Advanced: pass an existing psycopg connection object programmatically.",
-          "label": "Connection",
-          "name": "connection",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "default": null,
           "description": "PostgreSQL server hostname",
           "label": "Host",
           "name": "host",
