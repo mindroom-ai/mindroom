@@ -385,23 +385,25 @@ class TestThreadingBehavior:
         room.room_id = "!test:localhost"
         room.name = "Test Room"
 
+        chain_length = 55  # Intentionally exceeds the old fixed depth cap of 50.
+        newest_parent_id = f"$msg{chain_length}:localhost"
         event = nio.RoomMessageText.from_dict(
             {
                 "content": {
-                    "body": "14th message in reply-only chain",
+                    "body": f"{chain_length + 1}th message in reply-only chain",
                     "msgtype": "m.text",
-                    "m.relates_to": {"m.in_reply_to": {"event_id": "$msg13:localhost"}},
+                    "m.relates_to": {"m.in_reply_to": {"event_id": newest_parent_id}},
                 },
-                "event_id": "$msg14:localhost",
+                "event_id": f"$msg{chain_length + 1}:localhost",
                 "sender": "@user:localhost",
-                "origin_server_ts": 1234567894,
+                "origin_server_ts": 1234567890 + chain_length + 1,
                 "room_id": "!test:localhost",
                 "type": "m.room.message",
             },
         )
 
         responses: list[nio.RoomGetEventResponse] = []
-        for i in range(13, 0, -1):
+        for i in range(chain_length, 0, -1):
             content = {"body": f"Message {i}", "msgtype": "m.text"}
             if i > 1:
                 content["m.relates_to"] = {"m.in_reply_to": {"event_id": f"$msg{i - 1}:localhost"}}
@@ -423,12 +425,81 @@ class TestThreadingBehavior:
 
         with patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch:
             context = await bot._extract_message_context(room, event)
+            # Re-resolving should use cached reply-chain nodes and roots.
+            context_cached = await bot._extract_message_context(room, event)
 
         assert context.is_thread is True
+        assert context_cached.is_thread is True
         assert context.thread_id == "$msg1:localhost"
-        assert len(context.thread_history) == 13
+        assert context_cached.thread_id == "$msg1:localhost"
+        assert len(context.thread_history) == chain_length
         assert context.thread_history[0]["event_id"] == "$msg1:localhost"
-        assert context.thread_history[-1]["event_id"] == "$msg13:localhost"
+        assert context.thread_history[-1]["event_id"] == newest_parent_id
+        assert bot.client.room_get_event.await_count == chain_length
+        mock_fetch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_extract_context_reply_chain_cycle_stops_cleanly(self, bot: AgentBot) -> None:
+        """Cycle traversal should terminate without looping forever."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "Cycle edge case",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$msg3:localhost"}},
+                },
+                "event_id": "$incoming:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567896,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        bot.client.room_get_event = AsyncMock(
+            side_effect=[
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "Message 3",
+                            "msgtype": "m.text",
+                            "m.relates_to": {"m.in_reply_to": {"event_id": "$msg2:localhost"}},
+                        },
+                        "event_id": "$msg3:localhost",
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 1234567895,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "Message 2",
+                            "msgtype": "m.text",
+                            "m.relates_to": {"m.in_reply_to": {"event_id": "$msg3:localhost"}},
+                        },
+                        "event_id": "$msg2:localhost",
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 1234567894,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+            ],
+        )
+
+        with patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch:
+            context = await bot._extract_message_context(room, event)
+
+        assert context.is_thread is True
+        assert context.thread_id == "$msg2:localhost"
+        assert [msg["event_id"] for msg in context.thread_history] == ["$msg2:localhost", "$msg3:localhost"]
+        assert bot.client.room_get_event.await_count == 2
         mock_fetch.assert_not_called()
 
     @pytest.mark.asyncio
