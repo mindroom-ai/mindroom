@@ -19,8 +19,6 @@ classifiers = [
 dynamic = [ "version" ]
 dependencies = [
   "agno[anthropic,google,ollama,openai]==2.4.7",
-  "aiofiles",
-  "aiohttp",
   "anthropic>=0.70",
   "cerebras-cloud-sdk>=1.46",
   "chromadb>=1.0.15",
