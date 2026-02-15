@@ -126,6 +126,10 @@ ANTHROPIC_API_KEY=your_anthropic_key
 
 # MINDROOM_API_KEY=your-secret-key
 
+# If using the Vite frontend, set the same key for browser API calls
+
+# VITE_API_KEY=your-secret-key
+
 ```
 
 > [!NOTE]

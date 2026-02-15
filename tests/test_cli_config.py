@@ -52,6 +52,23 @@ class TestConfigInit:
         assert "agents:" in content
         assert "# MindRoom Configuration (minimal)" in content
 
+    def test_init_creates_env_with_matching_dashboard_keys(self, tmp_path: Path) -> None:
+        """Config init writes backend and frontend dashboard keys with the same value."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target)])
+        assert result.exit_code == 0
+
+        env_path = tmp_path / ".env"
+        assert env_path.exists()
+
+        content = env_path.read_text()
+        backend_match = re.search(r"^MINDROOM_API_KEY=(.+)$", content, flags=re.MULTILINE)
+        frontend_match = re.search(r"^VITE_API_KEY=(.+)$", content, flags=re.MULTILINE)
+        assert backend_match is not None
+        assert frontend_match is not None
+        assert backend_match.group(1)
+        assert backend_match.group(1) == frontend_match.group(1)
+
     def test_init_refuses_overwrite_without_force(self, tmp_path: Path) -> None:
         """Config init prompts before overwriting and aborts on 'n'."""
         target = tmp_path / "config.yaml"

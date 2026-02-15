@@ -318,7 +318,7 @@ def _full_template() -> str:
 def _env_template() -> str:
     """Return a starter .env file for standalone deployments.
 
-    Generates a random MINDROOM_API_KEY so the dashboard is protected by default.
+    Generates a random dashboard API key and sets both backend and frontend vars.
     """
     api_key = secrets.token_urlsafe(32)
     return f"""\
@@ -335,6 +335,9 @@ ANTHROPIC_API_KEY=
 # When set, all dashboard requests require: Authorization: Bearer <key>
 # Remove or comment out to allow open access (fine for localhost).
 MINDROOM_API_KEY={api_key}
+
+# Frontend dashboard key (Vite build-time env; keep this equal to MINDROOM_API_KEY)
+VITE_API_KEY={api_key}
 
 # OpenAI-compatible API authentication (separate from dashboard auth)
 # OPENAI_COMPAT_API_KEYS=sk-my-secret-key

@@ -1,6 +1,7 @@
 import { FaGoogle } from 'react-icons/fa';
 import { Integration, IntegrationProvider, IntegrationConfig } from '../types';
 import { GoogleIntegration as GoogleIntegrationComponent } from '@/components/GoogleIntegration/GoogleIntegration';
+import { getAuthHeaders } from '@/lib/api';
 
 // Wrapper component to handle the dialog integration
 function GoogleConfigDialog(props: { onClose: () => void; onSuccess?: () => void }) {
@@ -30,6 +31,7 @@ class GoogleIntegrationProvider implements IntegrationProvider {
       onDisconnect: async () => {
         const response = await fetch('/api/google/disconnect', {
           method: 'POST',
+          headers: { ...getAuthHeaders() },
         });
         if (!response.ok) {
           throw new Error('Failed to disconnect Google services');
@@ -42,7 +44,9 @@ class GoogleIntegrationProvider implements IntegrationProvider {
 
   async loadStatus(): Promise<Partial<Integration>> {
     try {
-      const response = await fetch('/api/google/status');
+      const response = await fetch('/api/google/status', {
+        headers: { ...getAuthHeaders() },
+      });
       if (response.ok) {
         const data = await response.json();
         if (data.connected) {
@@ -63,7 +67,9 @@ class GoogleIntegrationProvider implements IntegrationProvider {
 
   private async checkConnection(): Promise<boolean> {
     try {
-      const response = await fetch('/api/google/status');
+      const response = await fetch('/api/google/status', {
+        headers: { ...getAuthHeaders() },
+      });
       if (response.ok) {
         const data = await response.json();
         return data.connected === true;

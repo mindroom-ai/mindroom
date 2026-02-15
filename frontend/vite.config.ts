@@ -10,6 +10,8 @@ const isDocker = process.env.DOCKER_CONTAINER === '1';
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
+  // Load env vars from repository root where `mindroom config init` writes `.env`.
+  envDir: '..',
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

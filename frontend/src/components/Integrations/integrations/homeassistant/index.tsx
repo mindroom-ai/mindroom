@@ -1,6 +1,7 @@
 import { SiHomeassistant } from 'react-icons/si';
 import { Integration, IntegrationProvider, IntegrationConfig } from '../types';
 import { HomeAssistantIntegration as HomeAssistantIntegrationComponent } from '@/components/HomeAssistantIntegration/HomeAssistantIntegration';
+import { getAuthHeaders } from '@/lib/api';
 
 // Wrapper component to handle the dialog integration
 function HomeAssistantConfigDialog(props: { onClose: () => void; onSuccess?: () => void }) {
@@ -30,6 +31,7 @@ class HomeAssistantIntegrationProvider implements IntegrationProvider {
       onDisconnect: async () => {
         const response = await fetch('/api/homeassistant/disconnect', {
           method: 'POST',
+          headers: { ...getAuthHeaders() },
         });
         if (!response.ok) {
           throw new Error('Failed to disconnect Home Assistant');
@@ -42,7 +44,9 @@ class HomeAssistantIntegrationProvider implements IntegrationProvider {
 
   async loadStatus(): Promise<Partial<Integration>> {
     try {
-      const response = await fetch('/api/homeassistant/status');
+      const response = await fetch('/api/homeassistant/status', {
+        headers: { ...getAuthHeaders() },
+      });
       if (response.ok) {
         const data = await response.json();
         if (data.connected) {
@@ -69,7 +73,9 @@ class HomeAssistantIntegrationProvider implements IntegrationProvider {
 
   private async checkConnection(): Promise<boolean> {
     try {
-      const response = await fetch('/api/homeassistant/status');
+      const response = await fetch('/api/homeassistant/status', {
+        headers: { ...getAuthHeaders() },
+      });
       if (response.ok) {
         const data = await response.json();
         return data.connected === true;

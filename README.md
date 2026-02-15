@@ -255,6 +255,8 @@ export MATRIX_HOMESERVER=https://your-matrix.server
 export ANTHROPIC_API_KEY=your-key-here
 # Optional: protect dashboard API endpoints (recommended for non-localhost)
 # export MINDROOM_API_KEY=your-secret-key
+# Optional: if running the Vite frontend, set the same key for browser requests
+# export VITE_API_KEY=$MINDROOM_API_KEY
 # Optional: use a non-default config location
 # export MINDROOM_CONFIG_PATH=/path/to/config.yaml
 ```
