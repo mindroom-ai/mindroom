@@ -84,7 +84,9 @@ optional-dependencies.bitbucket = [
 optional-dependencies.brandfetch = [
   "httpx>=0.27",
 ]
-optional-dependencies.bravesearch = [  ]
+optional-dependencies.bravesearch = [
+  "brave-search",
+]
 optional-dependencies.brightdata = [
   "requests",
 ]

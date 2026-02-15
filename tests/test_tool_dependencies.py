@@ -39,7 +39,6 @@ def _normalize_tool_dep_name(name: str) -> str:
         "exa_py": "exa-py",
         "lxml_html_clean": "lxml-html-clean",
         "pygithub": "pygithub",
-        "yaml": "pyyaml",
         "youtube_transcript_api": "youtube-transcript-api",
     }
     normalized = aliases.get(name.lower(), name.lower())
