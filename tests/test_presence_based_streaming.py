@@ -109,12 +109,12 @@ class TestStreamingDecision:
 
         mock_client = AsyncMock(spec=nio.AsyncClient)
 
-        with patch.dict("os.environ", {"MINDROOM_ENABLE_STREAMING": "true"}):
-            result = await should_use_streaming(
-                mock_client,
-                "!room:example.com",
-                requester_user_id="@user:example.com",
-            )
+        result = await should_use_streaming(
+            mock_client,
+            "!room:example.com",
+            requester_user_id="@user:example.com",
+            enable_streaming=True,
+        )
 
         assert result is True
         mock_is_user_online.assert_called_once_with(mock_client, "@user:example.com")
@@ -130,18 +130,17 @@ class TestStreamingDecision:
 
         mock_client = AsyncMock(spec=nio.AsyncClient)
 
-        with patch.dict("os.environ", {"MINDROOM_ENABLE_STREAMING": "true"}):
-            result = await should_use_streaming(
-                mock_client,
-                "!room:example.com",
-                requester_user_id="@user:example.com",
-            )
+        result = await should_use_streaming(
+            mock_client,
+            "!room:example.com",
+            requester_user_id="@user:example.com",
+            enable_streaming=True,
+        )
 
         assert result is False
         mock_is_user_online.assert_called_once_with(mock_client, "@user:example.com")
 
     @pytest.mark.asyncio
-    @patch("mindroom.matrix.presence.ENABLE_STREAMING", False)
     async def test_should_use_streaming_when_globally_disabled(self) -> None:
         """Test that streaming is not used when globally disabled."""
         mock_client = AsyncMock(spec=nio.AsyncClient)
@@ -150,6 +149,7 @@ class TestStreamingDecision:
             mock_client,
             "!room:example.com",
             requester_user_id="@user:example.com",
+            enable_streaming=False,
         )
 
         assert result is False
@@ -165,12 +165,12 @@ class TestStreamingDecision:
         """Test that streaming defaults to True when no requester specified."""
         mock_client = AsyncMock(spec=nio.AsyncClient)
 
-        with patch.dict("os.environ", {"MINDROOM_ENABLE_STREAMING": "true"}):
-            result = await should_use_streaming(
-                mock_client,
-                "!room:example.com",
-                requester_user_id=None,
-            )
+        result = await should_use_streaming(
+            mock_client,
+            "!room:example.com",
+            requester_user_id=None,
+            enable_streaming=True,
+        )
 
         assert result is True
         # Should not check presence when no requester
@@ -227,24 +227,23 @@ class TestBotIntegration:
             access_token="test_token",  # noqa: S106
         )
 
-        with patch.dict("os.environ", {"MINDROOM_ENABLE_STREAMING": "true"}):
-            bot = create_bot_for_entity("test_agent", agent_user, config, tmp_path)
-            assert isinstance(bot, AgentBot)
-            bot.client = AsyncMock(spec=nio.AsyncClient)
-            bot.client.rooms = {}
-            bot.client.user_id = "@mindroom_test_agent:localhost"
-            bot.client.room_send = AsyncMock()
-            bot.client.room_put_state = AsyncMock()
+        bot = create_bot_for_entity("test_agent", agent_user, config, tmp_path)
+        assert isinstance(bot, AgentBot)
+        bot.client = AsyncMock(spec=nio.AsyncClient)
+        bot.client.rooms = {}
+        bot.client.user_id = "@mindroom_test_agent:localhost"
+        bot.client.room_send = AsyncMock()
+        bot.client.room_put_state = AsyncMock()
 
-            # Simulate a message from a user
-            await bot._generate_response(
-                room_id="!test:localhost",
-                prompt="Hello bot",
-                reply_to_event_id="$msg123",
-                thread_id="$thread123",
-                thread_history=[],
-                user_id="@user:localhost",
-            )
+        # Simulate a message from a user
+        await bot._generate_response(
+            room_id="!test:localhost",
+            prompt="Hello bot",
+            reply_to_event_id="$msg123",
+            thread_id="$thread123",
+            thread_history=[],
+            user_id="@user:localhost",
+        )
 
         # Should have used streaming since user is online
         mock_stream_agent_response.assert_called_once()
@@ -290,24 +289,23 @@ class TestBotIntegration:
             access_token="test_token",  # noqa: S106
         )
 
-        with patch.dict("os.environ", {"MINDROOM_ENABLE_STREAMING": "true"}):
-            bot = create_bot_for_entity("test_agent", agent_user, config, tmp_path)
-            assert isinstance(bot, AgentBot)
-            bot.client = AsyncMock(spec=nio.AsyncClient)
-            bot.client.rooms = {}
-            bot.client.user_id = "@mindroom_test_agent:localhost"
-            bot.client.room_send = AsyncMock()
-            bot.client.room_put_state = AsyncMock()
+        bot = create_bot_for_entity("test_agent", agent_user, config, tmp_path)
+        assert isinstance(bot, AgentBot)
+        bot.client = AsyncMock(spec=nio.AsyncClient)
+        bot.client.rooms = {}
+        bot.client.user_id = "@mindroom_test_agent:localhost"
+        bot.client.room_send = AsyncMock()
+        bot.client.room_put_state = AsyncMock()
 
-            # Simulate a message from a user
-            await bot._generate_response(
-                room_id="!test:localhost",
-                prompt="Hello bot",
-                reply_to_event_id="$msg123",
-                thread_id="$thread123",
-                thread_history=[],
-                user_id="@user:localhost",
-            )
+        # Simulate a message from a user
+        await bot._generate_response(
+            room_id="!test:localhost",
+            prompt="Hello bot",
+            reply_to_event_id="$msg123",
+            thread_id="$thread123",
+            thread_history=[],
+            user_id="@user:localhost",
+        )
 
         # Should have used non-streaming since user is offline
         mock_ai_response.assert_called_once()
