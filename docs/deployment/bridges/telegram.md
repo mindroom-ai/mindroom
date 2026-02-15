@@ -4,7 +4,17 @@ icon: lucide/message-circle
 
 # Telegram Bridge
 
-Bridge Telegram chats to Matrix using [mautrix-telegram](https://docs.mau.fi/bridges/python/telegram/) in **puppet mode**. Each user logs in with their own Telegram account, so messages appear as the real user on both sides.
+Bridge Telegram and Matrix using [mautrix-telegram](https://docs.mau.fi/bridges/python/telegram/) in **puppet mode**. Each user logs in with their own Telegram account, so messages appear as the real user on both sides.
+
+## What Can You Do With This?
+
+The bridge enables two main use cases:
+
+1. **Talk to MindRoom agents from Telegram** -- Link a Telegram group to a Matrix room (like Lobby) so you can chat with AI agents directly from the Telegram app, without opening Element.
+
+2. **Access Telegram chats from Matrix** -- Your existing Telegram conversations appear as Matrix rooms in Element, so you can use one client for everything.
+
+Most users want use case 1. See [Bridging Matrix Rooms to Telegram](#bridging-matrix-rooms-to-telegram) after setup.
 
 ## Architecture
 
@@ -13,9 +23,8 @@ Telegram Cloud <--> mautrix-telegram <--> Synapse <--> Element
                     (bridge bot)         (homeserver)   (client)
 ```
 
-- **mautrix-telegram** connects to both Telegram and Synapse
+- **mautrix-telegram** runs locally and connects outbound to Telegram's API -- your Matrix server does NOT need to be publicly accessible
 - Each Matrix user can log into their own Telegram account (puppeting)
-- Telegram chats appear as Matrix rooms with ghost users for Telegram contacts
 - Messages flow bidirectionally in real time
 
 ## Prerequisites
@@ -82,34 +91,67 @@ cf compose mindroom logs telegram-bridge --tail 20
 # Look for "Startup actions complete"
 ```
 
-## Usage: Puppet Mode Login
+## Usage
+
+### Step 1: Log in to Telegram via the bridge
+
+Before you can bridge anything, you must link your Telegram account:
 
 1. Open Element at `element.lab.nijho.lt`
 2. Start a DM with `@telegrambot:matrix.lab.nijho.lt`
-3. Send `login` to start the Telegram authentication flow
-4. Enter your phone number when prompted
+3. Send `login`
+4. Enter your phone number in international format (e.g., `+1234567890`)
 5. Enter the verification code sent to your Telegram app
-6. Your Telegram chats will appear as Matrix rooms
+6. Your existing Telegram chats will appear as Matrix rooms
 
-### Bridging Groups and Channels
+### Step 2: Bridge Matrix rooms to Telegram
 
-After logging in:
+This is the primary use case -- talking to MindRoom agents from Telegram.
+
+The bridge connects a **Telegram group** to a **Matrix room**. You need a Telegram group on the Telegram side because that's what you'll open in the Telegram app to send and receive messages.
+
+**For each Matrix room you want to access from Telegram** (e.g., Lobby):
+
+1. **Create a Telegram group** in the Telegram app (e.g., name it "MindRoom Lobby")
+2. **Add your bridge bot** (e.g., `@mindroom_lab_bot`) to that Telegram group
+3. **In Element**, go to the Matrix room you want to bridge (e.g., Lobby)
+4. **Invite the bridge bot**: invite `@telegrambot:matrix.lab.nijho.lt` to the room
+5. **Link the rooms**: in the Matrix room, send `!tg bridge` -- the bot will list your Telegram groups and let you pick which one to link
+
+Once linked:
+- Messages you send in the **Telegram group** appear in the **Matrix room** -- MindRoom agents will see and respond to them
+- Agent responses in the **Matrix room** appear in the **Telegram group**
+- You can chat with MindRoom agents entirely from the Telegram app
+
+Repeat for any other Matrix rooms you want accessible from Telegram.
+
+> **Why can't I just invite the bot directly?** The bridge bot
+> (`@telegrambot`) is Matrix-side infrastructure -- it manages the bridge
+> but isn't a Telegram chat. To use Telegram as your client, there must be
+> a Telegram group for the Telegram app to display. The bridge connects
+> that group to the Matrix room bidirectionally.
+
+### Accessing Telegram chats from Matrix
+
+After logging in (step 1), your Telegram chats automatically appear as Matrix rooms in Element. This lets you use Element as a unified client for both Matrix and Telegram conversations.
 
 - **Private chats**: Automatically bridged as Matrix DMs
-- **Groups**: Send `bridge <chat_id>` to the bridge bot, or use `search <query>` to find groups
-- **Channels**: Use `bridge <channel_username>` to bridge public channels
+- **Groups**: Automatically bridged if within `sync_create_limit` (default: 30)
+- **Additional groups**: Use `search <query>` in the bridge bot DM to find and bridge more
 
-### Useful Bot Commands
+### Bot Commands Reference
+
+Send these to `@telegrambot:matrix.lab.nijho.lt` in a DM, or in a bridged room:
 
 | Command | Description |
 |---------|-------------|
-| `login` | Start Telegram login |
-| `logout` | Disconnect Telegram account |
+| `login` | Link your Telegram account |
+| `logout` | Unlink your Telegram account |
 | `ping` | Check bridge connection status |
 | `search <query>` | Search your Telegram chats |
-| `bridge <id>` | Bridge a specific chat |
-| `unbridge` | Unbridge current room |
-| `sync` | Re-sync chat list |
+| `!tg bridge` | Link current Matrix room to a Telegram group (send in the room) |
+| `unbridge` | Unlink current room from Telegram |
+| `sync` | Re-sync Telegram chat list |
 | `help` | Show all commands |
 
 ## Configuration Reference
