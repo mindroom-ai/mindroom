@@ -34,7 +34,7 @@ if TYPE_CHECKING:
             description="Path to the configuration file (uses default if not specified)",
         ),
     ],
-    dependencies=["agno", "pydantic", "yaml"],
+    dependencies=["agno", "pydantic", "pyyaml"],
     docs_url="https://github.com/mindroom-ai/mindroom",
 )
 def config_manager_tools() -> type[ConfigManagerTools]:
