@@ -16,7 +16,7 @@ from mindroom.routing import AgentSuggestion, suggest_agent_for_message
 from mindroom.thread_utils import (
     extract_agent_name,
     has_any_agent_mentions_in_thread,
-    requires_explicit_mention_for_auto_response,
+    has_multiple_non_agent_users_in_room,
 )
 
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
@@ -266,25 +266,25 @@ class TestThreadUtils:
         assert extract_agent_name("@mindroom_user:localhost", self.config) is None
         assert extract_agent_name("@regular_user:localhost", self.config) is None
 
-    def test_requires_explicit_mention_for_auto_response_true(self) -> None:
-        """Require mention when more than one non-agent user is in the room."""
+    def test_has_multiple_non_agent_users_in_room_true(self) -> None:
+        """Detect more than one non-agent user in a room."""
         room = MagicMock()
         room.users = {
             "@mindroom_calculator:localhost": None,
             "@alice:localhost": None,
             "@bob:localhost": None,
         }
-        assert requires_explicit_mention_for_auto_response(room, self.config) is True
+        assert has_multiple_non_agent_users_in_room(room, self.config) is True
 
-    def test_requires_explicit_mention_for_auto_response_false(self) -> None:
-        """Do not require mention when only one non-agent user is present."""
+    def test_has_multiple_non_agent_users_in_room_false(self) -> None:
+        """Do not trigger when there is only one non-agent user."""
         room = MagicMock()
         room.users = {
             "@mindroom_calculator:localhost": None,
             "@mindroom_general:localhost": None,
             "@alice:localhost": None,
         }
-        assert requires_explicit_mention_for_auto_response(room, self.config) is False
+        assert has_multiple_non_agent_users_in_room(room, self.config) is False
 
 
 class TestAgentDescription:
