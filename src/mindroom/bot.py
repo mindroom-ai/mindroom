@@ -977,7 +977,7 @@ class AgentBot:
                     self.logger.info("Skipping routing: only one agent present")
                 else:
                     # Multiple agents available - perform AI routing
-                    await self._handle_ai_routing(room, event, context.thread_history)
+                    await self._handle_ai_routing(room, event, context.thread_history, context.thread_id)
             # Router's job is done after routing/command handling/voice transcription
             return
 
@@ -1212,7 +1212,7 @@ class AgentBot:
         """Resolve reply-chain context for clients that don't send thread relations.
 
         Returns:
-            Tuple of (conversation_root_id, chain_history, points_to_thread)
+            Tuple of (conversation_root_id, context_history, points_to_thread)
 
         """
         assert self.client is not None
@@ -1240,6 +1240,13 @@ class AgentBot:
             # If any replied-to event is already in a thread, switch to that full thread context.
             if target_info.thread_id:
                 return target_info.thread_id, [], True
+
+            # Some clients reply directly to the thread root without rel_type=m.thread.
+            # Detect this by checking whether the replied-to event already has thread messages.
+            if not target_info.reply_to_event_id and not chain_history:
+                thread_history = await fetch_thread_history(self.client, room_id, current_event_id)
+                if any(msg.get("event_id") != current_event_id for msg in thread_history):
+                    return current_event_id, thread_history, True
 
             chain_history.append(AgentBot._event_to_history_message(target_event))
 
@@ -1279,6 +1286,8 @@ class AgentBot:
             event_info.reply_to_event_id,
         )
         if points_to_thread:
+            if chain_history:
+                return True, context_root_id, chain_history
             thread_history = await fetch_thread_history(self.client, room_id, context_root_id)
             return True, context_root_id, thread_history
 
@@ -2054,6 +2063,7 @@ class AgentBot:
         room: nio.MatrixRoom,
         event: nio.RoomMessageText,
         thread_history: list[dict],
+        thread_id: str | None = None,
     ) -> None:
         # Only router agent should handle routing
         assert self.agent_name == ROUTER_AGENT_NAME
@@ -2066,7 +2076,6 @@ class AgentBot:
 
         self.logger.info("Handling AI routing", event_id=event.event_id)
 
-        event_info = EventInfo.from_event(event.source)
         suggested_agent = await suggest_agent_for_message(
             event.body,
             available_agents,
@@ -2084,10 +2093,7 @@ class AgentBot:
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
 
-        # Resolve thread from explicit thread relation or reply chain
-        _, thread_event_id, _ = await self._derive_conversation_context(room.room_id, event_info)
-        if not thread_event_id:
-            thread_event_id = event.event_id
+        thread_event_id = thread_id or event.event_id
 
         # Get latest thread event for MSC3440 compliance when no specific reply
         # Note: We use event.event_id as reply_to for routing suggestions

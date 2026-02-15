@@ -1098,7 +1098,7 @@ class TestRouterSkipsSingleAgent:
             await bot._on_message(room, event)
 
         # Verify router DID attempt to route
-        bot._handle_ai_routing.assert_called_once_with(room, event, [])
+        bot._handle_ai_routing.assert_called_once_with(room, event, [], None)
 
         # Verify it didn't log about skipping
         info_calls = [call[0][0] for call in bot.logger.info.call_args_list]
