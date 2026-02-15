@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import sys
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from mindroom.tool_dependencies import _PIP_TO_IMPORT, _pip_name_to_import, check_deps_installed
+from mindroom.tool_dependencies import (
+    _PIP_TO_IMPORT,
+    _install_via_uv_sync,
+    _pip_name_to_import,
+    check_deps_installed,
+    install_tool_extras,
+)
 from mindroom.tools_metadata import (
     TOOL_METADATA,
     TOOL_REGISTRY,
@@ -353,7 +361,11 @@ def test_check_deps_installed_empty_list() -> None:
         ("pyyaml", "yaml"),
         ("pygithub", "github"),
         ("google-api-python-client", "googleapiclient"),
+        ("linkup-sdk", "linkup"),
+        ("mem0ai", "mem0"),
+        ("newspaper4k", "newspaper"),
         ("e2b-code-interpreter", "e2b"),
+        ("tavily-python", "tavily"),
         ("exa-py", "exa_py"),
         ("google-auth", "google.auth"),
     ],
@@ -381,3 +393,69 @@ def test_pip_to_import_mapping_completeness() -> None:
         assert naive != import_name, (
             f"Mapping entry '{pip_name}' -> '{import_name}' is redundant (naive transform already gives '{naive}')"
         )
+
+
+def test_install_via_uv_sync_targets_active_virtualenv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Uv sync should target the active virtualenv when one is in use."""
+    captured: dict[str, object] = {}
+
+    def fake_run(
+        cmd: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        cwd: Path,
+        env: dict[str, str],
+    ) -> SimpleNamespace:
+        captured["cmd"] = cmd
+        captured["check"] = check
+        captured["capture_output"] = capture_output
+        captured["cwd"] = cwd
+        captured["env"] = env
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("mindroom.tool_dependencies._in_virtualenv", lambda: True)
+    monkeypatch.setattr("mindroom.tool_dependencies.subprocess.run", fake_run)
+
+    assert _install_via_uv_sync(["wikipedia"], quiet=True)
+    assert captured["cmd"] == [
+        "uv",
+        "sync",
+        "--locked",
+        "--inexact",
+        "--no-dev",
+        "--active",
+        "--extra",
+        "wikipedia",
+        "-q",
+    ]
+    assert captured["check"] is False
+    assert captured["capture_output"] is True
+    assert isinstance(captured["cwd"], Path)
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env["VIRTUAL_ENV"] == sys.prefix
+
+
+def test_install_tool_extras_skips_uv_sync_outside_virtualenv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Outside virtualenvs, tool extras should install via pip/uv pip instead of uv sync."""
+    calls = {"sync": 0, "env": 0}
+
+    def fake_install_via_uv_sync(_extras: list[str], *, quiet: bool) -> bool:  # noqa: ARG001
+        calls["sync"] += 1
+        return True
+
+    def fake_install_in_environment(_extras: list[str], *, quiet: bool) -> bool:  # noqa: ARG001
+        calls["env"] += 1
+        return True
+
+    monkeypatch.setattr("mindroom.tool_dependencies.is_uv_tool_install", lambda: False)
+    monkeypatch.setattr("mindroom.tool_dependencies._has_lockfile", lambda: True)
+    monkeypatch.setattr("mindroom.tool_dependencies._in_virtualenv", lambda: False)
+    monkeypatch.setattr("mindroom.tool_dependencies.shutil.which", lambda _binary: "/usr/bin/uv")
+    monkeypatch.setattr("mindroom.tool_dependencies._install_via_uv_sync", fake_install_via_uv_sync)
+    monkeypatch.setattr("mindroom.tool_dependencies._install_in_environment", fake_install_in_environment)
+
+    assert install_tool_extras(["wikipedia"], quiet=True)
+    assert calls["sync"] == 0
+    assert calls["env"] == 1

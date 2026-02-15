@@ -206,6 +206,10 @@ test-front:
 test-backend *args:
     uv run pytest {{args}}
 
+# Tool dependency auto-install smoke test in a fresh virtual environment
+test-tool-auto-install *args:
+    uv run python scripts/testing/tool_auto_install_smoke.py {{args}}
+
 #############################
 # Developer-friendly aliases
 #############################
