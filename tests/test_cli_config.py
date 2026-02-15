@@ -1,10 +1,12 @@
-"""Tests for CLI config subcommands and run-command error handling."""
+"""Tests for CLI config subcommands, run-command error handling, and doctor."""
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
+import httpx
 from typer.testing import CliRunner
 
 from mindroom.cli import app
@@ -15,6 +17,12 @@ if TYPE_CHECKING:
     import pytest
 
 runner = CliRunner()
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
 
 
 # ---------------------------------------------------------------------------
@@ -208,3 +216,199 @@ class TestVersionAndHelp:
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
         assert "config" in result.output
+
+
+# ---------------------------------------------------------------------------
+# run command: API server flags
+# ---------------------------------------------------------------------------
+
+
+class TestRunApiFlags:
+    """Tests for --api/--no-api, --api-port, --api-host flags."""
+
+    def test_run_help_shows_api_flags(self) -> None:
+        """Run --help lists the new API server flags."""
+        result = runner.invoke(app, ["run", "--help"])
+        assert result.exit_code == 0
+        output = _strip_ansi(result.output)
+        assert "--api" in output
+        assert "--no-api" in output
+        assert "--api-port" in output
+        assert "--api-host" in output
+
+    def test_run_passes_api_defaults(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Run passes api=True, port=8765, host=0.0.0.0 by default."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        mock_main = AsyncMock()
+        with patch("mindroom.bot.main", mock_main):
+            result = runner.invoke(app, ["run"])
+        assert result.exit_code == 0
+        mock_main.assert_awaited_once()
+        kwargs = mock_main.call_args
+        assert kwargs.kwargs["api"] is True
+        assert kwargs.kwargs["api_port"] == 8765
+        assert kwargs.kwargs["api_host"] == "0.0.0.0"  # noqa: S104
+
+    def test_run_no_api_flag(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Run --no-api passes api=False to bot main."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        mock_main = AsyncMock()
+        with patch("mindroom.bot.main", mock_main):
+            result = runner.invoke(app, ["run", "--no-api"])
+        assert result.exit_code == 0
+        assert mock_main.call_args.kwargs["api"] is False
+
+    def test_run_custom_port_and_host(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Run --api-port and --api-host are forwarded to bot main."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        mock_main = AsyncMock()
+        with patch("mindroom.bot.main", mock_main):
+            result = runner.invoke(app, ["run", "--api-port", "9000", "--api-host", "127.0.0.1"])
+        assert result.exit_code == 0
+        assert mock_main.call_args.kwargs["api_port"] == 9000
+        assert mock_main.call_args.kwargs["api_host"] == "127.0.0.1"
+
+
+# ---------------------------------------------------------------------------
+# mindroom doctor
+# ---------------------------------------------------------------------------
+
+_VALID_CONFIG = (
+    "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+    "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+    "router:\n  model: default\n"
+)
+
+
+def _patch_homeserver_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch httpx.get to simulate a reachable homeserver."""
+    resp = httpx.Response(200, json={"versions": ["v1.1"]})
+    monkeypatch.setattr("mindroom.cli.MATRIX_HOMESERVER", "http://localhost:8008")
+    monkeypatch.setattr("mindroom.cli.httpx.get", lambda *_a, **_kw: resp)
+
+
+def _patch_homeserver_fail(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch httpx.get to simulate an unreachable homeserver."""
+    monkeypatch.setattr("mindroom.cli.MATRIX_HOMESERVER", "http://localhost:8008")
+
+    def _raise(*_a: object, **_kw: object) -> None:
+        msg = "Connection refused"
+        raise httpx.ConnectError(msg)
+
+    monkeypatch.setattr("mindroom.cli.httpx.get", _raise)
+
+
+class TestDoctor:
+    """Tests for `mindroom doctor`."""
+
+    def test_all_checks_pass(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Doctor reports all green when everything is fine."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(_VALID_CONFIG)
+        storage = tmp_path / "storage"
+        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(storage))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0
+        assert "✓" in result.output
+        assert "✗" not in result.output
+        assert "5 passed" in result.output
+        assert "0 failed" in result.output
+
+    def test_missing_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Doctor reports failure when config file is missing."""
+        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", tmp_path / "missing.yaml")
+        monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(tmp_path / "storage"))
+        _patch_homeserver_ok(monkeypatch)
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 1
+        assert "Config file not found" in result.output
+
+    def test_invalid_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Doctor reports failure when config is invalid YAML/schema."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: not_a_dict\n")
+        storage = tmp_path / "storage"
+        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(storage))
+        _patch_homeserver_ok(monkeypatch)
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 1
+        assert "Config invalid" in result.output
+
+    def test_missing_api_key_is_warning(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Doctor warns (not fails) on missing API keys."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(_VALID_CONFIG)
+        storage = tmp_path / "storage"
+        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(storage))
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        _patch_homeserver_ok(monkeypatch)
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0
+        assert "Missing env: ANTHROPIC_API_KEY" in result.output
+        assert "1 warning" in result.output
+
+    def test_homeserver_unreachable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Doctor reports failure when Matrix homeserver is unreachable."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(_VALID_CONFIG)
+        storage = tmp_path / "storage"
+        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(storage))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        _patch_homeserver_fail(monkeypatch)
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 1
+        assert "Matrix homeserver unreachable" in result.output
+
+    def test_storage_not_writable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Doctor reports failure when storage directory is not writable."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(_VALID_CONFIG)
+        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        monkeypatch.setattr("mindroom.cli.STORAGE_PATH", "/proc/fake_mindroom_storage")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 1
+        assert "Storage not writable" in result.output
+
+    def test_skips_config_checks_when_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Doctor skips config-validation and API-key checks when config is missing."""
+        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", tmp_path / "missing.yaml")
+        monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(tmp_path / "storage"))
+        _patch_homeserver_ok(monkeypatch)
+
+        result = runner.invoke(app, ["doctor"])
+        # Config-dependent checks should not appear
+        assert "Config valid" not in result.output
+        assert "API keys" not in result.output
+        assert "Missing env:" not in result.output
