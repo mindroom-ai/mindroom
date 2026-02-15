@@ -2,6 +2,7 @@
 import asyncio
 import importlib
 import os
+import secrets
 import shutil
 import threading
 from collections.abc import AsyncIterator
@@ -177,7 +178,7 @@ async def verify_user(authorization: str | None = Header(None)) -> dict:
             if not authorization or not authorization.startswith("Bearer "):
                 raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
             token = authorization.removeprefix("Bearer ").strip()
-            if token != MINDROOM_API_KEY:
+            if not secrets.compare_digest(token, MINDROOM_API_KEY):
                 raise HTTPException(status_code=401, detail="Invalid API key")
         return {"user_id": "standalone", "email": None}
 

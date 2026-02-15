@@ -39,7 +39,7 @@ export function ApiKeyConfig({
   const checkApiKey = async () => {
     try {
       const response = await fetch(`/api/credentials/${service}/api-key?key_name=${keyName}`, {
-        headers: { ...getAuthHeaders() },
+        headers: getAuthHeaders(),
       });
       if (response.ok) {
         const data = await response.json();
@@ -105,7 +105,7 @@ export function ApiKeyConfig({
     try {
       const response = await fetch(`/api/credentials/${service}`, {
         method: 'DELETE',
-        headers: { ...getAuthHeaders() },
+        headers: getAuthHeaders(),
       });
 
       if (response.ok) {
@@ -134,7 +134,7 @@ export function ApiKeyConfig({
     try {
       const response = await fetch(`/api/credentials/${service}/test`, {
         method: 'POST',
-        headers: { ...getAuthHeaders() },
+        headers: getAuthHeaders(),
       });
 
       if (response.ok) {

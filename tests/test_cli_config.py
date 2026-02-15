@@ -69,6 +69,15 @@ class TestConfigInit:
         assert backend_match.group(1)
         assert backend_match.group(1) == frontend_match.group(1)
 
+    def test_init_force_does_not_overwrite_existing_env(self, tmp_path: Path) -> None:
+        """Config init --force should never overwrite an existing .env file."""
+        target = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        env_path.write_text("ANTHROPIC_API_KEY=sk-existing\n")
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--force"])
+        assert result.exit_code == 0
+        assert env_path.read_text() == "ANTHROPIC_API_KEY=sk-existing\n"
+
     def test_init_refuses_overwrite_without_force(self, tmp_path: Path) -> None:
         """Config init prompts before overwriting and aborts on 'n'."""
         target = tmp_path / "config.yaml"

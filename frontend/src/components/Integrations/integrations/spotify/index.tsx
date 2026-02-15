@@ -35,7 +35,7 @@ class SpotifyIntegrationProvider implements IntegrationProvider {
     try {
       const response = await fetch(`${API_BASE}/api/integrations/spotify/connect`, {
         method: 'POST',
-        headers: { ...getAuthHeaders() },
+        headers: getAuthHeaders(),
       });
 
       if (!response.ok) {
@@ -66,7 +66,7 @@ class SpotifyIntegrationProvider implements IntegrationProvider {
     try {
       await fetch(`${API_BASE}/api/integrations/spotify/disconnect`, {
         method: 'POST',
-        headers: { ...getAuthHeaders() },
+        headers: getAuthHeaders(),
       });
     } catch (error) {
       console.error('Failed to disconnect Spotify:', error);
@@ -81,7 +81,7 @@ class SpotifyIntegrationProvider implements IntegrationProvider {
     // Then check backend for authoritative status
     try {
       const response = await fetch(`${API_BASE}/api/integrations/spotify/status`, {
-        headers: { ...getAuthHeaders() },
+        headers: getAuthHeaders(),
       });
       if (response.ok) {
         const data = await response.json();

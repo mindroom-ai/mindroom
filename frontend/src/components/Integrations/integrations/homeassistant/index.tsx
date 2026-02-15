@@ -31,7 +31,7 @@ class HomeAssistantIntegrationProvider implements IntegrationProvider {
       onDisconnect: async () => {
         const response = await fetch('/api/homeassistant/disconnect', {
           method: 'POST',
-          headers: { ...getAuthHeaders() },
+          headers: getAuthHeaders(),
         });
         if (!response.ok) {
           throw new Error('Failed to disconnect Home Assistant');

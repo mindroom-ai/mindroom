@@ -31,7 +31,7 @@ class GoogleIntegrationProvider implements IntegrationProvider {
       onDisconnect: async () => {
         const response = await fetch('/api/google/disconnect', {
           method: 'POST',
-          headers: { ...getAuthHeaders() },
+          headers: getAuthHeaders(),
         });
         if (!response.ok) {
           throw new Error('Failed to disconnect Google services');

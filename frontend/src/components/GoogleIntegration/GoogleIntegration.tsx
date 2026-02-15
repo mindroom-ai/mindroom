@@ -64,7 +64,7 @@ export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
   const checkGoogleStatus = async () => {
     try {
       const response = await fetch(`${API_BASE}/api/google/status`, {
-        headers: { ...getAuthHeaders() },
+        headers: getAuthHeaders(),
       });
       const data = await response.json();
       setStatus({
@@ -86,7 +86,7 @@ export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
     try {
       const response = await fetch(`${API_BASE}/api/google/connect`, {
         method: 'POST',
-        headers: { ...getAuthHeaders() },
+        headers: getAuthHeaders(),
       });
 
       if (!response.ok) {
@@ -150,7 +150,7 @@ export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
     setLoading(true);
     try {
       const response = await fetch(`${API_BASE}/api/google/disconnect`, {
-        headers: { ...getAuthHeaders() },
+        headers: getAuthHeaders(),
         method: 'POST',
       });
 

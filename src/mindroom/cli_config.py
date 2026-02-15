@@ -118,7 +118,7 @@ def config_init(
 
     # Also create a .env file next to the config if one doesn't exist
     env_path = target.parent / ".env"
-    if not env_path.exists() or force:
+    if not env_path.exists():
         env_path.write_text(_env_template(), encoding="utf-8")
         console.print(f"[green]Env file created:[/green] {env_path}")
 
@@ -336,7 +336,10 @@ ANTHROPIC_API_KEY=
 # Remove or comment out to allow open access (fine for localhost).
 MINDROOM_API_KEY={api_key}
 
-# Frontend dashboard key (Vite build-time env; keep this equal to MINDROOM_API_KEY)
+# Frontend dashboard key (Vite build-time env; keep this equal to MINDROOM_API_KEY).
+# NOTE: This key is embedded in the browser JS bundle and visible to anyone with
+# DevTools.  It guards against casual/automated access, not determined attackers.
+# For public-facing deployments, use proper session-based auth instead.
 VITE_API_KEY={api_key}
 
 # OpenAI-compatible API authentication (separate from dashboard auth)

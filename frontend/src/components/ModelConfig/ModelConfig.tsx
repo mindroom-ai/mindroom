@@ -155,7 +155,7 @@ function isValidHttpUrl(value: string): boolean {
 async function fetchKeyStatus(service: string): Promise<KeyStatus> {
   try {
     const res = await fetch(`/api/credentials/${service}/api-key?key_name=api_key`, {
-      headers: { ...getAuthHeaders() },
+      headers: getAuthHeaders(),
     });
     if (!res.ok) {
       return { hasKey: false, source: null, maskedKey: null };
@@ -176,7 +176,7 @@ async function fetchApiKeyValue(service: string): Promise<string | null> {
   try {
     const res = await fetch(
       `/api/credentials/${service}/api-key?key_name=api_key&include_value=true`,
-      { headers: { ...getAuthHeaders() } }
+      { headers: getAuthHeaders() }
     );
     if (res.ok) {
       const data = await res.json();
@@ -187,7 +187,7 @@ async function fetchApiKeyValue(service: string): Promise<string | null> {
 
     // Fallback for older backends that don't support include_value
     const legacyRes = await fetch(`/api/credentials/${service}`, {
-      headers: { ...getAuthHeaders() },
+      headers: getAuthHeaders(),
     });
     if (!legacyRes.ok) {
       return null;
@@ -380,7 +380,7 @@ export function ModelConfig() {
     try {
       const res = await fetch(
         `/api/credentials/model:${targetModelName}/copy-from/model:${sourceModelName}`,
-        { method: 'POST', headers: { ...getAuthHeaders() } }
+        { method: 'POST', headers: getAuthHeaders() }
       );
 
       if (!res.ok) {
@@ -398,7 +398,7 @@ export function ModelConfig() {
     try {
       const res = await fetch(`/api/credentials/model:${modelName}`, {
         method: 'DELETE',
-        headers: { ...getAuthHeaders() },
+        headers: getAuthHeaders(),
       });
       if (!res.ok) {
         throw new Error('Failed to clear API key');

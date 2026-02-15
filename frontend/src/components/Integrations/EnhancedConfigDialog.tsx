@@ -118,7 +118,7 @@ export function EnhancedConfigDialog({
       try {
         // Try to load existing credentials
         const response = await fetch(`${API_BASE}/api/credentials/${service}`, {
-          headers: { ...getAuthHeaders() },
+          headers: getAuthHeaders(),
         });
         if (response.ok) {
           const data = await response.json();

@@ -16,7 +16,7 @@ export async function listSchedules(roomId?: string): Promise<ScheduleListRespon
 
   const response = await fetch(url.pathname + url.search, {
     method: 'GET',
-    headers: { ...getAuthHeaders() },
+    headers: getAuthHeaders(),
   });
 
   if (!response.ok) {
@@ -56,7 +56,7 @@ export async function cancelSchedule(
 
   const response = await fetch(url.pathname + url.search, {
     method: 'DELETE',
-    headers: { ...getAuthHeaders() },
+    headers: getAuthHeaders(),
   });
 
   if (!response.ok) {

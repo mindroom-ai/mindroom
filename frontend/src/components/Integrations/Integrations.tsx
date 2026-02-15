@@ -199,7 +199,7 @@ export function Integrations() {
         // For generic tools, delete credentials via API
         const response = await fetch(`${API_BASE}/api/credentials/${integration.id}`, {
           method: 'DELETE',
-          headers: { ...getAuthHeaders() },
+          headers: getAuthHeaders(),
         });
 
         if (!response.ok) {

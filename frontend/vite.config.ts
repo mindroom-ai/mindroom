@@ -10,7 +10,8 @@ const isDocker = process.env.DOCKER_CONTAINER === '1';
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
-  // Load env vars from repository root where `mindroom config init` writes `.env`.
+  // Load env vars from repo root (parent of `frontend/`) where `mindroom config init`
+  // writes `.env`.  This assumes the Vite dev server is started from `frontend/`.
   envDir: '..',
   resolve: {
     alias: {

@@ -54,7 +54,7 @@ export function HomeAssistantIntegration({ onSuccess }: HomeAssistantIntegration
     setLoading(true);
     try {
       const response = await fetch(`${API_BASE}/api/homeassistant/status`, {
-        headers: { ...getAuthHeaders() },
+        headers: getAuthHeaders(),
       });
       if (response.ok) {
         const data = await response.json();
@@ -119,7 +119,7 @@ export function HomeAssistantIntegration({ onSuccess }: HomeAssistantIntegration
 
           // Check the status again to see if we're now connected
           const statusResponse = await fetch(`${API_BASE}/api/homeassistant/status`, {
-            headers: { ...getAuthHeaders() },
+            headers: getAuthHeaders(),
           });
           if (statusResponse.ok) {
             const newStatus = await statusResponse.json();
@@ -215,7 +215,7 @@ export function HomeAssistantIntegration({ onSuccess }: HomeAssistantIntegration
     try {
       const response = await fetch(`${API_BASE}/api/homeassistant/disconnect`, {
         method: 'POST',
-        headers: { ...getAuthHeaders() },
+        headers: getAuthHeaders(),
       });
 
       if (!response.ok) {
