@@ -54,15 +54,24 @@ TELEGRAM_API_HASH=abcdef123456
 TELEGRAM_BOT_TOKEN=123456:ABC...
 ```
 
-### 2. Restart Synapse and start the bridge
+### 2. Recreate Synapse and start the bridge
+
+Synapse needs a new volume mount for the bridge registration file, so it must be **recreated** (not just restarted):
 
 ```bash
-# Restart Synapse to pick up the bridge registration
-cf compose mindroom restart synapse
+# Recreate Synapse to pick up the new volume mount and bridge registration
+cf compose mindroom up -d synapse
+
+# Wait for Synapse to become healthy
+cf compose mindroom ps synapse
 
 # Start the bridge
 cf compose mindroom up -d telegram-bridge
 ```
+
+> **Note:** `cf compose mindroom restart synapse` will NOT work here because the
+> `registration.yaml` volume mount is new in `compose.yaml`. A restart reuses the
+> existing container; `up -d` recreates it with the updated mounts.
 
 ### 3. Verify
 
@@ -70,7 +79,7 @@ cf compose mindroom up -d telegram-bridge
 # Check bridge logs
 cf compose mindroom logs telegram-bridge --tail 20
 
-# Look for "Bridge initialization complete"
+# Look for "Startup actions complete"
 ```
 
 ## Usage: Puppet Mode Login
