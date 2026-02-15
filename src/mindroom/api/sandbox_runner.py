@@ -42,7 +42,7 @@ RUNNER_SUBPROCESS_TIMEOUT_ENV = "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECO
 _RESPONSE_MARKER = "__SANDBOX_RESPONSE__"
 
 
-def _load_config_from_env() -> tuple[Config | None, Path | None]:
+def _load_config_from_env() -> tuple[Config | None, Path]:
     """Read runner config path from environment variables."""
     from mindroom.config import Config as _Config  # noqa: PLC0415
     from mindroom.constants import find_config  # noqa: PLC0415
