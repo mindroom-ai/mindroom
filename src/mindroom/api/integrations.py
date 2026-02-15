@@ -1,20 +1,35 @@
 """Third-party service integrations API."""
 
+from __future__ import annotations
+
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
-from spotipy import Spotify, SpotifyOAuth
 
 from mindroom.credentials import CredentialsManager
+from mindroom.tool_dependencies import ensure_tool_deps
 from mindroom.tools_metadata import ensure_tool_registry_loaded, export_tools_metadata
+
+if TYPE_CHECKING:
+    from spotipy import Spotify, SpotifyOAuth
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
 # Initialize credentials manager
 creds_manager = CredentialsManager()
+
+
+def _ensure_spotify_packages() -> tuple[type[Spotify], type[SpotifyOAuth]]:
+    """Lazily import Spotify packages, auto-installing if needed."""
+    ensure_tool_deps(["spotipy"], "spotify")
+
+    from spotipy import Spotify as _Spotify  # noqa: PLC0415
+    from spotipy import SpotifyOAuth as _SpotifyOAuth  # noqa: PLC0415
+
+    return _Spotify, _SpotifyOAuth
 
 
 # Load tool metadata from the single source of truth
@@ -88,7 +103,8 @@ async def get_service_status(service: str) -> ServiceStatus:
             if status.connected:
                 try:
                     # Try to get user info
-                    sp = Spotify(auth=creds["access_token"])
+                    spotify_cls, _ = _ensure_spotify_packages()
+                    sp = spotify_cls(auth=creds["access_token"])
                     user = sp.current_user()
                     status.details = {
                         "username": user["display_name"],
@@ -117,7 +133,8 @@ async def connect_spotify() -> dict[str, str]:
             detail="Spotify OAuth not configured. Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET environment variables.",
         )
 
-    sp_oauth = SpotifyOAuth(
+    _, spotify_oauth_cls = _ensure_spotify_packages()
+    sp_oauth = spotify_oauth_cls(
         client_id=client_id,
         client_secret=client_secret,
         redirect_uri="http://localhost:8000/api/integrations/spotify/callback",
@@ -138,7 +155,8 @@ async def spotify_callback(code: str) -> RedirectResponse:
         raise HTTPException(status_code=500, detail="Spotify OAuth not configured")
 
     try:
-        sp_oauth = SpotifyOAuth(
+        spotify_cls, spotify_oauth_cls = _ensure_spotify_packages()
+        sp_oauth = spotify_oauth_cls(
             client_id=client_id,
             client_secret=client_secret,
             redirect_uri="http://localhost:8000/api/integrations/spotify/callback",
@@ -147,7 +165,7 @@ async def spotify_callback(code: str) -> RedirectResponse:
         token_info = sp_oauth.get_access_token(code)
 
         # Get user info
-        sp = Spotify(auth=token_info["access_token"])
+        sp = spotify_cls(auth=token_info["access_token"])
         user = sp.current_user()
 
         # Save credentials
