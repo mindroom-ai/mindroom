@@ -75,6 +75,16 @@ PROVIDER_ENV_KEYS: dict[str, str] = {
 }
 
 
+def env_key_for_provider(provider: str) -> str | None:
+    """Get the environment variable name for a provider's API key.
+
+    Handles the gemini→google alias so callers don't need to.
+    """
+    if provider == "gemini":
+        return PROVIDER_ENV_KEYS.get("google")
+    return PROVIDER_ENV_KEYS.get(provider)
+
+
 def safe_replace(tmp_path: Path, target_path: Path) -> None:
     """Replace *target_path* with *tmp_path*, with a fallback for bind mounts.
 

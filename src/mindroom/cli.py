@@ -30,8 +30,8 @@ from mindroom.constants import (
     DEFAULT_AGENTS_CONFIG,
     MATRIX_HOMESERVER,
     MATRIX_SSL_VERIFY,
-    PROVIDER_ENV_KEYS,
     STORAGE_PATH,
+    env_key_for_provider,
 )
 
 app = typer.Typer(
@@ -246,19 +246,11 @@ _PROVIDER_VALIDATE_URLS: dict[str, str] = {
     "anthropic": "https://api.anthropic.com/v1/models",
     "openai": "https://api.openai.com/v1/models",
     "google": "https://generativelanguage.googleapis.com/v1beta/models",
-    "gemini": "https://generativelanguage.googleapis.com/v1beta/models",
     "openrouter": "https://openrouter.ai/api/v1/models",
     "deepseek": "https://api.deepseek.com/v1/models",
     "cerebras": "https://api.cerebras.ai/v1/models",
     "groq": "https://api.groq.com/openai/v1/models",
 }
-
-
-def _env_key_for_provider(provider: str) -> str | None:
-    """Get the environment variable name for a provider's API key."""
-    if provider == "gemini":
-        return PROVIDER_ENV_KEYS.get("google")
-    return PROVIDER_ENV_KEYS.get(provider)
 
 
 def _get_custom_base_url(config: Config, provider: str) -> str | None:
@@ -271,10 +263,15 @@ def _get_custom_base_url(config: Config, provider: str) -> str | None:
     return None
 
 
-def _http_check(url: str, headers: dict[str, str] | None = None) -> tuple[bool | None, str]:
+def _http_check(
+    url: str,
+    headers: dict[str, str] | None = None,
+    *,
+    verify: bool = True,
+) -> tuple[bool | None, str]:
     """Make a lightweight GET request and return (True, ""), (False, reason), or (None, reason)."""
     try:
-        resp = httpx.get(url, headers=headers or {}, timeout=5)
+        resp = httpx.get(url, headers=headers or {}, timeout=5, verify=verify)
     except httpx.HTTPError as exc:
         return None, str(exc)
     if resp.is_success:
@@ -292,40 +289,25 @@ def _validate_provider_key(
     Returns (True, "") if valid, (False, reason) if invalid,
     (None, reason) if inconclusive (e.g. connection error).
     """
+    # Normalize aliases so we look up a single URL and auth style
+    canonical = "google" if provider == "gemini" else provider
+
     if base_url:
         url = base_url.rstrip("/") + "/models"
-    elif provider in _PROVIDER_VALIDATE_URLS:
-        url = _PROVIDER_VALIDATE_URLS[provider]
+    elif canonical in _PROVIDER_VALIDATE_URLS:
+        url = _PROVIDER_VALIDATE_URLS[canonical]
     else:
-        return True, ""
+        return None, "unknown provider"
 
     headers: dict[str, str] = {}
-    if provider == "anthropic":
+    if canonical == "anthropic":
         headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
-    elif provider in ("google", "gemini"):
+    elif canonical == "google":
         url = f"{url}?key={api_key}"
     else:
         headers = {"Authorization": f"Bearer {api_key}"}
 
     return _http_check(url, headers)
-
-
-def _tally_validation(
-    valid: bool | None,
-    detail: str,
-    pass_msg: str,
-    fail_msg: str,
-    warn_msg: str,
-) -> tuple[int, int, int]:
-    """Print a validation result and return (passed, failed, warnings) delta."""
-    if valid is True:
-        console.print(f"[green]✓[/green] {pass_msg}")
-        return 1, 0, 0
-    if valid is False:
-        console.print(f"[red]✗[/red] {fail_msg} ({detail})")
-        return 0, 1, 0
-    console.print(f"[yellow]![/yellow] {warn_msg} ({detail})")
-    return 0, 0, 1
 
 
 def _get_ollama_host(config: Config) -> str:
@@ -366,6 +348,24 @@ def _check_providers(config: Config) -> tuple[int, int, int]:
     return passed, failed, warnings
 
 
+def _print_validation(
+    valid: bool | None,
+    detail: str,
+    pass_msg: str,
+    fail_msg: str,
+    warn_msg: str,
+) -> tuple[int, int, int]:
+    """Print a tri-state validation result. Returns (passed, failed, warnings)."""
+    if valid is True:
+        console.print(f"[green]✓[/green] {pass_msg}")
+        return 1, 0, 0
+    if valid is False:
+        console.print(f"[red]✗[/red] {fail_msg} ({detail})")
+        return 0, 1, 0
+    console.print(f"[yellow]![/yellow] {warn_msg} ({detail})")
+    return 0, 0, 1
+
+
 def _check_single_provider(
     provider: str,
     config: Config,
@@ -376,7 +376,7 @@ def _check_single_provider(
         host = _get_ollama_host(config)
         url = f"{host.rstrip('/')}/api/tags"
         valid, detail = _http_check(url)
-        return _tally_validation(
+        return _print_validation(
             valid,
             detail,
             f"{provider} reachable ({host})",
@@ -384,7 +384,7 @@ def _check_single_provider(
             f"{provider}: could not reach {host}",
         )
 
-    env_key = _env_key_for_provider(provider)
+    env_key = env_key_for_provider(provider)
     if not env_key:
         return 0, 0, 0
 
@@ -400,7 +400,7 @@ def _check_single_provider(
 
     base_url = _get_custom_base_url(config, provider)
     valid, detail = _validate_provider_key(provider, api_key, base_url)
-    return _tally_validation(
+    return _print_validation(
         valid,
         detail,
         f"{provider} API key valid",
@@ -412,19 +412,15 @@ def _check_single_provider(
 def _check_matrix_homeserver() -> tuple[int, int, int]:
     """Check Matrix homeserver reachability. Returns (passed, failed, warnings)."""
     url = f"{MATRIX_HOMESERVER}/_matrix/client/versions"
-    verify: bool = MATRIX_SSL_VERIFY
-    try:
-        resp = httpx.get(url, timeout=5, verify=verify)
-        if not resp.is_success:
-            console.print(
-                f"[red]✗[/red] Matrix homeserver returned {resp.status_code}: {MATRIX_HOMESERVER}",
-            )
-            return 0, 1, 0
-    except httpx.HTTPError as exc:
-        console.print(f"[red]✗[/red] Matrix homeserver unreachable: {MATRIX_HOMESERVER} ({exc})")
+    valid, detail = _http_check(url, verify=MATRIX_SSL_VERIFY)
+    if valid is True:
+        console.print(f"[green]✓[/green] Matrix homeserver: {MATRIX_HOMESERVER}")
+        return 1, 0, 0
+    if valid is False:
+        console.print(f"[red]✗[/red] Matrix homeserver returned {detail}: {MATRIX_HOMESERVER}")
         return 0, 1, 0
-    console.print(f"[green]✓[/green] Matrix homeserver: {MATRIX_HOMESERVER}")
-    return 1, 0, 0
+    console.print(f"[red]✗[/red] Matrix homeserver unreachable: {MATRIX_HOMESERVER} ({detail})")
+    return 0, 1, 0
 
 
 def _check_storage_writable() -> tuple[int, int, int]:
