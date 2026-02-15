@@ -631,8 +631,8 @@ class TestThreadingBehavior:
         assert [msg["event_id"] for msg in context.thread_history] == [
             "$root:localhost",
             "$t1:localhost",
-            "$t2:localhost",
             "$p1:localhost",
+            "$t2:localhost",
             "$p2:localhost",
         ]
         mock_fetch.assert_awaited_once_with(bot.client, room.room_id, "$root:localhost")

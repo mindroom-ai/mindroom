@@ -1205,19 +1205,78 @@ class AgentBot:
         }
 
     @staticmethod
+    def _unique_history_event_ids(messages: list[dict[str, Any]]) -> list[str]:
+        """Return unique string event IDs while preserving input order."""
+        ids: list[str] = []
+        seen: set[str] = set()
+        for message in messages:
+            event_id = message.get("event_id")
+            if not isinstance(event_id, str) or event_id in seen:
+                continue
+            seen.add(event_id)
+            ids.append(event_id)
+        return ids
+
+    @staticmethod
+    def _history_messages_by_event_id(messages: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        """Index history messages by event ID."""
+        return {event_id: message for message in messages if isinstance((event_id := message.get("event_id")), str)}
+
+    @staticmethod
+    def _shortest_common_supersequence_ids(thread_ids: list[str], chain_ids: list[str]) -> list[str]:
+        """Build a shortest common supersequence over event IDs."""
+        m = len(thread_ids)
+        n = len(chain_ids)
+
+        lcs: list[list[int]] = [[0] * (n + 1) for _ in range(m + 1)]
+        for i in range(m - 1, -1, -1):
+            for j in range(n - 1, -1, -1):
+                if thread_ids[i] == chain_ids[j]:
+                    lcs[i][j] = 1 + lcs[i + 1][j + 1]
+                else:
+                    lcs[i][j] = max(lcs[i + 1][j], lcs[i][j + 1])
+
+        merged_ids: list[str] = []
+        i = 0
+        j = 0
+        while i < m and j < n:
+            if thread_ids[i] == chain_ids[j]:
+                merged_ids.append(thread_ids[i])
+                i += 1
+                j += 1
+            elif lcs[i + 1][j] > lcs[i][j + 1]:
+                merged_ids.append(thread_ids[i])
+                i += 1
+            else:
+                merged_ids.append(chain_ids[j])
+                j += 1
+
+        merged_ids.extend(thread_ids[i:])
+        merged_ids.extend(chain_ids[j:])
+        return merged_ids
+
+    @staticmethod
     def _merge_thread_and_chain_history(
         thread_history: list[dict[str, Any]],
         chain_history: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         """Merge thread history with plain-reply chain history without duplicates."""
-        merged_history = list(thread_history)
-        seen_event_ids = {msg["event_id"] for msg in thread_history if isinstance(msg.get("event_id"), str)}
+        thread_ids = AgentBot._unique_history_event_ids(thread_history)
+        chain_ids = AgentBot._unique_history_event_ids(chain_history)
 
-        for message in chain_history:
-            event_id = message.get("event_id")
-            if isinstance(event_id, str) and event_id in seen_event_ids:
-                continue
-            merged_history.append(message)
+        if not thread_ids:
+            return list(chain_history)
+        if not chain_ids:
+            return list(thread_history)
+
+        thread_messages = AgentBot._history_messages_by_event_id(thread_history)
+        chain_messages = AgentBot._history_messages_by_event_id(chain_history)
+        merged_ids = AgentBot._shortest_common_supersequence_ids(thread_ids, chain_ids)
+        merged_history = [thread_messages.get(event_id) or chain_messages[event_id] for event_id in merged_ids]
+
+        merged_history.extend(
+            message for message in [*thread_history, *chain_history] if not isinstance(message.get("event_id"), str)
+        )
 
         return merged_history
 
