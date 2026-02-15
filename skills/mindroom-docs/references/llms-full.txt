@@ -275,6 +275,10 @@ ANTHROPIC_API_KEY=your_anthropic_key
 
 # GOOGLE_API_KEY=your_google_key
 
+# Optional: protect the dashboard API (recommended for non-localhost)
+
+# MINDROOM_API_KEY=your-secret-key
+
 ```
 
 > [!NOTE]
@@ -501,6 +505,7 @@ The dashboard communicates with the backend API at `/api/`:
 | GET    | `/api/matrix/agents/{id}/rooms` | Get specific agent's rooms       |
 | POST   | `/api/matrix/rooms/leave`       | Leave a single room              |
 | POST   | `/api/matrix/rooms/leave-bulk`  | Leave multiple rooms             |
+| POST   | `/api/test/model`               | Test model connection            |
 
 # Configuration
 
@@ -2421,7 +2426,7 @@ Client `system` / `developer` messages are prepended to the prompt. They augment
 | Unset                    | `true`                                | No authentication required                                        |
 | Unset                    | Unset/`false`                         | All requests return 401 (locked)                                  |
 
-The OpenAI-compatible API uses its own auth, separate from the dashboard's Supabase JWT auth.
+The OpenAI-compatible API uses its own auth (`OPENAI_COMPAT_API_KEYS`), separate from the dashboard API auth. In standalone mode, the dashboard `/api/*` endpoints can be protected with `MINDROOM_API_KEY` (Bearer token). These are independent: `MINDROOM_API_KEY` secures the dashboard, while `OPENAI_COMPAT_API_KEYS` secures the `/v1/*` chat completions endpoints.
 
 ## Limitations
 
@@ -3165,6 +3170,7 @@ Key environment variables (set in `.env` or pass directly):
 | `MINDROOM_CONFIG_PATH`  | Path to config.yaml                        | `./config.yaml`         |
 | `ANTHROPIC_API_KEY`     | Anthropic API key (if using Claude models) | -                       |
 | `OPENAI_API_KEY`        | OpenAI API key (if using OpenAI models)    | -                       |
+| `MINDROOM_API_KEY`      | API key for dashboard auth (standalone)    | - (open access)         |
 
 Streaming responses are configured in `config.yaml` via `defaults.enable_streaming` (default: `true`).
 

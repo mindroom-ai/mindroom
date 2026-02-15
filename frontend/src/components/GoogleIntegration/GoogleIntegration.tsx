@@ -5,7 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/components/ui/use-toast';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, getAuthHeaders } from '@/lib/api';
 
 interface GoogleStatus {
   connected: boolean;
@@ -63,7 +63,9 @@ export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
 
   const checkGoogleStatus = async () => {
     try {
-      const response = await fetch(`${API_BASE}/api/google/status`);
+      const response = await fetch(`${API_BASE}/api/google/status`, {
+        headers: { ...getAuthHeaders() },
+      });
       const data = await response.json();
       setStatus({
         connected: data.connected,
@@ -84,6 +86,7 @@ export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
     try {
       const response = await fetch(`${API_BASE}/api/google/connect`, {
         method: 'POST',
+        headers: { ...getAuthHeaders() },
       });
 
       if (!response.ok) {
@@ -147,6 +150,7 @@ export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
     setLoading(true);
     try {
       const response = await fetch(`${API_BASE}/api/google/disconnect`, {
+        headers: { ...getAuthHeaders() },
         method: 'POST',
       });
 

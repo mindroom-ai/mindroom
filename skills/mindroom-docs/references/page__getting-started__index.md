@@ -122,6 +122,10 @@ ANTHROPIC_API_KEY=your_anthropic_key
 
 # GOOGLE_API_KEY=your_google_key
 
+# Optional: protect the dashboard API (recommended for non-localhost)
+
+# MINDROOM_API_KEY=your-secret-key
+
 ```
 
 > [!NOTE]

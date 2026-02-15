@@ -25,7 +25,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Separator } from '@/components/ui/separator';
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/components/ui/use-toast';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, getAuthHeaders } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 interface ConfigField {
@@ -117,7 +117,9 @@ export function EnhancedConfigDialog({
 
       try {
         // Try to load existing credentials
-        const response = await fetch(`${API_BASE}/api/credentials/${service}`);
+        const response = await fetch(`${API_BASE}/api/credentials/${service}`, {
+          headers: { ...getAuthHeaders() },
+        });
         if (response.ok) {
           const data = await response.json();
           if (data.credentials) {
@@ -233,7 +235,7 @@ export function EnhancedConfigDialog({
       // Save all config values as environment variables using our credentials API
       const response = await fetch(`${API_BASE}/api/credentials/${service}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({
           credentials: configValues,
         }),

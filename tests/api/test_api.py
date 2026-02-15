@@ -469,3 +469,85 @@ def test_update_room_models(test_client: TestClient, temp_config_file: Path) -> 
     retrieved_models = response.json()
     assert retrieved_models["lobby"] == "gpt-4"
     assert retrieved_models["tech-room"] == "claude-3"
+
+
+# ---------------------------------------------------------------------------
+# MINDROOM_API_KEY authentication tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def api_key_client(temp_config_file: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    """Create a test client with MINDROOM_API_KEY enabled."""
+    monkeypatch.setattr(main, "CONFIG_PATH", temp_config_file)
+    monkeypatch.setattr(main, "MINDROOM_API_KEY", "test-key")
+    main.load_config_from_file()
+    return TestClient(main.app)
+
+
+def test_api_key_health_stays_open(api_key_client: TestClient) -> None:
+    """Health endpoint should remain accessible without auth even when API key is set."""
+    response = api_key_client.get("/api/health")
+    assert response.status_code == 200
+
+
+def test_api_key_valid_key_allows_access(api_key_client: TestClient) -> None:
+    """A valid Bearer token should grant access to protected endpoints."""
+    response = api_key_client.post(
+        "/api/config/load",
+        headers={"Authorization": "Bearer test-key"},
+    )
+    assert response.status_code == 200
+
+
+def test_api_key_missing_header_rejects(api_key_client: TestClient) -> None:
+    """Missing Authorization header should return 401 when API key is set."""
+    response = api_key_client.post("/api/config/load")
+    assert response.status_code == 401
+
+
+def test_api_key_wrong_key_rejects(api_key_client: TestClient) -> None:
+    """Wrong Bearer token should return 401."""
+    response = api_key_client.post(
+        "/api/config/load",
+        headers={"Authorization": "Bearer wrong-key"},
+    )
+    assert response.status_code == 401
+
+
+def test_api_key_protects_teams(api_key_client: TestClient) -> None:
+    """Teams endpoint should reject unauthenticated requests when API key is set."""
+    api_key_client.post("/api/config/load", headers={"Authorization": "Bearer test-key"})
+    response = api_key_client.get("/api/config/teams")
+    assert response.status_code == 401
+
+
+def test_api_key_protects_models(api_key_client: TestClient) -> None:
+    """Models endpoint should reject unauthenticated requests when API key is set."""
+    api_key_client.post("/api/config/load", headers={"Authorization": "Bearer test-key"})
+    response = api_key_client.get("/api/config/models")
+    assert response.status_code == 401
+
+
+def test_api_key_protects_rooms(api_key_client: TestClient) -> None:
+    """Rooms endpoint should reject unauthenticated requests when API key is set."""
+    api_key_client.post("/api/config/load", headers={"Authorization": "Bearer test-key"})
+    response = api_key_client.get("/api/rooms")
+    assert response.status_code == 401
+
+
+def test_api_key_protects_room_models(api_key_client: TestClient) -> None:
+    """Room-models endpoint should reject unauthenticated requests when API key is set."""
+    api_key_client.post("/api/config/load", headers={"Authorization": "Bearer test-key"})
+    response = api_key_client.get("/api/config/room-models")
+    assert response.status_code == 401
+
+
+def test_api_key_authenticated_teams_access(api_key_client: TestClient) -> None:
+    """Teams endpoint should work with valid auth when API key is set."""
+    api_key_client.post("/api/config/load", headers={"Authorization": "Bearer test-key"})
+    response = api_key_client.get(
+        "/api/config/teams",
+        headers={"Authorization": "Bearer test-key"},
+    )
+    assert response.status_code == 200

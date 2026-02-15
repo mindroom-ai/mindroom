@@ -1,3 +1,13 @@
+// Dashboard API key (optional, for standalone MINDROOM_API_KEY auth)
+const viteApiKey = (import.meta as any).env?.VITE_API_KEY;
+
+export function getAuthHeaders(): Record<string, string> {
+  if (viteApiKey) {
+    return { Authorization: `Bearer ${viteApiKey}` };
+  }
+  return {};
+}
+
 // API configuration
 // If VITE_API_URL is explicitly set to empty string, use relative URLs (for Docker/production)
 // Otherwise use the provided URL or fallback to localhost
@@ -76,6 +86,7 @@ export async function fetchJSON<T>(url: string, options?: RequestInit): Promise<
       signal: controller.signal,
       headers: {
         ...(useJsonHeaders ? { 'Content-Type': 'application/json' } : {}),
+        ...getAuthHeaders(),
         ...options?.headers,
       },
     });

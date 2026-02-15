@@ -138,6 +138,7 @@ config_lock = threading.Lock()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 ACCOUNT_ID = os.getenv("ACCOUNT_ID")  # optional: enforce instance ownership
+MINDROOM_API_KEY = os.getenv("MINDROOM_API_KEY")  # optional: dashboard auth for standalone mode
 
 
 def _init_supabase_auth(supabase_url: str | None, supabase_anon_key: str | None) -> "SupabaseClient | None":
@@ -171,7 +172,13 @@ async def verify_user(authorization: str | None = Header(None)) -> dict:
     In standalone mode (no Supabase), returns a default user to allow access.
     """
     if _supabase_auth is None:
-        # Standalone mode - no auth configured, allow access
+        # Standalone mode
+        if MINDROOM_API_KEY:
+            if not authorization or not authorization.startswith("Bearer "):
+                raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+            token = authorization.removeprefix("Bearer ").strip()
+            if token != MINDROOM_API_KEY:
+                raise HTTPException(status_code=401, detail="Invalid API key")
         return {"user_id": "standalone", "email": None}
 
     if not authorization or not authorization.startswith("Bearer "):
@@ -342,7 +349,7 @@ async def delete_agent(agent_id: str, _user: Annotated[dict, Depends(verify_user
 
 
 @app.get("/api/config/teams")
-async def get_teams() -> list[dict[str, Any]]:
+async def get_teams(_user: Annotated[dict, Depends(verify_user)]) -> list[dict[str, Any]]:
     """Get all teams."""
     with config_lock:
         teams = config.get("teams", {})
@@ -355,7 +362,11 @@ async def get_teams() -> list[dict[str, Any]]:
 
 
 @app.put("/api/config/teams/{team_id}")
-async def update_team(team_id: str, team_data: dict[str, Any]) -> dict[str, bool]:
+async def update_team(
+    team_id: str,
+    team_data: dict[str, Any],
+    _user: Annotated[dict, Depends(verify_user)],
+) -> dict[str, bool]:
     """Update a specific team."""
     with config_lock:
         if "teams" not in config:
@@ -377,7 +388,7 @@ async def update_team(team_id: str, team_data: dict[str, Any]) -> dict[str, bool
 
 
 @app.post("/api/config/teams")
-async def create_team(team_data: dict[str, Any]) -> dict[str, Any]:
+async def create_team(team_data: dict[str, Any], _user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Create a new team."""
     team_id = team_data.get("display_name", "new_team").lower().replace(" ", "_")
 
@@ -409,7 +420,7 @@ async def create_team(team_data: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.delete("/api/config/teams/{team_id}")
-async def delete_team(team_id: str) -> dict[str, bool]:
+async def delete_team(team_id: str, _user: Annotated[dict, Depends(verify_user)]) -> dict[str, bool]:
     """Delete a team."""
     with config_lock:
         if "teams" not in config or team_id not in config["teams"]:
@@ -427,7 +438,7 @@ async def delete_team(team_id: str) -> dict[str, bool]:
 
 
 @app.get("/api/config/models")
-async def get_models() -> dict[str, Any]:
+async def get_models(_user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Get all model configurations."""
     with config_lock:
         models = config.get("models", {})
@@ -435,7 +446,11 @@ async def get_models() -> dict[str, Any]:
 
 
 @app.put("/api/config/models/{model_id}")
-async def update_model(model_id: str, model_data: dict[str, Any]) -> dict[str, bool]:
+async def update_model(
+    model_id: str,
+    model_data: dict[str, Any],
+    _user: Annotated[dict, Depends(verify_user)],
+) -> dict[str, bool]:
     """Update a model configuration."""
     with config_lock:
         if "models" not in config:
@@ -453,7 +468,7 @@ async def update_model(model_id: str, model_data: dict[str, Any]) -> dict[str, b
 
 
 @app.get("/api/config/room-models")
-async def get_room_models() -> dict[str, Any]:
+async def get_room_models(_user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Get room-specific model overrides."""
     with config_lock:
         room_models = config.get("room_models", {})
@@ -461,7 +476,10 @@ async def get_room_models() -> dict[str, Any]:
 
 
 @app.put("/api/config/room-models")
-async def update_room_models(room_models: dict[str, str]) -> dict[str, bool]:
+async def update_room_models(
+    room_models: dict[str, str],
+    _user: Annotated[dict, Depends(verify_user)],
+) -> dict[str, bool]:
     """Update room-specific model overrides."""
     with config_lock:
         config["room_models"] = room_models
@@ -476,7 +494,7 @@ async def update_room_models(room_models: dict[str, str]) -> dict[str, bool]:
 
 
 @app.get("/api/rooms")
-async def get_available_rooms() -> list[str]:
+async def get_available_rooms(_user: Annotated[dict, Depends(verify_user)]) -> list[str]:
     """Get list of available rooms."""
     # Extract unique rooms from all agents
     rooms = set()

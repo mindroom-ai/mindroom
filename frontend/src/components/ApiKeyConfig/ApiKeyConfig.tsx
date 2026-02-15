@@ -6,6 +6,7 @@ import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useToast } from '@/components/ui/use-toast';
 import { Badge } from '@/components/ui/badge';
+import { getAuthHeaders } from '@/lib/api';
 
 interface ApiKeyConfigProps {
   service: string;
@@ -37,7 +38,9 @@ export function ApiKeyConfig({
 
   const checkApiKey = async () => {
     try {
-      const response = await fetch(`/api/credentials/${service}/api-key?key_name=${keyName}`);
+      const response = await fetch(`/api/credentials/${service}/api-key?key_name=${keyName}`, {
+        headers: { ...getAuthHeaders() },
+      });
       if (response.ok) {
         const data = await response.json();
         setHasKey(data.has_key);
@@ -63,7 +66,7 @@ export function ApiKeyConfig({
     try {
       const response = await fetch(`/api/credentials/${service}/api-key`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({
           service,
           api_key: apiKey,
@@ -102,6 +105,7 @@ export function ApiKeyConfig({
     try {
       const response = await fetch(`/api/credentials/${service}`, {
         method: 'DELETE',
+        headers: { ...getAuthHeaders() },
       });
 
       if (response.ok) {
@@ -130,6 +134,7 @@ export function ApiKeyConfig({
     try {
       const response = await fetch(`/api/credentials/${service}/test`, {
         method: 'POST',
+        headers: { ...getAuthHeaders() },
       });
 
       if (response.ok) {

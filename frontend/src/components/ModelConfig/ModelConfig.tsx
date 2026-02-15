@@ -32,6 +32,7 @@ import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { ProviderLogo } from './ProviderLogos';
 import { getProviderInfo, getProviderList } from '@/lib/providers';
+import { getAuthHeaders } from '@/lib/api';
 import type { ProviderType } from '@/types/config';
 
 interface RowDraft {
@@ -153,7 +154,9 @@ function isValidHttpUrl(value: string): boolean {
 
 async function fetchKeyStatus(service: string): Promise<KeyStatus> {
   try {
-    const res = await fetch(`/api/credentials/${service}/api-key?key_name=api_key`);
+    const res = await fetch(`/api/credentials/${service}/api-key?key_name=api_key`, {
+      headers: { ...getAuthHeaders() },
+    });
     if (!res.ok) {
       return { hasKey: false, source: null, maskedKey: null };
     }
@@ -172,7 +175,8 @@ async function fetchKeyStatus(service: string): Promise<KeyStatus> {
 async function fetchApiKeyValue(service: string): Promise<string | null> {
   try {
     const res = await fetch(
-      `/api/credentials/${service}/api-key?key_name=api_key&include_value=true`
+      `/api/credentials/${service}/api-key?key_name=api_key&include_value=true`,
+      { headers: { ...getAuthHeaders() } }
     );
     if (res.ok) {
       const data = await res.json();
@@ -182,7 +186,9 @@ async function fetchApiKeyValue(service: string): Promise<string | null> {
     }
 
     // Fallback for older backends that don't support include_value
-    const legacyRes = await fetch(`/api/credentials/${service}`);
+    const legacyRes = await fetch(`/api/credentials/${service}`, {
+      headers: { ...getAuthHeaders() },
+    });
     if (!legacyRes.ok) {
       return null;
     }
@@ -348,7 +354,7 @@ export function ModelConfig() {
     try {
       const res = await fetch(`/api/credentials/model:${modelName}/api-key`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({
           service: `model:${modelName}`,
           api_key: apiKey,
@@ -374,7 +380,7 @@ export function ModelConfig() {
     try {
       const res = await fetch(
         `/api/credentials/model:${targetModelName}/copy-from/model:${sourceModelName}`,
-        { method: 'POST' }
+        { method: 'POST', headers: { ...getAuthHeaders() } }
       );
 
       if (!res.ok) {
@@ -390,7 +396,10 @@ export function ModelConfig() {
 
   const deleteModelApiKey = async (modelName: string): Promise<boolean> => {
     try {
-      const res = await fetch(`/api/credentials/model:${modelName}`, { method: 'DELETE' });
+      const res = await fetch(`/api/credentials/model:${modelName}`, {
+        method: 'DELETE',
+        headers: { ...getAuthHeaders() },
+      });
       if (!res.ok) {
         throw new Error('Failed to clear API key');
       }

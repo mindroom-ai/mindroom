@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import platform
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -115,8 +116,15 @@ def config_init(
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
 
+    # Also create a .env file next to the config if one doesn't exist
+    env_path = target.parent / ".env"
+    if not env_path.exists() or force:
+        env_path.write_text(_env_template(), encoding="utf-8")
+        console.print(f"[green]Env file created:[/green] {env_path}")
+
     console.print(f"[green]Config created:[/green] {target}")
     console.print("\nNext steps:")
+    console.print(f"  [cyan]Edit {env_path.name}[/cyan]            Set your API keys and Matrix homeserver")
     console.print("  [cyan]mindroom config edit[/cyan]      Customize your config")
     console.print("  [cyan]mindroom config validate[/cyan]  Verify it's valid")
     console.print("  [cyan]mindroom run[/cyan]              Start the system")
@@ -305,6 +313,36 @@ def _check_env_keys(config: Config) -> None:
 def _full_template() -> str:
     """Load the bundled config template from the package directory."""
     return (Path(__file__).parent / "config_template.yaml").read_text(encoding="utf-8")
+
+
+def _env_template() -> str:
+    """Return a starter .env file for standalone deployments.
+
+    Generates a random MINDROOM_API_KEY so the dashboard is protected by default.
+    """
+    api_key = secrets.token_urlsafe(32)
+    return f"""\
+# Matrix homeserver (must allow open registration for agent accounts)
+MATRIX_HOMESERVER=https://matrix.example.com
+# MATRIX_SSL_VERIFY=false
+
+# AI provider API keys (at least one required)
+ANTHROPIC_API_KEY=
+# OPENAI_API_KEY=
+# GOOGLE_API_KEY=
+
+# Dashboard API key — protects the /api/* dashboard endpoints.
+# When set, all dashboard requests require: Authorization: Bearer <key>
+# Remove or comment out to allow open access (fine for localhost).
+MINDROOM_API_KEY={api_key}
+
+# OpenAI-compatible API authentication (separate from dashboard auth)
+# OPENAI_COMPAT_API_KEYS=sk-my-secret-key
+# OPENAI_COMPAT_ALLOW_UNAUTHENTICATED=true
+
+# Backend port (default 8765)
+# MINDROOM_PORT=8765
+"""
 
 
 def _minimal_template() -> str:

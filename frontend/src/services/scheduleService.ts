@@ -4,6 +4,7 @@ import type {
   ScheduleTask,
   UpdateScheduleRequest,
 } from '@/types/schedule';
+import { getAuthHeaders } from '@/lib/api';
 
 const API_BASE = '/api/schedules';
 
@@ -15,6 +16,7 @@ export async function listSchedules(roomId?: string): Promise<ScheduleListRespon
 
   const response = await fetch(url.pathname + url.search, {
     method: 'GET',
+    headers: { ...getAuthHeaders() },
   });
 
   if (!response.ok) {
@@ -32,6 +34,7 @@ export async function updateSchedule(
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
+      ...getAuthHeaders(),
     },
     body: JSON.stringify(payload),
   });
@@ -53,6 +56,7 @@ export async function cancelSchedule(
 
   const response = await fetch(url.pathname + url.search, {
     method: 'DELETE',
+    headers: { ...getAuthHeaders() },
   });
 
   if (!response.ok) {

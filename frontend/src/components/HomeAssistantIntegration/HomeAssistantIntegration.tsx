@@ -20,7 +20,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useToast } from '@/components/ui/use-toast';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, getAuthHeaders } from '@/lib/api';
 
 interface HomeAssistantStatus {
   connected: boolean;
@@ -53,7 +53,9 @@ export function HomeAssistantIntegration({ onSuccess }: HomeAssistantIntegration
   const checkStatus = async () => {
     setLoading(true);
     try {
-      const response = await fetch(`${API_BASE}/api/homeassistant/status`);
+      const response = await fetch(`${API_BASE}/api/homeassistant/status`, {
+        headers: { ...getAuthHeaders() },
+      });
       if (response.ok) {
         const data = await response.json();
         setStatus(data);
@@ -88,7 +90,7 @@ export function HomeAssistantIntegration({ onSuccess }: HomeAssistantIntegration
     try {
       const response = await fetch(`${API_BASE}/api/homeassistant/connect/oauth`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({
           instance_url: instanceUrl,
           client_id: clientId,
@@ -116,7 +118,9 @@ export function HomeAssistantIntegration({ onSuccess }: HomeAssistantIntegration
           await checkStatus();
 
           // Check the status again to see if we're now connected
-          const statusResponse = await fetch(`${API_BASE}/api/homeassistant/status`);
+          const statusResponse = await fetch(`${API_BASE}/api/homeassistant/status`, {
+            headers: { ...getAuthHeaders() },
+          });
           if (statusResponse.ok) {
             const newStatus = await statusResponse.json();
             if (newStatus.connected && !previousStatus) {
@@ -167,7 +171,7 @@ export function HomeAssistantIntegration({ onSuccess }: HomeAssistantIntegration
     try {
       const response = await fetch(`${API_BASE}/api/homeassistant/connect/token`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({
           instance_url: instanceUrl,
           long_lived_token: longLivedToken,
@@ -211,6 +215,7 @@ export function HomeAssistantIntegration({ onSuccess }: HomeAssistantIntegration
     try {
       const response = await fetch(`${API_BASE}/api/homeassistant/disconnect`, {
         method: 'POST',
+        headers: { ...getAuthHeaders() },
       });
 
       if (!response.ok) {
