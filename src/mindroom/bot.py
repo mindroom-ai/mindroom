@@ -27,7 +27,7 @@ from .commands import (
 )
 from .config import Config
 from .config_commands import handle_config_command
-from .constants import ENABLE_STREAMING, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, VOICE_PREFIX
+from .constants import DEFAULT_AGENTS_CONFIG, ENABLE_STREAMING, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, VOICE_PREFIX
 from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
 from .knowledge import initialize_knowledge_managers, shutdown_knowledge_managers
@@ -3009,7 +3009,7 @@ async def main(
     storage_path.mkdir(parents=True, exist_ok=True)
 
     # Get config file path
-    config_path = Path("config.yaml")
+    config_path = Path(DEFAULT_AGENTS_CONFIG)
 
     # Create and start orchestrator
     logger.info("Starting orchestrator...")

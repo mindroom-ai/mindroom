@@ -20,7 +20,6 @@ if TYPE_CHECKING:
     from mindroom.config import Config
 from mindroom.cli_config import (
     _check_env_keys,
-    _config_search_locations,
     _format_validation_errors,
     _load_config_quiet,
     config_app,
@@ -31,6 +30,7 @@ from mindroom.constants import (
     MATRIX_HOMESERVER,
     MATRIX_SSL_VERIFY,
     STORAGE_PATH,
+    config_search_locations,
     env_key_for_provider,
 )
 
@@ -449,10 +449,10 @@ def _print_missing_config_error() -> None:
     console.print("Quick start:")
     console.print("  [cyan]mindroom config init[/cyan]    Create a starter config")
     console.print("  [cyan]mindroom config edit[/cyan]    Edit your config\n")
-    console.print("Config search locations:")
-    for loc in _config_search_locations():
+    console.print("Config search locations (first match wins):")
+    for i, loc in enumerate(config_search_locations(), 1):
         status = "[green]exists[/green]" if loc.exists() else "[dim]not found[/dim]"
-        console.print(f"  - {loc} ({status})")
+        console.print(f"  {i}. {loc} ({status})")
     console.print("\nLearn more: https://github.com/mindroom-ai/mindroom")
 
 
