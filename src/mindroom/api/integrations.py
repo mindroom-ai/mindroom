@@ -16,8 +16,6 @@ from mindroom.tools_metadata import ensure_tool_registry_loaded, export_tools_me
 if TYPE_CHECKING:
     from spotipy import Spotify, SpotifyOAuth
 
-_SPOTIFY_DEPS = ["spotipy"]
-
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
 # Initialize credentials manager
@@ -26,7 +24,7 @@ creds_manager = CredentialsManager()
 
 def _ensure_spotify_packages() -> tuple[type[Spotify], type[SpotifyOAuth]]:
     """Lazily import Spotify packages, auto-installing if needed."""
-    ensure_tool_deps(_SPOTIFY_DEPS, "spotify")
+    ensure_tool_deps(["spotipy"], "spotify")
 
     from spotipy import Spotify as _Spotify  # noqa: PLC0415
     from spotipy import SpotifyOAuth as _SpotifyOAuth  # noqa: PLC0415
