@@ -637,6 +637,31 @@ class TestThreadingBehavior:
         ]
         mock_fetch.assert_awaited_once_with(bot.client, room.room_id, "$root:localhost")
 
+    def test_merge_thread_and_chain_history_preserves_chronological_order(self) -> None:
+        """Merged context should preserve chronological order for interleaved plain replies."""
+        thread_history = [
+            {"event_id": "$root:localhost", "body": "Thread root"},
+            {"event_id": "$t1:localhost", "body": "First threaded reply"},
+            {"event_id": "$t2:localhost", "body": "Thread reply after plain interleave"},
+        ]
+        chain_history = [
+            {"event_id": "$root:localhost", "body": "Thread root"},
+            {"event_id": "$t1:localhost", "body": "First threaded reply"},
+            {"event_id": "$p1:localhost", "body": "First plain interleaved reply"},
+            {"event_id": "$t2:localhost", "body": "Thread reply after plain interleave"},
+            {"event_id": "$p2:localhost", "body": "Second plain reply"},
+        ]
+
+        merged = AgentBot._merge_thread_and_chain_history(thread_history, chain_history)
+
+        assert [msg["event_id"] for msg in merged] == [
+            "$root:localhost",
+            "$t1:localhost",
+            "$p1:localhost",
+            "$t2:localhost",
+            "$p2:localhost",
+        ]
+
     @pytest.mark.asyncio
     async def test_command_as_reply_doesnt_cause_thread_error(self, tmp_path: Path) -> None:
         """Test that commands sent as replies don't cause threading errors."""
