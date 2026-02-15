@@ -533,7 +533,7 @@ def create_bot_for_entity(
             team_agents=team_matrix_ids,
             team_mode=team_config.mode,
             team_model=team_config.model,
-            enable_streaming=True,
+            enable_streaming=enable_streaming,
         )
 
     if entity_name in config.agents:
