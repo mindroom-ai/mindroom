@@ -126,9 +126,8 @@ def get_google_credentials() -> Credentials | None:
     if not token_data:
         return None
 
-    google_request_cls, credentials_cls, _ = _ensure_google_packages()
-
     try:
+        google_request_cls, credentials_cls, _ = _ensure_google_packages()
         creds = credentials_cls(
             token=token_data.get("token"),
             refresh_token=token_data.get("refresh_token"),
@@ -319,6 +318,8 @@ async def callback(request: Request) -> RedirectResponse:
         parsed_uri = urlparse(current_redirect_uri)
         base_url = f"{parsed_uri.scheme}://{parsed_uri.netloc}"
         return RedirectResponse(url=f"{base_url}/?google=connected")
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
     except Exception as e:
         # Check if it's a scope change error
         error_msg = str(e)
