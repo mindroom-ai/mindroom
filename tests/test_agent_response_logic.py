@@ -426,6 +426,20 @@ class TestAgentResponseLogic:
         )
         assert mentioned_should_respond is True
 
+        thread_history = [
+            {"sender": self.agent_id("calculator"), "body": "Sure, I can help."},
+            {"sender": "@alice:localhost", "body": "Can you continue?"},
+        ]
+        thread_should_respond = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=False,
+            is_thread=True,
+            room=room,
+            thread_history=thread_history,
+            config=self.config,
+        )
+        assert thread_should_respond is False
+
     def test_agent_stops_when_user_mentions_other_agent(self) -> None:
         """Test that an agent stops responding when user mentions a different agent.
 
