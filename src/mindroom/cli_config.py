@@ -138,10 +138,10 @@ def config_show(
     if not config_file.exists():
         console.print(f"[yellow]No config file found at:[/yellow] {config_file}")
         console.print("\nRun [cyan]mindroom config init[/cyan] to create one.")
-        console.print("\nSearch locations:")
-        for loc in config_search_locations():
+        console.print("\nSearch locations (first match wins):")
+        for i, loc in enumerate(config_search_locations(), 1):
             status = "[green]exists[/green]" if loc.exists() else "[dim]not found[/dim]"
-            console.print(f"  - {loc} ({status})")
+            console.print(f"  {i}. {loc} ({status})")
         raise typer.Exit(1)
 
     content = config_file.read_text(encoding="utf-8")
@@ -246,10 +246,10 @@ def config_path_cmd(
     status = "[green]exists[/green]" if exists else "[red]not found[/red]"
     console.print(f"Resolved config path: {resolved} ({status})")
 
-    console.print("\nSearch locations:")
-    for loc in config_search_locations():
+    console.print("\nSearch locations (first match wins):")
+    for i, loc in enumerate(config_search_locations(), 1):
         loc_status = "[green]exists[/green]" if loc.exists() else "[dim]not found[/dim]"
-        console.print(f"  - {loc} ({loc_status})")
+        console.print(f"  {i}. {loc} ({loc_status})")
 
 
 # ---------------------------------------------------------------------------
