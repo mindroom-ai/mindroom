@@ -100,3 +100,51 @@ async def test_voice_message_in_thread_continues_thread(mock_router_bot: AgentBo
         assert call_kwargs["thread_id"] == "$thread_root"
         # Message should have voice prefix
         assert call_kwargs["response_text"] == "🎤 show me the forecast"
+
+
+@pytest.mark.asyncio
+async def test_voice_plain_reply_to_thread_message_uses_thread_root(mock_router_bot: AgentBot) -> None:
+    """Voice messages without m.thread should still resolve to existing thread roots via reply chain."""
+    bot = mock_router_bot
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!test:server"
+
+    voice_event = MagicMock(spec=nio.RoomMessageAudio)
+    voice_event.event_id = "$voice789"
+    voice_event.sender = "@user:example.com"
+    voice_event.source = {
+        "content": {
+            "m.relates_to": {
+                "m.in_reply_to": {"event_id": "$thread_msg"},
+            },
+        },
+    }
+
+    bot.client.room_get_event = AsyncMock(
+        return_value=nio.RoomGetEventResponse.from_dict(
+            {
+                "content": {
+                    "body": "Earlier thread message",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+                },
+                "event_id": "$thread_msg",
+                "sender": "@mindroom_general:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!test:server",
+                "type": "m.room.message",
+            },
+        ),
+    )
+
+    with (
+        patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=[])),
+        patch("mindroom.bot.voice_handler.handle_voice_message", return_value="🎤 continue the same thread"),
+    ):
+        await bot._on_voice_message(room, voice_event)
+
+    bot._send_response.assert_called_once()
+    call_kwargs = bot._send_response.call_args[1]
+    assert call_kwargs["reply_to_event_id"] == "$voice789"
+    assert call_kwargs["thread_id"] == "$thread_root"
+    assert call_kwargs["response_text"] == "🎤 continue the same thread"

@@ -1171,11 +1171,12 @@ class AgentBot:
 
         if transcribed_message:
             event_info = EventInfo.from_event(event.source)
+            _, thread_id, _ = await self._derive_conversation_context(room.room_id, event_info)
             response_event_id = await self._send_response(
                 room_id=room.room_id,
                 reply_to_event_id=event.event_id,
                 response_text=transcribed_message,
-                thread_id=event_info.thread_id,
+                thread_id=thread_id,
             )
             self.response_tracker.mark_responded(event.event_id, response_event_id)
         else:
@@ -2093,9 +2094,13 @@ class AgentBot:
 
         # If no thread exists, create one with the original message as root
         thread_event_id = event_info.thread_id
+        if not thread_event_id and event_info.reply_to_event_id:
+            thread_event_id, _, _ = await self._resolve_reply_chain_context(
+                room.room_id,
+                event_info.reply_to_event_id,
+            )
         if not thread_event_id:
-            # Check if the current event can be a thread root
-            thread_event_id = event_info.safe_thread_root or event.event_id
+            thread_event_id = event.event_id
 
         # Get latest thread event for MSC3440 compliance when no specific reply
         # Note: We use event.event_id as reply_to for routing suggestions
@@ -2203,18 +2208,19 @@ class AgentBot:
         self.logger.info("Handling command", command_type=command.type.value)
 
         event_info = EventInfo.from_event(event.source)
+        _, thread_id, thread_history = await self._derive_conversation_context(room.room_id, event_info)
 
         # Widget command modifies room state, so it doesn't need a thread
         if command.type == CommandType.WIDGET:
             url = command.args.get("url")
             response_text = await handle_widget_command(client=self.client, room_id=room.room_id, url=url)
             # Send response in thread if in thread, otherwise in main room
-            await self._send_response(room.room_id, event.event_id, response_text, event_info.thread_id)
+            await self._send_response(room.room_id, event.event_id, response_text, thread_id)
             return
 
         # For commands that need thread context, use the existing thread or the event will start a new one
         # The _send_response method will automatically create a thread if needed
-        effective_thread_id = event_info.thread_id or event_info.safe_thread_root or event.event_id
+        effective_thread_id = thread_id or event.event_id
 
         response_text = ""
 
@@ -2299,7 +2305,7 @@ class AgentBot:
                     room.room_id,
                     event.event_id,
                     response_text,
-                    event_info.thread_id,
+                    effective_thread_id,
                     reply_to_event=event,
                     skip_mentions=True,
                 )
@@ -2309,7 +2315,7 @@ class AgentBot:
                     config_confirmation.register_pending_change(
                         event_id=event_id,
                         room_id=room.room_id,
-                        thread_id=event_info.thread_id,
+                        thread_id=effective_thread_id,
                         config_path=change_info["config_path"],
                         old_value=change_info["old_value"],
                         new_value=change_info["new_value"],
@@ -2368,13 +2374,6 @@ class AgentBot:
                             f"❌ Skill '{spec.name}' is configured to skip model invocation and has no tool dispatch."
                         )
                     else:
-                        thread_history = []
-                        if event_info.thread_id:
-                            thread_history = await fetch_thread_history(
-                                self.client,
-                                room.room_id,
-                                event_info.thread_id,
-                            )
                         prompt = _build_skill_command_prompt(spec.name, args_text)
                         event_id = await self._send_skill_command_response(
                             room_id=room.room_id,
@@ -2399,7 +2398,7 @@ class AgentBot:
                 room.room_id,
                 event.event_id,
                 response_text,
-                event_info.thread_id,
+                effective_thread_id,
                 reply_to_event=event,
                 skip_mentions=True,
             )
