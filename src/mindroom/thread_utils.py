@@ -197,15 +197,6 @@ def has_multiple_non_agent_users_in_room(room: nio.MatrixRoom, config: Config) -
     return False
 
 
-def should_allow_unmentioned_single_agent_auto_response(
-    *,
-    has_multiple_non_agent_users: bool,
-    available_agent_count: int,
-) -> bool:
-    """Return whether an unmentioned message should auto-start a single-agent response."""
-    return not has_multiple_non_agent_users and available_agent_count == 1
-
-
 def get_configured_agents_for_room(room_id: str, config: Config) -> list[MatrixID]:
     """Get list of agent MatrixIDs configured for a specific room.
 
@@ -330,11 +321,8 @@ def should_agent_respond(
     # Non-thread messages: allow a single available agent to respond automatically
     # This applies to both DM and regular rooms. Router is excluded from availability.
     if not is_thread:
-        available_agent_count = len(get_available_agents_in_room(room, config))
-        return should_allow_unmentioned_single_agent_auto_response(
-            has_multiple_non_agent_users=multi_non_agent_room,
-            available_agent_count=available_agent_count,
-        )
+        available_agents = get_available_agents_in_room(room, config)
+        return not multi_non_agent_room and len(available_agents) == 1
 
     agent_matrix_id = config.ids[agent_name]
 
@@ -348,8 +336,5 @@ def should_agent_respond(
         return False
 
     # Otherwise, respond if we're the only available agent.
-    available_agent_count = len(get_available_agents_in_room(room, config))
-    return should_allow_unmentioned_single_agent_auto_response(
-        has_multiple_non_agent_users=multi_non_agent_room,
-        available_agent_count=available_agent_count,
-    )
+    available_agents = get_available_agents_in_room(room, config)
+    return len(available_agents) == 1

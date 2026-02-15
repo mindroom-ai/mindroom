@@ -104,7 +104,6 @@ from .thread_utils import (
     has_user_responded_after_message,
     is_authorized_sender,
     should_agent_respond,
-    should_allow_unmentioned_single_agent_auto_response,
 )
 from .tools_metadata import get_tool_by_name
 
@@ -973,22 +972,16 @@ class AgentBot:
             # 2. No agents are already in the thread
             # 3. There's more than one agent available (routing makes sense)
             if not context.mentioned_agents and not agents_in_thread:
-                multi_non_agent_room = has_multiple_non_agent_users_in_room(room, self.config)
-                available_agent_count = 0
-                if not multi_non_agent_room:
-                    available_agent_count = len(get_available_agents_in_room(room, self.config))
-
-                if should_allow_unmentioned_single_agent_auto_response(
-                    has_multiple_non_agent_users=multi_non_agent_room,
-                    available_agent_count=available_agent_count,
-                ):
-                    # Skip routing in single-agent rooms - the agent will handle it directly
-                    self.logger.info("Skipping routing: only one agent present")
-                elif multi_non_agent_room:
+                if has_multiple_non_agent_users_in_room(room, self.config):
                     self.logger.info("Skipping routing: multiple non-agent users present (mention required)")
                 else:
-                    # Multiple agents available - perform AI routing
-                    await self._handle_ai_routing(room, event, context.thread_history)
+                    available_agents = get_available_agents_in_room(room, self.config)
+                    if len(available_agents) == 1:
+                        # Skip routing in single-agent rooms - the agent will handle it directly
+                        self.logger.info("Skipping routing: only one agent present")
+                    else:
+                        # Multiple agents available - perform AI routing
+                        await self._handle_ai_routing(room, event, context.thread_history)
             # Router's job is done after routing/command handling/voice transcription
             return
 
