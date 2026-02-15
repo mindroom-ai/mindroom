@@ -432,6 +432,92 @@ class TestThreadingBehavior:
         mock_fetch.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_extract_context_preserves_plain_replies_before_thread_link(self, bot: AgentBot) -> None:
+        """Reply-chain messages should be preserved when chain eventually points to a thread."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "Newest plain reply from non-thread client",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$plain2:localhost"}},
+                },
+                "event_id": "$plain3:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567895,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        bot.client.room_get_event = AsyncMock(
+            side_effect=[
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "Second plain reply",
+                            "msgtype": "m.text",
+                            "m.relates_to": {"m.in_reply_to": {"event_id": "$plain1:localhost"}},
+                        },
+                        "event_id": "$plain2:localhost",
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 1234567894,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "First plain reply",
+                            "msgtype": "m.text",
+                            "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_msg:localhost"}},
+                        },
+                        "event_id": "$plain1:localhost",
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 1234567893,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "Earlier threaded message",
+                            "msgtype": "m.text",
+                            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
+                        },
+                        "event_id": "$thread_msg:localhost",
+                        "sender": "@mindroom_general:localhost",
+                        "origin_server_ts": 1234567892,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+            ],
+        )
+
+        thread_history = [
+            {"event_id": "$thread_root:localhost", "body": "Thread root"},
+            {"event_id": "$thread_msg:localhost", "body": "Earlier threaded message"},
+        ]
+        with patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=thread_history)) as mock_fetch:
+            context = await bot._extract_message_context(room, event)
+
+        assert context.is_thread is True
+        assert context.thread_id == "$thread_root:localhost"
+        assert [msg["event_id"] for msg in context.thread_history] == [
+            "$thread_root:localhost",
+            "$thread_msg:localhost",
+            "$plain1:localhost",
+            "$plain2:localhost",
+        ]
+        mock_fetch.assert_awaited_once_with(bot.client, room.room_id, "$thread_root:localhost")
+
+    @pytest.mark.asyncio
     async def test_command_as_reply_doesnt_cause_thread_error(self, tmp_path: Path) -> None:
         """Test that commands sent as replies don't cause threading errors."""
         # Create a router bot to handle commands
