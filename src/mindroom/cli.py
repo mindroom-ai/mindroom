@@ -17,6 +17,8 @@ from pydantic import ValidationError
 from mindroom import __version__
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.config import Config
 from mindroom.cli_config import (
     _check_env_keys,
@@ -172,31 +174,34 @@ def doctor() -> None:
     config_path = Path(DEFAULT_AGENTS_CONFIG)
 
     # 1. Config file exists
-    p, f, w = _check_config_exists(config_path)
+    p, f, w = _run_doctor_step("Checking config file...", lambda: _check_config_exists(config_path))
     passed += p
     failed += f
     warnings += w
 
     # 2+. Config validity + provider API key validation (skip if file missing)
     if config_path.exists():
-        config, p, f, w = _check_config_valid(config_path)
+        config, p, f, w = _run_doctor_step(
+            "Validating configuration...",
+            lambda: _check_config_valid(config_path),
+        )
         passed += p
         failed += f
         warnings += w
         if config is not None:
-            p, f, w = _check_providers(config)
+            p, f, w = _run_doctor_step("Checking providers...", lambda: _check_providers(config))
             passed += p
             failed += f
             warnings += w
 
     # 4. Matrix homeserver reachable
-    p, f, w = _check_matrix_homeserver()
+    p, f, w = _run_doctor_step("Checking Matrix homeserver...", _check_matrix_homeserver)
     passed += p
     failed += f
     warnings += w
 
     # 5. Storage directory writable
-    p, f, w = _check_storage_writable()
+    p, f, w = _run_doctor_step("Checking storage...", _check_storage_writable)
     passed += p
     failed += f
     warnings += w
@@ -206,6 +211,12 @@ def doctor() -> None:
 
     if failed > 0:
         raise typer.Exit(1)
+
+
+def _run_doctor_step[T](message: str, check: Callable[[], T]) -> T:
+    """Run one doctor step with a minimal terminal spinner."""
+    with console.status(f"[dim]{message}[/dim]", spinner="dots"):
+        return check()
 
 
 def _check_config_exists(config_path: Path) -> tuple[int, int, int]:

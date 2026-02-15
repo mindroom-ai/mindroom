@@ -339,6 +339,36 @@ class TestDoctor:
         assert "anthropic (1 model)" in result.output
         assert "API key valid" in result.output
 
+    def test_uses_status_for_steps(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Doctor wraps checks in status contexts for interactive progress feedback."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(_VALID_CONFIG)
+        storage = tmp_path / "storage"
+        monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", cfg)
+        monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(storage))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        status_messages: list[str] = []
+
+        class _DummyStatus:
+            def __enter__(self) -> None:
+                return None
+
+            def __exit__(self, *_args: object) -> bool:
+                return False
+
+        def _status(message: str, **_kwargs: object) -> _DummyStatus:
+            status_messages.append(message)
+            return _DummyStatus()
+
+        monkeypatch.setattr("mindroom.cli.console.status", _status)
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0
+        assert len(status_messages) == 5
+        assert any("Matrix homeserver" in msg for msg in status_messages)
+
     def test_missing_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor reports failure when config file is missing."""
         monkeypatch.setattr("mindroom.cli.DEFAULT_AGENTS_CONFIG", tmp_path / "missing.yaml")
