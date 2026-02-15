@@ -1,10 +1,11 @@
 # ruff: noqa: D100
+import asyncio
 import importlib
 import os
 import shutil
 import threading
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -13,8 +14,7 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from watchdog.events import FileSystemEvent, FileSystemEventHandler
-from watchdog.observers import Observer
+from watchfiles import awatch
 
 # Import routers
 from mindroom.api.credentials import router as credentials_router
@@ -41,6 +41,15 @@ env_path = Path(__file__).parent.parent.parent / ".env"
 load_dotenv(env_path)
 
 
+async def _watch_config(stop_event: asyncio.Event) -> None:
+    """Watch config.yaml for changes using watchfiles."""
+    async for changes in awatch(CONFIG_PATH.parent, stop_event=stop_event):
+        for _change, path in changes:
+            if path.endswith("config.yaml"):
+                print(f"Config file changed: {path}")
+                load_config_from_file()
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown."""
@@ -51,10 +60,15 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     print("Syncing API keys from environment to CredentialsManager...")
     sync_env_to_credentials()
 
+    stop_event = asyncio.Event()
+    watch_task = asyncio.create_task(_watch_config(stop_event))
+
     yield
 
-    observer.stop()
-    observer.join()
+    stop_event.set()
+    watch_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await watch_task
 
 
 app = FastAPI(title="MindRoom Widget Backend", lifespan=lifespan)
@@ -195,19 +209,6 @@ class TestModelRequest(BaseModel):
     modelId: str  # noqa: N815
 
 
-class ConfigFileHandler(FileSystemEventHandler):
-    """Watch for changes to config.yaml."""
-
-    def on_modified(self, event: FileSystemEvent) -> None:
-        """Handle file modification events."""
-        src_path = event.src_path
-        if isinstance(src_path, bytes):
-            src_path = src_path.decode("utf-8")
-        if src_path.endswith("config.yaml"):
-            print(f"Config file changed: {src_path}")
-            load_config_from_file()
-
-
 def load_config_from_file() -> None:
     """Load config from YAML file."""
     global config
@@ -223,11 +224,6 @@ ensure_writable_config()
 
 # Load initial config
 load_config_from_file()
-
-# Set up file watcher
-observer = Observer()
-observer.schedule(ConfigFileHandler(), path=str(CONFIG_PATH.parent), recursive=False)
-observer.start()
 
 # Include routers
 app.include_router(credentials_router, dependencies=[Depends(verify_user)])

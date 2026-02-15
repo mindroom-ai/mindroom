@@ -178,7 +178,7 @@ def test_no_unused_dependencies() -> None:  # noqa: C901, PLR0912
         "structlog",  # Structured logging
         "typer",  # CLI framework
         "uvicorn",  # ASGI server
-        "watchdog",  # File watching
+        "watchfiles",  # File watching
         "markdown",  # Matrix message formatting
         "spotipy",  # Spotify integration (future)
     }

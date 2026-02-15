@@ -52,7 +52,6 @@ dependencies = [
   "tenacity>=9.1.2",
   "typer>=0.16",
   "uvicorn>=0.35",
-  "watchdog>=6",
   "watchfiles>=1",
 ]
 
