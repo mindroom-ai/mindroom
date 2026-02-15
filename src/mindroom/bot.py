@@ -2118,31 +2118,15 @@ class AgentBot:
         else:
             # Router mentions the suggested agent and asks them to help
             response_text = f"@{suggested_agent} could you help with this?"
-        sender_id = self.matrix_id
-        sender_domain = sender_id.domain
 
         thread_event_id = thread_id or event.event_id
 
-        # Get latest thread event for MSC3440 compliance when no specific reply
-        # Note: We use event.event_id as reply_to for routing suggestions
-        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
-            self.client,
-            room.room_id,
-            thread_event_id,
-            event.event_id,
-        )
-
-        content = format_message_with_mentions(
-            self.config,
-            response_text,
-            sender_domain=sender_domain,
-            thread_event_id=thread_event_id,
+        event_id = await self._send_response(
+            room_id=room.room_id,
             reply_to_event_id=event.event_id,
-            latest_thread_event_id=latest_thread_event_id,
+            response_text=response_text,
+            thread_id=thread_event_id,
         )
-
-        assert self.client is not None
-        event_id = await send_message(self.client, room.room_id, content)
         if event_id:
             self.logger.info("Routed to agent", suggested_agent=suggested_agent)
             self.response_tracker.mark_responded(event.event_id)
