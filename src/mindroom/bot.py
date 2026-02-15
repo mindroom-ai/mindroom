@@ -1204,6 +1204,25 @@ class AgentBot:
             "content": content,
         }
 
+    @staticmethod
+    def _merge_thread_and_chain_history(
+        thread_history: list[dict[str, Any]],
+        chain_history: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Merge thread history with plain-reply chain history without duplicates."""
+        merged_history = list(thread_history)
+        seen_event_ids = {event_id for msg in thread_history if isinstance((event_id := msg.get("event_id")), str)}
+
+        for message in chain_history:
+            event_id = message.get("event_id")
+            if isinstance(event_id, str) and event_id in seen_event_ids:
+                continue
+            merged_history.append(message)
+            if isinstance(event_id, str):
+                seen_event_ids.add(event_id)
+
+        return merged_history
+
     async def _resolve_reply_chain_context(
         self,
         room_id: str,
@@ -1239,7 +1258,9 @@ class AgentBot:
 
             # If any replied-to event is already in a thread, switch to that full thread context.
             if target_info.thread_id:
-                return target_info.thread_id, [], True
+                # Keep resolved plain-reply context and let callers merge with thread history.
+                chain_history.reverse()
+                return target_info.thread_id, chain_history, True
 
             # Some clients reply directly to the thread root without rel_type=m.thread.
             # Detect this by checking whether the replied-to event already has thread messages.
@@ -1286,9 +1307,13 @@ class AgentBot:
             event_info.reply_to_event_id,
         )
         if points_to_thread:
-            if chain_history:
+            # Root-direct lookup may already have fetched full thread history.
+            if chain_history and chain_history[0].get("event_id") == context_root_id:
                 return True, context_root_id, chain_history
+
             thread_history = await fetch_thread_history(self.client, room_id, context_root_id)
+            if chain_history:
+                thread_history = AgentBot._merge_thread_and_chain_history(thread_history, chain_history)
             return True, context_root_id, thread_history
 
         return True, context_root_id, chain_history
