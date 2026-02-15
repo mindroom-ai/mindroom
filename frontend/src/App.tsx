@@ -263,7 +263,7 @@ function AppContent() {
           <div className="px-3 sm:px-6 py-2 sm:py-4 flex items-center justify-between gap-2">
             <h1 className="flex items-center gap-2 sm:gap-3">
               <img
-                src="/brain-logo.svg"
+                src="/logo.svg"
                 alt="MindRoom logo"
                 className="h-8 w-8 sm:h-10 sm:w-10 shrink-0"
               />
