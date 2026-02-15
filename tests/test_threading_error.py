@@ -213,6 +213,122 @@ class TestThreadingBehavior:
         assert initial_content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$thread_msg:localhost"
 
     @pytest.mark.asyncio
+    async def test_extract_context_maps_plain_reply_to_existing_thread(self, bot: AgentBot) -> None:
+        """Plain replies to thread messages should resolve to the original thread root."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "Follow-up from a non-thread client",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_msg:localhost"}},
+                },
+                "event_id": "$reply_plain:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567891,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        bot.client.room_get_event = AsyncMock(
+            return_value=nio.RoomGetEventResponse.from_dict(
+                {
+                    "content": {
+                        "body": "Agent answer in thread",
+                        "msgtype": "m.text",
+                        "m.relates_to": {
+                            "rel_type": "m.thread",
+                            "event_id": "$thread_root:localhost",
+                        },
+                    },
+                    "event_id": "$thread_msg:localhost",
+                    "sender": "@mindroom_general:localhost",
+                    "origin_server_ts": 1234567890,
+                    "room_id": "!test:localhost",
+                    "type": "m.room.message",
+                },
+            ),
+        )
+
+        expected_history = [
+            {"event_id": "$thread_root:localhost", "body": "Root"},
+            {"event_id": "$thread_msg:localhost", "body": "Agent answer in thread"},
+        ]
+        with patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=expected_history)) as mock_fetch:
+            context = await bot._extract_message_context(room, event)
+
+        assert context.is_thread is True
+        assert context.thread_id == "$thread_root:localhost"
+        assert context.thread_history == expected_history
+        mock_fetch.assert_awaited_once_with(bot.client, room.room_id, "$thread_root:localhost")
+
+    @pytest.mark.asyncio
+    async def test_extract_context_builds_reply_chain_history_without_threads(self, bot: AgentBot) -> None:
+        """Reply-only chains should still keep linear conversation context."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "Third message in a reply-only chain",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$msg2:localhost"}},
+                },
+                "event_id": "$msg3:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567893,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        bot.client.room_get_event = AsyncMock(
+            side_effect=[
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "Second message",
+                            "msgtype": "m.text",
+                            "m.relates_to": {"m.in_reply_to": {"event_id": "$msg1:localhost"}},
+                        },
+                        "event_id": "$msg2:localhost",
+                        "sender": "@mindroom_general:localhost",
+                        "origin_server_ts": 1234567892,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": {
+                            "body": "First message",
+                            "msgtype": "m.text",
+                        },
+                        "event_id": "$msg1:localhost",
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 1234567891,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+            ],
+        )
+
+        with patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch:
+            context = await bot._extract_message_context(room, event)
+
+        assert context.is_thread is True
+        assert context.thread_id == "$msg1:localhost"
+        assert [msg["event_id"] for msg in context.thread_history] == ["$msg1:localhost", "$msg2:localhost"]
+        mock_fetch.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_command_as_reply_doesnt_cause_thread_error(self, tmp_path: Path) -> None:
         """Test that commands sent as replies don't cause threading errors."""
         # Create a router bot to handle commands

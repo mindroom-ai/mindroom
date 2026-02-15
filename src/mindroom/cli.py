@@ -36,6 +36,9 @@ from mindroom.constants import (
     env_key_for_provider,
 )
 
+# Backward-compatible alias still used by existing tests and downstream scripts.
+DEFAULT_AGENTS_CONFIG = CONFIG_PATH
+
 app = typer.Typer(
     help="MindRoom - AI agents that live in Matrix\n\nQuick start:\n  mindroom config init   Create a starter config\n  mindroom run           Start the system",
     pretty_exceptions_enable=True,

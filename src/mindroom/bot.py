@@ -1182,6 +1182,118 @@ class AgentBot:
             # Mark as responded to avoid reprocessing
             self.response_tracker.mark_responded(event.event_id)
 
+    @staticmethod
+    def _event_to_history_message(event: nio.Event, fallback_event_id: str) -> dict[str, Any]:
+        """Convert a Matrix event to normalized history message structure."""
+        source = event.source if isinstance(event.source, dict) else {}
+        content_data = source.get("content", {})
+        content = content_data if isinstance(content_data, dict) else {}
+
+        body_value = content.get("body")
+        if not isinstance(body_value, str):
+            event_body = getattr(event, "body", "")
+            body_value = str(event_body) if event_body else ""
+
+        event_id = getattr(event, "event_id", None)
+        normalized_event_id = event_id if isinstance(event_id, str) else fallback_event_id
+
+        sender_value = getattr(event, "sender", "")
+        sender = sender_value if isinstance(sender_value, str) else ""
+
+        timestamp_value = getattr(event, "server_timestamp", 0)
+        timestamp = timestamp_value if isinstance(timestamp_value, int) else 0
+
+        return {
+            "sender": sender,
+            "body": body_value,
+            "timestamp": timestamp,
+            "event_id": normalized_event_id,
+            "content": content,
+        }
+
+    async def _resolve_reply_chain_context(
+        self,
+        room_id: str,
+        reply_to_event_id: str,
+    ) -> tuple[str, list[dict[str, Any]], bool]:
+        """Resolve reply-chain context for clients that don't send thread relations.
+
+        Returns:
+            Tuple of (conversation_root_id, chain_history, points_to_thread)
+
+        """
+        assert self.client is not None
+
+        chain_history: list[dict[str, Any]] = []
+        current_event_id = reply_to_event_id
+        seen_event_ids: set[str] = set()
+
+        for _ in range(12):
+            if current_event_id in seen_event_ids:
+                break
+            seen_event_ids.add(current_event_id)
+
+            response = await self.client.room_get_event(room_id, current_event_id)
+            if not isinstance(response, nio.RoomGetEventResponse):
+                self.logger.debug(
+                    "Failed to resolve reply event for context",
+                    room_id=room_id,
+                    event_id=current_event_id,
+                    error=str(response),
+                )
+                break
+
+            target_event = response.event
+            target_info = EventInfo.from_event(target_event.source)
+
+            # If any replied-to event is already in a thread, switch to that full thread context.
+            if target_info.thread_id:
+                return target_info.thread_id, [], True
+
+            chain_history.append(AgentBot._event_to_history_message(target_event, current_event_id))
+
+            next_event_id = target_info.reply_to_event_id
+            if not next_event_id and target_info.safe_thread_root and target_info.safe_thread_root != current_event_id:
+                next_event_id = target_info.safe_thread_root
+
+            if not next_event_id:
+                break
+            current_event_id = next_event_id
+
+        if not chain_history:
+            return reply_to_event_id, [], False
+
+        # Fetches walk from newest->oldest, but consumers expect chronological history.
+        chain_history.reverse()
+        root_event_id = str(chain_history[0].get("event_id", reply_to_event_id))
+        return root_event_id, chain_history, False
+
+    async def _derive_conversation_context(
+        self,
+        room_id: str,
+        event_info: EventInfo,
+    ) -> tuple[bool, str | None, list[dict[str, Any]]]:
+        """Derive conversation context from threads or reply chains."""
+        assert self.client is not None
+
+        if event_info.thread_id:
+            thread_history = await fetch_thread_history(self.client, room_id, event_info.thread_id)
+            return True, event_info.thread_id, thread_history
+
+        if not event_info.reply_to_event_id:
+            return False, None, []
+
+        context_root_id, chain_history, points_to_thread = await AgentBot._resolve_reply_chain_context(
+            self,
+            room_id,
+            event_info.reply_to_event_id,
+        )
+        if points_to_thread:
+            thread_history = await fetch_thread_history(self.client, room_id, context_root_id)
+            return True, context_root_id, thread_history
+
+        return True, context_root_id, chain_history
+
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         assert self.client is not None
 
@@ -1199,15 +1311,16 @@ class AgentBot:
             self.logger.info("Mentioned", event_id=event.event_id, room_name=room.name)
 
         event_info = EventInfo.from_event(event.source)
-
-        thread_history = []
-        if event_info.thread_id:
-            thread_history = await fetch_thread_history(self.client, room.room_id, event_info.thread_id)
+        is_thread, thread_id, thread_history = await AgentBot._derive_conversation_context(
+            self,
+            room.room_id,
+            event_info,
+        )
 
         return MessageContext(
             am_i_mentioned=am_i_mentioned,
-            is_thread=event_info.is_thread,
-            thread_id=event_info.thread_id,
+            is_thread=is_thread,
+            thread_id=thread_id,
             thread_history=thread_history,
             mentioned_agents=mentioned_agents,
         )
