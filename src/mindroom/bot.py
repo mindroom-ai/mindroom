@@ -1780,8 +1780,6 @@ class AgentBot:
         session_id = create_session_id(room_id, thread_id)
 
         # Dynamically determine whether to use streaming based on user presence
-        # Only check presence if streaming is globally enabled
-        # Check if the user is online to decide whether to stream
         use_streaming = await should_use_streaming(
             self.client,
             room_id,
