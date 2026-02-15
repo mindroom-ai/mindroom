@@ -17,7 +17,7 @@ from rich.console import Console
 from rich.syntax import Syntax
 
 from mindroom.config import Config
-from mindroom.constants import DEFAULT_AGENTS_CONFIG, PROVIDER_ENV_KEYS
+from mindroom.constants import DEFAULT_AGENTS_CONFIG, env_key_for_provider
 
 console = Console()
 
@@ -295,7 +295,7 @@ def _find_missing_env_keys(config: Config) -> list[tuple[str, str]]:
     providers_used: set[str] = {model.provider for model in config.models.values()}
     missing: list[tuple[str, str]] = []
     for provider in sorted(providers_used):
-        env_key = PROVIDER_ENV_KEYS.get(provider)
+        env_key = env_key_for_provider(provider)
         if env_key and not os.getenv(env_key):
             missing.append((provider, env_key))
     return missing
