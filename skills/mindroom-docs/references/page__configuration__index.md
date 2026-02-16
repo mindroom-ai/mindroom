@@ -64,7 +64,7 @@ agents:
     display_name: Assistant        # Required: Human-readable name
     role: A helpful AI assistant   # Optional: Description of purpose
     model: sonnet                  # Optional: Model name (default: "default")
-    tools: [file, shell]           # Optional: List of tool names
+    tools: [file, shell]           # Optional: Agent-specific tools (merged with defaults.tools)
     skills: []                     # Optional: List of skill names
     instructions: []               # Optional: Custom instructions
     rooms: [lobby]                 # Optional: Rooms to auto-join
@@ -108,11 +108,14 @@ router:
 
 # Default settings for all agents (optional)
 defaults:
+  tools: [scheduler]               # Default: ["scheduler"] (added to every agent; set [] to disable)
   markdown: true                   # Default: true
   enable_streaming: true           # Default: true (stream responses via message edits)
   show_stop_button: false          # Default: false (global only, cannot be overridden per-agent)
   learning: true                   # Default: true
   learning_mode: always            # Default: always (or agentic)
+
+# defaults.tools are appended to each agent's tools list with duplicates removed.
 
 # Memory system configuration (optional)
 memory:

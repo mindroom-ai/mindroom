@@ -63,19 +63,19 @@ agents:
 
 ## Configuration Options
 
-| Option            | Type   | Default     | Description                                                                                                                                    |
-| ----------------- | ------ | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `display_name`    | string | *required*  | Human-readable name shown in Matrix as the bot's display name                                                                                  |
-| `role`            | string | `""`        | System prompt describing the agent's purpose — guides its behavior and expertise                                                               |
-| `model`           | string | `"default"` | Model name (must match a key in the `models` section)                                                                                          |
-| `tools`           | list   | `[]`        | Tool names the agent can use (see [Tools](https://docs.mindroom.chat/tools/index.md) for available options)                                    |
-| `skills`          | list   | `[]`        | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/index.md))                                                       |
-| `instructions`    | list   | `[]`        | Extra lines appended to the system prompt after the role                                                                                       |
-| `rooms`           | list   | `[]`        | Room aliases to auto-join; rooms are created if they don't exist                                                                               |
-| `markdown`        | bool   | `true`      | When enabled, the agent is instructed to format responses as Markdown                                                                          |
-| `learning`        | bool   | `true`      | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time |
-| `learning_mode`   | string | `"always"`  | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call                            |
-| `knowledge_bases` | list   | `[]`        | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                      |
+| Option            | Type   | Default     | Description                                                                                                                                              |
+| ----------------- | ------ | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `display_name`    | string | *required*  | Human-readable name shown in Matrix as the bot's display name                                                                                            |
+| `role`            | string | `""`        | System prompt describing the agent's purpose — guides its behavior and expertise                                                                         |
+| `model`           | string | `"default"` | Model name (must match a key in the `models` section)                                                                                                    |
+| `tools`           | list   | `[]`        | Agent-specific tool names (see [Tools](https://docs.mindroom.chat/tools/index.md)); effective tools are `defaults.tools + tools` with duplicates removed |
+| `skills`          | list   | `[]`        | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/index.md))                                                                 |
+| `instructions`    | list   | `[]`        | Extra lines appended to the system prompt after the role                                                                                                 |
+| `rooms`           | list   | `[]`        | Room aliases to auto-join; rooms are created if they don't exist                                                                                         |
+| `markdown`        | bool   | `true`      | When enabled, the agent is instructed to format responses as Markdown                                                                                    |
+| `learning`        | bool   | `true`      | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time           |
+| `learning_mode`   | string | `"always"`  | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call                                      |
+| `knowledge_bases` | list   | `[]`        | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                                |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
 
@@ -97,6 +97,7 @@ The `defaults` section sets fallback values for all agents. Any agent that omits
 
 ```
 defaults:
+  tools: [scheduler]        # Tools added to every agent by default (set [] to disable)
   markdown: true             # Format responses as Markdown
   learning: true             # Enable Agno Learning
   learning_mode: always      # "always" or "agentic"

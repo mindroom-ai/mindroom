@@ -13,16 +13,17 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 ```
  Usage: root [OPTIONS] COMMAND [ARGS]...
 
- MindRoom - AI agents that live in Matrix
+ AI agents that live in Matrix and work everywhere via bridges.
 
- Quick start:   mindroom config init   Create a starter config   mindroom run
- Start the system
+ Quick start:
+ mindroom config init   Create a starter config
+ mindroom run           Start the system
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --install-completion          Install completion for the current shell.                │
-│ --show-completion             Show completion for the current shell, to copy it or     │
-│                               customize the installation.                              │
-│ --help                        Show this message and exit.                              │
+│ --install-completion            Install completion for the current shell.              │
+│ --show-completion               Show completion for the current shell, to copy it or   │
+│                                 customize the installation.                            │
+│ --help                -h        Show this message and exit.                            │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
 │ version   Show the current version of Mindroom.                                        │
@@ -43,7 +44,7 @@ Show the current MindRoom version.
 
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --help          Show this message and exit.                                            │
+│ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -56,9 +57,11 @@ Start MindRoom with your configuration.
 
  Run the mindroom multi-agent system.
 
- This command starts the multi-agent bot system which automatically: - Creates all
- necessary user and agent accounts - Creates all rooms defined in config.yaml - Manages
- agent room memberships - Starts the dashboard API server (disable with --no-api)
+ This command starts the multi-agent bot system which automatically:
+ - Creates all necessary user and agent accounts
+ - Creates all rooms defined in config.yaml
+ - Manages agent room memberships
+ - Starts the dashboard API server (disable with --no-api)
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --log-level     -l              TEXT     Set the logging level (DEBUG, INFO, WARNING,  │
@@ -74,7 +77,7 @@ Start MindRoom with your configuration.
 │                                          [default: 8765]                               │
 │ --api-host                      TEXT     Host for the dashboard API server             │
 │                                          [default: 0.0.0.0]                            │
-│ --help                                   Show this message and exit.                   │
+│ --help          -h                       Show this message and exit.                   │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 

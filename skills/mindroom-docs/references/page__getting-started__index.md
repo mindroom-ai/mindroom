@@ -90,7 +90,7 @@ agents: assistant: display_name: Assistant role: A helpful AI assistant that can
 
 models: default: provider: anthropic id: claude-sonnet-4-5-latest
 
-defaults: markdown: true
+defaults: tools: [scheduler] markdown: true
 
 timezone: America/Los_Angeles
 

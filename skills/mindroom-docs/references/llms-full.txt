@@ -74,6 +74,7 @@ models:
     id: claude-sonnet-4-5-latest
 
 defaults:
+  tools: [scheduler]
   markdown: true
 ```
 
@@ -244,7 +245,7 @@ agents: assistant: display_name: Assistant role: A helpful AI assistant that can
 
 models: default: provider: anthropic id: claude-sonnet-4-5-latest
 
-defaults: markdown: true
+defaults: tools: [scheduler] markdown: true
 
 timezone: America/Los_Angeles
 
@@ -573,7 +574,7 @@ agents:
     display_name: Assistant        # Required: Human-readable name
     role: A helpful AI assistant   # Optional: Description of purpose
     model: sonnet                  # Optional: Model name (default: "default")
-    tools: [file, shell]           # Optional: List of tool names
+    tools: [file, shell]           # Optional: Agent-specific tools (merged with defaults.tools)
     skills: []                     # Optional: List of skill names
     instructions: []               # Optional: Custom instructions
     rooms: [lobby]                 # Optional: Rooms to auto-join
@@ -617,11 +618,14 @@ router:
 
 # Default settings for all agents (optional)
 defaults:
+  tools: [scheduler]               # Default: ["scheduler"] (added to every agent; set [] to disable)
   markdown: true                   # Default: true
   enable_streaming: true           # Default: true (stream responses via message edits)
   show_stop_button: false          # Default: false (global only, cannot be overridden per-agent)
   learning: true                   # Default: true
   learning_mode: always            # Default: always (or agentic)
+
+# defaults.tools are appended to each agent's tools list with duplicates removed.
 
 # Memory system configuration (optional)
 memory:
@@ -843,19 +847,19 @@ agents:
 
 ## Configuration Options
 
-| Option            | Type   | Default     | Description                                                                                                                                    |
-| ----------------- | ------ | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `display_name`    | string | *required*  | Human-readable name shown in Matrix as the bot's display name                                                                                  |
-| `role`            | string | `""`        | System prompt describing the agent's purpose — guides its behavior and expertise                                                               |
-| `model`           | string | `"default"` | Model name (must match a key in the `models` section)                                                                                          |
-| `tools`           | list   | `[]`        | Tool names the agent can use (see [Tools](https://docs.mindroom.chat/tools/index.md) for available options)                                    |
-| `skills`          | list   | `[]`        | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/index.md))                                                       |
-| `instructions`    | list   | `[]`        | Extra lines appended to the system prompt after the role                                                                                       |
-| `rooms`           | list   | `[]`        | Room aliases to auto-join; rooms are created if they don't exist                                                                               |
-| `markdown`        | bool   | `true`      | When enabled, the agent is instructed to format responses as Markdown                                                                          |
-| `learning`        | bool   | `true`      | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time |
-| `learning_mode`   | string | `"always"`  | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call                            |
-| `knowledge_bases` | list   | `[]`        | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                      |
+| Option            | Type   | Default     | Description                                                                                                                                              |
+| ----------------- | ------ | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `display_name`    | string | *required*  | Human-readable name shown in Matrix as the bot's display name                                                                                            |
+| `role`            | string | `""`        | System prompt describing the agent's purpose — guides its behavior and expertise                                                                         |
+| `model`           | string | `"default"` | Model name (must match a key in the `models` section)                                                                                                    |
+| `tools`           | list   | `[]`        | Agent-specific tool names (see [Tools](https://docs.mindroom.chat/tools/index.md)); effective tools are `defaults.tools + tools` with duplicates removed |
+| `skills`          | list   | `[]`        | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/index.md))                                                                 |
+| `instructions`    | list   | `[]`        | Extra lines appended to the system prompt after the role                                                                                                 |
+| `rooms`           | list   | `[]`        | Room aliases to auto-join; rooms are created if they don't exist                                                                                         |
+| `markdown`        | bool   | `true`      | When enabled, the agent is instructed to format responses as Markdown                                                                                    |
+| `learning`        | bool   | `true`      | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time           |
+| `learning_mode`   | string | `"always"`  | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call                                      |
+| `knowledge_bases` | list   | `[]`        | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                                |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
 
@@ -877,6 +881,7 @@ The `defaults` section sets fallback values for all agents. Any agent that omits
 
 ```
 defaults:
+  tools: [scheduler]        # Tools added to every agent by default (set [] to disable)
   markdown: true             # Format responses as Markdown
   learning: true             # Enable Agno Learning
   learning_mode: always      # "always" or "agentic"
@@ -1256,6 +1261,16 @@ agents:
       - github
       - duckduckgo
 ```
+
+You can also assign tools to all agents globally:
+
+```
+defaults:
+  tools:
+    - scheduler
+```
+
+`defaults.tools` are merged into each agent's own `tools` list with duplicates removed. Set `defaults.tools: []` to disable global default tools.
 
 ## Tool Categories
 
@@ -3784,16 +3799,17 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 ```
  Usage: root [OPTIONS] COMMAND [ARGS]...
 
- MindRoom - AI agents that live in Matrix
+ AI agents that live in Matrix and work everywhere via bridges.
 
- Quick start:   mindroom config init   Create a starter config   mindroom run
- Start the system
+ Quick start:
+ mindroom config init   Create a starter config
+ mindroom run           Start the system
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --install-completion          Install completion for the current shell.                │
-│ --show-completion             Show completion for the current shell, to copy it or     │
-│                               customize the installation.                              │
-│ --help                        Show this message and exit.                              │
+│ --install-completion            Install completion for the current shell.              │
+│ --show-completion               Show completion for the current shell, to copy it or   │
+│                                 customize the installation.                            │
+│ --help                -h        Show this message and exit.                            │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
 │ version   Show the current version of Mindroom.                                        │
@@ -3814,7 +3830,7 @@ Show the current MindRoom version.
 
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --help          Show this message and exit.                                            │
+│ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -3827,9 +3843,11 @@ Start MindRoom with your configuration.
 
  Run the mindroom multi-agent system.
 
- This command starts the multi-agent bot system which automatically: - Creates all
- necessary user and agent accounts - Creates all rooms defined in config.yaml - Manages
- agent room memberships - Starts the dashboard API server (disable with --no-api)
+ This command starts the multi-agent bot system which automatically:
+ - Creates all necessary user and agent accounts
+ - Creates all rooms defined in config.yaml
+ - Manages agent room memberships
+ - Starts the dashboard API server (disable with --no-api)
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --log-level     -l              TEXT     Set the logging level (DEBUG, INFO, WARNING,  │
@@ -3845,7 +3863,7 @@ Start MindRoom with your configuration.
 │                                          [default: 8765]                               │
 │ --api-host                      TEXT     Host for the dashboard API server             │
 │                                          [default: 0.0.0.0]                            │
-│ --help                                   Show this message and exit.                   │
+│ --help          -h                       Show this message and exit.                   │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 

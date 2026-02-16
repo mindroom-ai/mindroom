@@ -72,7 +72,7 @@ agents:
 | `display_name` | string | *required* | Human-readable name shown in Matrix as the bot's display name |
 | `role` | string | `""` | System prompt describing the agent's purpose — guides its behavior and expertise |
 | `model` | string | `"default"` | Model name (must match a key in the `models` section) |
-| `tools` | list | `[]` | Tool names the agent can use (see [Tools](../tools/index.md) for available options) |
+| `tools` | list | `[]` | Agent-specific tool names (see [Tools](../tools/index.md)); effective tools are `defaults.tools + tools` with duplicates removed |
 | `skills` | list | `[]` | Skill names the agent can use (see [Skills](../skills.md)) |
 | `instructions` | list | `[]` | Extra lines appended to the system prompt after the role |
 | `rooms` | list | `[]` | Room aliases to auto-join; rooms are created if they don't exist |
@@ -101,6 +101,7 @@ The `defaults` section sets fallback values for all agents. Any agent that omits
 
 ```yaml
 defaults:
+  tools: [scheduler]        # Tools added to every agent by default (set [] to disable)
   markdown: true             # Format responses as Markdown
   learning: true             # Enable Agno Learning
   learning_mode: always      # "always" or "agentic"
