@@ -383,6 +383,16 @@ def create_agent(  # noqa: C901, PLR0912, PLR0915
     return agent
 
 
+def _extract_summary_line(markdown_text: str) -> str | None:
+    """Extract the first non-heading line from markdown for concise summaries."""
+    for raw_line in markdown_text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        return line.lstrip("-* ").strip()
+    return None
+
+
 def describe_agent(agent_name: str, config: Config) -> str:
     """Generate a description of an agent or team based on its configuration.
 
@@ -428,12 +438,15 @@ def describe_agent(agent_name: str, config: Config) -> str:
         tool_list = ", ".join(agent_config.tools)
         parts.append(f"- Tools: {tool_list}")
 
-    # Add key instructions if any
-    if agent_config.instructions:
-        # Take first instruction as it's usually the most descriptive
+    first_instruction: str | None = None
+    agents_md_content = load_agents_md(agent_name, STORAGE_PATH_OBJ, config)
+    if agents_md_content:
+        first_instruction = _extract_summary_line(agents_md_content)
+    elif agent_config.instructions:
         first_instruction = agent_config.instructions[0]
-        if len(first_instruction) < MAX_INSTRUCTION_LENGTH:  # Only include if reasonably short
-            parts.append(f"- {first_instruction}")
+
+    if first_instruction and len(first_instruction) < MAX_INSTRUCTION_LENGTH:
+        parts.append(f"- {first_instruction}")
 
     return "\n  ".join(parts)
 

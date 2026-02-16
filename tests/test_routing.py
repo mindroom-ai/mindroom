@@ -400,6 +400,26 @@ class TestAgentDescription:
         assert "Tools:" not in description  # No tools section
         assert "Always provide a clear" in description
 
+    def test_describe_agent_uses_agents_md_when_present(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """AGENTS.md content should drive instruction summary when customized."""
+        config = Config.from_yaml()
+        workspace_dir = tmp_path / "workspace" / "calculator"
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        (workspace_dir / "AGENTS.md").write_text(
+            "# AGENTS.md\n\n- Prefer numerical stability over speed.",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("mindroom.agents.STORAGE_PATH_OBJ", tmp_path)
+
+        description = describe_agent("calculator", config)
+
+        assert "Prefer numerical stability over speed." in description
+        assert "Use the calculator tools" not in description
+
     def test_describe_unknown_agent(self) -> None:
         """Test describing an unknown agent."""
         config = Config.from_yaml()
