@@ -48,6 +48,7 @@ nav = [
     { "Google Services OAuth (Admin)" = "deployment/google-services-oauth.md" },
     { "Google Services OAuth (Individual)" = "deployment/google-services-user-oauth.md" },
     { "Docker" = "deployment/docker.md" },
+    { "Sandbox Proxy" = "deployment/sandbox-proxy.md" },
     { "Kubernetes" = "deployment/kubernetes.md" },
   ] },
   { "CLI Reference" = "cli.md" },

@@ -37,5 +37,6 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Google Services OAuth (Admin) | `deployment/google-services-oauth.md` | `deployment/google-services-oauth/index.md` | `page__deployment__google-services-oauth__index.md` |
 | Google Services OAuth (Individual) | `deployment/google-services-user-oauth.md` | `deployment/google-services-user-oauth/index.md` | `page__deployment__google-services-user-oauth__index.md` |
 | Docker | `deployment/docker.md` | `deployment/docker/index.md` | `page__deployment__docker__index.md` |
+| Sandbox Proxy | `deployment/sandbox-proxy.md` | `deployment/sandbox-proxy/index.md` | `page__deployment__sandbox-proxy__index.md` |
 | Kubernetes | `deployment/kubernetes.md` | `deployment/kubernetes/index.md` | `page__deployment__kubernetes__index.md` |
 | CLI Reference | `cli.md` | `cli/index.md` | `page__cli__index.md` |
