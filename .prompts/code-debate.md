@@ -15,6 +15,17 @@ The first agent to run will create `DEBATE.md` and become the opener. The second
 
 Do not ask the user which role to play. Detect it from file existence.
 
+## Non-simulation guardrails (MUST)
+
+- Never write content for the opposite role.
+- Never simulate, fabricate, or placeholder the other agent's response.
+- Never append both sides of a debate from one process.
+- Role is immutable for the run: once detected as Agent A or Agent B, keep that role until `## CONSENSUS`.
+- If you are about to write the opposite role, stop and report protocol violation instead of writing.
+- After appending your section, only poll. Do not append another turn unless checksum changed and turn order confirms it is now your turn.
+- If checksum does not change, keep polling until timeout or `## CONSENSUS`.
+- On timeout, append only a timeout `## CONSENSUS` from your own role.
+
 ## Checksum command
 
 Use a portable checksum. Pick the first available:
@@ -39,6 +50,11 @@ Before appending a section, check the last `## ` heading in `DEBATE.md`:
 
 If it is not your turn, re-read the file and go back to polling.
 
+Before appending, also verify the last signature line role:
+
+- If the last signature is your role, it is not your turn.
+- Append only when heading order and signature role both allow your turn.
+
 ## Polling discipline (critical)
 
 - After starting a poll loop, keep polling until one of these happens:
@@ -48,6 +64,16 @@ If it is not your turn, re-read the file and go back to polling.
 - Do not stop early just to report that polling started.
 - When checksum changes, immediately read `DEBATE.md` and continue the protocol.
 - Stop only when `## CONSENSUS` exists or timeout handling completes.
+- Polling is mandatory after every append. Do not return control to the user between append and poll completion.
+
+## Completion criteria (MUST)
+
+- A debate run is only complete when one of these is true:
+  - `## CONSENSUS` exists, or
+  - timeout handling completed and timeout `## CONSENSUS` was appended.
+- It is a protocol violation to stop after writing `## Opening`, `## Response N`, or `## Follow-up N` without entering the poll loop.
+- If `DEBATE.md` does not yet contain `## CONSENSUS`, you must still be in the protocol loop (append or poll).
+- Never send a “done”/“completed” status while waiting for the other agent; continue polling instead.
 
 ## Agent A (opener) flow
 
@@ -58,6 +84,7 @@ If it is not your turn, re-read the file and go back to polling.
    ```bash
    PREV=$(CKSUM DEBATE.md); SECONDS=0; while true; do sleep 5; if grep -q '^## CONSENSUS' DEBATE.md; then break; fi; NOW=$(CKSUM DEBATE.md); if [ "$NOW" != "$PREV" ]; then break; fi; if [ "$SECONDS" -ge 600 ]; then echo "TIMEOUT"; break; fi; done
    ```
+   This step is blocking and mandatory; do not exit the workflow before it finishes.
 5. If timed out → append `## CONSENSUS` noting the timeout and stop.
 6. Read Agent B's reply.
 7. If all points are resolved → append a `## CONSENSUS` section summarizing agreed outcomes and stop.
@@ -75,6 +102,7 @@ If it is not your turn, re-read the file and go back to polling.
 4. Append a `## Response N` section with a point-by-point reply.
 5. Compute the file's checksum.
 6. Poll for changes (same loop with 10-minute timeout).
+   This step is blocking and mandatory; do not exit the workflow before it finishes.
 7. If timed out → append `## CONSENSUS` noting the timeout and stop.
 8. Read Agent A's follow-up.
 9. If the file contains `## CONSENSUS` → stop, debate is over.
