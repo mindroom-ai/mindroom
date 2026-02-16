@@ -1185,7 +1185,7 @@ class TestRouterSkipsSingleAgent:
 
         bot._handle_ai_routing.assert_not_called()
         info_calls = [call[0][0] for call in bot.logger.info.call_args_list]
-        assert "Skipping routing: multiple non-agent users (mention required)" in info_calls
+        assert "Skipping routing: multiple non-agent users in thread (mention required)" in info_calls
 
     @pytest.mark.asyncio
     async def test_router_handles_command_even_with_single_agent(self) -> None:

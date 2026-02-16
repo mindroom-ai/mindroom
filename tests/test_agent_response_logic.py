@@ -450,7 +450,7 @@ class TestAgentResponseLogic:
             is True
         )
 
-        # Agent already participating in multi-human thread → thread continuity
+        # Agent already participating in multi-human thread → still require mention
         owned_thread_history = [
             {"sender": "@alice:localhost", "body": "help"},
             {"sender": "@bob:localhost", "body": "me too"},
@@ -466,7 +466,7 @@ class TestAgentResponseLogic:
                 thread_history=owned_thread_history,
                 config=self.config,
             )
-            is True
+            is False
         )
 
     def test_non_agent_mention_suppresses_auto_response(self) -> None:
@@ -486,8 +486,8 @@ class TestAgentResponseLogic:
             is False
         )
 
-    def test_multi_human_room_non_thread_requires_mention(self) -> None:
-        """Non-thread messages in multi-human rooms should require mention."""
+    def test_multi_human_room_non_thread_auto_responds(self) -> None:
+        """Non-thread messages in multi-human rooms auto-respond (single agent)."""
         room = create_mock_room("!room:localhost", ["calculator"], self.config)
         room.users["@alice:localhost"] = None
         room.users["@bob:localhost"] = None
@@ -501,7 +501,7 @@ class TestAgentResponseLogic:
                 thread_history=[],
                 config=self.config,
             )
-            is False
+            is True
         )
 
     def test_agent_stops_when_user_mentions_other_agent(self) -> None:

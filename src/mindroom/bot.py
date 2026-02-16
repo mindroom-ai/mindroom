@@ -100,9 +100,9 @@ from .thread_utils import (
     get_all_mentioned_agents_in_thread,
     get_available_agents_in_room,
     get_configured_agents_for_room,
+    has_multiple_non_agent_users_in_thread,
     has_user_responded_after_message,
     is_authorized_sender,
-    requires_mention,
     should_agent_respond,
 )
 from .tools_metadata import get_tool_by_name
@@ -969,8 +969,8 @@ class AgentBot:
         # Router: Route when no one is explicitly mentioned and no agents in thread
         if self.agent_name == ROUTER_AGENT_NAME:
             if not context.mentioned_agents and not context.has_non_agent_mentions and not agents_in_thread:
-                if requires_mention(context.is_thread, context.thread_history, room, self.config):
-                    self.logger.info("Skipping routing: multiple non-agent users (mention required)")
+                if context.is_thread and has_multiple_non_agent_users_in_thread(context.thread_history, self.config):
+                    self.logger.info("Skipping routing: multiple non-agent users in thread (mention required)")
                 else:
                     available_agents = get_available_agents_in_room(room, self.config)
                     if len(available_agents) == 1:
