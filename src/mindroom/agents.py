@@ -32,7 +32,6 @@ logger = get_logger(__name__)
 
 # Maximum length for instruction descriptions to include in agent summary
 MAX_INSTRUCTION_LENGTH = 100
-DEFAULT_AGENT_TOOL_NAMES = ["scheduler"]
 
 
 @dataclass
@@ -218,7 +217,7 @@ def create_agent(  # noqa: C901, PLR0912, PLR0915
         storage_path: Runtime storage path. Falls back to the
             module-level ``STORAGE_PATH_OBJ`` when *None*.
         knowledge: Optional shared knowledge base instance for RAG-enabled agents.
-        include_default_tools: Whether to include DEFAULT_AGENT_TOOL_NAMES
+        include_default_tools: Whether to include config.defaults.tools
             (e.g. "scheduler"). Set to False when creating agents outside
             of Matrix context where those tools are unavailable.
         include_interactive_questions: Whether to include the interactive
@@ -244,7 +243,7 @@ def create_agent(  # noqa: C901, PLR0912, PLR0915
 
     tool_names = list(agent_config.tools)
     if include_default_tools:
-        for default_tool_name in DEFAULT_AGENT_TOOL_NAMES:
+        for default_tool_name in defaults.tools:
             if default_tool_name not in tool_names:
                 tool_names.append(default_tool_name)
 

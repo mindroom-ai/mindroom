@@ -374,5 +374,7 @@ mindroom_user:
   username: mindroom_user
   display_name: MindRoomUser
 defaults:
+  tools:
+    - scheduler
   markdown: true
 """

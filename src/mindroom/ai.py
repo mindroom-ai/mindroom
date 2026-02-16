@@ -301,7 +301,7 @@ async def ai_response(
         room_id: Optional room ID for room memory access
         knowledge: Optional shared knowledge base for RAG-enabled agents
         user_id: Matrix user ID of the sender, used by Agno's LearningMachine
-        include_default_tools: Whether to include default tools (e.g. scheduler).
+        include_default_tools: Whether to include config defaults tools (e.g. scheduler).
             Set to False when calling outside of Matrix context.
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
@@ -369,7 +369,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         room_id: Optional room ID for room memory access
         knowledge: Optional shared knowledge base for RAG-enabled agents
         user_id: Matrix user ID of the sender, used by Agno's LearningMachine
-        include_default_tools: Whether to include default tools (e.g. scheduler).
+        include_default_tools: Whether to include config defaults tools (e.g. scheduler).
             Set to False when calling outside of Matrix context.
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
