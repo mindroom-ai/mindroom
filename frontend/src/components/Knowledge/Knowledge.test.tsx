@@ -152,12 +152,12 @@ describe('Knowledge', () => {
       expect(vi.mocked(global.fetch)).toHaveBeenNthCalledWith(
         1,
         API_ENDPOINTS.knowledge.status('docs'),
-        undefined
+        expect.objectContaining({ headers: expect.any(Object) })
       );
       expect(vi.mocked(global.fetch)).toHaveBeenNthCalledWith(
         2,
         API_ENDPOINTS.knowledge.files('docs'),
-        undefined
+        expect.objectContaining({ headers: expect.any(Object) })
       );
     });
     expect(screen.getByText('Active: docs')).toBeInTheDocument();
@@ -212,12 +212,12 @@ describe('Knowledge', () => {
       expect(vi.mocked(global.fetch)).toHaveBeenNthCalledWith(
         1,
         API_ENDPOINTS.knowledge.status('beta'),
-        undefined
+        expect.objectContaining({ headers: expect.any(Object) })
       );
       expect(vi.mocked(global.fetch)).toHaveBeenNthCalledWith(
         2,
         API_ENDPOINTS.knowledge.files('beta'),
-        undefined
+        expect.objectContaining({ headers: expect.any(Object) })
       );
     });
     expect(screen.getByText('Active: beta')).toBeInTheDocument();
