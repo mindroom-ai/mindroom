@@ -6136,6 +6136,21 @@
     {
       "auth_provider": null,
       "category": "productivity",
+      "config_fields": [],
+      "dependencies": [],
+      "description": "Write explicit notes to daily logs or MEMORY.md workspace files",
+      "display_name": "Write Workspace Memory",
+      "docs_url": null,
+      "helper_text": null,
+      "icon": "NotebookPen",
+      "icon_color": "text-emerald-500",
+      "name": "write_memory",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "auth_provider": null,
+      "category": "productivity",
       "config_fields": [
         {
           "default": null,
