@@ -163,31 +163,6 @@ def get_available_agents_in_room(room: nio.MatrixRoom, config: Config) -> list[M
     return sorted(agents, key=lambda x: x.full_id)
 
 
-def get_available_agent_matrix_ids_in_room(room: nio.MatrixRoom, config: Config) -> list[MatrixID]:
-    """Get list of available agent Matrix IDs in a room.
-
-    Note: Router agent is excluded as it's not a regular conversation participant.
-
-    Returns:
-        List of MatrixID objects for agents in the room.
-
-    """
-    agent_ids = []
-
-    for member_id in room.users:
-        agent_name = extract_agent_name(member_id, config)
-        # Exclude router agent
-        if agent_name and agent_name != ROUTER_AGENT_NAME:
-            try:
-                matrix_id = MatrixID.parse(member_id)
-                agent_ids.append(matrix_id)
-            except ValueError:
-                # Skip invalid Matrix IDs
-                pass
-
-    return sorted(agent_ids, key=lambda x: x.full_id)
-
-
 def has_multiple_non_agent_users_in_room(room: nio.MatrixRoom, config: Config) -> bool:
     """Return True when more than one non-agent user is present in the room."""
     non_agent_count = 0
@@ -209,6 +184,21 @@ def has_multiple_non_agent_users_in_thread(thread_history: list[dict[str, Any]],
             if len(non_agent_senders) > 1:
                 return True
     return False
+
+
+def requires_mention(
+    is_thread: bool,
+    thread_history: list[dict[str, Any]],
+    room: nio.MatrixRoom,
+    config: Config,
+) -> bool:
+    """Return True when a mention is required for agents to auto-respond.
+
+    Uses thread participation for thread messages, room membership for top-level messages.
+    """
+    if is_thread:
+        return has_multiple_non_agent_users_in_thread(thread_history, config)
+    return has_multiple_non_agent_users_in_room(room, config)
 
 
 def get_configured_agents_for_room(room_id: str, config: Config) -> list[MatrixID]:
@@ -334,7 +324,7 @@ def should_agent_respond(
     # Non-thread messages: auto-respond only in single-agent, single-human rooms.
     if not is_thread:
         return (
-            not has_multiple_non_agent_users_in_room(room, config)
+            not requires_mention(is_thread, thread_history, room, config)
             and len(get_available_agents_in_room(room, config)) == 1
         )
 
@@ -346,7 +336,7 @@ def should_agent_respond(
         return len(agents_in_thread) == 1 and agents_in_thread[0] == agent_matrix_id
 
     # No agents in thread yet: if multiple humans posted, require explicit mention.
-    if has_multiple_non_agent_users_in_thread(thread_history, config):
+    if requires_mention(is_thread, thread_history, room, config):
         return False
 
     # Otherwise, respond if we're the only available agent.
