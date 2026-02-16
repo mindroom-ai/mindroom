@@ -25,6 +25,8 @@
 - [Matrix Integration](https://docs.mindroom.chat/architecture/matrix/index.md)
 - [Agent Orchestration](https://docs.mindroom.chat/architecture/orchestration/index.md)
 - [Overview](https://docs.mindroom.chat/deployment/index.md)
+- [Overview](https://docs.mindroom.chat/deployment/bridges/index.md)
+- [Telegram](https://docs.mindroom.chat/deployment/bridges/telegram/index.md)
 - [Google Services OAuth (Admin)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md)
 - [Google Services OAuth (Individual)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md)
 - [Docker](https://docs.mindroom.chat/deployment/docker/index.md)
