@@ -264,7 +264,7 @@ knowledge_bases:
 - [Cultures](cultures.md) - Configure shared agent cultures
 - [Router](router.md) - Configure message routing
 - [Memory](../memory.md) - Configure memory providers and behavior
-- [Knowledge](../dashboard.md#knowledge) - Configure file-backed knowledge bases
+- [Knowledge Bases](../knowledge.md) - Configure file-backed knowledge bases
 - [Voice](../voice.md) - Configure speech-to-text voice processing
 - [Authorization](../authorization.md) - Configure user and room access control
 - [Skills](../skills.md) - Skill format, gating, and allowlists

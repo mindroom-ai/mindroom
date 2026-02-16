@@ -23,6 +23,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Built-in Tools | `tools/builtin.md` | `tools/builtin/index.md` | `page__tools__builtin__index.md` |
 | Skills | `skills.md` | `skills/index.md` | `page__skills__index.md` |
 | Plugins | `plugins.md` | `plugins/index.md` | `page__plugins__index.md` |
+| Knowledge Bases | `knowledge.md` | `knowledge/index.md` | `page__knowledge__index.md` |
 | Memory System | `memory.md` | `memory/index.md` | `page__memory__index.md` |
 | Voice Messages | `voice.md` | `voice/index.md` | `page__voice__index.md` |
 | Scheduling | `scheduling.md` | `scheduling/index.md` | `page__scheduling__index.md` |

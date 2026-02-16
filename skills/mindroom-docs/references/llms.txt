@@ -16,6 +16,7 @@
 - [Built-in Tools](https://docs.mindroom.chat/tools/builtin/index.md)
 - [Skills](https://docs.mindroom.chat/skills/index.md)
 - [Plugins](https://docs.mindroom.chat/plugins/index.md)
+- [Knowledge Bases](https://docs.mindroom.chat/knowledge/index.md)
 - [Memory System](https://docs.mindroom.chat/memory/index.md)
 - [Voice Messages](https://docs.mindroom.chat/voice/index.md)
 - [Scheduling](https://docs.mindroom.chat/scheduling/index.md)

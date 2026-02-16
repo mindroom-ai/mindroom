@@ -260,7 +260,7 @@ knowledge_bases:
 - [Cultures](https://docs.mindroom.chat/configuration/cultures/index.md) - Configure shared agent cultures
 - [Router](https://docs.mindroom.chat/configuration/router/index.md) - Configure message routing
 - [Memory](https://docs.mindroom.chat/memory/index.md) - Configure memory providers and behavior
-- [Knowledge](https://docs.mindroom.chat/dashboard/#knowledge) - Configure file-backed knowledge bases
+- [Knowledge Bases](https://docs.mindroom.chat/knowledge/index.md) - Configure file-backed knowledge bases
 - [Voice](https://docs.mindroom.chat/voice/index.md) - Configure speech-to-text voice processing
 - [Authorization](https://docs.mindroom.chat/authorization/index.md) - Configure user and room access control
 - [Skills](https://docs.mindroom.chat/skills/index.md) - Skill format, gating, and allowlists
