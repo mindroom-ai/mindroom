@@ -687,10 +687,9 @@ class TestThreadingBehavior:
 
         bot.client.room_get_event = AsyncMock(side_effect=responses)
 
-        with (
-            patch.object(AgentBot, "_REPLY_CHAIN_CACHE_MAX_SIZE", 5),
-            patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch,
-        ):
+        bot._reply_chain_nodes.maxsize = 5
+        bot._reply_chain_roots.maxsize = 5
+        with patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch:
             context = await bot._extract_message_context(room, event)
 
         assert context.is_thread is True

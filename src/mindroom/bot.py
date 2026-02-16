@@ -557,6 +557,33 @@ class MessageContext:
     mentioned_agents: list[MatrixID]
 
 
+class _LRUCache[T]:
+    """Bounded LRU cache keyed by (room_id, event_id)."""
+
+    __slots__ = ("_data", "maxsize")
+
+    def __init__(self, maxsize: int) -> None:
+        self._data: OrderedDict[tuple[str, str], T] = OrderedDict()
+        self.maxsize = maxsize
+
+    def get(self, room_id: str, event_id: str) -> T | None:
+        key = (room_id, event_id)
+        value = self._data.get(key)
+        if value is not None:
+            self._data.move_to_end(key)
+        return value
+
+    def put(self, room_id: str, event_id: str, value: T) -> None:
+        key = (room_id, event_id)
+        self._data[key] = value
+        self._data.move_to_end(key)
+        if len(self._data) > self.maxsize:
+            self._data.popitem(last=False)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+
 @dataclass
 class ReplyChainNode:
     """Cached reply-chain node metadata for context derivation."""
@@ -587,9 +614,14 @@ class AgentBot:
     running: bool = field(default=False, init=False)
     enable_streaming: bool = field(default=True)  # Enable/disable streaming responses
     orchestrator: MultiAgentOrchestrator | None = field(default=None, init=False)  # Reference to orchestrator
-    _reply_chain_nodes: OrderedDict[tuple[str, str], ReplyChainNode] = field(default_factory=OrderedDict, init=False)
-    _reply_chain_roots: OrderedDict[tuple[str, str], ReplyChainRoot] = field(default_factory=OrderedDict, init=False)
-    _REPLY_CHAIN_CACHE_MAX_SIZE: ClassVar[int] = 4096
+    _reply_chain_nodes: _LRUCache[ReplyChainNode] = field(
+        default_factory=lambda: _LRUCache(4096),
+        init=False,
+    )
+    _reply_chain_roots: _LRUCache[ReplyChainRoot] = field(
+        default_factory=lambda: _LRUCache(4096),
+        init=False,
+    )
     _REPLY_CHAIN_TRAVERSAL_LIMIT: ClassVar[int] = 500
 
     @property
@@ -1209,54 +1241,14 @@ class AgentBot:
     def _event_to_history_message(event: nio.Event) -> dict[str, Any]:
         """Convert a Matrix event to normalized history message structure."""
         content = event.source.get("content", {})
-        if not isinstance(content, dict):
-            content = {}
-
-        body = content.get("body", "")
-        if not isinstance(body, str):
-            body = getattr(event, "body", "") or ""
-
+        body = content.get("body", "") if isinstance(content, dict) else ""
         return {
             "sender": event.sender,
-            "body": body,
+            "body": body if isinstance(body, str) else "",
             "timestamp": event.server_timestamp,
             "event_id": event.event_id,
-            "content": content,
+            "content": content if isinstance(content, dict) else {},
         }
-
-    def _get_cached_reply_chain_node(self, room_id: str, event_id: str) -> ReplyChainNode | None:
-        """Return cached reply-chain node metadata if available."""
-        key = (room_id, event_id)
-        node = self._reply_chain_nodes.get(key)
-        if node is None:
-            return None
-        self._reply_chain_nodes.move_to_end(key)
-        return node
-
-    def _cache_reply_chain_node(self, room_id: str, event_id: str, node: ReplyChainNode) -> None:
-        """Store reply-chain node metadata."""
-        key = (room_id, event_id)
-        self._reply_chain_nodes[key] = node
-        self._reply_chain_nodes.move_to_end(key)
-        if len(self._reply_chain_nodes) > self._REPLY_CHAIN_CACHE_MAX_SIZE:
-            self._reply_chain_nodes.popitem(last=False)
-
-    def _get_cached_reply_chain_root(self, room_id: str, event_id: str) -> ReplyChainRoot | None:
-        """Return cached canonical root metadata for an event."""
-        key = (room_id, event_id)
-        root = self._reply_chain_roots.get(key)
-        if root is None:
-            return None
-        self._reply_chain_roots.move_to_end(key)
-        return root
-
-    def _cache_reply_chain_root(self, room_id: str, event_id: str, root: ReplyChainRoot) -> None:
-        """Store canonical root metadata with LRU eviction."""
-        key = (room_id, event_id)
-        self._reply_chain_roots[key] = root
-        self._reply_chain_roots.move_to_end(key)
-        if len(self._reply_chain_roots) > self._REPLY_CHAIN_CACHE_MAX_SIZE:
-            self._reply_chain_roots.popitem(last=False)
 
     def _cache_reply_chain_roots(
         self,
@@ -1268,12 +1260,12 @@ class AgentBot:
         """Path-compress canonical root metadata across visited events."""
         root = ReplyChainRoot(root_event_id=root_event_id, points_to_thread=points_to_thread)
         for event_id in event_ids:
-            self._cache_reply_chain_root(room_id, event_id, root)
+            self._reply_chain_roots.put(room_id, event_id, root)
 
     def _first_cached_reply_chain_root(self, room_id: str, event_ids: list[str]) -> ReplyChainRoot | None:
         """Return the first cached root metadata found in a traversal path."""
         for event_id in event_ids:
-            cached_root = self._get_cached_reply_chain_root(room_id, event_id)
+            cached_root = self._reply_chain_roots.get(room_id, event_id)
             if cached_root:
                 return cached_root
         return None
@@ -1301,7 +1293,7 @@ class AgentBot:
         event_id: str,
     ) -> ReplyChainNode | None:
         """Fetch reply-chain node metadata from cache or Matrix."""
-        cached_node = self._get_cached_reply_chain_node(room_id, event_id)
+        cached_node = self._reply_chain_nodes.get(room_id, event_id)
         if cached_node:
             return cached_node
 
@@ -1323,7 +1315,7 @@ class AgentBot:
             parent_event_id=AgentBot._next_reply_chain_event_id(target_info, event_id),
             thread_root_id=target_info.thread_id,
         )
-        self._cache_reply_chain_node(room_id, event_id, node)
+        self._reply_chain_nodes.put(room_id, event_id, node)
         if node.thread_root_id:
             self._cache_reply_chain_roots(room_id, [event_id], node.thread_root_id, points_to_thread=True)
         return node
@@ -1345,7 +1337,7 @@ class AgentBot:
         if not AgentBot._thread_history_has_replies(thread_history, event_id):
             return None
 
-        self._cache_reply_chain_node(
+        self._reply_chain_nodes.put(
             room_id,
             event_id,
             ReplyChainNode(message=node.message, parent_event_id=node.parent_event_id, thread_root_id=event_id),
@@ -1400,7 +1392,13 @@ class AgentBot:
 
     @staticmethod
     def _shortest_common_supersequence_ids(thread_ids: list[str], chain_ids: list[str]) -> list[str]:
-        """Build a shortest common supersequence over event IDs."""
+        """Build a shortest common supersequence over event IDs.
+
+        A simple seen-set merge would lose relative ordering when the two
+        sequences interleave (e.g. thread: [A, B, C] and chain: [A, X, B, Y, C]).
+        SCS preserves both orderings and inserts chain-only events at the correct
+        chronological positions.  Bounded by the 500-event traversal limit.
+        """
         m = len(thread_ids)
         n = len(chain_ids)
 
