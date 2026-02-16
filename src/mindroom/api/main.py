@@ -127,6 +127,9 @@ def _build_runtime_config(config_data: dict[str, Any]) -> Config | None:
     except ValidationError as exc:
         print(f"Warning: failed to parse runtime config: {exc}")
         return None
+    except Exception as exc:
+        print(f"Warning: unexpected runtime config parse error: {exc}")
+        return None
 
 
 def save_config_to_file(config_data: dict[str, Any]) -> None:
@@ -152,7 +155,7 @@ def save_config_to_file(config_data: dict[str, Any]) -> None:
 # Global variable to store current config
 config: dict[str, Any] = {}
 runtime_config: Config | None = None
-config_lock = threading.Lock()
+config_lock = threading.RLock()
 
 
 # =========================
