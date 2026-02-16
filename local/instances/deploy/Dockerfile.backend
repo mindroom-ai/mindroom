@@ -57,11 +57,11 @@ COPY --chown=1000:1000 scripts /app/scripts/
 COPY --chown=1000:1000 tools /app/tools/
 COPY --chown=1000:1000 avatars /app/avatars/
 
-# Make startup scripts executable
-RUN chmod +x /app/run-sandbox-runner.sh
-
-# Create necessary directories
-RUN mkdir -p /app/logs /app/mindroom_data
+# Make startup scripts executable and ensure runtime/cache directories
+# are writable by the non-root runtime user.
+RUN chmod +x /app/run-sandbox-runner.sh \
+    && mkdir -p /app/logs /app/mindroom_data /app/.cache/uv \
+    && chown 1000:1000 /app /app/logs /app/mindroom_data /app/.cache /app/.cache/uv
 
 # Set environment variable to indicate Docker mode
 ENV DOCKER_CONTAINER=1
