@@ -166,6 +166,7 @@ def _format_agent_description(agent_name: str, config: Config) -> str:
     """Format a concise agent description for the welcome message."""
     if agent_name in config.agents:
         agent_config = config.agents[agent_name]
+        tool_names = config.get_agent_tools(agent_name)
         desc_parts = []
 
         # Add role first
@@ -173,12 +174,12 @@ def _format_agent_description(agent_name: str, config: Config) -> str:
             desc_parts.append(agent_config.role)
 
         # Add tools with better formatting
-        if agent_config.tools:
+        if tool_names:
             # Wrap each tool name in backticks
-            formatted_tools = [f"`{tool}`" for tool in agent_config.tools[:3]]
+            formatted_tools = [f"`{tool}`" for tool in tool_names[:3]]
             tools_str = ", ".join(formatted_tools)
-            if len(agent_config.tools) > 3:
-                tools_str += f" +{len(agent_config.tools) - 3} more"
+            if len(tool_names) > 3:
+                tools_str += f" +{len(tool_names) - 3} more"
             desc_parts.append(f"(🔧 {tools_str})")
 
         return " ".join(desc_parts) if desc_parts else ""
@@ -303,9 +304,8 @@ def _resolve_skill_command_agent(  # noqa: C901
 
 
 def _collect_agent_toolkits(config: Config, agent_name: str) -> list[tuple[str, Toolkit]]:
-    agent_config = config.get_agent(agent_name)
     toolkits: list[tuple[str, Toolkit]] = []
-    for tool_name in agent_config.tools:
+    for tool_name in config.get_agent_tools(agent_name):
         try:
             toolkits.append((tool_name, get_tool_by_name(tool_name)))
         except ValueError as exc:

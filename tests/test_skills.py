@@ -357,3 +357,47 @@ async def test_skill_command_tool_dispatch() -> None:
         TOOL_METADATA.update(original_metadata)
 
     assert result == "skill:dispatch:hello"
+
+
+@pytest.mark.asyncio
+async def test_skill_command_tool_dispatch_uses_default_tools() -> None:
+    """Run skill command dispatch when toolkit is configured via defaults.tools."""
+
+    class DemoTools(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo_tools", tools=[self.demo])
+
+        def demo(self, command: str, commandName: str, skillName: str) -> str:  # noqa: N803
+            return f"{commandName}:{skillName}:{command}"
+
+    original_registry = TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    try:
+
+        @register_tool_with_metadata(
+            name="demo_toolkit",
+            display_name="Demo",
+            description="Demo tool",
+            category=ToolCategory.DEVELOPMENT,
+        )
+        def demo_toolkit() -> type[Toolkit]:
+            return DemoTools
+
+        config = _base_config(["dispatch"])
+        config.agents["code"].tools = []
+        config.defaults.tools = ["demo_toolkit"]
+
+        result = await _run_skill_command_tool(
+            config=config,
+            agent_name="code",
+            command_tool="demo",
+            skill_name="dispatch",
+            args_text="hello",
+        )
+    finally:
+        TOOL_REGISTRY.clear()
+        TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+
+    assert result == "skill:dispatch:hello"

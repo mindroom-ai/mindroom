@@ -200,7 +200,7 @@ def resolve_agent_culture(
     return culture_manager, settings
 
 
-def create_agent(  # noqa: C901, PLR0912, PLR0915
+def create_agent(  # noqa: PLR0915
     agent_name: str,
     config: Config,
     *,
@@ -241,11 +241,10 @@ def create_agent(  # noqa: C901, PLR0912, PLR0915
 
     load_plugins(config)
 
-    tool_names = list(agent_config.tools)
-    if include_default_tools:
-        for default_tool_name in defaults.tools:
-            if default_tool_name not in tool_names:
-                tool_names.append(default_tool_name)
+    tool_names = config.get_agent_tools(
+        agent_name,
+        include_default_tools=include_default_tools,
+    )
 
     # Create tools
     tools: list = []  # Use list type to satisfy Agent's parameter type
@@ -401,8 +400,9 @@ def describe_agent(agent_name: str, config: Config) -> str:
         parts.append(f"- {agent_config.role}")
 
     # Add tools if any
-    if agent_config.tools:
-        tool_list = ", ".join(agent_config.tools)
+    effective_tools = config.get_agent_tools(agent_name)
+    if effective_tools:
+        tool_list = ", ".join(effective_tools)
         parts.append(f"- Tools: {tool_list}")
 
     # Add key instructions if any

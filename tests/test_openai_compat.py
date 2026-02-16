@@ -194,8 +194,8 @@ class TestChatCompletions:
         assert data["choices"][0]["finish_reason"] == "stop"
         assert data["usage"]["prompt_tokens"] == 0
 
-    def test_passes_include_default_tools_false(self, app_client: TestClient) -> None:
-        """Passes include_default_tools=False to exclude scheduler."""
+    def test_passes_include_default_tools_true(self, app_client: TestClient) -> None:
+        """Passes include_default_tools=True so defaults.tools apply in API mode."""
         with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
             mock_ai.return_value = "Response"
 
@@ -207,7 +207,7 @@ class TestChatCompletions:
                 },
             )
 
-            assert mock_ai.call_args.kwargs["include_default_tools"] is False
+            assert mock_ai.call_args.kwargs["include_default_tools"] is True
             assert mock_ai.call_args.kwargs["include_interactive_questions"] is False
 
     def test_passes_knowledge_none(self, app_client: TestClient) -> None:
@@ -487,7 +487,7 @@ class TestStreamingCompletion:
             )
 
         assert response.status_code == 200
-        assert mock_stream_fn.call_args.kwargs["include_default_tools"] is False
+        assert mock_stream_fn.call_args.kwargs["include_default_tools"] is True
         assert mock_stream_fn.call_args.kwargs["include_interactive_questions"] is False
 
     def test_streaming_consistent_id(self, app_client: TestClient) -> None:
@@ -1772,6 +1772,7 @@ class TestTeamCompletion:
             _build_team("team_with_kb", config)
 
             assert mock_create.call_args.kwargs["knowledge"] is mock_knowledge
+            assert mock_create.call_args.kwargs["include_default_tools"] is True
             assert mock_create.call_args.kwargs["include_interactive_questions"] is False
 
 

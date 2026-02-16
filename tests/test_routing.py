@@ -393,12 +393,23 @@ class TestAgentDescription:
     def test_describe_agent_without_tools(self) -> None:
         """Test describing an agent without tools."""
         config = Config.from_yaml()
+        config.defaults.tools = []
         description = describe_agent("general", config)
 
         assert "general" in description
         assert "general-purpose assistant" in description
         assert "Tools:" not in description  # No tools section
         assert "Always provide a clear" in description
+
+    def test_describe_agent_includes_default_tools(self) -> None:
+        """Agent descriptions include defaults.tools when agent has no local tools."""
+        config = Config.from_yaml()
+        config.defaults.tools = ["scheduler"]
+        config.agents["general"].tools = []
+
+        description = describe_agent("general", config)
+
+        assert "Tools: scheduler" in description
 
     def test_describe_unknown_agent(self) -> None:
         """Test describing an unknown agent."""

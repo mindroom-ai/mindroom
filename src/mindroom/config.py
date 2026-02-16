@@ -512,6 +512,29 @@ class Config(BaseModel):
             raise ValueError(msg)
         return self.agents[agent_name]
 
+    def get_agent_tools(self, agent_name: str, *, include_default_tools: bool = True) -> list[str]:
+        """Get effective tools for an agent, optionally including defaults.
+
+        Args:
+            agent_name: Name of the agent.
+            include_default_tools: Whether to merge defaults.tools into the
+                agent-specific tools.
+
+        Returns:
+            Ordered tool names with duplicates removed.
+
+        Raises:
+            ValueError: If agent not found.
+
+        """
+        agent_config = self.get_agent(agent_name)
+        tool_names = list(agent_config.tools)
+        if include_default_tools:
+            for default_tool_name in self.defaults.tools:
+                if default_tool_name not in tool_names:
+                    tool_names.append(default_tool_name)
+        return tool_names
+
     def get_all_configured_rooms(self) -> set[str]:
         """Extract all room aliases configured for agents and teams.
 
