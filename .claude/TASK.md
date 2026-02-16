@@ -71,24 +71,21 @@ Mem0 stays available as an optional vector-search layer over those same Markdown
 ```
 mindroom_data/
 ├── workspace/                          # NEW: Markdown memory root
-│   ├── _shared/                        # Shared across all agents
-│   │   └── CULTURE.md                  # Maps to existing culture system
-│   ├── <agent_name>/                   # Per-agent workspace
-│   │   ├── SOUL.md                     # Persona, tone, boundaries
-│   │   ├── AGENTS.md                   # Operating rules, instructions
-│   │   ├── MEMORY.md                   # Curated long-term memory
-│   │   ├── memory/                     # Daily logs
-│   │   │   ├── 2026-02-15.md
-│   │   │   └── 2026-02-14.md
-│   │   └── rooms/                      # Per-room context (optional)
-│   │       └── <safe_room_id>.md
-│   └── <team_name>/                    # Per-team shared workspace
-│       ├── SOUL.md                     # Team persona
-│       └── MEMORY.md                   # Team shared memory
+│   └── <agent_name>/                   # Per-agent workspace
+│       ├── SOUL.md                     # Persona, tone, boundaries
+│       ├── AGENTS.md                   # Operating rules, instructions
+│       ├── MEMORY.md                   # Curated long-term memory
+│       ├── memory/                     # Daily logs
+│       │   ├── 2026-02-15.md
+│       │   └── 2026-02-14.md
+│       └── rooms/                      # Per-room context (P1)
+│           └── <safe_room_id>.md
 ├── sessions/                           # Existing: Agno SQLite
 ├── chroma/                             # Existing: Mem0 ChromaDB (optional)
 └── ...
 ```
+
+> **Deferred:** `_shared/CULTURE.md` is NOT included — the existing culture system (`resolve_agent_culture` at `agents.py:326`) already handles shared behavioral context. Team workspaces (`<team_name>/`) are deferred to P2.
 
 ### Prompt Assembly Flow (Modified)
 
@@ -98,48 +95,51 @@ USER MESSAGE arrives
     ▼
 _prepare_agent_and_prompt()                    [ai.py:248]
     │
-    ├─ 1. Load Markdown workspace files (NEW)
-    │      load_workspace_context(agent_name, storage_path, room_id, is_dm)
-    │      ├─ Read SOUL.md → persona block
-    │      ├─ Read AGENTS.md → rules block
+    ├─ 1. Create agent (EXISTING, modified)
+    │      create_agent()                       [agents.py:204]
+    │      ├─ identity_context (existing)
+    │      ├─ datetime_context (existing)
+    │      ├─ role = SOUL.md content → system prompt (NEW)
+    │      │    Precedence: SOUL.md > RICH_PROMPTS > YAML config.role
+    │      └─ instructions = AGENTS.md content (NEW)
+    │           Precedence: AGENTS.md > RICH_PROMPTS > YAML config.instructions
+    │
+    ├─ 2. Load factual memory context into prompt (NEW)
+    │      load_workspace_memory(agent_name, storage_path, room_id, is_dm)
     │      ├─ If is_dm: Read MEMORY.md → long-term memory block
     │      ├─ Read memory/today.md + memory/yesterday.md → recent context
     │      └─ If room_id: Read rooms/<room_id>.md → room context
-    │      Returns: formatted context string
+    │      Returns: formatted context string, prepended to user prompt
     │
-    ├─ 2. Optionally search Mem0 (EXISTING, now opt-in)
+    ├─ 3. Optionally search Mem0 (EXISTING, now opt-in)
     │      build_memory_enhanced_prompt()       [memory/functions.py:375]
-    │      Only runs if config.memory.mem0_search_enabled == True
+    │      Only runs if config.memory.mem0_search.enabled == True
     │
-    ├─ 3. Build thread history (EXISTING)
-    │      build_prompt_with_thread_history()   [ai.py:194]
-    │
-    └─ 4. Create agent (EXISTING, modified)
-           create_agent()                       [agents.py:204]
-           ├─ identity_context (existing)
-           ├─ datetime_context (existing)
-           ├─ role = SOUL.md content (replaces config.role for md-enabled agents)
-           ├─ instructions = AGENTS.md content (replaces config.instructions)
-           └─ Workspace context injected as additional_context parameter
+    └─ 4. Build thread history (EXISTING)
+           build_prompt_with_thread_history()   [ai.py:194]
 
 POST-RESPONSE:
     │
     └─ store_conversation_memory()             [memory/functions.py:450]
        Modified: appends to memory/YYYY-MM-DD.md instead of Mem0
-       (Mem0 storage remains available if explicitly enabled)
+       All three call sites updated: bot.py:1632, :1847, :2349
+       Team path passes agent_names as list[str] → append to each agent's log
+       (Mem0 storage remains available if config.memory.mem0_search.store_enabled)
 ```
 
 ### Context Loading Rules
 
-| Context | DM / Private Room | Group Room | Team Room |
+| Context | DM / Private Room | Group Room | Injection point |
 |---|---|---|---|
-| `SOUL.md` | Yes | Yes | Yes (team SOUL.md if team context) |
-| `AGENTS.md` | Yes | Yes | Yes |
-| `MEMORY.md` | Yes | **No** (security) | Team MEMORY.md only |
-| `memory/today.md` | Yes | Yes | Yes |
-| `memory/yesterday.md` | Yes | Yes | Yes |
-| `rooms/<room>.md` | N/A | Yes | Yes |
-| Mem0 search | If enabled | If enabled | If enabled |
+| `SOUL.md` | Yes | Yes | `role` param in `create_agent()` (system prompt) |
+| `AGENTS.md` | Yes | Yes | `instructions` param in `create_agent()` (system prompt) |
+| `MEMORY.md` | **Yes** | **No** (privacy) | User prompt prepend in `_prepare_agent_and_prompt()` |
+| `memory/today.md` | Yes | Yes | User prompt prepend in `_prepare_agent_and_prompt()` |
+| `memory/yesterday.md` | Yes | Yes | User prompt prepend in `_prepare_agent_and_prompt()` |
+| `rooms/<room>.md` | N/A | Yes (P1) | User prompt prepend in `_prepare_agent_and_prompt()` |
+| Mem0 search | If enabled | If enabled | User prompt prepend (existing path, now opt-in) |
+
+> **DM detection:** Uses existing `is_dm_room()` at `matrix/rooms.py:350` — multi-signal classifier using `m.direct` account data, nio room model, and state events. Already computed at `bot.py:946`, needs to be threaded through to `_prepare_agent_and_prompt()` via new `is_dm: bool` parameter.
 
 ### Coexistence with Mem0
 
@@ -183,9 +183,6 @@ DELETE /api/workspace/{agent_name}/file/{filename}  → Delete file (with confir
 GET    /api/workspace/{agent_name}/memory/daily     → List daily log files
 GET    /api/workspace/{agent_name}/memory/daily/{date} → Read specific daily log
 
-GET    /api/workspace/_shared/files                 → List shared workspace files
-GET    /api/workspace/_shared/file/{filename}        → Read shared file
-PUT    /api/workspace/_shared/file/{filename}        → Update shared file
 ```
 
 **Request/Response format:**
@@ -211,8 +208,9 @@ PUT    /api/workspace/_shared/file/{filename}        → Update shared file
 
 **Security constraints:**
 - Filenames are allowlisted: `SOUL.md`, `AGENTS.md`, `MEMORY.md`, and `memory/*.md`
-- Path traversal protection: reject any `..` or absolute paths
-- Content size validation: reject files exceeding `max_file_size`
+- Path traversal protection: reject any `..` or absolute paths — reuse `_resolve_within_root()` pattern from `api/knowledge.py:39`
+- Content size validation: reject files exceeding `max_file_size` with HTTP 400 (never truncate)
+- Optimistic concurrency: `ETag` header on GET responses (md5 of content), `If-Match` required on PUT, return 409 Conflict on mismatch
 - API key or session auth required (same as existing API endpoints)
 
 ### Frontend UX (Vite + React dashboard)
@@ -251,50 +249,53 @@ PUT    /api/workspace/_shared/file/{filename}        → Update shared file
 
 ## 7. Phased Rollout Plan
 
-### P0 — Core Markdown Memory (MVP)
+### P0 — Core Markdown Memory + SOUL (MVP)
 
-**Goal:** Replace Mem0's auto-extraction with file-based memory. Agents load workspace files into their prompt.
-
-| # | Change | File(s) | Details |
-|---|---|---|---|
-| 1 | Add workspace config to Pydantic models | `src/mindroom/config.py:108` | Add `WorkspaceConfig` with `enabled`, `max_file_size`, `daily_log_retention_days` fields inside `MemoryConfig` |
-| 2 | Create workspace module | `src/mindroom/workspace.py` (new) | Functions: `ensure_workspace(agent_name, storage_path)`, `load_workspace_context(agent_name, storage_path, room_id, is_dm)`, `append_daily_log(agent_name, storage_path, content)` |
-| 3 | Bundle default templates | `src/mindroom/templates/SOUL.md`, `AGENTS.md` (new) | Default workspace file content, adapted from OpenClaw |
-| 4 | Inject workspace context into prompt | `src/mindroom/ai.py:265` | In `_prepare_agent_and_prompt()`, call `load_workspace_context()` before `build_memory_enhanced_prompt()`. Prepend result to prompt. |
-| 5 | Make Mem0 search opt-in | `src/mindroom/memory/functions.py:375` | In `build_memory_enhanced_prompt()`, check `config.memory.mem0_search.enabled` before searching. Default: disabled. |
-| 6 | Replace Mem0 storage with daily log | `src/mindroom/memory/functions.py:450` | In `store_conversation_memory()`, when workspace is enabled, append a summary to `memory/YYYY-MM-DD.md` instead of calling `memory.add()`. |
-| 7 | Add `write_memory` agent tool | `src/mindroom/custom_tools/workspace_memory.py` (new) | Tool that agents can call explicitly to write to MEMORY.md or daily log. Registered like existing memory tool. |
-| 8 | Initialize workspace on agent boot | `src/mindroom/bot.py` (in agent init) | Call `ensure_workspace()` during `MultiAgentOrchestrator` initialization to create directories and copy templates if missing. |
-| 9 | Tests | `tests/test_workspace.py` (new) | Unit tests for workspace loading, context injection, daily log appending, file size limits. |
-| 10 | Config migration | `src/mindroom/config.py` | Add backward-compatible defaults so existing `config.yaml` files work unchanged. |
-
-### P1 — SOUL.md & Agent Identity
-
-**Goal:** Replace or augment the YAML `role` and `instructions` with SOUL.md and AGENTS.md content.
+**Goal:** Replace Mem0's auto-extraction with file-based memory. SOUL.md becomes the agent's persona (system prompt). AGENTS.md becomes operational rules. Daily logs replace Mem0 auto-extraction. Mem0 becomes opt-in.
 
 | # | Change | File(s) | Details |
 |---|---|---|---|
-| 1 | SOUL.md overrides `role` | `src/mindroom/agents.py:306-312` | If `SOUL.md` exists for agent, use its content as the role instead of `agent_config.role`. YAML role becomes fallback. |
-| 2 | AGENTS.md overrides `instructions` | `src/mindroom/agents.py:312` | If `AGENTS.md` exists, parse its content into instructions list. YAML instructions become fallback. |
-| 3 | Per-room context loading | `src/mindroom/workspace.py` | Add `load_room_context(agent_name, room_id, storage_path)` that reads `rooms/<safe_room_id>.md`. |
-| 4 | Team workspace support | `src/mindroom/workspace.py` | Add `load_team_workspace(team_name, storage_path)` for team SOUL.md and MEMORY.md. |
-| 5 | Private vs group context logic | `src/mindroom/ai.py` | Pass `is_dm` flag through to `load_workspace_context()`. Determine from room membership count or room type. |
-| 6 | Daily log auto-pruning | `src/mindroom/workspace.py` | On workspace init, delete daily logs older than `daily_log_retention_days`. |
+| 1 | Add workspace config to Pydantic models | `src/mindroom/config.py:108` | Add `WorkspaceConfig` with `enabled`, `max_file_size`, `daily_log_retention_days` fields inside `MemoryConfig`. Add `Mem0SearchConfig` with `enabled`, `store_enabled` (both default `false`). |
+| 2 | Create workspace module | `src/mindroom/workspace.py` (new) | Functions: `ensure_workspace(agent_name, storage_path)`, `load_workspace_memory(agent_name, storage_path, room_id, is_dm)`, `load_soul(agent_name, storage_path)`, `load_agents_md(agent_name, storage_path)`, `append_daily_log(agent_name: str \| list[str], storage_path, content)` |
+| 3 | Bundle default templates | `src/mindroom/templates/SOUL.md`, `AGENTS.md` (new) | Default workspace file content, adapted from OpenClaw's Core Truths / Boundaries / Vibe structure |
+| 4 | SOUL.md overrides `role` with RICH_PROMPTS handling | `src/mindroom/agents.py:303-312` | Precedence: if SOUL.md exists → use as `role` (overrides both RICH_PROMPTS and YAML). Else if `agent_name in RICH_PROMPTS` → use RICH_PROMPTS (existing). Else → use `agent_config.role` (existing). |
+| 5 | AGENTS.md overrides `instructions` | `src/mindroom/agents.py:312` | If AGENTS.md exists → use as `instructions`. Else → existing RICH_PROMPTS/YAML fallback. |
+| 6 | Thread `is_dm` to prompt assembly | `src/mindroom/ai.py:248`, `bot.py:946` | Add `is_dm: bool` parameter to `_prepare_agent_and_prompt()`, `ai_response()`, `stream_agent_response()`. Pass `_is_dm_room` (already computed at `bot.py:946`) through to these functions. |
+| 7 | Inject workspace memory into prompt | `src/mindroom/ai.py:265` | In `_prepare_agent_and_prompt()`, call `load_workspace_memory()` to load MEMORY.md (DM only) + daily logs. Prepend result to user prompt. |
+| 8 | Make Mem0 search opt-in | `src/mindroom/memory/functions.py:375` | In `build_memory_enhanced_prompt()`, check `config.memory.mem0_search.enabled` before searching. Default: disabled. |
+| 9 | Replace Mem0 storage with daily log (all 3 call sites) | `src/mindroom/memory/functions.py:450`, `bot.py:1632, :1847, :2349` | In `store_conversation_memory()`, when workspace is enabled, append a summary to `memory/YYYY-MM-DD.md` instead of calling `memory.add()`. Team path at `:2349` passes `agent_names` as `list[str]` → append to each agent's daily log. |
+| 10 | Initialize workspace on agent boot | `src/mindroom/bot.py` (in agent init) | Call `ensure_workspace()` during `MultiAgentOrchestrator` initialization to create directories and copy templates if missing. |
+| 11 | Tests | `tests/test_workspace.py` (new) | Unit tests for workspace loading, SOUL.md role injection, RICH_PROMPTS override, DM gating, daily log appending, file size rejection. |
+| 12 | Config migration | `src/mindroom/config.py` | Add backward-compatible defaults so existing `config.yaml` files work unchanged. |
 
-### P2 — Frontend & API
+### P1 — Memory Tooling & Observability
 
-**Goal:** Users can inspect and edit workspace files through the dashboard.
+**Goal:** Agents can explicitly write to memory files. Per-room context files. Context observability for debugging.
 
 | # | Change | File(s) | Details |
 |---|---|---|---|
-| 1 | Workspace API router | `src/mindroom/api/workspace.py` (new) | FastAPI router with CRUD endpoints for workspace files. |
-| 2 | Register router | `src/mindroom/api/main.py:17-27` | Add `from mindroom.api.workspace import router as workspace_router` and include it. |
-| 3 | Frontend Memory tab | `frontend/src/components/AgentMemory.tsx` (new) | React component with file list + Markdown editor. |
-| 4 | Frontend routing | `frontend/src/App.tsx` or equivalent | Add Memory tab to agent detail view. |
-| 5 | API client functions | `frontend/src/lib/api.ts` or equivalent | Add `getWorkspaceFiles()`, `getWorkspaceFile()`, `updateWorkspaceFile()`. |
+| 1 | Add `write_memory` agent tool | `src/mindroom/custom_tools/workspace_memory.py` (new) | Tool that agents call to write to MEMORY.md or daily log. Validates file size on write — rejects oversized content, never truncates. Registered like existing memory tool. |
+| 2 | Per-room context loading | `src/mindroom/workspace.py` | Add `load_room_context(agent_name, room_id, storage_path)` that reads `rooms/<safe_room_id>.md`. |
+| 3 | Context observability endpoint | `src/mindroom/api/main.py` | Add GET `/api/agents/{name}/context-report` that returns which workspace files were loaded, their sizes, and any warnings (missing files, size limits). |
+| 4 | Daily log auto-pruning | `src/mindroom/workspace.py` | On workspace init, delete daily logs older than `daily_log_retention_days`. |
+
+### P2 — Frontend, API & Team Workspace
+
+**Goal:** Users can inspect and edit workspace files through the dashboard. Teams get shared workspaces.
+
+| # | Change | File(s) | Details |
+|---|---|---|---|
+| 1 | Workspace API router | `src/mindroom/api/workspace.py` (new) | FastAPI router with CRUD endpoints for workspace files. Reuse `_resolve_within_root()` pattern from `api/knowledge.py:39`. |
+| 2 | ETag/If-Match conflict protection | `src/mindroom/api/workspace.py` | GET returns `ETag` header (md5 of content). PUT requires `If-Match` header, returns 409 Conflict on mismatch. Oversized content returns 400 (never truncate). |
+| 3 | Register router | `src/mindroom/api/main.py:17-27` | Add `from mindroom.api.workspace import router as workspace_router` and include it. |
+| 4 | Frontend Memory tab | `frontend/src/components/AgentMemory.tsx` (new) | React component with file list + Markdown editor. |
+| 5 | Frontend routing | `frontend/src/App.tsx` or equivalent | Add Memory tab to agent detail view. |
+| 6 | API client functions | `frontend/src/lib/api.ts` or equivalent | Add `getWorkspaceFiles()`, `getWorkspaceFile()`, `updateWorkspaceFile()`. |
+| 7 | Team workspace support | `src/mindroom/workspace.py` | Add `load_team_workspace(team_name, storage_path)` for team SOUL.md and MEMORY.md. Storage at `workspace/<team_name>/`. |
 
 ### P3 — Advanced Features (Future)
 
+- **`_shared/` workspace:** Shared workspace files across agents (e.g., `_shared/CULTURE.md`). Only add if the existing culture system (`resolve_agent_culture`) proves insufficient.
 - **Memory consolidation:** Periodic background task that reads daily logs and updates MEMORY.md with a summary (agent-driven or LLM-driven).
 - **Vector search over Markdown:** Re-index workspace Markdown files into ChromaDB for semantic search. Replaces Mem0's role entirely.
 - **Workspace git sync:** Optional git backup of workspace directories.
@@ -316,11 +317,16 @@ PUT    /api/workspace/_shared/file/{filename}        → Update shared file
 | `test_load_workspace_context_missing_files` | Graceful handling when workspace files don't exist |
 | `test_append_daily_log` | Content appended to correct date file with timestamp |
 | `test_daily_log_creates_directory` | memory/ dir created if missing |
-| `test_file_size_limit_enforced` | Files exceeding max_file_size are truncated with warning |
+| `test_file_size_limit_enforced` | Writes exceeding max_file_size are rejected with error (never truncated) |
 | `test_daily_log_pruning` | Logs older than retention period are deleted |
 | `test_workspace_context_in_prompt` | Full integration: workspace context appears in final prompt sent to AI |
 | `test_mem0_disabled_by_default` | With default config, Mem0 search is not called |
 | `test_mem0_enabled_opt_in` | With `mem0_search.enabled: true`, Mem0 search runs alongside workspace |
+| `test_soul_overrides_rich_prompts` | When SOUL.md exists, it takes precedence over RICH_PROMPTS for built-in agents |
+| `test_soul_fallback_to_rich_prompts` | When SOUL.md doesn't exist, RICH_PROMPTS behavior is preserved |
+| `test_agents_md_overrides_yaml_instructions` | When AGENTS.md exists, it replaces YAML instructions |
+| `test_is_dm_threaded_to_prompt_assembly` | `is_dm` parameter reaches `load_workspace_memory()` and gates MEMORY.md loading |
+| `test_daily_log_team_multi_agent` | Team path with `list[str]` agent names appends to each agent's daily log |
 
 ### Integration Tests
 
@@ -328,9 +334,8 @@ PUT    /api/workspace/_shared/file/{filename}        → Update shared file
 |---|---|
 | `test_agent_response_uses_soul` | Agent response reflects SOUL.md personality when changed |
 | `test_memory_written_after_conversation` | Daily log updated after a conversation round |
-| `test_write_memory_tool` | Agent can explicitly call write_memory to update MEMORY.md |
-| `test_room_context_isolation` | Different rooms get different room context files |
-| `test_team_workspace_shared` | Team agents share a team workspace |
+| `test_write_memory_tool` | Agent can explicitly call write_memory to update MEMORY.md (P1) |
+| `test_room_context_isolation` | Different rooms get different room context files (P1) |
 
 ### API Tests
 
@@ -342,16 +347,20 @@ PUT    /api/workspace/_shared/file/{filename}        → Update shared file
 | `test_api_path_traversal_blocked` | Filenames with `..` are rejected |
 | `test_api_file_size_limit` | PUT with oversized content returns 400 |
 | `test_api_allowlist_enforced` | PUT to non-allowed filename returns 422 |
+| `test_api_etag_conflict` | PUT with stale `If-Match` returns 409 Conflict |
+| `test_api_etag_required` | PUT without `If-Match` header returns 428 Precondition Required |
 
 ### Acceptance Criteria
 
 1. An agent with no workspace files works identically to today (backward compatible).
-2. When workspace is enabled, SOUL.md content appears at the start of the agent's system prompt.
-3. MEMORY.md is never included in group room contexts.
-4. Daily logs are appended after each conversation, with timestamp and summary.
-5. The frontend shows workspace files and allows editing with live preview.
-6. Existing Mem0 users can enable it alongside workspace with a single config flag.
-7. All existing tests continue to pass.
+2. When SOUL.md exists, it is used as the agent's `role` (system prompt), overriding both RICH_PROMPTS and YAML `role`.
+3. When SOUL.md does not exist, existing RICH_PROMPTS/YAML behavior is preserved.
+4. MEMORY.md is never included in group room contexts (gated by `is_dm_room()`).
+5. Daily logs are appended after each conversation at all three call sites (standard, streaming, team), with timestamp and summary.
+6. Oversized file writes are rejected with an error, never truncated.
+7. The frontend shows workspace files and allows editing with ETag-based conflict protection (P2).
+8. Existing Mem0 users can enable it alongside workspace with `mem0_search.enabled: true`.
+9. All existing tests continue to pass.
 
 ---
 
@@ -370,9 +379,9 @@ PUT    /api/workspace/_shared/file/{filename}        → Update shared file
 
 ### Open Questions
 
-1. **Should SOUL.md be per-agent or shared?** Current proposal: per-agent. But some users might want a shared personality. Decision: per-agent as default, shared via `_shared/SOUL.md` if needed (P3).
+1. **Should SOUL.md be per-agent or shared?** Decision: per-agent as default. Shared workspace (`_shared/`) deferred to P3. Existing culture system handles shared behavioral context.
 
-2. **How to determine if a room is "private"?** Options: (a) room has exactly 2 members (agent + 1 user), (b) room is marked private in config, (c) room name matches a pattern. Recommendation: option (a) is simplest and covers 90% of cases. Allow override in config.
+2. ~~**How to determine if a room is "private"?**~~ **RESOLVED:** Use existing `is_dm_room()` at `matrix/rooms.py:350` — multi-signal classifier using `m.direct` account data, nio room model, and state events. Already computed at `bot.py:946`. No new heuristic needed.
 
 3. **Should agents be able to edit their own SOUL.md?** OpenClaw allows it. Recommendation for P0: No. Agents can write to MEMORY.md and daily logs only. SOUL.md edits require human approval via frontend. Revisit in P3.
 
@@ -387,7 +396,7 @@ PUT    /api/workspace/_shared/file/{filename}        → Update shared file
    Key decision: token expiry set to 24h with refresh tokens.
    ```
 
-5. **How to handle the existing `instructions` field in config.yaml?** If AGENTS.md exists, it takes precedence. The YAML `instructions` field remains as a fallback and is merged (AGENTS.md first, then YAML instructions appended). This preserves backward compatibility.
+5. **How to handle the existing `instructions` field in config.yaml?** If AGENTS.md exists, it takes full precedence (replaces, not merges). YAML `instructions` field remains as fallback only. Same precedence pattern as SOUL.md: AGENTS.md > RICH_PROMPTS embedded instructions > YAML instructions.
 
 6. **Token budget for workspace context?** Recommendation: budget 4K tokens for workspace files (roughly: SOUL.md ~500 tokens, AGENTS.md ~500 tokens, MEMORY.md ~2K tokens, daily logs ~1K tokens). This is small relative to most model context windows (128K+).
 
@@ -408,8 +417,15 @@ PUT    /api/workspace/_shared/file/{filename}        → Update shared file
 | `src/mindroom/agents.py` | 341-358 | `Agent()` constructor call with all parameters |
 | `src/mindroom/config.py` | 26-70 | `AgentConfig` model — where `role`, `instructions`, `knowledge_bases` are defined |
 | `src/mindroom/config.py` | 108-116 | `MemoryConfig` model — current Mem0 configuration |
-| `src/mindroom/bot.py` | 1623-1635 | Where `store_conversation_memory()` is called post-response |
+| `src/mindroom/agents.py` | 303-307 | `RICH_PROMPTS` bypass — SOUL.md must override this branch when present |
+| `src/mindroom/agents.py` | 326-339 | `resolve_agent_culture()` — existing culture system (do not duplicate with `_shared/CULTURE.md`) |
+| `src/mindroom/bot.py` | 946 | `_is_dm_room` computed — needs to be threaded to `ai_response()` and `stream_agent_response()` |
+| `src/mindroom/bot.py` | 1632 | `store_conversation_memory()` call — standard (non-streaming) response path |
+| `src/mindroom/bot.py` | 1847 | `store_conversation_memory()` call — streaming/cancellable response path |
+| `src/mindroom/bot.py` | 2349 | `store_conversation_memory()` call — team response path (passes `list[str]` agent names) |
+| `src/mindroom/matrix/rooms.py` | 350 | `is_dm_room()` — multi-signal DM classifier (m.direct, nio model, state events) |
 | `src/mindroom/api/main.py` | 17-27 | API router registration — where workspace router would be added |
+| `src/mindroom/api/knowledge.py` | 39-49 | `_resolve_within_root()` — path validation pattern to reuse for workspace API |
 
 ### OpenClaw Code References
 
