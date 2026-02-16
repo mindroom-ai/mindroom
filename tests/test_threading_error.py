@@ -503,6 +503,124 @@ class TestThreadingBehavior:
         mock_fetch.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_extract_context_reply_chain_traversal_limit_warns_and_falls_back(self, bot: AgentBot) -> None:
+        """Traversal limit should warn and return the oldest resolved event as fallback root."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "Deep non-cyclic reply chain",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$msg6:localhost"}},
+                },
+                "event_id": "$incoming:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567897,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        responses: list[nio.RoomGetEventResponse] = []
+        for i in range(6, 0, -1):
+            content = {"body": f"Message {i}", "msgtype": "m.text"}
+            if i > 1:
+                content["m.relates_to"] = {"m.in_reply_to": {"event_id": f"$msg{i - 1}:localhost"}}
+            responses.append(
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": content,
+                        "event_id": f"$msg{i}:localhost",
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 1234567880 + i,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+            )
+
+        bot.client.room_get_event = AsyncMock(side_effect=responses)
+
+        with (
+            patch.object(AgentBot, "_REPLY_CHAIN_TRAVERSAL_LIMIT", 3),
+            patch.object(bot.logger, "warning") as mock_warning,
+            patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch,
+        ):
+            context = await bot._extract_message_context(room, event)
+
+        assert context.is_thread is True
+        assert context.thread_id == "$msg4:localhost"
+        assert [msg["event_id"] for msg in context.thread_history] == [
+            "$msg4:localhost",
+            "$msg5:localhost",
+            "$msg6:localhost",
+        ]
+        assert bot.client.room_get_event.await_count == 3
+        mock_warning.assert_called_once()
+        assert mock_warning.call_args.kwargs["traversal_limit"] == 3
+        assert mock_warning.call_args.kwargs["traversed_events"] == 3
+        assert mock_warning.call_args.kwargs["last_event_id"] == "$msg4:localhost"
+        mock_fetch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_extract_context_reply_chain_caches_stay_bounded(self, bot: AgentBot) -> None:
+        """Reply-chain caches should stay bounded by LRU eviction."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+
+        chain_length = 12
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "Check bounded caches",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": f"$msg{chain_length}:localhost"}},
+                },
+                "event_id": "$incoming:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567990,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        responses: list[nio.RoomGetEventResponse] = []
+        for i in range(chain_length, 0, -1):
+            content = {"body": f"Message {i}", "msgtype": "m.text"}
+            if i > 1:
+                content["m.relates_to"] = {"m.in_reply_to": {"event_id": f"$msg{i - 1}:localhost"}}
+            responses.append(
+                nio.RoomGetEventResponse.from_dict(
+                    {
+                        "content": content,
+                        "event_id": f"$msg{i}:localhost",
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 1234567900 + i,
+                        "room_id": "!test:localhost",
+                        "type": "m.room.message",
+                    },
+                ),
+            )
+
+        bot.client.room_get_event = AsyncMock(side_effect=responses)
+
+        with (
+            patch.object(AgentBot, "_REPLY_CHAIN_CACHE_MAX_SIZE", 5),
+            patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch,
+        ):
+            context = await bot._extract_message_context(room, event)
+
+        assert context.is_thread is True
+        assert context.thread_id == "$msg1:localhost"
+        assert len(bot._reply_chain_nodes) <= 5
+        assert len(bot._reply_chain_roots) <= 5
+        mock_fetch.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_extract_context_preserves_plain_replies_before_thread_link(self, bot: AgentBot) -> None:
         """Reply-chain messages should be preserved when chain eventually points to a thread."""
         room = MagicMock(spec=nio.MatrixRoom)

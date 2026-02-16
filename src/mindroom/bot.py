@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from collections import OrderedDict
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import nio
 import uvicorn
@@ -586,8 +587,10 @@ class AgentBot:
     running: bool = field(default=False, init=False)
     enable_streaming: bool = field(default=True)  # Enable/disable streaming responses
     orchestrator: MultiAgentOrchestrator | None = field(default=None, init=False)  # Reference to orchestrator
-    _reply_chain_nodes: dict[tuple[str, str], ReplyChainNode] = field(default_factory=dict, init=False)
-    _reply_chain_roots: dict[tuple[str, str], ReplyChainRoot] = field(default_factory=dict, init=False)
+    _reply_chain_nodes: OrderedDict[tuple[str, str], ReplyChainNode] = field(default_factory=OrderedDict, init=False)
+    _reply_chain_roots: OrderedDict[tuple[str, str], ReplyChainRoot] = field(default_factory=OrderedDict, init=False)
+    _REPLY_CHAIN_CACHE_MAX_SIZE: ClassVar[int] = 4096
+    _REPLY_CHAIN_TRAVERSAL_LIMIT: ClassVar[int] = 500
 
     @property
     def agent_name(self) -> str:
@@ -1221,22 +1224,39 @@ class AgentBot:
             "content": content,
         }
 
-    @staticmethod
-    def _reply_chain_cache_key(room_id: str, event_id: str) -> tuple[str, str]:
-        """Build a cache key for reply-chain lookups."""
-        return room_id, event_id
-
     def _get_cached_reply_chain_node(self, room_id: str, event_id: str) -> ReplyChainNode | None:
         """Return cached reply-chain node metadata if available."""
-        return self._reply_chain_nodes.get(self._reply_chain_cache_key(room_id, event_id))
+        key = (room_id, event_id)
+        node = self._reply_chain_nodes.get(key)
+        if node is None:
+            return None
+        self._reply_chain_nodes.move_to_end(key)
+        return node
 
     def _cache_reply_chain_node(self, room_id: str, event_id: str, node: ReplyChainNode) -> None:
         """Store reply-chain node metadata."""
-        self._reply_chain_nodes[self._reply_chain_cache_key(room_id, event_id)] = node
+        key = (room_id, event_id)
+        self._reply_chain_nodes[key] = node
+        self._reply_chain_nodes.move_to_end(key)
+        if len(self._reply_chain_nodes) > self._REPLY_CHAIN_CACHE_MAX_SIZE:
+            self._reply_chain_nodes.popitem(last=False)
 
     def _get_cached_reply_chain_root(self, room_id: str, event_id: str) -> ReplyChainRoot | None:
         """Return cached canonical root metadata for an event."""
-        return self._reply_chain_roots.get(self._reply_chain_cache_key(room_id, event_id))
+        key = (room_id, event_id)
+        root = self._reply_chain_roots.get(key)
+        if root is None:
+            return None
+        self._reply_chain_roots.move_to_end(key)
+        return root
+
+    def _cache_reply_chain_root(self, room_id: str, event_id: str, root: ReplyChainRoot) -> None:
+        """Store canonical root metadata with LRU eviction."""
+        key = (room_id, event_id)
+        self._reply_chain_roots[key] = root
+        self._reply_chain_roots.move_to_end(key)
+        if len(self._reply_chain_roots) > self._REPLY_CHAIN_CACHE_MAX_SIZE:
+            self._reply_chain_roots.popitem(last=False)
 
     def _cache_reply_chain_roots(
         self,
@@ -1248,7 +1268,7 @@ class AgentBot:
         """Path-compress canonical root metadata across visited events."""
         root = ReplyChainRoot(root_event_id=root_event_id, points_to_thread=points_to_thread)
         for event_id in event_ids:
-            self._reply_chain_roots[self._reply_chain_cache_key(room_id, event_id)] = root
+            self._cache_reply_chain_root(room_id, event_id, root)
 
     def _first_cached_reply_chain_root(self, room_id: str, event_ids: list[str]) -> ReplyChainRoot | None:
         """Return the first cached root metadata found in a traversal path."""
@@ -1325,10 +1345,55 @@ class AgentBot:
         if not AgentBot._thread_history_has_replies(thread_history, event_id):
             return None
 
-        node.thread_root_id = event_id
-        self._cache_reply_chain_node(room_id, event_id, node)
+        self._cache_reply_chain_node(
+            room_id,
+            event_id,
+            ReplyChainNode(message=node.message, parent_event_id=node.parent_event_id, thread_root_id=event_id),
+        )
         self._cache_reply_chain_roots(room_id, visited_event_ids, event_id, points_to_thread=True)
         return event_id, thread_history, True, True
+
+    def _build_reply_chain_context_result(
+        self,
+        *,
+        room_id: str,
+        reply_to_event_id: str,
+        chain_history: list[dict[str, Any]],
+        visited_event_ids: list[str],
+        thread_root_id: str | None,
+        hit_traversal_limit: bool,
+    ) -> tuple[str, list[dict[str, Any]], bool, bool]:
+        """Build reply-chain context tuple after traversal is complete."""
+        cached_root = self._first_cached_reply_chain_root(room_id, visited_event_ids)
+        if not chain_history:
+            if cached_root:
+                return cached_root.root_event_id, [], cached_root.points_to_thread, False
+            return reply_to_event_id, [], False, False
+
+        # Fetches walk from newest->oldest, but consumers expect chronological history.
+        chain_history.reverse()
+
+        if thread_root_id:
+            self._cache_reply_chain_roots(room_id, visited_event_ids, thread_root_id, points_to_thread=True)
+            return thread_root_id, chain_history, True, False
+
+        if hit_traversal_limit:
+            root_event_id = str(chain_history[0].get("event_id", reply_to_event_id))
+            self._cache_reply_chain_roots(room_id, visited_event_ids, root_event_id, points_to_thread=False)
+            return root_event_id, chain_history, False, False
+
+        if cached_root:
+            self._cache_reply_chain_roots(
+                room_id,
+                visited_event_ids,
+                cached_root.root_event_id,
+                points_to_thread=cached_root.points_to_thread,
+            )
+            return cached_root.root_event_id, chain_history, cached_root.points_to_thread, False
+
+        root_event_id = str(chain_history[0].get("event_id", reply_to_event_id))
+        self._cache_reply_chain_roots(room_id, visited_event_ids, root_event_id, points_to_thread=False)
+        return root_event_id, chain_history, False, False
 
     @staticmethod
     def _unique_history_event_ids(messages: list[dict[str, Any]]) -> list[str]:
@@ -1422,8 +1487,21 @@ class AgentBot:
         current_event_id: str | None = reply_to_event_id
         seen_event_ids: set[str] = set()
         visited_event_ids: list[str] = []
+        hit_traversal_limit = False
+        direct_thread_root_context: tuple[str, list[dict[str, Any]], bool, bool] | None = None
 
         while current_event_id:
+            if len(visited_event_ids) >= self._REPLY_CHAIN_TRAVERSAL_LIMIT:
+                hit_traversal_limit = True
+                self.logger.warning(
+                    "Reply-chain traversal limit reached while resolving context",
+                    room_id=room_id,
+                    reply_to_event_id=reply_to_event_id,
+                    traversal_limit=self._REPLY_CHAIN_TRAVERSAL_LIMIT,
+                    traversed_events=len(visited_event_ids),
+                    last_event_id=visited_event_ids[-1] if visited_event_ids else None,
+                )
+                break
             if current_event_id in seen_event_ids:
                 self.logger.debug(
                     "Detected reply-chain cycle while resolving context",
@@ -1450,35 +1528,21 @@ class AgentBot:
                 chain_history_length=len(chain_history),
             )
             if direct_thread_root_context is not None:
-                return direct_thread_root_context
+                break
 
             current_event_id = node.parent_event_id
 
-        cached_root = self._first_cached_reply_chain_root(room_id, visited_event_ids)
-        if not chain_history:
-            if cached_root:
-                return cached_root.root_event_id, [], cached_root.points_to_thread, False
-            return reply_to_event_id, [], False, False
+        if direct_thread_root_context is not None:
+            return direct_thread_root_context
 
-        # Fetches walk from newest->oldest, but consumers expect chronological history.
-        chain_history.reverse()
-
-        if thread_root_id:
-            self._cache_reply_chain_roots(room_id, visited_event_ids, thread_root_id, points_to_thread=True)
-            return thread_root_id, chain_history, True, False
-
-        if cached_root:
-            self._cache_reply_chain_roots(
-                room_id,
-                visited_event_ids,
-                cached_root.root_event_id,
-                points_to_thread=cached_root.points_to_thread,
-            )
-            return cached_root.root_event_id, chain_history, cached_root.points_to_thread, False
-
-        root_event_id = str(chain_history[0].get("event_id", reply_to_event_id))
-        self._cache_reply_chain_roots(room_id, visited_event_ids, root_event_id, points_to_thread=False)
-        return root_event_id, chain_history, False, False
+        return self._build_reply_chain_context_result(
+            room_id=room_id,
+            reply_to_event_id=reply_to_event_id,
+            chain_history=chain_history,
+            visited_event_ids=visited_event_ids,
+            thread_root_id=thread_root_id,
+            hit_traversal_limit=hit_traversal_limit,
+        )
 
     async def _derive_conversation_context(
         self,
