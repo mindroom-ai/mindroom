@@ -31,11 +31,14 @@ from mindroom.api.workspace import router as workspace_router
 from mindroom.config import Config, normalize_config_data
 from mindroom.constants import CONFIG_PATH, CONFIG_TEMPLATE_PATH, safe_replace
 from mindroom.credentials_sync import sync_env_to_credentials
+from mindroom.logging_config import get_logger
 from mindroom.tool_dependencies import auto_install_enabled, auto_install_tool_extra
 from mindroom.workspace import workspace_context_report
 
 if TYPE_CHECKING:
     from supabase import Client as SupabaseClient
+
+logger = get_logger(__name__)
 
 
 async def _watch_config(stop_event: asyncio.Event) -> None:
@@ -124,11 +127,11 @@ def ensure_writable_config() -> None:
 def _build_runtime_config(config_data: dict[str, Any]) -> Config | None:
     try:
         return Config(**config_data)
-    except ValidationError as exc:
-        print(f"Warning: failed to parse runtime config: {exc}")
+    except ValidationError:
+        logger.warning("Failed to parse runtime config", exc_info=True)
         return None
-    except Exception as exc:
-        print(f"Warning: unexpected runtime config parse error: {exc}")
+    except Exception:
+        logger.warning("Unexpected runtime config parse error", exc_info=True)
         return None
 
 
@@ -155,6 +158,7 @@ def save_config_to_file(config_data: dict[str, Any]) -> None:
 # Global variable to store current config
 config: dict[str, Any] = {}
 runtime_config: Config | None = None
+# Reentrant lock avoids deadlocks if config mutation and reload paths nest.
 config_lock = threading.RLock()
 
 
