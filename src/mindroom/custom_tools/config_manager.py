@@ -510,33 +510,19 @@ class ConfigManagerTools(Toolkit):
                 return knowledge_base_error
 
             # Create new agent config
-            if include_default_tools is None:
-                new_agent = AgentConfig(
-                    display_name=display_name,
-                    role=role,
-                    tools=tools,
-                    instructions=instructions,
-                    model=model,
-                    rooms=rooms,
-                    knowledge_bases=knowledge_bases,
-                    markdown=markdown,
-                    learning=learning,
-                    learning_mode=learning_mode,
-                )
-            else:
-                new_agent = AgentConfig(
-                    display_name=display_name,
-                    role=role,
-                    tools=tools,
-                    instructions=instructions,
-                    model=model,
-                    rooms=rooms,
-                    knowledge_bases=knowledge_bases,
-                    include_default_tools=include_default_tools,
-                    markdown=markdown,
-                    learning=learning,
-                    learning_mode=learning_mode,
-                )
+            new_agent = AgentConfig(
+                display_name=display_name,
+                role=role,
+                tools=tools,
+                instructions=instructions,
+                model=model,
+                rooms=rooms,
+                knowledge_bases=knowledge_bases,
+                include_default_tools=True if include_default_tools is None else include_default_tools,
+                markdown=markdown,
+                learning=learning,
+                learning_mode=learning_mode,
+            )
 
             # Add to config
             config.agents[agent_name] = new_agent
