@@ -1198,7 +1198,7 @@ class AgentBot:
             # Mark as responded to avoid reprocessing
             self.response_tracker.mark_responded(event.event_id)
 
-    async def _on_image_message(  # noqa: C901, PLR0911, PLR0912
+    async def _on_image_message(  # noqa: C901, PLR0911
         self,
         room: nio.MatrixRoom,
         event: nio.RoomMessageImage | nio.RoomEncryptedImage,
@@ -1227,49 +1227,47 @@ class AgentBot:
 
         # Skip messages from other agents unless mentioned
         sender_agent_name = extract_agent_name(event.sender, self.config)
+        context = await self._extract_message_context(room, event)
 
-        # Detect mentions and derive conversation context
-        skip_mentions = _should_skip_mentions(event.source)
-        if skip_mentions:
-            mentioned_agents: list[MatrixID] = []
-            am_i_mentioned = False
-            has_non_agent_mentions = False
-        else:
-            mentioned_agents, am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
-                event.source,
-                self.matrix_id,
-                self.config,
-            )
-
-        if sender_agent_name and not am_i_mentioned:
+        if sender_agent_name and not context.am_i_mentioned:
             self.logger.debug("Ignoring image from other agent (not mentioned)")
             return
 
-        event_info = EventInfo.from_event(event.source)
-        is_thread, thread_id, thread_history = await self._derive_conversation_context(
-            room.room_id,
-            event_info,
-        )
-
-        # Get agents in thread
-        agents_in_thread = get_agents_in_thread(thread_history, self.config)
-
         # Check for team formation
+        agents_in_thread = get_agents_in_thread(context.thread_history, self.config)
         _is_dm_room = await is_dm_room(self.client, room.room_id)
-        all_mentioned_in_thread = get_all_mentioned_agents_in_thread(thread_history, self.config)
+        all_mentioned_in_thread = get_all_mentioned_agents_in_thread(context.thread_history, self.config)
         form_team = await decide_team_formation(
             self.matrix_id,
-            mentioned_agents,
+            context.mentioned_agents,
             agents_in_thread,
             all_mentioned_in_thread,
             room=room,
             message=event.body,
             config=self.config,
             is_dm_room=_is_dm_room,
-            is_thread=is_thread,
+            is_thread=context.is_thread,
         )
 
-        # Download image
+        # Check if we should respond (individually or as team) before downloading
+        will_respond_as_team = form_team.should_form_team and self.matrix_id in form_team.agents
+        if will_respond_as_team:
+            first_agent = min(form_team.agents, key=lambda x: x.full_id)
+            if self.matrix_id != first_agent:
+                return
+        elif not should_agent_respond(
+            agent_name=self.agent_name,
+            am_i_mentioned=context.am_i_mentioned,
+            is_thread=context.is_thread,
+            room=room,
+            thread_history=context.thread_history,
+            config=self.config,
+            mentioned_agents=context.mentioned_agents,
+            has_non_agent_mentions=context.has_non_agent_mentions,
+        ):
+            return
+
+        # Download image only after confirming we should respond
         image = await image_handler.download_image(self.client, event)
         if image is None:
             self.logger.error("Failed to download image", event_id=event.event_id)
@@ -1277,60 +1275,34 @@ class AgentBot:
             return
 
         # Detect caption vs filename-only body
-        # Matrix clients set body to the filename when no caption is provided
         body = event.body
-        if body and "." in body and "/" not in body and len(body) < 260:
-            # Looks like a bare filename (e.g., "IMG_1234.jpg")
-            prompt = "[Attached image]"
-        else:
-            prompt = body or "[Attached image]"
+        prompt = "[Attached image]" if not body or image_handler.is_filename(body) else body
 
-        # Handle team formation
-        if form_team.should_form_team and self.matrix_id in form_team.agents:
-            first_agent = min(form_team.agents, key=lambda x: x.full_id)
-            if self.matrix_id != first_agent:
-                return
+        self.logger.info("Processing image", event_id=event.event_id)
 
+        if will_respond_as_team:
             response_event_id = await self._generate_team_response_helper(
                 room_id=room.room_id,
                 reply_to_event_id=event.event_id,
-                thread_id=thread_id,
+                thread_id=context.thread_id,
                 message=prompt,
                 team_agents=form_team.agents,
                 team_mode=form_team.mode,
-                thread_history=thread_history,
+                thread_history=context.thread_history,
                 requester_user_id=event.sender,
                 existing_event_id=None,
                 images=[image],
             )
-            self.response_tracker.mark_responded(event.event_id, response_event_id)
-            return
-
-        # Check if we should respond individually
-        should_respond = should_agent_respond(
-            agent_name=self.agent_name,
-            am_i_mentioned=am_i_mentioned,
-            is_thread=is_thread,
-            room=room,
-            thread_history=thread_history,
-            config=self.config,
-            mentioned_agents=mentioned_agents,
-            has_non_agent_mentions=has_non_agent_mentions,
-        )
-
-        if not should_respond:
-            return
-
-        self.logger.info("Processing image", event_id=event.event_id)
-        response_event_id = await self._generate_response(
-            room_id=room.room_id,
-            prompt=prompt,
-            reply_to_event_id=event.event_id,
-            thread_id=thread_id,
-            thread_history=thread_history,
-            user_id=event.sender,
-            images=[image],
-        )
+        else:
+            response_event_id = await self._generate_response(
+                room_id=room.room_id,
+                prompt=prompt,
+                reply_to_event_id=event.event_id,
+                thread_id=context.thread_id,
+                thread_history=context.thread_history,
+                user_id=event.sender,
+                images=[image],
+            )
         self.response_tracker.mark_responded(event.event_id, response_event_id)
 
     async def _derive_conversation_context(
@@ -1349,7 +1321,7 @@ class AgentBot:
             fetch_thread_history,
         )
 
-    async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
+    async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessage) -> MessageContext:
         assert self.client is not None
 
         # Check if mentions should be ignored for this message
