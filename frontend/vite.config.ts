@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite';
+import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 
@@ -6,17 +6,16 @@ import path from 'path';
 const backendPort = process.env.BACKEND_PORT || '8765';
 const frontendPort = parseInt(process.env.FRONTEND_PORT || '3003');
 const isDocker = process.env.DOCKER_CONTAINER === '1';
-// Dashboard API key — injected server-side by the proxy so it never
-// appears in the browser JS bundle.  Read from the repo-root .env
-// (same var the backend uses).
-const apiKey = process.env.MINDROOM_API_KEY;
+
+// Load MINDROOM_API_KEY from the repo-root .env (parent of frontend/).
+// The empty prefix '' makes loadEnv read ALL vars, not just VITE_-prefixed ones.
+// This key is used server-side by the dev proxy and never reaches the browser.
+const rootEnv = loadEnv('development', path.resolve(__dirname, '..'), '');
+const apiKey = process.env.MINDROOM_API_KEY || rootEnv.MINDROOM_API_KEY;
 
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
-  // Load .env from repo root (parent of frontend/) so that
-  // MINDROOM_API_KEY set in the root .env is available to the proxy.
-  envDir: '..',
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
