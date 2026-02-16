@@ -11,6 +11,13 @@ MindRoom can be deployed in various ways depending on your needs.
 | [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/index.md)            | Multi-tenant SaaS, production                               |
 | Direct                                                                             | Development, simple setups                                  |
 
+## Bridges
+
+Connect external messaging platforms to Matrix:
+
+- [Bridges overview](https://docs.mindroom.chat/deployment/bridges/index.md) - available bridges and how they work
+- [Telegram bridge](https://docs.mindroom.chat/deployment/bridges/telegram/index.md) - bridge Telegram chats via mautrix-telegram
+
 ## Google Services (Gmail/Calendar/Drive/Sheets)
 
 Use these guides if you want users to connect Google accounts in the MindRoom frontend:
