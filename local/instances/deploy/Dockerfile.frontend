@@ -29,11 +29,15 @@ WORKDIR /usr/share/nginx/html
 # Only copy what's needed for production
 COPY --from=builder /app/frontend/dist ./
 
+# Switch to root for nginx config setup (image defaults to UID 101)
+USER root
+
 # Write nginx config template.  The nginx-unprivileged entrypoint runs
 # envsubst on /etc/nginx/templates/*.template before starting nginx.
 # NGINX_ENVSUBST_FILTER limits substitution to only $BACKEND_URL so
 # nginx's own variables ($uri, $host, etc.) are left untouched.
 ENV NGINX_ENVSUBST_FILTER=BACKEND_URL
+RUN mkdir -p /etc/nginx/templates
 RUN cat > /etc/nginx/templates/default.conf.template << 'TMPL'
 server {
     listen 8080;
@@ -74,6 +78,9 @@ if [ -n "$MINDROOM_API_KEY" ]; then
 fi
 SH
 RUN chmod +x /docker-entrypoint.d/90-inject-api-key.sh
+
+# Switch back to unprivileged nginx user
+USER nginx
 
 # Expose port (8080 is default for nginx-unprivileged)
 EXPOSE 8080
