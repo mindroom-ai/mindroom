@@ -10,6 +10,14 @@ export const API_BASE_URL =
 // Export as API_BASE for compatibility
 export const API_BASE = API_BASE_URL;
 
+function encodePathSegments(path: string): string {
+  return path
+    .split('/')
+    .filter(segment => segment.length > 0)
+    .map(segment => encodeURIComponent(segment))
+    .join('/');
+}
+
 export const API_ENDPOINTS = {
   // Config endpoints
   config: {
@@ -56,6 +64,16 @@ export const API_ENDPOINTS = {
     delete: (service: string) => `${API_BASE_URL}/api/credentials/${encodeURIComponent(service)}`,
     test: (service: string) =>
       `${API_BASE_URL}/api/credentials/${encodeURIComponent(service)}/test`,
+  },
+
+  // Workspace operations
+  workspace: {
+    files: (agentName: string) =>
+      `${API_BASE_URL}/api/workspace/${encodeURIComponent(agentName)}/files`,
+    file: (agentName: string, filename: string) =>
+      `${API_BASE_URL}/api/workspace/${encodeURIComponent(agentName)}/file/${encodePathSegments(
+        filename
+      )}`,
   },
 
   // Other endpoints
@@ -112,4 +130,82 @@ export async function fetchJSON<T>(url: string, options?: RequestInit): Promise<
 // Backward-compatible helper for existing call sites.
 export async function fetchAPI(url: string, options?: RequestInit): Promise<any> {
   return fetchJSON<any>(url, options);
+}
+
+export type WorkspaceFileMetadata = {
+  filename: string;
+  size_bytes: number;
+  last_modified: string;
+  agent_name: string;
+};
+
+export type WorkspaceFileResponse = WorkspaceFileMetadata & {
+  content: string;
+};
+
+type WorkspaceFileListResponse = {
+  agent_name: string;
+  files: WorkspaceFileMetadata[];
+  count: number;
+};
+
+export async function getWorkspaceFiles(agentName: string): Promise<WorkspaceFileListResponse> {
+  return fetchJSON<WorkspaceFileListResponse>(API_ENDPOINTS.workspace.files(agentName));
+}
+
+export async function getWorkspaceFile(
+  agentName: string,
+  filename: string
+): Promise<{ file: WorkspaceFileResponse; etag: string }> {
+  const response = await fetch(API_ENDPOINTS.workspace.file(agentName, filename), {
+    headers: { 'Content-Type': 'application/json' },
+  });
+  if (!response.ok) {
+    let detail = `API call failed: ${response.status} ${response.statusText}`;
+    try {
+      const payload = await response.json();
+      if (typeof payload?.detail === 'string') {
+        detail = payload.detail;
+      }
+    } catch {
+      // Keep fallback detail text.
+    }
+    throw new Error(detail);
+  }
+
+  const etag = response.headers.get('etag') || '';
+  const file = (await response.json()) as WorkspaceFileResponse;
+  return { file, etag };
+}
+
+export async function updateWorkspaceFile(
+  agentName: string,
+  filename: string,
+  content: string,
+  etag: string
+): Promise<{ file: WorkspaceFileResponse; etag: string }> {
+  const response = await fetch(API_ENDPOINTS.workspace.file(agentName, filename), {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'If-Match': etag,
+    },
+    body: JSON.stringify({ content }),
+  });
+  if (!response.ok) {
+    let detail = `API call failed: ${response.status} ${response.statusText}`;
+    try {
+      const payload = await response.json();
+      if (typeof payload?.detail === 'string') {
+        detail = payload.detail;
+      }
+    } catch {
+      // Keep fallback detail text.
+    }
+    throw new Error(detail);
+  }
+
+  const nextEtag = response.headers.get('etag') || '';
+  const file = (await response.json()) as WorkspaceFileResponse;
+  return { file, etag: nextEtag };
 }
