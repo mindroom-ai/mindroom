@@ -41,6 +41,10 @@ nav = [
   ] },
   { "Deployment" = [
     { "Overview" = "deployment/index.md" },
+    { "Bridges" = [
+      { "Overview" = "deployment/bridges/index.md" },
+      { "Telegram" = "deployment/bridges/telegram.md" },
+    ] },
     { "Google Services OAuth (Admin)" = "deployment/google-services-oauth.md" },
     { "Google Services OAuth (Individual)" = "deployment/google-services-user-oauth.md" },
     { "Docker" = "deployment/docker.md" },
