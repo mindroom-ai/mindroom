@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections import OrderedDict
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any
 
 import nio
 import uvicorn
@@ -54,6 +53,7 @@ from .matrix.identity import (
 )
 from .matrix.mentions import format_message_with_mentions
 from .matrix.presence import build_agent_status_message, is_user_online, set_presence_status, should_use_streaming
+from .matrix.reply_chain import ReplyChainCaches, derive_conversation_context
 from .matrix.rooms import (
     ensure_all_rooms_exist,
     ensure_user_in_rooms,
@@ -557,50 +557,6 @@ class MessageContext:
     mentioned_agents: list[MatrixID]
 
 
-class _LRUCache[T]:
-    """Bounded LRU cache keyed by (room_id, event_id)."""
-
-    __slots__ = ("_data", "maxsize")
-
-    def __init__(self, maxsize: int) -> None:
-        self._data: OrderedDict[tuple[str, str], T] = OrderedDict()
-        self.maxsize = maxsize
-
-    def get(self, room_id: str, event_id: str) -> T | None:
-        key = (room_id, event_id)
-        value = self._data.get(key)
-        if value is not None:
-            self._data.move_to_end(key)
-        return value
-
-    def put(self, room_id: str, event_id: str, value: T) -> None:
-        key = (room_id, event_id)
-        self._data[key] = value
-        self._data.move_to_end(key)
-        if len(self._data) > self.maxsize:
-            self._data.popitem(last=False)
-
-    def __len__(self) -> int:
-        return len(self._data)
-
-
-@dataclass
-class ReplyChainNode:
-    """Cached reply-chain node metadata for context derivation."""
-
-    message: dict[str, Any]
-    parent_event_id: str | None
-    thread_root_id: str | None
-
-
-@dataclass
-class ReplyChainRoot:
-    """Canonical root metadata for a reply-chain event."""
-
-    root_event_id: str
-    points_to_thread: bool
-
-
 @dataclass
 class AgentBot:
     """Represents a single agent bot with its own Matrix account."""
@@ -614,15 +570,7 @@ class AgentBot:
     running: bool = field(default=False, init=False)
     enable_streaming: bool = field(default=True)  # Enable/disable streaming responses
     orchestrator: MultiAgentOrchestrator | None = field(default=None, init=False)  # Reference to orchestrator
-    _reply_chain_nodes: _LRUCache[ReplyChainNode] = field(
-        default_factory=lambda: _LRUCache(4096),
-        init=False,
-    )
-    _reply_chain_roots: _LRUCache[ReplyChainRoot] = field(
-        default_factory=lambda: _LRUCache(4096),
-        init=False,
-    )
-    _REPLY_CHAIN_TRAVERSAL_LIMIT: ClassVar[int] = 500
+    _reply_chain: ReplyChainCaches = field(default_factory=ReplyChainCaches, init=False)
 
     @property
     def agent_name(self) -> str:
@@ -1237,293 +1185,6 @@ class AgentBot:
             # Mark as responded to avoid reprocessing
             self.response_tracker.mark_responded(event.event_id)
 
-    @staticmethod
-    def _event_to_history_message(event: nio.Event) -> dict[str, Any]:
-        """Convert a Matrix event to normalized history message structure."""
-        content = event.source.get("content", {})
-        body = content.get("body", "") if isinstance(content, dict) else ""
-        return {
-            "sender": event.sender,
-            "body": body if isinstance(body, str) else "",
-            "timestamp": event.server_timestamp,
-            "event_id": event.event_id,
-            "content": content if isinstance(content, dict) else {},
-        }
-
-    def _cache_reply_chain_roots(
-        self,
-        room_id: str,
-        event_ids: list[str],
-        root_event_id: str,
-        points_to_thread: bool,
-    ) -> None:
-        """Path-compress canonical root metadata across visited events."""
-        root = ReplyChainRoot(root_event_id=root_event_id, points_to_thread=points_to_thread)
-        for event_id in event_ids:
-            self._reply_chain_roots.put(room_id, event_id, root)
-
-    def _first_cached_reply_chain_root(self, room_id: str, event_ids: list[str]) -> ReplyChainRoot | None:
-        """Return the first cached root metadata found in a traversal path."""
-        for event_id in event_ids:
-            cached_root = self._reply_chain_roots.get(room_id, event_id)
-            if cached_root:
-                return cached_root
-        return None
-
-    @staticmethod
-    def _next_reply_chain_event_id(
-        event_info: EventInfo,
-        current_event_id: str,
-    ) -> str | None:
-        """Resolve the next event in a reply chain."""
-        if event_info.reply_to_event_id:
-            return event_info.reply_to_event_id
-        if event_info.safe_thread_root and event_info.safe_thread_root != current_event_id:
-            return event_info.safe_thread_root
-        return None
-
-    @staticmethod
-    def _thread_history_has_replies(thread_history: list[dict[str, Any]], root_event_id: str) -> bool:
-        """Return whether a root event already has thread replies."""
-        return any(msg.get("event_id") != root_event_id for msg in thread_history)
-
-    async def _fetch_reply_chain_node(
-        self,
-        room_id: str,
-        event_id: str,
-    ) -> ReplyChainNode | None:
-        """Fetch reply-chain node metadata from cache or Matrix."""
-        cached_node = self._reply_chain_nodes.get(room_id, event_id)
-        if cached_node:
-            return cached_node
-
-        assert self.client is not None
-        response = await self.client.room_get_event(room_id, event_id)
-        if not isinstance(response, nio.RoomGetEventResponse):
-            self.logger.debug(
-                "Failed to resolve reply event for context",
-                room_id=room_id,
-                event_id=event_id,
-                error=str(response),
-            )
-            return None
-
-        target_event = response.event
-        target_info = EventInfo.from_event(target_event.source)
-        node = ReplyChainNode(
-            message=AgentBot._event_to_history_message(target_event),
-            parent_event_id=AgentBot._next_reply_chain_event_id(target_info, event_id),
-            thread_root_id=target_info.thread_id,
-        )
-        self._reply_chain_nodes.put(room_id, event_id, node)
-        if node.thread_root_id:
-            self._cache_reply_chain_roots(room_id, [event_id], node.thread_root_id, points_to_thread=True)
-        return node
-
-    async def _resolve_direct_thread_root_context(
-        self,
-        room_id: str,
-        event_id: str,
-        node: ReplyChainNode,
-        visited_event_ids: list[str],
-        chain_history_length: int,
-    ) -> tuple[str, list[dict[str, Any]], bool, bool] | None:
-        """Resolve clients that reply to an existing thread root without m.thread metadata."""
-        if chain_history_length != 1 or node.parent_event_id or node.thread_root_id:
-            return None
-
-        assert self.client is not None
-        thread_history = await fetch_thread_history(self.client, room_id, event_id)
-        if not AgentBot._thread_history_has_replies(thread_history, event_id):
-            return None
-
-        self._reply_chain_nodes.put(
-            room_id,
-            event_id,
-            ReplyChainNode(message=node.message, parent_event_id=node.parent_event_id, thread_root_id=event_id),
-        )
-        self._cache_reply_chain_roots(room_id, visited_event_ids, event_id, points_to_thread=True)
-        return event_id, thread_history, True, True
-
-    def _build_reply_chain_context_result(
-        self,
-        *,
-        room_id: str,
-        reply_to_event_id: str,
-        chain_history: list[dict[str, Any]],
-        visited_event_ids: list[str],
-        thread_root_id: str | None,
-    ) -> tuple[str, list[dict[str, Any]], bool, bool]:
-        """Build reply-chain context tuple after traversal is complete."""
-        cached_root = self._first_cached_reply_chain_root(room_id, visited_event_ids)
-        if not chain_history:
-            if cached_root:
-                return cached_root.root_event_id, [], cached_root.points_to_thread, False
-            return reply_to_event_id, [], False, False
-
-        # Fetches walk from newest->oldest, but consumers expect chronological history.
-        chain_history.reverse()
-
-        if thread_root_id:
-            self._cache_reply_chain_roots(room_id, visited_event_ids, thread_root_id, points_to_thread=True)
-            return thread_root_id, chain_history, True, False
-
-        root_event_id = str(chain_history[0].get("event_id", reply_to_event_id))
-        self._cache_reply_chain_roots(room_id, visited_event_ids, root_event_id, points_to_thread=False)
-        return root_event_id, chain_history, False, False
-
-    @staticmethod
-    def _unique_history_event_ids(messages: list[dict[str, Any]]) -> list[str]:
-        """Return unique string event IDs while preserving input order."""
-        ids: list[str] = []
-        seen: set[str] = set()
-        for message in messages:
-            event_id = message.get("event_id")
-            if not isinstance(event_id, str) or event_id in seen:
-                continue
-            seen.add(event_id)
-            ids.append(event_id)
-        return ids
-
-    @staticmethod
-    def _history_messages_by_event_id(messages: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-        """Index history messages by event ID."""
-        return {event_id: message for message in messages if isinstance((event_id := message.get("event_id")), str)}
-
-    @staticmethod
-    def _shortest_common_supersequence_ids(thread_ids: list[str], chain_ids: list[str]) -> list[str]:
-        """Build a shortest common supersequence over event IDs.
-
-        A simple seen-set merge would lose relative ordering when the two
-        sequences interleave (e.g. thread: [A, B, C] and chain: [A, X, B, Y, C]).
-        SCS preserves both orderings and inserts chain-only events at the correct
-        chronological positions.  Bounded by the 500-event traversal limit.
-        """
-        m = len(thread_ids)
-        n = len(chain_ids)
-
-        lcs: list[list[int]] = [[0] * (n + 1) for _ in range(m + 1)]
-        for i in range(m - 1, -1, -1):
-            for j in range(n - 1, -1, -1):
-                if thread_ids[i] == chain_ids[j]:
-                    lcs[i][j] = 1 + lcs[i + 1][j + 1]
-                else:
-                    lcs[i][j] = max(lcs[i + 1][j], lcs[i][j + 1])
-
-        merged_ids: list[str] = []
-        i = 0
-        j = 0
-        while i < m and j < n:
-            if thread_ids[i] == chain_ids[j]:
-                merged_ids.append(thread_ids[i])
-                i += 1
-                j += 1
-            elif lcs[i + 1][j] > lcs[i][j + 1]:
-                merged_ids.append(thread_ids[i])
-                i += 1
-            else:
-                merged_ids.append(chain_ids[j])
-                j += 1
-
-        merged_ids.extend(thread_ids[i:])
-        merged_ids.extend(chain_ids[j:])
-        return merged_ids
-
-    @staticmethod
-    def _merge_thread_and_chain_history(
-        thread_history: list[dict[str, Any]],
-        chain_history: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        """Merge thread history with plain-reply chain history without duplicates."""
-        thread_ids = AgentBot._unique_history_event_ids(thread_history)
-        chain_ids = AgentBot._unique_history_event_ids(chain_history)
-
-        if not thread_ids:
-            return list(chain_history)
-        if not chain_ids:
-            return list(thread_history)
-
-        thread_messages = AgentBot._history_messages_by_event_id(thread_history)
-        chain_messages = AgentBot._history_messages_by_event_id(chain_history)
-        merged_ids = AgentBot._shortest_common_supersequence_ids(thread_ids, chain_ids)
-        merged_history = [thread_messages.get(event_id) or chain_messages[event_id] for event_id in merged_ids]
-
-        merged_history.extend(
-            message for message in [*thread_history, *chain_history] if not isinstance(message.get("event_id"), str)
-        )
-
-        return merged_history
-
-    async def _resolve_reply_chain_context(
-        self,
-        room_id: str,
-        reply_to_event_id: str,
-    ) -> tuple[str, list[dict[str, Any]], bool, bool]:
-        """Resolve reply-chain context for clients that don't send thread relations.
-
-        Returns:
-            Tuple of (conversation_root_id, context_history, points_to_thread, is_full_thread_history)
-
-        """
-        chain_history: list[dict[str, Any]] = []
-        thread_root_id: str | None = None
-        current_event_id: str | None = reply_to_event_id
-        seen_event_ids: set[str] = set()
-        visited_event_ids: list[str] = []
-        direct_thread_root_context: tuple[str, list[dict[str, Any]], bool, bool] | None = None
-
-        while current_event_id:
-            if len(visited_event_ids) >= self._REPLY_CHAIN_TRAVERSAL_LIMIT:
-                self.logger.warning(
-                    "Reply-chain traversal limit reached while resolving context",
-                    room_id=room_id,
-                    reply_to_event_id=reply_to_event_id,
-                    traversal_limit=self._REPLY_CHAIN_TRAVERSAL_LIMIT,
-                    traversed_events=len(visited_event_ids),
-                    last_event_id=visited_event_ids[-1] if visited_event_ids else None,
-                )
-                break
-            if current_event_id in seen_event_ids:
-                self.logger.debug(
-                    "Detected reply-chain cycle while resolving context",
-                    room_id=room_id,
-                    event_id=current_event_id,
-                )
-                break
-            seen_event_ids.add(current_event_id)
-            visited_event_ids.append(current_event_id)
-
-            node = await self._fetch_reply_chain_node(room_id, current_event_id)
-            if node is None:
-                break
-
-            chain_history.append(node.message)
-            if node.thread_root_id:
-                thread_root_id = thread_root_id or node.thread_root_id
-
-            direct_thread_root_context = await self._resolve_direct_thread_root_context(
-                room_id=room_id,
-                event_id=current_event_id,
-                node=node,
-                visited_event_ids=visited_event_ids,
-                chain_history_length=len(chain_history),
-            )
-            if direct_thread_root_context is not None:
-                break
-
-            current_event_id = node.parent_event_id
-
-        if direct_thread_root_context is not None:
-            return direct_thread_root_context
-
-        return self._build_reply_chain_context_result(
-            room_id=room_id,
-            reply_to_event_id=reply_to_event_id,
-            chain_history=chain_history,
-            visited_event_ids=visited_event_ids,
-            thread_root_id=thread_root_id,
-        )
-
     async def _derive_conversation_context(
         self,
         room_id: str,
@@ -1531,33 +1192,14 @@ class AgentBot:
     ) -> tuple[bool, str | None, list[dict[str, Any]]]:
         """Derive conversation context from threads or reply chains."""
         assert self.client is not None
-
-        if event_info.thread_id:
-            thread_history = await fetch_thread_history(self.client, room_id, event_info.thread_id)
-            return True, event_info.thread_id, thread_history
-
-        if not event_info.reply_to_event_id:
-            return False, None, []
-
-        (
-            context_root_id,
-            chain_history,
-            points_to_thread,
-            is_full_thread_history,
-        ) = await self._resolve_reply_chain_context(
+        return await derive_conversation_context(
+            self.client,
             room_id,
-            event_info.reply_to_event_id,
+            event_info,
+            self._reply_chain,
+            self.logger,
+            fetch_thread_history,
         )
-        if points_to_thread:
-            if is_full_thread_history:
-                return True, context_root_id, chain_history
-
-            thread_history = await fetch_thread_history(self.client, room_id, context_root_id)
-            if chain_history:
-                thread_history = AgentBot._merge_thread_and_chain_history(thread_history, chain_history)
-            return True, context_root_id, thread_history
-
-        return True, context_root_id, chain_history
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         assert self.client is not None

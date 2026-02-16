@@ -17,6 +17,7 @@ import pytest_asyncio
 
 from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
+from mindroom.matrix.reply_chain import merge_thread_and_chain_history
 from mindroom.matrix.users import AgentMatrixUser
 
 from .conftest import TEST_PASSWORD
@@ -544,8 +545,8 @@ class TestThreadingBehavior:
 
         bot.client.room_get_event = AsyncMock(side_effect=responses)
 
+        bot._reply_chain.traversal_limit = 3
         with (
-            patch.object(AgentBot, "_REPLY_CHAIN_TRAVERSAL_LIMIT", 3),
             patch.object(bot.logger, "warning") as mock_warning,
             patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch,
         ):
@@ -609,16 +610,15 @@ class TestThreadingBehavior:
         )
 
         bot.client.room_get_event = AsyncMock(side_effect=_make_chain_responses(6))
-        with (
-            patch.object(AgentBot, "_REPLY_CHAIN_TRAVERSAL_LIMIT", 3),
-            patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch,
-        ):
+        bot._reply_chain.traversal_limit = 3
+        with patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch:
             ctx1 = await bot._extract_message_context(room, event1)
 
         assert ctx1.thread_id == "$msg4:localhost"  # stale root from limit hit
         mock_fetch.assert_not_called()
 
-        # --- Second resolve: limit=500, new event replies to $msg6 (overlapping cached events) ---
+        # --- Second resolve: default limit, new event replies to $msg6 (overlapping cached events) ---
+        bot._reply_chain.traversal_limit = 500
         event2 = nio.RoomMessageText.from_dict(
             {
                 "content": {
@@ -687,15 +687,15 @@ class TestThreadingBehavior:
 
         bot.client.room_get_event = AsyncMock(side_effect=responses)
 
-        bot._reply_chain_nodes.maxsize = 5
-        bot._reply_chain_roots.maxsize = 5
+        bot._reply_chain.nodes.maxsize = 5
+        bot._reply_chain.roots.maxsize = 5
         with patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch:
             context = await bot._extract_message_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$msg1:localhost"
-        assert len(bot._reply_chain_nodes) <= 5
-        assert len(bot._reply_chain_roots) <= 5
+        assert len(bot._reply_chain.nodes) <= 5
+        assert len(bot._reply_chain.roots) <= 5
         mock_fetch.assert_not_called()
 
     @pytest.mark.asyncio
@@ -919,7 +919,7 @@ class TestThreadingBehavior:
             {"event_id": "$p2:localhost", "body": "Second plain reply"},
         ]
 
-        merged = AgentBot._merge_thread_and_chain_history(thread_history, chain_history)
+        merged = merge_thread_and_chain_history(thread_history, chain_history)
 
         assert [msg["event_id"] for msg in merged] == [
             "$root:localhost",
