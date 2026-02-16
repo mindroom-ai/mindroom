@@ -53,6 +53,7 @@ from .matrix.identity import (
 )
 from .matrix.mentions import format_message_with_mentions
 from .matrix.presence import build_agent_status_message, is_user_online, set_presence_status, should_use_streaming
+from .matrix.reply_chain import ReplyChainCaches, derive_conversation_context
 from .matrix.rooms import (
     ensure_all_rooms_exist,
     ensure_user_in_rooms,
@@ -227,7 +228,7 @@ def _generate_welcome_message(room_id: str, config: Config) -> str:
         "💬 **How to interact:**\n"
         "• Mention an agent with @ to get their attention (e.g., @mindroom_assistant)\n"
         "• Use `!help` to see available commands\n"
-        "• Agents respond in threads to keep conversations organized\n"
+        "• Agents respond in threads; plain replies still continue the same conversation\n"
         "• Multiple agents can collaborate when you mention them together\n"
         "• 🎤 Voice messages are automatically transcribed and work perfectly!\n\n"
         "⚡ **Quick commands:**\n"
@@ -577,6 +578,7 @@ class AgentBot:
     running: bool = field(default=False, init=False)
     enable_streaming: bool = field(default=True)  # Enable/disable streaming responses
     orchestrator: MultiAgentOrchestrator | None = field(default=None, init=False)  # Reference to orchestrator
+    _reply_chain: ReplyChainCaches = field(default_factory=ReplyChainCaches, init=False)
 
     @property
     def agent_name(self) -> str:
@@ -984,7 +986,7 @@ class AgentBot:
                         self.logger.info("Skipping routing: only one agent present")
                     else:
                         # Multiple agents available - perform AI routing
-                        await self._handle_ai_routing(room, event, context.thread_history)
+                        await self._handle_ai_routing(room, event, context.thread_history, context.thread_id)
             # Router's job is done after routing/command handling/voice transcription
             return
 
@@ -1179,16 +1181,33 @@ class AgentBot:
 
         if transcribed_message:
             event_info = EventInfo.from_event(event.source)
+            _, thread_id, _ = await self._derive_conversation_context(room.room_id, event_info)
             response_event_id = await self._send_response(
                 room_id=room.room_id,
                 reply_to_event_id=event.event_id,
                 response_text=transcribed_message,
-                thread_id=event_info.thread_id,
+                thread_id=thread_id,
             )
             self.response_tracker.mark_responded(event.event_id, response_event_id)
         else:
             # Mark as responded to avoid reprocessing
             self.response_tracker.mark_responded(event.event_id)
+
+    async def _derive_conversation_context(
+        self,
+        room_id: str,
+        event_info: EventInfo,
+    ) -> tuple[bool, str | None, list[dict[str, Any]]]:
+        """Derive conversation context from threads or reply chains."""
+        assert self.client is not None
+        return await derive_conversation_context(
+            self.client,
+            room_id,
+            event_info,
+            self._reply_chain,
+            self.logger,
+            fetch_thread_history,
+        )
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         assert self.client is not None
@@ -1212,15 +1231,15 @@ class AgentBot:
             self.logger.info("Mentioned", event_id=event.event_id, room_name=room.name)
 
         event_info = EventInfo.from_event(event.source)
-
-        thread_history = []
-        if event_info.thread_id:
-            thread_history = await fetch_thread_history(self.client, room.room_id, event_info.thread_id)
+        is_thread, thread_id, thread_history = await self._derive_conversation_context(
+            room.room_id,
+            event_info,
+        )
 
         return MessageContext(
             am_i_mentioned=am_i_mentioned,
-            is_thread=event_info.is_thread,
-            thread_id=event_info.thread_id,
+            is_thread=is_thread,
+            thread_id=thread_id,
             thread_history=thread_history,
             mentioned_agents=mentioned_agents,
             has_non_agent_mentions=has_non_agent_mentions,
@@ -1966,6 +1985,7 @@ class AgentBot:
         room: nio.MatrixRoom,
         event: nio.RoomMessageText,
         thread_history: list[dict],
+        thread_id: str | None = None,
     ) -> None:
         # Only router agent should handle routing
         assert self.agent_name == ROUTER_AGENT_NAME
@@ -1978,7 +1998,6 @@ class AgentBot:
 
         self.logger.info("Handling AI routing", event_id=event.event_id)
 
-        event_info = EventInfo.from_event(event.source)
         suggested_agent = await suggest_agent_for_message(
             event.body,
             available_agents,
@@ -1993,35 +2012,15 @@ class AgentBot:
         else:
             # Router mentions the suggested agent and asks them to help
             response_text = f"@{suggested_agent} could you help with this?"
-        sender_id = self.matrix_id
-        sender_domain = sender_id.domain
 
-        # If no thread exists, create one with the original message as root
-        thread_event_id = event_info.thread_id
-        if not thread_event_id:
-            # Check if the current event can be a thread root
-            thread_event_id = event_info.safe_thread_root or event.event_id
+        thread_event_id = thread_id or event.event_id
 
-        # Get latest thread event for MSC3440 compliance when no specific reply
-        # Note: We use event.event_id as reply_to for routing suggestions
-        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
-            self.client,
-            room.room_id,
-            thread_event_id,
-            event.event_id,
-        )
-
-        content = format_message_with_mentions(
-            self.config,
-            response_text,
-            sender_domain=sender_domain,
-            thread_event_id=thread_event_id,
+        event_id = await self._send_response(
+            room_id=room.room_id,
             reply_to_event_id=event.event_id,
-            latest_thread_event_id=latest_thread_event_id,
+            response_text=response_text,
+            thread_id=thread_event_id,
         )
-
-        assert self.client is not None
-        event_id = await send_message(self.client, room.room_id, content)
         if event_id:
             self.logger.info("Routed to agent", suggested_agent=suggested_agent)
             self.response_tracker.mark_responded(event.event_id)
@@ -2109,18 +2108,19 @@ class AgentBot:
         self.logger.info("Handling command", command_type=command.type.value)
 
         event_info = EventInfo.from_event(event.source)
+        _, thread_id, thread_history = await self._derive_conversation_context(room.room_id, event_info)
 
         # Widget command modifies room state, so it doesn't need a thread
         if command.type == CommandType.WIDGET:
             url = command.args.get("url")
             response_text = await handle_widget_command(client=self.client, room_id=room.room_id, url=url)
             # Send response in thread if in thread, otherwise in main room
-            await self._send_response(room.room_id, event.event_id, response_text, event_info.thread_id)
+            await self._send_response(room.room_id, event.event_id, response_text, thread_id)
             return
 
         # For commands that need thread context, use the existing thread or the event will start a new one
         # The _send_response method will automatically create a thread if needed
-        effective_thread_id = event_info.thread_id or event_info.safe_thread_root or event.event_id
+        effective_thread_id = thread_id or event.event_id
 
         response_text = ""
 
@@ -2205,7 +2205,7 @@ class AgentBot:
                     room.room_id,
                     event.event_id,
                     response_text,
-                    event_info.thread_id,
+                    effective_thread_id,
                     reply_to_event=event,
                     skip_mentions=True,
                 )
@@ -2215,7 +2215,7 @@ class AgentBot:
                     config_confirmation.register_pending_change(
                         event_id=event_id,
                         room_id=room.room_id,
-                        thread_id=event_info.thread_id,
+                        thread_id=effective_thread_id,
                         config_path=change_info["config_path"],
                         old_value=change_info["old_value"],
                         new_value=change_info["new_value"],
@@ -2274,13 +2274,6 @@ class AgentBot:
                             f"❌ Skill '{spec.name}' is configured to skip model invocation and has no tool dispatch."
                         )
                     else:
-                        thread_history = []
-                        if event_info.thread_id:
-                            thread_history = await fetch_thread_history(
-                                self.client,
-                                room.room_id,
-                                event_info.thread_id,
-                            )
                         prompt = _build_skill_command_prompt(spec.name, args_text)
                         event_id = await self._send_skill_command_response(
                             room_id=room.room_id,
@@ -2305,7 +2298,7 @@ class AgentBot:
                 room.room_id,
                 event.event_id,
                 response_text,
-                event_info.thread_id,
+                effective_thread_id,
                 reply_to_event=event,
                 skip_mentions=True,
             )

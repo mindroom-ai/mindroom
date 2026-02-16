@@ -164,6 +164,16 @@ Teams (`src/mindroom/teams.py`) let multiple agents work together:
 - Do not wrap things in try-excepts unless it's necessary. Avoid wrapping things that should not fail.
 - NEVER put imports in the function, unless it is to avoid circular imports. Imports should be at the top of the file.
 
+### Refactor Policy
+
+- Default to the smallest correct change.
+- Use larger refactors when they provide clear immediate maintenance ROI, not hypothetical future value.
+- A larger refactor is justified only if it:
+  - Removes active duplication in current code paths.
+  - Creates a clear source of truth without adding unnecessary abstraction layers.
+  - Reduces net complexity (simpler call flow, fewer special cases).
+  - Is covered by tests in the same PR.
+
 ## 2. Workflow
 
 ### Step 1: Understand the Context

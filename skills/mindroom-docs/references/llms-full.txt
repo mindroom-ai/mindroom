@@ -2577,7 +2577,19 @@ Rooms are auto-created via `ensure_room_exists()` and `ensure_all_rooms_exist()`
 
 ## Threading (MSC3440)
 
-Agents respond in threads following [MSC3440](https://github.com/matrix-org/matrix-spec-proposals/blob/main/proposals/3440-threading-via-relations.md). Thread messages use `m.relates_to` with `rel_type: m.thread`.
+MindRoom emits thread replies following [MSC3440](https://github.com/matrix-org/matrix-spec-proposals/blob/main/proposals/3440-threading-via-relations.md), using `m.relates_to` with `rel_type: m.thread`.
+
+For clients that send plain replies without thread metadata (`m.in_reply_to` but no `rel_type: m.thread`), MindRoom resolves the reply chain to the existing thread root and continues the same conversation.
+
+### Resolution Rules
+
+When deriving context for a non-thread client reply, MindRoom:
+
+1. Traverses `m.in_reply_to` backwards until it finds a root, a known thread root, a cycle, or the traversal limit.
+1. Uses cycle detection and a bounded traversal limit (`ReplyChainCaches.traversal_limit`) to avoid runaway chains.
+1. If the chain points to a real thread root, fetches thread history and merges chain history so plain replies are preserved in order.
+1. If no thread relation exists, treats the reply chain itself as the conversation context root.
+1. Falls back to the oldest successfully resolved event when traversal is interrupted by fetch failures or limits.
 
 ```
 ├── User: @assistant help with this code
