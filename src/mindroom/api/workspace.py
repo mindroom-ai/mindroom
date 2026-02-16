@@ -64,6 +64,10 @@ def _resolve_within_root(root: Path, relative_path: str) -> Path:
 
 def _validate_filename(filename: str) -> str:
     decoded = unquote(filename).strip("/")
+    candidate = Path(decoded)
+    if any(part in {".", ".."} for part in candidate.parts):
+        raise HTTPException(status_code=422, detail="Filename is not allowed")
+
     if decoded in _ALLOWED_ROOT_FILES:
         return decoded
     if _MEMORY_FILE_PATTERN.fullmatch(decoded):

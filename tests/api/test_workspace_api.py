@@ -146,9 +146,11 @@ def test_workspace_allowlist_and_path_traversal(
     with patch("mindroom.api.workspace.Config.from_yaml", return_value=config):
         disallowed = test_client.get("/api/workspace/test_agent/file/not_allowed.md")
         traversal = test_client.get("/api/workspace/test_agent/file/..%2Fsecret.md")
+        nested_traversal = test_client.get("/api/workspace/test_agent/file/memory/..%2Fsecret.md")
 
     assert disallowed.status_code == 422
     assert traversal.status_code == 422
+    assert nested_traversal.status_code == 422
 
 
 def test_workspace_daily_endpoints(
