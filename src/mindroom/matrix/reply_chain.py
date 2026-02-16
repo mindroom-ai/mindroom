@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 # Callback type for fetching thread history, injected by the caller to keep
 # this module decoupled from the concrete import (and easy to mock in tests).
-type FetchThreadHistory = Callable[
+type _FetchThreadHistory = Callable[
     [nio.AsyncClient, str, str],
     Coroutine[Any, Any, list[dict[str, Any]]],
 ]
@@ -60,7 +60,7 @@ class _LRUCache[T]:
 
 
 @dataclass
-class ReplyChainNode:
+class _ReplyChainNode:
     """Cached reply-chain node metadata for context derivation."""
 
     message: dict[str, Any]
@@ -69,7 +69,7 @@ class ReplyChainNode:
 
 
 @dataclass
-class ReplyChainRoot:
+class _ReplyChainRoot:
     """Canonical root metadata for a reply-chain event."""
 
     root_event_id: str
@@ -80,8 +80,8 @@ class ReplyChainRoot:
 class ReplyChainCaches:
     """Per-bot caches for reply-chain traversal."""
 
-    nodes: _LRUCache[ReplyChainNode] = field(default_factory=lambda: _LRUCache(4096))
-    roots: _LRUCache[ReplyChainRoot] = field(default_factory=lambda: _LRUCache(4096))
+    nodes: _LRUCache[_ReplyChainNode] = field(default_factory=lambda: _LRUCache(4096))
+    roots: _LRUCache[_ReplyChainRoot] = field(default_factory=lambda: _LRUCache(4096))
     traversal_limit: int = 500
 
 
@@ -213,12 +213,12 @@ def _cache_roots(
     points_to_thread: bool,
 ) -> None:
     """Path-compress canonical root metadata across visited events."""
-    root = ReplyChainRoot(root_event_id=root_event_id, points_to_thread=points_to_thread)
+    root = _ReplyChainRoot(root_event_id=root_event_id, points_to_thread=points_to_thread)
     for event_id in event_ids:
         caches.roots.put(room_id, event_id, root)
 
 
-def _first_cached_root(caches: ReplyChainCaches, room_id: str, event_ids: list[str]) -> ReplyChainRoot | None:
+def _first_cached_root(caches: ReplyChainCaches, room_id: str, event_ids: list[str]) -> _ReplyChainRoot | None:
     """Return the first cached root metadata found in a traversal path."""
     for event_id in event_ids:
         cached_root = caches.roots.get(room_id, event_id)
@@ -238,7 +238,7 @@ async def _fetch_node(
     logger: structlog.stdlib.BoundLogger,
     room_id: str,
     event_id: str,
-) -> ReplyChainNode | None:
+) -> _ReplyChainNode | None:
     """Fetch reply-chain node metadata from cache or Matrix."""
     cached_node = caches.nodes.get(room_id, event_id)
     if cached_node:
@@ -256,7 +256,7 @@ async def _fetch_node(
 
     target_event = response.event
     target_info = EventInfo.from_event(target_event.source)
-    node = ReplyChainNode(
+    node = _ReplyChainNode(
         message=_event_to_history_message(target_event),
         parent_event_id=_next_reply_chain_event_id(target_info, event_id),
         thread_root_id=target_info.thread_id,
@@ -270,10 +270,10 @@ async def _fetch_node(
 async def _resolve_direct_thread_root(
     client: nio.AsyncClient,
     caches: ReplyChainCaches,
-    fetch_history: FetchThreadHistory,
+    fetch_history: _FetchThreadHistory,
     room_id: str,
     event_id: str,
-    node: ReplyChainNode,
+    node: _ReplyChainNode,
     visited_event_ids: list[str],
     chain_history_length: int,
 ) -> tuple[str, list[dict[str, Any]], bool, bool] | None:
@@ -288,7 +288,7 @@ async def _resolve_direct_thread_root(
     caches.nodes.put(
         room_id,
         event_id,
-        ReplyChainNode(message=node.message, parent_event_id=node.parent_event_id, thread_root_id=event_id),
+        _ReplyChainNode(message=node.message, parent_event_id=node.parent_event_id, thread_root_id=event_id),
     )
     _cache_roots(caches, room_id, visited_event_ids, event_id, points_to_thread=True)
     return event_id, thread_history, True, True
@@ -326,7 +326,7 @@ async def _resolve_reply_chain(
     client: nio.AsyncClient,
     caches: ReplyChainCaches,
     logger: structlog.stdlib.BoundLogger,
-    fetch_history: FetchThreadHistory,
+    fetch_history: _FetchThreadHistory,
     room_id: str,
     reply_to_event_id: str,
 ) -> tuple[str, list[dict[str, Any]], bool, bool]:
@@ -411,7 +411,7 @@ async def derive_conversation_context(
     event_info: EventInfo,
     caches: ReplyChainCaches,
     logger: structlog.stdlib.BoundLogger,
-    fetch_history: FetchThreadHistory,
+    fetch_history: _FetchThreadHistory,
 ) -> tuple[bool, str | None, list[dict[str, Any]]]:
     """Derive conversation context from threads or reply chains."""
     if event_info.thread_id:
