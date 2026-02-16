@@ -17,11 +17,12 @@ main() entry
 ┌──────────────────┐
 │  Initialize()    │
 │ ─────────────────│
-│ 1. Create "user" │
-│    Matrix account│
-│ 2. Parse config  │
+│ 1. Parse config  │
 │    (Pydantic)    │
-│ 3. Load plugins  │
+│ 2. Load plugins  │
+│ 3. Create "user" │
+│    Matrix account│
+│    (mindroom_user)│
 │ 4. Create bots   │
 │    for entities  │
 └────────┬─────────┘
@@ -53,6 +54,7 @@ main() entry
 - **Entity order**: Router first, then agents, then teams
 - **Room setup** (`_setup_rooms_and_memberships`): Router creates rooms, invites agents/users, bots join
 - **Sync loops**: Each bot runs `_sync_forever_with_restart()` with automatic retry
+- **Internal user identity**: `mindroom_user.username` is bootstrap-only; only `display_name` should change later
 
 ## Hot Reload
 

@@ -45,5 +45,5 @@ def test_authorization_check_uses_updated_config() -> None:
         assert is_authorized_sender("@alice:example.com", config, "!test:server")
         assert is_authorized_sender("@bob:example.com", config, "!test:server")
 
-        # mindroom_user should always be authorized
-        assert is_authorized_sender("@mindroom_user:example.com", config, "!test:server")
+        # Configured internal system user should always be authorized
+        assert is_authorized_sender(config.get_mindroom_user_id(), config, "!test:server")

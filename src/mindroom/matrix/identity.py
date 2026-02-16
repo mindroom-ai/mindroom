@@ -29,7 +29,7 @@ class MatrixID:
     @classmethod
     def from_agent(cls, agent_name: str, domain: str) -> MatrixID:
         """Create a MatrixID for an agent."""
-        return cls(username=f"{cls.AGENT_PREFIX}{agent_name}", domain=domain)
+        return cls(username=agent_username_localpart(agent_name), domain=domain)
 
     @classmethod
     def from_username(cls, username: str, domain: str) -> MatrixID:
@@ -126,6 +126,11 @@ def extract_agent_name(sender_id: str, config: Config) -> str | None:
         return None
     mid = MatrixID.parse(sender_id)
     return mid.agent_name(config)
+
+
+def agent_username_localpart(agent_name: str) -> str:
+    """Build the Matrix username localpart for an agent-like entity."""
+    return f"{MatrixID.AGENT_PREFIX}{agent_name}"
 
 
 def extract_server_name_from_homeserver(homeserver: str) -> str:

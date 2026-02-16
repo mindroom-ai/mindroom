@@ -324,6 +324,11 @@ agents:
       - lobby
 router:
   model: default
+# Set username before first run; once created, it cannot be changed.
+# You can still change display_name later.
+mindroom_user:
+  username: mindroom_user
+  display_name: MindRoomUser
 defaults:
   markdown: true
 """
