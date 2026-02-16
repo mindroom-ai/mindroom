@@ -181,6 +181,26 @@ class TestBuildAgentStatusMessage:
 
         assert "🔧 2 tools available" in status
 
+    def test_regular_agent_status_respects_include_default_tools_false(self) -> None:
+        """Tool count excludes defaults.tools when agent opts out."""
+        config = Config(
+            agents={
+                "assistant": AgentConfig(
+                    display_name="Assistant",
+                    role="General assistant",
+                    tools=[],
+                    include_default_tools=False,
+                    model="default",
+                ),
+            },
+            models={"default": ModelConfig(provider="ollama", id="llama3")},
+            defaults={"tools": ["scheduler", "calculator"]},
+        )
+
+        status = build_agent_status_message("assistant", config)
+
+        assert "🔧" not in status
+
 
 class TestIsUserOnline:
     """Test the is_user_online function."""

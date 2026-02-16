@@ -86,7 +86,7 @@ Create a `config.yaml` in your working directory:
 
 ```
 
-agents: assistant: display_name: Assistant role: A helpful AI assistant that can answer questions model: default rooms: [lobby]
+agents: assistant: display_name: Assistant role: A helpful AI assistant that can answer questions model: default include_default_tools: true rooms: [lobby]
 
 models: default: provider: anthropic id: claude-sonnet-4-5-latest
 

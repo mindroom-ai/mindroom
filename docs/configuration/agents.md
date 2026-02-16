@@ -73,6 +73,7 @@ agents:
 | `role` | string | `""` | System prompt describing the agent's purpose — guides its behavior and expertise |
 | `model` | string | `"default"` | Model name (must match a key in the `models` section) |
 | `tools` | list | `[]` | Agent-specific tool names (see [Tools](../tools/index.md)); effective tools are `defaults.tools + tools` with duplicates removed |
+| `include_default_tools` | bool | `true` | When `true`, append `defaults.tools` to this agent's `tools`; set to `false` to opt this agent out |
 | `skills` | list | `[]` | Skill names the agent can use (see [Skills](../skills.md)) |
 | `instructions` | list | `[]` | Extra lines appended to the system prompt after the role |
 | `rooms` | list | `[]` | Room aliases to auto-join; rooms are created if they don't exist |
@@ -106,4 +107,15 @@ defaults:
   learning: true             # Enable Agno Learning
   learning_mode: always      # "always" or "agentic"
   show_stop_button: false    # Show a stop button while agent is responding (global-only, cannot be overridden per-agent)
+```
+
+To opt out a specific agent:
+
+```yaml
+agents:
+  researcher:
+    display_name: Researcher
+    role: Focus on deep research
+    include_default_tools: false
+    tools: [web_search]
 ```

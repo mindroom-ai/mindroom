@@ -30,6 +30,10 @@ class AgentConfig(BaseModel):
     display_name: str = Field(description="Human-readable name for the agent")
     role: str = Field(default="", description="Description of the agent's purpose")
     tools: list[str] = Field(default_factory=list, description="List of tool names")
+    include_default_tools: bool = Field(
+        default=True,
+        description="Whether to merge defaults.tools into this agent's tools",
+    )
     skills: list[str] = Field(default_factory=list, description="List of skill names")
     instructions: list[str] = Field(default_factory=list, description="Agent instructions")
     rooms: list[str] = Field(default_factory=list, description="List of room IDs or names to auto-join")
@@ -512,13 +516,11 @@ class Config(BaseModel):
             raise ValueError(msg)
         return self.agents[agent_name]
 
-    def get_agent_tools(self, agent_name: str, *, include_default_tools: bool = True) -> list[str]:
-        """Get effective tools for an agent, optionally including defaults.
+    def get_agent_tools(self, agent_name: str) -> list[str]:
+        """Get effective tools for an agent.
 
         Args:
             agent_name: Name of the agent.
-            include_default_tools: Whether to merge defaults.tools into the
-                agent-specific tools.
 
         Returns:
             Ordered tool names with duplicates removed.
@@ -529,7 +531,7 @@ class Config(BaseModel):
         """
         agent_config = self.get_agent(agent_name)
         tool_names = list(agent_config.tools)
-        if include_default_tools:
+        if agent_config.include_default_tools:
             for default_tool_name in self.defaults.tools:
                 if default_tool_name not in tool_names:
                     tool_names.append(default_tool_name)

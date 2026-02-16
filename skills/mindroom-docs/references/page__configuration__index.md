@@ -65,6 +65,7 @@ agents:
     role: A helpful AI assistant   # Optional: Description of purpose
     model: sonnet                  # Optional: Model name (default: "default")
     tools: [file, shell]           # Optional: Agent-specific tools (merged with defaults.tools)
+    include_default_tools: true    # Optional: Per-agent opt-out for defaults.tools
     skills: []                     # Optional: List of skill names
     instructions: []               # Optional: Custom instructions
     rooms: [lobby]                 # Optional: Rooms to auto-join
@@ -116,6 +117,7 @@ defaults:
   learning_mode: always            # Default: always (or agentic)
 
 # defaults.tools are appended to each agent's tools list with duplicates removed.
+# Set agents.<name>.include_default_tools: false to opt out a specific agent.
 
 # Memory system configuration (optional)
 memory:

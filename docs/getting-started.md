@@ -83,6 +83,7 @@ agents:
     display_name: Assistant
     role: A helpful AI assistant that can answer questions
     model: default
+    include_default_tools: true
     rooms: [lobby]
 
 models:

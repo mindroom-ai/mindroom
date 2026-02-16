@@ -411,6 +411,17 @@ class TestAgentDescription:
 
         assert "Tools: scheduler" in description
 
+    def test_describe_agent_can_opt_out_of_default_tools(self) -> None:
+        """Agent descriptions omit defaults.tools when include_default_tools is false."""
+        config = Config.from_yaml()
+        config.defaults.tools = ["scheduler"]
+        config.agents["general"].tools = []
+        config.agents["general"].include_default_tools = False
+
+        description = describe_agent("general", config)
+
+        assert "Tools:" not in description
+
     def test_describe_unknown_agent(self) -> None:
         """Test describing an unknown agent."""
         config = Config.from_yaml()

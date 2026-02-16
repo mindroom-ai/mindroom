@@ -206,7 +206,6 @@ def create_agent(  # noqa: PLR0915
     *,
     storage_path: Path | None = None,
     knowledge: KnowledgeProtocol | None = None,
-    include_default_tools: bool = True,
     include_interactive_questions: bool = True,
 ) -> Agent:
     """Create an agent instance from configuration.
@@ -217,9 +216,6 @@ def create_agent(  # noqa: PLR0915
         storage_path: Runtime storage path. Falls back to the
             module-level ``STORAGE_PATH_OBJ`` when *None*.
         knowledge: Optional shared knowledge base instance for RAG-enabled agents.
-        include_default_tools: Whether to include config.defaults.tools
-            (e.g. "scheduler"). Set to False when creating agents outside
-            of Matrix context where those tools are unavailable.
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
@@ -241,10 +237,7 @@ def create_agent(  # noqa: PLR0915
 
     load_plugins(config)
 
-    tool_names = config.get_agent_tools(
-        agent_name,
-        include_default_tools=include_default_tools,
-    )
+    tool_names = config.get_agent_tools(agent_name)
 
     # Create tools
     tools: list = []  # Use list type to satisfy Agent's parameter type

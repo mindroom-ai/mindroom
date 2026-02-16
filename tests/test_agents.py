@@ -78,13 +78,14 @@ def test_default_tools_do_not_duplicate_agent_tools(mock_storage: MagicMock) -> 
 
 
 @patch("mindroom.agents.SqliteDb")
-def test_include_default_tools_false_skips_config_defaults(mock_storage: MagicMock) -> None:  # noqa: ARG001
-    """Passing include_default_tools=False should skip defaults.tools entirely."""
+def test_agent_include_default_tools_false_skips_config_defaults(mock_storage: MagicMock) -> None:  # noqa: ARG001
+    """Agent include_default_tools=False should skip defaults.tools entirely."""
     config = Config.from_yaml()
     config.defaults.tools = ["scheduler", "calculator"]
     config.agents["summary"].tools = []
+    config.agents["summary"].include_default_tools = False
 
-    agent = create_agent("summary", config=config, include_default_tools=False)
+    agent = create_agent("summary", config=config)
     tool_names = [tool.name for tool in agent.tools]
 
     assert "scheduler" not in tool_names
@@ -351,8 +352,18 @@ def test_create_agent_shares_culture_manager_for_same_culture(
     _CULTURE_MANAGER_CACHE.clear()
     config = Config(
         agents={
-            "agent_one": AgentConfig(display_name="Agent One", role="First", learning=False),
-            "agent_two": AgentConfig(display_name="Agent Two", role="Second", learning=False),
+            "agent_one": AgentConfig(
+                display_name="Agent One",
+                role="First",
+                learning=False,
+                include_default_tools=False,
+            ),
+            "agent_two": AgentConfig(
+                display_name="Agent Two",
+                role="Second",
+                learning=False,
+                include_default_tools=False,
+            ),
         },
         cultures={
             "engineering": CultureConfig(
@@ -373,14 +384,12 @@ def test_create_agent_shares_culture_manager_for_same_culture(
             "agent_one",
             config=config,
             storage_path=tmp_path,
-            include_default_tools=False,
             include_interactive_questions=False,
         )
         create_agent(
             "agent_two",
             config=config,
             storage_path=tmp_path,
-            include_default_tools=False,
             include_interactive_questions=False,
         )
 
@@ -414,7 +423,13 @@ def test_create_agent_culture_uses_agent_model_when_default_missing(
     _CULTURE_MANAGER_CACHE.clear()
     config = Config(
         agents={
-            "agent_one": AgentConfig(display_name="Agent One", role="First", model="m1", learning=False),
+            "agent_one": AgentConfig(
+                display_name="Agent One",
+                role="First",
+                model="m1",
+                learning=False,
+                include_default_tools=False,
+            ),
         },
         cultures={
             "engineering": CultureConfig(
@@ -435,7 +450,6 @@ def test_create_agent_culture_uses_agent_model_when_default_missing(
             "agent_one",
             config=config,
             storage_path=tmp_path,
-            include_default_tools=False,
             include_interactive_questions=False,
         )
 

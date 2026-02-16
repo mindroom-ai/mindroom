@@ -126,6 +126,7 @@ class ConfigManagerTools(Toolkit):
         model: str | None = None,
         rooms: list[str] | None = None,
         knowledge_bases: list[str] | None = None,
+        include_default_tools: bool | None = None,
         markdown: bool | None = None,
         learning: bool | None = None,
         learning_mode: AgentLearningMode | None = None,
@@ -142,6 +143,7 @@ class ConfigManagerTools(Toolkit):
             model: Model to use (default: "default")
             rooms: List of room IDs or names to auto-join
             knowledge_bases: List of knowledge base IDs to assign to this agent
+            include_default_tools: Whether this agent should include defaults.tools
             markdown: Whether to use markdown formatting
             learning: Whether to enable Agno Learning for this agent
             learning_mode: Learning mode for Agno Learning ("always" or "agentic")
@@ -164,6 +166,7 @@ class ConfigManagerTools(Toolkit):
                 model=model or "default",
                 rooms=rooms or [],
                 knowledge_bases=knowledge_bases or [],
+                include_default_tools=include_default_tools,
                 markdown=markdown,
                 learning=learning,
                 learning_mode=learning_mode,
@@ -178,6 +181,7 @@ class ConfigManagerTools(Toolkit):
                 model=model,
                 rooms=rooms,
                 knowledge_bases=knowledge_bases,
+                include_default_tools=include_default_tools,
                 markdown=markdown,
                 learning=learning,
                 learning_mode=learning_mode,
@@ -480,6 +484,7 @@ class ConfigManagerTools(Toolkit):
         model: str,
         rooms: list[str],
         knowledge_bases: list[str],
+        include_default_tools: bool | None,
         markdown: bool | None,
         learning: bool | None,
         learning_mode: AgentLearningMode | None,
@@ -505,18 +510,33 @@ class ConfigManagerTools(Toolkit):
                 return knowledge_base_error
 
             # Create new agent config
-            new_agent = AgentConfig(
-                display_name=display_name,
-                role=role,
-                tools=tools,
-                instructions=instructions,
-                model=model,
-                rooms=rooms,
-                knowledge_bases=knowledge_bases,
-                markdown=markdown,
-                learning=learning,
-                learning_mode=learning_mode,
-            )
+            if include_default_tools is None:
+                new_agent = AgentConfig(
+                    display_name=display_name,
+                    role=role,
+                    tools=tools,
+                    instructions=instructions,
+                    model=model,
+                    rooms=rooms,
+                    knowledge_bases=knowledge_bases,
+                    markdown=markdown,
+                    learning=learning,
+                    learning_mode=learning_mode,
+                )
+            else:
+                new_agent = AgentConfig(
+                    display_name=display_name,
+                    role=role,
+                    tools=tools,
+                    instructions=instructions,
+                    model=model,
+                    rooms=rooms,
+                    knowledge_bases=knowledge_bases,
+                    include_default_tools=include_default_tools,
+                    markdown=markdown,
+                    learning=learning,
+                    learning_mode=learning_mode,
+                )
 
             # Add to config
             config.agents[agent_name] = new_agent
@@ -551,6 +571,7 @@ class ConfigManagerTools(Toolkit):
         model: str | None,
         rooms: list[str] | None,
         knowledge_bases: list[str] | None,
+        include_default_tools: bool | None,
         markdown: bool | None,
         learning: bool | None,
         learning_mode: AgentLearningMode | None,
@@ -584,6 +605,7 @@ class ConfigManagerTools(Toolkit):
                 "model": (model, lambda v: v),
                 "rooms": (rooms, lambda v: ", ".join(v) if v else "(empty)"),
                 "knowledge_bases": (knowledge_bases, lambda v: ", ".join(v) if v else "(empty)"),
+                "include_default_tools": (include_default_tools, lambda v: str(v)),
                 "markdown": (markdown, lambda v: str(v)),
                 "learning": (learning, lambda v: str(v)),
                 "learning_mode": (learning_mode, lambda v: str(v)),
