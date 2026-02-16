@@ -263,6 +263,16 @@ def create_agent(  # noqa: C901, PLR0912, PLR0915
                         config=config,
                     ),
                 )
+            elif tool_name == "write_memory":
+                from .custom_tools.workspace_memory import WorkspaceMemoryTools  # noqa: PLC0415
+
+                tools.append(
+                    WorkspaceMemoryTools(
+                        agent_name=agent_name,
+                        storage_path=resolved_storage_path,
+                        config=config,
+                    ),
+                )
             else:
                 tools.append(get_tool_by_name(tool_name))
         except ValueError as e:

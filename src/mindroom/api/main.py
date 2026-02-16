@@ -30,6 +30,7 @@ from mindroom.config import Config
 from mindroom.constants import CONFIG_PATH, CONFIG_TEMPLATE_PATH, safe_replace
 from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.tool_dependencies import auto_install_enabled, auto_install_tool_extra
+from mindroom.workspace import workspace_context_report
 
 if TYPE_CHECKING:
     from supabase import Client as SupabaseClient
@@ -227,6 +228,25 @@ app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify
 async def health_check() -> dict[str, str]:
     """Health check endpoint for testing."""
     return {"status": "healthy"}
+
+
+@app.get("/api/agents/{name}/context-report", dependencies=[Depends(verify_user)])
+async def get_agent_context_report(
+    name: str,
+    room_id: str | None = None,
+    is_dm: bool = False,
+) -> dict[str, Any]:
+    """Return workspace context observability details for one agent."""
+    runtime_config = Config.from_yaml(CONFIG_PATH)
+    if name not in runtime_config.agents:
+        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+    return workspace_context_report(
+        name,
+        CONFIG_PATH.parent,
+        runtime_config,
+        room_id=room_id,
+        is_dm=is_dm,
+    )
 
 
 @app.post("/api/config/load")

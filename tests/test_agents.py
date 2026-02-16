@@ -51,6 +51,23 @@ def test_scheduler_tool_enabled_by_default(mock_storage: MagicMock) -> None:  # 
 
 
 @patch("mindroom.agents.SqliteDb")
+def test_write_memory_tool_loads_when_configured(mock_storage: MagicMock) -> None:  # noqa: ARG001
+    """Configured write_memory tool should be instantiated for agents."""
+    config = Config.from_yaml()
+    config.agents["general"].tools = ["write_memory"]
+
+    agent = create_agent(
+        "general",
+        config=config,
+        include_default_tools=False,
+        include_interactive_questions=False,
+    )
+
+    tool_names = [tool.name for tool in agent.tools]
+    assert "write_memory" in tool_names
+
+
+@patch("mindroom.agents.SqliteDb")
 def test_get_agent_code(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the code agent is created correctly."""
     config = Config.from_yaml()

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .logging_config import get_logger
 
@@ -233,16 +233,50 @@ def load_workspace_memory(
         if log_content:
             sections.append(f"### Daily Log {log_day.isoformat()}\n{log_content}")
 
-    if room_id:
-        room_path = workspace_dir / "rooms" / _safe_room_filename(room_id)
-        room_content = _read_workspace_file(room_path, max_file_size)
-        if room_content:
-            sections.append(f"### Room Context ({room_id})\n{room_content}")
+    room_content = load_room_context(agent_name, room_id, storage_path, config)
+    if room_content and room_id:
+        sections.append(f"### Room Context ({room_id})\n{room_content}")
 
     if not sections:
         return ""
 
     return "## Workspace Context\n\n" + "\n\n".join(sections)
+
+
+def load_room_context(
+    agent_name: str,
+    room_id: str | None,
+    storage_path: Path,
+    config: Config,
+) -> str | None:
+    """Load per-room context markdown for an agent."""
+    if not room_id or not _workspace_enabled(config):
+        return None
+
+    room_path = get_agent_workspace_path(agent_name, storage_path) / "rooms" / _safe_room_filename(room_id)
+    return _read_workspace_file(room_path, _workspace_max_file_size(config))
+
+
+def load_team_workspace(team_name: str, storage_path: Path, config: Config, *, is_dm: bool = False) -> str:
+    """Load team workspace context for prompt injection."""
+    if not _workspace_enabled(config):
+        return ""
+
+    workspace_dir = storage_path / WORKSPACE_DIRNAME / team_name
+    max_file_size = _workspace_max_file_size(config)
+    sections: list[str] = []
+
+    soul_content = _read_workspace_file(workspace_dir / SOUL_FILENAME, max_file_size)
+    if soul_content:
+        sections.append(f"### Team Soul\n{soul_content}")
+
+    memory_content = _read_workspace_file(workspace_dir / MEMORY_FILENAME, max_file_size)
+    if memory_content and is_dm:
+        sections.append(f"### Team Memory\n{memory_content}")
+
+    if not sections:
+        return ""
+    return "## Team Workspace Context\n\n" + "\n\n".join(sections)
 
 
 def append_daily_log(
@@ -273,3 +307,65 @@ def append_daily_log(
             msg = f"Daily log write exceeds max file size ({max_file_size} bytes): {log_path.as_posix()}"
             raise ValueError(msg)
         log_path.write_text(updated, encoding="utf-8")
+
+
+def workspace_context_report(
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+    *,
+    room_id: str | None = None,
+    is_dm: bool = False,
+) -> dict[str, Any]:
+    """Build an observability report for workspace context loading."""
+    report: dict[str, Any] = {
+        "agent_name": agent_name,
+        "room_id": room_id,
+        "is_dm": is_dm,
+        "loaded_files": [],
+        "warnings": [],
+    }
+
+    if not _workspace_enabled(config):
+        report["warnings"].append("Workspace memory is disabled")
+        return report
+
+    max_file_size = _workspace_max_file_size(config)
+    workspace_dir = get_agent_workspace_path(agent_name, storage_path)
+
+    def inspect(path: Path, *, required: bool, category: str) -> None:
+        if not path.exists() or not path.is_file():
+            if required:
+                report["warnings"].append(f"Missing {category}: {path.relative_to(workspace_dir).as_posix()}")
+            return
+
+        size_bytes = path.stat().st_size
+        if size_bytes > max_file_size:
+            report["warnings"].append(
+                f"Skipped oversized {category}: {path.relative_to(workspace_dir).as_posix()} ({size_bytes} bytes)",
+            )
+            return
+
+        report["loaded_files"].append(
+            {
+                "filename": path.relative_to(workspace_dir).as_posix(),
+                "size_bytes": size_bytes,
+                "category": category,
+            },
+        )
+
+    inspect(workspace_dir / SOUL_FILENAME, required=True, category="soul")
+    inspect(workspace_dir / AGENTS_FILENAME, required=True, category="agents")
+
+    if is_dm:
+        inspect(workspace_dir / MEMORY_FILENAME, required=False, category="memory")
+
+    today = datetime.now(UTC).date()
+    log_dir = _daily_log_dir(workspace_dir, room_id)
+    for log_day in (today, today - timedelta(days=1)):
+        inspect(log_dir / f"{log_day.isoformat()}.md", required=False, category="daily_log")
+
+    if room_id:
+        inspect(workspace_dir / "rooms" / _safe_room_filename(room_id), required=False, category="room")
+
+    return report

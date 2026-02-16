@@ -348,6 +348,7 @@ optional-dependencies.whatsapp = [
 optional-dependencies.wikipedia = [
   "wikipedia",
 ]
+optional-dependencies.write_memory = [  ]
 optional-dependencies.x = [
   "tweepy",
 ]

@@ -12,7 +12,10 @@ from mindroom.workspace import (
     append_daily_log,
     ensure_workspace,
     get_agent_workspace_path,
+    load_room_context,
+    load_team_workspace,
     load_workspace_memory,
+    workspace_context_report,
 )
 
 if TYPE_CHECKING:
@@ -75,3 +78,41 @@ def test_daily_logs_are_scoped_to_room(tmp_path: Path) -> None:
     assert "room-two-note" not in room_one_context
     assert "room-two-note" in room_two_context
     assert "room-one-note" not in room_two_context
+
+
+def test_load_room_context_reads_room_file(tmp_path: Path) -> None:
+    """Room context helper should load the scoped room markdown file."""
+    config = Config.from_yaml()
+    ensure_workspace("agent", tmp_path, config)
+    workspace_dir = get_agent_workspace_path("agent", tmp_path)
+    room_path = workspace_dir / "rooms" / "_room_server.md"
+    room_path.write_text("room context text", encoding="utf-8")
+
+    loaded = load_room_context("agent", "!room:server", tmp_path, config)
+    assert loaded == "room context text"
+
+
+def test_load_team_workspace_returns_soul_and_dm_memory(tmp_path: Path) -> None:
+    """Team workspace loader should include soul and DM-only memory."""
+    config = Config.from_yaml()
+    team_dir = tmp_path / "workspace" / "team_alpha"
+    team_dir.mkdir(parents=True, exist_ok=True)
+    (team_dir / SOUL_FILENAME).write_text("team soul", encoding="utf-8")
+    (team_dir / MEMORY_FILENAME).write_text("team memory", encoding="utf-8")
+
+    dm_context = load_team_workspace("team_alpha", tmp_path, config, is_dm=True)
+    group_context = load_team_workspace("team_alpha", tmp_path, config, is_dm=False)
+
+    assert "team soul" in dm_context
+    assert "team memory" in dm_context
+    assert "team memory" not in group_context
+
+
+def test_workspace_context_report_warns_on_missing_required_files(tmp_path: Path) -> None:
+    """Context report should include missing required file warnings."""
+    config = Config.from_yaml()
+    report = workspace_context_report("agent", tmp_path, config, is_dm=False)
+
+    assert report["agent_name"] == "agent"
+    assert report["loaded_files"] == []
+    assert any("Missing soul" in warning for warning in report["warnings"])

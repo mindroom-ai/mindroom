@@ -229,3 +229,20 @@ def test_workspace_memory_file_listed_files_are_readable(
     assert "memory/custom.md" in filenames
     assert read_response.status_code == 200
     assert read_response.json()["content"] == "custom memory"
+
+
+def test_agent_context_report_endpoint(test_client: TestClient) -> None:
+    """Context report endpoint should return observability payload."""
+    response = test_client.get("/api/agents/test_agent/context-report?is_dm=true")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["agent_name"] == "test_agent"
+    assert payload["is_dm"] is True
+    assert "loaded_files" in payload
+    assert "warnings" in payload
+
+
+def test_agent_context_report_unknown_agent_returns_404(test_client: TestClient) -> None:
+    """Unknown agents should return 404 on context-report endpoint."""
+    response = test_client.get("/api/agents/unknown/context-report")
+    assert response.status_code == 404
