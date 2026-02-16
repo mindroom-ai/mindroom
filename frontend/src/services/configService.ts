@@ -37,23 +37,6 @@ export async function saveConfig(config: Config): Promise<void> {
   }
 }
 
-export async function encryptAPIKey(provider: string, key: string): Promise<string> {
-  const response = await fetch(`${API_BASE}/keys/encrypt`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ provider, key }),
-  });
-
-  if (!response.ok) {
-    throw new Error('Failed to encrypt API key');
-  }
-
-  const result = await response.json();
-  return result.encryptedKey;
-}
-
 export async function getAvailableTools(): Promise<string[]> {
   const response = await fetch(`${API_BASE}/tools`);
 
