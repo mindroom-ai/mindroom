@@ -19,12 +19,12 @@ Indexing (startup + file changes):
          │ file watcher
          │ git sync
 
-Querying (agentic RAG — agent decides when to search):
+Querying (agentic RAG):
 
-  ┌──────────┐  search  ┌──────────┐  relevant  ┌───────┐
-  │  Agent   │ ───────▶ │ ChromaDB │ ────────▶  │ Agent │
-  └──────────┘          └──────────┘   chunks    │ reply │
-                                                 └───────┘
+  ┌───────┐  search   ┌──────────┐
+  │ Agent │ ────────▶ │ ChromaDB │
+  │       │ ◀──────── │          │
+  └───────┘  chunks   └──────────┘
 ```
 
 ## Quick Start
@@ -228,14 +228,7 @@ Git settings are currently configured only in `config.yaml` — the dashboard pr
 
 ## API Endpoints
 
-| Method | Endpoint                                      | Description                          |
-| ------ | --------------------------------------------- | ------------------------------------ |
-| GET    | `/api/knowledge/bases`                        | List all knowledge bases with status |
-| GET    | `/api/knowledge/bases/{base_id}/files`        | List files in a knowledge base       |
-| POST   | `/api/knowledge/bases/{base_id}/upload`       | Upload files (1 GiB max per file)    |
-| DELETE | `/api/knowledge/bases/{base_id}/files/{path}` | Delete a file from disk and index    |
-| GET    | `/api/knowledge/bases/{base_id}/status`       | Get indexing status                  |
-| POST   | `/api/knowledge/bases/{base_id}/reindex`      | Force full reindex                   |
+See the [Dashboard API reference](https://docs.mindroom.chat/dashboard/#knowledge) for the full list of knowledge base endpoints (list, upload, delete, reindex, status).
 
 ## Hot Reload
 
