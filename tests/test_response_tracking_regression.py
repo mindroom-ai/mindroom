@@ -175,6 +175,7 @@ class TestResponseTrackingRegression:
         mock_context.thread_id = None
         mock_context.thread_history = []
         mock_context.mentioned_agents = []
+        mock_context.has_non_agent_mentions = False
         bot._extract_message_context.return_value = mock_context
 
         # Mock the _send_response to track the call
