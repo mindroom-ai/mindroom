@@ -156,7 +156,7 @@ class TestStreamingBehavior:
 
         # Mock that we're mentioned
         with patch("mindroom.bot.check_agent_mentioned") as mock_check:
-            mock_check.return_value = (["helper"], True)
+            mock_check.return_value = (["helper"], True, False)
 
             # Process message with helper bot - it should stream a response
             await helper_bot._on_message(mock_room, user_event)
@@ -178,7 +178,7 @@ class TestStreamingBehavior:
 
         # Process initial message - calculator should NOT respond (has in-progress marker)
         with patch("mindroom.bot.check_agent_mentioned") as mock_check:
-            mock_check.return_value = (["calculator"], True)
+            mock_check.return_value = (["calculator"], True, False)
 
             # Debug: let's see what happens
             calc_bot.logger.info(f"Processing initial message: '{initial_event.body}'")
@@ -207,7 +207,7 @@ class TestStreamingBehavior:
 
         # Process final message - calculator SHOULD respond now
         with patch("mindroom.bot.check_agent_mentioned") as mock_check:
-            mock_check.return_value = (["calculator"], True)
+            mock_check.return_value = (["calculator"], True, False)
             with patch("mindroom.bot.extract_agent_name") as mock_extract:
                 # Make extract_agent_name return 'helper' for the sender
                 mock_extract.return_value = "helper"

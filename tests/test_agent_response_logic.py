@@ -400,6 +400,110 @@ class TestAgentResponseLogic:
         )
         assert should_respond is True  # Single agent takes ownership when only users have spoken
 
+    def test_multiple_non_agent_users_in_thread_require_mentions(self) -> None:
+        """Require mention when multiple humans posted in a thread, but allow thread continuity."""
+        room = create_mock_room("!room:localhost", ["calculator"], self.config)
+
+        # Thread with two different human senders and no agent yet → require mention
+        multi_human_thread = [
+            {"sender": "@alice:localhost", "body": "Can someone help?"},
+            {"sender": "@bob:localhost", "body": "I also need help"},
+        ]
+        assert (
+            should_agent_respond(
+                agent_name="calculator",
+                am_i_mentioned=False,
+                is_thread=True,
+                room=room,
+                thread_history=multi_human_thread,
+                config=self.config,
+            )
+            is False
+        )
+
+        # Same thread but agent is explicitly mentioned → respond
+        assert (
+            should_agent_respond(
+                agent_name="calculator",
+                am_i_mentioned=True,
+                is_thread=True,
+                room=room,
+                thread_history=multi_human_thread,
+                config=self.config,
+            )
+            is True
+        )
+
+        # Thread with only one human sender → auto-respond (single agent room)
+        single_human_thread = [
+            {"sender": "@alice:localhost", "body": "Can someone help?"},
+        ]
+        assert (
+            should_agent_respond(
+                agent_name="calculator",
+                am_i_mentioned=False,
+                is_thread=True,
+                room=room,
+                thread_history=single_human_thread,
+                config=self.config,
+            )
+            is True
+        )
+
+        # Agent already participating in multi-human thread → still require mention
+        owned_thread_history = [
+            {"sender": "@alice:localhost", "body": "help"},
+            {"sender": "@bob:localhost", "body": "me too"},
+            {"sender": self.agent_id("calculator"), "body": "Sure, I can help."},
+            {"sender": "@alice:localhost", "body": "Can you continue?"},
+        ]
+        assert (
+            should_agent_respond(
+                agent_name="calculator",
+                am_i_mentioned=False,
+                is_thread=True,
+                room=room,
+                thread_history=owned_thread_history,
+                config=self.config,
+            )
+            is False
+        )
+
+    def test_non_agent_mention_suppresses_auto_response(self) -> None:
+        """Agent should not auto-respond when a non-agent user is explicitly mentioned."""
+        room = create_mock_room("!room:localhost", ["calculator"], self.config)
+
+        assert (
+            should_agent_respond(
+                agent_name="calculator",
+                am_i_mentioned=False,
+                is_thread=False,
+                room=room,
+                thread_history=[],
+                config=self.config,
+                has_non_agent_mentions=True,
+            )
+            is False
+        )
+
+    def test_multi_human_room_non_thread_auto_responds(self) -> None:
+        """Non-thread messages in multi-human rooms auto-respond (single agent)."""
+        room = create_mock_room("!room:localhost", ["calculator"], self.config)
+        room.users["@alice:localhost"] = None
+        room.users["@bob:localhost"] = None
+
+        assert (
+            should_agent_respond(
+                agent_name="calculator",
+                am_i_mentioned=False,
+                is_thread=False,
+                room=room,
+                thread_history=[],
+                config=self.config,
+            )
+            is True
+        )
+
     def test_agent_stops_when_user_mentions_other_agent(self) -> None:
         """Test that an agent stops responding when user mentions a different agent.
 

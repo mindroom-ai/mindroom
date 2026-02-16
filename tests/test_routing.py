@@ -13,7 +13,12 @@ from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.routing import AgentSuggestion, suggest_agent_for_message
-from mindroom.thread_utils import extract_agent_name, has_any_agent_mentions_in_thread
+from mindroom.thread_utils import (
+    check_agent_mentioned,
+    extract_agent_name,
+    has_any_agent_mentions_in_thread,
+    has_multiple_non_agent_users_in_thread,
+)
 
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
@@ -261,6 +266,55 @@ class TestThreadUtils:
         # Regular users should still be rejected
         assert extract_agent_name(self.config.get_mindroom_user_id(), self.config) is None
         assert extract_agent_name("@regular_user:localhost", self.config) is None
+
+    def test_has_multiple_non_agent_users_in_thread_true(self) -> None:
+        """Detect more than one non-agent user posting in a thread."""
+        history = [
+            {"sender": "@alice:localhost", "body": "hello"},
+            {"sender": "@bob:localhost", "body": "hi"},
+        ]
+        assert has_multiple_non_agent_users_in_thread(history, self.config) is True
+
+    def test_has_multiple_non_agent_users_in_thread_false(self) -> None:
+        """Do not trigger when only one non-agent user has posted."""
+        history = [
+            {"sender": "@alice:localhost", "body": "hello"},
+            {"sender": "@mindroom_calculator:localhost", "body": "result"},
+        ]
+        assert has_multiple_non_agent_users_in_thread(history, self.config) is False
+
+    def test_has_multiple_non_agent_users_in_thread_ignores_agents(self) -> None:
+        """Agent senders should not count toward the non-agent tally."""
+        history = [
+            {"sender": "@alice:localhost", "body": "help"},
+            {"sender": "@mindroom_calculator:localhost", "body": "sure"},
+            {"sender": "@mindroom_general:localhost", "body": "me too"},
+        ]
+        assert has_multiple_non_agent_users_in_thread(history, self.config) is False
+
+    def test_check_agent_mentioned_detects_non_agent_mentions(self) -> None:
+        """Tagging a non-agent user sets has_non_agent_mentions."""
+        event_source = {
+            "content": {
+                "m.mentions": {"user_ids": ["@bob:localhost"]},
+            },
+        }
+        agent_id = MatrixID.from_username("mindroom_calculator", "localhost")
+        _, am_i_mentioned, has_non_agent = check_agent_mentioned(event_source, agent_id, self.config)
+        assert am_i_mentioned is False
+        assert has_non_agent is True
+
+    def test_check_agent_mentioned_no_non_agent_mentions(self) -> None:
+        """Tagging only agents does not set has_non_agent_mentions."""
+        event_source = {
+            "content": {
+                "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
+            },
+        }
+        agent_id = MatrixID.from_username("mindroom_calculator", "localhost")
+        _, am_i_mentioned, has_non_agent = check_agent_mentioned(event_source, agent_id, self.config)
+        assert am_i_mentioned is True
+        assert has_non_agent is False
 
 
 class TestAgentDescription:
