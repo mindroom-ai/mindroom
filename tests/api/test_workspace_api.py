@@ -147,10 +147,12 @@ def test_workspace_allowlist_and_path_traversal(
         disallowed = test_client.get("/api/workspace/test_agent/file/not_allowed.md")
         traversal = test_client.get("/api/workspace/test_agent/file/..%2Fsecret.md")
         nested_traversal = test_client.get("/api/workspace/test_agent/file/memory/..%2Fsecret.md")
+        dot_segment = test_client.get("/api/workspace/test_agent/file/memory/%2e/secret.md")
 
     assert disallowed.status_code == 422
     assert traversal.status_code == 422
     assert nested_traversal.status_code == 422
+    assert dot_segment.status_code == 422
 
 
 def test_workspace_daily_endpoints(

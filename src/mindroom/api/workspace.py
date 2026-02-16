@@ -64,8 +64,8 @@ def _resolve_within_root(root: Path, relative_path: str) -> Path:
 
 def _validate_filename(filename: str) -> str:
     decoded = unquote(filename).strip("/")
-    candidate = Path(decoded)
-    if any(part in {".", ".."} for part in candidate.parts):
+    path_segments = [segment for segment in decoded.split("/") if segment]
+    if any(segment in {".", ".."} for segment in path_segments):
         raise HTTPException(status_code=422, detail="Filename is not allowed")
 
     if decoded in _ALLOWED_ROOT_FILES:
