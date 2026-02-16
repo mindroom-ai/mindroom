@@ -18,28 +18,26 @@ Do not ask the user which role to play. Detect it from file existence.
 ## Agent A (opener) flow
 
 1. Analyze the subject the user specified (run `git show`, `git diff`, `gh pr view`, read files, etc. as appropriate).
-2. If `.prompts/pr-review.md` exists, read it and apply its review standards.
-3. Write your analysis to `DEBATE.md` using the file format below.
-4. Compute the file's checksum: `md5sum DEBATE.md | cut -d' ' -f1`
-5. Poll for changes: run a bash loop that checks md5sum every 5 seconds until the checksum changes.
+2. Write your analysis to `DEBATE.md` using the file format below.
+3. Compute the file's checksum: `md5sum DEBATE.md | cut -d' ' -f1`
+4. Poll for changes: run a bash loop that checks md5sum every 5 seconds until the checksum changes.
    ```bash
    PREV=$(md5sum DEBATE.md | cut -d' ' -f1); while true; do sleep 5; NOW=$(md5sum DEBATE.md | cut -d' ' -f1); if [ "$NOW" != "$PREV" ]; then break; fi; done
    ```
-6. Read Agent B's reply.
-7. If all points are resolved → append a `## CONSENSUS` section summarizing agreed outcomes and stop.
-8. Otherwise append a `## Follow-up N` section addressing unresolved points, then go to step 4.
+5. Read Agent B's reply.
+6. If all points are resolved → append a `## CONSENSUS` section summarizing agreed outcomes and stop.
+7. Otherwise append a `## Follow-up N` section addressing unresolved points, then go to step 3.
 
 ## Agent B (responder) flow
 
 1. Read `DEBATE.md` (it exists — that's how you know you're the responder).
 2. Analyze the same subject the user specified.
-3. If `.prompts/pr-review.md` exists, read it and apply its review standards.
-4. Append a `## Response N` section with a point-by-point reply.
-5. Compute the file's checksum.
-6. Poll for changes (same bash loop as above).
-7. Read Agent A's follow-up.
-8. If the file contains `## CONSENSUS` → stop, debate is over.
-9. Otherwise append another `## Response N` section, then go to step 5.
+3. Append a `## Response N` section with a point-by-point reply.
+4. Compute the file's checksum.
+5. Poll for changes (same bash loop as above).
+6. Read Agent A's follow-up.
+7. If the file contains `## CONSENSUS` → stop, debate is over.
+8. Otherwise append another `## Response N` section, then go to step 4.
 
 ## File format
 
