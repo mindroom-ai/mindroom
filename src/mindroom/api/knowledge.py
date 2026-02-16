@@ -83,7 +83,7 @@ async def _ensure_managers(config: Config) -> dict[str, KnowledgeManager]:
         config,
         STORAGE_PATH_OBJ,
         start_watchers=False,
-        reindex_on_create=False,
+        reindex_on_create=True,
     )
 
 
@@ -284,6 +284,9 @@ async def reindex_knowledge(base_id: str) -> dict[str, Any]:
     manager = await _ensure_manager(config, base_id)
     if manager is None:
         raise HTTPException(status_code=500, detail="Knowledge manager is unavailable")
+
+    if config.knowledge_bases[base_id].git is not None:
+        await manager.sync_git_repository()
 
     indexed_count = await manager.reindex_all()
     return {

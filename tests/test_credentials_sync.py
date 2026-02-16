@@ -147,6 +147,49 @@ class TestCredentialsSync:
             assert cm.get_api_key("openai") == "valid-key"
             assert cm.get_api_key("anthropic") is None
 
+    def test_sync_env_seeds_github_private_from_github_token(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """GITHUB_TOKEN should seed github_private credentials for Git KB auth."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp-test-token")
+
+        with patch("mindroom.credentials_sync.get_credentials_manager") as mock_get_cm:
+            cm = CredentialsManager(base_path=temp_credentials_dir)
+            mock_get_cm.return_value = cm
+            sync_env_to_credentials()
+
+            github_private = cm.load_credentials("github_private")
+            assert github_private == {
+                "username": "x-access-token",
+                "token": "ghp-test-token",
+                "_source": "env",
+            }
+
+    def test_sync_env_does_not_overwrite_ui_github_private_credentials(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """UI-managed github_private credentials must not be overwritten by env sync."""
+        cm = CredentialsManager(base_path=temp_credentials_dir)
+        ui_value = "ui-value"
+        cm.save_credentials(
+            "github_private",
+            {"username": "my-user", "token": ui_value, "_source": "ui"},
+        )
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp-env-token")
+
+        with patch("mindroom.credentials_sync.get_credentials_manager") as mock_get_cm:
+            mock_get_cm.return_value = cm
+            sync_env_to_credentials()
+
+            github_private = cm.load_credentials("github_private")
+            assert github_private is not None
+            assert github_private["token"] == ui_value
+            assert github_private["_source"] == "ui"
+
     def test_get_api_key_for_provider(self, credentials_manager: CredentialsManager) -> None:
         """Test getting API key for different providers."""
         # Set up test data
