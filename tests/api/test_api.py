@@ -551,3 +551,20 @@ def test_api_key_authenticated_teams_access(api_key_client: TestClient) -> None:
         headers={"Authorization": "Bearer test-key"},
     )
     assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/google/callback?code=test-code",
+        "/api/homeassistant/callback?code=test-code",
+        "/api/integrations/spotify/callback?code=test-code",
+    ],
+)
+def test_api_key_keeps_oauth_callbacks_open(
+    api_key_client: TestClient,
+    path: str,
+) -> None:
+    """OAuth callbacks must remain reachable without Authorization headers."""
+    response = api_key_client.get(path)
+    assert response.status_code != 401

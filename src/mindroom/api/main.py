@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
 import yaml
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from watchfiles import awatch
 
@@ -141,6 +141,14 @@ SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 ACCOUNT_ID = os.getenv("ACCOUNT_ID")  # optional: enforce instance ownership
 MINDROOM_API_KEY = os.getenv("MINDROOM_API_KEY")  # optional: dashboard auth for standalone mode
 
+STANDALONE_PUBLIC_PATHS = frozenset(
+    {
+        "/api/google/callback",
+        "/api/homeassistant/callback",
+        "/api/integrations/spotify/callback",
+    },
+)
+
 
 def _init_supabase_auth(supabase_url: str | None, supabase_anon_key: str | None) -> "SupabaseClient | None":
     """Initialize Supabase auth client when credentials are configured."""
@@ -167,13 +175,16 @@ def _init_supabase_auth(supabase_url: str | None, supabase_anon_key: str | None)
 _supabase_auth: "SupabaseClient | None" = _init_supabase_auth(SUPABASE_URL, SUPABASE_ANON_KEY)
 
 
-async def verify_user(authorization: str | None = Header(None)) -> dict:
+async def verify_user(request: Request, authorization: str | None = Header(None)) -> dict:
     """Validate Supabase JWT from Authorization header; enforce owner if ACCOUNT_ID set.
 
     In standalone mode (no Supabase), returns a default user to allow access.
     """
     if _supabase_auth is None:
         # Standalone mode
+        if request.url.path in STANDALONE_PUBLIC_PATHS:
+            return {"user_id": "standalone", "email": None}
+
         if MINDROOM_API_KEY:
             if not authorization or not authorization.startswith("Bearer "):
                 raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
