@@ -116,3 +116,29 @@ def test_workspace_context_report_warns_on_missing_required_files(tmp_path: Path
     assert report["agent_name"] == "agent"
     assert report["loaded_files"] == []
     assert any("Missing soul" in warning for warning in report["warnings"])
+
+
+def test_workspace_context_report_lists_only_loaded_context_files(tmp_path: Path) -> None:
+    """Context report should exclude default templates and DM-gated memory."""
+    config = Config.from_yaml()
+    ensure_workspace("agent", tmp_path, config)
+    workspace_dir = get_agent_workspace_path("agent", tmp_path)
+
+    default_report = workspace_context_report("agent", tmp_path, config, is_dm=True)
+    assert default_report["loaded_files"] == []
+
+    (workspace_dir / SOUL_FILENAME).write_text("custom soul", encoding="utf-8")
+    (workspace_dir / AGENTS_FILENAME).write_text("custom agents", encoding="utf-8")
+    (workspace_dir / MEMORY_FILENAME).write_text("custom memory", encoding="utf-8")
+
+    dm_report = workspace_context_report("agent", tmp_path, config, is_dm=True)
+    dm_loaded = {entry["filename"] for entry in dm_report["loaded_files"]}
+    assert "SOUL.md" in dm_loaded
+    assert "AGENTS.md" in dm_loaded
+    assert "MEMORY.md" in dm_loaded
+
+    group_report = workspace_context_report("agent", tmp_path, config, is_dm=False)
+    group_loaded = {entry["filename"] for entry in group_report["loaded_files"]}
+    assert "SOUL.md" in group_loaded
+    assert "AGENTS.md" in group_loaded
+    assert "MEMORY.md" not in group_loaded

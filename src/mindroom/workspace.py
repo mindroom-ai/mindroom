@@ -317,7 +317,7 @@ def workspace_context_report(
     room_id: str | None = None,
     is_dm: bool = False,
 ) -> dict[str, Any]:
-    """Build an observability report for workspace context loading."""
+    """Build an observability report for files actually loaded into context."""
     report: dict[str, Any] = {
         "agent_name": agent_name,
         "room_id": room_id,
@@ -333,7 +333,13 @@ def workspace_context_report(
     max_file_size = _workspace_max_file_size(config)
     workspace_dir = get_agent_workspace_path(agent_name, storage_path)
 
-    def inspect(path: Path, *, required: bool, category: str) -> None:
+    def inspect(
+        path: Path,
+        *,
+        required: bool,
+        category: str,
+        default_template: str | None = None,
+    ) -> None:
         if not path.exists() or not path.is_file():
             if required:
                 report["warnings"].append(f"Missing {category}: {path.relative_to(workspace_dir).as_posix()}")
@@ -346,6 +352,14 @@ def workspace_context_report(
             )
             return
 
+        content = (
+            _read_custom_workspace_file(path, default_template, max_file_size)
+            if default_template is not None
+            else _read_workspace_file(path, max_file_size)
+        )
+        if not content:
+            return
+
         report["loaded_files"].append(
             {
                 "filename": path.relative_to(workspace_dir).as_posix(),
@@ -354,11 +368,26 @@ def workspace_context_report(
             },
         )
 
-    inspect(workspace_dir / SOUL_FILENAME, required=True, category="soul")
-    inspect(workspace_dir / AGENTS_FILENAME, required=True, category="agents")
+    inspect(
+        workspace_dir / SOUL_FILENAME,
+        required=True,
+        category="soul",
+        default_template=DEFAULT_SOUL_TEMPLATE,
+    )
+    inspect(
+        workspace_dir / AGENTS_FILENAME,
+        required=True,
+        category="agents",
+        default_template=DEFAULT_AGENTS_TEMPLATE,
+    )
 
     if is_dm:
-        inspect(workspace_dir / MEMORY_FILENAME, required=False, category="memory")
+        inspect(
+            workspace_dir / MEMORY_FILENAME,
+            required=False,
+            category="memory",
+            default_template=DEFAULT_MEMORY_TEMPLATE,
+        )
 
     today = datetime.now(UTC).date()
     log_dir = _daily_log_dir(workspace_dir, room_id)
