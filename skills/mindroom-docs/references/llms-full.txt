@@ -279,10 +279,6 @@ ANTHROPIC_API_KEY=your_anthropic_key
 
 # MINDROOM_API_KEY=your-secret-key
 
-# If using the Vite frontend, set the same key for browser API calls
-
-# VITE_API_KEY=your-secret-key
-
 ```
 
 > [!NOTE]
@@ -2430,7 +2426,7 @@ Client `system` / `developer` messages are prepended to the prompt. They augment
 | Unset                    | `true`                                | No authentication required                                        |
 | Unset                    | Unset/`false`                         | All requests return 401 (locked)                                  |
 
-The OpenAI-compatible API uses its own auth (`OPENAI_COMPAT_API_KEYS`), separate from the dashboard API auth. In standalone mode, the dashboard `/api/*` endpoints can be protected with `MINDROOM_API_KEY` (Bearer token). If you run the Vite dashboard frontend, set `VITE_API_KEY` to the same value so browser requests include the Bearer token. These are independent: `MINDROOM_API_KEY` secures the dashboard, while `OPENAI_COMPAT_API_KEYS` secures the `/v1/*` chat completions endpoints.
+The OpenAI-compatible API uses its own auth (`OPENAI_COMPAT_API_KEYS`), separate from the dashboard API auth. In standalone mode, the dashboard `/api/*` endpoints can be protected with `MINDROOM_API_KEY` (Bearer token). The auth header is injected at the proxy layer (nginx in Docker/K8s), so the frontend JS bundle does not contain secrets. These are independent: `MINDROOM_API_KEY` secures the dashboard, while `OPENAI_COMPAT_API_KEYS` secures the `/v1/*` chat completions endpoints.
 
 ## Limitations
 
@@ -3164,18 +3160,17 @@ docker compose up -d
 
 Key environment variables (set in `.env` or pass directly):
 
-| Variable                | Description                                                                                        | Default                 |
-| ----------------------- | -------------------------------------------------------------------------------------------------- | ----------------------- |
-| `MATRIX_HOMESERVER`     | Matrix server URL                                                                                  | `http://localhost:8008` |
-| `MATRIX_SSL_VERIFY`     | Verify SSL certificates                                                                            | `true`                  |
-| `MATRIX_SERVER_NAME`    | Server name for federation (optional)                                                              | -                       |
-| `MINDROOM_STORAGE_PATH` | Data storage directory                                                                             | Relative to config file |
-| `LOG_LEVEL`             | Logging level                                                                                      | `INFO`                  |
-| `MINDROOM_CONFIG_PATH`  | Path to config.yaml                                                                                | `./config.yaml`         |
-| `ANTHROPIC_API_KEY`     | Anthropic API key (if using Claude models)                                                         | -                       |
-| `OPENAI_API_KEY`        | OpenAI API key (if using OpenAI models)                                                            | -                       |
-| `MINDROOM_API_KEY`      | API key for dashboard auth (standalone)                                                            | - (open access)         |
-| `VITE_API_KEY`          | Frontend build-time dashboard API key (set equal to `MINDROOM_API_KEY`; visible in browser bundle) | -                       |
+| Variable                | Description                                | Default                 |
+| ----------------------- | ------------------------------------------ | ----------------------- |
+| `MATRIX_HOMESERVER`     | Matrix server URL                          | `http://localhost:8008` |
+| `MATRIX_SSL_VERIFY`     | Verify SSL certificates                    | `true`                  |
+| `MATRIX_SERVER_NAME`    | Server name for federation (optional)      | -                       |
+| `MINDROOM_STORAGE_PATH` | Data storage directory                     | Relative to config file |
+| `LOG_LEVEL`             | Logging level                              | `INFO`                  |
+| `MINDROOM_CONFIG_PATH`  | Path to config.yaml                        | `./config.yaml`         |
+| `ANTHROPIC_API_KEY`     | Anthropic API key (if using Claude models) | -                       |
+| `OPENAI_API_KEY`        | OpenAI API key (if using OpenAI models)    | -                       |
+| `MINDROOM_API_KEY`      | API key for dashboard auth (standalone)    | - (open access)         |
 
 Streaming responses are configured in `config.yaml` via `defaults.enable_streaming` (default: `true`).
 

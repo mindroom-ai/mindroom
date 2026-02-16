@@ -1,6 +1,6 @@
 import { FaSpotify } from 'react-icons/fa';
 import { Integration, IntegrationProvider, IntegrationConfig } from '../types';
-import { API_BASE, getAuthHeaders } from '@/lib/api';
+import { API_BASE } from '@/lib/api';
 
 class SpotifyIntegrationProvider implements IntegrationProvider {
   private integration: Integration = {
@@ -35,7 +35,6 @@ class SpotifyIntegrationProvider implements IntegrationProvider {
     try {
       const response = await fetch(`${API_BASE}/api/integrations/spotify/connect`, {
         method: 'POST',
-        headers: getAuthHeaders(),
       });
 
       if (!response.ok) {
@@ -66,7 +65,6 @@ class SpotifyIntegrationProvider implements IntegrationProvider {
     try {
       await fetch(`${API_BASE}/api/integrations/spotify/disconnect`, {
         method: 'POST',
-        headers: getAuthHeaders(),
       });
     } catch (error) {
       console.error('Failed to disconnect Spotify:', error);
@@ -80,9 +78,7 @@ class SpotifyIntegrationProvider implements IntegrationProvider {
 
     // Then check backend for authoritative status
     try {
-      const response = await fetch(`${API_BASE}/api/integrations/spotify/status`, {
-        headers: getAuthHeaders(),
-      });
+      const response = await fetch(`${API_BASE}/api/integrations/spotify/status`);
       if (response.ok) {
         const data = await response.json();
         return data.connected === true;

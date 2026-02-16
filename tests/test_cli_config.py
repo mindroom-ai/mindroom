@@ -52,8 +52,8 @@ class TestConfigInit:
         assert "agents:" in content
         assert "# MindRoom Configuration (minimal)" in content
 
-    def test_init_creates_env_with_matching_dashboard_keys(self, tmp_path: Path) -> None:
-        """Config init writes backend and frontend dashboard keys with the same value."""
+    def test_init_creates_env_with_dashboard_key(self, tmp_path: Path) -> None:
+        """Config init writes a random MINDROOM_API_KEY to .env."""
         target = tmp_path / "config.yaml"
         result = runner.invoke(app, ["config", "init", "--path", str(target)])
         assert result.exit_code == 0
@@ -63,11 +63,10 @@ class TestConfigInit:
 
         content = env_path.read_text()
         backend_match = re.search(r"^MINDROOM_API_KEY=(.+)$", content, flags=re.MULTILINE)
-        frontend_match = re.search(r"^VITE_API_KEY=(.+)$", content, flags=re.MULTILINE)
         assert backend_match is not None
-        assert frontend_match is not None
         assert backend_match.group(1)
-        assert backend_match.group(1) == frontend_match.group(1)
+        # VITE_API_KEY should NOT be in the template (auth is handled at proxy layer)
+        assert "VITE_API_KEY" not in content
 
     def test_init_force_does_not_overwrite_existing_env(self, tmp_path: Path) -> None:
         """Config init --force should never overwrite an existing .env file."""

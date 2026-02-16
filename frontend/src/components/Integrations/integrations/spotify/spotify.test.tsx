@@ -169,10 +169,7 @@ describe('SpotifyIntegrationProvider', () => {
 
       expect(isConnected).toBe(true);
       expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining('/api/integrations/spotify/status'),
-        expect.objectContaining({
-          headers: expect.any(Object),
-        })
+        expect.stringContaining('/api/integrations/spotify/status')
       );
     });
 

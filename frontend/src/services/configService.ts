@@ -1,12 +1,10 @@
 import { Config } from '@/types/config';
-import { getAuthHeaders } from '@/lib/api';
 
 const API_BASE = '/api';
 
 export async function loadConfig(): Promise<Config> {
   const response = await fetch(`${API_BASE}/config/load`, {
     method: 'POST',
-    headers: getAuthHeaders(),
   });
 
   if (!response.ok) {
@@ -30,7 +28,6 @@ export async function saveConfig(config: Config): Promise<void> {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
-      ...getAuthHeaders(),
     },
     body: JSON.stringify(config),
   });
@@ -45,7 +42,6 @@ export async function encryptAPIKey(provider: string, key: string): Promise<stri
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...getAuthHeaders(),
     },
     body: JSON.stringify({ provider, key }),
   });
@@ -59,9 +55,7 @@ export async function encryptAPIKey(provider: string, key: string): Promise<stri
 }
 
 export async function getAvailableTools(): Promise<string[]> {
-  const response = await fetch(`${API_BASE}/tools`, {
-    headers: getAuthHeaders(),
-  });
+  const response = await fetch(`${API_BASE}/tools`);
 
   if (!response.ok) {
     throw new Error('Failed to fetch available tools');
@@ -71,9 +65,7 @@ export async function getAvailableTools(): Promise<string[]> {
 }
 
 export async function getAvailableRooms(): Promise<string[]> {
-  const response = await fetch(`${API_BASE}/rooms`, {
-    headers: getAuthHeaders(),
-  });
+  const response = await fetch(`${API_BASE}/rooms`);
 
   if (!response.ok) {
     throw new Error('Failed to fetch available rooms');

@@ -29,28 +29,51 @@ WORKDIR /usr/share/nginx/html
 # Only copy what's needed for production
 COPY --from=builder /app/frontend/dist ./
 
-# Create nginx config for SPA with proper routing (use port 8080, default for unprivileged)
-RUN cat > /etc/nginx/conf.d/default.conf << 'EOF'
+# Write nginx config template.  The nginx-unprivileged entrypoint runs
+# envsubst on /etc/nginx/templates/*.template before starting nginx.
+# NGINX_ENVSUBST_FILTER limits substitution to only $BACKEND_URL so
+# nginx's own variables ($uri, $host, etc.) are left untouched.
+ENV NGINX_ENVSUBST_FILTER=BACKEND_URL
+RUN cat > /etc/nginx/templates/default.conf.template << 'TMPL'
 server {
     listen 8080;
     server_name _;
     root /usr/share/nginx/html;
 
-    # SPA routing - all routes serve index.html
+    # ---- Dashboard API proxy ----
+    location /api {
+        proxy_pass ${BACKEND_URL};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3600;
+        proxy_send_timeout 3600;
+    }
+
+    # ---- SPA routing ----
     location / {
         try_files $uri /index.html;
     }
 
-    # Enable gzip (K8s ingress may override)
     gzip on;
     gzip_types text/css application/javascript application/json;
 }
-EOF
+TMPL
+
+# Entrypoint script: if MINDROOM_API_KEY is set, inject an Authorization
+# header into the /api proxy block.  Runs after envsubst but before nginx.
+RUN cat > /docker-entrypoint.d/90-inject-api-key.sh << 'SH'
+#!/bin/sh
+CONF="/etc/nginx/conf.d/default.conf"
+if [ -n "$MINDROOM_API_KEY" ]; then
+    sed -i '/location \/api {/a\        proxy_set_header Authorization "Bearer '"$MINDROOM_API_KEY"'";' "$CONF"
+fi
+SH
+chmod +x /docker-entrypoint.d/90-inject-api-key.sh
 
 # Expose port (8080 is default for nginx-unprivileged)
 EXPOSE 8080
-
-# No health check needed - K8s handles this via readiness/liveness probes
-
-# Start nginx server (already runs as non-root UID 101)
-CMD ["nginx", "-g", "daemon off;"]

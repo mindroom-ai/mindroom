@@ -52,12 +52,7 @@ describe('GoogleIntegrationProvider', () => {
 
       expect(status.status).toBe('connected');
       expect(status.connected).toBe(true);
-      expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining('/api/google/status'),
-        expect.objectContaining({
-          headers: expect.any(Object),
-        })
-      );
+      expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('/api/google/status'));
     });
 
     it('should return available status when not configured', async () => {

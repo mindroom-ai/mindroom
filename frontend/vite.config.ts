@@ -6,12 +6,16 @@ import path from 'path';
 const backendPort = process.env.BACKEND_PORT || '8765';
 const frontendPort = parseInt(process.env.FRONTEND_PORT || '3003');
 const isDocker = process.env.DOCKER_CONTAINER === '1';
+// Dashboard API key — injected server-side by the proxy so it never
+// appears in the browser JS bundle.  Read from the repo-root .env
+// (same var the backend uses).
+const apiKey = process.env.MINDROOM_API_KEY;
 
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
-  // Load env vars from repo root (parent of `frontend/`) where `mindroom config init`
-  // writes `.env`.  This assumes the Vite dev server is started from `frontend/`.
+  // Load .env from repo root (parent of frontend/) so that
+  // MINDROOM_API_KEY set in the root .env is available to the proxy.
   envDir: '..',
   resolve: {
     alias: {
@@ -25,6 +29,15 @@ export default defineConfig({
       '/api': {
         target: `http://localhost:${backendPort}`,
         changeOrigin: true,
+        configure(proxy) {
+          if (apiKey) {
+            proxy.on('proxyReq', (proxyReq, req) => {
+              if (!req.headers.authorization) {
+                proxyReq.setHeader('Authorization', `Bearer ${apiKey}`);
+              }
+            });
+          }
+        },
       },
     },
   },

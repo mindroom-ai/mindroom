@@ -8,7 +8,7 @@ import {
   type DragEvent,
 } from 'react';
 import { type ColumnDef, flexRender, getCoreRowModel, useReactTable } from '@tanstack/react-table';
-import { API_ENDPOINTS, getAuthHeaders } from '@/lib/api';
+import { API_ENDPOINTS } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { useConfigStore } from '@/store/configStore';
 import type { KnowledgeBaseConfig, KnowledgeGitConfig } from '@/types/config';
@@ -130,10 +130,7 @@ function validateBaseName(baseName: string): string | null {
 }
 
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    ...options,
-    headers: { ...getAuthHeaders(), ...options?.headers },
-  });
+  const response = await fetch(url, options);
   if (!response.ok) {
     let detail = response.statusText;
     try {

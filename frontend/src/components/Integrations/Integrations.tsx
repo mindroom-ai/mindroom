@@ -23,7 +23,7 @@ import { useToast } from '@/components/ui/use-toast';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useTools, mapToolToIntegration } from '@/hooks/useTools';
 import { getIconForTool } from './iconMapping';
-import { API_BASE, getAuthHeaders } from '@/lib/api';
+import { API_BASE } from '@/lib/api';
 import {
   Integration,
   IntegrationConfig,
@@ -199,7 +199,6 @@ export function Integrations() {
         // For generic tools, delete credentials via API
         const response = await fetch(`${API_BASE}/api/credentials/${integration.id}`, {
           method: 'DELETE',
-          headers: getAuthHeaders(),
         });
 
         if (!response.ok) {

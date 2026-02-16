@@ -321,7 +321,7 @@ def _full_template() -> str:
 def _env_template() -> str:
     """Return a starter .env file for standalone deployments.
 
-    Generates a random dashboard API key and sets both backend and frontend vars.
+    Generates a random dashboard API key.
     """
     api_key = secrets.token_urlsafe(32)
     return f"""\
@@ -336,14 +336,10 @@ MATRIX_HOMESERVER=https://matrix.example.com
 
 # Dashboard API key — protects the /api/* dashboard endpoints.
 # When set, all dashboard requests require: Authorization: Bearer <key>
+# The auth header is injected at the proxy layer (nginx / Vite dev server),
+# so the key never appears in the browser JS bundle.
 # Remove or comment out to allow open access (fine for localhost).
 MINDROOM_API_KEY={api_key}
-
-# Frontend dashboard key (Vite build-time env; keep this equal to MINDROOM_API_KEY).
-# NOTE: This key is embedded in the browser JS bundle and visible to anyone with
-# DevTools.  It guards against casual/automated access, not determined attackers.
-# For public-facing deployments, use proper session-based auth instead.
-VITE_API_KEY={api_key}
 
 # OpenAI-compatible API authentication (separate from dashboard auth)
 # OPENAI_COMPAT_API_KEYS=sk-my-secret-key
