@@ -163,7 +163,7 @@ async def register_user(
     server_name = extract_server_name_from_homeserver(homeserver)
     user_id = MatrixID.from_username(username, server_name).full_id
 
-    async with matrix_client(homeserver) as client:
+    async with matrix_client(homeserver, user_id=user_id) as client:
         # Try to register the user
         response = await client.register(
             username=username,
