@@ -504,6 +504,34 @@ class TestAgentResponseLogic:
             is True
         )
 
+    def test_bot_account_excluded_from_multi_human_thread(self) -> None:
+        """A bot_account posting in a thread should not count as a second human."""
+        config = Config(
+            agents={
+                "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
+            },
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            bot_accounts=["@telegram:localhost"],
+        )
+        room = create_mock_room("!room:localhost", ["calculator"], config)
+
+        thread_with_bot = [
+            {"sender": "@alice:localhost", "body": "hello"},
+            {"sender": "@telegram:localhost", "body": "relayed message"},
+        ]
+        # Only one real human — agent should auto-respond
+        assert (
+            should_agent_respond(
+                agent_name="calculator",
+                am_i_mentioned=False,
+                is_thread=True,
+                room=room,
+                thread_history=thread_with_bot,
+                config=config,
+            )
+            is True
+        )
+
     def test_agent_stops_when_user_mentions_other_agent(self) -> None:
         """Test that an agent stops responding when user mentions a different agent.
 

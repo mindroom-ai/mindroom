@@ -167,6 +167,11 @@ authorization:
 # Example: room_models: {dev: sonnet, lobby: gpt4o}
 room_models: {}
 
+# Non-MindRoom bot accounts to exclude from multi-human detection (optional)
+# These accounts won't trigger the mention requirement in threads
+bot_accounts:
+  - "@telegram:example.com"
+
 # Plugin paths (optional)
 plugins: []
 

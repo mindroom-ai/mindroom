@@ -78,13 +78,13 @@ Event callbacks are wrapped in `_create_task_wrapper()` to run as background tas
 1. Check sender authorization and handle edits
 1. Check if already responded (`ResponseTracker`)
 1. Router handles commands exclusively
-1. Extract message context (mentions, thread history)
+1. Extract message context (mentions, thread history, non-agent mention detection)
 1. Skip messages from other agents (unless mentioned)
-1. Router performs AI routing when no agent mentioned
+1. Router performs AI routing when no agent mentioned and thread doesn't have multiple human participants
 1. Check for team formation or individual response
 1. Generate response and store memory
 
-**Routing** (when no agent mentioned): Router uses `suggest_agent_for_message()` to pick the best agent based on room configuration and message content. Only routes when multiple agents are available.
+**Routing** (when no agent mentioned): Router uses `suggest_agent_for_message()` to pick the best agent based on room configuration and message content. Only routes when multiple agents are available. In threads where multiple non-agent users have posted, routing is skipped entirely — an explicit `@mention` is required. Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 
 ## Concurrency
 

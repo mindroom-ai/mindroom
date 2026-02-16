@@ -672,6 +672,11 @@ authorization:
 # Example: room_models: {dev: sonnet, lobby: gpt4o}
 room_models: {}
 
+# Non-MindRoom bot accounts to exclude from multi-human detection (optional)
+# These accounts won't trigger the mention requirement in threads
+bot_accounts:
+  - "@telegram:example.com"
+
 # Plugin paths (optional)
 plugins: []
 
@@ -1190,6 +1195,32 @@ When the router joins a room, it restores any previously scheduled tasks and pen
 ### Single-Agent Optimization
 
 When there's only one agent configured in a room, the router skips AI routing entirely. The single agent handles messages directly, which is faster and more efficient.
+
+### Multi-Human Thread Protection
+
+When multiple human users have posted in a thread, the router and agents require an explicit `@mention` before responding. This prevents agents from injecting themselves into human-to-human conversations.
+
+The rules are:
+
+1. **Mentioned agents always respond** — an explicit `@agent` overrides all other rules.
+1. **Non-thread messages** — agents auto-respond if they're the only agent in the room, regardless of how many humans are present.
+1. **Threads with one human** — normal auto-response behavior applies (the agent continues the conversation).
+1. **Threads with two or more humans** — agents stay silent unless explicitly mentioned.
+1. **Mentioning a non-agent user** — if a message tags only humans (not agents), agents stay silent.
+
+#### Bot accounts
+
+By default, any Matrix user that is not a MindRoom agent counts as a "human" for the rules above. This includes bridge bots (Telegram, Slack, etc.) and other non-MindRoom bots. If a bridge bot relays a message into a thread, it looks like a second human to MindRoom and triggers the mention requirement.
+
+To prevent this, list those accounts in `bot_accounts`:
+
+```
+bot_accounts:
+  - "@telegram:example.com"
+  - "@slackbot:example.com"
+```
+
+Accounts in this list are treated like MindRoom agents for response logic — their messages and mentions don't count toward the multi-human detection.
 
 ### Routing Fallback
 
@@ -2722,13 +2753,13 @@ Event callbacks are wrapped in `_create_task_wrapper()` to run as background tas
 1. Check sender authorization and handle edits
 1. Check if already responded (`ResponseTracker`)
 1. Router handles commands exclusively
-1. Extract message context (mentions, thread history)
+1. Extract message context (mentions, thread history, non-agent mention detection)
 1. Skip messages from other agents (unless mentioned)
-1. Router performs AI routing when no agent mentioned
+1. Router performs AI routing when no agent mentioned and thread doesn't have multiple human participants
 1. Check for team formation or individual response
 1. Generate response and store memory
 
-**Routing** (when no agent mentioned): Router uses `suggest_agent_for_message()` to pick the best agent based on room configuration and message content. Only routes when multiple agents are available.
+**Routing** (when no agent mentioned): Router uses `suggest_agent_for_message()` to pick the best agent based on room configuration and message content. Only routes when multiple agents are available. In threads where multiple non-agent users have posted, routing is skipped entirely — an explicit `@mention` is required. Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 
 ## Concurrency
 

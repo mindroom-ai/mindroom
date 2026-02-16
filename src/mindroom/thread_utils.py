@@ -14,6 +14,11 @@ if TYPE_CHECKING:
     from .config import Config
 
 
+def _is_bot_or_agent(sender: str, config: Config) -> bool:
+    """Return True when *sender* is a MindRoom agent **or** listed in ``bot_accounts``."""
+    return bool(extract_agent_name(sender, config)) or sender in config.bot_accounts
+
+
 def check_agent_mentioned(
     event_source: dict,
     agent_id: MatrixID | None,
@@ -23,14 +28,16 @@ def check_agent_mentioned(
 
     Returns (mentioned_agents, am_i_mentioned, has_non_agent_mentions).
     ``has_non_agent_mentions`` is True when the message explicitly tags a
-    user who is *not* a configured agent (e.g. a human or bridge bot).
+    user who is *not* a configured agent and not in ``config.bot_accounts``
+    (i.e. a real human user).
     """
     mentions = event_source.get("content", {}).get("m.mentions", {})
     mentioned_agents = get_mentioned_agents(mentions, config)
     am_i_mentioned = agent_id in mentioned_agents
 
-    all_mentioned_ids = mentions.get("user_ids", [])
-    has_non_agent_mentions = len(all_mentioned_ids) > len(mentioned_agents)
+    all_mentioned_ids: list[str] = mentions.get("user_ids", [])
+    non_agent_mentions = [uid for uid in all_mentioned_ids if not _is_bot_or_agent(uid, config)]
+    has_non_agent_mentions = len(non_agent_mentions) > 0
 
     return mentioned_agents, am_i_mentioned, has_non_agent_mentions
 
@@ -129,11 +136,15 @@ def get_available_agents_in_room(room: nio.MatrixRoom, config: Config) -> list[M
 
 
 def has_multiple_non_agent_users_in_thread(thread_history: list[dict[str, Any]], config: Config) -> bool:
-    """Return True when more than one non-agent user has posted in the thread."""
+    """Return True when more than one non-agent user has posted in the thread.
+
+    Senders that are MindRoom agents or listed in ``config.bot_accounts`` are
+    excluded from the count.
+    """
     non_agent_senders: set[str] = set()
     for msg in thread_history:
         sender: str = msg.get("sender", "")
-        if sender and not extract_agent_name(sender, config):
+        if sender and not _is_bot_or_agent(sender, config):
             non_agent_senders.add(sender)
             if len(non_agent_senders) > 1:
                 return True

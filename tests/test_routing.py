@@ -316,6 +316,66 @@ class TestThreadUtils:
         assert am_i_mentioned is True
         assert has_non_agent is False
 
+    def test_bot_accounts_excluded_from_multi_human_detection(self) -> None:
+        """Bot accounts listed in config should not count as non-agent users."""
+        config = Config(
+            agents={
+                "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
+                "general": AgentConfig(display_name="General", rooms=["#test:example.org"]),
+            },
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            bot_accounts=["@telegram:localhost"],
+        )
+        history = [
+            {"sender": "@alice:localhost", "body": "hello"},
+            {"sender": "@telegram:localhost", "body": "relayed message"},
+        ]
+        assert has_multiple_non_agent_users_in_thread(history, config) is False
+
+    def test_bot_accounts_not_excluded_when_unlisted(self) -> None:
+        """Without bot_accounts config, bridge bots count as non-agent users."""
+        history = [
+            {"sender": "@alice:localhost", "body": "hello"},
+            {"sender": "@telegram:localhost", "body": "relayed message"},
+        ]
+        assert has_multiple_non_agent_users_in_thread(history, self.config) is True
+
+    def test_check_agent_mentioned_bot_account_not_flagged_as_non_agent(self) -> None:
+        """Mentioning a bot_account should not set has_non_agent_mentions."""
+        config = Config(
+            agents={
+                "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
+            },
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            bot_accounts=["@telegram:localhost"],
+        )
+        event_source = {
+            "content": {
+                "m.mentions": {"user_ids": ["@telegram:localhost"]},
+            },
+        }
+        agent_id = MatrixID.from_username("mindroom_calculator", "localhost")
+        _, _, has_non_agent = check_agent_mentioned(event_source, agent_id, config)
+        assert has_non_agent is False
+
+    def test_check_agent_mentioned_mixed_bot_and_human_mentions(self) -> None:
+        """Mentioning both a bot_account and a human should still flag non-agent."""
+        config = Config(
+            agents={
+                "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
+            },
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            bot_accounts=["@telegram:localhost"],
+        )
+        event_source = {
+            "content": {
+                "m.mentions": {"user_ids": ["@telegram:localhost", "@bob:localhost"]},
+            },
+        }
+        agent_id = MatrixID.from_username("mindroom_calculator", "localhost")
+        _, _, has_non_agent = check_agent_mentioned(event_source, agent_id, config)
+        assert has_non_agent is True
+
 
 class TestAgentDescription:
     """Test agent description functionality."""
