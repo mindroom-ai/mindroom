@@ -14,15 +14,25 @@ if TYPE_CHECKING:
     from .config import Config
 
 
-def check_agent_mentioned(event_source: dict, agent_id: MatrixID | None, config: Config) -> tuple[list[MatrixID], bool]:
+def check_agent_mentioned(
+    event_source: dict,
+    agent_id: MatrixID | None,
+    config: Config,
+) -> tuple[list[MatrixID], bool, bool]:
     """Check if an agent is mentioned in a message.
 
-    Returns (mentioned_agents, am_i_mentioned).
+    Returns (mentioned_agents, am_i_mentioned, has_non_agent_mentions).
+    ``has_non_agent_mentions`` is True when the message explicitly tags a
+    user who is *not* a configured agent (e.g. a human or bridge bot).
     """
     mentions = event_source.get("content", {}).get("m.mentions", {})
     mentioned_agents = get_mentioned_agents(mentions, config)
     am_i_mentioned = agent_id in mentioned_agents
-    return mentioned_agents, am_i_mentioned
+
+    all_mentioned_ids = mentions.get("user_ids", [])
+    has_non_agent_mentions = len(all_mentioned_ids) > len(mentioned_agents)
+
+    return mentioned_agents, am_i_mentioned, has_non_agent_mentions
 
 
 def create_session_id(room_id: str, thread_id: str | None) -> str:
@@ -60,41 +70,6 @@ def get_agents_in_thread(thread_history: list[dict[str, Any]], config: Config) -
                 pass
 
     return agents
-
-
-def get_agent_matrix_ids_in_thread(thread_history: list[dict[str, Any]], config: Config) -> list[MatrixID]:
-    """Get list of unique agent Matrix IDs that have participated in thread.
-
-    Note: Router agent is excluded from the participant list as it's not
-    a conversation participant.
-
-    Preserves the order of first participation while preventing duplicates.
-
-    Returns:
-        List of MatrixID objects for agents who participated in the thread.
-
-    """
-    agent_ids = []
-    seen_ids = set()
-
-    for msg in thread_history:
-        sender = msg.get("sender", "")
-        agent_name = extract_agent_name(sender, config)
-
-        # Skip router agent and invalid senders
-        if not agent_name or agent_name == ROUTER_AGENT_NAME:
-            continue
-
-        try:
-            matrix_id = MatrixID.parse(sender)
-            if matrix_id.full_id not in seen_ids:
-                agent_ids.append(matrix_id)
-                seen_ids.add(matrix_id.full_id)
-        except ValueError:
-            # Skip invalid Matrix IDs
-            pass
-
-    return agent_ids
 
 
 def get_mentioned_agents(mentions: dict[str, Any], config: Config) -> list[MatrixID]:
@@ -153,29 +128,16 @@ def get_available_agents_in_room(room: nio.MatrixRoom, config: Config) -> list[M
     return sorted(agents, key=lambda x: x.full_id)
 
 
-def get_available_agent_matrix_ids_in_room(room: nio.MatrixRoom, config: Config) -> list[MatrixID]:
-    """Get list of available agent Matrix IDs in a room.
-
-    Note: Router agent is excluded as it's not a regular conversation participant.
-
-    Returns:
-        List of MatrixID objects for agents in the room.
-
-    """
-    agent_ids = []
-
-    for member_id in room.users:
-        agent_name = extract_agent_name(member_id, config)
-        # Exclude router agent
-        if agent_name and agent_name != ROUTER_AGENT_NAME:
-            try:
-                matrix_id = MatrixID.parse(member_id)
-                agent_ids.append(matrix_id)
-            except ValueError:
-                # Skip invalid Matrix IDs
-                pass
-
-    return sorted(agent_ids, key=lambda x: x.full_id)
+def has_multiple_non_agent_users_in_thread(thread_history: list[dict[str, Any]], config: Config) -> bool:
+    """Return True when more than one non-agent user has posted in the thread."""
+    non_agent_senders: set[str] = set()
+    for msg in thread_history:
+        sender: str = msg.get("sender", "")
+        if sender and not extract_agent_name(sender, config):
+            non_agent_senders.add(sender)
+            if len(non_agent_senders) > 1:
+                return True
+    return False
 
 
 def get_configured_agents_for_room(room_id: str, config: Config) -> list[MatrixID]:
@@ -272,6 +234,7 @@ def should_agent_respond(
     thread_history: list[dict],
     config: Config,
     mentioned_agents: list[MatrixID] | None = None,
+    has_non_agent_mentions: bool = False,
 ) -> bool:
     """Determine if an agent should respond to a message individually.
 
@@ -285,33 +248,32 @@ def should_agent_respond(
         thread_history: History of messages in the thread
         config: Application configuration
         mentioned_agents: List of all agent MatrixIDs mentioned in the message
+        has_non_agent_mentions: True when the message explicitly tags a non-agent user
 
     """
     # Always respond if mentioned
     if am_i_mentioned:
         return True
 
-    # Never respond if other agents are mentioned but not this one
-    # (User explicitly wants a different agent)
-    if mentioned_agents:
+    # Never respond if anyone else is explicitly mentioned (agent or not)
+    if mentioned_agents or has_non_agent_mentions:
         return False
 
-    # Non-thread messages: allow a single available agent to respond automatically
-    # This applies to both DM and regular rooms. Router is excluded from availability.
+    # Non-thread messages: auto-respond if we're the only agent in the room.
     if not is_thread:
-        available_agents = get_available_agents_in_room(room, config)
-        return len(available_agents) == 1
+        return len(get_available_agents_in_room(room, config)) == 1
+
+    # In threads with multiple human participants, always require explicit mention.
+    if has_multiple_non_agent_users_in_thread(thread_history, config):
+        return False
 
     agent_matrix_id = config.ids[agent_name]
 
-    # For threads, check if agents have already participated
-    if is_thread:
-        agents_in_thread = get_agents_in_thread(thread_history, config)
-        if agents_in_thread:
-            # Continue only if we're the single agent
-            return len(agents_in_thread) == 1 and agents_in_thread[0] == agent_matrix_id
+    # For threads, continue only if we're the single participating agent.
+    agents_in_thread = get_agents_in_thread(thread_history, config)
+    if agents_in_thread:
+        return len(agents_in_thread) == 1 and agents_in_thread[0] == agent_matrix_id
 
-    # No agents in thread yet OR DM room without thread
-    # Respond if we're the only agent available
+    # No agents in thread yet — respond if we're the only available agent.
     available_agents = get_available_agents_in_room(room, config)
     return len(available_agents) == 1

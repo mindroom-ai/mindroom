@@ -106,6 +106,7 @@ from .thread_utils import (
     get_all_mentioned_agents_in_thread,
     get_available_agents_in_room,
     get_configured_agents_for_room,
+    has_multiple_non_agent_users_in_thread,
     has_user_responded_after_message,
     is_authorized_sender,
     should_agent_respond,
@@ -560,6 +561,7 @@ class MessageContext:
     thread_id: str | None
     thread_history: list[dict]
     mentioned_agents: list[MatrixID]
+    has_non_agent_mentions: bool
 
 
 @dataclass
@@ -905,7 +907,7 @@ class AgentBot:
         else:
             self.logger.error("Failed to join room", room_id=room.room_id)
 
-    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:  # noqa: C901, PLR0911, PLR0912
+    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:  # noqa: C901, PLR0911, PLR0912, PLR0915
         self.logger.info("Received message", event_id=event.event_id, room_id=room.room_id, sender=event.sender)
         assert self.client is not None
         if event.body.endswith(IN_PROGRESS_MARKER):
@@ -970,20 +972,19 @@ class AgentBot:
         # Get agents in thread (excludes router)
         agents_in_thread = get_agents_in_thread(context.thread_history, self.config)
 
-        # Router: Route when no specific agent mentioned and no agents in thread
+        # Router: Route when no one is explicitly mentioned and no agents in thread
         if self.agent_name == ROUTER_AGENT_NAME:
-            # Only perform AI routing when:
-            # 1. No specific agent is mentioned
-            # 2. No agents are already in the thread
-            # 3. There's more than one agent available (routing makes sense)
-            if not context.mentioned_agents and not agents_in_thread:
-                available_agents = get_available_agents_in_room(room, self.config)
-                if len(available_agents) == 1:
-                    # Skip routing in single-agent rooms - the agent will handle it directly
-                    self.logger.info("Skipping routing: only one agent present")
+            if not context.mentioned_agents and not context.has_non_agent_mentions and not agents_in_thread:
+                if context.is_thread and has_multiple_non_agent_users_in_thread(context.thread_history, self.config):
+                    self.logger.info("Skipping routing: multiple non-agent users in thread (mention required)")
                 else:
-                    # Multiple agents available - perform AI routing
-                    await self._handle_ai_routing(room, event, context.thread_history)
+                    available_agents = get_available_agents_in_room(room, self.config)
+                    if len(available_agents) == 1:
+                        # Skip routing in single-agent rooms - the agent will handle it directly
+                        self.logger.info("Skipping routing: only one agent present")
+                    else:
+                        # Multiple agents available - perform AI routing
+                        await self._handle_ai_routing(room, event, context.thread_history)
             # Router's job is done after routing/command handling/voice transcription
             return
 
@@ -1034,6 +1035,7 @@ class AgentBot:
             thread_history=context.thread_history,
             config=self.config,
             mentioned_agents=context.mentioned_agents,
+            has_non_agent_mentions=context.has_non_agent_mentions,
         )
 
         if not should_respond:
@@ -1198,8 +1200,13 @@ class AgentBot:
             # Don't detect mentions if the message has skip_mentions metadata
             mentioned_agents: list[MatrixID] = []
             am_i_mentioned = False
+            has_non_agent_mentions = False
         else:
-            mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.matrix_id, self.config)
+            mentioned_agents, am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
+                event.source,
+                self.matrix_id,
+                self.config,
+            )
 
         if am_i_mentioned:
             self.logger.info("Mentioned", event_id=event.event_id, room_name=room.name)
@@ -1216,6 +1223,7 @@ class AgentBot:
             thread_id=event_info.thread_id,
             thread_history=thread_history,
             mentioned_agents=mentioned_agents,
+            has_non_agent_mentions=has_non_agent_mentions,
         )
 
     def _build_scheduling_tool_context(
@@ -2070,6 +2078,7 @@ class AgentBot:
             thread_history=context.thread_history,
             config=self.config,
             mentioned_agents=context.mentioned_agents,
+            has_non_agent_mentions=context.has_non_agent_mentions,
         )
 
         if not should_respond:
@@ -2127,7 +2136,7 @@ class AgentBot:
             full_text = command.args["full_text"]
 
             # Get mentioned agents from the command text
-            mentioned_agents, _ = check_agent_mentioned(event.source, None, self.config)
+            mentioned_agents, _, _ = check_agent_mentioned(event.source, None, self.config)
 
             assert self.client is not None
             _, response_text = await schedule_task(
@@ -2236,7 +2245,7 @@ class AgentBot:
             if not skill_name:
                 response_text = "Usage: !skill <name> [args]"
             else:
-                mentioned_agents, _ = check_agent_mentioned(event.source, None, self.config)
+                mentioned_agents, _, _ = check_agent_mentioned(event.source, None, self.config)
                 target_agent, error = _resolve_skill_command_agent(
                     skill_name,
                     config=self.config,

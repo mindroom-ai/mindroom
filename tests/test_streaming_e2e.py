@@ -253,7 +253,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
 
             # Mock that helper is mentioned
             with patch("mindroom.bot.check_agent_mentioned") as mock_check:
-                mock_check.return_value = (["helper"], True)
+                mock_check.return_value = (["helper"], True, False)
 
                 # Process with helper bot
                 await helper_bot._on_message(test_room, user_event)
@@ -318,7 +318,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
 
             # Also mock that calculator is mentioned
             with patch("mindroom.bot.check_agent_mentioned") as mock_check:
-                mock_check.return_value = (["calculator"], True)
+                mock_check.return_value = (["calculator"], True, False)
 
                 # Process final message with calculator bot
                 await calc_bot._on_message(test_room, final_event)
@@ -452,7 +452,7 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
 
             # Mock that calculator is mentioned
             with patch("mindroom.bot.check_agent_mentioned") as mock_check:
-                mock_check.return_value = (["calculator"], True)
+                mock_check.return_value = (["calculator"], True, False)
 
                 # Process edit - bot should NOT respond (edits are ignored)
                 await bot._on_message(test_room, edit_event)
