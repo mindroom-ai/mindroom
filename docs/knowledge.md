@@ -14,13 +14,21 @@ Knowledge bases give your agents access to your own documents through RAG (Retri
 4. Relevant document chunks are included in the agent's context
 
 ```
-┌─────────────┐     ┌───────────┐     ┌──────────┐     ┌───────┐
-│ Files/Folder │ ──▶ │  Embedder │ ──▶ │ ChromaDB │ ──▶ │ Agent │
-└─────────────┘     └───────────┘     └──────────┘     └───────┘
-       ▲                                                    │
-       │  file watcher /                                    │
-       │  git sync                              searches before
-       │                                        each response
+Indexing (startup + file changes):
+
+  ┌──────────────┐      ┌──────────┐      ┌──────────┐
+  │ Files/Folder │ ───▶ │ Embedder │ ───▶ │ ChromaDB │
+  └──────────────┘      └──────────┘      └──────────┘
+         ▲
+         │ file watcher
+         │ git sync
+
+Querying (every agent response):
+
+  ┌──────────┐  search  ┌──────────┐  relevant  ┌───────┐
+  │  Agent   │ ───────▶ │ ChromaDB │ ────────▶  │ Agent │
+  └──────────┘          └──────────┘   chunks    │ reply │
+                                                 └───────┘
 ```
 
 ## Quick Start
