@@ -86,6 +86,32 @@ When the router joins a room, it restores any previously scheduled tasks and pen
 
 When there's only one agent configured in a room, the router skips AI routing entirely. The single agent handles messages directly, which is faster and more efficient.
 
+### Multi-Human Thread Protection
+
+When multiple human users have posted in a thread, the router and agents require an explicit `@mention` before responding. This prevents agents from injecting themselves into human-to-human conversations.
+
+The rules are:
+
+1. **Mentioned agents always respond** — an explicit `@agent` overrides all other rules.
+1. **Non-thread messages** — agents auto-respond if they're the only agent in the room, regardless of how many humans are present.
+1. **Threads with one human** — normal auto-response behavior applies (the agent continues the conversation).
+1. **Threads with two or more humans** — agents stay silent unless explicitly mentioned.
+1. **Mentioning a non-agent user** — if a message tags only humans (not agents), agents stay silent.
+
+#### Bot accounts
+
+By default, any Matrix user that is not a MindRoom agent counts as a "human" for the rules above. This includes bridge bots (Telegram, Slack, etc.) and other non-MindRoom bots. If a bridge bot relays a message into a thread, it looks like a second human to MindRoom and triggers the mention requirement.
+
+To prevent this, list those accounts in `bot_accounts`:
+
+```
+bot_accounts:
+  - "@telegram:example.com"
+  - "@slackbot:example.com"
+```
+
+Accounts in this list are treated like MindRoom agents for response logic — their messages and mentions don't count toward the multi-human detection.
+
 ### Routing Fallback
 
 If routing fails (model error, invalid suggestion, etc.), the router sends a helpful error message: "I couldn't determine which agent should help with this. Please try mentioning an agent directly with @ or rephrase your request."

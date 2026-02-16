@@ -323,6 +323,10 @@ class Config(BaseModel):
         default_factory=AuthorizationConfig,
         description="Authorization configuration with fine-grained permissions",
     )
+    bot_accounts: list[str] = Field(
+        default_factory=list,
+        description="Matrix user IDs of non-MindRoom bots (e.g., bridge bots) that should be treated like agents for response logic — their messages won't trigger the multi-human-thread mention requirement",
+    )
 
     @model_validator(mode="after")
     def validate_knowledge_base_assignments(self) -> Config:
