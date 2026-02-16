@@ -20,8 +20,12 @@ Do not ask the user which role to play. Detect it from file existence.
 Use a portable checksum. Pick the first available:
 
 ```bash
-CKSUM() { md5sum "$1" 2>/dev/null || md5 -q "$1" 2>/dev/null || shasum "$1"; }
+CKSUM() { { md5sum "$1" 2>/dev/null || md5 -q "$1" 2>/dev/null || shasum "$1"; } | awk '{print $1}'; }
 ```
+
+## Shell requirement
+
+Run polling commands in `bash`. The timeout example uses Bash's `SECONDS`.
 
 ## Turn order enforcement
 
@@ -33,6 +37,16 @@ Before appending a section, check the last `## ` heading in `DEBATE.md`:
 
 If it is not your turn, re-read the file and go back to polling.
 
+## Polling discipline (critical)
+
+- After starting a poll loop, keep polling until one of these happens:
+  - checksum changed
+  - timeout reached
+  - `## CONSENSUS` exists
+- Do not stop early just to report that polling started.
+- When checksum changes, immediately read `DEBATE.md` and continue the protocol.
+- Stop only when `## CONSENSUS` exists or timeout handling completes.
+
 ## Agent A (opener) flow
 
 1. Analyze the subject the user specified (run `git show`, `git diff`, `gh pr view`, read files, etc. as appropriate).
@@ -40,8 +54,7 @@ If it is not your turn, re-read the file and go back to polling.
 3. Compute the file's checksum using `CKSUM DEBATE.md`.
 4. Poll for changes (5-second interval, 10-minute timeout):
    ```bash
-   CKSUM() { md5sum "$1" 2>/dev/null || md5 -q "$1" 2>/dev/null || shasum "$1"; }
-   PREV=$(CKSUM DEBATE.md); SECONDS=0; while true; do sleep 5; NOW=$(CKSUM DEBATE.md); if [ "$NOW" != "$PREV" ]; then break; fi; if [ "$SECONDS" -ge 600 ]; then echo "TIMEOUT"; break; fi; done
+   PREV=$(CKSUM DEBATE.md); SECONDS=0; while true; do sleep 5; if grep -q '^## CONSENSUS' DEBATE.md; then break; fi; NOW=$(CKSUM DEBATE.md); if [ "$NOW" != "$PREV" ]; then break; fi; if [ "$SECONDS" -ge 600 ]; then echo "TIMEOUT"; break; fi; done
    ```
 5. If timed out → append `## CONSENSUS` noting the timeout and stop.
 6. Read Agent B's reply.
@@ -52,7 +65,11 @@ If it is not your turn, re-read the file and go back to polling.
 
 1. Read `DEBATE.md` (it exists — that's how you know you're the responder).
 2. Analyze the same subject the user specified.
-3. Verify it is your turn (check the last `## ` heading). If not, poll until it is.
+3. Verify it is your turn (check the last `## ` heading). Example:
+   ```bash
+   LAST=$(grep -E '^## ' DEBATE.md | tail -n1)
+   ```
+   If not your turn, poll until it is.
 4. Append a `## Response N` section with a point-by-point reply.
 5. Compute the file's checksum.
 6. Poll for changes (same loop with 10-minute timeout).
@@ -63,7 +80,7 @@ If it is not your turn, re-read the file and go back to polling.
 
 ## File format
 
-Each section should end with a signature line: `*— <agent name or tool>, <timestamp>*`
+Each section should end with a signature line: `*— Agent A|Agent B (optional tool name), <timestamp>*`
 
 ```markdown
 # Code Debate: <subject>
@@ -71,14 +88,14 @@ Each section should end with a signature line: `*— <agent name or tool>, <time
 ## Opening
 <Agent A's initial analysis>
 
-*— Claude Code, 2025-06-15T14:30:00Z*
+*— Agent A, 2025-06-15T14:30:00Z*
 
 ---
 
 ## Response 1
 <Agent B's point-by-point reply>
 
-*— Gemini CLI, 2025-06-15T14:32:00Z*
+*— Agent B, 2025-06-15T14:32:00Z*
 
 ---
 
@@ -117,3 +134,4 @@ Every point in a response must be explicitly categorized:
 - Focus on substance — correctness, design, simplicity, edge cases — not style preferences.
 - Don't re-analyze the entire subject each round. Only address unresolved points.
 - The goal is convergence, not winning. Update your position when the other side makes a good argument.
+- `DEBATE.md` is a scratch file; delete it after the debate unless you want to keep it as a record.
