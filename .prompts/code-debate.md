@@ -65,6 +65,7 @@ Before appending, also verify the last signature line role:
 - When checksum changes, immediately read `DEBATE.md` and continue the protocol.
 - Stop only when `## CONSENSUS` exists or timeout handling completes.
 - Polling is mandatory after every append. Do not return control to the user between append and poll completion.
+- After checksum change, do not ask the user what to do next. Immediately take the next protocol step for your role.
 
 ## Completion criteria (MUST)
 
@@ -74,6 +75,7 @@ Before appending, also verify the last signature line role:
 - It is a protocol violation to stop after writing `## Opening`, `## Response N`, or `## Follow-up N` without entering the poll loop.
 - If `DEBATE.md` does not yet contain `## CONSENSUS`, you must still be in the protocol loop (append or poll).
 - Never send a “done”/“completed” status while waiting for the other agent; continue polling instead.
+- Never pause to request user confirmation between turns. Continue autonomously until consensus/timeout.
 
 ## Agent A (opener) flow
 
@@ -89,6 +91,7 @@ Before appending, also verify the last signature line role:
 6. Read Agent B's reply.
 7. If all points are resolved → append a `## CONSENSUS` section summarizing agreed outcomes and stop.
 8. Otherwise append a `## Follow-up N` section addressing unresolved points, then go to step 3.
+9. Do not ask the user to choose between follow-up or consensus; Agent A must decide and append immediately.
 
 ## Agent B (responder) flow
 
@@ -107,6 +110,7 @@ Before appending, also verify the last signature line role:
 8. Read Agent A's follow-up.
 9. If the file contains `## CONSENSUS` → stop, debate is over.
 10. Otherwise go to step 3.
+11. Do not ask the user whether to continue; continue automatically per turn order.
 
 ## File format
 
@@ -154,6 +158,15 @@ Every point in a response must be explicitly categorized:
 - **Agreed** — no further discussion needed.
 - **Partially agreed** — state what you agree with and what you don't, with reasoning.
 - **Disagreed** — state your reasoning.
+
+If the agent has already completed its own review of the subject, it must also include an **Independent findings** section in its next debate turn:
+
+- List its own review findings (with file paths/line references) even if they differ from the other agent.
+- Clearly mark each finding as one of:
+  - `same as other agent`
+  - `new finding`
+  - `not reproduced / disagreed`
+- Do not limit the response to rebuttals only; independent findings are required when available.
 
 ## Convergence rules
 
