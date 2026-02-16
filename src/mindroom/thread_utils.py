@@ -36,8 +36,7 @@ def check_agent_mentioned(
     am_i_mentioned = agent_id in mentioned_agents
 
     all_mentioned_ids: list[str] = mentions.get("user_ids", [])
-    non_agent_mentions = [uid for uid in all_mentioned_ids if not _is_bot_or_agent(uid, config)]
-    has_non_agent_mentions = len(non_agent_mentions) > 0
+    has_non_agent_mentions = any(not _is_bot_or_agent(uid, config) for uid in all_mentioned_ids)
 
     return mentioned_agents, am_i_mentioned, has_non_agent_mentions
 
