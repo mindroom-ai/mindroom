@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict, cast
 
 from mindroom.logging_config import get_logger
+from mindroom.workspace import append_daily_log
 
 from .config import create_memory_instance
 
@@ -393,6 +395,10 @@ async def build_memory_enhanced_prompt(
 
     """
     logger.debug("Building enhanced prompt", agent=agent_name)
+    if not config.memory.mem0_search.enabled:
+        logger.debug("Mem0 search disabled; returning original prompt", agent=agent_name)
+        return prompt
+
     enhanced_prompt = prompt
 
     agent_memories = await search_agent_memories(prompt, agent_name, storage_path, config)
@@ -447,6 +453,31 @@ def _build_conversation_messages(
     return messages
 
 
+def _format_workspace_daily_log_entry(
+    prompt: str,
+    agent_name: str | list[str],
+    room_id: str | None,
+    user_id: str | None,
+) -> str:
+    timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    lines = [f"## {timestamp}"]
+
+    if room_id:
+        lines.append(f"**Room:** {room_id}")
+    if user_id:
+        lines.append(f"**User:** {user_id}")
+    if isinstance(agent_name, list):
+        lines.append(f"**Agents:** {', '.join(agent_name)}")
+    else:
+        lines.append(f"**Agent:** {agent_name}")
+
+    lines.append("")
+    lines.append(prompt.strip())
+    lines.append("")
+
+    return "\n".join(lines) + "\n"
+
+
 async def store_conversation_memory(
     prompt: str,
     agent_name: str | list[str],
@@ -457,14 +488,7 @@ async def store_conversation_memory(
     thread_history: list[dict] | None = None,
     user_id: str | None = None,
 ) -> None:
-    """Store conversation in memory for future recall.
-
-    Uses mem0's intelligent extraction to identify relevant facts, preferences,
-    and context from the conversation. Provides full conversation context when
-    available to allow better understanding of user intent.
-
-    For teams, pass a list of agent names to store memory once under a shared
-    namespace, avoiding duplicate LLM processing.
+    """Store conversation memory in markdown logs and optionally Mem0.
 
     Args:
         prompt: The current user prompt
@@ -478,6 +502,13 @@ async def store_conversation_memory(
 
     """
     if not prompt:
+        return
+
+    if config.memory.workspace.enabled:
+        log_entry = _format_workspace_daily_log_entry(prompt, agent_name, room_id, user_id)
+        append_daily_log(agent_name, storage_path, config, log_entry)
+
+    if not config.memory.mem0_search.store_enabled:
         return
 
     # Build conversation messages in mem0 format

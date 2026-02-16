@@ -19,6 +19,7 @@ from .logging_config import get_logger
 from .plugins import load_plugins
 from .skills import build_agent_skills
 from .tools_metadata import get_tool_by_name
+from .workspace import load_agents_md, load_soul
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -299,8 +300,14 @@ def create_agent(  # noqa: C901, PLR0912, PLR0915
     # Combine identity and datetime contexts
     full_context = identity_context + datetime_context
 
-    # Use rich prompt if available, otherwise use YAML config
-    if agent_name in RICH_PROMPTS:
+    soul_content = load_soul(agent_name, resolved_storage_path, config)
+
+    # Use workspace SOUL first, then rich prompt fallback, then YAML role
+    if soul_content:
+        logger.info(f"Using SOUL.md prompt for agent: {agent_name}")
+        role = full_context + soul_content
+        instructions = list(agent_config.instructions)
+    elif agent_name in RICH_PROMPTS:
         logger.info(f"Using rich prompt for agent: {agent_name}")
         # Prepend full context to the rich prompt
         role = full_context + RICH_PROMPTS[agent_name]
@@ -309,7 +316,12 @@ def create_agent(  # noqa: C901, PLR0912, PLR0915
         logger.info(f"Using YAML config for agent: {agent_name}")
         # For YAML agents, prepend full context to role and keep original instructions
         role = full_context + agent_config.role
-        instructions = agent_config.instructions
+        instructions = list(agent_config.instructions)
+
+    agents_md_content = load_agents_md(agent_name, resolved_storage_path, config)
+    if agents_md_content:
+        logger.info(f"Using AGENTS.md instructions for agent: {agent_name}")
+        instructions = [agents_md_content]
 
     # Create agent with defaults applied
     model = get_model_instance(config, agent_config.model)

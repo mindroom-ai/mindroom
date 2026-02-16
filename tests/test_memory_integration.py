@@ -40,7 +40,9 @@ class TestMemoryIntegration:
     @pytest.fixture
     def config(self) -> Config:
         """Load config for testing."""
-        return Config.from_yaml()
+        config = Config.from_yaml()
+        config.memory.mem0_search.enabled = True
+        return config
 
     @pytest.mark.asyncio
     async def test_ai_response_with_memory(

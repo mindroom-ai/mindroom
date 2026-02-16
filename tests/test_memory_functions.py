@@ -52,7 +52,10 @@ class TestMemoryFunctions:
     @pytest.fixture
     def config(self) -> Config:
         """Load config for testing."""
-        return Config.from_yaml()
+        config = Config.from_yaml()
+        config.memory.mem0_search.enabled = True
+        config.memory.mem0_search.store_enabled = True
+        return config
 
     @pytest.mark.asyncio
     async def test_memory_instance_creation(self, mock_memory: AsyncMock, storage_path: Path, config: Config) -> None:

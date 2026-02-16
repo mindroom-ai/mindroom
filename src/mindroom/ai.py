@@ -30,6 +30,7 @@ from .tool_events import (
     format_tool_combined,
     format_tool_started_event,
 )
+from .workspace import load_workspace_memory
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -250,6 +251,7 @@ async def _prepare_agent_and_prompt(
     prompt: str,
     storage_path: Path,
     room_id: str | None,
+    is_dm: bool,
     config: Config,
     thread_history: list[dict[str, Any]] | None = None,
     knowledge: Knowledge | None = None,
@@ -262,7 +264,15 @@ async def _prepare_agent_and_prompt(
         Tuple of (agent, full_prompt, session_id)
 
     """
-    enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, storage_path, config, room_id)
+    workspace_context = load_workspace_memory(
+        agent_name,
+        storage_path,
+        config,
+        room_id=room_id,
+        is_dm=is_dm,
+    )
+    workspace_prompt = f"{workspace_context}\n\n{prompt}" if workspace_context else prompt
+    enhanced_prompt = await build_memory_enhanced_prompt(workspace_prompt, agent_name, storage_path, config, room_id)
     full_prompt = build_prompt_with_thread_history(enhanced_prompt, thread_history)
     logger.info("Preparing agent and prompt", agent=agent_name, full_prompt=full_prompt)
     agent = create_agent(
@@ -288,6 +298,7 @@ async def ai_response(
     user_id: str | None = None,
     include_default_tools: bool = True,
     include_interactive_questions: bool = True,
+    is_dm: bool = False,
 ) -> str:
     """Generates a response using the specified agno Agent with memory integration.
 
@@ -306,6 +317,7 @@ async def ai_response(
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
+        is_dm: Whether the current room is a DM/private room.
 
     Returns:
         Agent response string
@@ -320,6 +332,7 @@ async def ai_response(
             prompt,
             storage_path,
             room_id,
+            is_dm,
             config,
             thread_history,
             knowledge,
@@ -353,6 +366,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     user_id: str | None = None,
     include_default_tools: bool = True,
     include_interactive_questions: bool = True,
+    is_dm: bool = False,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
 
@@ -374,6 +388,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
+        is_dm: Whether the current room is a DM/private room.
 
     Yields:
         Streaming chunks/events as they become available
@@ -388,6 +403,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             prompt,
             storage_path,
             room_id,
+            is_dm,
             config,
             thread_history,
             knowledge,

@@ -112,6 +112,7 @@ from .thread_utils import (
     should_agent_respond,
 )
 from .tools_metadata import get_tool_by_name
+from .workspace import ensure_workspace
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -639,6 +640,14 @@ class AgentBot:
         """Get or create the StopManager for this agent."""
         return StopManager()
 
+    async def _resolve_is_dm_room(self, room_id: str, is_dm_room_value: bool | None) -> bool:
+        """Resolve DM status, using a precomputed value when available."""
+        if is_dm_room_value is not None:
+            return is_dm_room_value
+
+        assert self.client is not None
+        return await is_dm_room(self.client, room_id)
+
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
         assert self.client is not None
@@ -953,7 +962,7 @@ class AgentBot:
             if self.agent_name == ROUTER_AGENT_NAME:
                 # Router always handles commands, even in single-agent rooms
                 # Commands like !schedule, !help, etc. need to work regardless
-                await self._handle_command(room, event, command)
+                await self._handle_command(room, event, command, is_dm_room_value=_is_dm_room)
             return
 
         context = await self._extract_message_context(room, event)
@@ -1054,6 +1063,7 @@ class AgentBot:
             thread_id=context.thread_id,
             thread_history=context.thread_history,
             user_id=event.sender,
+            is_dm_room_value=_is_dm_room,
         )
         self.response_tracker.mark_responded(event.event_id, response_event_id)
 
@@ -1497,6 +1507,7 @@ class AgentBot:
         thread_history: list[dict],
         existing_event_id: str | None = None,
         user_id: str | None = None,
+        is_dm_room_value: bool | None = None,
     ) -> str | None:
         """Process a message and send a response (non-streaming)."""
         assert self.client is not None
@@ -1504,6 +1515,7 @@ class AgentBot:
             return None
 
         session_id = create_session_id(room_id, thread_id)
+        resolved_is_dm = await self._resolve_is_dm_room(room_id, is_dm_room_value)
         knowledge = self._knowledge_for_agent(self.agent_name)
         scheduler_context = self._build_scheduling_tool_context(
             room_id=room_id,
@@ -1526,6 +1538,7 @@ class AgentBot:
                         room_id=room_id,
                         knowledge=knowledge,
                         user_id=user_id,
+                        is_dm=resolved_is_dm,
                     )
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
@@ -1573,6 +1586,7 @@ class AgentBot:
         agent_name: str,
         user_id: str | None,
         reply_to_event: nio.RoomMessageText | None = None,
+        is_dm_room_value: bool | None = None,
     ) -> str | None:
         """Send a skill command response using a specific agent."""
         assert self.client is not None
@@ -1580,6 +1594,7 @@ class AgentBot:
             return None
 
         session_id = create_session_id(room_id, thread_id)
+        resolved_is_dm = await self._resolve_is_dm_room(room_id, is_dm_room_value)
         knowledge = self._knowledge_for_agent(agent_name)
         scheduler_context = self._build_scheduling_tool_context(
             room_id=room_id,
@@ -1599,6 +1614,7 @@ class AgentBot:
                     thread_history=thread_history,
                     room_id=room_id,
                     knowledge=knowledge,
+                    is_dm=resolved_is_dm,
                 )
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
@@ -1696,6 +1712,7 @@ class AgentBot:
         thread_history: list[dict],
         existing_event_id: str | None = None,
         user_id: str | None = None,
+        is_dm_room_value: bool | None = None,
     ) -> str | None:
         """Process a message and send a response (streaming)."""
         assert self.client is not None
@@ -1703,6 +1720,7 @@ class AgentBot:
             return None
 
         session_id = create_session_id(room_id, thread_id)
+        resolved_is_dm = await self._resolve_is_dm_room(room_id, is_dm_room_value)
         knowledge = self._knowledge_for_agent(self.agent_name)
         scheduler_context = self._build_scheduling_tool_context(
             room_id=room_id,
@@ -1725,6 +1743,7 @@ class AgentBot:
                         room_id=room_id,
                         knowledge=knowledge,
                         user_id=user_id,
+                        is_dm=resolved_is_dm,
                     )
 
                     event_id, accumulated = await send_streaming_response(
@@ -1771,6 +1790,7 @@ class AgentBot:
         thread_history: list[dict],
         existing_event_id: str | None = None,
         user_id: str | None = None,
+        is_dm_room_value: bool | None = None,
     ) -> str | None:
         """Generate and send/edit a response using AI.
 
@@ -1783,6 +1803,7 @@ class AgentBot:
             existing_event_id: If provided, edit this message instead of sending a new one
                              (only used for interactive question responses)
             user_id: User ID of the sender for identifying user messages in history
+            is_dm_room_value: Precomputed DM status for the room, if available.
 
         Returns:
             Event ID of the response message, or None if failed
@@ -1812,6 +1833,7 @@ class AgentBot:
                     thread_history,
                     message_id,  # Edit the thinking message or existing
                     user_id=user_id,
+                    is_dm_room_value=is_dm_room_value,
                 )
             else:
                 await self._process_and_respond(
@@ -1822,6 +1844,7 @@ class AgentBot:
                     thread_history,
                     message_id,  # Edit the thinking message or existing
                     user_id=user_id,
+                    is_dm_room_value=is_dm_room_value,
                 )
 
         # Use unified handler for cancellation support
@@ -2104,7 +2127,13 @@ class AgentBot:
         self.response_tracker.mark_responded(event_info.original_event_id, response_event_id)
         self.logger.info("Successfully regenerated response for edited message")
 
-    async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:  # noqa: C901, PLR0912, PLR0915
+    async def _handle_command(  # noqa: C901, PLR0912, PLR0915
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageText,
+        command: Command,
+        is_dm_room_value: bool | None = None,
+    ) -> None:
         assert self.client is not None
         self.logger.info("Handling command", command_type=command.type.value)
 
@@ -2291,6 +2320,7 @@ class AgentBot:
                             agent_name=target_agent,
                             user_id=event.sender,
                             reply_to_event=event,
+                            is_dm_room_value=is_dm_room_value,
                         )
                         if event_id:
                             self.response_tracker.mark_responded(event.event_id, event_id)
@@ -2334,6 +2364,7 @@ class TeamBot(AgentBot):
         thread_history: list[dict],
         existing_event_id: str | None = None,
         user_id: str | None = None,
+        is_dm_room_value: bool | None = None,  # noqa: ARG002
     ) -> None:
         """Generate a team response instead of individual agent response."""
         if not prompt.strip():
@@ -2408,6 +2439,11 @@ class MultiAgentOrchestrator:
             start_watchers=start_watcher,
         )
 
+    def _ensure_agent_workspaces(self, config: Config) -> None:
+        """Ensure markdown workspaces exist for all configured agents."""
+        for agent_name in config.agents:
+            ensure_workspace(agent_name, self.storage_path, config)
+
     async def initialize(self) -> None:
         """Initialize all agent bots with self-management.
 
@@ -2421,6 +2457,7 @@ class MultiAgentOrchestrator:
         # Ensure user account exists first
         await self._ensure_user_account(config)
         self.config = config
+        self._ensure_agent_workspaces(config)
         await self._configure_knowledge(config, start_watcher=False)
 
         # Create bots for all configured entities
@@ -2541,6 +2578,7 @@ class MultiAgentOrchestrator:
 
         # Only apply the new config after all validation/account checks succeed.
         self.config = new_config
+        self._ensure_agent_workspaces(new_config)
         await self._configure_knowledge(new_config, start_watcher=self.running)
 
         # Always update config for ALL existing bots (even those being restarted will get new config when recreated)

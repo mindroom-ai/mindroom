@@ -105,9 +105,40 @@ class MemoryLLMConfig(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict, description="Provider-specific LLM config")
 
 
+class WorkspaceConfig(BaseModel):
+    """Markdown workspace memory configuration."""
+
+    enabled: bool = Field(default=True, description="Enable markdown workspace memory")
+    max_file_size: int = Field(
+        default=16384,
+        ge=1,
+        description="Maximum allowed size in bytes for workspace markdown files",
+    )
+    daily_log_retention_days: int = Field(
+        default=30,
+        ge=0,
+        description="Retention period for daily log files",
+    )
+
+
+class Mem0SearchConfig(BaseModel):
+    """Configuration for Mem0 retrieval and optional storage."""
+
+    enabled: bool = Field(default=False, description="Enable Mem0 semantic search during prompt construction")
+    store_enabled: bool = Field(default=False, description="Also persist conversation memory to Mem0")
+
+
 class MemoryConfig(BaseModel):
     """Memory system configuration."""
 
+    workspace: WorkspaceConfig = Field(
+        default_factory=WorkspaceConfig,
+        description="Markdown workspace memory settings",
+    )
+    mem0_search: Mem0SearchConfig = Field(
+        default_factory=Mem0SearchConfig,
+        description="Optional Mem0 retrieval/storage settings",
+    )
     embedder: MemoryEmbedderConfig = Field(
         default_factory=MemoryEmbedderConfig,
         description="Embedder configuration for memory",
