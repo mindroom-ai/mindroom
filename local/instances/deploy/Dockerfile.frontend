@@ -73,7 +73,7 @@ if [ -n "$MINDROOM_API_KEY" ]; then
     sed -i '/location \/api {/a\        proxy_set_header Authorization "Bearer '"$MINDROOM_API_KEY"'";' "$CONF"
 fi
 SH
-chmod +x /docker-entrypoint.d/90-inject-api-key.sh
+RUN chmod +x /docker-entrypoint.d/90-inject-api-key.sh
 
 # Expose port (8080 is default for nginx-unprivileged)
 EXPOSE 8080
