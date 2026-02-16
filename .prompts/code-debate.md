@@ -23,6 +23,8 @@ Use a portable checksum. Pick the first available:
 CKSUM() { { md5sum "$1" 2>/dev/null || md5 -q "$1" 2>/dev/null || shasum "$1"; } | awk '{print $1}'; }
 ```
 
+Define this function before running the poll loop.
+
 ## Shell requirement
 
 Run polling commands in `bash`. The timeout example uses Bash's `SECONDS`.
@@ -102,10 +104,14 @@ Each section should end with a signature line: `*— Agent A|Agent B (optional t
 ## Follow-up 1
 <Agent A's follow-up on unresolved points>
 
+*— Agent A, 2025-06-15T14:35:00Z*
+
 ---
 
 ## Response 2
 <Agent B's reply>
+
+*— Agent B, 2025-06-15T14:38:00Z*
 
 ---
 
