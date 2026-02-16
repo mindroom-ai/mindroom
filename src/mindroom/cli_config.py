@@ -25,6 +25,7 @@ console = Console()
 config_app = typer.Typer(
     name="config",
     help="Manage MindRoom configuration files.",
+    rich_markup_mode="rich",
     no_args_is_help=True,
 )
 
