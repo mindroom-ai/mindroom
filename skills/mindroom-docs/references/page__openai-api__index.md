@@ -171,7 +171,7 @@ Client `system` / `developer` messages are prepended to the prompt. They augment
 | Unset                    | `true`                                | No authentication required                                        |
 | Unset                    | Unset/`false`                         | All requests return 401 (locked)                                  |
 
-The OpenAI-compatible API uses its own auth, separate from the dashboard's Supabase JWT auth.
+The OpenAI-compatible API uses its own auth (`OPENAI_COMPAT_API_KEYS`), separate from the dashboard API auth. In standalone mode, the dashboard `/api/*` endpoints can be protected with `MINDROOM_API_KEY` (Bearer token). The auth header is injected at the proxy layer (nginx in Docker/K8s), so the frontend JS bundle does not contain secrets. These are independent: `MINDROOM_API_KEY` secures the dashboard, while `OPENAI_COMPAT_API_KEYS` secures the `/v1/*` chat completions endpoints.
 
 ## Limitations
 

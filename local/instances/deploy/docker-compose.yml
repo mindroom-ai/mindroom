@@ -29,14 +29,14 @@ services:
       - mynetwork
     labels:
       - traefik.enable=true
-      # API routes - backend now serves REST and OpenAI-compatible endpoints on port 8765
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.rule=Host(`${INSTANCE_DOMAIN}`) && (PathPrefix(`/api`) || PathPrefix(`/v1`))
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.entrypoints=websecure
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.tls=true
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.tls.certresolver=porkbun
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.service=${INSTANCE_NAME:-mindroom}-api
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.priority=100
-      - traefik.http.services.${INSTANCE_NAME:-mindroom}-api.loadbalancer.server.port=8765
+      # OpenAI-compatible /v1 routes go directly to backend (has its own auth)
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-v1.rule=Host(`${INSTANCE_DOMAIN}`) && PathPrefix(`/v1`)
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-v1.entrypoints=websecure
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-v1.tls=true
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-v1.tls.certresolver=porkbun
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-v1.service=${INSTANCE_NAME:-mindroom}-v1
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-v1.priority=100
+      - traefik.http.services.${INSTANCE_NAME:-mindroom}-v1.loadbalancer.server.port=8765
 
   sandbox-runner:
     image: ${BACKEND_IMAGE:-deploy-mindroom-backend:latest}
@@ -68,14 +68,16 @@ services:
     volumes:
       - ${DATA_DIR}/logs:/app/logs
     environment:
-      - VITE_API_URL=  # Empty for relative URLs
       - HOME=/app
+      # nginx proxies /api to backend; MINDROOM_API_KEY injects auth header
+      - BACKEND_URL=http://backend:${BACKEND_PORT:-8765}
+      - MINDROOM_API_KEY=${MINDROOM_API_KEY:-}
     networks:
       - mindroom-network
       - mynetwork
     labels:
       - traefik.enable=true
-      # Frontend routes - serves the UI on port 8080 (nginx-unprivileged default)
+      # Frontend routes - serves UI + proxies /api on port 8080
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.rule=Host(`${INSTANCE_DOMAIN}`)
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.entrypoints=websecure
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.tls=true
