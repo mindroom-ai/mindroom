@@ -1361,7 +1361,6 @@ class AgentBot:
         chain_history: list[dict[str, Any]],
         visited_event_ids: list[str],
         thread_root_id: str | None,
-        hit_traversal_limit: bool,
     ) -> tuple[str, list[dict[str, Any]], bool, bool]:
         """Build reply-chain context tuple after traversal is complete."""
         cached_root = self._first_cached_reply_chain_root(room_id, visited_event_ids)
@@ -1376,11 +1375,6 @@ class AgentBot:
         if thread_root_id:
             self._cache_reply_chain_roots(room_id, visited_event_ids, thread_root_id, points_to_thread=True)
             return thread_root_id, chain_history, True, False
-
-        if hit_traversal_limit:
-            root_event_id = str(chain_history[0].get("event_id", reply_to_event_id))
-            self._cache_reply_chain_roots(room_id, visited_event_ids, root_event_id, points_to_thread=False)
-            return root_event_id, chain_history, False, False
 
         root_event_id = str(chain_history[0].get("event_id", reply_to_event_id))
         self._cache_reply_chain_roots(room_id, visited_event_ids, root_event_id, points_to_thread=False)
@@ -1478,12 +1472,10 @@ class AgentBot:
         current_event_id: str | None = reply_to_event_id
         seen_event_ids: set[str] = set()
         visited_event_ids: list[str] = []
-        hit_traversal_limit = False
         direct_thread_root_context: tuple[str, list[dict[str, Any]], bool, bool] | None = None
 
         while current_event_id:
             if len(visited_event_ids) >= self._REPLY_CHAIN_TRAVERSAL_LIMIT:
-                hit_traversal_limit = True
                 self.logger.warning(
                     "Reply-chain traversal limit reached while resolving context",
                     room_id=room_id,
@@ -1532,7 +1524,6 @@ class AgentBot:
             chain_history=chain_history,
             visited_event_ids=visited_event_ids,
             thread_root_id=thread_root_id,
-            hit_traversal_limit=hit_traversal_limit,
         )
 
     async def _derive_conversation_context(
