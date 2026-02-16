@@ -72,41 +72,6 @@ def get_agents_in_thread(thread_history: list[dict[str, Any]], config: Config) -
     return agents
 
 
-def get_agent_matrix_ids_in_thread(thread_history: list[dict[str, Any]], config: Config) -> list[MatrixID]:
-    """Get list of unique agent Matrix IDs that have participated in thread.
-
-    Note: Router agent is excluded from the participant list as it's not
-    a conversation participant.
-
-    Preserves the order of first participation while preventing duplicates.
-
-    Returns:
-        List of MatrixID objects for agents who participated in the thread.
-
-    """
-    agent_ids = []
-    seen_ids = set()
-
-    for msg in thread_history:
-        sender = msg.get("sender", "")
-        agent_name = extract_agent_name(sender, config)
-
-        # Skip router agent and invalid senders
-        if not agent_name or agent_name == ROUTER_AGENT_NAME:
-            continue
-
-        try:
-            matrix_id = MatrixID.parse(sender)
-            if matrix_id.full_id not in seen_ids:
-                agent_ids.append(matrix_id)
-                seen_ids.add(matrix_id.full_id)
-        except ValueError:
-            # Skip invalid Matrix IDs
-            pass
-
-    return agent_ids
-
-
 def get_mentioned_agents(mentions: dict[str, Any], config: Config) -> list[MatrixID]:
     """Extract agent names from mentions."""
     user_ids = mentions.get("user_ids", [])

@@ -966,12 +966,8 @@ class AgentBot:
         # Get agents in thread (excludes router)
         agents_in_thread = get_agents_in_thread(context.thread_history, self.config)
 
-        # Router: Route when no specific agent mentioned and no agents in thread
+        # Router: Route when no one is explicitly mentioned and no agents in thread
         if self.agent_name == ROUTER_AGENT_NAME:
-            # Only perform AI routing when:
-            # 1. No specific agent is mentioned
-            # 2. No agents are already in the thread
-            # 3. There's more than one agent available (routing makes sense)
             if not context.mentioned_agents and not context.has_non_agent_mentions and not agents_in_thread:
                 if requires_mention(context.is_thread, context.thread_history, room, self.config):
                     self.logger.info("Skipping routing: multiple non-agent users (mention required)")
