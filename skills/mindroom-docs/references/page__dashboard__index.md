@@ -197,3 +197,4 @@ The dashboard communicates with the backend API at `/api/`:
 | GET    | `/api/matrix/agents/{id}/rooms` | Get specific agent's rooms       |
 | POST   | `/api/matrix/rooms/leave`       | Leave a single room              |
 | POST   | `/api/matrix/rooms/leave-bulk`  | Leave multiple rooms             |
+| POST   | `/api/test/model`               | Test model connection            |

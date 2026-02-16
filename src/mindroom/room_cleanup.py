@@ -17,6 +17,7 @@ from .matrix.client import get_joined_rooms, get_room_members
 from .matrix.identity import MatrixID
 from .matrix.rooms import is_dm_room
 from .matrix.state import MatrixState
+from .matrix.users import INTERNAL_USER_ACCOUNT_KEY
 
 if TYPE_CHECKING:
     from .config import Config
@@ -36,8 +37,8 @@ def _get_all_known_bot_usernames() -> set[str]:
 
     # Get all agent accounts from state
     for key in state.accounts:
-        # Skip the user account (agent_user is the human user, not a bot)
-        if key.startswith("agent_") and key != "agent_user":
+        # Skip the internal user account; it is not a bot.
+        if key.startswith("agent_") and key != INTERNAL_USER_ACCOUNT_KEY:
             account = state.accounts[key]
             bot_usernames.add(account.username)
 

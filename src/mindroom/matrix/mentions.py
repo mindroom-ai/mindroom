@@ -74,7 +74,7 @@ def _process_mention(match: re.Match, config: Config, sender_domain: str) -> tup
     prefix = match.group(1) or ""  # "mindroom_" or empty
     name = match.group(2)
 
-    # Skip user mentions (mindroom_user_*)
+    # Skip user-like mentions (e.g. mindroom_user_*)
     if name.startswith("user_"):
         return None
 
