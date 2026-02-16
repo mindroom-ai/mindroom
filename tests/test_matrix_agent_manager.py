@@ -13,6 +13,7 @@ from mindroom.config import Config
 from mindroom.matrix.client import register_user
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import (
+    INTERNAL_USER_AGENT_NAME,
     AgentMatrixUser,
     create_agent_user,
     ensure_all_agent_users,
@@ -26,6 +27,8 @@ from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 if TYPE_CHECKING:
     from pathlib import Path
 
+DEFAULT_INTERNAL_USERNAME = Config().mindroom_user.username
+
 
 @pytest.fixture
 def temp_matrix_users_file(tmp_path: Path) -> Path:
@@ -34,7 +37,7 @@ def temp_matrix_users_file(tmp_path: Path) -> Path:
     initial_data = {
         "accounts": {
             "bot": {"username": "mindroom_bot", "password": "bot_password_123"},
-            "user": {"username": "mindroom_user", "password": "user_password_123"},
+            "user": {"username": DEFAULT_INTERNAL_USERNAME, "password": "user_password_123"},
         },
         "rooms": {},
     }
@@ -84,7 +87,7 @@ class TestMatrixUserManagement:
         assert "bot" in state.accounts
         assert state.accounts["bot"].username == "mindroom_bot"
         assert "user" in state.accounts
-        assert state.accounts["user"].username == "mindroom_user"
+        assert state.accounts["user"].username == DEFAULT_INTERNAL_USERNAME
 
     @patch("mindroom.matrix.state.MATRIX_STATE_FILE")
     def test_load_matrix_users_no_file(self, mock_file: MagicMock) -> None:
@@ -178,6 +181,8 @@ class TestMatrixRegistration:
         mock_response = MagicMock(spec=nio.ErrorResponse)
         mock_response.status_code = "M_USER_IN_USE"
         mock_client.register.return_value = mock_response
+        mock_client.login.return_value = MagicMock(spec=nio.LoginResponse)
+        mock_client.set_displayname.return_value = AsyncMock()
 
         with patch("mindroom.matrix.client.matrix_client") as mock_matrix_client:
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
@@ -186,6 +191,23 @@ class TestMatrixRegistration:
 
             assert user_id == "@existing_user:localhost"
             mock_matrix_client.assert_called_once()
+            mock_client.login.assert_called_once_with("test_pass")
+            mock_client.set_displayname.assert_called_once_with("Existing User")
+
+    @pytest.mark.asyncio
+    async def test_register_user_already_exists_login_failure(self) -> None:
+        """Test registration failure when user exists but provided password is invalid."""
+        mock_client = AsyncMock()
+        mock_response = MagicMock(spec=nio.ErrorResponse)
+        mock_response.status_code = "M_USER_IN_USE"
+        mock_client.register.return_value = mock_response
+        mock_client.login.return_value = MagicMock(spec=nio.LoginError)
+
+        with patch("mindroom.matrix.client.matrix_client") as mock_matrix_client:
+            mock_matrix_client.return_value.__aenter__.return_value = mock_client
+
+            with pytest.raises(ValueError, match="Login failed for existing user"):
+                await register_user("http://localhost:8008", "existing_user", "wrong_pass", "Existing User")
 
     @pytest.mark.asyncio
     async def test_register_user_failure(self) -> None:
@@ -254,6 +276,30 @@ class TestAgentUserCreation:
         assert agent_user.password == "existing_pass"  # noqa: S105
         mock_save_creds.assert_not_called()  # Should not save again
         mock_register.assert_called_once()  # Still tries to register/verify
+
+    @pytest.mark.asyncio
+    @patch("mindroom.matrix.users.register_user")
+    @patch("mindroom.matrix.users.get_agent_credentials")
+    async def test_create_internal_user_rejects_username_change(
+        self,
+        mock_get_creds: MagicMock,
+        mock_register: AsyncMock,
+    ) -> None:
+        """Internal username cannot change once credentials already exist."""
+        mock_get_creds.return_value = {
+            "username": DEFAULT_INTERNAL_USERNAME,
+            "password": "existing_pass",
+        }
+
+        with pytest.raises(ValueError, match="cannot be changed"):
+            await create_agent_user(
+                "http://localhost:8008",
+                INTERNAL_USER_AGENT_NAME,
+                "MindRoomUser",
+                username="alice_internal",
+            )
+
+        mock_register.assert_not_called()
 
 
 class TestAgentLogin:

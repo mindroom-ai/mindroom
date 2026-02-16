@@ -11,7 +11,7 @@ from mindroom.thread_utils import is_authorized_sender
 
 @pytest.fixture
 def mock_config_no_restrictions() -> Config:
-    """Config with no authorized users (defaults to only mindroom_user)."""
+    """Config with no authorized users (defaults to only internal system user)."""
     return Config(
         agents={
             "assistant": {
@@ -64,11 +64,11 @@ def mock_config_with_restrictions() -> Config:
     )
 
 
-def test_no_restrictions_only_allows_mindroom_user(
+def test_no_restrictions_only_allows_internal_user(
     mock_config_no_restrictions: Config,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Test that empty authorized_users list only allows mindroom_user and agents."""
+    """Test that empty authorized_users list only allows internal system user and agents."""
     # Mock the domain property
     monkeypatch.setattr(mock_config_no_restrictions.__class__, "domain", property(lambda _: "example.com"))
 
@@ -79,8 +79,12 @@ def test_no_restrictions_only_allows_mindroom_user(
     # Agents should still be allowed
     assert is_authorized_sender("@mindroom_assistant:example.com", mock_config_no_restrictions, "!test:server")
 
-    # mindroom_user should always be allowed
-    assert is_authorized_sender("@mindroom_user:example.com", mock_config_no_restrictions, "!test:server")
+    # Internal system user should always be allowed
+    assert is_authorized_sender(
+        mock_config_no_restrictions.get_mindroom_user_id(),
+        mock_config_no_restrictions,
+        "!test:server",
+    )
 
 
 def test_authorized_users_allowed(mock_config_with_restrictions: Config) -> None:
@@ -131,16 +135,50 @@ def test_router_always_allowed(mock_config_with_restrictions: Config, monkeypatc
     )
 
 
-def test_mindroom_user_always_allowed(mock_config_with_restrictions: Config, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test that mindroom_user on the current domain is always allowed."""
+def test_internal_system_user_always_allowed(
+    mock_config_with_restrictions: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that configured internal user on the current domain is always allowed."""
     # Mock the domain property
     monkeypatch.setattr(mock_config_with_restrictions.__class__, "domain", property(lambda _: "example.com"))
 
-    # mindroom_user should always be allowed, even with restrictions
-    assert is_authorized_sender("@mindroom_user:example.com", mock_config_with_restrictions, "!test:server")
+    # Internal system user should always be allowed, even with restrictions
+    assert is_authorized_sender(
+        mock_config_with_restrictions.get_mindroom_user_id(),
+        mock_config_with_restrictions,
+        "!test:server",
+    )
 
-    # mindroom_user from a different domain should NOT be allowed
-    assert not is_authorized_sender("@mindroom_user:different.com", mock_config_with_restrictions, "!test:server")
+    # Same username from a different domain should NOT be allowed
+    wrong_domain_id = mock_config_with_restrictions.get_mindroom_user_id().replace(":example.com", ":different.com")
+    assert not is_authorized_sender(wrong_domain_id, mock_config_with_restrictions, "!test:server")
+
+
+def test_custom_internal_system_user_always_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that custom configured internal user is always allowed."""
+    config = Config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        mindroom_user={
+            "username": "alice_internal",
+            "display_name": "Alice Internal",
+        },
+        authorization={
+            "global_users": [],
+            "room_permissions": {},
+            "default_room_access": False,
+        },
+    )
+    monkeypatch.setattr(config.__class__, "domain", property(lambda _: "example.com"))
+
+    assert is_authorized_sender("@alice_internal:example.com", config, "!test:server")
+    assert not is_authorized_sender("@mindroom_user:example.com", config, "!test:server")
 
 
 def test_mixed_authorization_scenarios(mock_config_with_restrictions: Config, monkeypatch: pytest.MonkeyPatch) -> None:

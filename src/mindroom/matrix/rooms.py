@@ -14,6 +14,7 @@ from mindroom.topic_generator import ensure_room_has_topic, generate_room_topic_
 from .client import check_and_set_avatar, create_room, join_room, leave_room, matrix_client
 from .identity import MatrixID, extract_server_name_from_homeserver
 from .state import MatrixRoom, MatrixState
+from .users import INTERNAL_USER_ACCOUNT_KEY
 
 if TYPE_CHECKING:
     from mindroom.config import Config
@@ -247,8 +248,7 @@ async def ensure_user_in_rooms(homeserver: str, room_ids: dict[str, str]) -> Non
 
     """
     state = MatrixState.load()
-    # User account is stored as "agent_user" (treated as a special agent)
-    user_account = state.get_account("agent_user")
+    user_account = state.get_account(INTERNAL_USER_ACCOUNT_KEY)
     if not user_account:
         logger.warning("No user account found, skipping user room membership")
         return

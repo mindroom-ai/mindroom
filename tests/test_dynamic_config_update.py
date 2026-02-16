@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -208,3 +208,116 @@ class TestDynamicConfigUpdate:
         assert mock_bot.enable_streaming is False
         assert router_bot.config == updated_config
         assert router_bot.enable_streaming is False
+
+    @pytest.mark.asyncio
+    async def test_mindroom_user_display_name_change_updates_user_account(self) -> None:
+        """Changing mindroom_user.display_name should refresh the internal user account."""
+        initial_config = Config(
+            agents={
+                "general": {
+                    "display_name": "GeneralAgent",
+                    "role": "General assistant",
+                    "model": "default",
+                    "rooms": ["lobby"],
+                },
+            },
+            models={"default": {"provider": "test", "id": "test-model"}},
+        )
+        updated_config = Config(
+            agents={
+                "general": {
+                    "display_name": "GeneralAgent",
+                    "role": "General assistant",
+                    "model": "default",
+                    "rooms": ["lobby"],
+                },
+            },
+            models={"default": {"provider": "test", "id": "test-model"}},
+            mindroom_user={"username": "mindroom_user", "display_name": "Alice Internal"},
+        )
+
+        orchestrator = MultiAgentOrchestrator(storage_path=MagicMock())
+        orchestrator.config = initial_config
+        mock_bot = MagicMock(spec=AgentBot)
+        mock_bot.config = initial_config
+        mock_bot.enable_streaming = True
+        mock_bot._set_presence_with_model_info = AsyncMock()
+        orchestrator.agent_bots["general"] = mock_bot
+        router_bot = MagicMock(spec=AgentBot)
+        router_bot.config = initial_config
+        router_bot.enable_streaming = True
+        router_bot._set_presence_with_model_info = AsyncMock()
+        orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
+
+        with (
+            patch.object(Config, "from_yaml", return_value=updated_config),
+            patch("mindroom.bot._identify_entities_to_restart", return_value=set()),
+            patch.object(orchestrator, "_ensure_user_account", new=AsyncMock()) as mock_ensure_user,
+            patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
+        ):
+            updated = await orchestrator.update_config()
+
+        assert updated is True
+        assert orchestrator.config == updated_config
+        assert router_bot.config == updated_config
+        mock_ensure_user.assert_awaited_once_with(updated_config)
+        mock_setup.assert_awaited_once_with([])
+
+    @pytest.mark.asyncio
+    async def test_mindroom_user_username_change_is_rejected_without_partial_update(self) -> None:
+        """Reject changing mindroom_user.username and keep the current runtime config."""
+        initial_config = Config(
+            agents={
+                "general": {
+                    "display_name": "GeneralAgent",
+                    "role": "General assistant",
+                    "model": "default",
+                    "rooms": ["lobby"],
+                },
+            },
+            models={"default": {"provider": "test", "id": "test-model"}},
+        )
+        updated_config = Config(
+            agents={
+                "general": {
+                    "display_name": "GeneralAgent",
+                    "role": "General assistant",
+                    "model": "default",
+                    "rooms": ["lobby"],
+                },
+            },
+            models={"default": {"provider": "test", "id": "test-model"}},
+            mindroom_user={"username": "alice_internal", "display_name": "Alice Internal"},
+        )
+
+        orchestrator = MultiAgentOrchestrator(storage_path=MagicMock())
+        orchestrator.config = initial_config
+        mock_bot = MagicMock(spec=AgentBot)
+        mock_bot.config = initial_config
+        mock_bot.enable_streaming = True
+        mock_bot._set_presence_with_model_info = AsyncMock()
+        orchestrator.agent_bots["general"] = mock_bot
+        router_bot = MagicMock(spec=AgentBot)
+        router_bot.config = initial_config
+        router_bot.enable_streaming = True
+        router_bot._set_presence_with_model_info = AsyncMock()
+        orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
+
+        with (
+            patch.object(Config, "from_yaml", return_value=updated_config),
+            patch("mindroom.bot._identify_entities_to_restart", return_value=set()),
+            patch.object(
+                orchestrator,
+                "_ensure_user_account",
+                new=AsyncMock(side_effect=ValueError("mindroom_user.username cannot be changed")),
+            ) as mock_ensure_user,
+            patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
+            pytest.raises(ValueError, match="cannot be changed"),
+        ):
+            await orchestrator.update_config()
+
+        assert orchestrator.config == initial_config
+        assert mock_bot.config == initial_config
+        assert router_bot.config == initial_config
+        mock_ensure_user.assert_awaited_once_with(updated_config)
+        mock_setup.assert_not_awaited()
