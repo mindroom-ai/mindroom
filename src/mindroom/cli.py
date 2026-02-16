@@ -15,6 +15,7 @@ import httpx
 import typer
 import yaml
 from pydantic import ValidationError
+from rich.panel import Panel
 from rich.text import Text
 
 from mindroom import __version__
@@ -61,7 +62,7 @@ _TAGLINES = [
 
 def _make_banner(
     tagline: tuple[str, str] | None = None,
-) -> Text:
+) -> Panel:
     """Create the MindRoom banner with a red-pill-to-Matrix-green gradient.
 
     Args:
@@ -72,20 +73,20 @@ def _make_banner(
     from rich.color import Color  # noqa: PLC0415
     from rich.style import Style  # noqa: PLC0415
 
-    banner = Text()
-    for i, line in enumerate(_LOGO.splitlines()):
+    lines = _LOGO.strip().splitlines()
+    # Build the gradient logo
+    logo = Text(justify="center")
+    for i, line in enumerate(lines):
         if i > 0:
-            banner.append("\n")
-        line_text = Text(line)
-        start = len(line) - len(line.lstrip())
-        end = len(line.rstrip())
-        width = max(end - start - 1, 1)
-        for j in range(start, end):
-            t = (j - start) / width
+            logo.append("\n")
+        line_text = Text(line.strip())
+        width = max(len(line_text) - 1, 1)
+        for j in range(len(line_text)):
+            t = j / width
             r, g, b = int(255 * (1 - t)), int(255 * t), int(65 * t)
             line_text.stylize(Style(color=Color.from_rgb(r, g, b), bold=True), j, j + 1)
-        banner.append(line_text)
-    banner.append("\n")
+        logo.append(line_text)
+    # Build the tagline
     if tagline is not None:
         green_part, dim_part = tagline
     else:
@@ -96,9 +97,15 @@ def _make_banner(
             dim_part = "Released March 31, 1999."
         else:
             green_part, dim_part = random.choice(_TAGLINES)  # noqa: S311
-    banner.append(Text(f"  {green_part}", style="bold green"))
-    banner.append(Text(dim_part, style="dim"))
-    return banner
+    tag = Text(justify="center")
+    tag.append(green_part, style="bold green")
+    tag.append(dim_part, style="dim")
+    # Combine into panel
+    content = Text(justify="center")
+    content.append_text(logo)
+    content.append("\n")
+    content.append_text(tag)
+    return Panel(content, border_style="green", expand=False)
 
 
 _HELP = """\
