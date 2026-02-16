@@ -87,7 +87,11 @@ app.add_middleware(
 
 
 def load_runtime_config() -> tuple[Config, Path]:
-    """Load the current runtime config and return it with its path."""
+    """Return the in-memory runtime config and its path."""
+    with config_lock:
+        if runtime_config is not None:
+            return runtime_config, CONFIG_PATH
+
     return Config.from_yaml(CONFIG_PATH), CONFIG_PATH
 
 
@@ -116,12 +120,37 @@ def ensure_writable_config() -> None:
     print(f"Created new config file at {CONFIG_PATH}")
 
 
-def save_config_to_file(config: dict[str, Any]) -> None:
+def _normalize_config_data(config_data: dict[str, Any] | None) -> dict[str, Any]:
+    normalized = dict(config_data or {})
+
+    if normalized.get("teams") is None:
+        normalized["teams"] = {}
+    if normalized.get("cultures") is None:
+        normalized["cultures"] = {}
+    if normalized.get("room_models") is None:
+        normalized["room_models"] = {}
+    if normalized.get("plugins") is None:
+        normalized["plugins"] = []
+    if normalized.get("knowledge_bases") is None:
+        normalized["knowledge_bases"] = {}
+
+    return normalized
+
+
+def _build_runtime_config(config_data: dict[str, Any]) -> Config | None:
+    try:
+        return Config(**config_data)
+    except Exception:
+        return None
+
+
+def save_config_to_file(config_data: dict[str, Any]) -> None:
     """Save config to YAML file with deterministic ordering."""
     tmp_path = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".tmp")
+    normalized = _normalize_config_data(config_data)
     with tmp_path.open("w", encoding="utf-8") as f:
         yaml.dump(
-            config,
+            normalized,
             f,
             default_flow_style=False,
             sort_keys=True,
@@ -129,9 +158,15 @@ def save_config_to_file(config: dict[str, Any]) -> None:
         )
     safe_replace(tmp_path, CONFIG_PATH)
 
+    global config, runtime_config
+    with config_lock:
+        config = normalized
+        runtime_config = _build_runtime_config(normalized)
+
 
 # Global variable to store current config
 config: dict[str, Any] = {}
+runtime_config: Config | None = None
 config_lock = threading.Lock()
 
 
@@ -215,10 +250,11 @@ async def verify_user(request: Request, authorization: str | None = Header(None)
 
 def load_config_from_file() -> None:
     """Load config from YAML file."""
-    global config
+    global config, runtime_config
     try:
         with CONFIG_PATH.open() as f, config_lock:
-            config = yaml.safe_load(f)
+            config = _normalize_config_data(yaml.safe_load(f))
+            runtime_config = _build_runtime_config(config)
         print("Config loaded successfully")
     except Exception as e:
         print(f"Error loading config: {e}")
@@ -256,7 +292,7 @@ async def get_agent_context_report(
     is_dm: bool = False,
 ) -> dict[str, Any]:
     """Return workspace context observability details for one agent."""
-    runtime_config = Config.from_yaml(CONFIG_PATH)
+    runtime_config, _ = load_runtime_config()
     if name not in runtime_config.agents:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
     return workspace_context_report(

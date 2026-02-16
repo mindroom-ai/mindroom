@@ -6,13 +6,12 @@ import hashlib
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 from urllib.parse import unquote
 
 from fastapi import APIRouter, Header, HTTPException, Response
 from pydantic import BaseModel, Field
 
-from mindroom.config import Config
 from mindroom.constants import STORAGE_PATH_OBJ
 from mindroom.workspace import (
     AGENTS_FILENAME,
@@ -21,6 +20,9 @@ from mindroom.workspace import (
     ensure_workspace,
     get_agent_workspace_path,
 )
+
+if TYPE_CHECKING:
+    from mindroom.config import Config
 
 router = APIRouter(prefix="/api/workspace", tags=["workspace"])
 
@@ -35,13 +37,20 @@ class WorkspaceFileUpdate(BaseModel):
     content: str = Field(default="", description="New markdown file content")
 
 
+def _runtime_config() -> Config:
+    from mindroom.api.main import load_runtime_config  # noqa: PLC0415
+
+    config, _ = load_runtime_config()
+    return config
+
+
 def _workspace_root(config: Config, agent_name: str) -> Path:
     if agent_name not in config.agents:
         raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_name}")
 
     root = get_agent_workspace_path(agent_name, STORAGE_PATH_OBJ).resolve()
     if not root.exists():
-        ensure_workspace(agent_name, STORAGE_PATH_OBJ, config)
+        ensure_workspace(agent_name, STORAGE_PATH_OBJ, config, prune_daily_logs=False)
         return root
 
     (root / "memory").mkdir(parents=True, exist_ok=True)
@@ -118,7 +127,7 @@ def _workspace_file_entries(root: Path, agent_name: str) -> list[dict[str, Any]]
 @router.get("/{agent_name}/files")
 async def list_workspace_files(agent_name: str) -> dict[str, Any]:
     """List allowed workspace files for an agent."""
-    config = Config.from_yaml()
+    config = _runtime_config()
     root = _workspace_root(config, agent_name)
     files = _workspace_file_entries(root, agent_name)
     return {
@@ -131,7 +140,7 @@ async def list_workspace_files(agent_name: str) -> dict[str, Any]:
 @router.get("/{agent_name}/file/{filename:path}")
 async def read_workspace_file(agent_name: str, filename: str, response: Response) -> dict[str, Any]:
     """Read one workspace file and return content + metadata."""
-    config = Config.from_yaml()
+    config = _runtime_config()
     root = _workspace_root(config, agent_name)
     allowed_filename = _validate_filename(filename)
     target = _resolve_within_root(root, allowed_filename)
@@ -158,7 +167,7 @@ async def update_workspace_file(
     if if_match is None:
         raise HTTPException(status_code=428, detail="If-Match header is required")
 
-    config = Config.from_yaml()
+    config = _runtime_config()
     root = _workspace_root(config, agent_name)
     allowed_filename = _validate_filename(filename)
     target = _resolve_within_root(root, allowed_filename)
@@ -186,7 +195,7 @@ async def update_workspace_file(
 @router.delete("/{agent_name}/file/{filename:path}")
 async def delete_workspace_file(agent_name: str, filename: str) -> dict[str, Any]:
     """Delete one allowed workspace file."""
-    config = Config.from_yaml()
+    config = _runtime_config()
     root = _workspace_root(config, agent_name)
     allowed_filename = _validate_filename(filename)
     target = _resolve_within_root(root, allowed_filename)
@@ -205,7 +214,7 @@ async def delete_workspace_file(agent_name: str, filename: str) -> dict[str, Any
 @router.get("/{agent_name}/memory/daily")
 async def list_daily_logs(agent_name: str) -> dict[str, Any]:
     """List all daily logs for one agent across scopes."""
-    config = Config.from_yaml()
+    config = _runtime_config()
     root = _workspace_root(config, agent_name)
     memory_dir = root / "memory"
     files = [
@@ -226,7 +235,7 @@ async def read_daily_logs_for_date(agent_name: str, date: str) -> dict[str, Any]
     if not _DATE_PATTERN.fullmatch(date):
         raise HTTPException(status_code=422, detail="Date must be YYYY-MM-DD")
 
-    config = Config.from_yaml()
+    config = _runtime_config()
     root = _workspace_root(config, agent_name)
     memory_dir = root / "memory"
     matches = [

@@ -35,7 +35,7 @@ def test_workspace_list_files(test_client: TestClient, tmp_path: Path, monkeypat
     config = _workspace_config()
     monkeypatch.setattr("mindroom.api.workspace.STORAGE_PATH_OBJ", tmp_path)
 
-    with patch("mindroom.api.workspace.Config.from_yaml", return_value=config):
+    with patch("mindroom.api.workspace._runtime_config", return_value=config):
         response = test_client.get("/api/workspace/test_agent/files")
 
     assert response.status_code == 200
@@ -44,6 +44,39 @@ def test_workspace_list_files(test_client: TestClient, tmp_path: Path, monkeypat
     assert "SOUL.md" in filenames
     assert "AGENTS.md" in filenames
     assert "MEMORY.md" in filenames
+
+
+def test_workspace_api_init_skips_daily_log_prune(
+    test_client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """API bootstrap should not trigger daily-log pruning."""
+    config = _workspace_config()
+    monkeypatch.setattr("mindroom.api.workspace.STORAGE_PATH_OBJ", tmp_path)
+    prune_flags: list[bool] = []
+
+    def _fake_ensure_workspace(
+        agent_name: str,
+        storage_path: Path,
+        _config: Config,
+        *,
+        prune_daily_logs: bool = True,
+    ) -> None:
+        prune_flags.append(prune_daily_logs)
+        workspace_root = storage_path / "workspace" / agent_name
+        workspace_root.mkdir(parents=True, exist_ok=True)
+        (workspace_root / "memory").mkdir(parents=True, exist_ok=True)
+        (workspace_root / "rooms").mkdir(parents=True, exist_ok=True)
+
+    with (
+        patch("mindroom.api.workspace._runtime_config", return_value=config),
+        patch("mindroom.api.workspace.ensure_workspace", side_effect=_fake_ensure_workspace),
+    ):
+        response = test_client.get("/api/workspace/test_agent/files")
+
+    assert response.status_code == 200
+    assert prune_flags == [False]
 
 
 def test_workspace_read_file_sets_etag(
@@ -55,7 +88,7 @@ def test_workspace_read_file_sets_etag(
     config = _workspace_config()
     monkeypatch.setattr("mindroom.api.workspace.STORAGE_PATH_OBJ", tmp_path)
 
-    with patch("mindroom.api.workspace.Config.from_yaml", return_value=config):
+    with patch("mindroom.api.workspace._runtime_config", return_value=config):
         response = test_client.get("/api/workspace/test_agent/file/SOUL.md")
 
     assert response.status_code == 200
@@ -74,7 +107,7 @@ def test_workspace_update_requires_if_match(
     config = _workspace_config()
     monkeypatch.setattr("mindroom.api.workspace.STORAGE_PATH_OBJ", tmp_path)
 
-    with patch("mindroom.api.workspace.Config.from_yaml", return_value=config):
+    with patch("mindroom.api.workspace._runtime_config", return_value=config):
         response = test_client.put(
             "/api/workspace/test_agent/file/SOUL.md",
             json={"content": "updated"},
@@ -92,7 +125,7 @@ def test_workspace_update_rejects_stale_etag(
     config = _workspace_config()
     monkeypatch.setattr("mindroom.api.workspace.STORAGE_PATH_OBJ", tmp_path)
 
-    with patch("mindroom.api.workspace.Config.from_yaml", return_value=config):
+    with patch("mindroom.api.workspace._runtime_config", return_value=config):
         read_response = test_client.get("/api/workspace/test_agent/file/SOUL.md")
         stale_etag = read_response.headers["etag"]
 
@@ -121,7 +154,7 @@ def test_workspace_update_rejects_oversized_content(
     config = _workspace_config(max_file_size=10)
     monkeypatch.setattr("mindroom.api.workspace.STORAGE_PATH_OBJ", tmp_path)
 
-    with patch("mindroom.api.workspace.Config.from_yaml", return_value=config):
+    with patch("mindroom.api.workspace._runtime_config", return_value=config):
         read_response = test_client.get("/api/workspace/test_agent/file/SOUL.md")
         etag = read_response.headers["etag"]
         response = test_client.put(
@@ -143,7 +176,7 @@ def test_workspace_allowlist_and_path_traversal(
     config = _workspace_config()
     monkeypatch.setattr("mindroom.api.workspace.STORAGE_PATH_OBJ", tmp_path)
 
-    with patch("mindroom.api.workspace.Config.from_yaml", return_value=config):
+    with patch("mindroom.api.workspace._runtime_config", return_value=config):
         disallowed = test_client.get("/api/workspace/test_agent/file/not_allowed.md")
         traversal = test_client.get("/api/workspace/test_agent/file/..%2Fsecret.md")
         nested_traversal = test_client.get("/api/workspace/test_agent/file/memory/..%2Fsecret.md")
@@ -173,7 +206,7 @@ def test_workspace_daily_endpoints(
     )
     today = datetime.now(UTC).date().isoformat()
 
-    with patch("mindroom.api.workspace.Config.from_yaml", return_value=config):
+    with patch("mindroom.api.workspace._runtime_config", return_value=config):
         list_response = test_client.get("/api/workspace/test_agent/memory/daily")
         date_response = test_client.get(f"/api/workspace/test_agent/memory/daily/{today}")
 
@@ -197,7 +230,7 @@ def test_workspace_delete_is_durable(
     config = _workspace_config()
     monkeypatch.setattr("mindroom.api.workspace.STORAGE_PATH_OBJ", tmp_path)
 
-    with patch("mindroom.api.workspace.Config.from_yaml", return_value=config):
+    with patch("mindroom.api.workspace._runtime_config", return_value=config):
         delete_response = test_client.delete("/api/workspace/test_agent/file/SOUL.md")
         list_response = test_client.get("/api/workspace/test_agent/files")
         read_response = test_client.get("/api/workspace/test_agent/file/SOUL.md")
@@ -220,7 +253,7 @@ def test_workspace_memory_file_listed_files_are_readable(
     memory_file.parent.mkdir(parents=True, exist_ok=True)
     memory_file.write_text("custom memory", encoding="utf-8")
 
-    with patch("mindroom.api.workspace.Config.from_yaml", return_value=config):
+    with patch("mindroom.api.workspace._runtime_config", return_value=config):
         list_response = test_client.get("/api/workspace/test_agent/files")
         read_response = test_client.get("/api/workspace/test_agent/file/memory/custom.md")
 

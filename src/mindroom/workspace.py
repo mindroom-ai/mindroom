@@ -156,7 +156,13 @@ def _prune_daily_logs(memory_dir: Path, retention_days: int) -> None:
             log_path.unlink(missing_ok=True)
 
 
-def ensure_workspace(agent_name: str, storage_path: Path, config: Config) -> None:
+def ensure_workspace(
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+    *,
+    prune_daily_logs: bool = True,
+) -> None:
     """Ensure workspace directories and base markdown files exist for an agent."""
     if not _workspace_enabled(config):
         return
@@ -171,7 +177,8 @@ def ensure_workspace(agent_name: str, storage_path: Path, config: Config) -> Non
     _write_if_missing(workspace_dir / AGENTS_FILENAME, DEFAULT_AGENTS_TEMPLATE)
     _write_if_missing(workspace_dir / MEMORY_FILENAME, DEFAULT_MEMORY_TEMPLATE)
 
-    _prune_daily_logs(memory_dir, config.memory.workspace.daily_log_retention_days)
+    if prune_daily_logs:
+        _prune_daily_logs(memory_dir, config.memory.workspace.daily_log_retention_days)
 
 
 def load_soul(agent_name: str, storage_path: Path, config: Config) -> str | None:
@@ -255,28 +262,6 @@ def load_room_context(
 
     room_path = get_agent_workspace_path(agent_name, storage_path) / "rooms" / _safe_room_filename(room_id)
     return _read_workspace_file(room_path, _workspace_max_file_size(config))
-
-
-def load_team_workspace(team_name: str, storage_path: Path, config: Config, *, is_dm: bool = False) -> str:
-    """Load team workspace context for prompt injection."""
-    if not _workspace_enabled(config):
-        return ""
-
-    workspace_dir = storage_path / WORKSPACE_DIRNAME / team_name
-    max_file_size = _workspace_max_file_size(config)
-    sections: list[str] = []
-
-    soul_content = _read_workspace_file(workspace_dir / SOUL_FILENAME, max_file_size)
-    if soul_content:
-        sections.append(f"### Team Soul\n{soul_content}")
-
-    memory_content = _read_workspace_file(workspace_dir / MEMORY_FILENAME, max_file_size)
-    if memory_content and is_dm:
-        sections.append(f"### Team Memory\n{memory_content}")
-
-    if not sections:
-        return ""
-    return "## Team Workspace Context\n\n" + "\n\n".join(sections)
 
 
 def append_daily_log(

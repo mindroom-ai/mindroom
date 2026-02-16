@@ -13,7 +13,6 @@ from mindroom.workspace import (
     ensure_workspace,
     get_agent_workspace_path,
     load_room_context,
-    load_team_workspace,
     load_workspace_memory,
     workspace_context_report,
 )
@@ -90,22 +89,6 @@ def test_load_room_context_reads_room_file(tmp_path: Path) -> None:
 
     loaded = load_room_context("agent", "!room:server", tmp_path, config)
     assert loaded == "room context text"
-
-
-def test_load_team_workspace_returns_soul_and_dm_memory(tmp_path: Path) -> None:
-    """Team workspace loader should include soul and DM-only memory."""
-    config = Config.from_yaml()
-    team_dir = tmp_path / "workspace" / "team_alpha"
-    team_dir.mkdir(parents=True, exist_ok=True)
-    (team_dir / SOUL_FILENAME).write_text("team soul", encoding="utf-8")
-    (team_dir / MEMORY_FILENAME).write_text("team memory", encoding="utf-8")
-
-    dm_context = load_team_workspace("team_alpha", tmp_path, config, is_dm=True)
-    group_context = load_team_workspace("team_alpha", tmp_path, config, is_dm=False)
-
-    assert "team soul" in dm_context
-    assert "team memory" in dm_context
-    assert "team memory" not in group_context
 
 
 def test_workspace_context_report_warns_on_missing_required_files(tmp_path: Path) -> None:
