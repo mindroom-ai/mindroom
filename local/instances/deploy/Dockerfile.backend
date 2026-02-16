@@ -44,24 +44,24 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y bash curl git \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Copy the app with venv from builder
-COPY --from=builder /app /app
+# Create non-root user before copying files
+RUN useradd -u 1000 -U -m mindroom
+
+# Copy the app with venv from builder (owned by mindroom)
+COPY --from=builder --chown=1000:1000 /app /app
 
 # Copy additional files needed by MindRoom
-COPY config.yaml /app/
-COPY run-sandbox-runner.sh /app/
-COPY scripts /app/scripts/
-COPY tools /app/tools/
-COPY avatars /app/avatars/
+COPY --chown=1000:1000 config.yaml /app/
+COPY --chown=1000:1000 run-sandbox-runner.sh /app/
+COPY --chown=1000:1000 scripts /app/scripts/
+COPY --chown=1000:1000 tools /app/tools/
+COPY --chown=1000:1000 avatars /app/avatars/
 
 # Make startup scripts executable
 RUN chmod +x /app/run-sandbox-runner.sh
 
 # Create necessary directories
 RUN mkdir -p /app/logs /app/mindroom_data
-
-# Create non-root user and set ownership
-RUN useradd -u 1000 -U -m mindroom && chown -R 1000:1000 /app
 
 # Set environment variable to indicate Docker mode
 ENV DOCKER_CONTAINER=1
