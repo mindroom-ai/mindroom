@@ -19,6 +19,16 @@ agents:
       - duckduckgo
 ```
 
+You can also assign tools to all agents globally:
+
+```
+defaults:
+  tools:
+    - scheduler
+```
+
+`defaults.tools` are merged into each agent's own `tools` list with duplicates removed. Set `defaults.tools: []` to disable global default tools, or set `agents.<name>.include_default_tools: false` to opt out a specific agent.
+
 ## Tool Categories
 
 Tools are organized by category:

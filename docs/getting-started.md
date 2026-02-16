@@ -83,6 +83,7 @@ agents:
     display_name: Assistant
     role: A helpful AI assistant that can answer questions
     model: default
+    include_default_tools: true
     rooms: [lobby]
 
 models:
@@ -91,6 +92,7 @@ models:
     id: claude-sonnet-4-5-latest
 
 defaults:
+  tools: [scheduler]
   markdown: true
 
 timezone: America/Los_Angeles

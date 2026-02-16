@@ -33,4 +33,6 @@ mindroom_user:
 
 # Default settings for all agents
 defaults:
+  tools:
+    - scheduler
   markdown: true

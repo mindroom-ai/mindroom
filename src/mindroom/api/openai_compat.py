@@ -684,7 +684,6 @@ async def _non_stream_completion(
         room_id=None,
         knowledge=knowledge,
         user_id=user,
-        include_default_tools=False,
         include_interactive_questions=False,
     )
 
@@ -831,7 +830,6 @@ async def _stream_completion(
         room_id=None,
         knowledge=knowledge,
         user_id=user,
-        include_default_tools=False,
         include_interactive_questions=False,
     )
 
@@ -904,7 +902,6 @@ def _build_team(team_name: str, config: Config) -> tuple[list[Agent], Team | Non
                     config,
                     storage_path=STORAGE_PATH_OBJ,
                     knowledge=_resolve_knowledge(member_name, config),
-                    include_default_tools=False,
                     include_interactive_questions=False,
                 ),
             )

@@ -73,6 +73,7 @@ models:
     id: claude-sonnet-4-5-latest
 
 defaults:
+  tools: [scheduler]
   markdown: true
 ```
 

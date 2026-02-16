@@ -21,6 +21,7 @@ logger = get_logger(__name__)
 AgentLearningMode = Literal["always", "agentic"]
 CultureMode = Literal["automatic", "agentic", "manual"]
 MATRIX_LOCALPART_PATTERN = re.compile(r"^[a-z0-9._=/-]+$")
+DEFAULT_DEFAULT_TOOLS = ("scheduler",)
 
 
 class AgentConfig(BaseModel):
@@ -29,6 +30,10 @@ class AgentConfig(BaseModel):
     display_name: str = Field(description="Human-readable name for the agent")
     role: str = Field(default="", description="Description of the agent's purpose")
     tools: list[str] = Field(default_factory=list, description="List of tool names")
+    include_default_tools: bool = Field(
+        default=True,
+        description="Whether to merge defaults.tools into this agent's tools",
+    )
     skills: list[str] = Field(default_factory=list, description="List of skill names")
     instructions: list[str] = Field(default_factory=list, description="Agent instructions")
     rooms: list[str] = Field(default_factory=list, description="List of room IDs or names to auto-join")
@@ -73,6 +78,10 @@ class AgentConfig(BaseModel):
 class DefaultsConfig(BaseModel):
     """Default configuration values for agents."""
 
+    tools: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_DEFAULT_TOOLS),
+        description="Tool names automatically added to every agent",
+    )
     markdown: bool = Field(default=True, description="Default markdown setting")
     enable_streaming: bool = Field(
         default=True,
@@ -81,6 +90,22 @@ class DefaultsConfig(BaseModel):
     show_stop_button: bool = Field(default=False, description="Whether to automatically show stop button on messages")
     learning: bool = Field(default=True, description="Default Agno Learning setting")
     learning_mode: AgentLearningMode = Field(default="always", description="Default Agno Learning mode")
+
+    @field_validator("tools")
+    @classmethod
+    def validate_unique_tools(cls, tools: list[str]) -> list[str]:
+        """Ensure each default tool appears at most once."""
+        seen: set[str] = set()
+        duplicates: list[str] = []
+        for tool_name in tools:
+            if tool_name in seen and tool_name not in duplicates:
+                duplicates.append(tool_name)
+            seen.add(tool_name)
+
+        if duplicates:
+            msg = f"Duplicate default tools are not allowed: {', '.join(duplicates)}"
+            raise ValueError(msg)
+        return tools
 
 
 class EmbedderConfig(BaseModel):
@@ -490,6 +515,27 @@ class Config(BaseModel):
             msg = f"Unknown agent: {agent_name}. Available agents: {available}"
             raise ValueError(msg)
         return self.agents[agent_name]
+
+    def get_agent_tools(self, agent_name: str) -> list[str]:
+        """Get effective tools for an agent.
+
+        Args:
+            agent_name: Name of the agent.
+
+        Returns:
+            Ordered tool names with duplicates removed.
+
+        Raises:
+            ValueError: If agent not found.
+
+        """
+        agent_config = self.get_agent(agent_name)
+        tool_names = list(agent_config.tools)
+        if agent_config.include_default_tools:
+            for default_tool_name in self.defaults.tools:
+                if default_tool_name not in tool_names:
+                    tool_names.append(default_tool_name)
+        return tool_names
 
     def get_all_configured_rooms(self) -> set[str]:
         """Extract all room aliases configured for agents and teams.

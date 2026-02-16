@@ -70,6 +70,7 @@ class TestBuildAgentStatusMessage:
                 ),
             },
             models={"claude": ModelConfig(provider="anthropic", id="claude-3-opus")},
+            defaults={"tools": []},
         )
 
         status = build_agent_status_message("researcher", config)
@@ -89,6 +90,7 @@ class TestBuildAgentStatusMessage:
                 ),
             },
             models={"default": ModelConfig(provider="ollama", id="llama3")},
+            defaults={"tools": []},
         )
 
         status = build_agent_status_message("assistant", config)
@@ -135,6 +137,7 @@ class TestBuildAgentStatusMessage:
                     id="model_id",
                 ),
             },
+            defaults={"tools": []},
         )
 
         status = build_agent_status_message("agent", config)
@@ -158,6 +161,45 @@ class TestBuildAgentStatusMessage:
         status = build_agent_status_message("agent", config)
 
         assert "🤖 Model: unknown_model" in status
+
+    def test_regular_agent_status_counts_default_tools(self) -> None:
+        """Tool count includes defaults.tools when the agent has no local tools."""
+        config = Config(
+            agents={
+                "assistant": AgentConfig(
+                    display_name="Assistant",
+                    role="General assistant",
+                    tools=[],
+                    model="default",
+                ),
+            },
+            models={"default": ModelConfig(provider="ollama", id="llama3")},
+            defaults={"tools": ["scheduler", "calculator"]},
+        )
+
+        status = build_agent_status_message("assistant", config)
+
+        assert "🔧 2 tools available" in status
+
+    def test_regular_agent_status_respects_include_default_tools_false(self) -> None:
+        """Tool count excludes defaults.tools when agent opts out."""
+        config = Config(
+            agents={
+                "assistant": AgentConfig(
+                    display_name="Assistant",
+                    role="General assistant",
+                    tools=[],
+                    include_default_tools=False,
+                    model="default",
+                ),
+            },
+            models={"default": ModelConfig(provider="ollama", id="llama3")},
+            defaults={"tools": ["scheduler", "calculator"]},
+        )
+
+        status = build_agent_status_message("assistant", config)
+
+        assert "🔧" not in status
 
 
 class TestIsUserOnline:
