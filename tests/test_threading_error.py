@@ -8,7 +8,7 @@ This test verifies that:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -563,6 +563,85 @@ class TestThreadingBehavior:
         assert mock_warning.call_args.kwargs["traversal_limit"] == 3
         assert mock_warning.call_args.kwargs["traversed_events"] == 3
         assert mock_warning.call_args.kwargs["last_event_id"] == "$msg4:localhost"
+        mock_fetch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_extract_context_deeper_traversal_overrides_stale_limit_cache(self, bot: AgentBot) -> None:
+        """A successful deeper traversal must override a stale root cached from a prior limit hit."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+
+        def _make_chain_responses(length: int) -> list[nio.RoomGetEventResponse]:
+            responses: list[nio.RoomGetEventResponse] = []
+            for i in range(length, 0, -1):
+                content: dict[str, Any] = {"body": f"Message {i}", "msgtype": "m.text"}
+                if i > 1:
+                    content["m.relates_to"] = {"m.in_reply_to": {"event_id": f"$msg{i - 1}:localhost"}}
+                responses.append(
+                    nio.RoomGetEventResponse.from_dict(
+                        {
+                            "content": content,
+                            "event_id": f"$msg{i}:localhost",
+                            "sender": "@user:localhost",
+                            "origin_server_ts": 1234567880 + i,
+                            "room_id": "!test:localhost",
+                            "type": "m.room.message",
+                        },
+                    ),
+                )
+            return responses
+
+        # --- First resolve: limit=3 starting from $msg6, caches stale root $msg4 ---
+        event1 = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "First incoming",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$msg6:localhost"}},
+                },
+                "event_id": "$incoming1:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567900,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        bot.client.room_get_event = AsyncMock(side_effect=_make_chain_responses(6))
+        with (
+            patch.object(AgentBot, "_REPLY_CHAIN_TRAVERSAL_LIMIT", 3),
+            patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch,
+        ):
+            ctx1 = await bot._extract_message_context(room, event1)
+
+        assert ctx1.thread_id == "$msg4:localhost"  # stale root from limit hit
+        mock_fetch.assert_not_called()
+
+        # --- Second resolve: limit=500, new event replies to $msg6 (overlapping cached events) ---
+        event2 = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "Second incoming",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$msg6:localhost"}},
+                },
+                "event_id": "$incoming2:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567901,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        # Node cache already has $msg6..$msg4; supply $msg3..$msg1 for the deeper walk
+        bot.client.room_get_event = AsyncMock(side_effect=_make_chain_responses(3))
+        with patch("mindroom.bot.fetch_thread_history", AsyncMock()) as mock_fetch:
+            ctx2 = await bot._extract_message_context(room, event2)
+
+        assert ctx2.is_thread is True
+        assert ctx2.thread_id == "$msg1:localhost"  # true root, not stale $msg4
+        assert ctx2.thread_history[0]["event_id"] == "$msg1:localhost"
         mock_fetch.assert_not_called()
 
     @pytest.mark.asyncio

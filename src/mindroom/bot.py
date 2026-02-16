@@ -1382,15 +1382,6 @@ class AgentBot:
             self._cache_reply_chain_roots(room_id, visited_event_ids, root_event_id, points_to_thread=False)
             return root_event_id, chain_history, False, False
 
-        if cached_root:
-            self._cache_reply_chain_roots(
-                room_id,
-                visited_event_ids,
-                cached_root.root_event_id,
-                points_to_thread=cached_root.points_to_thread,
-            )
-            return cached_root.root_event_id, chain_history, cached_root.points_to_thread, False
-
         root_event_id = str(chain_history[0].get("event_id", reply_to_event_id))
         self._cache_reply_chain_roots(room_id, visited_event_ids, root_event_id, points_to_thread=False)
         return root_event_id, chain_history, False, False
