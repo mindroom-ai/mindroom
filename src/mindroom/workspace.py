@@ -132,12 +132,22 @@ def _safe_room_filename(room_id: str) -> str:
     return f"{safe_room}.md"
 
 
+def _daily_log_scope(room_id: str | None) -> str:
+    if room_id is None:
+        return "_global"
+    return re.sub(r"[^A-Za-z0-9._-]", "_", room_id)
+
+
+def _daily_log_dir(workspace_dir: Path, room_id: str | None) -> Path:
+    return workspace_dir / "memory" / _daily_log_scope(room_id)
+
+
 def _prune_daily_logs(memory_dir: Path, retention_days: int) -> None:
     if retention_days < 0:
         return
 
     cutoff = datetime.now(UTC).date() - timedelta(days=retention_days)
-    for log_path in memory_dir.glob("*.md"):
+    for log_path in memory_dir.rglob("*.md"):
         try:
             log_date = date.fromisoformat(log_path.stem)
         except ValueError:
@@ -216,8 +226,9 @@ def load_workspace_memory(
             sections.append(f"### Long-Term Memory\n{memory_content}")
 
     today = datetime.now(UTC).date()
+    log_dir = _daily_log_dir(workspace_dir, room_id)
     for log_day in (today, today - timedelta(days=1)):
-        log_path = workspace_dir / "memory" / f"{log_day.isoformat()}.md"
+        log_path = log_dir / f"{log_day.isoformat()}.md"
         log_content = _read_workspace_file(log_path, max_file_size)
         if log_content:
             sections.append(f"### Daily Log {log_day.isoformat()}\n{log_content}")
@@ -239,6 +250,8 @@ def append_daily_log(
     storage_path: Path,
     config: Config,
     content: str,
+    *,
+    room_id: str | None = None,
 ) -> None:
     """Append content to today's daily memory log for one or many agents."""
     if not _workspace_enabled(config) or not content.strip():
@@ -249,7 +262,7 @@ def append_daily_log(
     max_file_size = _workspace_max_file_size(config)
 
     for name in agent_names:
-        memory_dir = get_agent_workspace_path(name, storage_path) / "memory"
+        memory_dir = _daily_log_dir(get_agent_workspace_path(name, storage_path), room_id)
         memory_dir.mkdir(parents=True, exist_ok=True)
 
         log_path = memory_dir / f"{today}.md"

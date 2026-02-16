@@ -39,6 +39,19 @@ class ScopedMemoryReader(Protocol):
         """Return the memory payload for a given memory ID."""
 
 
+class MemoryWriter(Protocol):
+    """Minimal protocol for writing memory entries."""
+
+    async def add(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        user_id: str,
+        metadata: dict[str, object] | None = None,
+    ) -> object:
+        """Persist messages under the provided user scope."""
+
+
 class MemoryNotFoundError(ValueError):
     """Raised when a memory ID does not exist in the caller's allowed scope."""
 
@@ -478,6 +491,74 @@ def _format_workspace_daily_log_entry(
     return "\n".join(lines) + "\n"
 
 
+def _build_storage_messages(
+    prompt: str,
+    thread_history: list[dict] | None,
+    user_id: str | None,
+) -> list[dict[str, str]]:
+    if thread_history and user_id:
+        return _build_conversation_messages(thread_history, prompt, user_id)
+    return [{"role": "user", "content": prompt}]
+
+
+async def _store_agent_or_team_memory(
+    memory: MemoryWriter,
+    messages: list[dict[str, str]],
+    agent_name: str | list[str],
+    session_id: str,
+) -> None:
+    if isinstance(agent_name, list):
+        team_id = _build_team_user_id(agent_name)
+        metadata = {
+            "type": "conversation",
+            "session_id": session_id,
+            "is_team": True,
+            "team_members": agent_name,
+        }
+        try:
+            await memory.add(messages, user_id=team_id, metadata=metadata)
+            logger.info("Team memory added", team_id=team_id, members=agent_name)
+        except Exception as e:
+            logger.exception("Failed to add team memory", team_id=team_id, error=str(e))
+        return
+
+    metadata = {
+        "type": "conversation",
+        "session_id": session_id,
+        "agent": agent_name,
+    }
+    try:
+        await memory.add(messages, user_id=f"agent_{agent_name}", metadata=metadata)
+        logger.info("Memory added", agent=agent_name)
+    except Exception as e:
+        logger.exception("Failed to add memory", agent=agent_name, error=str(e))
+
+
+async def _store_room_memory(
+    memory: MemoryWriter,
+    messages: list[dict[str, str]],
+    agent_name: str | list[str],
+    session_id: str,
+    room_id: str | None,
+) -> None:
+    if not room_id:
+        return
+
+    contributed_by = agent_name if isinstance(agent_name, str) else f"team:{','.join(agent_name)}"
+    room_metadata = {
+        "type": "conversation",
+        "session_id": session_id,
+        "room_id": room_id,
+        "contributed_by": contributed_by,
+    }
+    safe_room_id = room_id.replace(":", "_").replace("!", "")
+    try:
+        await memory.add(messages, user_id=f"room_{safe_room_id}", metadata=room_metadata)
+        logger.debug("Room memory added", room_id=room_id)
+    except Exception as e:
+        logger.exception("Failed to add room memory", room_id=room_id, error=str(e))
+
+
 async def store_conversation_memory(
     prompt: str,
     agent_name: str | list[str],
@@ -506,67 +587,15 @@ async def store_conversation_memory(
 
     if config.memory.workspace.enabled:
         log_entry = _format_workspace_daily_log_entry(prompt, agent_name, room_id, user_id)
-        append_daily_log(agent_name, storage_path, config, log_entry)
+        try:
+            append_daily_log(agent_name, storage_path, config, log_entry, room_id=room_id)
+        except ValueError as exc:
+            logger.warning("Skipping workspace daily log write", error=str(exc))
 
     if not config.memory.mem0_search.store_enabled:
         return
 
-    # Build conversation messages in mem0 format
-    if thread_history and user_id:
-        # Use structured messages with roles for better context
-        messages = _build_conversation_messages(thread_history, prompt, user_id)
-    else:
-        # Fallback to simple user message
-        messages = [{"role": "user", "content": prompt}]
-
-    # Store for agent memory with structured messages
+    messages = _build_storage_messages(prompt, thread_history, user_id)
     memory = await create_memory_instance(storage_path, config)
-
-    # Handle both single agents and teams
-    if isinstance(agent_name, list):
-        # For teams, store once under a team namespace
-        # Sort agent names for consistent team ID
-        team_id = _build_team_user_id(agent_name)
-
-        metadata = {
-            "type": "conversation",
-            "session_id": session_id,
-            "is_team": True,
-            "team_members": agent_name,  # Keep original order for reference
-        }
-
-        try:
-            await memory.add(messages, user_id=team_id, metadata=metadata)
-            logger.info("Team memory added", team_id=team_id, members=agent_name)
-        except Exception as e:
-            logger.exception("Failed to add team memory", team_id=team_id, error=str(e))
-    else:
-        # Single agent - store normally
-        metadata = {
-            "type": "conversation",
-            "session_id": session_id,
-            "agent": agent_name,
-        }
-
-        try:
-            await memory.add(messages, user_id=f"agent_{agent_name}", metadata=metadata)
-            logger.info("Memory added", agent=agent_name)
-        except Exception as e:
-            logger.exception("Failed to add memory", agent=agent_name, error=str(e))
-
-    if room_id:
-        # Also store for room context
-        contributed_by = agent_name if isinstance(agent_name, str) else f"team:{','.join(agent_name)}"
-        room_metadata = {
-            "type": "conversation",
-            "session_id": session_id,
-            "room_id": room_id,
-            "contributed_by": contributed_by,
-        }
-
-        safe_room_id = room_id.replace(":", "_").replace("!", "")
-        try:
-            await memory.add(messages, user_id=f"room_{safe_room_id}", metadata=room_metadata)
-            logger.debug("Room memory added", room_id=room_id)
-        except Exception as e:
-            logger.exception("Failed to add room memory", room_id=room_id, error=str(e))
+    await _store_agent_or_team_memory(memory, messages, agent_name, session_id)
+    await _store_room_memory(memory, messages, agent_name, session_id, room_id)

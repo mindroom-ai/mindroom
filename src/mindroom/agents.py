@@ -321,7 +321,7 @@ def create_agent(  # noqa: C901, PLR0912, PLR0915
     agents_md_content = load_agents_md(agent_name, resolved_storage_path, config)
     if agents_md_content:
         logger.info(f"Using AGENTS.md instructions for agent: {agent_name}")
-        instructions = [agents_md_content]
+        instructions = [agents_md_content, *instructions]
 
     # Create agent with defaults applied
     model = get_model_instance(config, agent_config.model)

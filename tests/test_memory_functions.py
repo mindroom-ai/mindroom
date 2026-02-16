@@ -480,6 +480,27 @@ class TestMemoryFunctions:
             assert metadata["team_members"] == team_agents  # Original order preserved
 
     @pytest.mark.asyncio
+    async def test_store_conversation_memory_log_overflow_still_stores_mem0(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Daily-log overflow should not prevent Mem0 persistence."""
+        config.memory.workspace.max_file_size = 1
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+            await store_conversation_memory(
+                "This prompt is intentionally longer than one byte",
+                "calculator",
+                storage_path,
+                "session123",
+                config,
+            )
+
+            assert mock_memory.add.call_count == 1
+
+    @pytest.mark.asyncio
     async def test_search_agent_memories_with_teams(
         self,
         mock_memory: AsyncMock,

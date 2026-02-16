@@ -77,6 +77,47 @@ def test_get_agent_summary(mock_storage: MagicMock) -> None:  # noqa: ARG001
     assert agent.name == "SummaryAgent"
 
 
+@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.Agent")
+def test_agents_md_preserves_yaml_instructions(
+    mock_agent_class: MagicMock,
+    mock_storage: MagicMock,  # noqa: ARG001
+    tmp_path: Path,
+) -> None:
+    """AGENTS.md should augment, not remove, YAML instructions."""
+    config = Config(
+        agents={
+            "custom": AgentConfig(
+                display_name="CustomAgent",
+                role="Custom role",
+                instructions=["yaml instruction"],
+                learning=False,
+            ),
+        },
+        models={
+            "default": ModelConfig(provider="openai", id="gpt-4o-mini"),
+        },
+    )
+    workspace_dir = tmp_path / "workspace" / "custom"
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    (workspace_dir / "AGENTS.md").write_text("custom instructions", encoding="utf-8")
+
+    model = MagicMock()
+    model.id = "gpt-4o-mini"
+    with patch("mindroom.ai.get_model_instance", return_value=model):
+        create_agent(
+            "custom",
+            config=config,
+            storage_path=tmp_path,
+            include_default_tools=False,
+            include_interactive_questions=False,
+        )
+
+    instructions = mock_agent_class.call_args.kwargs["instructions"]
+    assert instructions[0] == "custom instructions"
+    assert "yaml instruction" in instructions
+
+
 def test_get_agent_unknown() -> None:
     """Tests that an unknown agent raises a ValueError."""
     config = Config.from_yaml()
