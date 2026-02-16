@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -19,6 +20,7 @@ logger = get_logger(__name__)
 
 AgentLearningMode = Literal["always", "agentic"]
 CultureMode = Literal["automatic", "agentic", "manual"]
+MATRIX_LOCALPART_PATTERN = re.compile(r"^[a-z0-9._=/-]+$")
 
 
 class AgentConfig(BaseModel):
@@ -282,6 +284,13 @@ class MindRoomUserConfig(BaseModel):
             msg = "mindroom_user.username must be a Matrix localpart (without domain)"
             raise ValueError(msg)
 
+        if not MATRIX_LOCALPART_PATTERN.fullmatch(normalized):
+            msg = (
+                "mindroom_user.username contains invalid characters; "
+                "allowed: lowercase letters, digits, '.', '_', '=', '-', '/'"
+            )
+            raise ValueError(msg)
+
         return normalized
 
 
@@ -369,6 +378,20 @@ class Config(BaseModel):
                 )
             )
             msg = f"Agents cannot belong to multiple cultures: {formatted}"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_internal_user_username_not_reserved(self) -> Config:
+        """Ensure the internal user localpart does not collide with bot accounts."""
+        reserved_localparts = {
+            f"mindroom_{ROUTER_AGENT_NAME}": f"router '{ROUTER_AGENT_NAME}'",
+            **{f"mindroom_{agent_name}": f"agent '{agent_name}'" for agent_name in self.agents},
+            **{f"mindroom_{team_name}": f"team '{team_name}'" for team_name in self.teams},
+        }
+        conflict = reserved_localparts.get(self.mindroom_user.username)
+        if conflict:
+            msg = f"mindroom_user.username '{self.mindroom_user.username}' conflicts with {conflict} Matrix localpart"
             raise ValueError(msg)
         return self
 

@@ -294,3 +294,30 @@ def test_mindroom_user_username_rejects_multiple_at() -> None:
     """Config should reject malformed usernames with multiple @ characters."""
     with pytest.raises(ValueError, match="at most one leading @"):
         Config(mindroom_user={"username": "@@alice", "display_name": "Alice"})
+
+
+def test_mindroom_user_username_rejects_invalid_characters() -> None:
+    """Config should reject localparts containing disallowed characters."""
+    with pytest.raises(ValueError, match="contains invalid characters"):
+        Config(mindroom_user={"username": "alice smith", "display_name": "Alice"})
+
+
+def test_mindroom_user_username_rejects_router_collision() -> None:
+    """Internal user localpart must not collide with the router account localpart."""
+    with pytest.raises(ValueError, match="conflicts with router 'router'"):
+        Config(mindroom_user={"username": "mindroom_router", "display_name": "Alice"})
+
+
+def test_mindroom_user_username_rejects_agent_collision() -> None:
+    """Internal user localpart must not collide with configured agent localparts."""
+    with pytest.raises(ValueError, match="conflicts with agent 'assistant'"):
+        Config(
+            agents={
+                "assistant": {
+                    "display_name": "Assistant",
+                    "role": "Test assistant",
+                    "rooms": ["test_room"],
+                },
+            },
+            mindroom_user={"username": "mindroom_assistant", "display_name": "Alice"},
+        )

@@ -17,12 +17,12 @@ main() entry
 ┌──────────────────┐
 │  Initialize()    │
 │ ─────────────────│
-│ 1. Create "user" │
+│ 1. Parse config  │
+│    (Pydantic)    │
+│ 2. Load plugins  │
+│ 3. Create "user" │
 │    Matrix account│
 │    (mindroom_user)│
-│ 2. Parse config  │
-│    (Pydantic)    │
-│ 3. Load plugins  │
 │ 4. Create bots   │
 │    for entities  │
 └────────┬─────────┘
