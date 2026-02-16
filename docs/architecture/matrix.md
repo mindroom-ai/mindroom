@@ -50,6 +50,16 @@ MindRoom emits thread replies following [MSC3440](https://github.com/matrix-org/
 
 For clients that send plain replies without thread metadata (`m.in_reply_to` but no `rel_type: m.thread`), MindRoom resolves the reply chain to the existing thread root and continues the same conversation.
 
+### Resolution Rules
+
+When deriving context for a non-thread client reply, MindRoom:
+
+1. Traverses `m.in_reply_to` backwards until it finds a root, a known thread root, a cycle, or the traversal limit.
+2. Uses cycle detection and a bounded traversal limit (`ReplyChainCaches.traversal_limit`) to avoid runaway chains.
+3. If the chain points to a real thread root, fetches thread history and merges chain history so plain replies are preserved in order.
+4. If no thread relation exists, treats the reply chain itself as the conversation context root.
+5. Falls back to the oldest successfully resolved event when traversal is interrupted by fetch failures or limits.
+
 ```
 ├── User: @assistant help with this code
 │   ├── Assistant: I can help! Let me look at it...

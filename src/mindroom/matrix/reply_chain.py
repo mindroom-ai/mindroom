@@ -443,4 +443,6 @@ async def derive_conversation_context(
             thread_history = merge_thread_and_chain_history(thread_history, chain_history)
         return True, context_root_id, thread_history
 
+    # Policy choice: reply-only chains are still treated as one conversation
+    # context so responder selection and memory use a stable root.
     return True, context_root_id, chain_history
