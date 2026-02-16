@@ -4,14 +4,14 @@ icon: lucide/book-open
 
 # Knowledge Bases
 
-Knowledge bases give your agents access to your own documents through RAG (Retrieval-Augmented Generation). Drop files into a folder, point a knowledge base at it, and agents automatically search the indexed content before responding.
+Knowledge bases give your agents access to your own documents through RAG (Retrieval-Augmented Generation). Drop files into a folder, point a knowledge base at it, and agents can search the indexed content when answering questions.
 
 ## How It Works
 
 1. You configure a knowledge base pointing to a folder of documents
 2. MindRoom indexes the files into a vector database (ChromaDB) using an embedder
-3. Agents assigned to that knowledge base automatically search it before every response
-4. Relevant document chunks are included in the agent's context
+3. Agents assigned to that knowledge base get a search tool that queries the indexed documents
+4. When the agent uses the tool, relevant document chunks are included in its context
 
 ```
 Indexing (startup + file changes):
@@ -23,7 +23,7 @@ Indexing (startup + file changes):
          │ file watcher
          │ git sync
 
-Querying (every agent response):
+Querying (agentic RAG — agent decides when to search):
 
   ┌──────────┐  search  ┌──────────┐  relevant  ┌───────┐
   │  Agent   │ ───────▶ │ ChromaDB │ ────────▶  │ Agent │
@@ -214,7 +214,7 @@ memory:
 
 ## Storage
 
-Knowledge data is stored under `<storage_path>/knowledge_db/<base_id_hash>/`. Each knowledge base gets its own ChromaDB collection named `mindroom_knowledge_<base_id_hash>`.
+Knowledge data is stored under `<storage_path>/knowledge_db/<base_id>_<hash>/`. Each knowledge base gets its own ChromaDB collection named `mindroom_knowledge_<base_id>_<hash>`.
 
 The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can be set with `MINDROOM_STORAGE_PATH`.
 
