@@ -10,36 +10,60 @@ The first agent to run will create `DEBATE.md` and become the opener. The second
 
 ## Role detection
 
-- If `DEBATE.md` does **not** exist in the repo root → you are **Agent A** (opener). Write the opening position.
+- If `DEBATE.md` does **not** exist → you are **Agent A** (opener). Write the opening position.
 - If `DEBATE.md` **already exists** → you are **Agent B** (responder). Read what's there and respond.
 
 Do not ask the user which role to play. Detect it from file existence.
+
+## Checksum command
+
+Use a portable checksum. Pick the first available:
+
+```bash
+CKSUM() { md5sum "$1" 2>/dev/null || md5 -q "$1" 2>/dev/null || shasum "$1"; }
+```
+
+## Turn order enforcement
+
+Before appending a section, check the last `## ` heading in `DEBATE.md`:
+
+- After `## Opening` → only Agent B may append `## Response 1`.
+- After `## Response N` → only Agent A may append `## Follow-up N` (or `## CONSENSUS`).
+- After `## Follow-up N` → only Agent B may append `## Response N+1`.
+
+If it is not your turn, re-read the file and go back to polling.
 
 ## Agent A (opener) flow
 
 1. Analyze the subject the user specified (run `git show`, `git diff`, `gh pr view`, read files, etc. as appropriate).
 2. Write your analysis to `DEBATE.md` using the file format below.
-3. Compute the file's checksum: `md5sum DEBATE.md | cut -d' ' -f1`
-4. Poll for changes: run a bash loop that checks md5sum every 5 seconds until the checksum changes.
+3. Compute the file's checksum using `CKSUM DEBATE.md`.
+4. Poll for changes (5-second interval, 10-minute timeout):
    ```bash
-   PREV=$(md5sum DEBATE.md | cut -d' ' -f1); while true; do sleep 5; NOW=$(md5sum DEBATE.md | cut -d' ' -f1); if [ "$NOW" != "$PREV" ]; then break; fi; done
+   CKSUM() { md5sum "$1" 2>/dev/null || md5 -q "$1" 2>/dev/null || shasum "$1"; }
+   PREV=$(CKSUM DEBATE.md); SECONDS=0; while true; do sleep 5; NOW=$(CKSUM DEBATE.md); if [ "$NOW" != "$PREV" ]; then break; fi; if [ "$SECONDS" -ge 600 ]; then echo "TIMEOUT"; break; fi; done
    ```
-5. Read Agent B's reply.
-6. If all points are resolved → append a `## CONSENSUS` section summarizing agreed outcomes and stop.
-7. Otherwise append a `## Follow-up N` section addressing unresolved points, then go to step 3.
+5. If timed out → append `## CONSENSUS` noting the timeout and stop.
+6. Read Agent B's reply.
+7. If all points are resolved → append a `## CONSENSUS` section summarizing agreed outcomes and stop.
+8. Otherwise append a `## Follow-up N` section addressing unresolved points, then go to step 3.
 
 ## Agent B (responder) flow
 
 1. Read `DEBATE.md` (it exists — that's how you know you're the responder).
 2. Analyze the same subject the user specified.
-3. Append a `## Response N` section with a point-by-point reply.
-4. Compute the file's checksum.
-5. Poll for changes (same bash loop as above).
-6. Read Agent A's follow-up.
-7. If the file contains `## CONSENSUS` → stop, debate is over.
-8. Otherwise append another `## Response N` section, then go to step 4.
+3. Verify it is your turn (check the last `## ` heading). If not, poll until it is.
+4. Append a `## Response N` section with a point-by-point reply.
+5. Compute the file's checksum.
+6. Poll for changes (same loop with 10-minute timeout).
+7. If timed out → append `## CONSENSUS` noting the timeout and stop.
+8. Read Agent A's follow-up.
+9. If the file contains `## CONSENSUS` → stop, debate is over.
+10. Otherwise go to step 3.
 
 ## File format
+
+Each section should end with a signature line: `*— <agent name or tool>, <timestamp>*`
 
 ```markdown
 # Code Debate: <subject>
@@ -47,10 +71,14 @@ Do not ask the user which role to play. Detect it from file existence.
 ## Opening
 <Agent A's initial analysis>
 
+*— Claude Code, 2025-06-15T14:30:00Z*
+
 ---
 
 ## Response 1
 <Agent B's point-by-point reply>
+
+*— Gemini CLI, 2025-06-15T14:32:00Z*
 
 ---
 
