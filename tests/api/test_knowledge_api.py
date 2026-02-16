@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from mindroom.config import Config, KnowledgeBaseConfig
+from mindroom.config import Config, KnowledgeBaseConfig, KnowledgeGitConfig
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -14,7 +14,16 @@ if TYPE_CHECKING:
     from fastapi.testclient import TestClient
 
 
-def _knowledge_config(path: Path, *, base_id: str = "research") -> Config:
+def _knowledge_config(path: Path, *, base_id: str = "research", with_git: bool = False) -> Config:
+    git_config = (
+        KnowledgeGitConfig(
+            repo_url="https://github.com/example/private-repo.git",
+            branch="main",
+            poll_interval_seconds=300,
+        )
+        if with_git
+        else None
+    )
     return Config(
         agents={},
         models={},
@@ -22,16 +31,17 @@ def _knowledge_config(path: Path, *, base_id: str = "research") -> Config:
             base_id: KnowledgeBaseConfig(
                 path=str(path),
                 watch=False,
+                git=git_config,
             ),
         },
     )
 
 
-def test_knowledge_bases_list_initializes_managers_without_full_reindex(
+def test_knowledge_bases_list_initializes_managers_with_full_reindex(
     test_client: TestClient,
     tmp_path: Path,
 ) -> None:
-    """Base listing should initialize managers only in incremental mode."""
+    """Base listing should initialize managers with full create-time indexing."""
     config = _knowledge_config(tmp_path)
     manager = MagicMock()
     manager.get_status.return_value = {"indexed_count": 3, "file_count": 4}
@@ -52,7 +62,7 @@ def test_knowledge_bases_list_initializes_managers_without_full_reindex(
     assert payload["bases"][0]["indexed_count"] == 3
     assert payload["bases"][0]["file_count"] == 4
     init_managers.assert_awaited_once()
-    assert init_managers.await_args.kwargs["reindex_on_create"] is False
+    assert init_managers.await_args.kwargs["reindex_on_create"] is True
 
 
 def test_knowledge_files_list_uses_manager_filters_when_available(
@@ -93,7 +103,7 @@ def test_knowledge_files_list_uses_manager_filters_when_available(
         },
     ]
     init_managers.assert_awaited_once()
-    assert init_managers.await_args.kwargs["reindex_on_create"] is False
+    assert init_managers.await_args.kwargs["reindex_on_create"] is True
 
 
 def test_knowledge_upload_rolls_back_on_oversized_file(
@@ -118,11 +128,11 @@ def test_knowledge_upload_rolls_back_on_oversized_file(
     assert not (tmp_path / "second.txt").exists()
 
 
-def test_knowledge_upload_initializes_manager_without_full_reindex(
+def test_knowledge_upload_initializes_manager_with_full_reindex(
     test_client: TestClient,
     tmp_path: Path,
 ) -> None:
-    """Upload should create manager in incremental mode to avoid full reindex-on-first-call."""
+    """Upload should initialize managers with full create-time indexing."""
     config = _knowledge_config(tmp_path)
     manager = MagicMock()
     manager.index_file = AsyncMock(return_value=True)
@@ -142,15 +152,15 @@ def test_knowledge_upload_initializes_manager_without_full_reindex(
     assert response.status_code == 200
     assert (tmp_path / "note.txt").exists()
     init_managers.assert_awaited_once()
-    assert init_managers.await_args.kwargs["reindex_on_create"] is False
+    assert init_managers.await_args.kwargs["reindex_on_create"] is True
     manager.index_file.assert_awaited_once_with("note.txt", upsert=True)
 
 
-def test_knowledge_delete_initializes_manager_without_full_reindex(
+def test_knowledge_delete_initializes_manager_with_full_reindex(
     test_client: TestClient,
     tmp_path: Path,
 ) -> None:
-    """Delete should update vector index without forcing a full reindex."""
+    """Delete should use managers initialized with full create-time indexing."""
     config = _knowledge_config(tmp_path)
     target = tmp_path / "a.txt"
     target.write_text("hello", encoding="utf-8")
@@ -169,7 +179,7 @@ def test_knowledge_delete_initializes_manager_without_full_reindex(
     assert response.status_code == 200
     assert not target.exists()
     init_managers.assert_awaited_once()
-    assert init_managers.await_args.kwargs["reindex_on_create"] is False
+    assert init_managers.await_args.kwargs["reindex_on_create"] is True
     manager.remove_file.assert_awaited_once_with("a.txt")
 
 
@@ -193,3 +203,35 @@ def test_unknown_knowledge_base_returns_404(test_client: TestClient, tmp_path: P
 
     assert response.status_code == 404
     assert "not found" in response.json()["detail"]
+
+
+def test_reindex_syncs_git_before_reindex_for_git_bases(test_client: TestClient, tmp_path: Path) -> None:
+    """Git-backed bases should fetch/sync before a full reindex."""
+    config = _knowledge_config(tmp_path, with_git=True)
+    manager = MagicMock()
+    call_order: list[str] = []
+
+    async def _sync() -> dict[str, int | bool]:
+        call_order.append("sync")
+        return {"updated": True, "changed_count": 0, "removed_count": 0}
+
+    async def _reindex() -> int:
+        call_order.append("reindex")
+        return 2
+
+    manager.sync_git_repository = AsyncMock(side_effect=_sync)
+    manager.reindex_all = AsyncMock(side_effect=_reindex)
+
+    with (
+        patch("mindroom.api.knowledge.Config.from_yaml", return_value=config),
+        patch(
+            "mindroom.api.knowledge.initialize_knowledge_managers",
+            new=AsyncMock(return_value={"research": manager}),
+        ),
+    ):
+        response = test_client.post("/api/knowledge/bases/research/reindex")
+
+    assert response.status_code == 200
+    assert call_order == ["sync", "reindex"]
+    manager.sync_git_repository.assert_awaited_once()
+    manager.reindex_all.assert_awaited_once()
