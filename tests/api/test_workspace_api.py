@@ -182,3 +182,46 @@ def test_workspace_daily_endpoints(
     date_payload = date_response.json()
     assert date_payload["count"] == 1
     assert "daily note" in date_payload["entries"][0]["content"]
+
+
+def test_workspace_delete_is_durable(
+    test_client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deleted base files should stay deleted until explicitly recreated."""
+    config = _workspace_config()
+    monkeypatch.setattr("mindroom.api.workspace.STORAGE_PATH_OBJ", tmp_path)
+
+    with patch("mindroom.api.workspace.Config.from_yaml", return_value=config):
+        delete_response = test_client.delete("/api/workspace/test_agent/file/SOUL.md")
+        list_response = test_client.get("/api/workspace/test_agent/files")
+        read_response = test_client.get("/api/workspace/test_agent/file/SOUL.md")
+
+    assert delete_response.status_code == 200
+    filenames = {entry["filename"] for entry in list_response.json()["files"]}
+    assert "SOUL.md" not in filenames
+    assert read_response.status_code == 404
+
+
+def test_workspace_memory_file_listed_files_are_readable(
+    test_client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Any memory markdown file returned by list should be readable via file endpoint."""
+    config = _workspace_config()
+    monkeypatch.setattr("mindroom.api.workspace.STORAGE_PATH_OBJ", tmp_path)
+    memory_file = tmp_path / "workspace" / "test_agent" / "memory" / "custom.md"
+    memory_file.parent.mkdir(parents=True, exist_ok=True)
+    memory_file.write_text("custom memory", encoding="utf-8")
+
+    with patch("mindroom.api.workspace.Config.from_yaml", return_value=config):
+        list_response = test_client.get("/api/workspace/test_agent/files")
+        read_response = test_client.get("/api/workspace/test_agent/file/memory/custom.md")
+
+    assert list_response.status_code == 200
+    filenames = {entry["filename"] for entry in list_response.json()["files"]}
+    assert "memory/custom.md" in filenames
+    assert read_response.status_code == 200
+    assert read_response.json()["content"] == "custom memory"

@@ -26,7 +26,7 @@ router = APIRouter(prefix="/api/workspace", tags=["workspace"])
 
 _ALLOWED_ROOT_FILES = {SOUL_FILENAME, AGENTS_FILENAME, MEMORY_FILENAME}
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_DAILY_FILE_PATTERN = re.compile(r"^memory/(?:[A-Za-z0-9._-]+/)?\d{4}-\d{2}-\d{2}\.md$")
+_MEMORY_FILE_PATTERN = re.compile(r"^memory(?:/[A-Za-z0-9._-]+)*/[A-Za-z0-9._-]+\.md$")
 
 
 class WorkspaceFileUpdate(BaseModel):
@@ -39,8 +39,14 @@ def _workspace_root(config: Config, agent_name: str) -> Path:
     if agent_name not in config.agents:
         raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_name}")
 
-    ensure_workspace(agent_name, STORAGE_PATH_OBJ, config)
-    return get_agent_workspace_path(agent_name, STORAGE_PATH_OBJ).resolve()
+    root = get_agent_workspace_path(agent_name, STORAGE_PATH_OBJ).resolve()
+    if not root.exists():
+        ensure_workspace(agent_name, STORAGE_PATH_OBJ, config)
+        return root
+
+    (root / "memory").mkdir(parents=True, exist_ok=True)
+    (root / "rooms").mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def _resolve_within_root(root: Path, relative_path: str) -> Path:
@@ -60,7 +66,7 @@ def _validate_filename(filename: str) -> str:
     decoded = unquote(filename).strip("/")
     if decoded in _ALLOWED_ROOT_FILES:
         return decoded
-    if _DAILY_FILE_PATTERN.fullmatch(decoded):
+    if _MEMORY_FILE_PATTERN.fullmatch(decoded):
         return decoded
     raise HTTPException(status_code=422, detail="Filename is not allowed")
 
