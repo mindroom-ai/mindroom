@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import ValidationError
 from watchfiles import awatch
 
 # Import routers
@@ -27,7 +28,7 @@ from mindroom.api.schedules import router as schedules_router
 from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.workspace import router as workspace_router
-from mindroom.config import Config
+from mindroom.config import Config, normalize_config_data
 from mindroom.constants import CONFIG_PATH, CONFIG_TEMPLATE_PATH, safe_replace
 from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.tool_dependencies import auto_install_enabled, auto_install_tool_extra
@@ -120,46 +121,30 @@ def ensure_writable_config() -> None:
     print(f"Created new config file at {CONFIG_PATH}")
 
 
-def _normalize_config_data(config_data: dict[str, Any] | None) -> dict[str, Any]:
-    normalized = dict(config_data or {})
-
-    if normalized.get("teams") is None:
-        normalized["teams"] = {}
-    if normalized.get("cultures") is None:
-        normalized["cultures"] = {}
-    if normalized.get("room_models") is None:
-        normalized["room_models"] = {}
-    if normalized.get("plugins") is None:
-        normalized["plugins"] = []
-    if normalized.get("knowledge_bases") is None:
-        normalized["knowledge_bases"] = {}
-
-    return normalized
-
-
 def _build_runtime_config(config_data: dict[str, Any]) -> Config | None:
     try:
         return Config(**config_data)
-    except Exception:
+    except ValidationError as exc:
+        print(f"Warning: failed to parse runtime config: {exc}")
         return None
 
 
 def save_config_to_file(config_data: dict[str, Any]) -> None:
     """Save config to YAML file with deterministic ordering."""
     tmp_path = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".tmp")
-    normalized = _normalize_config_data(config_data)
-    with tmp_path.open("w", encoding="utf-8") as f:
-        yaml.dump(
-            normalized,
-            f,
-            default_flow_style=False,
-            sort_keys=True,
-            allow_unicode=True,
-        )
-    safe_replace(tmp_path, CONFIG_PATH)
+    normalized = normalize_config_data(config_data)
 
     global config, runtime_config
     with config_lock:
+        with tmp_path.open("w", encoding="utf-8") as f:
+            yaml.dump(
+                normalized,
+                f,
+                default_flow_style=False,
+                sort_keys=True,
+                allow_unicode=True,
+            )
+        safe_replace(tmp_path, CONFIG_PATH)
         config = normalized
         runtime_config = _build_runtime_config(normalized)
 
@@ -253,7 +238,7 @@ def load_config_from_file() -> None:
     global config, runtime_config
     try:
         with CONFIG_PATH.open() as f, config_lock:
-            config = _normalize_config_data(yaml.safe_load(f))
+            config = normalize_config_data(yaml.safe_load(f))
             runtime_config = _build_runtime_config(config)
         print("Config loaded successfully")
     except Exception as e:

@@ -23,6 +23,24 @@ CultureMode = Literal["automatic", "agentic", "manual"]
 MATRIX_LOCALPART_PATTERN = re.compile(r"^[a-z0-9._=/-]+$")
 
 
+def normalize_config_data(data: dict[str, Any] | None) -> dict[str, Any]:
+    """Normalize optional top-level collections loaded from YAML."""
+    normalized = dict(data or {})
+
+    if normalized.get("teams") is None:
+        normalized["teams"] = {}
+    if normalized.get("cultures") is None:
+        normalized["cultures"] = {}
+    if normalized.get("room_models") is None:
+        normalized["room_models"] = {}
+    if normalized.get("plugins") is None:
+        normalized["plugins"] = []
+    if normalized.get("knowledge_bases") is None:
+        normalized["knowledge_bases"] = {}
+
+    return normalized
+
+
 class AgentConfig(BaseModel):
     """Configuration for a single agent."""
 
@@ -477,19 +495,7 @@ class Config(BaseModel):
             raise FileNotFoundError(msg)
 
         with path.open() as f:
-            data = yaml.safe_load(f) or {}
-
-        # Handle None values for optional dictionaries
-        if data.get("teams") is None:
-            data["teams"] = {}
-        if data.get("cultures") is None:
-            data["cultures"] = {}
-        if data.get("room_models") is None:
-            data["room_models"] = {}
-        if data.get("plugins") is None:
-            data["plugins"] = []
-        if data.get("knowledge_bases") is None:
-            data["knowledge_bases"] = {}
+            data = normalize_config_data(yaml.safe_load(f))
 
         config = cls(**data)
         logger.info(f"Loaded agent configuration from {path}")

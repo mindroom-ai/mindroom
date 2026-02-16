@@ -38,6 +38,7 @@ class WorkspaceFileUpdate(BaseModel):
 
 
 def _runtime_config() -> Config:
+    # Local import avoids a module cycle because main.py imports this router.
     from mindroom.api.main import load_runtime_config  # noqa: PLC0415
 
     config, _ = load_runtime_config()
@@ -50,6 +51,7 @@ def _workspace_root(config: Config, agent_name: str) -> Path:
 
     root = get_agent_workspace_path(agent_name, STORAGE_PATH_OBJ).resolve()
     if not root.exists():
+        # API reads should not trigger retention pruning side effects.
         ensure_workspace(agent_name, STORAGE_PATH_OBJ, config, prune_daily_logs=False)
         return root
 
