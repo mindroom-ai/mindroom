@@ -264,7 +264,7 @@ class TestThreadUtils:
         assert extract_agent_name("@mindroom_calculator:localhost", self.config) == "calculator"
 
         # Regular users should still be rejected
-        assert extract_agent_name("@mindroom_user:localhost", self.config) is None
+        assert extract_agent_name(self.config.get_mindroom_user_id(), self.config) is None
         assert extract_agent_name("@regular_user:localhost", self.config) is None
 
     def test_has_multiple_non_agent_users_in_thread_true(self) -> None:

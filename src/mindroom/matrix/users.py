@@ -10,10 +10,19 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 
 from .client import login, register_user
-from .identity import MatrixID, extract_server_name_from_homeserver
+from .identity import MatrixID, agent_username_localpart, extract_server_name_from_homeserver
 from .state import MatrixState
 
 logger = get_logger(__name__)
+
+
+def account_key_for_agent(agent_name: str) -> str:
+    """Build the Matrix state account key for an agent-like entity."""
+    return f"agent_{agent_name}"
+
+
+INTERNAL_USER_AGENT_NAME = "user"
+INTERNAL_USER_ACCOUNT_KEY = account_key_for_agent(INTERNAL_USER_AGENT_NAME)
 
 
 def extract_domain_from_user_id(user_id: str) -> str:
@@ -50,7 +59,7 @@ def get_agent_credentials(agent_name: str) -> dict[str, str] | None:
 
     """
     state = MatrixState.load()
-    agent_key = f"agent_{agent_name}"
+    agent_key = account_key_for_agent(agent_name)
     account = state.get_account(agent_key)
     if account:
         return {"username": account.username, "password": account.password}
@@ -67,7 +76,7 @@ def save_agent_credentials(agent_name: str, username: str, password: str) -> Non
 
     """
     state = MatrixState.load()
-    agent_key = f"agent_{agent_name}"
+    agent_key = account_key_for_agent(agent_name)
     state.add_account(agent_key, username, password)
     state.save()
     logger.info(f"Saved credentials for agent {agent_name}")
@@ -77,6 +86,7 @@ async def create_agent_user(
     homeserver: str,
     agent_name: str,
     agent_display_name: str,
+    username: str | None = None,
 ) -> AgentMatrixUser:
     """Create or retrieve a Matrix user account for an agent.
 
@@ -84,6 +94,7 @@ async def create_agent_user(
         homeserver: The Matrix homeserver URL
         agent_name: The internal agent name (e.g., 'calculator')
         agent_display_name: The display name for the agent (e.g., 'CalculatorAgent')
+        username: Optional explicit Matrix username localpart to use
 
     Returns:
         AgentMatrixUser object with account details
@@ -91,45 +102,48 @@ async def create_agent_user(
     """
     # Check if credentials already exist in matrix_state.yaml
     existing_creds = get_agent_credentials(agent_name)
+    preferred_username = username
 
-    if existing_creds:
-        username = existing_creds["username"]
+    if (
+        agent_name == INTERNAL_USER_AGENT_NAME
+        and preferred_username is not None
+        and existing_creds
+        and existing_creds["username"] != preferred_username
+    ):
+        msg = (
+            "mindroom_user.username cannot be changed after first startup "
+            f"(existing: '{existing_creds['username']}', configured: '{preferred_username}'). "
+            "Keep the existing username and change mindroom_user.display_name instead."
+        )
+        raise ValueError(msg)
+
+    if existing_creds and (preferred_username is None or existing_creds["username"] == preferred_username):
+        matrix_username = existing_creds["username"]
         password = existing_creds["password"]
         logger.info(f"Using existing credentials for agent {agent_name} from matrix_state.yaml")
         registration_needed = False
     else:
         # Generate new credentials
-        username = f"mindroom_{agent_name}"
+        matrix_username = preferred_username or agent_username_localpart(agent_name)
         password = f"{agent_name}_secure_password"  # _{os.urandom(8).hex()}"
         logger.info(f"Generated new credentials for agent {agent_name}")
         registration_needed = True
 
     # Extract server name from homeserver URL
     server_name = extract_server_name_from_homeserver(homeserver)
-    user_id = MatrixID.from_username(username, server_name).full_id
+    user_id = MatrixID.from_username(matrix_username, server_name).full_id
 
-    # Try to register/verify the user
-    try:
-        await register_user(
-            homeserver=homeserver,
-            username=username,
-            password=password,
-            display_name=agent_display_name,
-        )
-        # Only save credentials after successful registration
-        if registration_needed:
-            save_agent_credentials(agent_name, username, password)
-            logger.info(f"Saved credentials for agent {agent_name} after successful registration")
-    except ValueError as e:
-        # If user already exists, that's fine
-        error_msg = str(e) if e else ""
-        logger.debug(f"ValueError when registering {username}: {error_msg}")
-        if "already exists" not in error_msg and "RegisterErrorResponse" not in error_msg:
-            raise
-        # Save credentials if the user already exists (registration succeeded in the past)
-        if registration_needed and "already exists" in error_msg:
-            save_agent_credentials(agent_name, username, password)
-            logger.info(f"Saved credentials for agent {agent_name} (user already exists)")
+    await register_user(
+        homeserver=homeserver,
+        username=matrix_username,
+        password=password,
+        display_name=agent_display_name,
+    )
+
+    # Save credentials only after registration/verification succeeds.
+    if registration_needed:
+        save_agent_credentials(agent_name, matrix_username, password)
+        logger.info(f"Saved credentials for agent {agent_name} after successful registration")
 
     return AgentMatrixUser(
         agent_name=agent_name,

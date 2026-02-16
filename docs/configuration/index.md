@@ -155,6 +155,11 @@ voice:
   intelligence:
     model: default                 # Model for command recognition
 
+# Internal MindRoom user account (optional)
+mindroom_user:
+  username: mindroom_user          # Set before first startup (localpart only)
+  display_name: MindRoomUser       # Can be changed later
+
 # Authorization (optional)
 authorization:
   global_users: []                 # Users with access to all rooms
@@ -172,6 +177,12 @@ plugins: []
 # Timezone for scheduled tasks (optional)
 timezone: America/Los_Angeles      # Default: UTC
 ```
+
+## Internal User Username
+
+- Configure `mindroom_user.username` with the Matrix localpart you want before first startup.
+- After the account is created, `mindroom_user.username` is locked and cannot be changed in-place.
+- You can safely change `mindroom_user.display_name` at any time.
 
 ## Git-backed Knowledge Bases
 

@@ -204,9 +204,8 @@ def is_authorized_sender(sender_id: str, config: Config, room_id: str) -> bool:
         True if the sender is authorized, False otherwise
 
     """
-    # Always allow mindroom_user on the current domain
-    mindroom_user_id = f"@mindroom_user:{config.domain}"
-    if sender_id == mindroom_user_id:
+    # Always allow configured internal user on the current domain.
+    if sender_id == config.get_mindroom_user_id():
         return True
 
     # Check if sender is an agent or team

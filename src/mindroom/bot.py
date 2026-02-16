@@ -63,7 +63,13 @@ from .matrix.rooms import (
 )
 from .matrix.state import MatrixState
 from .matrix.typing import typing_indicator
-from .matrix.users import AgentMatrixUser, create_agent_user, login_agent_user
+from .matrix.users import (
+    INTERNAL_USER_ACCOUNT_KEY,
+    INTERNAL_USER_AGENT_NAME,
+    AgentMatrixUser,
+    create_agent_user,
+    login_agent_user,
+)
 from .memory import store_conversation_memory
 from .plugins import load_plugins
 from .response_tracker import ResponseTracker
@@ -2379,7 +2385,7 @@ class MultiAgentOrchestrator:
     _sync_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     knowledge_managers: dict[str, KnowledgeManager] = field(default_factory=dict, init=False)
 
-    async def _ensure_user_account(self) -> None:
+    async def _ensure_user_account(self, config: Config) -> None:
         """Ensure a user account exists, creating one if necessary.
 
         This reuses the same create_agent_user function that agents use,
@@ -2388,8 +2394,9 @@ class MultiAgentOrchestrator:
         # The user account is just another "agent" from the perspective of account management
         user_account = await create_agent_user(
             MATRIX_HOMESERVER,
-            "user",  # Special agent name for the human user
-            "Mindroom User",  # Display name
+            INTERNAL_USER_AGENT_NAME,
+            config.mindroom_user.display_name,
+            username=config.mindroom_user.username,
         )
         logger.info(f"User account ready: {user_account.user_id}")
 
@@ -2408,11 +2415,11 @@ class MultiAgentOrchestrator:
         """
         logger.info("Initializing multi-agent system...")
 
-        # Ensure user account exists first
-        await self._ensure_user_account()
-
         config = Config.from_yaml()
         load_plugins(config)
+
+        # Ensure user account exists first
+        await self._ensure_user_account(config)
         self.config = config
         await self._configure_knowledge(config, start_watcher=False)
 
@@ -2513,19 +2520,26 @@ class MultiAgentOrchestrator:
         load_plugins(new_config)
 
         if not self.config:
+            await self._ensure_user_account(new_config)
             self.config = new_config
             await self._configure_knowledge(new_config, start_watcher=self.running)
             return False
 
+        current_config = self.config
+
         # Identify what changed - we can keep using the existing helper functions
-        entities_to_restart = await _identify_entities_to_restart(self.config, new_config, self.agent_bots)
+        entities_to_restart = await _identify_entities_to_restart(current_config, new_config, self.agent_bots)
+        mindroom_user_changed = current_config.mindroom_user != new_config.mindroom_user
 
         # Also check for new entities that didn't exist before
         all_new_entities = set(new_config.agents.keys()) | set(new_config.teams.keys()) | {ROUTER_AGENT_NAME}
         existing_entities = set(self.agent_bots.keys())
         new_entities = all_new_entities - existing_entities - entities_to_restart
 
-        # Always update the orchestrator's config first
+        if mindroom_user_changed:
+            await self._ensure_user_account(new_config)
+
+        # Only apply the new config after all validation/account checks succeed.
         self.config = new_config
         await self._configure_knowledge(new_config, start_watcher=self.running)
 
@@ -2540,7 +2554,7 @@ class MultiAgentOrchestrator:
                 await bot._set_presence_with_model_info()
                 logger.debug(f"Updated config for {entity_name}")
 
-        if not entities_to_restart and not new_entities:
+        if not entities_to_restart and not new_entities and not mindroom_user_changed:
             # No entities to restart or create, we're done
             return False
 
@@ -2601,7 +2615,7 @@ class MultiAgentOrchestrator:
             if entity_name in self.agent_bots
         ]
 
-        if bots_to_setup:
+        if bots_to_setup or mindroom_user_changed:
             await self._setup_rooms_and_memberships(bots_to_setup)
 
         logger.info(f"Configuration update complete: {len(entities_to_restart) + len(new_entities)} bots affected")
@@ -2716,7 +2730,7 @@ class MultiAgentOrchestrator:
 
         # First, invite the user account to all rooms
         state = MatrixState.load()
-        user_account = state.get_account("agent_user")  # User is stored as "agent_user"
+        user_account = state.get_account(INTERNAL_USER_ACCOUNT_KEY)
         if user_account:
             user_id = MatrixID.from_username(user_account.username, server_name).full_id
             for room_id in joined_rooms:
