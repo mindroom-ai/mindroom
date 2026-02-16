@@ -135,6 +135,7 @@ mindroom run
 - [Authorization](https://docs.mindroom.chat/authorization/index.md) - User and room access control
 - [Architecture](https://docs.mindroom.chat/architecture/index.md) - How it works under the hood
 - [Deployment](https://docs.mindroom.chat/deployment/index.md) - Docker and Kubernetes deployment
+- [Bridges](https://docs.mindroom.chat/deployment/bridges/index.md) - Connect Telegram, Slack, and other platforms to Matrix
 - [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) - Isolate code-execution tools in a sandbox
 - [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) - Admin OAuth setup for Gmail/Calendar/Drive/Sheets
 - [Google Services OAuth (Individual)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) - Single-user OAuth setup
