@@ -14,8 +14,10 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.routing import AgentSuggestion, suggest_agent_for_message
 from mindroom.thread_utils import (
+    check_agent_mentioned,
     extract_agent_name,
     has_any_agent_mentions_in_thread,
+    has_multiple_non_agent_users_in_room,
     has_multiple_non_agent_users_in_thread,
 )
 
@@ -290,6 +292,50 @@ class TestThreadUtils:
             {"sender": "@mindroom_general:localhost", "body": "me too"},
         ]
         assert has_multiple_non_agent_users_in_thread(history, self.config) is False
+
+    def test_has_multiple_non_agent_users_in_room_true(self) -> None:
+        """Detect more than one non-agent user in a room."""
+        room = MagicMock()
+        room.users = {
+            "@mindroom_calculator:localhost": None,
+            "@alice:localhost": None,
+            "@bob:localhost": None,
+        }
+        assert has_multiple_non_agent_users_in_room(room, self.config) is True
+
+    def test_has_multiple_non_agent_users_in_room_false(self) -> None:
+        """Do not trigger when there is only one non-agent user."""
+        room = MagicMock()
+        room.users = {
+            "@mindroom_calculator:localhost": None,
+            "@mindroom_general:localhost": None,
+            "@alice:localhost": None,
+        }
+        assert has_multiple_non_agent_users_in_room(room, self.config) is False
+
+    def test_check_agent_mentioned_detects_non_agent_mentions(self) -> None:
+        """Tagging a non-agent user sets has_non_agent_mentions."""
+        event_source = {
+            "content": {
+                "m.mentions": {"user_ids": ["@bob:localhost"]},
+            },
+        }
+        agent_id = MatrixID.from_username("mindroom_calculator", "localhost")
+        _, am_i_mentioned, has_non_agent = check_agent_mentioned(event_source, agent_id, self.config)
+        assert am_i_mentioned is False
+        assert has_non_agent is True
+
+    def test_check_agent_mentioned_no_non_agent_mentions(self) -> None:
+        """Tagging only agents does not set has_non_agent_mentions."""
+        event_source = {
+            "content": {
+                "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
+            },
+        }
+        agent_id = MatrixID.from_username("mindroom_calculator", "localhost")
+        _, am_i_mentioned, has_non_agent = check_agent_mentioned(event_source, agent_id, self.config)
+        assert am_i_mentioned is True
+        assert has_non_agent is False
 
 
 class TestAgentDescription:

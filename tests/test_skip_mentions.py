@@ -159,7 +159,7 @@ async def test_extract_context_with_skip_mentions() -> None:
 
     # Mock check_agent_mentioned to return that we're mentioned
     with patch("mindroom.bot.check_agent_mentioned") as mock_check:
-        mock_check.return_value = (["email_agent"], True)
+        mock_check.return_value = (["email_agent"], True, False)
         with patch("mindroom.bot.fetch_thread_history") as mock_fetch:
             mock_fetch.return_value = []
 

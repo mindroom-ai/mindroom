@@ -14,15 +14,25 @@ if TYPE_CHECKING:
     from .config import Config
 
 
-def check_agent_mentioned(event_source: dict, agent_id: MatrixID | None, config: Config) -> tuple[list[MatrixID], bool]:
+def check_agent_mentioned(
+    event_source: dict,
+    agent_id: MatrixID | None,
+    config: Config,
+) -> tuple[list[MatrixID], bool, bool]:
     """Check if an agent is mentioned in a message.
 
-    Returns (mentioned_agents, am_i_mentioned).
+    Returns (mentioned_agents, am_i_mentioned, has_non_agent_mentions).
+    ``has_non_agent_mentions`` is True when the message explicitly tags a
+    user who is *not* a configured agent (e.g. a human or bridge bot).
     """
     mentions = event_source.get("content", {}).get("m.mentions", {})
     mentioned_agents = get_mentioned_agents(mentions, config)
     am_i_mentioned = agent_id in mentioned_agents
-    return mentioned_agents, am_i_mentioned
+
+    all_mentioned_ids = mentions.get("user_ids", [])
+    has_non_agent_mentions = len(all_mentioned_ids) > len(mentioned_agents)
+
+    return mentioned_agents, am_i_mentioned, has_non_agent_mentions
 
 
 def create_session_id(room_id: str, thread_id: str | None) -> str:
@@ -178,6 +188,17 @@ def get_available_agent_matrix_ids_in_room(room: nio.MatrixRoom, config: Config)
     return sorted(agent_ids, key=lambda x: x.full_id)
 
 
+def has_multiple_non_agent_users_in_room(room: nio.MatrixRoom, config: Config) -> bool:
+    """Return True when more than one non-agent user is present in the room."""
+    non_agent_count = 0
+    for member_id in room.users:
+        if not extract_agent_name(member_id, config):
+            non_agent_count += 1
+            if non_agent_count > 1:
+                return True
+    return False
+
+
 def has_multiple_non_agent_users_in_thread(thread_history: list[dict[str, Any]], config: Config) -> bool:
     """Return True when more than one non-agent user has posted in the thread."""
     non_agent_senders: set[str] = set()
@@ -285,6 +306,7 @@ def should_agent_respond(
     thread_history: list[dict],
     config: Config,
     mentioned_agents: list[MatrixID] | None = None,
+    has_non_agent_mentions: bool = False,
 ) -> bool:
     """Determine if an agent should respond to a message individually.
 
@@ -298,22 +320,23 @@ def should_agent_respond(
         thread_history: History of messages in the thread
         config: Application configuration
         mentioned_agents: List of all agent MatrixIDs mentioned in the message
+        has_non_agent_mentions: True when the message explicitly tags a non-agent user
 
     """
     # Always respond if mentioned
     if am_i_mentioned:
         return True
 
-    # Never respond if other agents are mentioned but not this one
-    # (User explicitly wants a different agent)
-    if mentioned_agents:
+    # Never respond if anyone else is explicitly mentioned (agent or not)
+    if mentioned_agents or has_non_agent_mentions:
         return False
 
-    # Non-thread messages: allow a single available agent to respond automatically.
-    # This applies to both DM and regular rooms. Router is excluded from availability.
+    # Non-thread messages: auto-respond only in single-agent, single-human rooms.
     if not is_thread:
-        available_agents = get_available_agents_in_room(room, config)
-        return len(available_agents) == 1
+        return (
+            not has_multiple_non_agent_users_in_room(room, config)
+            and len(get_available_agents_in_room(room, config)) == 1
+        )
 
     agent_matrix_id = config.ids[agent_name]
 

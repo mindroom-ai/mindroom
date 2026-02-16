@@ -469,6 +469,41 @@ class TestAgentResponseLogic:
             is True
         )
 
+    def test_non_agent_mention_suppresses_auto_response(self) -> None:
+        """Agent should not auto-respond when a non-agent user is explicitly mentioned."""
+        room = create_mock_room("!room:localhost", ["calculator"], self.config)
+
+        assert (
+            should_agent_respond(
+                agent_name="calculator",
+                am_i_mentioned=False,
+                is_thread=False,
+                room=room,
+                thread_history=[],
+                config=self.config,
+                has_non_agent_mentions=True,
+            )
+            is False
+        )
+
+    def test_multi_human_room_non_thread_requires_mention(self) -> None:
+        """Non-thread messages in multi-human rooms should require mention."""
+        room = create_mock_room("!room:localhost", ["calculator"], self.config)
+        room.users["@alice:localhost"] = None
+        room.users["@bob:localhost"] = None
+
+        assert (
+            should_agent_respond(
+                agent_name="calculator",
+                am_i_mentioned=False,
+                is_thread=False,
+                room=room,
+                thread_history=[],
+                config=self.config,
+            )
+            is False
+        )
+
     def test_agent_stops_when_user_mentions_other_agent(self) -> None:
         """Test that an agent stops responding when user mentions a different agent.
 

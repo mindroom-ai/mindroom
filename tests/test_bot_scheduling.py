@@ -483,6 +483,7 @@ class TestCommandHandling:
         mock_context.thread_history = []
         # mentioned_agents should be a list of MatrixID objects
         mock_context.mentioned_agents = [config.ids["calculator"]] if "calculator" in config.ids else []
+        mock_context.has_non_agent_mentions = False
         bot._extract_message_context = AsyncMock(return_value=mock_context)
 
         # Mock should_agent_respond to return True
@@ -533,6 +534,7 @@ class TestCommandHandling:
             mock_context.thread_id = "$thread123"
             mock_context.thread_history = []
             mock_context.mentioned_agents = []
+            mock_context.has_non_agent_mentions = False
             bot._extract_message_context = AsyncMock(return_value=mock_context)
 
             # Create a room and event with error message from router agent
@@ -647,6 +649,7 @@ class TestCommandHandling:
             mock_context = MagicMock()
             mock_context.am_i_mentioned = False
             mock_context.mentioned_agents = []
+            mock_context.has_non_agent_mentions = False
             mock_context.is_thread = True
             mock_context.thread_id = "$thread123"
             mock_context.thread_history = []
@@ -740,7 +743,8 @@ class TestCommandHandling:
         mock_context.is_thread = True
         mock_context.thread_id = "$thread123"
         mock_context.thread_history = thread_history  # History before router error
-        mock_context.mentioned_agents = []  # Router doesn't mention anyone
+        mock_context.mentioned_agents = []
+        mock_context.has_non_agent_mentions = False  # Router doesn't mention anyone
         bot._extract_message_context = AsyncMock(return_value=mock_context)
 
         # Create room and event for router error
@@ -853,6 +857,7 @@ class TestCommandHandling:
             },
         ]
         mock_context.mentioned_agents = []
+        mock_context.has_non_agent_mentions = False
         bot._extract_message_context = AsyncMock(return_value=mock_context)
 
         # Create room and event for router error
@@ -912,7 +917,8 @@ class TestCommandHandling:
         # Mock context extraction - no agents mentioned
         mock_context = MagicMock()
         mock_context.am_i_mentioned = False
-        mock_context.mentioned_agents = []  # No agents mentioned
+        mock_context.mentioned_agents = []
+        mock_context.has_non_agent_mentions = False  # No agents mentioned
         mock_context.is_thread = True
         mock_context.thread_id = "$thread123"
         mock_context.thread_history = []
@@ -983,6 +989,7 @@ class TestRouterSkipsSingleAgent:
         mock_context = MagicMock()
         mock_context.am_i_mentioned = False
         mock_context.mentioned_agents = []
+        mock_context.has_non_agent_mentions = False
         mock_context.is_thread = False
         mock_context.thread_id = None
         mock_context.thread_history = []
@@ -1062,6 +1069,7 @@ class TestRouterSkipsSingleAgent:
         mock_context = MagicMock()
         mock_context.am_i_mentioned = False
         mock_context.mentioned_agents = []
+        mock_context.has_non_agent_mentions = False
         mock_context.is_thread = False
         mock_context.thread_id = None
         mock_context.thread_history = []
@@ -1139,6 +1147,7 @@ class TestRouterSkipsSingleAgent:
         mock_context = MagicMock()
         mock_context.am_i_mentioned = False
         mock_context.mentioned_agents = []
+        mock_context.has_non_agent_mentions = False
         mock_context.is_thread = True
         mock_context.thread_id = "$thread1"
         mock_context.thread_history = [
@@ -1176,7 +1185,7 @@ class TestRouterSkipsSingleAgent:
 
         bot._handle_ai_routing.assert_not_called()
         info_calls = [call[0][0] for call in bot.logger.info.call_args_list]
-        assert "Skipping routing: multiple non-agent users in thread (mention required)" in info_calls
+        assert "Skipping routing: multiple non-agent users (mention required)" in info_calls
 
     @pytest.mark.asyncio
     async def test_router_handles_command_even_with_single_agent(self) -> None:
@@ -1350,6 +1359,7 @@ class TestRouterSkipsSingleAgent:
         mock_context = MagicMock()
         mock_context.am_i_mentioned = False
         mock_context.mentioned_agents = []
+        mock_context.has_non_agent_mentions = False
         mock_context.is_thread = False
         mock_context.thread_id = None
         mock_context.thread_history = []
