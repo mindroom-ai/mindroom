@@ -2007,6 +2007,7 @@ class AgentBot:
             available_agents,
             self.config,
             thread_history,
+            storage_path=self.storage_path,
         )
 
         if not suggested_agent:

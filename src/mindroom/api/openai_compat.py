@@ -484,7 +484,13 @@ async def _resolve_auto_route(
     and no agents are available.
     """
     available = [n for n in config.agents if n != ROUTER_AGENT_NAME]
-    routed = await suggest_agent(prompt, available, config, thread_history)
+    routed = await suggest_agent(
+        prompt,
+        available,
+        config,
+        thread_history,
+        storage_path=STORAGE_PATH_OBJ,
+    )
     if routed is None:
         if not available:
             return _error_response(500, "No agents configured for auto-routing", error_type="server_error")

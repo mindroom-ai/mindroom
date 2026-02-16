@@ -393,12 +393,13 @@ def _extract_summary_line(markdown_text: str) -> str | None:
     return None
 
 
-def describe_agent(agent_name: str, config: Config) -> str:
+def describe_agent(agent_name: str, config: Config, *, storage_path: Path | None = None) -> str:
     """Generate a description of an agent or team based on its configuration.
 
     Args:
         agent_name: Name of the agent or team to describe
         config: Application configuration
+        storage_path: Optional storage root for workspace lookup
 
     Returns:
         Human-readable description of the agent or team
@@ -439,7 +440,8 @@ def describe_agent(agent_name: str, config: Config) -> str:
         parts.append(f"- Tools: {tool_list}")
 
     first_instruction: str | None = None
-    agents_md_content = load_agents_md(agent_name, STORAGE_PATH_OBJ, config)
+    resolved_storage_path = storage_path if storage_path is not None else STORAGE_PATH_OBJ
+    agents_md_content = load_agents_md(agent_name, resolved_storage_path, config)
     if agents_md_content:
         first_instruction = _extract_summary_line(agents_md_content)
     elif agent_config.instructions:

@@ -12,7 +12,7 @@ from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.routing import AgentSuggestion, suggest_agent_for_message
+from mindroom.routing import AgentSuggestion, suggest_agent, suggest_agent_for_message
 from mindroom.thread_utils import (
     check_agent_mentioned,
     extract_agent_name,
@@ -157,6 +157,42 @@ class TestAIRouting:
             result = await suggest_agent_for_message("Test message", agents, config)
 
             assert result is None
+
+    @pytest.mark.asyncio
+    async def test_suggest_agent_uses_storage_path_for_agents_md(self, tmp_path: Path) -> None:
+        """Routing descriptions should read AGENTS.md from the runtime storage path."""
+        config = Config(
+            agents={
+                "calculator": AgentConfig(display_name="Calculator", rooms=[]),
+            },
+            router=RouterConfig(model="default"),
+        )
+        workspace_dir = tmp_path / "workspace" / "calculator"
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        (workspace_dir / "AGENTS.md").write_text(
+            "# AGENTS.md\n\n- Prefer numerical stability over speed.",
+            encoding="utf-8",
+        )
+
+        with patch("mindroom.routing.get_model_instance"):
+            mock_agent = AsyncMock()
+            mock_response = MagicMock()
+            mock_response.content = AgentSuggestion(
+                agent_name="calculator",
+                reasoning="Math request",
+            )
+            mock_agent.arun.return_value = mock_response
+
+            with patch("mindroom.routing.Agent", return_value=mock_agent):
+                result = await suggest_agent(
+                    "What is 2 + 2?",
+                    ["calculator"],
+                    config,
+                    storage_path=tmp_path,
+                )
+
+        assert result == "calculator"
+        assert "Prefer numerical stability over speed." in mock_agent.arun.call_args[0][0]
 
     @pytest.mark.asyncio
     async def test_only_router_agent_routes(self, tmp_path: Path) -> None:
@@ -403,7 +439,6 @@ class TestAgentDescription:
     def test_describe_agent_uses_agents_md_when_present(
         self,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """AGENTS.md content should drive instruction summary when customized."""
         config = Config.from_yaml()
@@ -413,9 +448,7 @@ class TestAgentDescription:
             "# AGENTS.md\n\n- Prefer numerical stability over speed.",
             encoding="utf-8",
         )
-        monkeypatch.setattr("mindroom.agents.STORAGE_PATH_OBJ", tmp_path)
-
-        description = describe_agent("calculator", config)
+        description = describe_agent("calculator", config, storage_path=tmp_path)
 
         assert "Prefer numerical stability over speed." in description
         assert "Use the calculator tools" not in description

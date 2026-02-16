@@ -13,6 +13,8 @@ from .logging_config import get_logger
 from .matrix.identity import MatrixID
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from .config import Config
 
 logger = get_logger(__name__)
@@ -30,6 +32,8 @@ async def suggest_agent(
     available_agent_names: list[str],
     config: Config,
     thread_context: list[dict[str, Any]] | None = None,
+    *,
+    storage_path: Path | None = None,
 ) -> str | None:
     """Use AI to suggest which agent should respond to a message.
 
@@ -41,6 +45,7 @@ async def suggest_agent(
         config: Application configuration.
         thread_context: Optional recent messages for context.
             Each dict should have "sender" and "body" keys.
+        storage_path: Optional storage root for workspace-backed descriptions.
 
     Returns:
         The suggested agent name, or None if routing fails.
@@ -50,7 +55,7 @@ async def suggest_agent(
         # Build agent descriptions
         agent_descriptions = []
         for agent_name in available_agent_names:
-            description = describe_agent(agent_name, config)
+            description = describe_agent(agent_name, config, storage_path=storage_path)
             agent_descriptions.append(f"{agent_name}:\n  {description}")
 
         agents_info = "\n\n".join(agent_descriptions)
@@ -121,6 +126,8 @@ async def suggest_agent_for_message(
     available_agents: list[MatrixID],
     config: Config,
     thread_context: list[dict[str, Any]] | None = None,
+    *,
+    storage_path: Path | None = None,
 ) -> str | None:
     """Use AI to suggest which agent should respond to a message.
 
@@ -141,4 +148,10 @@ async def suggest_agent_for_message(
                 sender = sender_id.agent_name(config) or sender_id.domain
             resolved_context.append({"sender": sender, "body": msg.get("body", "")})
 
-    return await suggest_agent(message, agent_names, config, resolved_context)
+    return await suggest_agent(
+        message,
+        agent_names,
+        config,
+        resolved_context,
+        storage_path=storage_path,
+    )
