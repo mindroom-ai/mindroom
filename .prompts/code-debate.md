@@ -1,19 +1,34 @@
 # Code Debate Protocol
 
-A protocol for two coding agents (Claude Code, Gemini CLI, Codex, or any other) to debate code changes through a shared file (`DEBATE.md`). Both agents receive this same prompt. Role is determined automatically by file existence.
+A protocol for two coding agents (Claude Code, Gemini CLI, Codex, or any other) to debate code changes through a shared file (`DEBATE.md`). Both agents receive this same prompt. Role is determined by explicit designation when provided, otherwise by file existence.
 
 ## How to use
 
 Open two terminal tabs with coding agents (same or different). Give both this prompt along with a subject to discuss — e.g., a commit, a diff, a PR, or one agent's review of another agent's work.
 
-The first agent to run will create `DEBATE.md` and become the opener. The second agent will find the file already exists and become the responder.
+You may send this prompt to both agents at the same time. If you designate one agent as **Agent B**, that agent must immediately start polling and wait for `DEBATE.md` to exist, then read it and continue as Agent B.
+
+Without designation, the first agent to run will create `DEBATE.md` and become the opener. The second agent will find the file already exists and become the responder.
 
 ## Role detection
 
-- If `DEBATE.md` does **not** exist → you are **Agent A** (opener). Write the opening position.
-- If `DEBATE.md` **already exists** → you are **Agent B** (responder). Read what's there and respond.
+- If the user explicitly designates you as **Agent B** → you are **Agent B**, even if `DEBATE.md` does not exist yet. Start polling and wait for file creation.
+- Otherwise, use file existence:
+  - If `DEBATE.md` does **not** exist → you are **Agent A** (opener). Write the opening position.
+  - If `DEBATE.md` **already exists** → you are **Agent B** (responder). Read what's there and respond.
 
-Do not ask the user which role to play. Detect it from file existence.
+Do not ask the user which role to play. Respect explicit Agent B designation if provided; otherwise detect from file existence.
+
+## Non-simulation guardrails (MUST)
+
+- Never write content for the opposite role.
+- Never simulate, fabricate, or placeholder the other agent's response.
+- Never append both sides of a debate from one process.
+- Role is immutable for the run: once detected as Agent A or Agent B, keep that role until `## CONSENSUS`.
+- If you are about to write the opposite role, stop and report protocol violation instead of writing.
+- After appending your section, only poll. Do not append another turn unless checksum changed and turn order confirms it is now your turn.
+- If checksum does not change, keep polling until timeout or `## CONSENSUS`.
+- On timeout, append only a timeout `## CONSENSUS` from your own role.
 
 ## Non-simulation guardrails (MUST)
 
@@ -95,7 +110,14 @@ Before appending, also verify the last signature line role:
 
 ## Agent B (responder) flow
 
-1. Read `DEBATE.md` (it exists — that's how you know you're the responder).
+1. Ensure `DEBATE.md` exists before reading:
+   - If it exists, read it immediately.
+   - If it does not exist (for example, you were explicitly designated as Agent B), start polling and wait until it exists, then read it.
+   - If timeout is reached before the file exists, stop and report timeout. Do not create `DEBATE.md` as Agent B.
+   Example:
+   ```bash
+   SECONDS=0; while [ ! -f DEBATE.md ]; do sleep 5; if [ "$SECONDS" -ge 600 ]; then echo "TIMEOUT waiting for DEBATE.md"; exit 0; fi; done
+   ```
 2. Analyze the same subject the user specified.
 3. Verify it is your turn (check the last `## ` heading). Example:
    ```bash
