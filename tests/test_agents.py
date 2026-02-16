@@ -96,12 +96,12 @@ def test_get_agent_summary(mock_storage: MagicMock) -> None:  # noqa: ARG001
 
 @patch("mindroom.agents.SqliteDb")
 @patch("mindroom.agents.Agent")
-def test_agents_md_preserves_yaml_instructions(
+def test_agents_md_overrides_yaml_instructions(
     mock_agent_class: MagicMock,
     mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
 ) -> None:
-    """AGENTS.md should augment, not remove, YAML instructions."""
+    """AGENTS.md should replace YAML instructions when present."""
     config = Config(
         agents={
             "custom": AgentConfig(
@@ -132,7 +132,7 @@ def test_agents_md_preserves_yaml_instructions(
 
     instructions = mock_agent_class.call_args.kwargs["instructions"]
     assert instructions[0] == "custom instructions"
-    assert "yaml instruction" in instructions
+    assert "yaml instruction" not in instructions
 
 
 def test_get_agent_unknown() -> None:
