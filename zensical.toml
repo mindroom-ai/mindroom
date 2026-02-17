@@ -29,6 +29,7 @@ nav = [
   ] },
   { "Skills" = "skills.md" },
   { "Plugins" = "plugins.md" },
+  { "Knowledge Bases" = "knowledge.md" },
   { "Memory System" = "memory.md" },
   { "Voice Messages" = "voice.md" },
   { "Scheduling" = "scheduling.md" },
