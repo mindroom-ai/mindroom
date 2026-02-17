@@ -48,6 +48,14 @@ class AgentConfig(BaseModel):
         default_factory=list,
         description="Knowledge base IDs assigned to this agent",
     )
+    context_files: list[str] = Field(
+        default_factory=list,
+        description="File paths read at agent init and prepended to role context",
+    )
+    memory_dir: str | None = Field(
+        default=None,
+        description="Directory containing memory.md and dated memory files to auto-load into role context",
+    )
 
     @model_validator(mode="before")
     @classmethod
