@@ -18,6 +18,7 @@ from agno.knowledge.knowledge import Knowledge
 from agno.vectordb.chroma import ChromaDb
 from watchfiles import Change, awatch
 
+from .constants import CONFIG_PATH, resolve_config_relative_path
 from .credentials import get_credentials_manager
 from .credentials_sync import get_api_key_for_provider, get_ollama_host
 from .logging_config import get_logger
@@ -34,7 +35,7 @@ _URL_PATTERN = re.compile(r"https?://[^\s'\"<>]+")
 
 
 def _resolve_knowledge_path(path: str) -> Path:
-    return Path(path).expanduser().resolve()
+    return resolve_config_relative_path(path, config_path=CONFIG_PATH)
 
 
 def _safe_identifier(value: str) -> str:

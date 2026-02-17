@@ -123,3 +123,19 @@ class TestConfigSearchLocations:
         result = constants_mod.config_search_locations()
         resolved_paths = [str(p) for p in result]
         assert len(resolved_paths) == len(set(resolved_paths))
+
+
+class TestResolveConfigRelativePath:
+    """Tests for resolve_config_relative_path()."""
+
+    def test_relative_path_resolves_from_config_directory(self, tmp_path: Path) -> None:
+        """Relative paths should resolve against the config parent directory."""
+        config_path = tmp_path / "cfg" / "config.yaml"
+        resolved = constants_mod.resolve_config_relative_path("openclaw_data/memory", config_path=config_path)
+        assert resolved == (tmp_path / "cfg" / "openclaw_data" / "memory").resolve()
+
+    def test_absolute_path_is_preserved(self, tmp_path: Path) -> None:
+        """Absolute paths should stay absolute."""
+        absolute_path = tmp_path / "knowledge"
+        resolved = constants_mod.resolve_config_relative_path(absolute_path, config_path=tmp_path / "config.yaml")
+        assert resolved == absolute_path.resolve()
