@@ -1310,6 +1310,7 @@ class AgentBot:
                 thread_history=context.thread_history,
                 user_id=event.sender,
                 images=[image],
+                is_dm_room_value=_is_dm_room,
             )
         self.response_tracker.mark_responded(event.event_id, response_event_id)
 

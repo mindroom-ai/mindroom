@@ -688,6 +688,7 @@ class TestAgentBot:
             thread_history=[],
             user_id="@user:localhost",
             images=[image],
+            is_dm_room_value=False,
         )
         tracker.mark_responded.assert_called_once_with("$img_event", "$response")
 
