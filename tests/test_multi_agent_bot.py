@@ -15,7 +15,7 @@ from agno.models.ollama import Ollama
 from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
 
-from mindroom.bot import AgentBot, MultiAgentOrchestrator, MultiKnowledgeVectorDb
+from mindroom.bot import AgentBot, MessageContext, MultiAgentOrchestrator, MultiKnowledgeVectorDb
 from mindroom.config import AgentConfig, Config, KnowledgeBaseConfig, ModelConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
@@ -412,7 +412,7 @@ class TestAgentBot:
         # The bot calls ensure_setup which calls ensure_user_account
         # and then login with whatever user account was ensured
         assert mock_login.called
-        assert mock_client.add_event_callback.call_count == 3  # invite, message, and reaction callbacks
+        assert mock_client.add_event_callback.call_count == 5  # invite, message, reaction, and 2 image callbacks
 
     @pytest.mark.asyncio
     async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
@@ -586,6 +586,7 @@ class TestAgentBot:
                 knowledge=None,
                 user_id="@user:localhost",
                 is_dm=False,
+                images=None,
             )
             mock_ai_response.assert_not_called()
             # With streaming and stop button: initial message + reaction + edits
@@ -603,6 +604,7 @@ class TestAgentBot:
                 knowledge=None,
                 user_id="@user:localhost",
                 is_dm=False,
+                images=None,
             )
             mock_stream_agent_response.assert_not_called()
             # With stop button support: initial + reaction + final
@@ -626,6 +628,120 @@ class TestAgentBot:
 
         # Should not send any response
         bot.client.room_send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_agent_bot_on_image_message_forwards_image_to_generate_response(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Image messages should call _generate_response with images payload."""
+        config = Config.from_yaml()
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot.client = AsyncMock()
+
+        tracker = MagicMock()
+        tracker.has_responded.return_value = False
+        bot.__dict__["response_tracker"] = tracker
+
+        bot._extract_message_context = AsyncMock(
+            return_value=MessageContext(
+                am_i_mentioned=False,
+                is_thread=False,
+                thread_id=None,
+                thread_history=[],
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+            ),
+        )
+        bot._generate_response = AsyncMock(return_value="$response")
+
+        room = MagicMock()
+        room.room_id = "!test:localhost"
+
+        event = MagicMock(spec=nio.RoomMessageImage)
+        event.sender = "@user:localhost"
+        event.event_id = "$img_event"
+        event.body = "photo.jpg"
+        event.source = {"content": {"body": "photo.jpg"}}  # no filename → body is filename
+
+        image = MagicMock()
+
+        with (
+            patch("mindroom.bot.is_authorized_sender", return_value=True),
+            patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
+            patch(
+                "mindroom.bot.decide_team_formation",
+                new_callable=AsyncMock,
+                return_value=MagicMock(should_form_team=False, agents=[]),
+            ),
+            patch("mindroom.bot.should_agent_respond", return_value=True),
+            patch("mindroom.bot.image_handler.download_image", new_callable=AsyncMock, return_value=image),
+        ):
+            await bot._on_image_message(room, event)
+
+        bot._generate_response.assert_awaited_once_with(
+            room_id="!test:localhost",
+            prompt="[Attached image]",
+            reply_to_event_id="$img_event",
+            thread_id=None,
+            thread_history=[],
+            user_id="@user:localhost",
+            images=[image],
+        )
+        tracker.mark_responded.assert_called_once_with("$img_event", "$response")
+
+    @pytest.mark.asyncio
+    async def test_agent_bot_on_image_message_marks_responded_when_download_fails(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Image download failure should still mark event as responded."""
+        config = Config.from_yaml()
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot.client = AsyncMock()
+
+        tracker = MagicMock()
+        tracker.has_responded.return_value = False
+        bot.__dict__["response_tracker"] = tracker
+
+        bot._extract_message_context = AsyncMock(
+            return_value=MessageContext(
+                am_i_mentioned=False,
+                is_thread=False,
+                thread_id=None,
+                thread_history=[],
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+            ),
+        )
+        bot._generate_response = AsyncMock()
+
+        room = MagicMock()
+        room.room_id = "!test:localhost"
+
+        event = MagicMock(spec=nio.RoomMessageImage)
+        event.sender = "@user:localhost"
+        event.event_id = "$img_event_fail"
+        event.body = "please analyze"
+        event.source = {"content": {"body": "please analyze"}}
+
+        with (
+            patch("mindroom.bot.is_authorized_sender", return_value=True),
+            patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
+            patch(
+                "mindroom.bot.decide_team_formation",
+                new_callable=AsyncMock,
+                return_value=MagicMock(should_form_team=False, agents=[]),
+            ),
+            patch("mindroom.bot.should_agent_respond", return_value=True),
+            patch("mindroom.bot.image_handler.download_image", new_callable=AsyncMock, return_value=None),
+        ):
+            await bot._on_image_message(room, event)
+
+        bot._generate_response.assert_not_called()
+        tracker.mark_responded.assert_called_once_with("$img_event_fail")
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])

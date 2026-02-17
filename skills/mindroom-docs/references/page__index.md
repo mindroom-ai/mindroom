@@ -13,6 +13,7 @@ MindRoom is an AI agent orchestration system with Matrix integration. It provide
 - **Hot-reload configuration** - Update `config.yaml` and agents restart automatically
 - **Scheduled tasks** - Schedule agents to run at specific times with cron expressions or natural language
 - **Voice messages** - Speech-to-text transcription with intelligent command recognition
+- **Image analysis** - Pass images to vision-capable AI models for analysis
 - **Authorization** - Fine-grained access control for users and rooms
 
 > [!TIP] **Matrix is the backbone** - MindRoom agents communicate through the Matrix protocol, which means they can be bridged to Discord, Slack, Telegram, and other platforms.
@@ -101,6 +102,7 @@ mindroom run
 | **Skills**                | OpenClaw-compatible skills system for extended agent capabilities |
 | **Scheduling**            | Schedule tasks with cron expressions or natural language          |
 | **Voice**                 | Speech-to-text transcription for voice messages                   |
+| **Images**                | Pass user-sent images to vision-capable AI models                 |
 | **Cultures**              | Shared evolving principles across groups of agents                |
 | **Authorization**         | Fine-grained user and room access control                         |
 | **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client       |
@@ -125,14 +127,18 @@ mindroom run
 
 - [Getting Started](https://docs.mindroom.chat/getting-started/index.md) - Installation and first steps
 - [Configuration](https://docs.mindroom.chat/configuration/index.md) - All configuration options
+- [Cultures](https://docs.mindroom.chat/configuration/cultures/index.md) - Configure shared agent cultures
 - [Dashboard](https://docs.mindroom.chat/dashboard/index.md) - Web UI for configuration
 - [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/index.md) - Use agents from any OpenAI-compatible client
 - [Tools](https://docs.mindroom.chat/tools/index.md) - Available tool integrations
+- [MCP (Planned)](https://docs.mindroom.chat/tools/mcp/index.md) - Native MCP status and current plugin workaround
 - [Skills](https://docs.mindroom.chat/skills/index.md) - OpenClaw-compatible skills system
 - [Plugins](https://docs.mindroom.chat/plugins/index.md) - Extend with custom tools and skills
+- [Knowledge Bases](https://docs.mindroom.chat/knowledge/index.md) - Configure RAG-backed document indexing
 - [Memory System](https://docs.mindroom.chat/memory/index.md) - How agent memory works
 - [Scheduling](https://docs.mindroom.chat/scheduling/index.md) - Schedule tasks with cron or natural language
 - [Voice Messages](https://docs.mindroom.chat/voice/index.md) - Voice message transcription
+- [Image Messages](https://docs.mindroom.chat/images/index.md) - Image analysis with vision models
 - [Authorization](https://docs.mindroom.chat/authorization/index.md) - User and room access control
 - [Architecture](https://docs.mindroom.chat/architecture/index.md) - How it works under the hood
 - [Deployment](https://docs.mindroom.chat/deployment/index.md) - Docker and Kubernetes deployment

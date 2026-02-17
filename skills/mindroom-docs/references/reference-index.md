@@ -18,14 +18,17 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Agents | `configuration/agents.md` | `configuration/agents/index.md` | `page__configuration__agents__index.md` |
 | Models | `configuration/models.md` | `configuration/models/index.md` | `page__configuration__models__index.md` |
 | Teams | `configuration/teams.md` | `configuration/teams/index.md` | `page__configuration__teams__index.md` |
+| Cultures | `configuration/cultures.md` | `configuration/cultures/index.md` | `page__configuration__cultures__index.md` |
 | Router | `configuration/router.md` | `configuration/router/index.md` | `page__configuration__router__index.md` |
 | Overview | `tools/index.md` | `tools/index.md` | `page__tools__index.md` |
 | Built-in Tools | `tools/builtin.md` | `tools/builtin/index.md` | `page__tools__builtin__index.md` |
+| MCP (Planned) | `tools/mcp.md` | `tools/mcp/index.md` | `page__tools__mcp__index.md` |
 | Skills | `skills.md` | `skills/index.md` | `page__skills__index.md` |
 | Plugins | `plugins.md` | `plugins/index.md` | `page__plugins__index.md` |
 | Knowledge Bases | `knowledge.md` | `knowledge/index.md` | `page__knowledge__index.md` |
 | Memory System | `memory.md` | `memory/index.md` | `page__memory__index.md` |
 | Voice Messages | `voice.md` | `voice/index.md` | `page__voice__index.md` |
+| Image Messages | `images.md` | `images/index.md` | `page__images__index.md` |
 | Scheduling | `scheduling.md` | `scheduling/index.md` | `page__scheduling__index.md` |
 | Authorization | `authorization.md` | `authorization/index.md` | `page__authorization__index.md` |
 | OpenAI-Compatible API | `openai-api.md` | `openai-api/index.md` | `page__openai-api__index.md` |

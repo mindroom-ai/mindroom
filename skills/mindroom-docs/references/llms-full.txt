@@ -19,6 +19,7 @@ MindRoom is an AI agent orchestration system with Matrix integration. It provide
 - **Hot-reload configuration** - Update `config.yaml` and agents restart automatically
 - **Scheduled tasks** - Schedule agents to run at specific times with cron expressions or natural language
 - **Voice messages** - Speech-to-text transcription with intelligent command recognition
+- **Image analysis** - Pass images to vision-capable AI models for analysis
 - **Authorization** - Fine-grained access control for users and rooms
 
 > [!TIP] **Matrix is the backbone** - MindRoom agents communicate through the Matrix protocol, which means they can be bridged to Discord, Slack, Telegram, and other platforms.
@@ -107,6 +108,7 @@ mindroom run
 | **Skills**                | OpenClaw-compatible skills system for extended agent capabilities |
 | **Scheduling**            | Schedule tasks with cron expressions or natural language          |
 | **Voice**                 | Speech-to-text transcription for voice messages                   |
+| **Images**                | Pass user-sent images to vision-capable AI models                 |
 | **Cultures**              | Shared evolving principles across groups of agents                |
 | **Authorization**         | Fine-grained user and room access control                         |
 | **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client       |
@@ -131,14 +133,18 @@ mindroom run
 
 - [Getting Started](https://docs.mindroom.chat/getting-started/index.md) - Installation and first steps
 - [Configuration](https://docs.mindroom.chat/configuration/index.md) - All configuration options
+- [Cultures](https://docs.mindroom.chat/configuration/cultures/index.md) - Configure shared agent cultures
 - [Dashboard](https://docs.mindroom.chat/dashboard/index.md) - Web UI for configuration
 - [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/index.md) - Use agents from any OpenAI-compatible client
 - [Tools](https://docs.mindroom.chat/tools/index.md) - Available tool integrations
+- [MCP (Planned)](https://docs.mindroom.chat/tools/mcp/index.md) - Native MCP status and current plugin workaround
 - [Skills](https://docs.mindroom.chat/skills/index.md) - OpenClaw-compatible skills system
 - [Plugins](https://docs.mindroom.chat/plugins/index.md) - Extend with custom tools and skills
+- [Knowledge Bases](https://docs.mindroom.chat/knowledge/index.md) - Configure RAG-backed document indexing
 - [Memory System](https://docs.mindroom.chat/memory/index.md) - How agent memory works
 - [Scheduling](https://docs.mindroom.chat/scheduling/index.md) - Schedule tasks with cron or natural language
 - [Voice Messages](https://docs.mindroom.chat/voice/index.md) - Voice message transcription
+- [Image Messages](https://docs.mindroom.chat/images/index.md) - Image analysis with vision models
 - [Authorization](https://docs.mindroom.chat/authorization/index.md) - User and room access control
 - [Architecture](https://docs.mindroom.chat/architecture/index.md) - How it works under the hood
 - [Deployment](https://docs.mindroom.chat/deployment/index.md) - Docker and Kubernetes deployment
@@ -1072,6 +1078,62 @@ When AI mode selection is unavailable or fails, MindRoom falls back to:
 - **coordinate** when multiple agents are explicitly tagged in the message (they likely have different roles to fulfill)
 - **collaborate** for all other cases, such as agents from thread history or DM rooms (likely discussing the same topic)
 
+# Culture Configuration
+
+Cultures let a group of agents share evolving principles, practices, and conventions. A culture is backed by [Agno's CultureManager](https://docs.agno.com/agents/culture) and persists its knowledge in a SQLite database under `mindroom_data/culture/<culture_name>.db`.
+
+## Basic Culture
+
+```
+cultures:
+  engineering:
+    description: Follow clean code principles and write tests
+    agents: [developer, reviewer]
+```
+
+## Full Configuration
+
+```
+cultures:
+  engineering:
+    # Describes the shared principles this culture captures
+    description: Follow clean code principles, write tests, and review before merging
+
+    # Agents assigned to this culture (must be defined in agents section)
+    agents:
+      - developer
+      - reviewer
+
+    # How the culture is updated: automatic, agentic, or manual (default: automatic)
+    mode: automatic
+```
+
+## Configuration Fields
+
+| Field         | Required | Default       | Description                                                               |
+| ------------- | -------- | ------------- | ------------------------------------------------------------------------- |
+| `description` | No       | `""`          | Description of the shared principles and practices the culture captures   |
+| `agents`      | No       | `[]`          | Agent names assigned to this culture (must exist in the `agents` section) |
+| `mode`        | No       | `"automatic"` | How culture knowledge is updated (see modes below)                        |
+
+## Culture Modes
+
+| Mode        | Behavior                                                                                                  |
+| ----------- | --------------------------------------------------------------------------------------------------------- |
+| `automatic` | Culture knowledge is automatically extracted from every agent interaction and added to the shared context |
+| `agentic`   | The agent decides when to update culture knowledge via a tool call                                        |
+| `manual`    | Culture context is read-only; the description is included in agent context but knowledge is never updated |
+
+All modes include the culture description in the agent's context. The difference is whether and how the culture's knowledge base evolves over time.
+
+## Rules
+
+- Each agent can belong to **at most one** culture. Assigning the same agent to multiple cultures is a validation error.
+- All agents listed in a culture must exist in the top-level `agents` section.
+- Culture state is persisted to `mindroom_data/culture/<culture_name>.db` and survives restarts.
+- Culture managers are cached and shared across agents in the same culture — if two agents belong to the same culture, they share the same `CultureManager` instance.
+- Changes to a culture's `description` or `mode` in `config.yaml` invalidate the cache, so the manager is recreated on the next hot-reload.
+
 # Router Configuration
 
 The router is a built-in system component that handles intelligent message routing and room management. It decides which agent should respond when no specific agent is mentioned, sends welcome messages to new rooms, and manages various system-level tasks.
@@ -1312,6 +1374,7 @@ uv sync --extra gmail --extra slack --extra github
 See the full list in:
 
 - [Built-in Tools](https://docs.mindroom.chat/tools/builtin/index.md) - Complete list of available built-in tools with configuration details
+- [MCP (Planned)](https://docs.mindroom.chat/tools/mcp/index.md) - Native MCP status and plugin-based workaround
 - [Plugins](https://docs.mindroom.chat/plugins/index.md) - Extend MindRoom with custom tools and skills (including MCP via plugin workaround)
 
 # Built-in Tools
@@ -1581,6 +1644,16 @@ REPLICATE_API_TOKEN=r8_...
 ```
 
 MindRoom automatically loads `.env` files from the working directory.
+
+# MCP (Planned)
+
+> [!WARNING] MindRoom does not currently support direct MCP server configuration in `config.yaml`.
+
+MCP can still be used today through the plugin system by wrapping Agno `MCPTools` in a plugin tool factory.
+
+See [Plugins](https://docs.mindroom.chat/plugins/#mcp-via-plugins-advanced) for the current workaround and setup instructions.
+
+This page remains as a compatibility pointer and will be expanded when native MCP support is added.
 
 # Skills
 
@@ -2386,6 +2459,60 @@ See the [Tools documentation](/tools) for configuration details.
 - **Say the agent name first** - "Hey @assistant, what's the weather?"
 - **Use display names** - The AI converts spoken names like "HomeAssistant" to the correct `@home` mention
 
+# Image Messages
+
+MindRoom can process images sent to Matrix rooms, passing them to vision-capable AI models for analysis.
+
+## Overview
+
+When a user sends an image in a Matrix room:
+
+1. The agent determines whether it should respond (via mention, thread participation, or DM)
+1. The image is downloaded and decrypted (if E2E encrypted)
+1. The image is wrapped as an `agno.media.Image` and passed to the AI model
+1. The agent responds with its analysis
+
+Image support works automatically for all agents -- no configuration is needed. The AI model must support vision (e.g., Claude, GPT-4o).
+
+## How It Works
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│ Image Msg   │────>│ Download &  │────>│ Pass to AI  │
+│ (Matrix)    │     │ Decrypt     │     │ Model       │
+└─────────────┘     └─────────────┘     └─────────────┘
+                                              │
+                                              v
+                                        ┌─────────────┐
+                                        │ Agent       │
+                                        │ Responds    │
+                                        └─────────────┘
+```
+
+## Usage
+
+Send an image in a Matrix room and mention the agent in the caption:
+
+- **With caption**: `@assistant What does this diagram show?` -- the caption is used as the prompt
+- **Without caption**: The agent receives `[Attached image]` as the prompt and describes what it sees
+- **Bare filename**: If the body is just a filename (e.g., `IMG_1234.jpg`), it is treated the same as no caption
+
+Images work in both direct messages and threads, and with both individual agents and teams.
+
+## Encryption
+
+Both unencrypted and E2E encrypted images are supported. Encrypted images are decrypted transparently using the key material from the Matrix event.
+
+## Caching
+
+AI response caching is automatically skipped when images are present, since image payloads are large and unlikely to repeat.
+
+## Limitations
+
+- **Router does not route image events** -- in multi-agent rooms, you must `@mention` the agent in the image caption. Without a mention, no agent will respond. Tracked in [#154](https://github.com/mindroom-ai/mindroom/issues/154).
+- **Bridge mention detection** relies on `m.mentions` in the event, which some bridges (e.g., mautrix-telegram) do not set. Images sent from bridged platforms may not trigger agent responses.
+- **Model support** -- the configured model must support vision. Text-only models will ignore the image or return an error.
+
 # Scheduling
 
 Schedule agents to perform tasks at specific times or intervals using natural language. Tasks run in the thread where they were created.
@@ -3162,7 +3289,7 @@ Telegram Cloud <--> mautrix-telegram <--> Synapse <--> Element
 
 ### 1. Add credentials to config
 
-Edit `/opt/stacks/mindroom/telegram-bridge/config.yaml` and replace the placeholders in the `telegram:` section:
+Edit `telegram-bridge/config.yaml` and replace the placeholders in the `telegram:` section:
 
 ```
 telegram:
@@ -3171,7 +3298,7 @@ telegram:
     bot_token: 123456:ABC...  # Your bot token from BotFather
 ```
 
-Also update the same values in `/opt/stacks/mindroom/.env`:
+Also update the same values in your `.env`:
 
 ```
 TELEGRAM_API_ID=12345678
@@ -3185,22 +3312,22 @@ Synapse needs a new volume mount for the bridge registration file, so it must be
 
 ```
 # Recreate Synapse to pick up the new volume mount and bridge registration
-cf compose mindroom up -d synapse
+docker compose up -d synapse
 
 # Wait for Synapse to become healthy
-cf compose mindroom ps synapse
+docker compose ps synapse
 
 # Start the bridge
-cf compose mindroom up -d telegram-bridge
+docker compose up -d telegram-bridge
 ```
 
-> **Note:** `cf compose mindroom restart synapse` will NOT work here because the `registration.yaml` volume mount is new in `compose.yaml`. A restart reuses the existing container; `up -d` recreates it with the updated mounts.
+> **Note:** `docker compose restart synapse` will NOT work here because the `registration.yaml` volume mount is new in `compose.yaml`. A restart reuses the existing container; `up -d` recreates it with the updated mounts.
 
 ### 3. Verify
 
 ```
 # Check bridge logs
-cf compose mindroom logs telegram-bridge --tail 20
+docker compose logs telegram-bridge --tail 20
 
 # Look for "Startup actions complete"
 ```
@@ -3211,8 +3338,8 @@ cf compose mindroom logs telegram-bridge --tail 20
 
 Before you can bridge anything, you must link your Telegram account:
 
-1. Open Element at `element.lab.nijho.lt`
-1. Start a DM with `@telegrambot:matrix.lab.nijho.lt`
+1. Open Element at your Element URL
+1. Start a DM with `@telegrambot:your.matrix.domain`
 1. Send `login`
 1. Enter your phone number in international format (e.g., `+1234567890`)
 1. Enter the verification code sent to your Telegram app
@@ -3227,9 +3354,9 @@ The bridge connects a **Telegram group** to a **Matrix room**. You need a Telegr
 **For each Matrix room you want to access from Telegram** (e.g., Lobby):
 
 1. **Create a Telegram group** in the Telegram app (e.g., name it "MindRoom Lobby")
-1. **Add your bridge bot** (e.g., `@mindroom_lab_bot`) to that Telegram group
+1. **Add your bridge bot** (e.g., `@your_bridge_bot`) to that Telegram group
 1. **In Element**, go to the Matrix room you want to bridge (e.g., Lobby)
-1. **Invite the bridge bot**: invite `@telegrambot:matrix.lab.nijho.lt` to the room
+1. **Invite the bridge bot**: invite `@telegrambot:your.matrix.domain` to the room
 1. **Link the rooms**: in the Matrix room, send `!tg bridge` -- the bot will list your Telegram groups and let you pick which one to link
 
 Once linked:
@@ -3252,7 +3379,7 @@ After logging in (step 1), your Telegram chats automatically appear as Matrix ro
 
 ### Bot Commands Reference
 
-Send these to `@telegrambot:matrix.lab.nijho.lt` in a DM, or in a bridged room:
+Send these to `@telegrambot:your.matrix.domain` in a DM, or in a bridged room:
 
 | Command          | Description                                                     |
 | ---------------- | --------------------------------------------------------------- |
@@ -3288,15 +3415,15 @@ Set in `bridge.permissions`:
 - `full` - Full access including creating portals
 - `admin` - Bridge administration
 
-Default config gives `full` to all `matrix.lab.nijho.lt` users.
+Default config gives `full` to all users on your homeserver domain.
 
 ## Troubleshooting
 
 ### Bridge won't start
 
 - Check credentials: `api_id` must be numeric, `api_hash` must be a hex string, `bot_token` must be a valid BotFather token
-- Check logs: `cf compose mindroom logs telegram-bridge --tail 50`
-- Verify Synapse is healthy: `cf compose mindroom ps`
+- Check logs: `docker compose logs telegram-bridge --tail 50`
+- Verify Synapse is healthy: `docker compose ps`
 
 ### Login fails
 
@@ -3319,12 +3446,12 @@ To make your messages from Matrix appear as your real Telegram account (not the 
 
 ### Database issues
 
-The bridge uses SQLite at `/mnt/data/mindroom/telegram-bridge/mautrix-telegram.db`. To reset:
+The bridge uses SQLite stored in the `telegram-bridge` data volume. To reset:
 
 ```
-cf compose mindroom stop telegram-bridge
-rm /mnt/data/mindroom/telegram-bridge/mautrix-telegram.db
-cf compose mindroom up -d telegram-bridge
+docker compose stop telegram-bridge
+rm <data-dir>/telegram-bridge/mautrix-telegram.db
+docker compose up -d telegram-bridge
 ```
 
 Note: This will require re-logging into Telegram.
@@ -3334,14 +3461,14 @@ Note: This will require re-logging into Telegram.
 If Synapse reports appservice errors, regenerate the registration:
 
 ```
-cf compose mindroom stop telegram-bridge
-rm /opt/stacks/mindroom/telegram-bridge/registration.yaml
+docker compose stop telegram-bridge
+rm telegram-bridge/registration.yaml
 # Temporarily set valid api_id in config.yaml, then:
-cf compose mindroom run --rm --no-deps --entrypoint \
+docker compose run --rm --no-deps --entrypoint \
   "python -m mautrix_telegram -g -c /data/config.yaml -r /data/registration.yaml" \
   telegram-bridge
-cf compose mindroom restart synapse
-cf compose mindroom up -d telegram-bridge
+docker compose restart synapse
+docker compose up -d telegram-bridge
 ```
 
 ## Maintenance
@@ -3349,19 +3476,17 @@ cf compose mindroom up -d telegram-bridge
 ### Updating
 
 ```
-cf update mindroom
-# Or just the bridge:
-cf compose mindroom pull telegram-bridge
-cf compose mindroom up -d telegram-bridge
+docker compose pull telegram-bridge
+docker compose up -d telegram-bridge
 ```
 
 ### Backup
 
 Important data locations:
 
-- `/opt/stacks/mindroom/telegram-bridge/config.yaml` - Bridge configuration
-- `/opt/stacks/mindroom/telegram-bridge/registration.yaml` - Appservice registration
-- `/mnt/data/mindroom/telegram-bridge/` - SQLite database with session data
+- `telegram-bridge/config.yaml` - Bridge configuration
+- `telegram-bridge/registration.yaml` - Appservice registration
+- Telegram bridge data volume - SQLite database with session data
 
 # Google Services OAuth (Admin Setup)
 
@@ -3874,6 +3999,7 @@ services:
     environment:
       - MINDROOM_SANDBOX_RUNNER_MODE=true
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN}
+      - MINDROOM_CONFIG_PATH=/app/config.yaml
       - MINDROOM_STORAGE_PATH=/app/workspace/.mindroom
 
 volumes:
