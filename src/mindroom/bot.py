@@ -1387,7 +1387,6 @@ class AgentBot:
         self,
         room_id: str,
         thread_id: str | None,
-        reply_to_event_id: str,
         user_id: str | None,
     ) -> OpenClawToolContext | None:
         """Build runtime context for OpenClaw-compatible tool calls."""
@@ -1397,10 +1396,9 @@ class AgentBot:
         return OpenClawToolContext(
             agent_name=self.agent_name,
             room_id=room_id,
-            thread_id=thread_id or reply_to_event_id,
+            thread_id=thread_id,
             requester_id=user_id or self.matrix_id.full_id,
             client=self.client,
-            orchestrator=self.orchestrator,
             config=self.config,
             storage_path=self.storage_path,
         )
@@ -1449,7 +1447,6 @@ class AgentBot:
         openclaw_context = self._build_openclaw_tool_context(
             room_id=room_id,
             thread_id=thread_id,
-            reply_to_event_id=reply_to_event_id,
             user_id=requester_user_id,
         )
         orchestrator = self.orchestrator
@@ -1677,7 +1674,6 @@ class AgentBot:
         openclaw_context = self._build_openclaw_tool_context(
             room_id=room_id,
             thread_id=thread_id,
-            reply_to_event_id=reply_to_event_id,
             user_id=user_id,
         )
 
@@ -1760,7 +1756,6 @@ class AgentBot:
         openclaw_context = self._build_openclaw_tool_context(
             room_id=room_id,
             thread_id=thread_id,
-            reply_to_event_id=reply_to_event_id,
             user_id=user_id,
         )
 
@@ -1890,7 +1885,6 @@ class AgentBot:
         openclaw_context = self._build_openclaw_tool_context(
             room_id=room_id,
             thread_id=thread_id,
-            reply_to_event_id=reply_to_event_id,
             user_id=user_id,
         )
 

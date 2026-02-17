@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -22,10 +22,9 @@ class OpenClawToolContext:
 
     agent_name: str
     room_id: str
-    thread_id: str
+    thread_id: str | None
     requester_id: str
     client: nio.AsyncClient
-    orchestrator: Any
     config: Config
     storage_path: Path
 

@@ -43,7 +43,7 @@ class TestUserIdPassthrough:
                 context = get_openclaw_tool_context()
                 assert context is not None
                 assert context.room_id == "!test:localhost"
-                assert context.thread_id == "$user_msg"
+                assert context.thread_id is None
                 assert context.requester_id == "@alice:localhost"
                 return "Hello!"
 
@@ -87,7 +87,7 @@ class TestUserIdPassthrough:
                 context = get_openclaw_tool_context()
                 assert context is not None
                 assert context.room_id == "!test:localhost"
-                assert context.thread_id == "$user_msg"
+                assert context.thread_id is None
                 assert context.requester_id == "@bob:localhost"
 
                 async def fake_stream() -> AsyncIterator[str]:
