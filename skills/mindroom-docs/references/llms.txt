@@ -30,6 +30,7 @@
 - [Google Services OAuth (Admin)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md)
 - [Google Services OAuth (Individual)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md)
 - [Docker](https://docs.mindroom.chat/deployment/docker/index.md)
+- [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md)
 - [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/index.md)
 - [CLI Reference](https://docs.mindroom.chat/cli/index.md)
 
