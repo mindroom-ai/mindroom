@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -214,9 +215,9 @@ def test_agent_context_files_are_loaded_into_role(mock_storage: MagicMock, tmp_p
     agent = create_agent("general", config=config, storage_path=tmp_path)
 
     assert "## Personality Context" in agent.role
-    assert "## SOUL.md" in agent.role
+    assert "### SOUL.md" in agent.role
     assert "Core personality directive." in agent.role
-    assert "## USER.md" in agent.role
+    assert "### USER.md" in agent.role
     assert "User preference: concise answers." in agent.role
 
 
@@ -240,12 +241,65 @@ def test_agent_memory_dir_is_loaded_into_role(mock_storage: MagicMock, tmp_path:
     agent = create_agent("general", config=config, storage_path=tmp_path)
 
     assert "## Memory Context" in agent.role
-    assert "## memory.md" in agent.role
+    assert "### memory.md" in agent.role
     assert "Long-term memory summary." in agent.role
-    assert f"## {yesterday.isoformat()}.md" in agent.role
+    assert f"### {yesterday.isoformat()}.md" in agent.role
     assert "Yesterday memory note." in agent.role
-    assert f"## {today.isoformat()}.md" in agent.role
+    assert f"### {today.isoformat()}.md" in agent.role
     assert "Today's memory note." in agent.role
+
+
+@patch("mindroom.agents.SqliteDb")
+def test_agent_missing_context_file_is_ignored(mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG001
+    """Missing context files should not prevent agent creation."""
+    config = Config.from_yaml()
+    config.agents["general"].context_files = [str(tmp_path / "does-not-exist.md")]
+
+    agent = create_agent("general", config=config, storage_path=tmp_path)
+
+    assert "## Personality Context" not in agent.role
+    assert "does-not-exist.md" not in agent.role
+
+
+@patch("mindroom.agents.SqliteDb")
+def test_agent_missing_memory_dir_is_ignored(mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG001
+    """Missing memory directories should not prevent agent creation."""
+    config = Config.from_yaml()
+    config.agents["general"].memory_dir = str(tmp_path / "missing-memory-dir")
+
+    agent = create_agent("general", config=config, storage_path=tmp_path)
+
+    assert "## Memory Context" not in agent.role
+
+
+def test_agent_relative_context_paths_resolve_from_config_dir(tmp_path: Path) -> None:
+    """Relative context paths should resolve from the config directory, not CWD."""
+    config = Config.from_yaml()
+    config.timezone = "UTC"
+
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    soul_path = config_dir / "SOUL.md"
+    soul_path.write_text("Relative soul context.", encoding="utf-8")
+    memory_dir = config_dir / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    (memory_dir / "memory.md").write_text("Relative memory context.", encoding="utf-8")
+
+    config.agents["general"].context_files = ["SOUL.md"]
+    config.agents["general"].memory_dir = "memory"
+
+    original_cwd = Path.cwd()
+    other_cwd = tmp_path / "other"
+    other_cwd.mkdir(parents=True, exist_ok=True)
+    os.chdir(other_cwd)
+    try:
+        with patch("mindroom.agents.SqliteDb"), patch("mindroom.agents.CONFIG_PATH", config_dir / "config.yaml"):
+            agent = create_agent("general", config=config, storage_path=tmp_path)
+    finally:
+        os.chdir(original_cwd)
+
+    assert "Relative soul context." in agent.role
+    assert "Relative memory context." in agent.role
 
 
 def test_config_rejects_unknown_agent_knowledge_base_assignment() -> None:
