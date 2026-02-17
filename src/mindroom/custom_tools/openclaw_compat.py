@@ -221,6 +221,31 @@ class OpenClawCompatTools(Toolkit):
             return run
 
     @classmethod
+    def _update_all_runs_status(cls, context: OpenClawToolContext, status: str) -> list[str]:
+        with cls._registry_lock:
+            registry = cls._load_registry(context)
+            runs = registry.get("runs")
+            if not isinstance(runs, dict):
+                return []
+
+            now_iso = cls._now_iso()
+            now_epoch = cls._now_epoch()
+            updated: list[str] = []
+            for run in runs.values():
+                if not isinstance(run, dict):
+                    continue
+                run_id = run.get("run_id")
+                if not isinstance(run_id, str):
+                    continue
+                run["status"] = status
+                run["updated_at"] = now_iso
+                run["updated_at_epoch"] = now_epoch
+                updated.append(run_id)
+
+            cls._save_registry(context, registry)
+            return updated
+
+    @classmethod
     def _list_runs(cls, context: OpenClawToolContext) -> list[dict[str, Any]]:
         with cls._registry_lock:
             registry = cls._load_registry(context)
@@ -321,6 +346,15 @@ class OpenClawCompatTools(Toolkit):
             for session in sessions
         ]
 
+    @staticmethod
+    def _tool_enabled_for_agent(context: OpenClawToolContext, tool_name: str) -> bool:
+        agents = getattr(context.config, "agents", None)
+        if not isinstance(agents, dict):
+            return False
+        agent_config = agents.get(context.agent_name)
+        agent_tools = getattr(agent_config, "tools", None)
+        return isinstance(agent_tools, list) and tool_name in agent_tools
+
     def _read_agent_sessions(self, context: OpenClawToolContext) -> list[dict[str, Any]]:
         db_path = context.storage_path / "sessions" / f"{context.agent_name}.db"
         if not db_path.is_file():
@@ -328,7 +362,10 @@ class OpenClawCompatTools(Toolkit):
 
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
-            rows = conn.execute(self._agent_sessions_query(context.agent_name)).fetchall()
+            try:
+                rows = conn.execute(self._agent_sessions_query(context.agent_name)).fetchall()
+            except sqlite3.OperationalError:
+                return []
 
         sessions: list[dict[str, Any]] = []
         for row in rows:
@@ -352,7 +389,7 @@ class OpenClawCompatTools(Toolkit):
     def _session_key_to_room_thread(session_key: str) -> tuple[str, str | None]:
         marker = ":$"
         if marker in session_key:
-            room_id, thread_suffix = session_key.split(marker, 1)
+            room_id, thread_suffix = session_key.rsplit(marker, 1)
             return room_id, f"${thread_suffix}"
         return session_key, None
 
@@ -461,7 +498,10 @@ class OpenClawCompatTools(Toolkit):
 
             db_path = context.storage_path / "sessions" / f"{context.agent_name}.db"
             with sqlite3.connect(db_path) as conn:
-                row = conn.execute(self._session_runs_query(context.agent_name), (session_key,)).fetchone()
+                try:
+                    row = conn.execute(self._session_runs_query(context.agent_name), (session_key,)).fetchone()
+                except sqlite3.OperationalError:
+                    row = None
             runs = self._decode_runs(row[0] if row else None)
             for run in runs:
                 content_type = str(run.get("content_type", ""))
@@ -648,13 +688,7 @@ class OpenClawCompatTools(Toolkit):
             return self._payload("subagents", "error", action="kill", message="Target run_id is required.")
 
         if target == "all":
-            updated: list[str] = []
-            for run in self._list_runs(context):
-                run_id = run.get("run_id")
-                if not isinstance(run_id, str):
-                    continue
-                self._update_run_status(context, run_id, "killed")
-                updated.append(run_id)
+            updated = self._update_all_runs_status(context, "killed")
             return self._payload("subagents", "ok", action="kill", updated=updated)
 
         updated_run = self._update_run_status(context, target, "killed")
@@ -762,7 +796,7 @@ class OpenClawCompatTools(Toolkit):
         if target is None:
             return self._payload("message", "error", action="react", message="target event_id is required.")
 
-        reaction = message.strip() if message else "👍"
+        reaction = message.strip() if message and message.strip() else "👍"
         content = {
             "m.relates_to": {
                 "rel_type": "m.annotation",
@@ -857,9 +891,11 @@ class OpenClawCompatTools(Toolkit):
 
         normalized_action = action.strip().lower()
         room_id = channel or context.room_id
-        effective_thread_id = thread_id or context.thread_id
 
         if normalized_action in {"send", "thread-reply", "reply"}:
+            effective_thread_id = thread_id
+            if normalized_action in {"thread-reply", "reply"} and effective_thread_id is None:
+                effective_thread_id = context.thread_id
             return await self._message_send_or_reply(
                 context,
                 action=normalized_action,
@@ -878,7 +914,7 @@ class OpenClawCompatTools(Toolkit):
             return await self._message_read(
                 context,
                 room_id=room_id,
-                effective_thread_id=effective_thread_id,
+                effective_thread_id=thread_id or context.thread_id,
             )
 
         return self._payload(
@@ -966,16 +1002,31 @@ class OpenClawCompatTools(Toolkit):
         if not command.strip():
             return self._payload("exec", "error", message="command cannot be empty")
 
-        args = shlex.split(command)
+        context = get_openclaw_tool_context()
+        if context is not None and not self._tool_enabled_for_agent(context, "shell"):
+            return self._payload(
+                "exec",
+                "error",
+                message=f"shell tool is not enabled for agent '{context.agent_name}'.",
+            )
+
+        try:
+            args = shlex.split(command)
+        except ValueError as exc:
+            return self._payload("exec", "error", command=command, message=f"invalid shell command: {exc}")
+
         if not args:
             return self._payload("exec", "error", message="command parsed to empty args")
 
-        result = self._shell.run_shell_command(args)
+        try:
+            result = self._shell.run_shell_command(args)
+        except Exception as exc:
+            return self._payload("exec", "error", command=command, message=str(exc))
+
         return self._payload("exec", "ok", command=command, result=result)
 
     async def process(self, command: str) -> str:
         """Alias for exec."""
-        result = await self.exec(command)
-        parsed = json.loads(result)
+        parsed = json.loads(await self.exec(command))
         parsed["tool"] = "process"
         return json.dumps(parsed, sort_keys=True)

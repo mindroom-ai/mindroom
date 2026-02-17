@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -155,6 +157,124 @@ async def test_openclaw_compat_agents_list_with_runtime_context(tmp_path: Path) 
     assert payload["status"] == "ok"
     assert payload["tool"] == "agents_list"
     assert payload["agents"] == ["code", "research"]
+
+
+@pytest.mark.asyncio
+async def test_openclaw_compat_message_send_does_not_force_current_thread(tmp_path: Path) -> None:
+    """Verify message send stays room-level unless thread_id is explicitly provided."""
+    tool = OpenClawCompatTools()
+    tool._send_matrix_text = AsyncMock(return_value="$evt")
+    config = MagicMock()
+    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
+    ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id="$ctx-thread:localhost",
+        requester_id="@user:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+
+    with openclaw_tool_context(ctx):
+        payload = json.loads(await tool.message(action="send", message="hello"))
+
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "message"
+    assert payload["thread_id"] is None
+    tool._send_matrix_text.assert_awaited_once_with(
+        ctx,
+        room_id="!room:localhost",
+        text="hello",
+        thread_id=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_openclaw_compat_message_reply_uses_context_thread(tmp_path: Path) -> None:
+    """Verify replies default to the active context thread when none is passed."""
+    tool = OpenClawCompatTools()
+    tool._send_matrix_text = AsyncMock(return_value="$evt")
+    config = MagicMock()
+    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
+    ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id="$ctx-thread:localhost",
+        requester_id="@user:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+
+    with openclaw_tool_context(ctx):
+        payload = json.loads(await tool.message(action="reply", message="hello"))
+
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "message"
+    assert payload["thread_id"] == "$ctx-thread:localhost"
+    tool._send_matrix_text.assert_awaited_once_with(
+        ctx,
+        room_id="!room:localhost",
+        text="hello",
+        thread_id="$ctx-thread:localhost",
+    )
+
+
+@pytest.mark.asyncio
+async def test_openclaw_compat_exec_returns_error_for_invalid_shell_syntax() -> None:
+    """Verify malformed shell commands return a structured error payload."""
+    tool = OpenClawCompatTools()
+    payload = json.loads(await tool.exec('echo "unterminated'))
+    assert payload["status"] == "error"
+    assert payload["tool"] == "exec"
+    assert "invalid shell command" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_openclaw_compat_exec_requires_shell_tool_in_context(tmp_path: Path) -> None:
+    """Verify exec is blocked when the active agent does not enable shell tool."""
+    tool = OpenClawCompatTools()
+    config = MagicMock()
+    config.agents = {"openclaw": SimpleNamespace(tools=["file"])}
+    ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id="$ctx-thread:localhost",
+        requester_id="@user:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+
+    with openclaw_tool_context(ctx):
+        payload = json.loads(await tool.exec("echo hi"))
+
+    assert payload["status"] == "error"
+    assert payload["tool"] == "exec"
+    assert "shell tool is not enabled" in payload["message"]
+
+
+def test_openclaw_compat_read_agent_sessions_handles_missing_table(tmp_path: Path) -> None:
+    """Verify session reads tolerate sqlite files without the expected session table."""
+    tool = OpenClawCompatTools()
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir(parents=True)
+    with sqlite3.connect(sessions_dir / "openclaw.db") as conn:
+        conn.execute("CREATE TABLE marker (id INTEGER PRIMARY KEY)")
+    config = MagicMock()
+    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
+    ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id="$ctx-thread:localhost",
+        requester_id="@user:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+
+    assert tool._read_agent_sessions(ctx) == []
 
 
 def test_openclaw_context_readable_inside_context_manager() -> None:
