@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -11,6 +12,9 @@ import mindroom.tools  # noqa: F401
 from mindroom.custom_tools.openclaw_compat import OpenClawCompatTools
 from mindroom.openclaw_context import OpenClawToolContext, get_openclaw_tool_context, openclaw_tool_context
 from mindroom.tools_metadata import TOOL_METADATA, get_tool_by_name
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 OPENCLAW_COMPAT_CORE_TOOLS = {
     "agents_list",
@@ -57,7 +61,6 @@ def test_openclaw_compat_core_tool_names_present() -> None:
     assert OPENCLAW_COMPAT_CORE_TOOLS.issubset(exposed_names)
 
 
-@pytest.mark.xfail(reason="Alias tools not yet implemented (Phase 6)")
 def test_openclaw_compat_alias_tool_names_present() -> None:
     """Lock the alias OpenClaw-compatible tool name contract."""
     tool = OpenClawCompatTools()
@@ -69,43 +72,89 @@ def test_openclaw_compat_alias_tool_names_present() -> None:
 
 @pytest.mark.asyncio
 async def test_openclaw_compat_placeholder_responses_are_json() -> None:
-    """Verify placeholder responses follow a stable JSON structure."""
+    """Verify context-bound tools return structured errors without runtime context."""
     tool = OpenClawCompatTools()
-    responses = [
-        ("agents_list", {}, await tool.agents_list()),
-        ("session_status", {"session_key", "model"}, await tool.session_status()),
-        ("sessions_list", {"kinds", "limit", "active_minutes", "message_limit"}, await tool.sessions_list()),
-        ("sessions_history", {"session_key", "limit", "include_tools"}, await tool.sessions_history("main")),
-        (
-            "sessions_send",
-            {"message", "session_key", "label", "agent_id", "timeout_seconds"},
-            await tool.sessions_send(message="hello", session_key="main"),
-        ),
-        (
-            "sessions_spawn",
-            {"task", "label", "agent_id", "model", "run_timeout_seconds", "timeout_seconds", "cleanup"},
-            await tool.sessions_spawn(task="do this"),
-        ),
-        ("subagents", {"action", "target", "message", "recent_minutes"}, await tool.subagents()),
-        (
-            "message",
-            {"action", "message", "channel", "target", "thread_id"},
-            await tool.message(action="send", message="hi"),
-        ),
-        ("gateway", {"action", "raw", "base_hash", "note"}, await tool.gateway(action="config.get")),
-        ("nodes", {"action", "node"}, await tool.nodes(action="status")),
-        ("canvas", {"action", "node", "target", "url", "java_script"}, await tool.canvas(action="snapshot")),
+    context_required = [
+        ("agents_list", await tool.agents_list()),
+        ("session_status", await tool.session_status()),
+        ("sessions_list", await tool.sessions_list()),
+        ("sessions_history", await tool.sessions_history("main")),
+        ("sessions_send", await tool.sessions_send(message="hello", session_key="main")),
+        ("sessions_spawn", await tool.sessions_spawn(task="do this")),
+        ("subagents", await tool.subagents()),
+        ("message", await tool.message(action="send", message="hi")),
+    ]
+    not_configured = [
+        ("gateway", await tool.gateway(action="config.get")),
+        ("nodes", await tool.nodes(action="status")),
+        ("canvas", await tool.canvas(action="snapshot")),
     ]
 
-    for expected_tool_name, expected_arg_keys, raw_response in responses:
+    for expected_tool_name, raw_response in context_required:
         payload = json.loads(raw_response)
         assert payload["tool"] == expected_tool_name
-        assert payload["status"] == "not_implemented"
-        if expected_arg_keys:
-            assert "args" in payload, f"{expected_tool_name} should include args"
-            assert set(payload["args"].keys()) == expected_arg_keys, (
-                f"{expected_tool_name} args mismatch: {set(payload['args'].keys())} != {expected_arg_keys}"
-            )
+        assert payload["status"] == "error"
+        assert "message" in payload
+
+    for expected_tool_name, raw_response in not_configured:
+        payload = json.loads(raw_response)
+        assert payload["tool"] == expected_tool_name
+        assert payload["status"] == "not_configured"
+        assert "message" in payload
+
+
+@pytest.mark.asyncio
+async def test_openclaw_compat_aliases_return_structured_results() -> None:
+    """Verify alias tools are callable and return stable JSON payloads."""
+    tool = OpenClawCompatTools()
+    tool._duckduckgo.web_search = MagicMock(return_value='{"results": []}')
+    tool._website.read_url = MagicMock(return_value='{"docs": []}')
+    tool._shell.run_shell_command = MagicMock(return_value="ok")
+    tool._scheduler.schedule = AsyncMock(return_value="scheduled")
+
+    web_search_payload = json.loads(await tool.web_search("mindroom"))
+    assert web_search_payload["status"] == "ok"
+    assert web_search_payload["tool"] == "web_search"
+
+    web_fetch_payload = json.loads(await tool.web_fetch("https://example.com"))
+    assert web_fetch_payload["status"] == "ok"
+    assert web_fetch_payload["tool"] == "web_fetch"
+
+    exec_payload = json.loads(await tool.exec("echo hi"))
+    assert exec_payload["status"] == "ok"
+    assert exec_payload["tool"] == "exec"
+
+    process_payload = json.loads(await tool.process("echo hi"))
+    assert process_payload["status"] == "ok"
+    assert process_payload["tool"] == "process"
+
+    cron_payload = json.loads(await tool.cron("in 1 minute remind me to test"))
+    assert cron_payload["status"] == "ok"
+    assert cron_payload["tool"] == "cron"
+
+
+@pytest.mark.asyncio
+async def test_openclaw_compat_agents_list_with_runtime_context(tmp_path: Path) -> None:
+    """Verify context-bound tools can read runtime context when provided."""
+    tool = OpenClawCompatTools()
+    config = MagicMock()
+    config.agents = {"code": MagicMock(), "research": MagicMock()}
+    ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id="$thread:localhost",
+        requester_id="@user:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+
+    with openclaw_tool_context(ctx):
+        payload = json.loads(await tool.agents_list())
+
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "agents_list"
+    assert payload["agents"] == ["code", "research"]
 
 
 def test_openclaw_context_readable_inside_context_manager() -> None:
