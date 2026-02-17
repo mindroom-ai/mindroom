@@ -72,7 +72,7 @@ from .matrix.users import (
     login_agent_user,
 )
 from .memory import store_conversation_memory
-from .openclaw_context import OpenClawToolContext, openclaw_tool_context
+from .openclaw_context import build_openclaw_tool_context, openclaw_tool_context
 from .plugins import load_plugins
 from .response_tracker import ResponseTracker
 from .room_cleanup import cleanup_all_orphaned_bots
@@ -1383,26 +1383,6 @@ class AgentBot:
             config=self.config,
         )
 
-    def _build_openclaw_tool_context(
-        self,
-        room_id: str,
-        thread_id: str | None,
-        user_id: str | None,
-    ) -> OpenClawToolContext | None:
-        """Build runtime context for OpenClaw-compatible tool calls."""
-        if self.client is None:
-            return None
-
-        return OpenClawToolContext(
-            agent_name=self.agent_name,
-            room_id=room_id,
-            thread_id=thread_id,
-            requester_id=user_id or self.matrix_id.full_id,
-            client=self.client,
-            config=self.config,
-            storage_path=self.storage_path,
-        )
-
     async def _generate_team_response_helper(
         self,
         room_id: str,
@@ -1444,10 +1424,14 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             user_id=requester_user_id,
         )
-        openclaw_context = self._build_openclaw_tool_context(
+        openclaw_context = build_openclaw_tool_context(
+            agent_name=self.agent_name,
             room_id=room_id,
             thread_id=thread_id,
-            user_id=requester_user_id,
+            requester_id=requester_user_id or self.matrix_id.full_id,
+            client=self.client,
+            config=self.config,
+            storage_path=self.storage_path,
         )
         orchestrator = self.orchestrator
         if orchestrator is None:
@@ -1671,10 +1655,14 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
         )
-        openclaw_context = self._build_openclaw_tool_context(
+        openclaw_context = build_openclaw_tool_context(
+            agent_name=self.agent_name,
             room_id=room_id,
             thread_id=thread_id,
-            user_id=user_id,
+            requester_id=user_id or self.matrix_id.full_id,
+            client=self.client,
+            config=self.config,
+            storage_path=self.storage_path,
         )
 
         try:
@@ -1753,10 +1741,14 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
         )
-        openclaw_context = self._build_openclaw_tool_context(
+        openclaw_context = build_openclaw_tool_context(
+            agent_name=self.agent_name,
             room_id=room_id,
             thread_id=thread_id,
-            user_id=user_id,
+            requester_id=user_id or self.matrix_id.full_id,
+            client=self.client,
+            config=self.config,
+            storage_path=self.storage_path,
         )
 
         async with typing_indicator(self.client, room_id):
@@ -1882,10 +1874,14 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
         )
-        openclaw_context = self._build_openclaw_tool_context(
+        openclaw_context = build_openclaw_tool_context(
+            agent_name=self.agent_name,
             room_id=room_id,
             thread_id=thread_id,
-            user_id=user_id,
+            requester_id=user_id or self.matrix_id.full_id,
+            client=self.client,
+            config=self.config,
+            storage_path=self.storage_path,
         )
 
         try:

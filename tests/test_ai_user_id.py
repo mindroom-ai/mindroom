@@ -33,7 +33,6 @@ class TestUserIdPassthrough:
         bot.config = Config.from_yaml()
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response_id")
-        bot._build_openclaw_tool_context = AgentBot._build_openclaw_tool_context.__get__(bot, AgentBot)
 
         process_method = AgentBot._process_and_respond
 
@@ -77,7 +76,6 @@ class TestUserIdPassthrough:
         bot.storage_path = tmp_path
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._handle_interactive_question = AsyncMock()
-        bot._build_openclaw_tool_context = AgentBot._build_openclaw_tool_context.__get__(bot, AgentBot)
 
         streaming_method = AgentBot._process_and_respond_streaming
 

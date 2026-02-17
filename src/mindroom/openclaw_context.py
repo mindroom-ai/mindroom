@@ -40,6 +40,31 @@ def get_openclaw_tool_context() -> OpenClawToolContext | None:
     return _OPENCLAW_TOOL_CONTEXT.get()
 
 
+def build_openclaw_tool_context(
+    *,
+    agent_name: str,
+    room_id: str,
+    thread_id: str | None,
+    requester_id: str,
+    client: nio.AsyncClient | None,
+    config: Config,
+    storage_path: Path,
+) -> OpenClawToolContext | None:
+    """Build runtime context for OpenClaw-compatible tool calls."""
+    if client is None:
+        return None
+
+    return OpenClawToolContext(
+        agent_name=agent_name,
+        room_id=room_id,
+        thread_id=thread_id,
+        requester_id=requester_id,
+        client=client,
+        config=config,
+        storage_path=storage_path,
+    )
+
+
 @contextmanager
 def openclaw_tool_context(context: OpenClawToolContext | None) -> Iterator[None]:
     """Set OpenClaw-compatible tool context for the current async scope."""
