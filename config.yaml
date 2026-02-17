@@ -353,7 +353,12 @@ authorization:
   global_users:
   - '@test:m-test-4.mindroom.chat'
   room_permissions: {}
+bot_accounts: []
+mindroom_user:
+  display_name: MindRoomUser
+  username: mindroom_user
 defaults:
+  enable_streaming: true
   learning: true
   learning_mode: always
   markdown: true
