@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
@@ -14,15 +15,13 @@ from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProf
 
 from . import agent_prompts
 from . import tools as _tools_module  # noqa: F401
-from .constants import ROUTER_AGENT_NAME, STORAGE_PATH_OBJ
+from .constants import CONFIG_PATH, ROUTER_AGENT_NAME, STORAGE_PATH_OBJ
 from .logging_config import get_logger
 from .plugins import load_plugins
 from .skills import build_agent_skills
 from .tools_metadata import get_tool_by_name
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from agno.knowledge.protocol import KnowledgeProtocol
     from agno.models.base import Model
 
@@ -76,6 +75,77 @@ Today is {date_str}.
 The current time is {time_str} ({timezone_str} timezone).
 
 """
+
+
+def _resolve_context_path(raw_path: str, config_base_dir: Path) -> Path:
+    """Resolve a configured path relative to the config directory when needed."""
+    unresolved = Path(raw_path).expanduser()
+    if unresolved.is_absolute():
+        return unresolved.resolve()
+    return (config_base_dir / unresolved).resolve()
+
+
+def _load_context_files(context_files: list[str], config_base_dir: Path) -> str:
+    """Load configured context files and return a formatted block."""
+    loaded_parts: list[str] = []
+    for raw_path in context_files:
+        resolved_path = _resolve_context_path(raw_path, config_base_dir)
+        if resolved_path.is_file():
+            loaded_parts.append(f"### {resolved_path.name}\n{resolved_path.read_text(encoding='utf-8').strip()}")
+        else:
+            logger.warning(f"Context file not found: {resolved_path}")
+    if not loaded_parts:
+        return ""
+    return "\n\n".join(loaded_parts) + "\n\n"
+
+
+def _load_memory_dir_context(memory_dir: str, timezone_str: str, config_base_dir: Path) -> str:
+    """Load memory.md plus today's and yesterday's dated memory files."""
+    resolved_dir = _resolve_context_path(memory_dir, config_base_dir)
+    if not resolved_dir.is_dir():
+        logger.warning(f"Memory directory not found: {resolved_dir}")
+        return ""
+
+    memory_parts: list[str] = []
+    memory_md = resolved_dir / "memory.md"
+    if memory_md.is_file():
+        memory_parts.append(f"### memory.md\n{memory_md.read_text(encoding='utf-8').strip()}")
+
+    today = datetime.now(ZoneInfo(timezone_str)).date()
+    yesterday = today - timedelta(days=1)
+    for target_date in (yesterday, today):
+        target_file = resolved_dir / f"{target_date.isoformat()}.md"
+        if target_file.is_file():
+            memory_parts.append(f"### {target_file.name}\n{target_file.read_text(encoding='utf-8').strip()}")
+
+    if not memory_parts:
+        return ""
+    return "\n\n".join(memory_parts) + "\n\n"
+
+
+def _build_additional_context(
+    agent_config: AgentConfig,
+    timezone_str: str,
+    config_base_dir: Path,
+) -> str:
+    """Build additional role context from configured files/directories.
+
+    This is evaluated when the agent is created (and re-created on config
+    reload), so file content snapshots update on agent hot-reload.
+    """
+    additional_context = ""
+
+    if agent_config.context_files:
+        context_files_block = _load_context_files(agent_config.context_files, config_base_dir)
+        if context_files_block:
+            additional_context += "## Personality Context\n" + context_files_block
+
+    if agent_config.memory_dir:
+        memory_context_block = _load_memory_dir_context(agent_config.memory_dir, timezone_str, config_base_dir)
+        if memory_context_block:
+            additional_context += "## Memory Context\n" + memory_context_block
+
+    return additional_context
 
 
 # Rich prompt mapping - agents that use detailed prompts instead of simple roles
@@ -289,6 +359,9 @@ def create_agent(  # noqa: PLR0915
 
     # Combine identity and datetime contexts
     full_context = identity_context + datetime_context
+
+    config_base_dir = CONFIG_PATH.expanduser().resolve().parent
+    full_context += _build_additional_context(agent_config, config.timezone, config_base_dir)
 
     # Use rich prompt if available, otherwise use YAML config
     if agent_name in RICH_PROMPTS:

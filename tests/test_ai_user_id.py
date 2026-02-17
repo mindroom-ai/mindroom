@@ -10,6 +10,7 @@ import pytest
 from mindroom.ai import ai_response, stream_agent_response
 from mindroom.bot import AgentBot
 from mindroom.config import Config
+from mindroom.openclaw_context import get_openclaw_tool_context
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -32,11 +33,21 @@ class TestUserIdPassthrough:
         bot.config = Config.from_yaml()
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response_id")
+        bot._build_openclaw_tool_context = AgentBot._build_openclaw_tool_context.__get__(bot, AgentBot)
 
         process_method = AgentBot._process_and_respond
 
         with patch("mindroom.bot.ai_response") as mock_ai:
-            mock_ai.return_value = "Hello!"
+
+            async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
+                context = get_openclaw_tool_context()
+                assert context is not None
+                assert context.room_id == "!test:localhost"
+                assert context.thread_id is None
+                assert context.requester_id == "@alice:localhost"
+                return "Hello!"
+
+            mock_ai.side_effect = fake_ai_response
 
             await process_method(
                 bot,
@@ -66,15 +77,25 @@ class TestUserIdPassthrough:
         bot.storage_path = tmp_path
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._handle_interactive_question = AsyncMock()
+        bot._build_openclaw_tool_context = AgentBot._build_openclaw_tool_context.__get__(bot, AgentBot)
 
         streaming_method = AgentBot._process_and_respond_streaming
 
         with patch("mindroom.bot.stream_agent_response") as mock_stream:
 
-            async def fake_stream() -> AsyncIterator[str]:
-                yield "Hello!"
+            def fake_stream_agent_response(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+                context = get_openclaw_tool_context()
+                assert context is not None
+                assert context.room_id == "!test:localhost"
+                assert context.thread_id is None
+                assert context.requester_id == "@bob:localhost"
 
-            mock_stream.return_value = fake_stream()
+                async def fake_stream() -> AsyncIterator[str]:
+                    yield "Hello!"
+
+                return fake_stream()
+
+            mock_stream.side_effect = fake_stream_agent_response
 
             with patch("mindroom.bot.send_streaming_response") as mock_send_streaming:
                 mock_send_streaming.return_value = ("$msg_id", "Hello!")
