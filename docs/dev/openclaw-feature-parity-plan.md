@@ -154,8 +154,10 @@ For each commit:
 - Review rounds for `729ebaa3`:
   - Round 1:
     - Reviewer A (`gpt-oss-low:20b` local): APPROVE.
-    - Reviewer B (`qwen3-thinking:8b` local): CHANGES REQUIRED (doc/status concerns; mixed low-signal config comments).
-    - Reviewer C (`devstral:24b` local fallback while `claude` session stalled): CHANGES REQUIRED (mostly non-blocking config/doc comments).
+    - Reviewer B (`qwen3-thinking:8b` local): CHANGES REQUIRED (Phase 6 tracker status still showed "in progress"; requested explicit closure update).
+    - Reviewer C (`devstral:24b` local fallback while `claude` session stalled): CHANGES REQUIRED (requested clearer documentation of round outcomes; also raised non-blocking comments on cluster defaults outside OpenClaw scope).
   - Resolution:
     - Updated this tracker to mark Phase 6 complete with commit reference.
+    - Expanded the review notes to spell out exact reviewer concerns and outcomes.
     - Confirmed `openclaw` rollout fields are present in both config files and obsolete instructions are removed.
+    - Resolution summary: no additional runtime code changes were required for Phase 6; remaining comments were documentation clarity items.
