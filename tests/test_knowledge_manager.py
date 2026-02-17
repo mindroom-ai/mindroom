@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, call
 
@@ -228,11 +229,10 @@ async def test_sync_git_repository_updates_index_for_changed_and_deleted_files(
         storage_path=tmp_path / "storage",
     )
 
-    monkeypatch.setattr(
-        manager,
-        "_sync_git_repository_once",
-        lambda _git_config: ({"docs/new.md", "docs/updated.md"}, {"docs/deleted.md"}, True),
-    )
+    async def _sync_once(_git_config: object) -> tuple[set[str], set[str], bool]:
+        return {"docs/new.md", "docs/updated.md"}, {"docs/deleted.md"}, True
+
+    monkeypatch.setattr(manager, "_sync_git_repository_once", _sync_once)
     manager.index_file = AsyncMock(return_value=True)
     manager.remove_file = AsyncMock(return_value=True)
 
@@ -247,6 +247,92 @@ async def test_sync_git_repository_updates_index_for_changed_and_deleted_files(
         ],
         any_order=False,
     )
+
+
+@pytest.mark.asyncio
+async def test_run_git_redacts_credentials_in_error_message(
+    dummy_manager: KnowledgeManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Git command errors should not leak embedded URL credentials."""
+
+    class _FailingProcess:
+        returncode = 128
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return (
+                b"",
+                (
+                    b"fatal: unable to access "
+                    b"'https://x-access-token:secret-token@github.com/example/private.git/': "
+                    b"The requested URL returned error: 403"
+                ),
+            )
+
+    async def _fake_create_subprocess_exec(*args: object, **kwargs: object) -> _FailingProcess:
+        _ = args, kwargs
+        return _FailingProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    with pytest.raises(RuntimeError, match="Git command failed") as exc_info:
+        await dummy_manager._run_git(
+            [
+                "clone",
+                "https://x-access-token:secret-token@github.com/example/private.git",
+                "dest",
+            ],
+        )
+
+    message = str(exc_info.value)
+    assert "secret-token" not in message
+    assert "x-access-token:***@github.com/example/private.git" in message
+
+
+@pytest.mark.asyncio
+async def test_run_git_cancellation_kills_subprocess(
+    dummy_manager: KnowledgeManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancelling a git command should terminate and reap the child process."""
+    wait_forever = asyncio.Event()
+
+    class _HangingProcess:
+        returncode: int | None = None
+
+        def __init__(self) -> None:
+            self.kill_called = False
+            self.wait_called = False
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            await wait_forever.wait()
+            return b"", b""
+
+        def kill(self) -> None:
+            self.kill_called = True
+
+        async def wait(self) -> int:
+            self.wait_called = True
+            self.returncode = -9
+            return -9
+
+    process = _HangingProcess()
+
+    async def _fake_create_subprocess_exec(*args: object, **kwargs: object) -> _HangingProcess:
+        _ = args, kwargs
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    task = asyncio.create_task(dummy_manager._run_git(["fetch", "origin", "main"]))
+    await asyncio.sleep(0)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert process.kill_called is True
+    assert process.wait_called is True
 
 
 def test_list_files_skips_hidden_paths_when_git_skip_hidden_enabled(
