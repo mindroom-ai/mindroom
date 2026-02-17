@@ -130,11 +130,14 @@ mindroom run
 
 - [Getting Started](getting-started.md) - Installation and first steps
 - [Configuration](configuration/index.md) - All configuration options
+- [Cultures](configuration/cultures.md) - Configure shared agent cultures
 - [Dashboard](dashboard.md) - Web UI for configuration
 - [OpenAI-Compatible API](openai-api.md) - Use agents from any OpenAI-compatible client
 - [Tools](tools/index.md) - Available tool integrations
+- [MCP (Planned)](tools/mcp.md) - Native MCP status and current plugin workaround
 - [Skills](skills.md) - OpenClaw-compatible skills system
 - [Plugins](plugins.md) - Extend with custom tools and skills
+- [Knowledge Bases](knowledge.md) - Configure RAG-backed document indexing
 - [Memory System](memory.md) - How agent memory works
 - [Scheduling](scheduling.md) - Schedule tasks with cron or natural language
 - [Voice Messages](voice.md) - Voice message transcription
