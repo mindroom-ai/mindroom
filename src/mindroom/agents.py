@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
@@ -14,7 +14,7 @@ from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProf
 
 from . import agent_prompts
 from . import tools as _tools_module  # noqa: F401
-from .constants import ROUTER_AGENT_NAME, STORAGE_PATH_OBJ
+from .constants import ROUTER_AGENT_NAME, STORAGE_PATH_OBJ, resolve_config_relative_path
 from .logging_config import get_logger
 from .plugins import load_plugins
 from .skills import build_agent_skills
@@ -76,6 +76,68 @@ Today is {date_str}.
 The current time is {time_str} ({timezone_str} timezone).
 
 """
+
+
+def _load_context_files(context_files: list[str]) -> str:
+    """Load configured context files and return a formatted block."""
+    loaded_parts: list[str] = []
+    for raw_path in context_files:
+        resolved_path = resolve_config_relative_path(raw_path)
+        if resolved_path.is_file():
+            loaded_parts.append(f"### {resolved_path.name}\n{resolved_path.read_text(encoding='utf-8').strip()}")
+        else:
+            logger.warning(f"Context file not found: {resolved_path}")
+    if not loaded_parts:
+        return ""
+    return "\n\n".join(loaded_parts) + "\n\n"
+
+
+def _load_memory_dir_context(memory_dir: str, timezone_str: str) -> str:
+    """Load MEMORY.md plus today's and yesterday's dated memory files."""
+    resolved_dir = resolve_config_relative_path(memory_dir)
+    if not resolved_dir.is_dir():
+        logger.warning(f"Memory directory not found: {resolved_dir}")
+        return ""
+
+    memory_parts: list[str] = []
+    memory_md = resolved_dir / "MEMORY.md"
+    if memory_md.is_file():
+        memory_parts.append(f"### MEMORY.md\n{memory_md.read_text(encoding='utf-8').strip()}")
+
+    today = datetime.now(ZoneInfo(timezone_str)).date()
+    yesterday = today - timedelta(days=1)
+    for target_date in (yesterday, today):
+        target_file = resolved_dir / f"{target_date.isoformat()}.md"
+        if target_file.is_file():
+            memory_parts.append(f"### {target_file.name}\n{target_file.read_text(encoding='utf-8').strip()}")
+
+    if not memory_parts:
+        return ""
+    return "\n\n".join(memory_parts) + "\n\n"
+
+
+def _build_additional_context(
+    agent_config: AgentConfig,
+    timezone_str: str,
+) -> str:
+    """Build additional role context from configured files/directories.
+
+    This is evaluated when the agent is created (and re-created on config
+    reload), so file content snapshots update on agent hot-reload.
+    """
+    additional_context = ""
+
+    if agent_config.context_files:
+        context_files_block = _load_context_files(agent_config.context_files)
+        if context_files_block:
+            additional_context += "## Personality Context\n" + context_files_block
+
+    if agent_config.memory_dir:
+        memory_context_block = _load_memory_dir_context(agent_config.memory_dir, timezone_str)
+        if memory_context_block:
+            additional_context += "## Memory Context\n" + memory_context_block
+
+    return additional_context
 
 
 # Rich prompt mapping - agents that use detailed prompts instead of simple roles
@@ -289,6 +351,8 @@ def create_agent(  # noqa: PLR0915
 
     # Combine identity and datetime contexts
     full_context = identity_context + datetime_context
+
+    full_context += _build_additional_context(agent_config, config.timezone)
 
     # Use rich prompt if available, otherwise use YAML config
     if agent_name in RICH_PROMPTS:

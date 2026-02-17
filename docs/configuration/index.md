@@ -77,6 +77,11 @@ agents:
     learning: true                 # Optional: Override default (inherits from defaults section)
     learning_mode: always          # Optional: Override default (inherits from defaults section)
     knowledge_bases: [docs]         # Optional: Assign one or more configured knowledge bases
+    context_files:                 # Optional: Load files into role context at init/reload
+      - ./openclaw_data/SOUL.md
+      - ./openclaw_data/USER.md
+      - ./openclaw_data/AGENTS.md
+    memory_dir: ./openclaw_data/memory  # Optional: Load MEMORY.md + dated files from this dir
 
 # Model configurations (at least a "default" model is recommended)
 models:
@@ -213,5 +218,6 @@ timezone: America/Los_Angeles      # Default: UTC
 - All top-level sections are optional with sensible defaults, but you need at least one agent
 - A model named `default` is required unless all agents/teams specify explicit models
 - Agents can set `knowledge_bases`, but each entry must exist in the top-level `knowledge_bases` section
+- `agents.<name>.context_files` and `agents.<name>.memory_dir` inject file-based context at agent creation/reload (see [Agents](agents.md))
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
 - The `memory` system works out of the box with OpenAI; use `memory.llm` for memory summarization with a different provider

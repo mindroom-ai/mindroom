@@ -12,6 +12,7 @@ from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.openclaw_context import get_openclaw_tool_context
 from mindroom.scheduling_context import get_scheduling_tool_context
 
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
@@ -67,6 +68,7 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
 
     async def fake_team_response(*_args: object, **_kwargs: object) -> str:
         assert get_scheduling_tool_context() is not None
+        assert get_openclaw_tool_context() is not None
         return "team non-streaming response"
 
     bot._run_cancellable_response = AsyncMock(side_effect=fake_run_cancellable_response)
@@ -108,6 +110,7 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
 
     async def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
         assert get_scheduling_tool_context() is not None
+        assert get_openclaw_tool_context() is not None
         yield "stream chunk"
 
     bot._run_cancellable_response = AsyncMock(side_effect=fake_run_cancellable_response)

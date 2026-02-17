@@ -135,6 +135,30 @@ def dummy_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> KnowledgeM
     return KnowledgeManager(base_id="research", config=config, storage_path=tmp_path / "storage")
 
 
+def test_knowledge_base_relative_path_resolves_from_config_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Knowledge base relative paths should resolve from the config directory."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.Knowledge", _DummyKnowledge)
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml")
+
+    config = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(path="knowledge", watch=False),
+        },
+    )
+    manager = KnowledgeManager(base_id="research", config=config, storage_path=tmp_path / "storage")
+
+    assert manager.knowledge_path == (config_dir / "knowledge").resolve()
+
+
 def test_resolve_file_path_rejects_traversal(dummy_manager: KnowledgeManager) -> None:
     """resolve_file_path should reject escapes outside the knowledge root."""
     with pytest.raises(ValueError, match="outside knowledge folder"):

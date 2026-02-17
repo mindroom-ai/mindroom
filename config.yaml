@@ -233,6 +233,45 @@ agents:
     tools:
     - duckduckgo
     - newspaper
+  openclaw:
+    display_name: OpenClawAgent
+    # Drop-in OpenClaw workspace import.
+    # Place your files under ./openclaw_data/ (SOUL.md, AGENTS.md, USER.md, MEMORY.md, memory/*.md, etc).
+    instructions:
+    - Load identity and behavior from context files before acting.
+    - Persist new context to daily memory files and curate long-term memory.
+    - Use knowledge search for older history beyond recent daily files.
+    - Ask before external/public actions and destructive shell operations.
+    include_default_tools: false
+    learning: false
+    learning_mode: always
+    context_files:
+    - ./openclaw_data/SOUL.md
+    - ./openclaw_data/AGENTS.md
+    - ./openclaw_data/USER.md
+    - ./openclaw_data/IDENTITY.md
+    - ./openclaw_data/MEMORY.md
+    - ./openclaw_data/TOOLS.md
+    - ./openclaw_data/HEARTBEAT.md
+    memory_dir: ./openclaw_data/memory
+    knowledge_bases:
+    - openclaw_memory
+    model: opus
+    role: OpenClaw-style personal assistant with persistent file-based identity
+      and memory.
+    rooms:
+    - personal
+    skills:
+    - transcribe
+    tools:
+    - file
+    - shell
+    - scheduler
+    - duckduckgo
+    - website
+    - openclaw_compat
+    - python
+    - calculator
   research:
     display_name: ResearchAgent
     instructions:
@@ -363,7 +402,11 @@ defaults:
   learning_mode: always
   markdown: true
   show_stop_button: true
-knowledge_bases: {}
+knowledge_bases:
+  openclaw_memory:
+    # Semantic search over historical memory files (beyond today's/yesterday's preload).
+    path: ./openclaw_data/memory
+    watch: true
 memory:
   embedder:
     config:

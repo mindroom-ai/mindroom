@@ -134,6 +134,9 @@ agents:
     tools:
       - tool_name_1
       - tool_name_2
+    include_default_tools: true  # Optional: merge defaults.tools into this agent's tools
+    skills:
+      - skill_name_1
     instructions:
       - "Specific behavior instruction 1"
       - "Specific behavior instruction 2"
@@ -142,6 +145,12 @@ agents:
       - dev
     learning: true  # Optional: enable Agno Learning (defaults to true)
     learning_mode: "always"  # Optional: "always" or "agentic"
+    knowledge_bases:
+      - docs
+    context_files:
+      - ./workspace/SOUL.md
+      - ./workspace/USER.md
+    memory_dir: ./workspace/memory
     model: "anthropic"  # Optional: specific model for this agent (overrides default)
 ```
 
@@ -151,11 +160,25 @@ agents:
 - **display_name**: A friendly name shown in conversations
 - **role**: A brief description of the agent's purpose
 - **tools**: List of tools the agent can use (see Available Tools below)
+- **include_default_tools**: Whether to merge `defaults.tools` into this agent's `tools` (default: true)
+- **skills**: Skill names the agent can use
 - **instructions**: Specific guidelines for the agent's behavior
 - **rooms**: List of room aliases where this agent should be active
 - **learning**: Enable Agno Learning for this agent (default: true)
 - **learning_mode**: Learning mode (`always` or `agentic`, default: `always`)
+- **knowledge_bases**: List of configured knowledge base IDs assigned to this agent
+- **context_files**: File paths loaded into role context when the agent is created/reloaded
+- **memory_dir**: Directory loaded into role context for `MEMORY.md` plus yesterday/today `YYYY-MM-DD.md` files
 - **model**: (Optional) Specific model to use for this agent, overrides the default model
+
+### File-Based Context Loading
+
+`context_files` and `memory_dir` are useful for OpenClaw-style file memory patterns:
+
+- Paths are resolved relative to `config.yaml`
+- `context_files` are injected in listed order
+- `memory_dir` loads `MEMORY.md` (uppercase) and dated memory files for yesterday/today
+- Content is refreshed when agents are created or reloaded
 
 ## Room Configuration
 

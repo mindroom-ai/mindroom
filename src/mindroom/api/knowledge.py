@@ -10,7 +10,7 @@ from urllib.parse import unquote
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from mindroom.config import Config
-from mindroom.constants import STORAGE_PATH_OBJ
+from mindroom.constants import STORAGE_PATH_OBJ, resolve_config_relative_path
 from mindroom.knowledge import (
     KnowledgeManager,
     get_knowledge_manager,
@@ -30,7 +30,7 @@ def _ensure_base_exists(config: Config, base_id: str) -> None:
 
 def _knowledge_root(config: Config, base_id: str, *, create: bool = False) -> Path:
     _ensure_base_exists(config, base_id)
-    root = Path(config.knowledge_bases[base_id].path).expanduser().resolve()
+    root = resolve_config_relative_path(config.knowledge_bases[base_id].path)
     if create:
         root.mkdir(parents=True, exist_ok=True)
     return root

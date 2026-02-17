@@ -59,6 +59,15 @@ agents:
 
     # Assign agent to one or more configured knowledge bases (optional)
     knowledge_bases: [docs]
+
+    # Optional: additional files loaded into role context at agent init/reload
+    context_files:
+      - ./openclaw_data/SOUL.md
+      - ./openclaw_data/USER.md
+      - ./openclaw_data/AGENTS.md
+
+    # Optional: directory-based memory context (MEMORY.md + dated files)
+    memory_dir: ./openclaw_data/memory
 ```
 
 ## Configuration Options
@@ -77,12 +86,33 @@ agents:
 | `learning`              | bool   | `true`      | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time           |
 | `learning_mode`         | string | `"always"`  | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call                                      |
 | `knowledge_bases`       | list   | `[]`        | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                                |
+| `context_files`         | list   | `[]`        | File paths loaded at agent init/reload and prepended to role context (under `Personality Context`)                                                       |
+| `memory_dir`            | string | `null`      | Directory loaded at agent init/reload for `MEMORY.md` and dated files (under `Memory Context`)                                                           |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
 
 All per-agent settings above that show a default value inherit from the `defaults` section. Per-agent values override them.
 
 Learning data is persisted to `mindroom_data/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted.
+
+## File-Based Context Loading
+
+You can inject file content directly into an agent's role context without using a knowledge base.
+
+`context_files` behavior:
+
+- Paths are resolved relative to the config file directory
+- Existing files are loaded in list order and added under `Personality Context`
+- Missing files are skipped with a warning in logs
+
+`memory_dir` behavior:
+
+- Paths are resolved relative to the config file directory
+- Loads `MEMORY.md` (uppercase) if present
+- Loads dated files named `YYYY-MM-DD.md` for yesterday and today
+- Content is added under `Memory Context`
+
+This loading happens when the agent is created (and on config reload), not continuously on every message.
 
 ## Rich Prompt Agents
 

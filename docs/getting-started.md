@@ -85,6 +85,9 @@ agents:
     model: default
     include_default_tools: true
     rooms: [lobby]
+    # Optional: file-based context (OpenClaw-style)
+    # context_files: [./workspace/SOUL.md, ./workspace/USER.md]
+    # memory_dir: ./workspace/memory
 
 models:
   default:
@@ -140,5 +143,6 @@ MindRoom will:
 ## Next Steps
 
 - Learn about [agent configuration](configuration/agents.md)
+- Learn about [OpenClaw workspace import](openclaw.md) if you want file-based memory/context patterns
 - Explore [available tools](tools/index.md)
 - Set up [teams for multi-agent collaboration](configuration/teams.md)

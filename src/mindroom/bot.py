@@ -72,6 +72,7 @@ from .matrix.users import (
     login_agent_user,
 )
 from .memory import store_conversation_memory
+from .openclaw_context import OpenClawToolContext, openclaw_tool_context
 from .plugins import load_plugins
 from .response_tracker import ResponseTracker
 from .room_cleanup import cleanup_all_orphaned_bots
@@ -1382,6 +1383,27 @@ class AgentBot:
             config=self.config,
         )
 
+    def _build_openclaw_context(
+        self,
+        room_id: str,
+        thread_id: str | None,
+        user_id: str | None,
+        *,
+        agent_name: str | None = None,
+    ) -> OpenClawToolContext | None:
+        """Build runtime context for OpenClaw-compatible tool calls."""
+        if self.client is None:
+            return None
+        return OpenClawToolContext(
+            agent_name=agent_name or self.agent_name,
+            room_id=room_id,
+            thread_id=thread_id,
+            requester_id=user_id or self.matrix_id.full_id,
+            client=self.client,
+            config=self.config,
+            storage_path=self.storage_path,
+        )
+
     async def _generate_team_response_helper(
         self,
         room_id: str,
@@ -1423,6 +1445,7 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             user_id=requester_user_id,
         )
+        openclaw_context = self._build_openclaw_context(room_id, thread_id, requester_user_id)
         orchestrator = self.orchestrator
         if orchestrator is None:
             msg = "Orchestrator is not set"
@@ -1435,7 +1458,7 @@ class AgentBot:
             if use_streaming and not existing_event_id:
                 # Show typing indicator while team generates streaming response
                 async with typing_indicator(client, room_id):
-                    with scheduling_tool_context(scheduler_context):
+                    with scheduling_tool_context(scheduler_context), openclaw_tool_context(openclaw_context):
                         response_stream = team_response_stream(
                             agent_ids=team_agents,
                             message=message,
@@ -1471,7 +1494,7 @@ class AgentBot:
             else:
                 # Show typing indicator while team generates non-streaming response
                 async with typing_indicator(client, room_id):
-                    with scheduling_tool_context(scheduler_context):
+                    with scheduling_tool_context(scheduler_context), openclaw_tool_context(openclaw_context):
                         response_text = await team_response(
                             agent_names=agent_names,
                             mode=mode,
@@ -1645,11 +1668,12 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
         )
+        openclaw_context = self._build_openclaw_context(room_id, thread_id, user_id)
 
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
-                with scheduling_tool_context(scheduler_context):
+                with scheduling_tool_context(scheduler_context), openclaw_tool_context(openclaw_context):
                     response_text = await ai_response(
                         agent_name=self.agent_name,
                         prompt=prompt,
@@ -1722,9 +1746,10 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
         )
+        openclaw_context = self._build_openclaw_context(room_id, thread_id, user_id, agent_name=agent_name)
 
         async with typing_indicator(self.client, room_id):
-            with scheduling_tool_context(scheduler_context):
+            with scheduling_tool_context(scheduler_context), openclaw_tool_context(openclaw_context):
                 response_text = await ai_response(
                     agent_name=agent_name,
                     prompt=prompt,
@@ -1846,11 +1871,12 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
         )
+        openclaw_context = self._build_openclaw_context(room_id, thread_id, user_id)
 
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
-                with scheduling_tool_context(scheduler_context):
+                with scheduling_tool_context(scheduler_context), openclaw_tool_context(openclaw_context):
                     response_stream = stream_agent_response(
                         agent_name=self.agent_name,
                         prompt=prompt,

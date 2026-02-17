@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import mindroom.api.knowledge as knowledge_api
 from mindroom.config import Config, KnowledgeBaseConfig, KnowledgeGitConfig
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     import pytest
     from fastapi.testclient import TestClient
 
@@ -63,6 +63,21 @@ def test_knowledge_bases_list_initializes_managers_with_full_reindex(
     assert payload["bases"][0]["file_count"] == 4
     init_managers.assert_awaited_once()
     assert init_managers.await_args.kwargs["reindex_on_create"] is True
+
+
+def test_knowledge_root_resolves_relative_path_from_config_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Knowledge API should resolve relative base paths from the config directory."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml")
+    config = _knowledge_config(path=Path("knowledge"))
+
+    root = knowledge_api._knowledge_root(config, "research")
+
+    assert root == (config_dir / "knowledge").resolve()
 
 
 def test_knowledge_files_list_uses_manager_filters_when_available(
