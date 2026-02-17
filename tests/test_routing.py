@@ -429,6 +429,7 @@ class TestAgentDescription:
     def test_describe_agent_without_tools(self) -> None:
         """Test describing an agent without tools."""
         config = Config.from_yaml()
+        config.defaults.tools = []
         description = describe_agent("general", config)
 
         assert "general" in description
@@ -452,6 +453,27 @@ class TestAgentDescription:
 
         assert "Prefer numerical stability over speed." in description
         assert "Use the calculator tools" not in description
+
+    def test_describe_agent_includes_default_tools(self) -> None:
+        """Agent descriptions include defaults.tools when agent has no local tools."""
+        config = Config.from_yaml()
+        config.defaults.tools = ["scheduler"]
+        config.agents["general"].tools = []
+
+        description = describe_agent("general", config)
+
+        assert "Tools: scheduler" in description
+
+    def test_describe_agent_can_opt_out_of_default_tools(self) -> None:
+        """Agent descriptions omit defaults.tools when include_default_tools is false."""
+        config = Config.from_yaml()
+        config.defaults.tools = ["scheduler"]
+        config.agents["general"].tools = []
+        config.agents["general"].include_default_tools = False
+
+        description = describe_agent("general", config)
+
+        assert "Tools:" not in description
 
     def test_describe_unknown_agent(self) -> None:
         """Test describing an unknown agent."""

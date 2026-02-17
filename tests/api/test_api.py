@@ -230,6 +230,7 @@ def test_save_config(test_client: TestClient, temp_config_file: Path) -> None:
     assert saved_config["models"]["default"]["id"] == "test-model-2"
     assert "new_agent" in saved_config["agents"]
     assert saved_config["defaults"] == {
+        "tools": ["scheduler"],
         "markdown": True,
         "enable_streaming": True,
         "show_stop_button": False,

@@ -52,6 +52,31 @@ class TestConfigInit:
         assert "agents:" in content
         assert "# MindRoom Configuration (minimal)" in content
 
+    def test_init_creates_env_with_dashboard_key(self, tmp_path: Path) -> None:
+        """Config init writes a random MINDROOM_API_KEY to .env."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target)])
+        assert result.exit_code == 0
+
+        env_path = tmp_path / ".env"
+        assert env_path.exists()
+
+        content = env_path.read_text()
+        backend_match = re.search(r"^MINDROOM_API_KEY=(.+)$", content, flags=re.MULTILINE)
+        assert backend_match is not None
+        assert backend_match.group(1)
+        # VITE_API_KEY should NOT be in the template (auth is handled at proxy layer)
+        assert "VITE_API_KEY" not in content
+
+    def test_init_force_does_not_overwrite_existing_env(self, tmp_path: Path) -> None:
+        """Config init --force should never overwrite an existing .env file."""
+        target = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        env_path.write_text("ANTHROPIC_API_KEY=sk-existing\n")
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--force"])
+        assert result.exit_code == 0
+        assert env_path.read_text() == "ANTHROPIC_API_KEY=sk-existing\n"
+
     def test_init_refuses_overwrite_without_force(self, tmp_path: Path) -> None:
         """Config init prompts before overwriting and aborts on 'n'."""
         target = tmp_path / "config.yaml"

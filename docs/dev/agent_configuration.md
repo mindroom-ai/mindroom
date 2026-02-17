@@ -405,6 +405,7 @@ agents:
 
 # Defaults
 defaults:
+  tools: [scheduler]
   markdown: true
 
 # Router

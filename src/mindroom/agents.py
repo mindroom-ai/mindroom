@@ -33,7 +33,6 @@ logger = get_logger(__name__)
 
 # Maximum length for instruction descriptions to include in agent summary
 MAX_INSTRUCTION_LENGTH = 100
-DEFAULT_AGENT_TOOL_NAMES = ["scheduler"]
 
 
 @dataclass
@@ -208,7 +207,6 @@ def create_agent(  # noqa: C901, PLR0912, PLR0915
     *,
     storage_path: Path | None = None,
     knowledge: KnowledgeProtocol | None = None,
-    include_default_tools: bool = True,
     include_interactive_questions: bool = True,
 ) -> Agent:
     """Create an agent instance from configuration.
@@ -219,9 +217,6 @@ def create_agent(  # noqa: C901, PLR0912, PLR0915
         storage_path: Runtime storage path. Falls back to the
             module-level ``STORAGE_PATH_OBJ`` when *None*.
         knowledge: Optional shared knowledge base instance for RAG-enabled agents.
-        include_default_tools: Whether to include DEFAULT_AGENT_TOOL_NAMES
-            (e.g. "scheduler"). Set to False when creating agents outside
-            of Matrix context where those tools are unavailable.
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
@@ -243,11 +238,7 @@ def create_agent(  # noqa: C901, PLR0912, PLR0915
 
     load_plugins(config)
 
-    tool_names = list(agent_config.tools)
-    if include_default_tools:
-        for default_tool_name in DEFAULT_AGENT_TOOL_NAMES:
-            if default_tool_name not in tool_names:
-                tool_names.append(default_tool_name)
+    tool_names = config.get_agent_tools(agent_name)
 
     # Create tools
     tools: list = []  # Use list type to satisfy Agent's parameter type
@@ -435,8 +426,9 @@ def describe_agent(agent_name: str, config: Config, *, storage_path: Path | None
         parts.append(f"- {agent_config.role}")
 
     # Add tools if any
-    if agent_config.tools:
-        tool_list = ", ".join(agent_config.tools)
+    effective_tools = config.get_agent_tools(agent_name)
+    if effective_tools:
+        tool_list = ", ".join(effective_tools)
         parts.append(f"- Tools: {tool_list}")
 
     first_instruction: str | None = None

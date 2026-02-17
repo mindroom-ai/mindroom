@@ -15,6 +15,7 @@ import yaml
 from pydantic import ValidationError
 
 from mindroom import __version__
+from mindroom.cli_banner import make_banner
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -36,8 +37,19 @@ from mindroom.constants import (
     env_key_for_provider,
 )
 
+_HELP = """\
+AI agents that live in Matrix and work everywhere via bridges.
+
+[bold]Quick start:[/bold]
+  [cyan]mindroom config init[/cyan]   Create a starter config
+  [cyan]mindroom run[/cyan]           Start the system\
+"""
+
 app = typer.Typer(
-    help="MindRoom - AI agents that live in Matrix\n\nQuick start:\n  mindroom config init   Create a starter config\n  mindroom run           Start the system",
+    help=_HELP,
+    rich_markup_mode="rich",
+    context_settings={"help_option_names": ["-h", "--help"]},
+    no_args_is_help=True,
     pretty_exceptions_enable=True,
     # Disable showing locals which can be very large (also see `setup_logging`)
     pretty_exceptions_show_locals=False,
@@ -131,6 +143,8 @@ async def _run(
     # Check for missing API keys
     _check_env_keys(config)
 
+    console.print(make_banner())
+    console.print()
     console.print(f"Starting Mindroom (log level: {log_level})...")
     if api:
         console.print(f"Dashboard API: http://{api_host}:{api_port}")
@@ -480,15 +494,11 @@ def _print_connection_error(exc: BaseException) -> None:
 
 def main() -> None:
     """Main entry point that shows help by default."""
-    # Handle -h flag by replacing with --help
-    for i, arg in enumerate(sys.argv):
-        if arg == "-h":
-            sys.argv[i] = "--help"
-            break
-
-    # If no arguments provided, show help
-    if len(sys.argv) == 1:
-        sys.argv.append("--help")
+    # Print banner for top-level help (no subcommand given)
+    if len(sys.argv) == 1 or (len(sys.argv) == 2 and sys.argv[1] in ("-h", "--help")):
+        console.print(
+            make_banner(tagline=("💊 What if I told you... ", "AI agents live in Matrix.")),
+        )
 
     app()
 

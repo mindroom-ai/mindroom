@@ -64,7 +64,8 @@ agents:
     display_name: Assistant        # Required: Human-readable name
     role: A helpful AI assistant   # Optional: Description of purpose
     model: sonnet                  # Optional: Model name (default: "default")
-    tools: [file, shell]           # Optional: List of tool names
+    tools: [file, shell]           # Optional: Agent-specific tools (merged with defaults.tools)
+    include_default_tools: true    # Optional: Per-agent opt-out for defaults.tools
     skills: []                     # Optional: List of skill names
     instructions: []               # Optional: Custom instructions
     rooms: [lobby]                 # Optional: Rooms to auto-join
@@ -108,11 +109,15 @@ router:
 
 # Default settings for all agents (optional)
 defaults:
+  tools: [scheduler]               # Default: ["scheduler"] (added to every agent; set [] to disable)
   markdown: true                   # Default: true
   enable_streaming: true           # Default: true (stream responses via message edits)
   show_stop_button: false          # Default: false (global only, cannot be overridden per-agent)
   learning: true                   # Default: true
   learning_mode: always            # Default: always (or agentic)
+
+# defaults.tools are appended to each agent's tools list with duplicates removed.
+# Set agents.<name>.include_default_tools: false to opt out a specific agent.
 
 # Memory system configuration (optional)
 memory:
@@ -195,6 +200,8 @@ Each knowledge base can optionally sync from Git by setting `knowledge_bases.<ba
 - Local uncommitted changes inside that checkout are discarded on sync.
 - Git polling runs even when `watch: false`; `watch` controls only local filesystem watching.
 - GitHub/GitLab webhooks are not part of this V1; updates are pull-based via polling.
+- In API-only mode (`uv run uvicorn mindroom.api.main:app --host 0.0.0.0 --port 8765`), Git-backed bases are auto-cloned/synced/indexed when managers are first initialized.
+- `POST /api/knowledge/bases/{base_id}/reindex` performs a Git sync first for Git-backed bases, then rebuilds the index.
 
 ### Git Fields
 
@@ -217,6 +224,14 @@ Each knowledge base can optionally sync from Git by setting `knowledge_bases.<ba
 ### Private Repository Authentication
 
 For private HTTPS repositories, set credentials under a service name and reference it via `credentials_service`.
+
+If `GITHUB_TOKEN` is set, MindRoom automatically seeds/updates `github_private` credentials as:
+
+- `username: x-access-token`
+- `token: <GITHUB_TOKEN>`
+- `_source: env`
+
+This env bootstrap never overwrites UI-managed (`_source: ui`) or legacy credentials.
 
 ```
 curl -X POST http://localhost:8765/api/credentials/github_private \

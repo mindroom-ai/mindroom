@@ -74,6 +74,7 @@ models:
     id: claude-sonnet-4-5-latest
 
 defaults:
+  tools: [scheduler]
   markdown: true
 ```
 
@@ -240,11 +241,11 @@ Create a `config.yaml` in your working directory:
 
 ```
 
-agents: assistant: display_name: Assistant role: A helpful AI assistant that can answer questions model: default rooms: [lobby]
+agents: assistant: display_name: Assistant role: A helpful AI assistant that can answer questions model: default include_default_tools: true rooms: [lobby]
 
 models: default: provider: anthropic id: claude-sonnet-4-5-latest
 
-defaults: markdown: true
+defaults: tools: [scheduler] markdown: true
 
 timezone: America/Los_Angeles
 
@@ -275,6 +276,10 @@ ANTHROPIC_API_KEY=your_anthropic_key
 # OPENAI_API_KEY=your_openai_key
 
 # GOOGLE_API_KEY=your_google_key
+
+# Optional: protect the dashboard API (recommended for non-localhost)
+
+# MINDROOM_API_KEY=your-secret-key
 
 ```
 
@@ -402,6 +407,8 @@ Git-backed knowledge bases are supported, but Git settings are currently configu
 - The dashboard preserves existing `git` settings when you edit `path`/`watch`.
 - `/api/knowledge/bases/{base_id}/files` reflects the manager's filtered file set (for example `include_patterns`/`exclude_patterns`).
 - Private HTTPS repo auth can be managed in the **Credentials** tab, then referenced by `knowledge_bases.<id>.git.credentials_service`.
+- In API-only mode, Git-backed bases are cloned/synced/indexed automatically on first manager initialization.
+- `POST /api/knowledge/bases/{base_id}/reindex` syncs Git first for Git-backed bases before rebuilding the index.
 
 ### Credentials
 
@@ -413,6 +420,7 @@ Manage service credentials directly from the dashboard:
 - **Test credentials existence** using `/api/credentials/{service}/test`
 - **Delete credential sets** using `/api/credentials/{service}`
 - **Reuse credentials for Git knowledge sync** by setting `knowledge_bases.<id>.git.credentials_service` to the same service name
+- `GITHUB_TOKEN` auto-seeds `github_private` (`username: x-access-token`, `token: <GITHUB_TOKEN>`, `_source: env`) unless the service is UI-managed
 
 ### Voice
 
@@ -569,7 +577,8 @@ agents:
     display_name: Assistant        # Required: Human-readable name
     role: A helpful AI assistant   # Optional: Description of purpose
     model: sonnet                  # Optional: Model name (default: "default")
-    tools: [file, shell]           # Optional: List of tool names
+    tools: [file, shell]           # Optional: Agent-specific tools (merged with defaults.tools)
+    include_default_tools: true    # Optional: Per-agent opt-out for defaults.tools
     skills: []                     # Optional: List of skill names
     instructions: []               # Optional: Custom instructions
     rooms: [lobby]                 # Optional: Rooms to auto-join
@@ -613,11 +622,15 @@ router:
 
 # Default settings for all agents (optional)
 defaults:
+  tools: [scheduler]               # Default: ["scheduler"] (added to every agent; set [] to disable)
   markdown: true                   # Default: true
   enable_streaming: true           # Default: true (stream responses via message edits)
   show_stop_button: false          # Default: false (global only, cannot be overridden per-agent)
   learning: true                   # Default: true
   learning_mode: always            # Default: always (or agentic)
+
+# defaults.tools are appended to each agent's tools list with duplicates removed.
+# Set agents.<name>.include_default_tools: false to opt out a specific agent.
 
 # Memory system configuration (optional)
 memory:
@@ -700,6 +713,8 @@ Each knowledge base can optionally sync from Git by setting `knowledge_bases.<ba
 - Local uncommitted changes inside that checkout are discarded on sync.
 - Git polling runs even when `watch: false`; `watch` controls only local filesystem watching.
 - GitHub/GitLab webhooks are not part of this V1; updates are pull-based via polling.
+- In API-only mode (`uv run uvicorn mindroom.api.main:app --host 0.0.0.0 --port 8765`), Git-backed bases are auto-cloned/synced/indexed when managers are first initialized.
+- `POST /api/knowledge/bases/{base_id}/reindex` performs a Git sync first for Git-backed bases, then rebuilds the index.
 
 ### Git Fields
 
@@ -722,6 +737,14 @@ Each knowledge base can optionally sync from Git by setting `knowledge_bases.<ba
 ### Private Repository Authentication
 
 For private HTTPS repositories, set credentials under a service name and reference it via `credentials_service`.
+
+If `GITHUB_TOKEN` is set, MindRoom automatically seeds/updates `github_private` credentials as:
+
+- `username: x-access-token`
+- `token: <GITHUB_TOKEN>`
+- `_source: env`
+
+This env bootstrap never overwrites UI-managed (`_source: ui`) or legacy credentials.
 
 ```
 curl -X POST http://localhost:8765/api/credentials/github_private \
@@ -839,19 +862,20 @@ agents:
 
 ## Configuration Options
 
-| Option            | Type   | Default     | Description                                                                                                                                    |
-| ----------------- | ------ | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `display_name`    | string | *required*  | Human-readable name shown in Matrix as the bot's display name                                                                                  |
-| `role`            | string | `""`        | System prompt describing the agent's purpose — guides its behavior and expertise                                                               |
-| `model`           | string | `"default"` | Model name (must match a key in the `models` section)                                                                                          |
-| `tools`           | list   | `[]`        | Tool names the agent can use (see [Tools](https://docs.mindroom.chat/tools/index.md) for available options)                                    |
-| `skills`          | list   | `[]`        | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/index.md))                                                       |
-| `instructions`    | list   | `[]`        | Extra lines appended to the system prompt after the role                                                                                       |
-| `rooms`           | list   | `[]`        | Room aliases to auto-join; rooms are created if they don't exist                                                                               |
-| `markdown`        | bool   | `true`      | When enabled, the agent is instructed to format responses as Markdown                                                                          |
-| `learning`        | bool   | `true`      | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time |
-| `learning_mode`   | string | `"always"`  | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call                            |
-| `knowledge_bases` | list   | `[]`        | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                      |
+| Option                  | Type   | Default     | Description                                                                                                                                              |
+| ----------------------- | ------ | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `display_name`          | string | *required*  | Human-readable name shown in Matrix as the bot's display name                                                                                            |
+| `role`                  | string | `""`        | System prompt describing the agent's purpose — guides its behavior and expertise                                                                         |
+| `model`                 | string | `"default"` | Model name (must match a key in the `models` section)                                                                                                    |
+| `tools`                 | list   | `[]`        | Agent-specific tool names (see [Tools](https://docs.mindroom.chat/tools/index.md)); effective tools are `defaults.tools + tools` with duplicates removed |
+| `include_default_tools` | bool   | `true`      | When `true`, append `defaults.tools` to this agent's `tools`; set to `false` to opt this agent out                                                       |
+| `skills`                | list   | `[]`        | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/index.md))                                                                 |
+| `instructions`          | list   | `[]`        | Extra lines appended to the system prompt after the role                                                                                                 |
+| `rooms`                 | list   | `[]`        | Room aliases to auto-join; rooms are created if they don't exist                                                                                         |
+| `markdown`              | bool   | `true`      | When enabled, the agent is instructed to format responses as Markdown                                                                                    |
+| `learning`              | bool   | `true`      | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time           |
+| `learning_mode`         | string | `"always"`  | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call                                      |
+| `knowledge_bases`       | list   | `[]`        | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                                |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
 
@@ -873,10 +897,22 @@ The `defaults` section sets fallback values for all agents. Any agent that omits
 
 ```
 defaults:
+  tools: [scheduler]        # Tools added to every agent by default (set [] to disable)
   markdown: true             # Format responses as Markdown
   learning: true             # Enable Agno Learning
   learning_mode: always      # "always" or "agentic"
   show_stop_button: false    # Show a stop button while agent is responding (global-only, cannot be overridden per-agent)
+```
+
+To opt out a specific agent:
+
+```
+agents:
+  researcher:
+    display_name: Researcher
+    role: Focus on deep research
+    include_default_tools: false
+    tools: [web_search]
 ```
 
 # Model Configuration
@@ -1252,6 +1288,16 @@ agents:
       - github
       - duckduckgo
 ```
+
+You can also assign tools to all agents globally:
+
+```
+defaults:
+  tools:
+    - scheduler
+```
+
+`defaults.tools` are merged into each agent's own `tools` list with duplicates removed. Set `defaults.tools: []` to disable global default tools, or set `agents.<name>.include_default_tools: false` to opt out a specific agent.
 
 ## Tool Categories
 
@@ -2449,7 +2495,7 @@ Parallel Claude sub-sessions are supported by using different `session_label` va
 
 ### Knowledge bases
 
-Agents with configured `knowledge_bases` in `config.yaml` get RAG support automatically. No additional API configuration needed.
+Agents with configured `knowledge_bases` in `config.yaml` get RAG support automatically. No additional API configuration needed. For Git-backed knowledge bases, API-only deployments auto-clone/sync/index on manager initialization.
 
 ## What's ignored
 
@@ -2471,7 +2517,7 @@ Client `system` / `developer` messages are prepended to the prompt. They augment
 | Unset                    | `true`                                | No authentication required                                        |
 | Unset                    | Unset/`false`                         | All requests return 401 (locked)                                  |
 
-The OpenAI-compatible API uses its own auth, separate from the dashboard's Supabase JWT auth.
+The OpenAI-compatible API uses its own auth (`OPENAI_COMPAT_API_KEYS`), separate from the dashboard API auth. In standalone mode, the dashboard `/api/*` endpoints can be protected with `MINDROOM_API_KEY` (Bearer token). The auth header is injected at the proxy layer (nginx in Docker/K8s), so the frontend JS bundle does not contain secrets. These are independent: `MINDROOM_API_KEY` secures the dashboard, while `OPENAI_COMPAT_API_KEYS` secures the `/v1/*` chat completions endpoints.
 
 ## Limitations
 
@@ -2573,7 +2619,19 @@ Rooms are auto-created via `ensure_room_exists()` and `ensure_all_rooms_exist()`
 
 ## Threading (MSC3440)
 
-Agents respond in threads following [MSC3440](https://github.com/matrix-org/matrix-spec-proposals/blob/main/proposals/3440-threading-via-relations.md). Thread messages use `m.relates_to` with `rel_type: m.thread`.
+MindRoom emits thread replies following [MSC3440](https://github.com/matrix-org/matrix-spec-proposals/blob/main/proposals/3440-threading-via-relations.md), using `m.relates_to` with `rel_type: m.thread`.
+
+For clients that send plain replies without thread metadata (`m.in_reply_to` but no `rel_type: m.thread`), MindRoom resolves the reply chain to the existing thread root and continues the same conversation.
+
+### Resolution Rules
+
+When deriving context for a non-thread client reply, MindRoom:
+
+1. Traverses `m.in_reply_to` backwards until it finds a root, a known thread root, a cycle, or the traversal limit.
+1. Uses cycle detection and a bounded traversal limit (`ReplyChainCaches.traversal_limit`) to avoid runaway chains.
+1. If the chain points to a real thread root, fetches thread history and merges chain history so plain replies are preserved in order.
+1. If no thread relation exists, treats the reply chain itself as the conversation context root.
+1. Falls back to the oldest successfully resolved event when traversal is interrupted by fetch failures or limits.
 
 ```
 ├── User: @assistant help with this code
@@ -3498,6 +3556,7 @@ Key environment variables (set in `.env` or pass directly):
 | `MINDROOM_CONFIG_PATH`  | Path to config.yaml                        | `./config.yaml`         |
 | `ANTHROPIC_API_KEY`     | Anthropic API key (if using Claude models) | -                       |
 | `OPENAI_API_KEY`        | OpenAI API key (if using OpenAI models)    | -                       |
+| `MINDROOM_API_KEY`      | API key for dashboard auth (standalone)    | - (open access)         |
 
 Streaming responses are configured in `config.yaml` via `defaults.enable_streaming` (default: `true`).
 
@@ -3767,16 +3826,17 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 ```
  Usage: root [OPTIONS] COMMAND [ARGS]...
 
- MindRoom - AI agents that live in Matrix
+ AI agents that live in Matrix and work everywhere via bridges.
 
- Quick start:   mindroom config init   Create a starter config   mindroom run
- Start the system
+ Quick start:
+ mindroom config init   Create a starter config
+ mindroom run           Start the system
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --install-completion          Install completion for the current shell.                │
-│ --show-completion             Show completion for the current shell, to copy it or     │
-│                               customize the installation.                              │
-│ --help                        Show this message and exit.                              │
+│ --install-completion            Install completion for the current shell.              │
+│ --show-completion               Show completion for the current shell, to copy it or   │
+│                                 customize the installation.                            │
+│ --help                -h        Show this message and exit.                            │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
 │ version   Show the current version of Mindroom.                                        │
@@ -3797,7 +3857,7 @@ Show the current MindRoom version.
 
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --help          Show this message and exit.                                            │
+│ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -3810,9 +3870,11 @@ Start MindRoom with your configuration.
 
  Run the mindroom multi-agent system.
 
- This command starts the multi-agent bot system which automatically: - Creates all
- necessary user and agent accounts - Creates all rooms defined in config.yaml - Manages
- agent room memberships - Starts the dashboard API server (disable with --no-api)
+ This command starts the multi-agent bot system which automatically:
+ - Creates all necessary user and agent accounts
+ - Creates all rooms defined in config.yaml
+ - Manages agent room memberships
+ - Starts the dashboard API server (disable with --no-api)
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --log-level     -l              TEXT     Set the logging level (DEBUG, INFO, WARNING,  │
@@ -3828,7 +3890,7 @@ Start MindRoom with your configuration.
 │                                          [default: 8765]                               │
 │ --api-host                      TEXT     Host for the dashboard API server             │
 │                                          [default: 0.0.0.0]                            │
-│ --help                                   Show this message and exit.                   │
+│ --help          -h                       Show this message and exit.                   │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 

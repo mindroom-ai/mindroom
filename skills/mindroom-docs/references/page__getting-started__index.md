@@ -86,11 +86,11 @@ Create a `config.yaml` in your working directory:
 
 ```
 
-agents: assistant: display_name: Assistant role: A helpful AI assistant that can answer questions model: default rooms: [lobby]
+agents: assistant: display_name: Assistant role: A helpful AI assistant that can answer questions model: default include_default_tools: true rooms: [lobby]
 
 models: default: provider: anthropic id: claude-sonnet-4-5-latest
 
-defaults: markdown: true
+defaults: tools: [scheduler] markdown: true
 
 timezone: America/Los_Angeles
 
@@ -121,6 +121,10 @@ ANTHROPIC_API_KEY=your_anthropic_key
 # OPENAI_API_KEY=your_openai_key
 
 # GOOGLE_API_KEY=your_google_key
+
+# Optional: protect the dashboard API (recommended for non-localhost)
+
+# MINDROOM_API_KEY=your-secret-key
 
 ```
 

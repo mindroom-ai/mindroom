@@ -6,6 +6,18 @@ Review the pull request with a **zero-tolerance standard**. Every issue you find
 
 Never approve with suggestions. Never say "looks good overall but...". If there's a "but", it's CHANGES REQUIRED.
 
+## Scope and Refactor Standard
+
+Enforce strict quality, but avoid speculative architecture churn.
+
+- Default expectation: smallest correct fix for the PR scope.
+- Require a broader refactor only when it has clear immediate ROI:
+  - It removes active duplication in current code paths.
+  - It creates one clear consolidation point.
+  - It reduces net complexity after the change.
+  - It is validated by meaningful tests in the same PR.
+- Do not require broad refactors for hypothetical future needs.
+
 ## Review checklist
 
 - **Code cleanliness**: Is the implementation clean and well-structured?

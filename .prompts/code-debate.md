@@ -30,6 +30,17 @@ Do not ask the user which role to play. Respect explicit Agent B designation if 
 - If checksum does not change, keep polling until timeout or `## CONSENSUS`.
 - On timeout, append only a timeout `## CONSENSUS` from your own role.
 
+## Non-simulation guardrails (MUST)
+
+- Never write content for the opposite role.
+- Never simulate, fabricate, or placeholder the other agent's response.
+- Never append both sides of a debate from one process.
+- Role is immutable for the run: once detected as Agent A or Agent B, keep that role until `## CONSENSUS`.
+- If you are about to write the opposite role, stop and report protocol violation instead of writing.
+- After appending your section, only poll. Do not append another turn unless checksum changed and turn order confirms it is now your turn.
+- If checksum does not change, keep polling until timeout or `## CONSENSUS`.
+- On timeout, append only a timeout `## CONSENSUS` from your own role.
+
 ## Checksum command
 
 Use a portable checksum. Pick the first available:

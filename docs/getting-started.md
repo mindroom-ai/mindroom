@@ -83,6 +83,7 @@ agents:
     display_name: Assistant
     role: A helpful AI assistant that can answer questions
     model: default
+    include_default_tools: true
     rooms: [lobby]
 
 models:
@@ -91,6 +92,7 @@ models:
     id: claude-sonnet-4-5-latest
 
 defaults:
+  tools: [scheduler]
   markdown: true
 
 timezone: America/Los_Angeles
@@ -114,6 +116,9 @@ MATRIX_HOMESERVER=https://matrix.example.com
 ANTHROPIC_API_KEY=your_anthropic_key
 # OPENAI_API_KEY=your_openai_key
 # GOOGLE_API_KEY=your_google_key
+
+# Optional: protect the dashboard API (recommended for non-localhost)
+# MINDROOM_API_KEY=your-secret-key
 ```
 
 > [!NOTE]
