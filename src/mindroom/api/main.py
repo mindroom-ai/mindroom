@@ -29,7 +29,7 @@ from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.workspace import router as workspace_router
 from mindroom.config import Config, normalize_config_data
-from mindroom.constants import CONFIG_PATH, CONFIG_TEMPLATE_PATH, safe_replace
+from mindroom.constants import CONFIG_PATH, CONFIG_TEMPLATE_PATH, STORAGE_PATH_OBJ, safe_replace
 from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.logging_config import get_logger
 from mindroom.tool_dependencies import auto_install_enabled, auto_install_tool_extra
@@ -289,7 +289,7 @@ async def get_agent_context_report(
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
     return workspace_context_report(
         name,
-        CONFIG_PATH.parent,
+        STORAGE_PATH_OBJ,
         runtime_config,
         room_id=room_id,
         is_dm=is_dm,

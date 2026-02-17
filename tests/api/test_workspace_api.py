@@ -264,14 +264,28 @@ def test_workspace_memory_file_listed_files_are_readable(
     assert read_response.json()["content"] == "custom memory"
 
 
-def test_agent_context_report_endpoint(test_client: TestClient) -> None:
-    """Context report endpoint should return observability payload."""
+def test_agent_context_report_endpoint(
+    test_client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Context report should load workspace files from runtime storage path."""
+    monkeypatch.setattr("mindroom.api.main.STORAGE_PATH_OBJ", tmp_path)
+    workspace_root = tmp_path / "workspace" / "test_agent"
+    workspace_root.mkdir(parents=True, exist_ok=True)
+    (workspace_root / "SOUL.md").write_text("custom soul", encoding="utf-8")
+    (workspace_root / "AGENTS.md").write_text("custom agents", encoding="utf-8")
+    (workspace_root / "MEMORY.md").write_text("custom memory", encoding="utf-8")
+
     response = test_client.get("/api/agents/test_agent/context-report?is_dm=true")
     assert response.status_code == 200
     payload = response.json()
     assert payload["agent_name"] == "test_agent"
     assert payload["is_dm"] is True
-    assert "loaded_files" in payload
+    loaded_files = {entry["filename"] for entry in payload["loaded_files"]}
+    assert "SOUL.md" in loaded_files
+    assert "AGENTS.md" in loaded_files
+    assert "MEMORY.md" in loaded_files
     assert "warnings" in payload
 
 
