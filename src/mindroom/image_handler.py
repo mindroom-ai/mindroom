@@ -63,13 +63,24 @@ async def download_image(
     if isinstance(event, nio.RoomMessageImage):
         image_bytes = response.body
     else:
-        # Decrypt the image (same pattern as voice_handler._download_audio)
-        image_bytes = crypto.attachments.decrypt_attachment(
-            response.body,
-            event.source["content"]["file"]["key"]["k"],
-            event.source["content"]["file"]["hashes"]["sha256"],
-            event.source["content"]["file"]["iv"],
-        )
+        # Decrypt the image (same pattern as voice_handler._download_audio).
+        # Return None on malformed payloads to match this function's contract.
+        try:
+            key = event.source["content"]["file"]["key"]["k"]
+            sha256 = event.source["content"]["file"]["hashes"]["sha256"]
+            iv = event.source["content"]["file"]["iv"]
+        except (KeyError, TypeError):
+            logger.exception(
+                "Encrypted image payload missing decryption fields",
+                event_id=getattr(event, "event_id", None),
+            )
+            return None
+
+        try:
+            image_bytes = crypto.attachments.decrypt_attachment(response.body, key, sha256, iv)
+        except Exception:
+            logger.exception("Image decryption failed")
+            return None
 
     mime_type = event.source.get("content", {}).get("info", {}).get("mimetype", "image/png")
     return Image(content=image_bytes, mime_type=mime_type)

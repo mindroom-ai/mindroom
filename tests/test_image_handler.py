@@ -120,6 +120,55 @@ class TestDownloadImage:
         assert result is None
 
     @pytest.mark.asyncio
+    async def test_download_encrypted_image_missing_key_material_returns_none(self) -> None:
+        """Test encrypted payloads missing key material fail gracefully."""
+        client = AsyncMock()
+        event = MagicMock(spec=nio.RoomEncryptedImage)
+        event.url = "mxc://example.org/encrypted_missing_keys"
+        event.source = {
+            "content": {
+                "file": {
+                    "key": {},
+                    "hashes": {"sha256": "test_hash"},
+                    "iv": "test_iv",
+                },
+            },
+        }
+
+        response = MagicMock()
+        response.body = b"encrypted_image_data"
+        client.download.return_value = response
+
+        result = await image_handler.download_image(client, event)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_download_encrypted_image_decrypt_error_returns_none(self) -> None:
+        """Test decryption failures are handled without raising."""
+        client = AsyncMock()
+        event = MagicMock(spec=nio.RoomEncryptedImage)
+        event.url = "mxc://example.org/encrypted_bad"
+        event.source = {
+            "content": {
+                "file": {
+                    "key": {"k": "test_key"},
+                    "hashes": {"sha256": "test_hash"},
+                    "iv": "test_iv",
+                },
+            },
+        }
+
+        response = MagicMock()
+        response.body = b"encrypted_image_data"
+        client.download.return_value = response
+
+        with patch("mindroom.image_handler.crypto.attachments.decrypt_attachment") as mock_decrypt:
+            mock_decrypt.side_effect = ValueError("bad ciphertext")
+            result = await image_handler.download_image(client, event)
+
+        assert result is None
+
+    @pytest.mark.asyncio
     async def test_download_defaults_mimetype_to_png(self) -> None:
         """Test that missing mimetype defaults to image/png."""
         client = AsyncMock()
