@@ -101,6 +101,8 @@ Git-backed knowledge bases are supported, but Git settings are currently configu
 - The dashboard preserves existing `git` settings when you edit `path`/`watch`.
 - `/api/knowledge/bases/{base_id}/files` reflects the manager's filtered file set (for example `include_patterns`/`exclude_patterns`).
 - Private HTTPS repo auth can be managed in the **Credentials** tab, then referenced by `knowledge_bases.<id>.git.credentials_service`.
+- In API-only mode, Git-backed bases are cloned/synced/indexed automatically on first manager initialization.
+- `POST /api/knowledge/bases/{base_id}/reindex` syncs Git first for Git-backed bases before rebuilding the index.
 
 ### Credentials
 
@@ -112,6 +114,7 @@ Manage service credentials directly from the dashboard:
 - **Test credentials existence** using `/api/credentials/{service}/test`
 - **Delete credential sets** using `/api/credentials/{service}`
 - **Reuse credentials for Git knowledge sync** by setting `knowledge_bases.<id>.git.credentials_service` to the same service name
+- `GITHUB_TOKEN` auto-seeds `github_private` (`username: x-access-token`, `token: <GITHUB_TOKEN>`, `_source: env`) unless the service is UI-managed
 
 ### Voice
 

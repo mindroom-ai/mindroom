@@ -40,6 +40,39 @@ def _get_secret(name: str) -> str | None:
     return None
 
 
+def _sync_github_private_credentials() -> bool:
+    """Seed/update github_private from GITHUB_TOKEN for Git knowledge sync."""
+    github_token = _get_secret("GITHUB_TOKEN")
+    if not github_token:
+        logger.debug("No value found for GITHUB_TOKEN or GITHUB_TOKEN_FILE")
+        return False
+
+    os.environ["GITHUB_TOKEN"] = github_token
+
+    creds_manager = get_credentials_manager()
+    existing = creds_manager.load_credentials("github_private")
+    if existing is not None:
+        source = existing.get("_source")
+        if source != "env":
+            # UI-set or legacy (no _source) — don't overwrite
+            logger.debug("Credentials for github_private not env-sourced, skipping env sync")
+            return False
+
+    creds_manager.save_credentials(
+        "github_private",
+        {
+            "username": "x-access-token",
+            "token": github_token,
+            "_source": "env",
+        },
+    )
+    if existing is None:
+        logger.info("Seeded github_private credentials from GITHUB_TOKEN")
+    else:
+        logger.info("Updated github_private credentials from GITHUB_TOKEN")
+    return True
+
+
 def sync_env_to_credentials() -> None:
     """Sync API keys from environment variables into CredentialsManager.
 
@@ -87,6 +120,9 @@ def sync_env_to_credentials() -> None:
             logger.info(f"Seeded {service} credentials from environment")
         else:
             logger.info(f"Updated {service} credentials from environment")
+        synced_count += 1
+
+    if _sync_github_private_credentials():
         synced_count += 1
 
     if synced_count > 0:

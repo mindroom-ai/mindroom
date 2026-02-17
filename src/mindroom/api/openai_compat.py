@@ -507,7 +507,7 @@ async def _ensure_knowledge_initialized(config: Config) -> None:
         config=config,
         storage_path=STORAGE_PATH_OBJ,
         start_watchers=False,
-        reindex_on_create=False,
+        reindex_on_create=True,
     )
 
 
