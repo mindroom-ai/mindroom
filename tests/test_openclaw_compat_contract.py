@@ -111,7 +111,7 @@ async def test_openclaw_compat_aliases_return_structured_results() -> None:
     tool = OpenClawCompatTools()
     tool._duckduckgo.web_search = MagicMock(return_value='{"results": []}')
     tool._website.read_url = MagicMock(return_value='{"docs": []}')
-    tool._shell.run_shell_command = MagicMock(return_value="ok")
+    tool._shell.functions["run_shell_command"].entrypoint = MagicMock(return_value="ok")
     tool._scheduler.schedule = AsyncMock(return_value="scheduled")
 
     web_search_payload = json.loads(await tool.web_search("mindroom"))
@@ -133,6 +133,22 @@ async def test_openclaw_compat_aliases_return_structured_results() -> None:
     cron_payload = json.loads(await tool.cron("in 1 minute remind me to test"))
     assert cron_payload["status"] == "ok"
     assert cron_payload["tool"] == "cron"
+
+
+@pytest.mark.asyncio
+async def test_openclaw_compat_exec_uses_shell_tool_entrypoint() -> None:
+    """Verify exec dispatches via shell toolkit function entrypoint."""
+    tool = OpenClawCompatTools()
+    tool._shell.run_shell_command = MagicMock(side_effect=AssertionError("direct method should not be used"))
+    entrypoint = MagicMock(return_value="ok")
+    tool._shell.functions["run_shell_command"].entrypoint = entrypoint
+
+    payload = json.loads(await tool.exec("echo hi"))
+
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "exec"
+    entrypoint.assert_called_once_with(["echo", "hi"])
+    tool._shell.run_shell_command.assert_not_called()
 
 
 @pytest.mark.asyncio

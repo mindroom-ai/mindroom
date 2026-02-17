@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import shlex
 import sqlite3
@@ -13,7 +14,6 @@ from uuid import uuid4
 import nio
 from agno.tools import Toolkit
 from agno.tools.duckduckgo import DuckDuckGoTools
-from agno.tools.shell import ShellTools
 from agno.tools.website import WebsiteTools
 
 from mindroom.custom_tools.scheduler import SchedulerTools
@@ -22,6 +22,7 @@ from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_content import extract_and_resolve_message
 from mindroom.openclaw_context import OpenClawToolContext, get_openclaw_tool_context
 from mindroom.thread_utils import create_session_id
+from mindroom.tools_metadata import get_tool_by_name
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -58,7 +59,7 @@ class OpenClawCompatTools(Toolkit):
         self._scheduler = SchedulerTools()
         self._duckduckgo = DuckDuckGoTools()
         self._website = WebsiteTools()
-        self._shell = ShellTools()
+        self._shell = get_tool_by_name("shell")
 
     @staticmethod
     def _payload(tool_name: str, status: str, **kwargs: object) -> str:
@@ -1010,16 +1011,35 @@ class OpenClawCompatTools(Toolkit):
                 message=f"shell tool is not enabled for agent '{context.agent_name}'.",
             )
 
+        parse_error: str | None = None
         try:
             args = shlex.split(command)
         except ValueError as exc:
-            return self._payload("exec", "error", command=command, message=f"invalid shell command: {exc}")
+            parse_error = f"invalid shell command: {exc}"
+            args = []
 
-        if not args:
-            return self._payload("exec", "error", message="command parsed to empty args")
+        if parse_error is not None or not args:
+            return self._payload(
+                "exec",
+                "error",
+                command=command,
+                message=parse_error or "command parsed to empty args",
+            )
+
+        shell_function = self._shell.functions.get("run_shell_command") or self._shell.async_functions.get(
+            "run_shell_command",
+        )
+        if shell_function is None or shell_function.entrypoint is None:
+            return self._payload(
+                "exec",
+                "error",
+                message="shell tool does not expose run_shell_command.",
+            )
 
         try:
-            result = self._shell.run_shell_command(args)
+            result = shell_function.entrypoint(args)
+            if inspect.isawaitable(result):
+                result = await result
         except Exception as exc:
             return self._payload("exec", "error", command=command, message=str(exc))
 
