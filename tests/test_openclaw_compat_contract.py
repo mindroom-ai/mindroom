@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from itertools import count
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
@@ -264,6 +265,106 @@ async def test_openclaw_compat_sessions_send_returns_error_when_matrix_send_fail
 
 
 @pytest.mark.asyncio
+async def test_openclaw_compat_sessions_list_scopes_registry_entries_by_context(tmp_path: Path) -> None:
+    """Verify sessions_list only returns registry sessions from the active context scope."""
+    tool = OpenClawCompatTools()
+    config = MagicMock()
+    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
+    ctx_a = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room-a:localhost",
+        thread_id="$thread-a:localhost",
+        requester_id="@alice:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+    ctx_b = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room-b:localhost",
+        thread_id="$thread-b:localhost",
+        requester_id="@bob:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+    session_a = create_session_id(ctx_a.room_id, "$thread-a:localhost")
+    session_b = create_session_id(ctx_b.room_id, "$thread-b:localhost")
+    tool._touch_session(ctx_a, session_key=session_a, kind="thread", label="alpha", status="active")
+    tool._touch_session(ctx_b, session_key=session_b, kind="thread", label="beta", status="active")
+
+    with openclaw_tool_context(ctx_a):
+        payload_a = json.loads(await tool.sessions_list())
+    with openclaw_tool_context(ctx_b):
+        payload_b = json.loads(await tool.sessions_list())
+
+    assert [session["session_key"] for session in payload_a["sessions"]] == [session_a]
+    assert [session["session_key"] for session in payload_b["sessions"]] == [session_b]
+
+
+@pytest.mark.asyncio
+async def test_openclaw_compat_sessions_send_label_prefers_latest_in_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify label lookup is scoped and chooses the most recently updated matching session."""
+    tool = OpenClawCompatTools()
+    tool._send_matrix_text = AsyncMock(return_value="$evt")
+    config = MagicMock()
+    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
+    ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id="$ctx-thread:localhost",
+        requester_id="@alice:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+    other_ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id="$other-thread:localhost",
+        requester_id="@bob:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+
+    epoch_counter = count(1)
+    iso_counter = count(1)
+    monkeypatch.setattr(
+        OpenClawCompatTools,
+        "_now_epoch",
+        staticmethod(lambda: next(epoch_counter)),
+    )
+    monkeypatch.setattr(
+        OpenClawCompatTools,
+        "_now_iso",
+        staticmethod(lambda: f"2026-01-01T00:00:{next(iso_counter):02d}+00:00"),
+    )
+
+    outsider_session = create_session_id(ctx.room_id, "$outside:localhost")
+    older_session = create_session_id(ctx.room_id, "$older:localhost")
+    newer_session = create_session_id(ctx.room_id, "$newer:localhost")
+    tool._touch_session(other_ctx, session_key=outsider_session, kind="thread", label="work", status="active")
+    tool._touch_session(ctx, session_key=older_session, kind="thread", label="work", status="active")
+    tool._touch_session(ctx, session_key=newer_session, kind="thread", label="work", status="active")
+
+    with openclaw_tool_context(ctx):
+        payload = json.loads(await tool.sessions_send(message="hello", label="work"))
+
+    assert payload["status"] == "ok"
+    assert payload["session_key"] == newer_session
+    tool._send_matrix_text.assert_awaited_once_with(
+        ctx,
+        room_id=ctx.room_id,
+        text="hello",
+        thread_id="$newer:localhost",
+    )
+
+
+@pytest.mark.asyncio
 async def test_openclaw_compat_sessions_spawn_returns_error_when_matrix_send_fails(tmp_path: Path) -> None:
     """Verify sessions_spawn returns an error payload when Matrix send fails."""
     tool = OpenClawCompatTools()
@@ -286,6 +387,63 @@ async def test_openclaw_compat_sessions_spawn_returns_error_when_matrix_send_fai
     assert payload["status"] == "error"
     assert payload["tool"] == "sessions_spawn"
     assert "Failed to send spawn message" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_openclaw_compat_subagents_kill_all_scopes_to_context(tmp_path: Path) -> None:
+    """Verify kill-all only updates runs belonging to the active context scope."""
+    tool = OpenClawCompatTools()
+    config = MagicMock()
+    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
+    ctx_a = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id="$thread-a:localhost",
+        requester_id="@alice:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+    ctx_b = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id="$thread-b:localhost",
+        requester_id="@bob:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+    tool._track_run(
+        ctx_a,
+        run_id="run-a",
+        session_key=create_session_id(ctx_a.room_id, "$thread-a:localhost"),
+        task="task a",
+        target_agent="openclaw",
+        status="accepted",
+        event_id="$event-a",
+    )
+    tool._track_run(
+        ctx_b,
+        run_id="run-b",
+        session_key=create_session_id(ctx_b.room_id, "$thread-b:localhost"),
+        task="task b",
+        target_agent="openclaw",
+        status="accepted",
+        event_id="$event-b",
+    )
+
+    with openclaw_tool_context(ctx_a):
+        kill_payload = json.loads(await tool.subagents(action="kill", target="all"))
+        list_a_payload = json.loads(await tool.subagents(action="list"))
+    with openclaw_tool_context(ctx_b):
+        list_b_payload = json.loads(await tool.subagents(action="list"))
+
+    assert kill_payload["status"] == "ok"
+    assert kill_payload["updated"] == ["run-a"]
+    assert [run["run_id"] for run in list_a_payload["runs"]] == ["run-a"]
+    assert [run["status"] for run in list_a_payload["runs"]] == ["killed"]
+    assert [run["run_id"] for run in list_b_payload["runs"]] == ["run-b"]
+    assert [run["status"] for run in list_b_payload["runs"]] == ["accepted"]
 
 
 @pytest.mark.asyncio
@@ -312,6 +470,44 @@ async def test_openclaw_compat_message_send_returns_error_when_matrix_send_fails
     assert payload["tool"] == "message"
     assert payload["action"] == "send"
     assert "Failed to send message" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_openclaw_compat_subagents_steer_does_not_mark_run_steered_on_dispatch_error(
+    tmp_path: Path,
+) -> None:
+    """Verify steer keeps run state unchanged when dispatch fails."""
+    tool = OpenClawCompatTools()
+    tool._send_matrix_text = AsyncMock(return_value=None)
+    config = MagicMock()
+    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
+    ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id="$ctx-thread:localhost",
+        requester_id="@alice:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+    tool._track_run(
+        ctx,
+        run_id="run-1",
+        session_key=create_session_id(ctx.room_id, "$thread-1:localhost"),
+        task="task",
+        target_agent="openclaw",
+        status="accepted",
+        event_id="$event-1",
+    )
+
+    with openclaw_tool_context(ctx):
+        steer_payload = json.loads(await tool.subagents(action="steer", target="run-1", message="continue"))
+        list_payload = json.loads(await tool.subagents(action="list"))
+
+    assert steer_payload["status"] == "error"
+    assert steer_payload["dispatch"]["status"] == "error"
+    assert [run["run_id"] for run in list_payload["runs"]] == ["run-1"]
+    assert [run["status"] for run in list_payload["runs"]] == ["accepted"]
 
 
 @pytest.mark.asyncio

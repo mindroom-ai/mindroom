@@ -139,6 +139,7 @@ class OpenClawCompatTools(Toolkit):
         status: str = "active",
     ) -> dict[str, Any]:
         """Create or update a tracked session entry."""
+        room_id, thread_id = cls._session_key_to_room_thread(session_key)
         with cls._registry_lock:
             registry = cls._load_registry(context)
             sessions = registry["sessions"]
@@ -150,8 +151,9 @@ class OpenClawCompatTools(Toolkit):
                 session = {
                     "session_key": session_key,
                     "kind": kind,
-                    "room_id": context.room_id,
-                    "thread_id": context.thread_id,
+                    "agent_name": context.agent_name,
+                    "room_id": room_id,
+                    "thread_id": thread_id,
                     "label": label,
                     "parent_session_key": parent_session_key,
                     "target_agent": target_agent,
@@ -170,6 +172,10 @@ class OpenClawCompatTools(Toolkit):
                     session["parent_session_key"] = parent_session_key
                 if target_agent is not None:
                     session["target_agent"] = target_agent
+                session["agent_name"] = context.agent_name
+                session["room_id"] = room_id
+                session["thread_id"] = thread_id
+                session["requester_id"] = context.requester_id
                 session["status"] = status
                 session["updated_at"] = now_iso
                 session["updated_at_epoch"] = now_epoch
@@ -190,6 +196,7 @@ class OpenClawCompatTools(Toolkit):
         status: str,
         event_id: str | None,
     ) -> dict[str, Any]:
+        room_id, thread_id = cls._session_key_to_room_thread(session_key)
         with cls._registry_lock:
             registry = cls._load_registry(context)
             runs = registry["runs"]
@@ -200,7 +207,11 @@ class OpenClawCompatTools(Toolkit):
                 "run_id": run_id,
                 "session_key": session_key,
                 "task": task,
+                "agent_name": context.agent_name,
                 "target_agent": target_agent,
+                "room_id": room_id,
+                "thread_id": thread_id,
+                "requester_id": context.requester_id,
                 "status": status,
                 "event_id": event_id,
                 "created_at": now_iso,
@@ -218,6 +229,8 @@ class OpenClawCompatTools(Toolkit):
             registry = cls._load_registry(context)
             run = registry["runs"].get(run_id)
             if not isinstance(run, dict):
+                return None
+            if not cls._run_in_scope(run, context):
                 return None
             run["status"] = status
             run["updated_at"] = cls._now_iso()
@@ -242,6 +255,8 @@ class OpenClawCompatTools(Toolkit):
                 run_id = run.get("run_id")
                 if not isinstance(run_id, str):
                     continue
+                if not cls._run_in_scope(run, context):
+                    continue
                 run["status"] = status
                 run["updated_at"] = now_iso
                 run["updated_at_epoch"] = now_epoch
@@ -257,7 +272,7 @@ class OpenClawCompatTools(Toolkit):
             runs = registry.get("runs", {})
             if not isinstance(runs, dict):
                 return []
-            values = [run for run in runs.values() if isinstance(run, dict)]
+            values = [run for run in runs.values() if isinstance(run, dict) and cls._run_in_scope(run, context)]
             return sorted(values, key=lambda run: int(run.get("updated_at_epoch", 0)), reverse=True)
 
     @staticmethod
@@ -331,6 +346,22 @@ class OpenClawCompatTools(Toolkit):
         # Matrix timestamps are often milliseconds; convert for ordering.
         return numeric / 1000.0 if numeric > 1_000_000_000_000 else numeric
 
+    @staticmethod
+    def _session_in_scope(session: dict[str, Any], context: OpenClawToolContext) -> bool:
+        return (
+            session.get("agent_name") == context.agent_name
+            and session.get("room_id") == context.room_id
+            and session.get("requester_id") == context.requester_id
+        )
+
+    @staticmethod
+    def _run_in_scope(run: dict[str, Any], context: OpenClawToolContext) -> bool:
+        return (
+            run.get("agent_name") == context.agent_name
+            and run.get("room_id") == context.room_id
+            and run.get("requester_id") == context.requester_id
+        )
+
     @classmethod
     def _registry_sessions(cls, context: OpenClawToolContext) -> list[dict[str, Any]]:
         with cls._registry_lock:
@@ -338,7 +369,11 @@ class OpenClawCompatTools(Toolkit):
         sessions = registry.get("sessions", {})
         if not isinstance(sessions, dict):
             return []
-        return [session for session in sessions.values() if isinstance(session, dict)]
+        return [
+            session
+            for session in sessions.values()
+            if isinstance(session, dict) and cls._session_in_scope(session, context)
+        ]
 
     @staticmethod
     def _dedupe_sessions(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -616,21 +651,36 @@ class OpenClawCompatTools(Toolkit):
         context = get_openclaw_tool_context()
         if context is None:
             return self._context_error("sessions_send")
+        active_context: OpenClawToolContext = context
 
         if not message.strip():
             return self._payload("sessions_send", "error", message="Message cannot be empty.")
 
-        target_session = session_key or create_session_id(context.room_id, context.thread_id)
+        target_session = session_key or create_session_id(active_context.room_id, active_context.thread_id)
         if label:
 
             def _find_labeled() -> str:
                 with self._registry_lock:
-                    registry = self._load_registry(context)
-                    for tracked_session in registry.get("sessions", {}).values():
-                        if isinstance(tracked_session, dict) and tracked_session.get("label") == label:
-                            candidate = tracked_session.get("session_key")
-                            if isinstance(candidate, str):
-                                return candidate
+                    registry = self._load_registry(active_context)
+                    sessions = registry.get("sessions")
+                    if not isinstance(sessions, dict):
+                        return target_session
+
+                    candidates = [
+                        tracked_session
+                        for tracked_session in sessions.values()
+                        if isinstance(tracked_session, dict)
+                        and tracked_session.get("label") == label
+                        and self._session_in_scope(tracked_session, active_context)
+                    ]
+                    candidates.sort(
+                        key=lambda tracked_session: self._coerce_epoch(tracked_session.get("updated_at_epoch")),
+                        reverse=True,
+                    )
+                    for tracked_session in candidates:
+                        candidate = tracked_session.get("session_key")
+                        if isinstance(candidate, str):
+                            return candidate
                 return target_session
 
             target_session = await asyncio.to_thread(_find_labeled)
@@ -641,7 +691,7 @@ class OpenClawCompatTools(Toolkit):
             outgoing = f"@mindroom_{agent_id} {outgoing}"
 
         event_id = await self._send_matrix_text(
-            context,
+            active_context,
             room_id=target_room_id,
             text=outgoing,
             thread_id=target_thread_id,
@@ -657,7 +707,7 @@ class OpenClawCompatTools(Toolkit):
 
         await asyncio.to_thread(
             self._touch_session,
-            context,
+            active_context,
             session_key=target_session,
             kind="thread" if target_thread_id else "room",
             label=label,
@@ -797,13 +847,24 @@ class OpenClawCompatTools(Toolkit):
             session_key=str(run.get("session_key")),
             agent_id=str(run.get("target_agent") or context.agent_name),
         )
+        dispatch = json.loads(result)
+        if dispatch.get("status") != "ok":
+            return self._payload(
+                "subagents",
+                "error",
+                action="steer",
+                run_id=target,
+                dispatch=dispatch,
+                message="Failed to steer run.",
+            )
+
         await asyncio.to_thread(self._update_run_status, context, target, "steered")
         return self._payload(
             "subagents",
             "ok",
             action="steer",
             run_id=target,
-            dispatch=json.loads(result),
+            dispatch=dispatch,
         )
 
     async def subagents(
