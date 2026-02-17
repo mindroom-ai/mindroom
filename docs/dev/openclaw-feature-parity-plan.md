@@ -112,7 +112,7 @@ For each commit:
 | Phase 3 | Completed | `eb88ecf2` |
 | Phase 4 | Completed | `eb88ecf2` |
 | Phase 5 | Completed | `eb88ecf2`, `50649f51` |
-| Phase 6 | In progress | Config rollout edits prepared, commit pending |
+| Phase 6 | Completed | `729ebaa3` |
 
 ## Commit and Review Log
 
@@ -150,3 +150,12 @@ For each commit:
     - Reviewer B (`qwen3-thinking:8b` local): APPROVE (confirmed `rsplit` correctness).
     - Reviewer C (`gpt-oss-low:20b` local): CHANGES REQUIRED (false positives; manually verified as non-issues).
   - Reviewer infra note: `gemini` unavailable in this environment (`GEMINI_API_KEY` missing), so local model reviewers are used as fallback per protocol.
+- Commit `729ebaa3`: wired OpenClaw config rollout (`context_files`, `memory_dir`, `openclaw_compat`) in both root and cluster defaults; removed obsolete file-loading instructions.
+- Review rounds for `729ebaa3`:
+  - Round 1:
+    - Reviewer A (`gpt-oss-low:20b` local): APPROVE.
+    - Reviewer B (`qwen3-thinking:8b` local): CHANGES REQUIRED (doc/status concerns; mixed low-signal config comments).
+    - Reviewer C (`devstral:24b` local fallback while `claude` session stalled): CHANGES REQUIRED (mostly non-blocking config/doc comments).
+  - Resolution:
+    - Updated this tracker to mark Phase 6 complete with commit reference.
+    - Confirmed `openclaw` rollout fields are present in both config files and obsolete instructions are removed.
