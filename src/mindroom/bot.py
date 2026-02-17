@@ -646,7 +646,6 @@ class AgentBot:
         """Resolve DM status, using a precomputed value when available."""
         if is_dm_room_value is not None:
             return is_dm_room_value
-
         assert self.client is not None
         return await is_dm_room(self.client, room_id)
 

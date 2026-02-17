@@ -80,20 +80,8 @@ def get_agent_workspace_path(agent_name: str, storage_path: Path) -> Path:
     return storage_path / WORKSPACE_DIRNAME / agent_name
 
 
-def _workspace_max_file_size(config: Config) -> int:
-    return config.memory.workspace.max_file_size
-
-
-def _workspace_enabled(config: Config) -> bool:
-    return config.memory.workspace.enabled
-
-
-def _normalize_markdown(value: str) -> str:
-    return value.strip()
-
-
 def _is_default_template(content: str, default_template: str) -> bool:
-    return _normalize_markdown(content) == _normalize_markdown(default_template)
+    return content.strip() == default_template.strip()
 
 
 def _read_workspace_file(path: Path, max_file_size: int) -> str | None:
@@ -113,7 +101,7 @@ def _read_workspace_file(path: Path, max_file_size: int) -> str | None:
     return path.read_text(encoding="utf-8")
 
 
-def _read_custom_workspace_file(path: Path, default_template: str, max_file_size: int) -> str | None:
+def _read_if_customized(path: Path, default_template: str, max_file_size: int) -> str | None:
     content = _read_workspace_file(path, max_file_size)
     if content is None:
         return None
@@ -164,7 +152,7 @@ def ensure_workspace(
     prune_daily_logs: bool = True,
 ) -> None:
     """Ensure workspace directories and base markdown files exist for an agent."""
-    if not _workspace_enabled(config):
+    if not config.memory.workspace.enabled:
         return
 
     workspace_dir = get_agent_workspace_path(agent_name, storage_path)
@@ -183,27 +171,27 @@ def ensure_workspace(
 
 def load_soul(agent_name: str, storage_path: Path, config: Config) -> str | None:
     """Load custom SOUL.md content when present and not the default template."""
-    if not _workspace_enabled(config):
+    if not config.memory.workspace.enabled:
         return None
 
     workspace_dir = get_agent_workspace_path(agent_name, storage_path)
-    return _read_custom_workspace_file(
+    return _read_if_customized(
         workspace_dir / SOUL_FILENAME,
         DEFAULT_SOUL_TEMPLATE,
-        _workspace_max_file_size(config),
+        config.memory.workspace.max_file_size,
     )
 
 
 def load_agents_md(agent_name: str, storage_path: Path, config: Config) -> str | None:
     """Load custom AGENTS.md content when present and not the default template."""
-    if not _workspace_enabled(config):
+    if not config.memory.workspace.enabled:
         return None
 
     workspace_dir = get_agent_workspace_path(agent_name, storage_path)
-    return _read_custom_workspace_file(
+    return _read_if_customized(
         workspace_dir / AGENTS_FILENAME,
         DEFAULT_AGENTS_TEMPLATE,
-        _workspace_max_file_size(config),
+        config.memory.workspace.max_file_size,
     )
 
 
@@ -216,15 +204,15 @@ def load_workspace_memory(
     is_dm: bool = False,
 ) -> str:
     """Load workspace memory blocks to prepend to the user prompt."""
-    if not _workspace_enabled(config):
+    if not config.memory.workspace.enabled:
         return ""
 
     workspace_dir = get_agent_workspace_path(agent_name, storage_path)
-    max_file_size = _workspace_max_file_size(config)
+    max_file_size = config.memory.workspace.max_file_size
     sections: list[str] = []
 
     if is_dm:
-        memory_content = _read_custom_workspace_file(
+        memory_content = _read_if_customized(
             workspace_dir / MEMORY_FILENAME,
             DEFAULT_MEMORY_TEMPLATE,
             max_file_size,
@@ -257,11 +245,11 @@ def load_room_context(
     config: Config,
 ) -> str | None:
     """Load per-room context markdown for an agent."""
-    if not room_id or not _workspace_enabled(config):
+    if not room_id or not config.memory.workspace.enabled:
         return None
 
     room_path = get_agent_workspace_path(agent_name, storage_path) / "rooms" / _safe_room_filename(room_id)
-    return _read_workspace_file(room_path, _workspace_max_file_size(config))
+    return _read_workspace_file(room_path, config.memory.workspace.max_file_size)
 
 
 def append_daily_log(
@@ -273,12 +261,12 @@ def append_daily_log(
     room_id: str | None = None,
 ) -> None:
     """Append content to today's daily memory log for one or many agents."""
-    if not _workspace_enabled(config) or not content.strip():
+    if not config.memory.workspace.enabled or not content.strip():
         return
 
     agent_names = [agent_name] if isinstance(agent_name, str) else agent_name
     today = datetime.now(UTC).date().isoformat()
-    max_file_size = _workspace_max_file_size(config)
+    max_file_size = config.memory.workspace.max_file_size
 
     for name in agent_names:
         memory_dir = _daily_log_dir(get_agent_workspace_path(name, storage_path), room_id)
@@ -311,11 +299,11 @@ def workspace_context_report(
         "warnings": [],
     }
 
-    if not _workspace_enabled(config):
+    if not config.memory.workspace.enabled:
         report["warnings"].append("Workspace memory is disabled")
         return report
 
-    max_file_size = _workspace_max_file_size(config)
+    max_file_size = config.memory.workspace.max_file_size
     workspace_dir = get_agent_workspace_path(agent_name, storage_path)
 
     def inspect(
@@ -338,7 +326,7 @@ def workspace_context_report(
             return
 
         content = (
-            _read_custom_workspace_file(path, default_template, max_file_size)
+            _read_if_customized(path, default_template, max_file_size)
             if default_template is not None
             else _read_workspace_file(path, max_file_size)
         )

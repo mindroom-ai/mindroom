@@ -81,6 +81,20 @@ export const API_ENDPOINTS = {
   rooms: `${API_BASE_URL}/api/rooms`,
 };
 
+async function throwIfNotOk(response: Response): Promise<void> {
+  if (response.ok) return;
+  let detail = `API call failed: ${response.status} ${response.statusText}`;
+  try {
+    const payload = await response.json();
+    if (typeof payload?.detail === 'string') {
+      detail = payload.detail;
+    }
+  } catch {
+    // Keep fallback detail text.
+  }
+  throw new Error(detail);
+}
+
 export async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
   // Add a timeout to prevent hanging requests
   const controller = new AbortController();
@@ -100,18 +114,7 @@ export async function fetchJSON<T>(url: string, options?: RequestInit): Promise<
 
     clearTimeout(timeoutId);
 
-    if (!response.ok) {
-      let detail = `API call failed: ${response.status} ${response.statusText}`;
-      try {
-        const payload = await response.json();
-        if (typeof payload?.detail === 'string') {
-          detail = payload.detail;
-        }
-      } catch {
-        // Keep fallback detail text.
-      }
-      throw new Error(detail);
-    }
+    await throwIfNotOk(response);
 
     if (response.status === 204) {
       return undefined as T;
@@ -160,18 +163,7 @@ export async function getWorkspaceFile(
   const response = await fetch(API_ENDPOINTS.workspace.file(agentName, filename), {
     headers: { 'Content-Type': 'application/json' },
   });
-  if (!response.ok) {
-    let detail = `API call failed: ${response.status} ${response.statusText}`;
-    try {
-      const payload = await response.json();
-      if (typeof payload?.detail === 'string') {
-        detail = payload.detail;
-      }
-    } catch {
-      // Keep fallback detail text.
-    }
-    throw new Error(detail);
-  }
+  await throwIfNotOk(response);
 
   const etag = response.headers.get('etag') || '';
   const file = (await response.json()) as WorkspaceFileResponse;
@@ -192,18 +184,7 @@ export async function updateWorkspaceFile(
     },
     body: JSON.stringify({ content }),
   });
-  if (!response.ok) {
-    let detail = `API call failed: ${response.status} ${response.statusText}`;
-    try {
-      const payload = await response.json();
-      if (typeof payload?.detail === 'string') {
-        detail = payload.detail;
-      }
-    } catch {
-      // Keep fallback detail text.
-    }
-    throw new Error(detail);
-  }
+  await throwIfNotOk(response);
 
   const nextEtag = response.headers.get('etag') || '';
   const file = (await response.json()) as WorkspaceFileResponse;
