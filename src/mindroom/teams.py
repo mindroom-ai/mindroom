@@ -34,9 +34,10 @@ from .tool_events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Sequence
 
     import nio
+    from agno.media import Image
 
     from .bot import MultiAgentOrchestrator
     from .config import Config
@@ -523,6 +524,7 @@ async def team_response(
     orchestrator: MultiAgentOrchestrator,
     thread_history: list[dict] | None = None,
     model_name: str | None = None,
+    images: Sequence[Image] | None = None,
 ) -> str:
     """Create a team and execute response."""
     agents = _get_agents_from_orchestrator(agent_names, orchestrator)
@@ -538,7 +540,7 @@ async def team_response(
     logger.info(f"TEAM PROMPT: {prompt[:500]}")
 
     try:
-        response = await team.arun(prompt)
+        response = await team.arun(prompt, images=images)
     except Exception as e:
         logger.exception(f"Error in team response with agents {agent_list}")
         # Return user-friendly error message
@@ -575,6 +577,7 @@ async def team_response_stream_raw(
     orchestrator: MultiAgentOrchestrator,
     thread_history: list[dict] | None = None,
     model_name: str | None = None,
+    images: Sequence[Image] | None = None,
 ) -> AsyncIterator[Any]:
     """Yield raw team events (for structured live rendering). Falls back to a final response.
 
@@ -600,7 +603,7 @@ async def team_response_stream_raw(
         logger.debug(f"Team member: {agent.name}")
 
     try:
-        return team.arun(prompt, stream=True, stream_events=True)
+        return team.arun(prompt, stream=True, stream_events=True, images=images)
     except Exception as e:
         logger.exception(f"Error in team streaming with agents {agent_names}")
         team_name = f"Team ({', '.join(agent_names)})"
@@ -619,6 +622,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     mode: TeamMode = TeamMode.COORDINATE,
     thread_history: list[dict] | None = None,
     model_name: str | None = None,
+    images: Sequence[Image] | None = None,
 ) -> AsyncIterator[TeamStreamChunk]:
     """Aggregate team streaming into a non-stream-style document, live.
 
@@ -654,6 +658,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         orchestrator=orchestrator,
         thread_history=thread_history,
         model_name=model_name,
+        images=images,
     )
 
     async for event in raw_stream:

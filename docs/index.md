@@ -17,6 +17,7 @@ MindRoom is an AI agent orchestration system with Matrix integration. It provide
 - **Hot-reload configuration** - Update `config.yaml` and agents restart automatically
 - **Scheduled tasks** - Schedule agents to run at specific times with cron expressions or natural language
 - **Voice messages** - Speech-to-text transcription with intelligent command recognition
+- **Image analysis** - Pass images to vision-capable AI models for analysis
 - **Authorization** - Fine-grained access control for users and rooms
 
 > [!TIP]
@@ -106,6 +107,7 @@ mindroom run
 | **Skills** | OpenClaw-compatible skills system for extended agent capabilities |
 | **Scheduling** | Schedule tasks with cron expressions or natural language |
 | **Voice** | Speech-to-text transcription for voice messages |
+| **Images** | Pass user-sent images to vision-capable AI models |
 | **Cultures** | Shared evolving principles across groups of agents |
 | **Authorization** | Fine-grained user and room access control |
 | **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client |
@@ -141,6 +143,7 @@ mindroom run
 - [Memory System](memory.md) - How agent memory works
 - [Scheduling](scheduling.md) - Schedule tasks with cron or natural language
 - [Voice Messages](voice.md) - Voice message transcription
+- [Image Messages](images.md) - Image analysis with vision models
 - [Authorization](authorization.md) - User and room access control
 - [Architecture](architecture/index.md) - How it works under the hood
 - [Deployment](deployment/index.md) - Docker and Kubernetes deployment

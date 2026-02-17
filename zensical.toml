@@ -34,6 +34,7 @@ nav = [
   { "Knowledge Bases" = "knowledge.md" },
   { "Memory System" = "memory.md" },
   { "Voice Messages" = "voice.md" },
+  { "Image Messages" = "images.md" },
   { "Scheduling" = "scheduling.md" },
   { "Authorization" = "authorization.md" },
   { "OpenAI-Compatible API" = "openai-api.md" },

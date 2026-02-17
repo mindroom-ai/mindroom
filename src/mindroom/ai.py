@@ -32,11 +32,12 @@ from .tool_events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Sequence
     from pathlib import Path
 
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
+    from agno.media import Image
     from agno.models.base import Model
 
     from .config import Config, ModelConfig
@@ -223,11 +224,13 @@ async def _cached_agent_run(
     agent_name: str,
     storage_path: Path,
     user_id: str | None = None,
+    images: Sequence[Image] | None = None,
 ) -> RunOutput:
     """Cached wrapper for agent.arun() calls."""
-    cache = get_cache(storage_path)
+    # Skip cache when images are present (large bytes, unlikely to repeat)
+    cache = None if images else get_cache(storage_path)
     if cache is None:
-        return await agent.arun(full_prompt, session_id=session_id, user_id=user_id)
+        return await agent.arun(full_prompt, session_id=session_id, user_id=user_id, images=images)
 
     model = agent.model
     assert model is not None
@@ -285,6 +288,7 @@ async def ai_response(
     knowledge: Knowledge | None = None,
     user_id: str | None = None,
     include_interactive_questions: bool = True,
+    images: Sequence[Image] | None = None,
 ) -> str:
     """Generates a response using the specified agno Agent with memory integration.
 
@@ -301,6 +305,7 @@ async def ai_response(
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
+        images: Optional images to pass to the AI model for vision analysis
 
     Returns:
         Agent response string
@@ -326,7 +331,15 @@ async def ai_response(
 
     # Execute the AI call - this can fail for network, rate limits, etc.
     try:
-        response = await _cached_agent_run(agent, full_prompt, session_id, agent_name, storage_path, user_id=user_id)
+        response = await _cached_agent_run(
+            agent,
+            full_prompt,
+            session_id,
+            agent_name,
+            storage_path,
+            user_id=user_id,
+            images=images,
+        )
     except Exception as e:
         logger.exception("Error generating AI response", agent=agent_name)
         return get_user_friendly_error_message(e, agent_name)
@@ -346,6 +359,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     knowledge: Knowledge | None = None,
     user_id: str | None = None,
     include_interactive_questions: bool = True,
+    images: Sequence[Image] | None = None,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
 
@@ -365,6 +379,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
+        images: Optional images to pass to the AI model for vision analysis
 
     Yields:
         Streaming chunks/events as they become available
@@ -389,8 +404,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         yield get_user_friendly_error_message(e, agent_name)
         return
 
-    # Check cache (this shouldn't fail)
-    cache = get_cache(storage_path)
+    # Check cache (skip when images are present)
+    cache = None if images else get_cache(storage_path)
     if cache is not None:
         model = agent.model
         assert model is not None
@@ -410,6 +425,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             full_prompt,
             session_id=session_id,
             user_id=user_id,
+            images=images,
             stream=True,
             stream_events=True,
         )

@@ -19,6 +19,7 @@ MindRoom is an AI agent orchestration system with Matrix integration. It provide
 - **Hot-reload configuration** - Update `config.yaml` and agents restart automatically
 - **Scheduled tasks** - Schedule agents to run at specific times with cron expressions or natural language
 - **Voice messages** - Speech-to-text transcription with intelligent command recognition
+- **Image analysis** - Pass images to vision-capable AI models for analysis
 - **Authorization** - Fine-grained access control for users and rooms
 
 > [!TIP] **Matrix is the backbone** - MindRoom agents communicate through the Matrix protocol, which means they can be bridged to Discord, Slack, Telegram, and other platforms.
@@ -107,6 +108,7 @@ mindroom run
 | **Skills**                | OpenClaw-compatible skills system for extended agent capabilities |
 | **Scheduling**            | Schedule tasks with cron expressions or natural language          |
 | **Voice**                 | Speech-to-text transcription for voice messages                   |
+| **Images**                | Pass user-sent images to vision-capable AI models                 |
 | **Cultures**              | Shared evolving principles across groups of agents                |
 | **Authorization**         | Fine-grained user and room access control                         |
 | **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client       |
@@ -142,6 +144,7 @@ mindroom run
 - [Memory System](https://docs.mindroom.chat/memory/index.md) - How agent memory works
 - [Scheduling](https://docs.mindroom.chat/scheduling/index.md) - Schedule tasks with cron or natural language
 - [Voice Messages](https://docs.mindroom.chat/voice/index.md) - Voice message transcription
+- [Image Messages](https://docs.mindroom.chat/images/index.md) - Image analysis with vision models
 - [Authorization](https://docs.mindroom.chat/authorization/index.md) - User and room access control
 - [Architecture](https://docs.mindroom.chat/architecture/index.md) - How it works under the hood
 - [Deployment](https://docs.mindroom.chat/deployment/index.md) - Docker and Kubernetes deployment
@@ -2455,6 +2458,60 @@ See the [Tools documentation](/tools) for configuration details.
 
 - **Say the agent name first** - "Hey @assistant, what's the weather?"
 - **Use display names** - The AI converts spoken names like "HomeAssistant" to the correct `@home` mention
+
+# Image Messages
+
+MindRoom can process images sent to Matrix rooms, passing them to vision-capable AI models for analysis.
+
+## Overview
+
+When a user sends an image in a Matrix room:
+
+1. The agent determines whether it should respond (via mention, thread participation, or DM)
+1. The image is downloaded and decrypted (if E2E encrypted)
+1. The image is wrapped as an `agno.media.Image` and passed to the AI model
+1. The agent responds with its analysis
+
+Image support works automatically for all agents -- no configuration is needed. The AI model must support vision (e.g., Claude, GPT-4o).
+
+## How It Works
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│ Image Msg   │────>│ Download &  │────>│ Pass to AI  │
+│ (Matrix)    │     │ Decrypt     │     │ Model       │
+└─────────────┘     └─────────────┘     └─────────────┘
+                                              │
+                                              v
+                                        ┌─────────────┐
+                                        │ Agent       │
+                                        │ Responds    │
+                                        └─────────────┘
+```
+
+## Usage
+
+Send an image in a Matrix room and mention the agent in the caption:
+
+- **With caption**: `@assistant What does this diagram show?` -- the caption is used as the prompt
+- **Without caption**: The agent receives `[Attached image]` as the prompt and describes what it sees
+- **Bare filename**: If the body is just a filename (e.g., `IMG_1234.jpg`), it is treated the same as no caption
+
+Images work in both direct messages and threads, and with both individual agents and teams.
+
+## Encryption
+
+Both unencrypted and E2E encrypted images are supported. Encrypted images are decrypted transparently using the key material from the Matrix event.
+
+## Caching
+
+AI response caching is automatically skipped when images are present, since image payloads are large and unlikely to repeat.
+
+## Limitations
+
+- **Router does not route image events** -- in multi-agent rooms, you must `@mention` the agent in the image caption. Without a mention, no agent will respond. Tracked in [#154](https://github.com/mindroom-ai/mindroom/issues/154).
+- **Bridge mention detection** relies on `m.mentions` in the event, which some bridges (e.g., mautrix-telegram) do not set. Images sent from bridged platforms may not trigger agent responses.
+- **Model support** -- the configured model must support vision. Text-only models will ignore the image or return an error.
 
 # Scheduling
 

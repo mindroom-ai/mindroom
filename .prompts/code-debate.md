@@ -30,17 +30,6 @@ Do not ask the user which role to play. Respect explicit Agent B designation if 
 - If checksum does not change, keep polling until timeout or `## CONSENSUS`.
 - On timeout, append only a timeout `## CONSENSUS` from your own role.
 
-## Non-simulation guardrails (MUST)
-
-- Never write content for the opposite role.
-- Never simulate, fabricate, or placeholder the other agent's response.
-- Never append both sides of a debate from one process.
-- Role is immutable for the run: once detected as Agent A or Agent B, keep that role until `## CONSENSUS`.
-- If you are about to write the opposite role, stop and report protocol violation instead of writing.
-- After appending your section, only poll. Do not append another turn unless checksum changed and turn order confirms it is now your turn.
-- If checksum does not change, keep polling until timeout or `## CONSENSUS`.
-- On timeout, append only a timeout `## CONSENSUS` from your own role.
-
 ## Checksum command
 
 Use a portable checksum. Pick the first available:
@@ -81,6 +70,32 @@ Before appending, also verify the last signature line role:
 - Stop only when `## CONSENSUS` exists or timeout handling completes.
 - Polling is mandatory after every append. Do not return control to the user between append and poll completion.
 - After checksum change, do not ask the user what to do next. Immediately take the next protocol step for your role.
+
+## Hard Exit Gate (MUST)
+
+- After entering this protocol, do not send any user-facing status/progress/completion message until one of these is true:
+  - `DEBATE.md` contains `## CONSENSUS`, or
+  - timeout handling completed per role rules.
+- Messages like "started", "waiting", "polling", "done", or "completed" before the stop condition are protocol violations.
+- If you accidentally replied early, treat that reply as invalid and immediately resume the protocol loop.
+
+## Pre-Reply Check (MUST)
+
+- Before any user-facing reply, run this gate:
+  - If `DEBATE.md` exists and does not contain `## CONSENSUS`, do not reply; continue append/poll flow immediately.
+  - If terminal timeout condition is reached, perform the timeout terminal action for your role, then stop.
+
+## Blocking Poll Requirement (MUST)
+
+- After every append (`## Opening`, `## Response N`, `## Follow-up N`), run one blocking poll loop.
+- Do not return control early while polling.
+- Exit the loop only on checksum change, `## CONSENSUS`, or timeout.
+
+## Conflict Override
+
+- This protocol overrides default responsiveness/progress-update behavior.
+- Do not pause for confirmations between turns.
+- Do not emit intermediary "in progress" messages while the debate is active.
 
 ## Completion criteria (MUST)
 
