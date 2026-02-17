@@ -412,7 +412,7 @@ class TestAgentBot:
         # The bot calls ensure_setup which calls ensure_user_account
         # and then login with whatever user account was ensured
         assert mock_login.called
-        assert mock_client.add_event_callback.call_count == 3  # invite, message, and reaction callbacks
+        assert mock_client.add_event_callback.call_count == 5  # invite, message, reaction, and 2 image callbacks
 
     @pytest.mark.asyncio
     async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
@@ -585,6 +585,7 @@ class TestAgentBot:
                 room_id="!test:localhost",
                 knowledge=None,
                 user_id="@user:localhost",
+                images=None,
             )
             mock_ai_response.assert_not_called()
             # With streaming and stop button: initial message + reaction + edits
@@ -601,6 +602,7 @@ class TestAgentBot:
                 room_id="!test:localhost",
                 knowledge=None,
                 user_id="@user:localhost",
+                images=None,
             )
             mock_stream_agent_response.assert_not_called()
             # With stop button support: initial + reaction + final

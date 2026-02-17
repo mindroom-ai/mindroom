@@ -14,7 +14,7 @@ import nio
 import uvicorn
 from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
 
-from . import config_confirmation, interactive, voice_handler
+from . import config_confirmation, image_handler, interactive, voice_handler
 from .agents import create_agent, get_rooms_for_entity
 from .ai import ai_response, stream_agent_response
 from .background_tasks import create_background_task, wait_for_background_tasks
@@ -115,11 +115,12 @@ from .thread_utils import (
 from .tools_metadata import get_tool_by_name
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     import structlog
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
+    from agno.media import Image
     from agno.tools.function import Function
     from agno.tools.toolkit import Toolkit
 
@@ -751,6 +752,10 @@ class AgentBot:
             self.client.add_event_callback(_create_task_wrapper(self._on_voice_message), nio.RoomMessageAudio)
             self.client.add_event_callback(_create_task_wrapper(self._on_voice_message), nio.RoomEncryptedAudio)
 
+        # Register image message callbacks on all agents (each agent handles its own routing)
+        self.client.add_event_callback(_create_task_wrapper(self._on_image_message), nio.RoomMessageImage)
+        self.client.add_event_callback(_create_task_wrapper(self._on_image_message), nio.RoomEncryptedImage)
+
         self.running = True
 
         # Router bot has additional responsibilities
@@ -1193,6 +1198,113 @@ class AgentBot:
             # Mark as responded to avoid reprocessing
             self.response_tracker.mark_responded(event.event_id)
 
+    async def _on_image_message(  # noqa: C901, PLR0911
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageImage | nio.RoomEncryptedImage,
+    ) -> None:
+        """Handle image message events by passing the image to the AI model."""
+        assert self.client is not None
+
+        # Skip our own messages
+        if event.sender == self.matrix_id.full_id:
+            return
+
+        # Check if we've already seen this message
+        if self.response_tracker.has_responded(event.event_id):
+            self.logger.debug("Already processed image message", event_id=event.event_id)
+            return
+
+        # Check if sender is authorized
+        if not is_authorized_sender(event.sender, self.config, room.room_id):
+            self.response_tracker.mark_responded(event.event_id)
+            self.logger.debug(f"Ignoring image from unauthorized sender: {event.sender}")
+            return
+
+        # Router doesn't handle images directly (no routing for images)
+        if self.agent_name == ROUTER_AGENT_NAME:
+            return
+
+        # Skip messages from other agents unless mentioned
+        sender_agent_name = extract_agent_name(event.sender, self.config)
+        context = await self._extract_message_context(room, event)
+
+        if sender_agent_name and not context.am_i_mentioned:
+            self.logger.debug("Ignoring image from other agent (not mentioned)")
+            return
+
+        # Check for team formation
+        agents_in_thread = get_agents_in_thread(context.thread_history, self.config)
+        _is_dm_room = await is_dm_room(self.client, room.room_id)
+        all_mentioned_in_thread = get_all_mentioned_agents_in_thread(context.thread_history, self.config)
+        form_team = await decide_team_formation(
+            self.matrix_id,
+            context.mentioned_agents,
+            agents_in_thread,
+            all_mentioned_in_thread,
+            room=room,
+            message=event.body,
+            config=self.config,
+            is_dm_room=_is_dm_room,
+            is_thread=context.is_thread,
+        )
+
+        # Check if we should respond (individually or as team) before downloading
+        will_respond_as_team = form_team.should_form_team and self.matrix_id in form_team.agents
+        if will_respond_as_team:
+            first_agent = min(form_team.agents, key=lambda x: x.full_id)
+            if self.matrix_id != first_agent:
+                return
+        elif not should_agent_respond(
+            agent_name=self.agent_name,
+            am_i_mentioned=context.am_i_mentioned,
+            is_thread=context.is_thread,
+            room=room,
+            thread_history=context.thread_history,
+            config=self.config,
+            mentioned_agents=context.mentioned_agents,
+            has_non_agent_mentions=context.has_non_agent_mentions,
+        ):
+            return
+
+        # Download image only after confirming we should respond
+        image = await image_handler.download_image(self.client, event)
+        if image is None:
+            self.logger.error("Failed to download image", event_id=event.event_id)
+            self.response_tracker.mark_responded(event.event_id)
+            return
+
+        # Detect caption vs filename-only body
+        body = event.body
+        prompt = "[Attached image]" if not body or image_handler.is_filename(body) else body
+
+        self.logger.info("Processing image", event_id=event.event_id)
+
+        if will_respond_as_team:
+            response_event_id = await self._generate_team_response_helper(
+                room_id=room.room_id,
+                reply_to_event_id=event.event_id,
+                thread_id=context.thread_id,
+                message=prompt,
+                team_agents=form_team.agents,
+                team_mode=form_team.mode,
+                thread_history=context.thread_history,
+                requester_user_id=event.sender,
+                existing_event_id=None,
+                images=[image],
+            )
+        else:
+            response_event_id = await self._generate_response(
+                room_id=room.room_id,
+                prompt=prompt,
+                reply_to_event_id=event.event_id,
+                thread_id=context.thread_id,
+                thread_history=context.thread_history,
+                user_id=event.sender,
+                images=[image],
+            )
+        self.response_tracker.mark_responded(event.event_id, response_event_id)
+
     async def _derive_conversation_context(
         self,
         room_id: str,
@@ -1209,7 +1321,7 @@ class AgentBot:
             fetch_thread_history,
         )
 
-    async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
+    async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessage) -> MessageContext:
         assert self.client is not None
 
         # Check if mentions should be ignored for this message
@@ -1282,6 +1394,7 @@ class AgentBot:
         thread_history: list[dict],
         requester_user_id: str,
         existing_event_id: str | None = None,
+        images: Sequence[Image] | None = None,
     ) -> str | None:
         """Generate a team response (shared between preformed teams and TeamBot).
 
@@ -1331,6 +1444,7 @@ class AgentBot:
                             mode=mode,
                             thread_history=thread_history,
                             model_name=model_name,
+                            images=images,
                         )
 
                         event_id, accumulated = await send_streaming_response(
@@ -1366,6 +1480,7 @@ class AgentBot:
                             orchestrator=orchestrator,
                             thread_history=thread_history,
                             model_name=model_name,
+                            images=images,
                         )
 
                 # Either edit the thinking message or send new
@@ -1516,6 +1631,7 @@ class AgentBot:
         thread_history: list[dict],
         existing_event_id: str | None = None,
         user_id: str | None = None,
+        images: Sequence[Image] | None = None,
     ) -> str | None:
         """Process a message and send a response (non-streaming)."""
         assert self.client is not None
@@ -1545,6 +1661,7 @@ class AgentBot:
                         room_id=room_id,
                         knowledge=knowledge,
                         user_id=user_id,
+                        images=images,
                     )
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
@@ -1715,6 +1832,7 @@ class AgentBot:
         thread_history: list[dict],
         existing_event_id: str | None = None,
         user_id: str | None = None,
+        images: Sequence[Image] | None = None,
     ) -> str | None:
         """Process a message and send a response (streaming)."""
         assert self.client is not None
@@ -1744,6 +1862,7 @@ class AgentBot:
                         room_id=room_id,
                         knowledge=knowledge,
                         user_id=user_id,
+                        images=images,
                     )
 
                     event_id, accumulated = await send_streaming_response(
@@ -1790,6 +1909,7 @@ class AgentBot:
         thread_history: list[dict],
         existing_event_id: str | None = None,
         user_id: str | None = None,
+        images: Sequence[Image] | None = None,
     ) -> str | None:
         """Generate and send/edit a response using AI.
 
@@ -1802,6 +1922,7 @@ class AgentBot:
             existing_event_id: If provided, edit this message instead of sending a new one
                              (only used for interactive question responses)
             user_id: User ID of the sender for identifying user messages in history
+            images: Optional images to pass to the AI model
 
         Returns:
             Event ID of the response message, or None if failed
@@ -1831,6 +1952,7 @@ class AgentBot:
                     thread_history,
                     message_id,  # Edit the thinking message or existing
                     user_id=user_id,
+                    images=images,
                 )
             else:
                 await self._process_and_respond(
@@ -1841,6 +1963,7 @@ class AgentBot:
                     thread_history,
                     message_id,  # Edit the thinking message or existing
                     user_id=user_id,
+                    images=images,
                 )
 
         # Use unified handler for cancellation support
@@ -2327,6 +2450,7 @@ class TeamBot(AgentBot):
         thread_history: list[dict],
         existing_event_id: str | None = None,
         user_id: str | None = None,
+        images: Sequence[Image] | None = None,
     ) -> None:
         """Generate a team response instead of individual agent response."""
         if not prompt.strip():
@@ -2364,6 +2488,7 @@ class TeamBot(AgentBot):
             thread_history=thread_history,
             requester_user_id=user_id or "",
             existing_event_id=existing_event_id,
+            images=images,
         )
 
 
