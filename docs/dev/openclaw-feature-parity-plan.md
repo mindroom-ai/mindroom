@@ -3,6 +3,7 @@
 Last updated: 2026-02-17
 Owner: MindRoom backend
 Branch: openclaw-phase1-runtime-context
+Supersedes: `docs/dev/PROPOSAL.md` draft notes
 
 ## Objective
 
@@ -39,20 +40,26 @@ These rules are required for this implementation run.
 
 ## Implementation Plan
 
-## Phase 2: Personality and Memory Auto-Loading
+### Phase 0 + 1 Baseline (Completed)
+
+- Commit `e18933f5`: OpenClaw compat toolkit scaffold + contract tests.
+- Commit `3a9b6beb`: runtime context plumbing through response paths.
+- Commit `526125c2`: review fixes for phase 0+1 (thread semantics + stricter tests).
+
+### Phase 2: Personality and Memory Auto-Loading
 
 - Add `context_files` and `memory_dir` to `AgentConfig`.
 - Load `SOUL.md`, `USER.md`, and selected memory files into role context at agent creation.
 - Keep load deterministic and resilient to missing files.
 - Add tests for context injection.
 
-## Phase 3: Session/Subagent Registry Foundation
+### Phase 3: Session/Subagent Registry Foundation
 
 - Implement persistent lightweight registry for OpenClaw-compatible session metadata.
 - Track canonical current session key from Matrix room/thread context.
 - Support listing/history/status lookups from registry + existing runtime data.
 
-## Phase 4: Read-Only Tools + Aliases
+### Phase 4: Read-Only Tools + Aliases
 
 - Implement `agents_list`, `session_status`, `sessions_list`, `sessions_history`.
 - Implement aliases:
@@ -63,13 +70,13 @@ These rules are required for this implementation run.
   - `process`
 - Ensure deterministic JSON response shapes.
 
-## Phase 5: Active Orchestration and Matrix Messaging
+### Phase 5: Active Orchestration and Matrix Messaging
 
 - Implement `sessions_send` and `sessions_spawn` against Matrix runtime context.
 - Implement `subagents` (`list`, `kill`, `steer`) on top of spawned run tracking.
 - Implement `message` actions for send/reply/react/read with thread support.
 
-## Phase 6: Rollout and Config Cleanup
+### Phase 6: Rollout and Config Cleanup
 
 - Add `openclaw_compat` to OpenClaw agent tool list.
 - Remove obsolete instruction-only file-loading guidance (now automatic).
@@ -83,7 +90,7 @@ For each commit:
 1. Run three independent reviewers:
    - `codex review`
    - `claude -p` with strict review prompt
-   - `gemini -p` with strict review prompt
+   - `gemini -p` with strict review prompt (fallback: `llm` local model when Gemini credentials are unavailable)
 2. Aggregate findings into this document.
 3. Fix findings in follow-up commit(s).
 4. Re-run all three reviewers.
@@ -99,6 +106,8 @@ For each commit:
 
 | Phase | Status | Notes |
 |---|---|---|
+| Phase 0 | Completed | `e18933f5` |
+| Phase 1 | Completed | `3a9b6beb`, `526125c2` |
 | Phase 2 | In progress | Starting implementation now |
 | Phase 3 | Pending | Not started |
 | Phase 4 | Pending | Not started |
@@ -109,5 +118,9 @@ For each commit:
 
 ### 2026-02-17
 
-- Plan updated to living execution document with mandatory commit/review protocol.
-- Next step: implement Phase 2 in first feature commit, then start 3-agent multi-round review cycle.
+- Commit `28d37d51`: created this living execution tracker.
+- Review round 1 for `28d37d51`:
+  - Reviewer A (`codex review`): APPROVE.
+  - Reviewer B (`claude -p`): CHANGES REQUIRED (structure/backfill issues).
+  - Reviewer C (`llm` local `gpt-oss:20b`): APPROVE.
+- Resolution plan: backfill completed phases, fix heading hierarchy, and record reviewer fallback policy.
