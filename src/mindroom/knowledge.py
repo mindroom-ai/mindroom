@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import subprocess
+import re
 from contextlib import suppress
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _COLLECTION_PREFIX = "mindroom_knowledge"
+_URL_PATTERN = re.compile(r"https?://[^\s'\"<>]+")
 
 
 def _resolve_knowledge_path(path: str) -> Path:
@@ -133,6 +134,26 @@ def _authenticated_repo_url(repo_url: str, credentials_service: str | None) -> s
     hostname = parsed.netloc.split("@")[-1]
     auth_netloc = f"{quote(username, safe='')}:{quote(secret, safe='')}@{hostname}"
     return urlunparse(parsed._replace(netloc=auth_netloc))
+
+
+def _redact_url_credentials(value: str) -> str:
+    """Redact password/token information from an HTTP(S) URL."""
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or "@" not in parsed.netloc:
+        return value
+
+    userinfo, host = parsed.netloc.rsplit("@", 1)
+    if ":" in userinfo:
+        username = userinfo.split(":", 1)[0]
+        redacted_userinfo = f"{username}:***"
+    else:
+        redacted_userinfo = "***"
+    return urlunparse(parsed._replace(netloc=f"{redacted_userinfo}@{host}"))
+
+
+def _redact_credentials_in_text(value: str) -> str:
+    """Redact credential-bearing URLs embedded inside free-form text."""
+    return _URL_PATTERN.sub(lambda match: _redact_url_credentials(match.group(0)), value)
 
 
 def _split_posix_parts(value: str) -> tuple[str, ...]:
@@ -258,35 +279,55 @@ class KnowledgeManager:
 
         return not any(_matches_root_glob(relative_path, pattern) for pattern in git_config.exclude_patterns)
 
-    def _run_git(self, args: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["git", *args],
+    async def _run_git(self, args: list[str], *, cwd: Path | None = None) -> str:
+        process = await asyncio.create_subprocess_exec(
+            "git",
+            *args,
             cwd=str(cwd or self.knowledge_path),
-            check=True,
-            capture_output=True,
-            text=True,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-
-    def _git_rev_parse(self, ref: str) -> str | None:
         try:
-            result = self._run_git(["rev-parse", ref])
-        except subprocess.CalledProcessError:
-            return None
-        return result.stdout.strip() or None
+            stdout, stderr = await process.communicate()
+        except asyncio.CancelledError:
+            with suppress(ProcessLookupError):
+                process.kill()
+            with suppress(ProcessLookupError):
+                await process.wait()
+            raise
 
-    def _git_list_tracked_files(self) -> set[str]:
-        result = self._run_git(["ls-files", "-z"])
-        raw_paths = [entry for entry in result.stdout.split("\x00") if entry]
+        if process.returncode != 0:
+            stdout_text = stdout.decode("utf-8", errors="replace").strip()
+            stderr_text = stderr.decode("utf-8", errors="replace").strip()
+            details = _redact_credentials_in_text(stderr_text or stdout_text)
+            command = " ".join(["git", *(_redact_url_credentials(arg) for arg in args)])
+            msg = f"Git command failed with exit code {process.returncode}: {command}"
+            if details:
+                msg = f"{msg}\n{details}"
+            raise RuntimeError(msg)
+
+        return stdout.decode("utf-8", errors="replace")
+
+    async def _git_rev_parse(self, ref: str) -> str | None:
+        try:
+            output = await self._run_git(["rev-parse", ref])
+        except RuntimeError:
+            return None
+        return output.strip() or None
+
+    async def _git_list_tracked_files(self) -> set[str]:
+        output = await self._run_git(["ls-files", "-z"])
+        raw_paths = [entry for entry in output.split("\x00") if entry]
         return {path for path in raw_paths if self._include_relative_path(path)}
 
-    def _ensure_git_repository(self, git_config: KnowledgeGitConfig) -> None:
+    async def _ensure_git_repository(self, git_config: KnowledgeGitConfig) -> None:
         git_dir = self.knowledge_path / ".git"
         if git_dir.is_dir():
-            current_remote = self._run_git(["remote", "get-url", "origin"]).stdout.strip()
+            current_remote = (await self._run_git(["remote", "get-url", "origin"])).strip()
             expected_remote = _authenticated_repo_url(git_config.repo_url, git_config.credentials_service)
             if current_remote != expected_remote:
-                self._run_git(["remote", "set-url", "origin", expected_remote])
-            self._run_git(["checkout", git_config.branch])
+                await self._run_git(["remote", "set-url", "origin", expected_remote])
+            await self._run_git(["checkout", git_config.branch])
             return
 
         if self.knowledge_path.exists() and any(self.knowledge_path.iterdir()):
@@ -298,7 +339,7 @@ class KnowledgeManager:
 
         self.knowledge_path.parent.mkdir(parents=True, exist_ok=True)
         clone_url = _authenticated_repo_url(git_config.repo_url, git_config.credentials_service)
-        self._run_git(
+        await self._run_git(
             [
                 "clone",
                 "--single-branch",
@@ -310,15 +351,15 @@ class KnowledgeManager:
             cwd=self.knowledge_path.parent,
         )
 
-    def _sync_git_repository_once(self, git_config: KnowledgeGitConfig) -> tuple[set[str], set[str], bool]:
-        self._ensure_git_repository(git_config)
+    async def _sync_git_repository_once(self, git_config: KnowledgeGitConfig) -> tuple[set[str], set[str], bool]:
+        await self._ensure_git_repository(git_config)
 
-        before_head = self._git_rev_parse("HEAD")
-        before_files = self._git_list_tracked_files()
+        before_head = await self._git_rev_parse("HEAD")
+        before_files = await self._git_list_tracked_files()
 
-        self._run_git(["fetch", "origin", git_config.branch])
+        await self._run_git(["fetch", "origin", git_config.branch])
         remote_ref = f"origin/{git_config.branch}"
-        remote_head = self._git_rev_parse(remote_ref)
+        remote_head = await self._git_rev_parse(remote_ref)
         if remote_head is None:
             msg = f"Could not resolve remote ref '{remote_ref}' for knowledge base '{self.base_id}'"
             raise RuntimeError(msg)
@@ -326,16 +367,16 @@ class KnowledgeManager:
         if before_head == remote_head:
             return set(), set(), False
 
-        self._run_git(["checkout", git_config.branch])
+        await self._run_git(["checkout", git_config.branch])
         # Force-align the local checkout with remote to tolerate local dirty state.
-        self._run_git(["reset", "--hard", remote_ref])
+        await self._run_git(["reset", "--hard", remote_ref])
 
-        after_files = self._git_list_tracked_files()
+        after_files = await self._git_list_tracked_files()
         if before_head is None:
             changed_paths = after_files
         else:
-            diff_result = self._run_git(["diff", "--name-only", "--no-renames", f"{before_head}..HEAD"])
-            changed_paths = {path for path in diff_result.stdout.splitlines() if self._include_relative_path(path)}
+            diff_output = await self._run_git(["diff", "--name-only", "--no-renames", f"{before_head}..HEAD"])
+            changed_paths = {path for path in diff_output.splitlines() if self._include_relative_path(path)}
 
         removed_files = before_files - after_files
         changed_files = {path for path in changed_paths if path in after_files} | (after_files - before_files)
@@ -438,10 +479,7 @@ class KnowledgeManager:
             return {"updated": False, "changed_count": 0, "removed_count": 0}
 
         async with self._git_sync_lock:
-            changed_files, removed_files, updated = await asyncio.to_thread(
-                self._sync_git_repository_once,
-                git_config,
-            )
+            changed_files, removed_files, updated = await self._sync_git_repository_once(git_config)
 
         for relative_path in sorted(removed_files):
             await self.remove_file(relative_path)
@@ -453,7 +491,7 @@ class KnowledgeManager:
             logger.info(
                 "Knowledge Git repository synchronized",
                 base_id=self.base_id,
-                repo_url=git_config.repo_url,
+                repo_url=_redact_url_credentials(git_config.repo_url),
                 branch=git_config.branch,
                 changed_count=len(changed_files),
                 removed_count=len(removed_files),
@@ -477,7 +515,7 @@ class KnowledgeManager:
                 logger.exception(
                     "Knowledge Git sync failed",
                     base_id=self.base_id,
-                    repo_url=git_config.repo_url,
+                    repo_url=_redact_url_credentials(git_config.repo_url),
                     branch=git_config.branch,
                 )
 
@@ -501,7 +539,7 @@ class KnowledgeManager:
         logger.info(
             "Knowledge Git sync started",
             base_id=self.base_id,
-            repo_url=git_config.repo_url,
+            repo_url=_redact_url_credentials(git_config.repo_url),
             branch=git_config.branch,
             poll_interval_seconds=git_config.poll_interval_seconds,
         )
