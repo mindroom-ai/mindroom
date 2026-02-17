@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import mindroom.plugins as plugin_module
@@ -12,8 +14,6 @@ from mindroom.skills import get_plugin_skill_roots, set_plugin_skill_roots
 from mindroom.tools_metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     import pytest
 
 
@@ -156,3 +156,23 @@ def test_load_plugins_from_python_package(tmp_path: Path, monkeypatch: pytest.Mo
         plugin_module._TOOL_MODULE_CACHE.clear()
         plugin_module._TOOL_MODULE_CACHE.update(original_tool_cache)
         set_plugin_skill_roots(original_plugin_roots)
+
+
+def test_resolve_plugin_root_relative_to_config_dir_not_cwd(tmp_path: Path) -> None:
+    """Relative plugin paths should resolve from the config directory."""
+    config_dir = tmp_path / "cfg"
+    plugin_root = config_dir / "plugins" / "demo"
+    plugin_root.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+
+    original_cwd = Path.cwd()
+    other_cwd = tmp_path / "other"
+    other_cwd.mkdir(parents=True, exist_ok=True)
+    os.chdir(other_cwd)
+    try:
+        resolved = plugin_module._resolve_plugin_root("./plugins/demo", config_path=config_path)
+    finally:
+        os.chdir(original_cwd)
+
+    assert resolved == plugin_root.resolve()

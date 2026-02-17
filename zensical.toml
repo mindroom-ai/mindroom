@@ -29,6 +29,7 @@ nav = [
     { "Built-in Tools" = "tools/builtin.md" },
     { "MCP (Planned)" = "tools/mcp.md" },
   ] },
+  { "OpenClaw Import" = "openclaw.md" },
   { "Skills" = "skills.md" },
   { "Plugins" = "plugins.md" },
   { "Knowledge Bases" = "knowledge.md" },

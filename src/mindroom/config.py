@@ -21,6 +21,7 @@ logger = get_logger(__name__)
 AgentLearningMode = Literal["always", "agentic"]
 CultureMode = Literal["automatic", "agentic", "manual"]
 MATRIX_LOCALPART_PATTERN = re.compile(r"^[a-z0-9._=/-]+$")
+AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
 DEFAULT_DEFAULT_TOOLS = ("scheduler",)
 
 
@@ -47,6 +48,14 @@ class AgentConfig(BaseModel):
     knowledge_bases: list[str] = Field(
         default_factory=list,
         description="Knowledge base IDs assigned to this agent",
+    )
+    context_files: list[str] = Field(
+        default_factory=list,
+        description="File paths read at agent init and prepended to role context",
+    )
+    memory_dir: str | None = Field(
+        default=None,
+        description="Directory containing MEMORY.md and dated memory files to auto-load into role context",
     )
 
     @model_validator(mode="before")
@@ -352,6 +361,17 @@ class Config(BaseModel):
         default_factory=list,
         description="Matrix user IDs of non-MindRoom bots (e.g., bridge bots) that should be treated like agents for response logic — their messages won't trigger the multi-human-thread mention requirement",
     )
+
+    @model_validator(mode="after")
+    def validate_entity_names(self) -> Config:
+        """Ensure agent and team names contain only alphanumeric characters and underscores."""
+        invalid_agents = [name for name in self.agents if not AGENT_NAME_PATTERN.fullmatch(name)]
+        invalid_teams = [name for name in self.teams if not AGENT_NAME_PATTERN.fullmatch(name)]
+        invalid = sorted(invalid_agents + invalid_teams)
+        if invalid:
+            msg = f"Agent/team names must be alphanumeric/underscore only, got: {', '.join(invalid)}"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def validate_knowledge_base_assignments(self) -> Config:

@@ -23,6 +23,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Overview | `tools/index.md` | `tools/index.md` | `page__tools__index.md` |
 | Built-in Tools | `tools/builtin.md` | `tools/builtin/index.md` | `page__tools__builtin__index.md` |
 | MCP (Planned) | `tools/mcp.md` | `tools/mcp/index.md` | `page__tools__mcp__index.md` |
+| OpenClaw Import | `openclaw.md` | `openclaw/index.md` | `page__openclaw__index.md` |
 | Skills | `skills.md` | `skills/index.md` | `page__skills__index.md` |
 | Plugins | `plugins.md` | `plugins/index.md` | `page__plugins__index.md` |
 | Knowledge Bases | `knowledge.md` | `knowledge/index.md` | `page__knowledge__index.md` |
