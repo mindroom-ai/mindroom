@@ -661,7 +661,7 @@ class TestAgentBot:
         event.sender = "@user:localhost"
         event.event_id = "$img_event"
         event.body = "photo.jpg"
-        event.source = {"content": {"body": "photo.jpg"}}
+        event.source = {"content": {"body": "photo.jpg"}}  # no filename → body is filename
 
         image = MagicMock()
 

@@ -1274,9 +1274,8 @@ class AgentBot:
             self.response_tracker.mark_responded(event.event_id)
             return
 
-        # Detect caption vs filename-only body
-        body = event.body
-        prompt = "[Attached image]" if not body or image_handler.is_filename(body) else body
+        # Extract caption using MSC2530 semantics (filename field vs body)
+        prompt = image_handler.extract_caption(event)
 
         self.logger.info("Processing image", event_id=event.event_id)
 
