@@ -2,7 +2,7 @@
 
 Last updated: 2026-02-17
 Owner: MindRoom backend
-Branch: openclaw-phase1-runtime-context
+Branch: openclaw-compat
 Supersedes: `docs/dev/PROPOSAL.md` draft notes
 
 ## Objective
@@ -37,6 +37,13 @@ These rules are required for this implementation run.
 ### Excluded
 
 - OpenClaw Gateway implementation itself (only explicit `not_configured` behavior)
+
+### Post-Phase Follow-Up (Open)
+
+- Track remaining OpenClaw parity gaps (gateway/nodes/canvas backend integration + alias coverage) in issue `#171`.
+- Keep thread-mode and context-compaction work in dedicated issues:
+  - `#169` room-level conversation mode
+  - `#170` context management/compaction
 
 ## Implementation Plan
 
@@ -113,6 +120,7 @@ For each commit:
 | Phase 4 | Completed | `eb88ecf2` |
 | Phase 5 | Completed | `eb88ecf2`, `50649f51` |
 | Phase 6 | Completed | `729ebaa3` |
+| Post-phase hardening | Completed | `bb14dc30`, `cdefce68` |
 
 ## Commit and Review Log
 
@@ -161,3 +169,6 @@ For each commit:
     - Expanded the review notes to spell out exact reviewer concerns and outcomes.
     - Confirmed `openclaw` rollout fields are present in both config files and obsolete instructions are removed.
     - Resolution summary: no additional runtime code changes were required for Phase 6; remaining comments were documentation clarity items.
+- Commit `bb14dc30`: consolidated OpenClaw behavioral parity implementation and docs into current branch history.
+- Commit `cdefce68`: scoped session/run registry operations to active context and fixed steer status transitions on dispatch failure.
+- Open issue `#171`: track remaining parity work for non-stub `gateway`/`nodes`/`canvas` and missing alias coverage.
