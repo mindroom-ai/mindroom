@@ -108,11 +108,11 @@ For each commit:
 |---|---|---|
 | Phase 0 | Completed | `e18933f5` |
 | Phase 1 | Completed | `3a9b6beb`, `526125c2` |
-| Phase 2 | In progress | Starting implementation now |
-| Phase 3 | Pending | Not started |
-| Phase 4 | Pending | Not started |
-| Phase 5 | Pending | Not started |
-| Phase 6 | Pending | Not started |
+| Phase 2 | Completed | `09d0473c`, `87ab0c74` |
+| Phase 3 | Completed | `eb88ecf2` |
+| Phase 4 | Completed | `eb88ecf2` |
+| Phase 5 | Completed | `eb88ecf2`, `50649f51` |
+| Phase 6 | In progress | Config rollout edits prepared, commit pending |
 
 ## Commit and Review Log
 
@@ -124,3 +124,29 @@ For each commit:
   - Reviewer B (`claude -p`): CHANGES REQUIRED (structure/backfill issues).
   - Reviewer C (`llm` local `gpt-oss:20b`): APPROVE.
 - Resolution plan: backfill completed phases, fix heading hierarchy, and record reviewer fallback policy.
+- Commit `6fd698f3`: backfilled tracker with completed phase work and review protocol details.
+- Commit `09d0473c`: implemented automatic `context_files` + `memory_dir` context loading.
+- Commit `87ab0c74`: fixed context path resolution and hardened phase 2 tests.
+- Review rounds for `87ab0c74`:
+  - Round 1:
+    - Reviewer A (`qwen3-thinking:8b` local): APPROVE.
+    - Reviewer B (`gpt-oss-low:20b` local): APPROVE.
+    - Reviewer C (`claude -p`): APPROVE.
+- Commit `eb88ecf2`: implemented session registry, read-only tools, active orchestration tools, aliases, and gateway/nodes/canvas `not_configured` fallbacks.
+- Review rounds for `eb88ecf2`:
+  - Round 1:
+    - Reviewer A (`claude -p`): CHANGES REQUIRED (hardening and behavior fixes).
+    - Reviewer B (`qwen3-thinking:8b` local): CHANGES REQUIRED (partially stale findings).
+    - Reviewer C (`gpt-oss-low:20b` local): APPROVE.
+  - Resolution: addressed actionable findings in follow-up commit.
+- Commit `50649f51`: review fixes for openclaw compat runtime behavior.
+- Review rounds for `50649f51`:
+  - Round 1:
+    - Reviewer A (`claude -p`): APPROVE with low-risk notes.
+    - Reviewer B (`qwen3-thinking:8b` local): CHANGES REQUIRED (single parser concern).
+    - Reviewer C (`gpt-oss-low:20b` local): APPROVE.
+  - Round 2:
+    - Reviewer A (`claude -p`): APPROVE.
+    - Reviewer B (`qwen3-thinking:8b` local): APPROVE (confirmed `rsplit` correctness).
+    - Reviewer C (`gpt-oss-low:20b` local): CHANGES REQUIRED (false positives; manually verified as non-issues).
+  - Reviewer infra note: `gemini` unavailable in this environment (`GEMINI_API_KEY` missing), so local model reviewers are used as fallback per protocol.
