@@ -46,7 +46,7 @@ Telegram Cloud <--> mautrix-telegram <--> Synapse <--> Element
 
 ### 1. Add credentials to config
 
-Edit `/opt/stacks/mindroom/telegram-bridge/config.yaml` and replace the placeholders in the `telegram:` section:
+Edit `telegram-bridge/config.yaml` and replace the placeholders in the `telegram:` section:
 
 ```yaml
 telegram:
@@ -55,7 +55,7 @@ telegram:
     bot_token: 123456:ABC...  # Your bot token from BotFather
 ```
 
-Also update the same values in `/opt/stacks/mindroom/.env`:
+Also update the same values in your `.env`:
 
 ```bash
 TELEGRAM_API_ID=12345678
@@ -69,16 +69,16 @@ Synapse needs a new volume mount for the bridge registration file, so it must be
 
 ```bash
 # Recreate Synapse to pick up the new volume mount and bridge registration
-cf compose mindroom up -d synapse
+docker compose up -d synapse
 
 # Wait for Synapse to become healthy
-cf compose mindroom ps synapse
+docker compose ps synapse
 
 # Start the bridge
-cf compose mindroom up -d telegram-bridge
+docker compose up -d telegram-bridge
 ```
 
-> **Note:** `cf compose mindroom restart synapse` will NOT work here because the
+> **Note:** `docker compose restart synapse` will NOT work here because the
 > `registration.yaml` volume mount is new in `compose.yaml`. A restart reuses the
 > existing container; `up -d` recreates it with the updated mounts.
 
@@ -86,7 +86,7 @@ cf compose mindroom up -d telegram-bridge
 
 ```bash
 # Check bridge logs
-cf compose mindroom logs telegram-bridge --tail 20
+docker compose logs telegram-bridge --tail 20
 
 # Look for "Startup actions complete"
 ```
@@ -97,8 +97,8 @@ cf compose mindroom logs telegram-bridge --tail 20
 
 Before you can bridge anything, you must link your Telegram account:
 
-1. Open Element at `element.lab.nijho.lt`
-2. Start a DM with `@telegrambot:matrix.lab.nijho.lt`
+1. Open Element at your Element URL
+2. Start a DM with `@telegrambot:your.matrix.domain`
 3. Send `login`
 4. Enter your phone number in international format (e.g., `+1234567890`)
 5. Enter the verification code sent to your Telegram app
@@ -113,9 +113,9 @@ The bridge connects a **Telegram group** to a **Matrix room**. You need a Telegr
 **For each Matrix room you want to access from Telegram** (e.g., Lobby):
 
 1. **Create a Telegram group** in the Telegram app (e.g., name it "MindRoom Lobby")
-2. **Add your bridge bot** (e.g., `@mindroom_lab_bot`) to that Telegram group
+2. **Add your bridge bot** (e.g., `@your_bridge_bot`) to that Telegram group
 3. **In Element**, go to the Matrix room you want to bridge (e.g., Lobby)
-4. **Invite the bridge bot**: invite `@telegrambot:matrix.lab.nijho.lt` to the room
+4. **Invite the bridge bot**: invite `@telegrambot:your.matrix.domain` to the room
 5. **Link the rooms**: in the Matrix room, send `!tg bridge` -- the bot will list your Telegram groups and let you pick which one to link
 
 Once linked:
@@ -141,7 +141,7 @@ After logging in (step 1), your Telegram chats automatically appear as Matrix ro
 
 ### Bot Commands Reference
 
-Send these to `@telegrambot:matrix.lab.nijho.lt` in a DM, or in a bridged room:
+Send these to `@telegrambot:your.matrix.domain` in a DM, or in a bridged room:
 
 | Command | Description |
 |---------|-------------|
@@ -177,15 +177,15 @@ Set in `bridge.permissions`:
 - `full` - Full access including creating portals
 - `admin` - Bridge administration
 
-Default config gives `full` to all `matrix.lab.nijho.lt` users.
+Default config gives `full` to all users on your homeserver domain.
 
 ## Troubleshooting
 
 ### Bridge won't start
 
 - Check credentials: `api_id` must be numeric, `api_hash` must be a hex string, `bot_token` must be a valid BotFather token
-- Check logs: `cf compose mindroom logs telegram-bridge --tail 50`
-- Verify Synapse is healthy: `cf compose mindroom ps`
+- Check logs: `docker compose logs telegram-bridge --tail 50`
+- Verify Synapse is healthy: `docker compose ps`
 
 ### Login fails
 
@@ -208,12 +208,12 @@ To make your messages from Matrix appear as your real Telegram account (not the 
 
 ### Database issues
 
-The bridge uses SQLite at `/mnt/data/mindroom/telegram-bridge/mautrix-telegram.db`. To reset:
+The bridge uses SQLite stored in the `telegram-bridge` data volume. To reset:
 
 ```bash
-cf compose mindroom stop telegram-bridge
-rm /mnt/data/mindroom/telegram-bridge/mautrix-telegram.db
-cf compose mindroom up -d telegram-bridge
+docker compose stop telegram-bridge
+rm <data-dir>/telegram-bridge/mautrix-telegram.db
+docker compose up -d telegram-bridge
 ```
 
 Note: This will require re-logging into Telegram.
@@ -223,14 +223,14 @@ Note: This will require re-logging into Telegram.
 If Synapse reports appservice errors, regenerate the registration:
 
 ```bash
-cf compose mindroom stop telegram-bridge
-rm /opt/stacks/mindroom/telegram-bridge/registration.yaml
+docker compose stop telegram-bridge
+rm telegram-bridge/registration.yaml
 # Temporarily set valid api_id in config.yaml, then:
-cf compose mindroom run --rm --no-deps --entrypoint \
+docker compose run --rm --no-deps --entrypoint \
   "python -m mautrix_telegram -g -c /data/config.yaml -r /data/registration.yaml" \
   telegram-bridge
-cf compose mindroom restart synapse
-cf compose mindroom up -d telegram-bridge
+docker compose restart synapse
+docker compose up -d telegram-bridge
 ```
 
 ## Maintenance
@@ -238,16 +238,14 @@ cf compose mindroom up -d telegram-bridge
 ### Updating
 
 ```bash
-cf update mindroom
-# Or just the bridge:
-cf compose mindroom pull telegram-bridge
-cf compose mindroom up -d telegram-bridge
+docker compose pull telegram-bridge
+docker compose up -d telegram-bridge
 ```
 
 ### Backup
 
 Important data locations:
 
-- `/opt/stacks/mindroom/telegram-bridge/config.yaml` - Bridge configuration
-- `/opt/stacks/mindroom/telegram-bridge/registration.yaml` - Appservice registration
-- `/mnt/data/mindroom/telegram-bridge/` - SQLite database with session data
+- `telegram-bridge/config.yaml` - Bridge configuration
+- `telegram-bridge/registration.yaml` - Appservice registration
+- Telegram bridge data volume - SQLite database with session data
