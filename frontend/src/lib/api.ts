@@ -95,7 +95,7 @@ async function throwIfNotOk(response: Response): Promise<void> {
   throw new Error(detail);
 }
 
-export async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
+async function fetchWithTimeout(url: string, options?: RequestInit): Promise<Response> {
   // Add a timeout to prevent hanging requests
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
@@ -103,7 +103,7 @@ export async function fetchJSON<T>(url: string, options?: RequestInit): Promise<
   try {
     const useJsonHeaders = typeof FormData === 'undefined' || !(options?.body instanceof FormData);
 
-    const response = await fetch(url, {
+    return await fetch(url, {
       ...options,
       signal: controller.signal,
       headers: {
@@ -111,23 +111,25 @@ export async function fetchJSON<T>(url: string, options?: RequestInit): Promise<
         ...options?.headers,
       },
     });
-
-    clearTimeout(timeoutId);
-
-    await throwIfNotOk(response);
-
-    if (response.status === 204) {
-      return undefined as T;
-    }
-
-    return (await response.json()) as T;
   } catch (error) {
-    clearTimeout(timeoutId);
     if (error instanceof Error && error.name === 'AbortError') {
       throw new Error('API call timed out');
     }
     throw error;
+  } finally {
+    clearTimeout(timeoutId);
   }
+}
+
+export async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
+  const response = await fetchWithTimeout(url, options);
+  await throwIfNotOk(response);
+
+  if (response.status === 204) {
+    return undefined as T;
+  }
+
+  return (await response.json()) as T;
 }
 
 // Backward-compatible helper for existing call sites.
@@ -160,9 +162,7 @@ export async function getWorkspaceFile(
   agentName: string,
   filename: string
 ): Promise<{ file: WorkspaceFileResponse; etag: string }> {
-  const response = await fetch(API_ENDPOINTS.workspace.file(agentName, filename), {
-    headers: { 'Content-Type': 'application/json' },
-  });
+  const response = await fetchWithTimeout(API_ENDPOINTS.workspace.file(agentName, filename));
   await throwIfNotOk(response);
 
   const etag = response.headers.get('etag') || '';
@@ -176,7 +176,7 @@ export async function updateWorkspaceFile(
   content: string,
   etag: string
 ): Promise<{ file: WorkspaceFileResponse; etag: string }> {
-  const response = await fetch(API_ENDPOINTS.workspace.file(agentName, filename), {
+  const response = await fetchWithTimeout(API_ENDPOINTS.workspace.file(agentName, filename), {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',

@@ -273,9 +273,10 @@ async def _prepare_agent_and_prompt(
         room_id=room_id,
         is_dm=is_dm,
     )
-    workspace_prompt = f"{workspace_context}\n\n{prompt}" if workspace_context else prompt
-    enhanced_prompt = await build_memory_enhanced_prompt(workspace_prompt, agent_name, storage_path, config, room_id)
-    full_prompt = build_prompt_with_thread_history(enhanced_prompt, thread_history)
+    # Keep semantic memory search scoped to the user's raw prompt.
+    enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, storage_path, config, room_id)
+    prompt_with_workspace = f"{workspace_context}\n\n{enhanced_prompt}" if workspace_context else enhanced_prompt
+    full_prompt = build_prompt_with_thread_history(prompt_with_workspace, thread_history)
     logger.info("Preparing agent and prompt", agent=agent_name, full_prompt=full_prompt)
     agent = create_agent(
         agent_name,

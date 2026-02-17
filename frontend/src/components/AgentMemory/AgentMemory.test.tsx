@@ -8,6 +8,14 @@ import {
   type WorkspaceFileResponse,
 } from '@/lib/api';
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(res => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 vi.mock('@/lib/api', async () => {
   const actual = await vi.importActual<typeof import('@/lib/api')>('@/lib/api');
   return {
@@ -108,5 +116,75 @@ describe('AgentMemory', () => {
 
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
     expect(screen.getByText(/Daily logs are read-only/)).toBeInTheDocument();
+  });
+
+  it('ignores stale file responses when selection changes quickly', async () => {
+    vi.mocked(getWorkspaceFiles).mockResolvedValue({
+      agent_name: 'test_agent',
+      files: [
+        {
+          filename: 'SOUL.md',
+          size_bytes: 10,
+          last_modified: '2026-02-16T00:00:00Z',
+          agent_name: 'test_agent',
+        },
+        {
+          filename: 'AGENTS.md',
+          size_bytes: 14,
+          last_modified: '2026-02-16T00:00:00Z',
+          agent_name: 'test_agent',
+        },
+      ],
+      count: 2,
+    });
+
+    const soulRequest = deferred<{ file: WorkspaceFileResponse; etag: string }>();
+    const agentsRequest = deferred<{ file: WorkspaceFileResponse; etag: string }>();
+
+    vi.mocked(getWorkspaceFile).mockImplementation((_agentId, filename) => {
+      if (filename === 'SOUL.md') {
+        return soulRequest.promise;
+      }
+      if (filename === 'AGENTS.md') {
+        return agentsRequest.promise;
+      }
+      throw new Error(`Unexpected filename: ${filename}`);
+    });
+
+    render(<AgentMemory agentId="test_agent" />);
+
+    await screen.findByText('SOUL.md');
+    const agentsButton = screen.getByText('AGENTS.md').closest('button');
+    expect(agentsButton).not.toBeNull();
+    if (!agentsButton) {
+      throw new Error('AGENTS button not found');
+    }
+    fireEvent.click(agentsButton);
+
+    agentsRequest.resolve({
+      file: {
+        filename: 'AGENTS.md',
+        content: 'agents content',
+        size_bytes: 14,
+        last_modified: '2026-02-16T00:00:00Z',
+        agent_name: 'test_agent',
+      },
+      etag: '"agents-etag"',
+    });
+
+    await waitFor(() => expect(screen.getByRole('textbox')).toHaveValue('agents content'));
+
+    soulRequest.resolve({
+      file: {
+        filename: 'SOUL.md',
+        content: 'stale soul content',
+        size_bytes: 10,
+        last_modified: '2026-02-16T00:00:00Z',
+        agent_name: 'test_agent',
+      },
+      etag: '"soul-etag"',
+    });
+
+    await waitFor(() => expect(screen.getByRole('textbox')).toHaveValue('agents content'));
   });
 });

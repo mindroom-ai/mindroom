@@ -111,6 +111,36 @@ class TestMemoryIntegration:
             # Note: Memory storage now happens at the bot level, not in ai_response
 
     @pytest.mark.asyncio
+    async def test_ai_response_uses_raw_prompt_for_mem0_search_with_workspace_context(
+        self,
+        mock_agent_run: AsyncMock,
+        mock_memory_functions: AsyncMock,
+        tmp_path: Path,
+        config: Config,
+    ) -> None:
+        """Mem0 search should run on raw prompt even when workspace context is present."""
+        mock_build = mock_memory_functions
+
+        with (
+            patch("mindroom.ai._cached_agent_run", mock_agent_run),
+            patch("mindroom.ai.get_model_instance", return_value=Ollama(id="test-model")),
+            patch("mindroom.ai.load_workspace_memory", return_value="## Workspace Context\n\nworkspace note"),
+        ):
+            await ai_response(
+                agent_name="calculator",
+                prompt="What is 2+2?",
+                session_id="test_session",
+                storage_path=tmp_path,
+                config=config,
+                room_id="!test:room",
+                is_dm=True,
+            )
+
+        mock_build.assert_called_once_with("What is 2+2?", "calculator", tmp_path, config, "!test:room")
+        call_args = mock_agent_run.call_args[0]
+        assert call_args[1].startswith("## Workspace Context\n\nworkspace note\n\n[Enhanced] What is 2+2?")
+
+    @pytest.mark.asyncio
     async def test_ai_response_error_handling(self, tmp_path: Path, config: Config) -> None:
         """Test error handling in AI response."""
         # Mock memory to prevent real memory instance creation during error handling

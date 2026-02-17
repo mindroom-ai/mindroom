@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   getWorkspaceFile,
   getWorkspaceFiles,
@@ -23,6 +23,8 @@ export function AgentMemory({ agentId }: AgentMemoryProps) {
   const [loadingList, setLoadingList] = useState(false);
   const [loadingFile, setLoadingFile] = useState(false);
   const [saving, setSaving] = useState(false);
+  const selectedFilenameRef = useRef('');
+  const fileRequestSeqRef = useRef(0);
 
   const isDailyLog = useMemo(
     () => selectedFilename.length > 0 && DAILY_LOG_FILE_PATTERN.test(selectedFilename),
@@ -51,16 +53,24 @@ export function AgentMemory({ agentId }: AgentMemoryProps) {
   };
 
   const loadFile = async (filename: string) => {
+    const requestSeq = ++fileRequestSeqRef.current;
     setLoadingFile(true);
     setStatus('');
     try {
       const payload = await getWorkspaceFile(agentId, filename);
+      if (requestSeq !== fileRequestSeqRef.current || selectedFilenameRef.current !== filename) {
+        return;
+      }
       setContent(payload.file.content);
       setEtag(payload.etag);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Failed to load file');
+      if (requestSeq === fileRequestSeqRef.current) {
+        setStatus(error instanceof Error ? error.message : 'Failed to load file');
+      }
     } finally {
-      setLoadingFile(false);
+      if (requestSeq === fileRequestSeqRef.current) {
+        setLoadingFile(false);
+      }
     }
   };
 
@@ -93,9 +103,15 @@ export function AgentMemory({ agentId }: AgentMemoryProps) {
   };
 
   useEffect(() => {
+    selectedFilenameRef.current = selectedFilename;
+  }, [selectedFilename]);
+
+  useEffect(() => {
+    fileRequestSeqRef.current += 1;
     setSelectedFilename('');
     setContent('');
     setEtag('');
+    setLoadingFile(false);
     void loadFiles();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId]);
