@@ -21,11 +21,13 @@ nav = [
     { "Agents" = "configuration/agents.md" },
     { "Models" = "configuration/models.md" },
     { "Teams" = "configuration/teams.md" },
+    { "Cultures" = "configuration/cultures.md" },
     { "Router" = "configuration/router.md" },
   ] },
   { "Tools" = [
     { "Overview" = "tools/index.md" },
     { "Built-in Tools" = "tools/builtin.md" },
+    { "MCP (Planned)" = "tools/mcp.md" },
   ] },
   { "Skills" = "skills.md" },
   { "Plugins" = "plugins.md" },

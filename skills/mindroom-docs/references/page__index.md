@@ -125,11 +125,14 @@ mindroom run
 
 - [Getting Started](https://docs.mindroom.chat/getting-started/index.md) - Installation and first steps
 - [Configuration](https://docs.mindroom.chat/configuration/index.md) - All configuration options
+- [Cultures](https://docs.mindroom.chat/configuration/cultures/index.md) - Configure shared agent cultures
 - [Dashboard](https://docs.mindroom.chat/dashboard/index.md) - Web UI for configuration
 - [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/index.md) - Use agents from any OpenAI-compatible client
 - [Tools](https://docs.mindroom.chat/tools/index.md) - Available tool integrations
+- [MCP (Planned)](https://docs.mindroom.chat/tools/mcp/index.md) - Native MCP status and current plugin workaround
 - [Skills](https://docs.mindroom.chat/skills/index.md) - OpenClaw-compatible skills system
 - [Plugins](https://docs.mindroom.chat/plugins/index.md) - Extend with custom tools and skills
+- [Knowledge Bases](https://docs.mindroom.chat/knowledge/index.md) - Configure RAG-backed document indexing
 - [Memory System](https://docs.mindroom.chat/memory/index.md) - How agent memory works
 - [Scheduling](https://docs.mindroom.chat/scheduling/index.md) - Schedule tasks with cron or natural language
 - [Voice Messages](https://docs.mindroom.chat/voice/index.md) - Voice message transcription
