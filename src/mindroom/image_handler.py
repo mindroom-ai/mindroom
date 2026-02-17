@@ -76,13 +76,13 @@ async def download_image(
                 logger.exception("Image decryption failed")
                 return None
 
-        # For encrypted images, nio already parses mimetype with proper
-        # fallback (info.mimetype -> file.mimetype).  For unencrypted images
-        # there is no mimetype field on the dataclass, so we read from source.
+        # Prefer Matrix-provided mimetype metadata and keep it unset when absent.
+        # For encrypted images, nio parses info.mimetype -> file.mimetype into
+        # event.mimetype; for unencrypted images we read content.info.mimetype.
         if isinstance(event, nio.RoomEncryptedImage):
-            mime_type = event.mimetype or "image/png"
+            mime_type = event.mimetype
         else:
-            mime_type = event.source.get("content", {}).get("info", {}).get("mimetype", "image/png")
+            mime_type = event.source.get("content", {}).get("info", {}).get("mimetype")
         return Image(content=image_bytes, mime_type=mime_type)
     except Exception:
         logger.exception("Error downloading image")

@@ -186,8 +186,8 @@ class TestDownloadImage:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_download_defaults_mimetype_to_png(self) -> None:
-        """Test that missing mimetype defaults to image/png."""
+    async def test_download_leaves_mimetype_unset_when_missing(self) -> None:
+        """Test that missing unencrypted mimetype remains unset."""
         client = AsyncMock()
         event = MagicMock(spec=nio.RoomMessageImage)
         event.url = "mxc://example.org/notype"
@@ -199,7 +199,7 @@ class TestDownloadImage:
 
         result = await image_handler.download_image(client, event)
         assert isinstance(result, Image)
-        assert result.mime_type == "image/png"
+        assert result.mime_type is None
 
     @pytest.mark.asyncio
     async def test_encrypted_image_uses_event_mimetype(self) -> None:
@@ -230,8 +230,8 @@ class TestDownloadImage:
         assert result.mime_type == "image/webp"
 
     @pytest.mark.asyncio
-    async def test_encrypted_image_defaults_mimetype_when_none(self) -> None:
-        """Test that encrypted images default to image/png when mimetype is None."""
+    async def test_encrypted_image_leaves_mimetype_unset_when_none(self) -> None:
+        """Test that encrypted images keep mimetype unset when absent."""
         client = AsyncMock()
         event = MagicMock(spec=nio.RoomEncryptedImage)
         event.url = "mxc://example.org/enc_notype"
@@ -255,4 +255,4 @@ class TestDownloadImage:
             result = await image_handler.download_image(client, event)
 
         assert isinstance(result, Image)
-        assert result.mime_type == "image/png"
+        assert result.mime_type is None
