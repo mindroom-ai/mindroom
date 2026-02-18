@@ -250,6 +250,39 @@ def test_agent_memory_dir_is_loaded_into_role(mock_storage: MagicMock, tmp_path:
 
 
 @patch("mindroom.agents.SqliteDb")
+def test_agent_preload_cap_truncates_daily_before_memory_and_personality(
+    mock_storage: MagicMock,  # noqa: ARG001
+    tmp_path: Path,
+) -> None:
+    """Preload cap should drop oldest daily files before MEMORY.md and context files."""
+    config = Config.from_yaml()
+    config.timezone = "UTC"
+    config.defaults.max_preload_chars = 620
+
+    soul_path = tmp_path / "SOUL.md"
+    soul_path.write_text("P" * 140, encoding="utf-8")
+
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    (memory_dir / "MEMORY.md").write_text("M" * 140, encoding="utf-8")
+    today = datetime.now(ZoneInfo(config.timezone)).date()
+    yesterday = today - timedelta(days=1)
+    (memory_dir / f"{yesterday.isoformat()}.md").write_text("Y" * 140, encoding="utf-8")
+    (memory_dir / f"{today.isoformat()}.md").write_text("T" * 140, encoding="utf-8")
+
+    config.agents["general"].context_files = [str(soul_path)]
+    config.agents["general"].memory_dir = str(memory_dir)
+
+    agent = create_agent("general", config=config, storage_path=tmp_path)
+
+    assert "[Content truncated - " in agent.role
+    assert f"### {yesterday.isoformat()}.md" not in agent.role
+    assert f"### {today.isoformat()}.md" in agent.role
+    assert "### MEMORY.md" in agent.role
+    assert "### SOUL.md" in agent.role
+
+
+@patch("mindroom.agents.SqliteDb")
 def test_agent_missing_context_file_is_ignored(mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG001
     """Missing context files should not prevent agent creation."""
     config = Config.from_yaml()

@@ -173,3 +173,5 @@ class TestMemoryIntegration:
 
             # Memory search should have been called
             mock_memory.search.assert_called_with("What is A?", user_id="agent_general", limit=3)
+
+
