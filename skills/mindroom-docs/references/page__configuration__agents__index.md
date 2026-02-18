@@ -63,8 +63,12 @@ agents:
     # Optional: additional files loaded into role context at agent init/reload
     context_files:
       - ./openclaw_data/SOUL.md
-      - ./openclaw_data/USER.md
       - ./openclaw_data/AGENTS.md
+      - ./openclaw_data/USER.md
+      - ./openclaw_data/IDENTITY.md
+      - ./openclaw_data/MEMORY.md
+      - ./openclaw_data/TOOLS.md
+      - ./openclaw_data/HEARTBEAT.md
 
     # Optional: directory-based memory context (MEMORY.md + dated files)
     memory_dir: ./openclaw_data/memory

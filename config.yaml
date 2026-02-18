@@ -244,7 +244,6 @@ agents:
     - Ask before external/public actions and destructive shell operations.
     include_default_tools: false
     learning: false
-    learning_mode: always
     context_files:
     - ./openclaw_data/SOUL.md
     - ./openclaw_data/AGENTS.md

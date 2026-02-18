@@ -79,8 +79,12 @@ agents:
     knowledge_bases: [docs]         # Optional: Assign one or more configured knowledge bases
     context_files:                 # Optional: Load files into role context at init/reload
       - ./openclaw_data/SOUL.md
-      - ./openclaw_data/USER.md
       - ./openclaw_data/AGENTS.md
+      - ./openclaw_data/USER.md
+      - ./openclaw_data/IDENTITY.md
+      - ./openclaw_data/MEMORY.md
+      - ./openclaw_data/TOOLS.md
+      - ./openclaw_data/HEARTBEAT.md
     memory_dir: ./openclaw_data/memory  # Optional: Load MEMORY.md + dated files from this dir
 
 # Model configurations (at least a "default" model is recommended)
