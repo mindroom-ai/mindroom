@@ -406,10 +406,7 @@ class TestPrepareAgentAndPrompt:
 
     @pytest.mark.asyncio
     async def test_session_has_runs_but_no_metadata_uses_agno_path(self, config: Config, tmp_path: object) -> None:
-        """Prevent double-history for pre-migration runs that lack metadata.
-
-        Session has runs but no matrix metadata → still uses Agno history (no stuffing).
-        """
+        """Session has runs but no matrix metadata → still uses Agno history (no stuffing)."""
         thread_history = [
             {"sender": "@user:example.com", "body": "Msg", "event_id": "$u1"},
         ]
