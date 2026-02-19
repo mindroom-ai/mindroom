@@ -148,7 +148,7 @@ class StreamingResponse:
             text=display_text,
             sender_domain=self.sender_domain,
             thread_event_id=effective_thread_id,
-            reply_to_event_id=self.reply_to_event_id,
+            reply_to_event_id=None if self.room_mode else self.reply_to_event_id,
             latest_thread_event_id=latest_for_message,
             tool_trace=self.tool_trace,
         )

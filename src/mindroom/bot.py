@@ -8,7 +8,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import nio
 import uvicorn
@@ -598,7 +598,7 @@ class AgentBot:
         return self.agent_user.matrix_id
 
     @property
-    def thread_mode(self) -> str:
+    def thread_mode(self) -> Literal["thread", "room"]:
         """Get the thread mode for this agent."""
         agent_config = self.config.agents.get(self.agent_name)
         return agent_config.thread_mode if agent_config else "thread"
@@ -1491,6 +1491,7 @@ class AgentBot:
                             streaming_cls=ReplacementStreamingResponse,
                             header=None,
                             existing_event_id=message_id,
+                            room_mode=self.thread_mode == "room",
                         )
 
                 # Handle interactive questions in team responses
@@ -2124,26 +2125,34 @@ class AgentBot:
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
 
-        # For edits in threads, we need to get the latest thread event ID for MSC3440 compliance
-        # When editing, we still need the latest thread event for the fallback behavior
-        # So we fetch it directly rather than using get_latest_thread_event_id_if_needed
-        latest_thread_event_id = None
-        if thread_id:
-            assert self.client is not None
-            # For edits, we always need the latest thread event ID
-            # We can use the event being edited as the fallback if we can't get the latest
-            latest_thread_event_id = await _latest_thread_event_id(self.client, room_id, thread_id)
-            # If we couldn't get the latest, use the event being edited as fallback
-            if latest_thread_event_id is None:
-                latest_thread_event_id = event_id
+        if self.thread_mode == "room":
+            # Room mode: no thread metadata on edits
+            content = format_message_with_mentions(
+                self.config,
+                new_text,
+                sender_domain=sender_domain,
+            )
+        else:
+            # For edits in threads, we need to get the latest thread event ID for MSC3440 compliance
+            # When editing, we still need the latest thread event for the fallback behavior
+            # So we fetch it directly rather than using get_latest_thread_event_id_if_needed
+            latest_thread_event_id = None
+            if thread_id:
+                assert self.client is not None
+                # For edits, we always need the latest thread event ID
+                # We can use the event being edited as the fallback if we can't get the latest
+                latest_thread_event_id = await _latest_thread_event_id(self.client, room_id, thread_id)
+                # If we couldn't get the latest, use the event being edited as fallback
+                if latest_thread_event_id is None:
+                    latest_thread_event_id = event_id
 
-        content = format_message_with_mentions(
-            self.config,
-            new_text,
-            sender_domain=sender_domain,
-            thread_event_id=thread_id,
-            latest_thread_event_id=latest_thread_event_id,
-        )
+            content = format_message_with_mentions(
+                self.config,
+                new_text,
+                sender_domain=sender_domain,
+                thread_event_id=thread_id,
+                latest_thread_event_id=latest_thread_event_id,
+            )
 
         assert self.client is not None
         response = await edit_message(self.client, room_id, event_id, content, new_text)
