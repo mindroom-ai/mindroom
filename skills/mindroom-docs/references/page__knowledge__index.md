@@ -57,11 +57,11 @@ knowledge_bases:
     watch: true                       # Auto-reindex on file changes
 ```
 
-| Field   | Type   | Default            | Description                                             |
-| ------- | ------ | ------------------ | ------------------------------------------------------- |
-| `path`  | string | `./knowledge_docs` | Folder path (relative to working directory or absolute) |
-| `watch` | bool   | `true`             | Watch for filesystem changes and reindex automatically  |
-| `git`   | object | `null`             | Optional Git repository sync settings                   |
+| Field   | Type   | Default            | Description                                                     |
+| ------- | ------ | ------------------ | --------------------------------------------------------------- |
+| `path`  | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute) |
+| `watch` | bool   | `true`             | Watch for filesystem changes and reindex automatically          |
+| `git`   | object | `null`             | Optional Git repository sync settings                           |
 
 ### Multiple Knowledge Bases
 

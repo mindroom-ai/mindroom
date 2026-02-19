@@ -753,8 +753,8 @@ timezone: America/Los_Angeles      # Default: UTC
 
 ## Notes
 
-- All top-level sections are optional with sensible defaults, but you need at least one agent
-- A model named `default` is required unless all agents/teams specify explicit models
+- All top-level sections are optional with sensible defaults, but at least one agent is recommended for Matrix interactions
+- A model named `default` is required unless agents, teams, and the router all specify explicit non-`default` models
 - Agents can set `knowledge_bases`, but each entry must exist in the top-level `knowledge_bases` section
 - `agents.<name>.context_files` and `agents.<name>.memory_dir` inject file-based context at agent creation/reload (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md))
 - `defaults.max_preload_chars` caps preloaded file context (`context_files` + `memory_dir`)
@@ -844,7 +844,7 @@ agents:
 | `display_name`                | string | *required*  | Human-readable name shown in Matrix as the bot's display name                                                                                                                                                     |
 | `role`                        | string | `""`        | System prompt describing the agent's purpose — guides its behavior and expertise                                                                                                                                  |
 | `model`                       | string | `"default"` | Model name (must match a key in the `models` section)                                                                                                                                                             |
-| `tools`                       | list   | `[]`        | Agent-specific tool names (see [Tools](https://docs.mindroom.chat/tools/index.md)); effective tools are `defaults.tools + tools` with duplicates removed                                                          |
+| `tools`                       | list   | `[]`        | Agent-specific tool names (see [Tools](https://docs.mindroom.chat/tools/index.md)); effective tools are `tools + defaults.tools` with duplicates removed                                                          |
 | `include_default_tools`       | bool   | `true`      | When `true`, append `defaults.tools` to this agent's `tools`; set to `false` to opt this agent out                                                                                                                |
 | `skills`                      | list   | `[]`        | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/index.md))                                                                                                                          |
 | `instructions`                | list   | `[]`        | Extra lines appended to the system prompt after the role                                                                                                                                                          |
@@ -2288,11 +2288,11 @@ knowledge_bases:
     watch: true                       # Auto-reindex on file changes
 ```
 
-| Field   | Type   | Default            | Description                                             |
-| ------- | ------ | ------------------ | ------------------------------------------------------- |
-| `path`  | string | `./knowledge_docs` | Folder path (relative to working directory or absolute) |
-| `watch` | bool   | `true`             | Watch for filesystem changes and reindex automatically  |
-| `git`   | object | `null`             | Optional Git repository sync settings                   |
+| Field   | Type   | Default            | Description                                                     |
+| ------- | ------ | ------------------ | --------------------------------------------------------------- |
+| `path`  | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute) |
+| `watch` | bool   | `true`             | Watch for filesystem changes and reindex automatically          |
+| `git`   | object | `null`             | Optional Git repository sync settings                           |
 
 ### Multiple Knowledge Bases
 
