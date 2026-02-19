@@ -169,3 +169,101 @@ def test_proxy_requires_shared_token(monkeypatch: pytest.MonkeyPatch) -> None:
     assert entrypoint is not None
     with pytest.raises(RuntimeError, match="MINDROOM_SANDBOX_PROXY_TOKEN"):
         entrypoint(1, 2)
+
+
+class TestSandboxToolsOverride:
+    """Tests for per-agent sandbox_tools_override parameter."""
+
+    def test_override_none_defers_to_env_vars(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """None override should defer to the standard env var logic."""
+        monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
+        monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox:8765")
+        monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "selective")
+        monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOOLS", {"shell"})
+
+        # None override → falls through to env var logic
+        assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool("shell", sandbox_tools_override=None) is True
+        assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool("calculator", sandbox_tools_override=None) is False
+
+    def test_override_empty_list_disables_sandboxing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Empty list override should disable sandboxing even when env vars enable it."""
+        monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
+        monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox:8765")
+        monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "all")
+
+        assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool("shell", sandbox_tools_override=[]) is False
+        assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool("file", sandbox_tools_override=[]) is False
+
+    def test_override_explicit_list_selects_tools(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Explicit list override should sandbox only the listed tools."""
+        monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
+        monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox:8765")
+        # Even with env var saying "off", override wins
+        monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "off")
+
+        assert (
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool("shell", sandbox_tools_override=["shell", "file"])
+            is True
+        )
+        assert (
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool("file", sandbox_tools_override=["shell", "file"])
+            is True
+        )
+        assert (
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool("calculator", sandbox_tools_override=["shell", "file"])
+            is False
+        )
+
+    def test_override_still_respects_runner_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Runner mode should always disable proxying, even with override."""
+        monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", True)
+        monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox:8765")
+
+        assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool("shell", sandbox_tools_override=["shell"]) is False
+
+    def test_override_still_requires_proxy_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No proxy URL should always disable proxying, even with override."""
+        monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
+        monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", None)
+
+        assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool("shell", sandbox_tools_override=["shell"]) is False
+
+    def test_get_tool_by_name_passes_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """get_tool_by_name should pass sandbox_tools_override through to the proxy wrapper."""
+        captured: dict[str, Any] = {}
+
+        class _FakeResponse:
+            def raise_for_status(self) -> None:
+                return
+
+            def json(self) -> dict[str, object]:
+                return {"ok": True, "result": "sandbox-result"}
+
+        class _FakeClient:
+            def __init__(self, *, timeout: float) -> None:
+                pass
+
+            def __enter__(self) -> Self:
+                return self
+
+            def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+                return
+
+            def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeResponse:  # noqa: ARG002
+                captured["url"] = url
+                return _FakeResponse()
+
+        monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox:8765")
+        monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
+        monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "off")  # env says off
+        monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
+        monkeypatch.setattr(sandbox_proxy_module, "_CREDENTIAL_POLICY", {})
+        monkeypatch.setattr("mindroom.sandbox_proxy.httpx.Client", _FakeClient)
+
+        # Override says sandbox calculator
+        tool = get_tool_by_name("calculator", sandbox_tools_override=["calculator"])
+        entrypoint = tool.functions["add"].entrypoint
+        assert entrypoint is not None
+        result = entrypoint(1, 2)
+        assert result == "sandbox-result"
+        assert captured["url"] == "http://sandbox:8765/api/sandbox-runner/execute"

@@ -169,13 +169,25 @@ def _collect_shared_credential_overrides(tool_name: str, function_name: str) -> 
     return merged_overrides
 
 
-def sandbox_proxy_enabled_for_tool(tool_name: str) -> bool:
-    """Return whether the given tool should execute through the sandbox proxy."""
+def sandbox_proxy_enabled_for_tool(
+    tool_name: str,
+    *,
+    sandbox_tools_override: list[str] | None = None,
+) -> bool:
+    """Return whether the given tool should execute through the sandbox proxy.
+
+    When *sandbox_tools_override* is not ``None``, it takes precedence over the
+    env-var based ``_EXECUTION_MODE`` / ``_PROXY_TOOLS`` logic.  An empty list
+    means "sandbox nothing for this agent".
+    """
     if _SANDBOX_RUNNER_MODE:
         return False
 
     if _PROXY_URL is None:
         return False
+
+    if sandbox_tools_override is not None:
+        return tool_name in sandbox_tools_override
 
     if _EXECUTION_MODE in {"off", "local", "disabled"}:
         return False
@@ -277,13 +289,18 @@ def _wrap_async_function(function: Function, tool_name: str, function_name: str)
     return wrapped
 
 
-def maybe_wrap_toolkit_for_sandbox_proxy(tool_name: str, toolkit: Toolkit) -> Toolkit:
+def maybe_wrap_toolkit_for_sandbox_proxy(
+    tool_name: str,
+    toolkit: Toolkit,
+    *,
+    sandbox_tools_override: list[str] | None = None,
+) -> Toolkit:
     """Wrap toolkit functions so calls execute through the sandbox runner API.
 
     Note: mutates ``toolkit.functions`` and ``toolkit.async_functions`` in place.
     Callers must pass a freshly-created toolkit (``get_tool_by_name`` does this).
     """
-    if not sandbox_proxy_enabled_for_tool(tool_name):
+    if not sandbox_proxy_enabled_for_tool(tool_name, sandbox_tools_override=sandbox_tools_override):
         return toolkit
 
     toolkit.functions = {

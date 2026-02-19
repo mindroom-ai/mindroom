@@ -74,6 +74,7 @@ agents:
     instructions: []               # Optional: Custom instructions
     rooms: [lobby]                 # Optional: Rooms to auto-join
     markdown: true                 # Optional: Override default (inherits from defaults section)
+    sandbox_tools: [shell, file]   # Optional: Override default (inherits from defaults section)
     learning: true                 # Optional: Override default (inherits from defaults section)
     learning_mode: always          # Optional: Override default (inherits from defaults section)
     knowledge_bases: [docs]         # Optional: Assign one or more configured knowledge bases
@@ -151,6 +152,7 @@ defaults:
   enable_session_summaries: false  # AI summaries of older conversation segments (costs extra LLM call)
   max_tool_calls_from_history: null  # Limit tool call messages replayed from history (null = no limit)
   show_tool_calls: true            # Default: true (show tool call details inline in responses)
+  sandbox_tools: null              # Default: null (tool names to sandbox; null = use env var config, [] = disable)
 
 # defaults.tools are appended to each agent's tools list with duplicates removed.
 # Set agents.<name>.include_default_tools: false to opt out a specific agent.

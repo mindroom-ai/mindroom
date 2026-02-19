@@ -86,6 +86,10 @@ class AgentConfig(BaseModel):
         default=None,
         description="Whether to show tool call details inline in responses (per-agent override)",
     )
+    sandbox_tools: list[str] | None = Field(
+        default=None,
+        description="Tool names to execute through sandbox proxy (overrides defaults; None = inherit)",
+    )
 
     @model_validator(mode="after")
     def _check_history_config(self) -> Self:
@@ -159,6 +163,10 @@ class DefaultsConfig(BaseModel):
     show_tool_calls: bool = Field(
         default=True,
         description="Whether to show tool call details inline in responses",
+    )
+    sandbox_tools: list[str] | None = Field(
+        default=None,
+        description="Tool names to sandbox by default for all agents (None = use env var config)",
     )
     max_preload_chars: int = Field(
         default=50000,
@@ -613,6 +621,18 @@ class Config(BaseModel):
             msg = f"Unknown agent: {agent_name}. Available agents: {available}"
             raise ValueError(msg)
         return self.agents[agent_name]
+
+    def get_agent_sandbox_tools(self, agent_name: str) -> list[str] | None:
+        """Get the sandbox tool list for an agent, falling back to defaults.
+
+        Returns:
+            List of tool names to sandbox, or None to defer to env var globals.
+
+        """
+        agent_config = self.get_agent(agent_name)
+        if agent_config.sandbox_tools is not None:
+            return agent_config.sandbox_tools
+        return self.defaults.sandbox_tools
 
     def get_agent_tools(self, agent_name: str) -> list[str]:
         """Get effective tools for an agent.

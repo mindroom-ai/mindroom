@@ -106,6 +106,19 @@ export function AgentEditor() {
   const effectiveLearningEnabled = learningEnabled ?? defaultLearning;
   const numHistoryRuns = useWatch({ name: 'num_history_runs', control });
   const numHistoryMessages = useWatch({ name: 'num_history_messages', control });
+  const agentTools = useWatch({ name: 'tools', control });
+  const includeDefaultTools = useWatch({ name: 'include_default_tools', control });
+
+  // Compute effective tools: agent tools + defaults.tools (when include_default_tools is enabled)
+  const effectiveTools = useMemo(() => {
+    const tools = new Set(agentTools);
+    if ((includeDefaultTools ?? true) && config?.defaults.tools) {
+      for (const t of config.defaults.tools) {
+        tools.add(t);
+      }
+    }
+    return [...tools];
+  }, [agentTools, includeDefaultTools, config?.defaults.tools]);
 
   // Prepare checkbox items for skills (includes orphaned selected skills)
   const skillItems: CheckboxListItem[] = useMemo(() => {
@@ -793,6 +806,68 @@ export function AgentEditor() {
           )}
         />
       </FieldGroup>
+
+      {/* Sandbox Tools */}
+      {effectiveTools.length > 0 && (
+        <FieldGroup
+          label="Sandbox Tools"
+          helperText={`Select which of this agent's tools to execute through the sandbox proxy${
+            config?.defaults.sandbox_tools != null
+              ? ` (default: ${
+                  config.defaults.sandbox_tools.length > 0
+                    ? config.defaults.sandbox_tools.join(', ')
+                    : 'none'
+                })`
+              : ''
+          }`}
+        >
+          <Controller
+            name="sandbox_tools"
+            control={control}
+            render={({ field }) => (
+              <div className="space-y-1 max-h-48 overflow-y-auto border rounded-lg p-2">
+                {effectiveTools.map(toolName => {
+                  const effective = field.value ?? config?.defaults.sandbox_tools ?? [];
+                  const isChecked = effective.includes(toolName);
+                  const isInherited = field.value == null && config?.defaults.sandbox_tools != null;
+                  const toggle = () => {
+                    // On first interaction when inheriting, seed from defaults
+                    const current = field.value ?? config?.defaults.sandbox_tools ?? [];
+                    const updated = isChecked
+                      ? current.filter(t => t !== toolName)
+                      : [...current, toolName];
+                    field.onChange(updated);
+                    handleFieldChange('sandbox_tools', updated);
+                  };
+                  return (
+                    <div
+                      key={toolName}
+                      className="flex items-center space-x-3 sm:space-x-2 p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-colors"
+                    >
+                      <Checkbox
+                        aria-label={`sandbox ${toolName}`}
+                        checked={isChecked}
+                        onCheckedChange={toggle}
+                        className="h-5 w-5 sm:h-4 sm:w-4"
+                      />
+                      <span
+                        role="none"
+                        onClick={toggle}
+                        className={`text-sm font-medium leading-none cursor-pointer select-none${
+                          isInherited && isChecked ? ' text-gray-400 dark:text-gray-500 italic' : ''
+                        }`}
+                      >
+                        {toolName}
+                        {isInherited && isChecked ? ' (default)' : ''}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          />
+        </FieldGroup>
+      )}
 
       {/* History & Context Settings */}
       <div className="border-t border-gray-200 dark:border-gray-700 pt-4 mt-2">

@@ -294,8 +294,9 @@ describe('AgentEditor', () => {
   it('updates tools when checkboxes are toggled', () => {
     render(<AgentEditor />);
 
-    // Find the calculator checkbox (should be checked)
-    const calculatorCheckbox = screen.getByRole('checkbox', { name: /calculator/i });
+    // Find the calculator checkbox (should be checked) — use exact name to
+    // distinguish from the sandbox-tools checkboxes which have "sandbox ..." labels
+    const calculatorCheckbox = screen.getByRole('checkbox', { name: 'Calculator' });
     expect(calculatorCheckbox).toBeChecked();
 
     // Uncheck it
@@ -309,7 +310,7 @@ describe('AgentEditor', () => {
     );
 
     // Check another tool
-    const fileCheckbox = screen.getByRole('checkbox', { name: /file/i });
+    const fileCheckbox = screen.getByRole('checkbox', { name: 'File' });
     fireEvent.click(fileCheckbox);
 
     expect(mockStore.updateAgent).toHaveBeenCalledWith(
@@ -447,6 +448,80 @@ describe('AgentEditor', () => {
         learning: false,
       })
     );
+  });
+
+  describe('sandbox_tools inheritance', () => {
+    const twoToolAgent = { ...mockAgent, tools: ['calculator', 'file'] };
+
+    it('shows inherited defaults as checked with (default) label', () => {
+      (useConfigStore as any).mockReturnValue({
+        ...mockStore,
+        agents: [{ ...twoToolAgent, sandbox_tools: undefined }],
+        config: {
+          ...mockConfig,
+          defaults: { ...mockConfig.defaults, sandbox_tools: ['calculator'] },
+        },
+        rooms: mockStore.rooms,
+      });
+
+      render(<AgentEditor />);
+
+      const sandboxCalc = screen.getByRole('checkbox', { name: 'sandbox calculator' });
+      expect(sandboxCalc).toBeChecked();
+      expect(screen.getByText('calculator (default)')).toBeTruthy();
+
+      const sandboxFile = screen.getByRole('checkbox', { name: 'sandbox file' });
+      expect(sandboxFile).not.toBeChecked();
+    });
+
+    it('seeds from defaults on first toggle so other defaults are preserved', () => {
+      (useConfigStore as any).mockReturnValue({
+        ...mockStore,
+        agents: [{ ...twoToolAgent, sandbox_tools: undefined }],
+        config: {
+          ...mockConfig,
+          defaults: { ...mockConfig.defaults, sandbox_tools: ['calculator'] },
+        },
+        rooms: mockStore.rooms,
+      });
+
+      render(<AgentEditor />);
+
+      // Toggle file ON — should seed from defaults first, so calculator stays
+      const sandboxFile = screen.getByRole('checkbox', { name: 'sandbox file' });
+      fireEvent.click(sandboxFile);
+
+      expect(mockStore.updateAgent).toHaveBeenCalledWith(
+        'test_agent',
+        expect.objectContaining({
+          sandbox_tools: ['calculator', 'file'],
+        })
+      );
+    });
+
+    it('renders empty list as explicit disable (all unchecked, no default labels)', () => {
+      (useConfigStore as any).mockReturnValue({
+        ...mockStore,
+        agents: [{ ...twoToolAgent, sandbox_tools: [] }],
+        config: {
+          ...mockConfig,
+          defaults: { ...mockConfig.defaults, sandbox_tools: ['calculator'] },
+        },
+        rooms: mockStore.rooms,
+      });
+
+      render(<AgentEditor />);
+
+      const sandboxCalc = screen.getByRole('checkbox', { name: 'sandbox calculator' });
+      expect(sandboxCalc).not.toBeChecked();
+
+      const sandboxFile = screen.getByRole('checkbox', { name: 'sandbox file' });
+      expect(sandboxFile).not.toBeChecked();
+
+      // No sandbox tool label should show "(default)"
+      expect(screen.queryByText('calculator (default)')).toBeNull();
+      expect(screen.queryByText('file (default)')).toBeNull();
+    });
   });
 
   it('regression test: form updates should not cause infinite loops', async () => {

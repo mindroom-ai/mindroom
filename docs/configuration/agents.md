@@ -83,6 +83,9 @@ agents:
     # Response mode: "thread" (replies in Matrix threads) or "room" (plain room messages)
     thread_mode: thread
 
+    # Tools to execute through the sandbox proxy (optional, inherits from defaults)
+    sandbox_tools: [shell, file]
+
     # History context controls (all optional, inherit from defaults)
     num_history_runs: null
     num_history_messages: null
@@ -117,6 +120,7 @@ agents:
 | `enable_session_summaries` | bool | `null` | Generate AI summaries of older conversation segments for compaction (each summary costs an extra LLM call). Inherits from `defaults.enable_session_summaries` (default: `false`) |
 | `max_tool_calls_from_history` | int | `null` | Limit tool call messages replayed from history (`null` = no limit) |
 | `show_tool_calls` | bool | `null` | Show tool call details inline in responses. Inherits from `defaults.show_tool_calls` (default: `true`). Set to `false` to hide `<tool>…</tool>` blocks (metadata is still tracked) |
+| `sandbox_tools` | list | `null` | Tool names to execute through the [sandbox proxy](../deployment/sandbox-proxy.md). Inherits from `defaults.sandbox_tools` (default: `null` — defers to env vars). Set to `[]` to explicitly disable sandboxing for this agent |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
 
@@ -171,6 +175,7 @@ defaults:
   enable_session_summaries: false       # AI summaries of older conversation segments (costs extra LLM call)
   max_tool_calls_from_history: null     # Limit tool call messages replayed from history (null = no limit)
   show_tool_calls: true                 # Show tool call details inline in responses
+  sandbox_tools: null                    # Tool names to sandbox (null = use env var config, [] = disable)
 ```
 
 To opt out a specific agent:

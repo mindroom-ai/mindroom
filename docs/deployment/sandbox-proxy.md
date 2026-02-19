@@ -185,6 +185,38 @@ This shares the `github` credential service with `shell` tool calls and `openai`
 - In Kubernetes, the runner uses `emptyDir` for scratch space — no persistent state
 - The primary backend **does not** mount the sandbox runner router — the `/api/sandbox-runner/` endpoints exist only in the runner process
 
+## Per-agent configuration
+
+By default, all agents share the same sandbox behavior from environment variables. You can override which tools are sandboxed per agent (or set a default for all agents) in `config.yaml`:
+
+```yaml
+defaults:
+  sandbox_tools: [shell, file]       # sandbox shell+file for all agents by default
+
+agents:
+  code:
+    tools: [file, shell, calculator]
+    # inherits sandbox_tools from defaults → shell and file sandboxed
+
+  research:
+    tools: [web_search, calculator]
+    sandbox_tools: []                # explicitly no sandboxing
+
+  untrusted:
+    tools: [shell, file, python]
+    sandbox_tools: [shell, file, python]  # sandbox everything
+```
+
+The `sandbox_tools` field has three states:
+
+| Value | Behavior |
+|-------|----------|
+| `null` (omitted) | Defer to env var globals (`MINDROOM_SANDBOX_EXECUTION_MODE` / `MINDROOM_SANDBOX_PROXY_TOOLS`) |
+| `[]` (empty list) | Explicitly disable sandboxing for this agent, even if env vars enable it |
+| `["shell", "file"]` | Sandbox exactly these tools, overriding env vars |
+
+Agent-level `sandbox_tools` overrides `defaults.sandbox_tools`, which in turn overrides env vars. A sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must still be configured for any sandboxing to take effect.
+
 ## Without sandbox proxy
 
 When no `MINDROOM_SANDBOX_PROXY_URL` is set, all tools execute directly in the primary backend process. This is fine for development but not recommended for production deployments where agents run untrusted code.

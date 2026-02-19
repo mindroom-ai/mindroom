@@ -5,7 +5,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from mindroom.config import AgentConfig, Config, KnowledgeBaseConfig, TeamConfig
+from mindroom.config import AgentConfig, Config, DefaultsConfig, KnowledgeBaseConfig, TeamConfig
 from mindroom.custom_tools.config_manager import ConfigManagerTools, InfoType
 
 
@@ -506,3 +506,56 @@ class TestConsolidatedConfigManager:
             assert "anthropic" in result
         finally:
             config_path.unlink(missing_ok=True)
+
+
+class TestGetAgentSandboxTools:
+    """Tests for Config.get_agent_sandbox_tools resolution."""
+
+    def test_agent_override_takes_precedence(self) -> None:
+        """Agent-level sandbox_tools should override defaults."""
+        config = Config(
+            defaults=DefaultsConfig(sandbox_tools=["shell", "file"]),
+            agents={
+                "code": AgentConfig(display_name="Code", sandbox_tools=["python"]),
+            },
+        )
+        assert config.get_agent_sandbox_tools("code") == ["python"]
+
+    def test_falls_back_to_defaults(self) -> None:
+        """When agent has no sandbox_tools, should fall back to defaults."""
+        config = Config(
+            defaults=DefaultsConfig(sandbox_tools=["shell", "file"]),
+            agents={
+                "code": AgentConfig(display_name="Code"),
+            },
+        )
+        assert config.get_agent_sandbox_tools("code") == ["shell", "file"]
+
+    def test_both_none_returns_none(self) -> None:
+        """When neither agent nor defaults set sandbox_tools, returns None."""
+        config = Config(
+            agents={
+                "code": AgentConfig(display_name="Code"),
+            },
+        )
+        assert config.get_agent_sandbox_tools("code") is None
+
+    def test_agent_empty_list_disables(self) -> None:
+        """Agent can explicitly disable sandboxing with empty list."""
+        config = Config(
+            defaults=DefaultsConfig(sandbox_tools=["shell"]),
+            agents={
+                "research": AgentConfig(display_name="Research", sandbox_tools=[]),
+            },
+        )
+        assert config.get_agent_sandbox_tools("research") == []
+
+    def test_defaults_empty_list_disables(self) -> None:
+        """Defaults can explicitly disable sandboxing with empty list."""
+        config = Config(
+            defaults=DefaultsConfig(sandbox_tools=[]),
+            agents={
+                "code": AgentConfig(display_name="Code"),
+            },
+        )
+        assert config.get_agent_sandbox_tools("code") == []
