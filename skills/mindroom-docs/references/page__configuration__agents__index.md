@@ -72,6 +72,9 @@ agents:
 
     # Optional: directory-based memory context (MEMORY.md + dated files)
     memory_dir: ./openclaw_data/memory
+
+    # Optional: per-agent cap for thread messages included in prompts
+    max_thread_messages: 80
 ```
 
 ## Configuration Options
@@ -92,6 +95,7 @@ agents:
 | `knowledge_bases`       | list   | `[]`        | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                                |
 | `context_files`         | list   | `[]`        | File paths loaded at agent init/reload and prepended to role context (under `Personality Context`)                                                       |
 | `memory_dir`            | string | `null`      | Directory loaded at agent init/reload for `MEMORY.md` and dated files (under `Memory Context`)                                                           |
+| `max_thread_messages`   | int    | `null`      | Optional per-agent override for thread history message cap; when unset, inherits `defaults.max_thread_messages`                                          |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
 
@@ -115,6 +119,7 @@ You can inject file content directly into an agent's role context without using 
 - Loads `MEMORY.md` (uppercase) if present
 - Loads dated files named `YYYY-MM-DD.md` for yesterday and today
 - Content is added under `Memory Context`
+- Preloaded context is capped by `defaults.max_preload_chars`; if exceeded, truncation drops daily files first, then `MEMORY.md`, then personality files
 
 This loading happens when the agent is created (and on config reload), not continuously on every message.
 
@@ -136,6 +141,12 @@ defaults:
   markdown: true             # Format responses as Markdown
   learning: true             # Enable Agno Learning
   learning_mode: always      # "always" or "agentic"
+  max_thread_messages: 50    # Default thread-history cap (most recent N messages)
+  max_preload_chars: 50000   # Hard cap for preloaded context from context_files/memory_dir
+  memory_flush:
+    enabled: true
+    threshold_percent: 80    # Trigger pre-trim flush when estimated usage exceeds this %
+    timeout_seconds: 30
   show_stop_button: false    # Show a stop button while agent is responding (global-only, cannot be overridden per-agent)
 ```
 

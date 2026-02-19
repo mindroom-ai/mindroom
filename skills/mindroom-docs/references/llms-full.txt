@@ -603,6 +603,7 @@ agents:
       - ./openclaw_data/TOOLS.md
       - ./openclaw_data/HEARTBEAT.md
     memory_dir: ./openclaw_data/memory  # Optional: Load MEMORY.md + dated files from this dir
+    max_thread_messages: 80       # Optional: Per-agent thread-history cap (most recent N messages)
 
 # Model configurations (at least a "default" model is recommended)
 models:
@@ -614,6 +615,7 @@ models:
     id: claude-sonnet-4-5-latest     # Required: Model ID for the provider
     host: null                     # Optional: Host URL (e.g., for Ollama)
     api_key: null                  # Optional: API key (usually from env vars)
+    context_window: null           # Optional: Prompt budgeting window; defaults to 128000 if unset
     extra_kwargs: null             # Optional: Provider-specific parameters
 
 # Team configurations (optional)
@@ -642,9 +644,15 @@ defaults:
   tools: [scheduler]               # Default: ["scheduler"] (added to every agent; set [] to disable)
   markdown: true                   # Default: true
   enable_streaming: true           # Default: true (stream responses via message edits)
-  show_stop_button: false          # Default: false (global only, cannot be overridden per-agent)
   learning: true                   # Default: true
   learning_mode: always            # Default: always (or agentic)
+  max_thread_messages: 50          # Default thread-history cap (most recent N messages)
+  max_preload_chars: 50000         # Hard cap for preloaded context from context_files/memory_dir
+  memory_flush:
+    enabled: true
+    threshold_percent: 80          # Flush trigger percentage of model context window
+    timeout_seconds: 30
+  show_stop_button: false          # Default: false (global only, cannot be overridden per-agent)
 
 # defaults.tools are appended to each agent's tools list with duplicates removed.
 # Set agents.<name>.include_default_tools: false to opt out a specific agent.
@@ -740,6 +748,10 @@ timezone: America/Los_Angeles      # Default: UTC
 - A model named `default` is required unless all agents/teams specify explicit models
 - Agents can set `knowledge_bases`, but each entry must exist in the top-level `knowledge_bases` section
 - `agents.<name>.context_files` and `agents.<name>.memory_dir` inject file-based context at agent creation/reload (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md))
+- `defaults.max_thread_messages` and `agents.<name>.max_thread_messages` control prompt thread-history length
+- `defaults.max_preload_chars` caps preloaded file context (`context_files` + `memory_dir`)
+- `defaults.memory_flush` controls pre-trim memory flush turns for agents with `memory_dir`
+- `models.<name>.context_window` controls budgeting thresholds for trimming and flush triggers
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
 - The `memory` system works out of the box with OpenAI; use `memory.llm` for memory summarization with a different provider
 
@@ -817,6 +829,9 @@ agents:
 
     # Optional: directory-based memory context (MEMORY.md + dated files)
     memory_dir: ./openclaw_data/memory
+
+    # Optional: per-agent cap for thread messages included in prompts
+    max_thread_messages: 80
 ```
 
 ## Configuration Options
@@ -837,6 +852,7 @@ agents:
 | `knowledge_bases`       | list   | `[]`        | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                                |
 | `context_files`         | list   | `[]`        | File paths loaded at agent init/reload and prepended to role context (under `Personality Context`)                                                       |
 | `memory_dir`            | string | `null`      | Directory loaded at agent init/reload for `MEMORY.md` and dated files (under `Memory Context`)                                                           |
+| `max_thread_messages`   | int    | `null`      | Optional per-agent override for thread history message cap; when unset, inherits `defaults.max_thread_messages`                                          |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
 
@@ -860,6 +876,7 @@ You can inject file content directly into an agent's role context without using 
 - Loads `MEMORY.md` (uppercase) if present
 - Loads dated files named `YYYY-MM-DD.md` for yesterday and today
 - Content is added under `Memory Context`
+- Preloaded context is capped by `defaults.max_preload_chars`; if exceeded, truncation drops daily files first, then `MEMORY.md`, then personality files
 
 This loading happens when the agent is created (and on config reload), not continuously on every message.
 
@@ -881,6 +898,12 @@ defaults:
   markdown: true             # Format responses as Markdown
   learning: true             # Enable Agno Learning
   learning_mode: always      # "always" or "agentic"
+  max_thread_messages: 50    # Default thread-history cap (most recent N messages)
+  max_preload_chars: 50000   # Hard cap for preloaded context from context_files/memory_dir
+  memory_flush:
+    enabled: true
+    threshold_percent: 80    # Trigger pre-trim flush when estimated usage exceeds this %
+    timeout_seconds: 30
   show_stop_button: false    # Show a stop button while agent is responding (global-only, cannot be overridden per-agent)
 ```
 
@@ -914,13 +937,14 @@ Models define the AI providers and model IDs used by agents.
 
 Each model configuration supports the following fields:
 
-| Field          | Required | Description                                       |
-| -------------- | -------- | ------------------------------------------------- |
-| `provider`     | Yes      | The AI provider (see supported providers above)   |
-| `id`           | Yes      | Model ID specific to the provider                 |
-| `host`         | No       | Host URL for self-hosted models (e.g., Ollama)    |
-| `api_key`      | No       | API key (usually read from environment variables) |
-| `extra_kwargs` | No       | Additional provider-specific parameters           |
+| Field            | Required | Description                                                              |
+| ---------------- | -------- | ------------------------------------------------------------------------ |
+| `provider`       | Yes      | The AI provider (see supported providers above)                          |
+| `id`             | Yes      | Model ID specific to the provider                                        |
+| `host`           | No       | Host URL for self-hosted models (e.g., Ollama)                           |
+| `api_key`        | No       | API key (usually read from environment variables)                        |
+| `extra_kwargs`   | No       | Additional provider-specific parameters                                  |
+| `context_window` | No       | Context window size used by prompt budgeting and memory-flush thresholds |
 
 ## Configuration Examples
 
@@ -930,6 +954,7 @@ models:
   sonnet:
     provider: anthropic
     id: claude-sonnet-4-5-latest
+    context_window: 200000  # Optional; defaults to 128000 when omitted
 
   haiku:
     provider: anthropic
@@ -975,6 +1000,7 @@ models:
   custom:
     provider: openai
     id: my-model
+    context_window: 128000
     extra_kwargs:
       base_url: http://localhost:8080/v1
 ```
@@ -986,6 +1012,12 @@ The `extra_kwargs` field passes additional parameters directly to the underlying
 - `base_url` - Custom API endpoint (useful for OpenAI-compatible servers)
 - `temperature` - Sampling temperature
 - `max_tokens` - Maximum tokens in response
+
+## Context Window Budgeting
+
+- If `context_window` is not set, MindRoom uses `128000` as a conservative default.
+- The value is used to estimate prompt usage and decide when to trim thread history.
+- `defaults.memory_flush.threshold_percent` is evaluated against this window for pre-trim memory flush turns.
 
 ## Environment Variables
 
@@ -1709,6 +1741,7 @@ MindRoom supports a practical OpenClaw-compatible workflow focused on workspace 
 - Keep daily memory logs in `memory/YYYY-MM-DD.md`
 - Use `openclaw_compat` tool names where supported
 - Add semantic recall over historical memory via knowledge bases
+- Apply context budgeting with pre-trim memory flush for long threads
 
 ## What this is (and is not)
 
@@ -1755,10 +1788,12 @@ agents:
     rooms: [personal]
 
     instructions:
-      - Load identity and behavior from context files before acting.
-      - Persist new context to daily memory files and curate long-term memory.
-      - Use knowledge search for older history beyond recent daily files.
-      - Ask before external/public actions and destructive shell operations.
+      - You wake up fresh each session with no memory of previous conversations. Your context files are already loaded into your system prompt.
+      - Today's and yesterday's daily memory files from `memory_dir` are pre-loaded. For older history, use `search_knowledge_base`.
+      - IMPORTANT: If you want to remember something, write it to `./openclaw_data/memory/YYYY-MM-DD.md` (append, never overwrite).
+      - Curate long-term memory in `MEMORY.md` by distilling important points from recent daily files.
+      - Ask before external/public actions and destructive operations.
+      - Before answering prior-history questions, search memory files first with `search_knowledge_base`.
 
     context_files:
       - ./openclaw_data/SOUL.md
@@ -1789,6 +1824,20 @@ knowledge_bases:
   openclaw_memory:
     path: ./openclaw_data/memory
     watch: true
+
+defaults:
+  max_thread_messages: 50
+  max_preload_chars: 50000
+  memory_flush:
+    enabled: true
+    threshold_percent: 80
+    timeout_seconds: 30
+
+models:
+  opus:
+    provider: anthropic
+    id: claude-opus-4-6-latest
+    context_window: 200000  # Optional: used for budgeting and flush thresholds
 ```
 
 ## Recommended workspace layout
@@ -1819,11 +1868,19 @@ openclaw_data/
 
 For older history, use `knowledge_bases` on your memory folder — this provides semantic search across all files regardless of date.
 
+## Context Management
+
+MindRoom now includes built-in context controls for OpenClaw-style agents:
+
+- Thread history is capped to the most recent messages (`defaults.max_thread_messages`, overridable per agent with `agents.<name>.max_thread_messages`)
+- Preloaded role context from `context_files` + `memory_dir` is hard-capped by `defaults.max_preload_chars`
+- If preload exceeds the cap, truncation priority is: daily files -> `MEMORY.md` -> personality files (`SOUL.md`, etc.), with a truncation marker appended
+- Prompt budgeting estimates tokens from role + instructions + prompt and trims oldest thread lines when near the context window threshold
+- For agents with `memory_dir`, a silent pre-trim memory flush turn runs at `defaults.memory_flush.threshold_percent` before trimming (response hidden from users; file writes persist)
+
 ## Known limitations
 
 **Threading model:** MindRoom responds in Matrix threads by default. OpenClaw uses continuous room-level conversations. On mobile or via bridges (Telegram, Signal, WhatsApp), this means you must navigate into threads to continue a conversation. See [#169](https://github.com/mindroom-ai/mindroom/issues/169) for the planned `thread_mode: room` option.
-
-**Context length:** Long conversations have no automatic truncation or compaction. If a thread exceeds the model's context window, the request will fail. See [#170](https://github.com/mindroom-ai/mindroom/issues/170) for the planned context management feature.
 
 ## Privacy guidance
 
