@@ -73,6 +73,15 @@ class AgentConfig(BaseModel):
         default=None,
         description="Compress tool results in history to save context (per-agent override)",
     )
+    enable_session_summaries: bool | None = Field(
+        default=None,
+        description="Enable Agno session summaries for conversation compaction (per-agent override)",
+    )
+    max_tool_calls_from_history: int | None = Field(
+        default=None,
+        ge=0,
+        description="Max tool call messages replayed from history (per-agent override)",
+    )
 
     @model_validator(mode="after")
     def _check_history_config(self) -> Self:
@@ -133,6 +142,15 @@ class DefaultsConfig(BaseModel):
     compress_tool_results: bool = Field(
         default=True,
         description="Compress tool results in history to save context",
+    )
+    enable_session_summaries: bool = Field(
+        default=False,
+        description="Enable Agno session summaries for conversation compaction",
+    )
+    max_tool_calls_from_history: int | None = Field(
+        default=None,
+        ge=0,
+        description="Max tool call messages replayed from history (None = no limit)",
     )
     max_preload_chars: int = Field(
         default=50000,

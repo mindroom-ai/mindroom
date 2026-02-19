@@ -649,6 +649,18 @@ class AgentBot:
         """Get or create the StopManager for this agent."""
         return StopManager()
 
+    async def _fetch_thread_images(self, room_id: str, thread_id: str) -> list[Image]:
+        """Download images from the thread root event, if it is an image message."""
+        assert self.client is not None
+        response = await self.client.room_get_event(room_id, thread_id)
+        if not isinstance(response, nio.RoomGetEventResponse):
+            return []
+        event = response.event
+        if not isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage):
+            return []
+        img = await image_handler.download_image(self.client, event)
+        return [img] if img else []
+
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
         assert self.client is not None
@@ -1061,6 +1073,11 @@ class AgentBot:
 
         # Generate and send response
         self.logger.info("Processing", event_id=event.event_id)
+
+        # If responding in a thread, check whether the thread root is an image
+        # so the model can actually see it (e.g. after router routes an image).
+        thread_images = await self._fetch_thread_images(room.room_id, context.thread_id) if context.thread_id else []
+
         response_event_id = await self._generate_response(
             room_id=room.room_id,
             prompt=event.body,
@@ -1068,6 +1085,7 @@ class AgentBot:
             thread_id=context.thread_id,
             thread_history=context.thread_history,
             user_id=event.sender,
+            images=thread_images or None,
         )
         self.response_tracker.mark_responded(event.event_id, response_event_id)
 
@@ -1205,7 +1223,7 @@ class AgentBot:
             # Mark as responded to avoid reprocessing
             self.response_tracker.mark_responded(event.event_id)
 
-    async def _on_image_message(  # noqa: C901, PLR0911
+    async def _on_image_message(  # noqa: C901, PLR0911, PLR0912
         self,
         room: nio.MatrixRoom,
         event: nio.RoomMessageImage | nio.RoomEncryptedImage,
@@ -1228,10 +1246,6 @@ class AgentBot:
             self.logger.debug(f"Ignoring image from unauthorized sender: {event.sender}")
             return
 
-        # Router doesn't handle images directly (no routing for images)
-        if self.agent_name == ROUTER_AGENT_NAME:
-            return
-
         # Skip messages from other agents unless mentioned
         sender_agent_name = extract_agent_name(event.sender, self.config)
         context = await self._extract_message_context(room, event)
@@ -1240,8 +1254,28 @@ class AgentBot:
             self.logger.debug("Ignoring image from other agent (not mentioned)")
             return
 
-        # Check for team formation
+        # Get agents in thread (excludes router)
         agents_in_thread = get_agents_in_thread(context.thread_history, self.config)
+
+        # Router: Route when no one is explicitly mentioned and no agents in thread
+        if self.agent_name == ROUTER_AGENT_NAME:
+            if not context.mentioned_agents and not context.has_non_agent_mentions and not agents_in_thread:
+                if context.is_thread and has_multiple_non_agent_users_in_thread(context.thread_history, self.config):
+                    self.logger.info("Skipping routing: multiple non-agent users in thread (mention required)")
+                else:
+                    available_agents = get_available_agents_in_room(room, self.config)
+                    if len(available_agents) == 1:
+                        self.logger.info("Skipping routing: only one agent present")
+                    else:
+                        caption = image_handler.extract_caption(event)
+                        await self._handle_ai_routing(
+                            room,
+                            event,
+                            context.thread_history,
+                            context.thread_id,
+                            message=caption,
+                        )
+            return
         _is_dm_room = await is_dm_room(self.client, room.room_id)
         all_mentioned_in_thread = get_all_mentioned_agents_in_thread(context.thread_history, self.config)
         form_team = await decide_team_formation(
@@ -2166,9 +2200,10 @@ class AgentBot:
     async def _handle_ai_routing(
         self,
         room: nio.MatrixRoom,
-        event: nio.RoomMessageText,
+        event: nio.RoomMessageText | nio.RoomMessageImage | nio.RoomEncryptedImage,
         thread_history: list[dict],
         thread_id: str | None = None,
+        message: str | None = None,
     ) -> None:
         # Only router agent should handle routing
         assert self.agent_name == ROUTER_AGENT_NAME
@@ -2181,8 +2216,9 @@ class AgentBot:
 
         self.logger.info("Handling AI routing", event_id=event.event_id)
 
+        routing_text = message or event.body
         suggested_agent = await suggest_agent_for_message(
-            event.body,
+            routing_text,
             available_agents,
             self.config,
             thread_history,

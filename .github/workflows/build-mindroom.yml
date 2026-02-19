@@ -40,6 +40,7 @@ jobs:
       matrix:
         image:
           - backend
+          - backend-minimal
           - frontend
         platform:
           - linux/amd64
@@ -118,6 +119,7 @@ jobs:
       matrix:
         image:
           - backend
+          - backend-minimal
           - frontend
 
     steps:
