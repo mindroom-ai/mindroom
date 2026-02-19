@@ -40,9 +40,9 @@ class TestHistoryConfig:
     """Test history configuration fields and validation."""
 
     def test_defaults_num_history_runs_default(self) -> None:
-        """Default num_history_runs is 3."""
+        """Default num_history_runs is None (include all history)."""
         defaults = DefaultsConfig()
-        assert defaults.num_history_runs == 3
+        assert defaults.num_history_runs is None
         assert defaults.num_history_messages is None
 
     def test_agent_config_history_defaults_none(self) -> None:
@@ -94,13 +94,13 @@ class TestHistoryConfig:
         assert agent.num_history_runs is None
 
     def test_num_history_runs_config_wired_to_agent(self) -> None:
-        """Verify num_history_runs from config is wired to Agent constructor."""
+        """Default config includes all history (sentinel value bypasses Agno's default of 3)."""
         config = Config.from_yaml()
-        # Use defaults (num_history_runs=3)
         with patch("mindroom.agents.SqliteDb"):
             agent = create_agent("calculator", config=config)
         assert agent.add_history_to_context is True
-        assert agent.num_history_runs == 3
+        # Both defaults are None → sentinel 1_000_000 to bypass Agno's hardcoded default of 3
+        assert agent.num_history_runs == 1_000_000
 
     def test_num_history_runs_per_agent_override(self) -> None:
         """Per-agent num_history_runs overrides defaults and clears num_history_messages."""

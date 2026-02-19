@@ -463,6 +463,12 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         num_history_runs = defaults.num_history_runs
         num_history_messages = defaults.num_history_messages
 
+    # Agno hardcodes num_history_runs=3 when both are None.  We want
+    # "include everything" as the default, so use a large sentinel that
+    # get_messages handles via ``runs[-last_n_runs:]`` (safe for any N > len).
+    if num_history_runs is None and num_history_messages is None:
+        num_history_runs = 1_000_000
+
     agent = Agent(
         name=agent_config.display_name,
         id=agent_name,
