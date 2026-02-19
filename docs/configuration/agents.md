@@ -116,7 +116,7 @@ agents:
 | `compress_tool_results` | bool | `null` | Compress tool results in history to save context. Inherits from `defaults.compress_tool_results` (default: `true`) |
 | `enable_session_summaries` | bool | `null` | Generate AI summaries of older conversation segments for compaction (each summary costs an extra LLM call). Inherits from `defaults.enable_session_summaries` (default: `false`) |
 | `max_tool_calls_from_history` | int | `null` | Limit tool call messages replayed from history (`null` = no limit) |
-| `show_tool_calls` | bool | `true` | Show tool call details inline in responses. Set to `false` to hide `<tool>…</tool>` blocks (metadata is still tracked) |
+| `show_tool_calls` | bool | `null` | Show tool call details inline in responses. Inherits from `defaults.show_tool_calls` (default: `true`). Set to `false` to hide `<tool>…</tool>` blocks (metadata is still tracked) |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
 
