@@ -86,6 +86,22 @@ agents:
       - ./openclaw_data/TOOLS.md
       - ./openclaw_data/HEARTBEAT.md
     memory_dir: ./openclaw_data/memory  # Optional: Load MEMORY.md + dated files from this dir
+  researcher:
+    display_name: Researcher
+    role: Research and gather information
+    model: sonnet
+  writer:
+    display_name: Writer
+    role: Write and edit content
+    model: sonnet
+  developer:
+    display_name: Developer
+    role: Write code and implement features
+    model: sonnet
+  reviewer:
+    display_name: Reviewer
+    role: Review code and provide feedback
+    model: sonnet
 
 # Model configurations (at least a "default" model is recommended)
 models:
