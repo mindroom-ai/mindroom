@@ -242,6 +242,10 @@ class ModelConfig(BaseModel):
         default=None,
         description="Additional provider-specific parameters passed directly to the model",
     )
+    context_window: int | None = Field(
+        default=None,
+        description="Context window size in tokens; when set, history is dynamically trimmed to stay within 80%% of this limit",
+    )
 
 
 class RouterConfig(BaseModel):

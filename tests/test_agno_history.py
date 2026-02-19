@@ -20,13 +20,16 @@ from mindroom.agents import (
     remove_run_by_event_id,
 )
 from mindroom.ai import (
+    _apply_context_window_limit,
     _build_prompt_with_unseen,
+    _estimate_run_tokens,
     _get_unseen_messages,
     _prepare_agent_and_prompt,
     ai_response,
+    estimate_tokens,
 )
 from mindroom.bot import AgentBot
-from mindroom.config import AgentConfig, Config, DefaultsConfig
+from mindroom.config import AgentConfig, Config, DefaultsConfig, ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 
@@ -778,3 +781,232 @@ class TestFullScenario:
         restart_seen = {"$a1", "$b1", "$c1", "$a2", "$b2", "$a3"}
         unseen_after_restart = _get_unseen_messages(thread_history, "bot", config, restart_seen, "$a3")
         assert unseen_after_restart == []
+
+
+# ---------------------------------------------------------------------------
+# Token-aware context window pre-check tests
+# ---------------------------------------------------------------------------
+
+
+class TestEstimateTokens:
+    """Test the chars/4 token estimation function."""
+
+    def test_empty_string(self) -> None:
+        """Empty string yields 0 tokens."""
+        assert estimate_tokens("") == 0
+
+    def test_basic(self) -> None:
+        """Four chars yields 1 token."""
+        assert estimate_tokens("abcd") == 1
+
+    def test_longer_text(self) -> None:
+        """100 chars yields 25 tokens."""
+        assert estimate_tokens("a" * 100) == 25
+
+    def test_rounding_down(self) -> None:
+        """Partial chars round down (3 // 4 == 0)."""
+        assert estimate_tokens("abc") == 0
+
+
+class TestEstimateRunTokens:
+    """Test token estimation for a single Agno run."""
+
+    @staticmethod
+    def _make_msg(content: str = "", compressed: str | None = None, tool_calls: object = None) -> MagicMock:
+        """Create a mock message with the given content fields."""
+        msg = MagicMock()
+        msg.content = content
+        msg.compressed_content = compressed
+        msg.tool_calls = tool_calls
+        return msg
+
+    def test_no_messages(self) -> None:
+        """Run with messages=None yields 0 tokens."""
+        run = RunOutput(run_id="r1", messages=None)
+        assert _estimate_run_tokens(run) == 0
+
+    def test_empty_messages(self) -> None:
+        """Run with empty messages list yields 0 tokens."""
+        run = RunOutput(run_id="r1", messages=[])
+        assert _estimate_run_tokens(run) == 0
+
+    def test_text_content(self) -> None:
+        """Plain text content is estimated correctly."""
+        msg = self._make_msg(content="a" * 400)
+        run = RunOutput(run_id="r1", messages=[msg])
+        assert _estimate_run_tokens(run) == 100
+
+    def test_prefers_compressed_content(self) -> None:
+        """Compressed content is used over raw content when present."""
+        msg = self._make_msg(content="a" * 400, compressed="b" * 100)
+        run = RunOutput(run_id="r1", messages=[msg])
+        assert _estimate_run_tokens(run) == 25
+
+    def test_list_content(self) -> None:
+        """List content parts are stringified and summed."""
+        msg = self._make_msg(content=["hello", "world"])
+        run = RunOutput(run_id="r1", messages=[msg])
+        # len(str("hello")) + len(str("world")) = 5 + 5 = 10
+        assert _estimate_run_tokens(run) == 10 // 4
+
+    def test_includes_tool_calls(self) -> None:
+        """Tool call content is included in the estimate."""
+        tool_calls = [{"name": "search", "args": {"q": "test"}}]
+        msg = self._make_msg(content="a" * 100, tool_calls=tool_calls)
+        run = RunOutput(run_id="r1", messages=[msg])
+        expected = (100 + len(str(tool_calls))) // 4
+        assert _estimate_run_tokens(run) == expected
+
+
+class TestApplyContextWindowLimit:
+    """Test dynamic history reduction based on context window."""
+
+    @staticmethod
+    def _make_config(context_window: int | None = None) -> Config:
+        """Create a Config with the given context_window on the default model."""
+        return Config(
+            agents={"test_agent": AgentConfig(display_name="Test")},
+            models={"default": {"provider": "openai", "id": "test", "context_window": context_window}},
+        )
+
+    @staticmethod
+    def _make_agent(
+        role: str = "Short role.",
+        instructions: list[str] | None = None,
+        num_history_runs: int | None = None,
+        num_history_messages: int | None = None,
+    ) -> MagicMock:
+        """Create a mock Agent with the given history settings."""
+        agent = MagicMock(spec=Agent)
+        agent.role = role
+        agent.instructions = instructions or []
+        agent.num_history_runs = num_history_runs
+        agent.num_history_messages = num_history_messages
+        return agent
+
+    @staticmethod
+    def _make_msg(content: str) -> MagicMock:
+        """Create a mock message with text content."""
+        msg = MagicMock()
+        msg.content = content
+        msg.compressed_content = None
+        msg.tool_calls = None
+        return msg
+
+    def _make_session(self, run_contents: list[str]) -> AgentSession:
+        """Create a session with runs containing the given content strings."""
+        runs = []
+        for i, content in enumerate(run_contents):
+            msg = self._make_msg(content)
+            runs.append(RunOutput(run_id=f"r{i}", messages=[msg]))
+        return AgentSession(session_id="sid", runs=runs)
+
+    def test_no_context_window(self, tmp_path: object) -> None:
+        """No context_window configured -> num_history_runs unchanged."""
+        config = self._make_config(context_window=None)
+        agent = self._make_agent(num_history_runs=5)
+        _apply_context_window_limit(agent, "test_agent", config, "Hello", "sid", tmp_path)
+        assert agent.num_history_runs == 5
+
+    def test_no_session_id(self, tmp_path: object) -> None:
+        """No session_id -> num_history_runs unchanged."""
+        config = self._make_config(context_window=1000)
+        agent = self._make_agent(num_history_runs=5)
+        _apply_context_window_limit(agent, "test_agent", config, "Hello", None, tmp_path)
+        assert agent.num_history_runs == 5
+
+    def test_skips_when_num_history_messages_set(self, tmp_path: object) -> None:
+        """When num_history_messages is set, skip run-based reduction."""
+        config = self._make_config(context_window=100)
+        agent = self._make_agent(num_history_messages=10)
+        _apply_context_window_limit(agent, "test_agent", config, "Hello", "sid", tmp_path)
+        assert agent.num_history_messages == 10
+
+    def test_no_session_no_change(self, tmp_path: object) -> None:
+        """No existing session -> num_history_runs unchanged."""
+        config = self._make_config(context_window=100)
+        agent = self._make_agent(num_history_runs=5)
+        with (
+            patch("mindroom.ai.create_session_storage"),
+            patch("mindroom.ai._get_agent_session", return_value=None),
+        ):
+            _apply_context_window_limit(agent, "test_agent", config, "Hello", "sid", tmp_path)
+        assert agent.num_history_runs == 5
+
+    def test_within_budget_no_change(self, tmp_path: object) -> None:
+        """Under threshold -> num_history_runs unchanged."""
+        # context_window=10000, threshold=8000
+        # Static: ~10 tokens, history: ~50 tokens -> well under 8000
+        config = self._make_config(context_window=10000)
+        agent = self._make_agent(role="Short role.", num_history_runs=None)
+        session = self._make_session(["a" * 100, "b" * 100])
+        with (
+            patch("mindroom.ai.create_session_storage"),
+            patch("mindroom.ai._get_agent_session", return_value=session),
+        ):
+            _apply_context_window_limit(agent, "test_agent", config, "Hello", "sid", tmp_path)
+        assert agent.num_history_runs is None  # Unchanged
+
+    def test_reduces_history_over_budget(self, tmp_path: object) -> None:
+        """Over threshold -> num_history_runs reduced."""
+        # context_window=100, threshold=80
+        # Static: role(40 chars = 10 tokens) + prompt(40 chars = 10 tokens) = 20 tokens
+        # History: 5 runs x 100 chars = 25 tokens each, total = 125 tokens
+        # Grand total: 20 + 125 = 145 > 80
+        # Budget for history: 80 - 20 = 60 tokens
+        # Each run ~ 25 tokens -> fits 2 runs (50 <= 60)
+        config = self._make_config(context_window=100)
+        agent = self._make_agent(role="x" * 40, num_history_runs=None)
+        session = self._make_session(["a" * 100] * 5)
+        with (
+            patch("mindroom.ai.create_session_storage"),
+            patch("mindroom.ai._get_agent_session", return_value=session),
+        ):
+            _apply_context_window_limit(agent, "test_agent", config, "y" * 40, "sid", tmp_path)
+        assert agent.num_history_runs == 2
+
+    def test_reduces_with_explicit_limit(self, tmp_path: object) -> None:
+        """When num_history_runs is already set but still too high, it gets reduced."""
+        config = self._make_config(context_window=100)
+        agent = self._make_agent(role="x" * 40, num_history_runs=5)
+        session = self._make_session(["a" * 100] * 10)
+        with (
+            patch("mindroom.ai.create_session_storage"),
+            patch("mindroom.ai._get_agent_session", return_value=session),
+        ):
+            _apply_context_window_limit(agent, "test_agent", config, "y" * 40, "sid", tmp_path)
+        assert agent.num_history_runs == 2
+
+    def test_keeps_at_least_one_run(self, tmp_path: object) -> None:
+        """Even when severely over budget, at least 1 run is kept."""
+        config = self._make_config(context_window=10)
+        agent = self._make_agent(role="x" * 100, num_history_runs=5)
+        session = self._make_session(["a" * 1000] * 5)
+        with (
+            patch("mindroom.ai.create_session_storage"),
+            patch("mindroom.ai._get_agent_session", return_value=session),
+        ):
+            _apply_context_window_limit(agent, "test_agent", config, "y" * 100, "sid", tmp_path)
+        assert agent.num_history_runs == 1
+
+    def test_no_change_when_already_within_limit(self, tmp_path: object) -> None:
+        """With explicit num_history_runs that fits within budget, no change."""
+        config = self._make_config(context_window=10000)
+        agent = self._make_agent(role="Short.", num_history_runs=2)
+        session = self._make_session(["a" * 100, "b" * 100])
+        with (
+            patch("mindroom.ai.create_session_storage"),
+            patch("mindroom.ai._get_agent_session", return_value=session),
+        ):
+            _apply_context_window_limit(agent, "test_agent", config, "Hello", "sid", tmp_path)
+        assert agent.num_history_runs == 2  # Unchanged
+
+    def test_model_config_context_window_field(self) -> None:
+        """ModelConfig accepts and stores context_window."""
+        mc = ModelConfig(provider="openai", id="gpt-4", context_window=128000)
+        assert mc.context_window == 128000
+
+    def test_model_config_context_window_defaults_none(self) -> None:
+        """context_window defaults to None."""
+        mc = ModelConfig(provider="openai", id="gpt-4")
+        assert mc.context_window is None

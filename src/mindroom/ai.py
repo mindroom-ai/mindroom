@@ -47,6 +47,113 @@ logger = get_logger(__name__)
 AIStreamChunk = str | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
 
 
+def estimate_tokens(text: str) -> int:
+    """Estimate token count from text using chars/4 approximation."""
+    return len(text) // 4
+
+
+def _estimate_run_tokens(run: RunOutput) -> int:
+    """Estimate token count for all messages in a single Agno run."""
+    if not run.messages:
+        return 0
+    total_chars = 0
+    for msg in run.messages:
+        content = msg.compressed_content or msg.content
+        if isinstance(content, str):
+            total_chars += len(content)
+        elif isinstance(content, list):
+            for part in content:
+                total_chars += len(str(part))
+        if msg.tool_calls:
+            total_chars += len(str(msg.tool_calls))
+    return total_chars // 4
+
+
+def _estimate_static_tokens(agent: Agent, full_prompt: str) -> int:
+    """Estimate tokens for the system prompt and current user message."""
+    static_chars = len(agent.role or "")
+    instructions = agent.instructions
+    if isinstance(instructions, list):
+        for instruction in instructions:
+            static_chars += len(str(instruction))
+    static_chars += len(full_prompt)
+    return static_chars // 4
+
+
+def _count_fitting_runs(run_token_counts: list[int], budget: int) -> int:
+    """Count how many recent runs fit within the token budget (most-recent first)."""
+    fitting = 0
+    cumulative = 0
+    for tokens in reversed(run_token_counts):
+        if cumulative + tokens > budget:
+            break
+        cumulative += tokens
+        fitting += 1
+    return max(fitting, 1)  # Always keep at least 1 run
+
+
+def _apply_context_window_limit(
+    agent: Agent,
+    agent_name: str,
+    config: Config,
+    full_prompt: str,
+    session_id: str | None,
+    storage_path: Path,
+) -> None:
+    """Dynamically reduce ``agent.num_history_runs`` when the estimated context approaches the model's context window.
+
+    Uses chars/4 token estimation and an 80 % threshold to leave headroom
+    for the model response and tool definitions.  Only applies to run-based
+    history limits (skipped when ``num_history_messages`` is set).
+    """
+    if agent.num_history_messages is not None or not session_id:
+        return
+
+    model_name = config.get_entity_model_name(agent_name)
+    model_config = config.models.get(model_name)
+    if model_config is None or model_config.context_window is None:
+        return
+
+    context_window = model_config.context_window
+    threshold = int(context_window * 0.8)
+    static_tokens = _estimate_static_tokens(agent, full_prompt)
+
+    # Load session to estimate history size
+    storage = create_session_storage(agent_name, storage_path)
+    session = _get_agent_session(storage, session_id)
+    if not session or not session.runs:
+        return
+
+    all_runs = [r for r in session.runs if isinstance(r, RunOutput)]
+    if not all_runs:
+        return
+
+    run_token_counts = [_estimate_run_tokens(run) for run in all_runs]
+
+    # Determine how many runs the agent currently considers
+    current_limit = agent.num_history_runs
+    considered = run_token_counts[-current_limit:] if current_limit and current_limit > 0 else run_token_counts
+    total_tokens = static_tokens + sum(considered)
+    if total_tokens <= threshold:
+        return
+
+    original = current_limit if current_limit is not None else len(all_runs)
+    budget = threshold - static_tokens
+    new_limit = 1 if budget <= 0 else _count_fitting_runs(run_token_counts, budget)
+
+    if new_limit < original:
+        agent.num_history_runs = new_limit
+        logger.warning(
+            "Context window limit approaching, reducing history",
+            agent=agent_name,
+            original_runs=original,
+            reduced_runs=new_limit,
+            estimated_tokens=total_tokens,
+            context_window=context_window,
+            threshold=threshold,
+        )
+
+
 def _extract_response_content(response: RunOutput) -> str:
     response_parts = []
 
@@ -367,6 +474,7 @@ async def _prepare_agent_and_prompt(
         knowledge=knowledge,
         include_interactive_questions=include_interactive_questions,
     )
+    _apply_context_window_limit(agent, agent_name, config, full_prompt, session_id, storage_path)
     return agent, full_prompt, unseen_event_ids
 
 
