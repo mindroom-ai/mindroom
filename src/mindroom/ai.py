@@ -16,6 +16,7 @@ from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat
 from agno.models.openrouter import OpenRouter
 from agno.run.agent import RunContentEvent, RunErrorEvent, RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
+from agno.run.base import RunStatus
 
 from .agents import _get_agent_session, create_agent, create_session_storage, get_seen_event_ids
 from .constants import ENABLE_AI_CACHE, PROVIDER_ENV_KEYS
@@ -48,12 +49,12 @@ logger = get_logger(__name__)
 AIStreamChunk = str | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
 
 
-def _estimate_run_tokens(run: RunOutput) -> int:
-    """Estimate token count for all messages in a single Agno run (chars / 4)."""
-    if not run.messages:
+def _estimate_messages_tokens(messages: Sequence[Any] | None) -> int:
+    """Estimate token count for messages using chars / 4 approximation."""
+    if not messages:
         return 0
     total_chars = 0
-    for msg in run.messages:
+    for msg in messages:
         content = msg.compressed_content or msg.content
         if isinstance(content, str):
             total_chars += len(content)
@@ -78,16 +79,66 @@ def _estimate_static_tokens(agent: Agent, full_prompt: str) -> int:
     return static_chars // 4
 
 
-def _count_fitting_runs(run_token_counts: list[int], budget: int) -> int:
-    """Count how many recent runs fit within the token budget (most-recent first)."""
-    fitting = 0
-    cumulative = 0
-    for tokens in reversed(run_token_counts):
-        if cumulative + tokens > budget:
-            break
-        cumulative += tokens
-        fitting += 1
-    return fitting
+def _get_history_skip_roles(agent: Agent) -> list[str] | None:
+    """Return history skip_roles matching Agno's run-message construction."""
+    system_role = getattr(agent, "system_message_role", None)
+    if isinstance(system_role, str) and system_role not in {"user", "assistant", "tool"}:
+        return [system_role]
+    return None
+
+
+def _get_team_scope(agent: Agent) -> tuple[str | None, str | None]:
+    """Return (team_id, agent_id) only when agent is actually in a team scope."""
+    team_id = getattr(agent, "team_id", None)
+    if not isinstance(team_id, str) or not team_id:
+        return None, None
+    agent_id = getattr(agent, "id", None)
+    return team_id, agent_id if isinstance(agent_id, str) and agent_id else None
+
+
+def _get_replayable_runs(session: AgentSession, agent: Agent) -> list[RunOutput]:
+    """Get runs eligible for history replay, matching Agno session filtering."""
+    runs = [run for run in session.runs or [] if isinstance(run, RunOutput)]
+
+    team_id, agent_id = _get_team_scope(agent)
+    if team_id is not None:
+        if agent_id:
+            runs = [run for run in runs if run.agent_id == agent_id]
+        runs = [run for run in runs if getattr(run, "team_id", None) == team_id]
+
+    skip_statuses = {RunStatus.paused, RunStatus.cancelled, RunStatus.error}
+    return [run for run in runs if run.parent_run_id is None and run.status not in skip_statuses]
+
+
+def _estimate_history_tokens(session: AgentSession, agent: Agent, run_limit: int | None) -> int:
+    """Estimate tokens for replayed history messages using Agno's get_messages path."""
+    team_id, agent_id = _get_team_scope(agent)
+    messages = session.get_messages(
+        agent_id=agent_id,
+        team_id=team_id,
+        last_n_runs=run_limit,
+        limit=None,
+        skip_roles=_get_history_skip_roles(agent),
+    )
+    return _estimate_messages_tokens(messages)
+
+
+def _find_fitting_run_limit(session: AgentSession, agent: Agent, max_runs: int, budget: int) -> int:
+    """Find the largest run limit whose replayed history stays within budget."""
+    low = 0
+    high = max_runs
+    best = 0
+
+    while low <= high:
+        mid = (low + high) // 2
+        tokens = 0 if mid == 0 else _estimate_history_tokens(session, agent, mid)
+        if tokens <= budget:
+            best = mid
+            low = mid + 1
+        else:
+            high = mid - 1
+
+    return best
 
 
 def _disable_history_for_run(
@@ -148,27 +199,31 @@ def _apply_context_window_limit(
     if not session or not session.runs:
         return
 
-    all_runs = [r for r in session.runs if isinstance(r, RunOutput)]
-    if not all_runs:
+    replayable_runs = _get_replayable_runs(session, agent)
+    if not replayable_runs:
         return
-
-    run_token_counts = [_estimate_run_tokens(run) for run in all_runs]
 
     # Determine how many runs the agent currently considers
     current_limit = agent.num_history_runs
-    considered = run_token_counts[-current_limit:] if current_limit and current_limit > 0 else run_token_counts
-    total_tokens = static_tokens + sum(considered)
+    max_considered_runs = (
+        min(current_limit, len(replayable_runs))
+        if current_limit is not None and current_limit > 0
+        else len(replayable_runs)
+    )
+    initial_run_limit = max_considered_runs if current_limit is not None and current_limit > 0 else None
+    history_tokens = _estimate_history_tokens(session, agent, initial_run_limit)
+    total_tokens = static_tokens + history_tokens
     if total_tokens <= threshold:
         return
 
-    original = current_limit if current_limit is not None else len(all_runs)
+    original = current_limit if current_limit is not None else len(replayable_runs)
     budget = threshold - static_tokens
     if budget <= 0:
         new_limit = 0
         reason = "no_history_budget"
     else:
-        new_limit = _count_fitting_runs(run_token_counts, budget)
-        reason = "latest_run_exceeds_budget"
+        new_limit = _find_fitting_run_limit(session, agent, max_considered_runs, budget)
+        reason = "history_exceeds_budget"
 
     if new_limit == 0:
         _disable_history_for_run(

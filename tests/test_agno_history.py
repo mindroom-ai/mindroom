@@ -9,7 +9,9 @@ import nio
 import pytest
 from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
+from agno.models.message import Message
 from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 from pydantic import ValidationError
 
@@ -22,7 +24,6 @@ from mindroom.agents import (
 from mindroom.ai import (
     _apply_context_window_limit,
     _build_prompt_with_unseen,
-    _estimate_run_tokens,
     _get_unseen_messages,
     _prepare_agent_and_prompt,
     ai_response,
@@ -876,56 +877,6 @@ class TestFullScenario:
 # ---------------------------------------------------------------------------
 
 
-class TestEstimateRunTokens:
-    """Test token estimation for a single Agno run."""
-
-    @staticmethod
-    def _make_msg(content: str = "", compressed: str | None = None, tool_calls: object = None) -> MagicMock:
-        """Create a mock message with the given content fields."""
-        msg = MagicMock()
-        msg.content = content
-        msg.compressed_content = compressed
-        msg.tool_calls = tool_calls
-        return msg
-
-    def test_no_messages(self) -> None:
-        """Run with messages=None yields 0 tokens."""
-        run = RunOutput(run_id="r1", messages=None)
-        assert _estimate_run_tokens(run) == 0
-
-    def test_empty_messages(self) -> None:
-        """Run with empty messages list yields 0 tokens."""
-        run = RunOutput(run_id="r1", messages=[])
-        assert _estimate_run_tokens(run) == 0
-
-    def test_text_content(self) -> None:
-        """Plain text content is estimated correctly."""
-        msg = self._make_msg(content="a" * 400)
-        run = RunOutput(run_id="r1", messages=[msg])
-        assert _estimate_run_tokens(run) == 100
-
-    def test_prefers_compressed_content(self) -> None:
-        """Compressed content is used over raw content when present."""
-        msg = self._make_msg(content="a" * 400, compressed="b" * 100)
-        run = RunOutput(run_id="r1", messages=[msg])
-        assert _estimate_run_tokens(run) == 25
-
-    def test_list_content(self) -> None:
-        """List content parts are stringified and summed."""
-        msg = self._make_msg(content=["hello", "world"])
-        run = RunOutput(run_id="r1", messages=[msg])
-        # len(str("hello")) + len(str("world")) = 5 + 5 = 10
-        assert _estimate_run_tokens(run) == 10 // 4
-
-    def test_includes_tool_calls(self) -> None:
-        """Tool call content is included in the estimate."""
-        tool_calls = [{"name": "search", "args": {"q": "test"}}]
-        msg = self._make_msg(content="a" * 100, tool_calls=tool_calls)
-        run = RunOutput(run_id="r1", messages=[msg])
-        expected = (100 + len(str(tool_calls))) // 4
-        assert _estimate_run_tokens(run) == expected
-
-
 class TestApplyContextWindowLimit:
     """Test dynamic history reduction based on context window."""
 
@@ -954,20 +905,24 @@ class TestApplyContextWindowLimit:
         return agent
 
     @staticmethod
-    def _make_msg(content: str) -> MagicMock:
-        """Create a mock message with text content."""
-        msg = MagicMock()
-        msg.content = content
-        msg.compressed_content = None
-        msg.tool_calls = None
-        return msg
+    def _make_msg(content: str, *, from_history: bool = False, role: str = "user") -> Message:
+        """Create a real Agno Message with text content."""
+        return Message(role=role, content=content, from_history=from_history)
 
-    def _make_session(self, run_contents: list[str]) -> AgentSession:
+    def _make_session(
+        self,
+        run_contents: list[str],
+        *,
+        from_history_indices: set[int] | None = None,
+        statuses: list[RunStatus] | None = None,
+    ) -> AgentSession:
         """Create a session with runs containing the given content strings."""
+        history_indices = from_history_indices or set()
         runs = []
         for i, content in enumerate(run_contents):
-            msg = self._make_msg(content)
-            runs.append(RunOutput(run_id=f"r{i}", messages=[msg]))
+            msg = self._make_msg(content, from_history=i in history_indices)
+            status = statuses[i] if statuses is not None else RunStatus.running
+            runs.append(RunOutput(run_id=f"r{i}", messages=[msg], status=status))
         return AgentSession(session_id="sid", runs=runs)
 
     def test_no_context_window(self, tmp_path: object) -> None:
@@ -1057,6 +1012,30 @@ class TestApplyContextWindowLimit:
         session = self._make_session(["a" * 100, "b" * 100])
         _apply_context_window_limit(agent, "test_agent", config, "Hello", "sid", tmp_path, session=session)
         assert agent.num_history_runs == 2  # Unchanged
+
+    def test_ignores_messages_already_tagged_as_history(self, tmp_path: object) -> None:
+        """Messages tagged with from_history should not be counted again."""
+        config = self._make_config(context_window=100)  # threshold=80
+        agent = self._make_agent(role="x" * 40, num_history_runs=None)
+        session = self._make_session(
+            ["a" * 100, "b" * 1000],
+            from_history_indices={1},
+        )
+        _apply_context_window_limit(agent, "test_agent", config, "y" * 40, "sid", tmp_path, session=session)
+        assert agent.num_history_runs is None
+        assert agent.add_history_to_context is True
+
+    def test_ignores_non_replayable_error_runs(self, tmp_path: object) -> None:
+        """Errored runs should not influence history budgeting."""
+        config = self._make_config(context_window=100)  # threshold=80
+        agent = self._make_agent(role="x" * 40, num_history_runs=None)
+        session = self._make_session(
+            ["a" * 100, "b" * 1000],
+            statuses=[RunStatus.running, RunStatus.error],
+        )
+        _apply_context_window_limit(agent, "test_agent", config, "y" * 40, "sid", tmp_path, session=session)
+        assert agent.num_history_runs is None
+        assert agent.add_history_to_context is True
 
     def test_model_config_context_window_field(self) -> None:
         """ModelConfig accepts and stores context_window."""
