@@ -377,7 +377,7 @@ class TestPrepareAgentAndPrompt:
             patch("mindroom.ai.create_session_storage"),
         ):
             mock_create.return_value = MagicMock(spec=Agent)
-            agent, prompt, unseen_ids = await _prepare_agent_and_prompt(
+            _agent, prompt, unseen_ids = await _prepare_agent_and_prompt(
                 "calculator",
                 "test",
                 tmp_path,
@@ -407,7 +407,7 @@ class TestPrepareAgentAndPrompt:
             patch("mindroom.ai.create_session_storage"),
         ):
             mock_create.return_value = MagicMock(spec=Agent)
-            agent, prompt, unseen_ids = await _prepare_agent_and_prompt(
+            _agent, _prompt, unseen_ids = await _prepare_agent_and_prompt(
                 "calculator",
                 "test",
                 tmp_path,
@@ -437,7 +437,7 @@ class TestPrepareAgentAndPrompt:
         ):
             mock_create.return_value = MagicMock(spec=Agent)
             # $u1 is current, so no unseen, but Agno path used
-            _, prompt, unseen_ids = await _prepare_agent_and_prompt(
+            _, _prompt, unseen_ids = await _prepare_agent_and_prompt(
                 "calculator",
                 "test",
                 tmp_path,
@@ -460,7 +460,7 @@ class TestPrepareAgentAndPrompt:
             patch("mindroom.ai.build_prompt_with_thread_history", return_value="stuffed") as mock_stuff,
         ):
             mock_create.return_value = MagicMock(spec=Agent)
-            _, prompt, unseen_ids = await _prepare_agent_and_prompt(
+            _, _prompt, unseen_ids = await _prepare_agent_and_prompt(
                 "calculator",
                 "test",
                 tmp_path,
@@ -861,6 +861,7 @@ class TestApplyContextWindowLimit:
         agent.instructions = instructions or []
         agent.num_history_runs = num_history_runs
         agent.num_history_messages = num_history_messages
+        agent.add_history_to_context = True
         return agent
 
     @staticmethod
@@ -944,13 +945,21 @@ class TestApplyContextWindowLimit:
         _apply_context_window_limit(agent, "test_agent", config, "y" * 40, "sid", tmp_path, session=session)
         assert agent.num_history_runs == 2
 
-    def test_keeps_at_least_one_run(self, tmp_path: object) -> None:
-        """Even when severely over budget, at least 1 run is kept."""
+    def test_disables_history_when_latest_run_exceeds_budget(self, tmp_path: object) -> None:
+        """If no runs fit budget, history is disabled for this run."""
         config = self._make_config(context_window=10)
         agent = self._make_agent(role="x" * 100, num_history_runs=5)
         session = self._make_session(["a" * 1000] * 5)
         _apply_context_window_limit(agent, "test_agent", config, "y" * 100, "sid", tmp_path, session=session)
-        assert agent.num_history_runs == 1
+        assert agent.add_history_to_context is False
+
+    def test_disables_history_when_static_prompt_exhausts_budget(self, tmp_path: object) -> None:
+        """If static prompt exceeds threshold, history is disabled for this run."""
+        config = self._make_config(context_window=50)  # threshold=40
+        agent = self._make_agent(role="x" * 200, num_history_runs=3)
+        session = self._make_session(["a" * 20] * 3)
+        _apply_context_window_limit(agent, "test_agent", config, "y" * 200, "sid", tmp_path, session=session)
+        assert agent.add_history_to_context is False
 
     def test_no_change_when_already_within_limit(self, tmp_path: object) -> None:
         """With explicit num_history_runs that fits within budget, no change."""
@@ -969,3 +978,8 @@ class TestApplyContextWindowLimit:
         """context_window defaults to None."""
         mc = ModelConfig(provider="openai", id="gpt-4")
         assert mc.context_window is None
+
+    def test_model_config_context_window_must_be_positive(self) -> None:
+        """context_window rejects zero values."""
+        with pytest.raises(ValidationError):
+            ModelConfig(provider="openai", id="gpt-4", context_window=0)

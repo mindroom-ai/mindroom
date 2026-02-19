@@ -87,7 +87,28 @@ def _count_fitting_runs(run_token_counts: list[int], budget: int) -> int:
             break
         cumulative += tokens
         fitting += 1
-    return max(fitting, 1)  # Always keep at least 1 run
+    return fitting
+
+
+def _disable_history_for_run(
+    agent: Agent,
+    *,
+    reason: str,
+    agent_name: str,
+    context_window: int,
+    threshold: int,
+) -> None:
+    """Disable history context for this run when no safe history budget remains."""
+    if not agent.add_history_to_context:
+        return
+    agent.add_history_to_context = False
+    logger.warning(
+        "Context window limit approaching, disabling history for this run",
+        agent=agent_name,
+        reason=reason,
+        context_window=context_window,
+        threshold=threshold,
+    )
 
 
 def _apply_context_window_limit(
@@ -142,7 +163,22 @@ def _apply_context_window_limit(
 
     original = current_limit if current_limit is not None else len(all_runs)
     budget = threshold - static_tokens
-    new_limit = 1 if budget <= 0 else _count_fitting_runs(run_token_counts, budget)
+    if budget <= 0:
+        new_limit = 0
+        reason = "no_history_budget"
+    else:
+        new_limit = _count_fitting_runs(run_token_counts, budget)
+        reason = "latest_run_exceeds_budget"
+
+    if new_limit == 0:
+        _disable_history_for_run(
+            agent,
+            reason=reason,
+            agent_name=agent_name,
+            context_window=context_window,
+            threshold=threshold,
+        )
+        return
 
     if new_limit < original:
         agent.num_history_runs = new_limit
