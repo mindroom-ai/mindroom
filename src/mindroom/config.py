@@ -75,6 +75,7 @@ class AgentConfig(BaseModel):
     )
     max_tool_calls_from_history: int | None = Field(
         default=None,
+        ge=0,
         description="Max tool call messages replayed from history (per-agent override)",
     )
 
@@ -144,6 +145,7 @@ class DefaultsConfig(BaseModel):
     )
     max_tool_calls_from_history: int | None = Field(
         default=None,
+        ge=0,
         description="Max tool call messages replayed from history (None = no limit)",
     )
     max_preload_chars: int = Field(

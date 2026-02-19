@@ -213,6 +213,16 @@ class TestHistoryConfig:
             agent = create_agent("calculator", config=config)
         assert agent.max_tool_calls_from_history == 3
 
+    def test_max_tool_calls_from_history_defaults_rejects_negative(self) -> None:
+        """DefaultsConfig rejects negative max_tool_calls_from_history."""
+        with pytest.raises(ValidationError):
+            DefaultsConfig(max_tool_calls_from_history=-1)
+
+    def test_max_tool_calls_from_history_agent_rejects_negative(self) -> None:
+        """AgentConfig rejects negative max_tool_calls_from_history."""
+        with pytest.raises(ValidationError):
+            AgentConfig(display_name="Test", max_tool_calls_from_history=-1)
+
 
 # ---------------------------------------------------------------------------
 # Agent helper tests
