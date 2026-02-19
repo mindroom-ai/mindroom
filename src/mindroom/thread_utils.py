@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 from .constants import ROUTER_AGENT_NAME
@@ -12,6 +13,31 @@ if TYPE_CHECKING:
     import nio
 
     from .config import Config
+
+# Matches <a href="https://matrix.to/#/@user:domain">...</a> pills used by bridges.
+# Accepts both single and double quotes (mautrix bridges use single quotes).
+# Requires @localpart:domain format to avoid feeding malformed IDs to MatrixID.parse.
+_MATRIX_PILL_RE = re.compile(r"""href=["']https://matrix\.to/#/(@[^"':]+:[^"']+)["']""")
+
+
+def _extract_mentioned_user_ids(content: dict[str, Any]) -> list[str]:
+    """Extract mentioned user IDs from message content.
+
+    Checks ``m.mentions.user_ids`` first.  When that field is absent or empty
+    (common with bridges like mautrix-telegram), falls back to parsing Matrix
+    HTML pills (``<a href="https://matrix.to/#/@user:domain">``) from
+    ``formatted_body``.
+    """
+    mentions = content.get("m.mentions", {})
+    user_ids: list[str] = mentions.get("user_ids", [])
+    if user_ids:
+        return user_ids
+
+    # Fallback: parse formatted_body for HTML pills
+    formatted_body = content.get("formatted_body", "")
+    if formatted_body:
+        return _MATRIX_PILL_RE.findall(formatted_body)
+    return []
 
 
 def _is_bot_or_agent(sender: str, config: Config) -> bool:
@@ -31,11 +57,10 @@ def check_agent_mentioned(
     user who is *not* a configured agent and not in ``config.bot_accounts``
     (i.e. a real human user).
     """
-    mentions = event_source.get("content", {}).get("m.mentions", {})
-    mentioned_agents = get_mentioned_agents(mentions, config)
+    content = event_source.get("content", {})
+    all_mentioned_ids = _extract_mentioned_user_ids(content)
+    mentioned_agents = _agents_from_user_ids(all_mentioned_ids, config)
     am_i_mentioned = agent_id in mentioned_agents
-
-    all_mentioned_ids: list[str] = mentions.get("user_ids", [])
     has_non_agent_mentions = any(not _is_bot_or_agent(uid, config) for uid in all_mentioned_ids)
 
     return mentioned_agents, am_i_mentioned, has_non_agent_mentions
@@ -78,16 +103,13 @@ def get_agents_in_thread(thread_history: list[dict[str, Any]], config: Config) -
     return agents
 
 
-def get_mentioned_agents(mentions: dict[str, Any], config: Config) -> list[MatrixID]:
-    """Extract agent names from mentions."""
-    user_ids = mentions.get("user_ids", [])
+def _agents_from_user_ids(user_ids: list[str], config: Config) -> list[MatrixID]:
+    """Return agent MatrixIDs from a list of raw Matrix user ID strings."""
     agents: list[MatrixID] = []
-
     for user_id in user_ids:
         mid = MatrixID.parse(user_id)
         if mid.agent_name(config):
             agents.append(mid)
-
     return agents
 
 
@@ -174,8 +196,8 @@ def has_any_agent_mentions_in_thread(thread_history: list[dict[str, Any]], confi
     """Check if any agents are mentioned anywhere in the thread."""
     for msg in thread_history:
         content = msg.get("content", {})
-        mentions = content.get("m.mentions", {})
-        if get_mentioned_agents(mentions, config):
+        user_ids = _extract_mentioned_user_ids(content)
+        if _agents_from_user_ids(user_ids, config):
             return True
     return False
 
@@ -186,14 +208,13 @@ def get_all_mentioned_agents_in_thread(thread_history: list[dict[str, Any]], con
     Preserves the order of first mention while preventing duplicates.
     """
     mentioned_agents = []
-    seen_ids = set()
+    seen_ids: set[str] = set()
 
     for msg in thread_history:
         content = msg.get("content", {})
-        mentions = content.get("m.mentions", {})
-        agents = get_mentioned_agents(mentions, config)
+        user_ids = _extract_mentioned_user_ids(content)
+        agents = _agents_from_user_ids(user_ids, config)
 
-        # Add agents in order, but only if not seen before
         for agent in agents:
             if agent.full_id not in seen_ids:
                 mentioned_agents.append(agent)
