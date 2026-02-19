@@ -35,7 +35,7 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 | `skills.py` | Skill integration system (OpenClaw-compatible) |
 | `plugins.py` | Plugin loading and tool/skill extension |
 | `scheduling.py` | Cron and natural-language task scheduling |
-| `tools/` | 90+ tool integrations |
+| `tools/` | 100+ tool integrations |
 | `tool_dependencies.py` | Auto-install per-tool optional dependencies at runtime |
 | `ai.py` | AI model instantiation, caching, and response generation |
 | `credentials.py` | Unified credential management (CredentialsManager) |

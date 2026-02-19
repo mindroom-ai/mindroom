@@ -1375,7 +1375,7 @@ The router is always present and cannot be disabled. It automatically joins any 
 
 # Tools
 
-MindRoom includes 90+ tool integrations that agents can use to interact with external services.
+MindRoom includes 100+ tool integrations that agents can use to interact with external services.
 
 ## Enabling Tools
 
@@ -1494,7 +1494,7 @@ See the full list in:
 
 # Built-in Tools
 
-MindRoom includes 90+ built-in tool integrations organized by category.
+MindRoom includes 100+ built-in tool integrations organized by category.
 
 ## File & System
 

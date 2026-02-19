@@ -4,7 +4,7 @@ icon: lucide/box
 
 # Built-in Tools
 
-MindRoom includes 90+ built-in tool integrations organized by category.
+MindRoom includes 100+ built-in tool integrations organized by category.
 
 ## File & System
 
