@@ -88,12 +88,16 @@ Event callbacks are wrapped in `_create_task_wrapper()` to run as background tas
 8. Check for team formation or individual response
 9. Generate response and store memory
 
+**`_on_image_message`**: Handles `RoomMessageImage` and `RoomEncryptedImage` events. Downloads and decrypts image data, then processes it through the agent. When no agent is mentioned, AI routing is used to select the appropriate agent, similar to text messages.
+
+**`_on_reaction`**: Handles `ReactionEvent` for the interactive Q&A system (e.g., confirming or rejecting agent suggestions) and config confirmation workflows.
+
 **Routing** (when no agent mentioned): Router uses `suggest_agent_for_message()` to pick the best agent based on room configuration and message content. Only routes when multiple agents are available. In threads where multiple non-agent users have posted, routing is skipped entirely — an explicit `@mention` is required. Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 
 ## Concurrency
 
 - Each bot runs its own sync loop via `_sync_forever_with_restart()`
-- Sync loop failures trigger automatic restart with exponential backoff (5s, 10s, ... up to 60s max)
+- Sync loop failures trigger automatic restart with linear backoff (5s, 10s, 15s, ... up to 60s max)
 - Event callbacks run as background tasks (never block the sync loop)
 - `ResponseTracker` prevents duplicate replies
 - `StopManager` handles cancellation of in-progress responses
@@ -102,6 +106,7 @@ Event callbacks are wrapped in `_create_task_wrapper()` to run as background tas
 
 On `orchestrator.stop()`:
 
-1. Cancel all sync tasks
-2. Signal all bots to stop (`bot.running = False`)
-3. Call `bot.stop()` for each bot (waits 5s for background tasks, closes Matrix client)
+1. Shut down knowledge managers (`shutdown_knowledge_managers()`)
+2. Cancel all sync tasks
+3. Signal all bots to stop (`bot.running = False`)
+4. Call `bot.stop()` for each bot (waits 5s for background tasks, closes Matrix client)

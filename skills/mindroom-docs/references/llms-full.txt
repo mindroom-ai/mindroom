@@ -603,6 +603,22 @@ agents:
       - ./openclaw_data/TOOLS.md
       - ./openclaw_data/HEARTBEAT.md
     memory_dir: ./openclaw_data/memory  # Optional: Load MEMORY.md + dated files from this dir
+  researcher:
+    display_name: Researcher
+    role: Research and gather information
+    model: sonnet
+  writer:
+    display_name: Writer
+    role: Write and edit content
+    model: sonnet
+  developer:
+    display_name: Developer
+    role: Write code and implement features
+    model: sonnet
+  reviewer:
+    display_name: Reviewer
+    role: Review code and provide feedback
+    model: sonnet
 
 # Model configurations (at least a "default" model is recommended)
 models:
@@ -892,6 +908,8 @@ defaults:
   max_preload_chars: 50000              # Hard cap for preloaded context from context_files/memory_dir
   show_stop_button: false               # Show a stop button while agent is responding (global-only, cannot be overridden per-agent)
   num_history_runs: null                # Number of prior runs to include (null = all)
+  num_history_messages: null            # Max messages from history (null = use num_history_runs)
+  enable_streaming: true                # Stream agent responses via progressive message edits
   compress_tool_results: true           # Compress tool results in history to save context
   enable_session_summaries: false       # AI summaries of older conversation segments (costs extra LLM call)
   max_tool_calls_from_history: null     # Limit tool call messages replayed from history (null = no limit)
@@ -2492,6 +2510,8 @@ memory:
 
 The `host` field is converted internally to `openai_base_url` or `ollama_base_url` depending on the provider.
 
+**Default**: When the `llm` section is omitted, MindRoom falls back to Ollama with `llama3.2` at `http://localhost:11434`.
+
 ## How Memory Works
 
 1. **Semantic Retrieval**: Before responding, agents search for relevant memories (limit: 3 per scope)
@@ -2726,8 +2746,8 @@ AI response caching is automatically skipped when images are present, since imag
 
 ## Limitations
 
-- **Router does not route image events** -- in multi-agent rooms, you must `@mention` the agent in the image caption. Without a mention, no agent will respond. Tracked in [#154](https://github.com/mindroom-ai/mindroom/issues/154).
-- **Bridge mention detection** relies on `m.mentions` in the event, which some bridges (e.g., mautrix-telegram) do not set. Images sent from bridged platforms may not trigger agent responses.
+- **Routing in multi-agent rooms** -- in multi-agent rooms without an `@mention`, the router selects the best agent based on the image caption.
+- **Bridge mention detection** uses `m.mentions` in the event, falling back to parsing HTML pills from `formatted_body` when `m.mentions` is absent (e.g., mautrix-telegram). Bridges that set neither may not trigger agent responses.
 - **Model support** -- the configured model must support vision. Text-only models will ignore the image or return an error.
 
 # Scheduling
@@ -2857,6 +2877,19 @@ Authorization checks are performed in order:
 1. **Default access** - Rooms not in `room_permissions` use `default_room_access`
 
 > [!TIP] Set `default_room_access: false` and explicitly grant access via `global_users` or `room_permissions` for better security.
+
+## Bot Accounts
+
+The `bot_accounts` field is a **top-level** config option (not under `authorization:`). It lists Matrix user IDs of non-MindRoom bots — such as bridge bots for Telegram, Slack, or other platforms — that should be treated like agents for response logic. Bots in this list won't trigger the multi-human-thread mention requirement.
+
+```
+# Top-level config, not under authorization:
+bot_accounts:
+  - "@telegram_bot:example.com"
+  - "@slack_bot:example.com"
+```
+
+For more details on how `bot_accounts` affects routing behavior, see the [Router configuration](https://docs.mindroom.chat/configuration/router/index.md) page.
 
 # OpenAI-Compatible API
 
@@ -3038,7 +3071,7 @@ The OpenAI-compatible API uses its own auth (`OPENAI_COMPAT_API_KEYS`), separate
 - **Token usage is always zeros** — Agno doesn't expose token counts
 - **No native `tool_calls` format** — tool results appear inline in content text
 - **No room memory** — only agent-scoped memory (no `room_id` in API requests)
-- **Scheduler tool unavailable** — scheduling requires Matrix context and is stripped from API agents
+- **Scheduler tool unavailable** — scheduling requires Matrix context and returns an error message when no Matrix scheduling context is available
 
 # Architecture
 
@@ -3331,12 +3364,16 @@ Event callbacks are wrapped in `_create_task_wrapper()` to run as background tas
 1. Check for team formation or individual response
 1. Generate response and store memory
 
+**`_on_image_message`**: Handles `RoomMessageImage` and `RoomEncryptedImage` events. Downloads and decrypts image data, then processes it through the agent. When no agent is mentioned, AI routing is used to select the appropriate agent, similar to text messages.
+
+**`_on_reaction`**: Handles `ReactionEvent` for the interactive Q&A system (e.g., confirming or rejecting agent suggestions) and config confirmation workflows.
+
 **Routing** (when no agent mentioned): Router uses `suggest_agent_for_message()` to pick the best agent based on room configuration and message content. Only routes when multiple agents are available. In threads where multiple non-agent users have posted, routing is skipped entirely — an explicit `@mention` is required. Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 
 ## Concurrency
 
 - Each bot runs its own sync loop via `_sync_forever_with_restart()`
-- Sync loop failures trigger automatic restart with exponential backoff (5s, 10s, ... up to 60s max)
+- Sync loop failures trigger automatic restart with linear backoff (5s, 10s, 15s, ... up to 60s max)
 - Event callbacks run as background tasks (never block the sync loop)
 - `ResponseTracker` prevents duplicate replies
 - `StopManager` handles cancellation of in-progress responses
@@ -3345,6 +3382,7 @@ Event callbacks are wrapped in `_create_task_wrapper()` to run as background tas
 
 On `orchestrator.stop()`:
 
+1. Shut down knowledge managers (`shutdown_knowledge_managers()`)
 1. Cancel all sync tasks
 1. Signal all bots to stop (`bot.running = False`)
 1. Call `bot.stop()` for each bot (waits 5s for background tasks, closes Matrix client)
@@ -4058,17 +4096,17 @@ docker compose up -d
 
 Key environment variables (set in `.env` or pass directly):
 
-| Variable                | Description                                | Default                 |
-| ----------------------- | ------------------------------------------ | ----------------------- |
-| `MATRIX_HOMESERVER`     | Matrix server URL                          | `http://localhost:8008` |
-| `MATRIX_SSL_VERIFY`     | Verify SSL certificates                    | `true`                  |
-| `MATRIX_SERVER_NAME`    | Server name for federation (optional)      | -                       |
-| `MINDROOM_STORAGE_PATH` | Data storage directory                     | Relative to config file |
-| `LOG_LEVEL`             | Logging level                              | `INFO`                  |
-| `MINDROOM_CONFIG_PATH`  | Path to config.yaml                        | `./config.yaml`         |
-| `ANTHROPIC_API_KEY`     | Anthropic API key (if using Claude models) | -                       |
-| `OPENAI_API_KEY`        | OpenAI API key (if using OpenAI models)    | -                       |
-| `MINDROOM_API_KEY`      | API key for dashboard auth (standalone)    | - (open access)         |
+| Variable                | Description                                | Default                                         |
+| ----------------------- | ------------------------------------------ | ----------------------------------------------- |
+| `MATRIX_HOMESERVER`     | Matrix server URL                          | `http://localhost:8008`                         |
+| `MATRIX_SSL_VERIFY`     | Verify SSL certificates                    | `true`                                          |
+| `MATRIX_SERVER_NAME`    | Server name for federation (optional)      | -                                               |
+| `MINDROOM_STORAGE_PATH` | Data storage directory                     | Relative to config file                         |
+| `LOG_LEVEL`             | Logging level                              | `INFO`                                          |
+| `MINDROOM_CONFIG_PATH`  | Path to config.yaml                        | `./config.yaml`, then `~/.mindroom/config.yaml` |
+| `ANTHROPIC_API_KEY`     | Anthropic API key (if using Claude models) | -                                               |
+| `OPENAI_API_KEY`        | OpenAI API key (if using OpenAI models)    | -                                               |
+| `MINDROOM_API_KEY`      | API key for dashboard auth (standalone)    | - (open access)                                 |
 
 Streaming responses are configured in `config.yaml` via `defaults.enable_streaming` (default: `true`).
 
@@ -4081,6 +4119,8 @@ docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.backend .
 ```
 
 The Dockerfile uses a multi-stage build with `uv` for dependency management and runs as a non-root user (UID 1000).
+
+A `Dockerfile.backend-minimal` variant is also available, which builds a smaller image without pre-installed tool extras -- useful for sandbox runners.
 
 ## With Local Matrix
 
@@ -4117,7 +4157,9 @@ MindRoom stores data in the `mindroom_data` directory:
 
 - `sessions/` - Per-agent conversation history (SQLite)
 - `learning/` - Per-agent Agno Learning state (SQLite, persistent across restarts)
-- `memory/` - Vector store for agent/room memories
+- `chroma/` - ChromaDB vector store for agent/room memories
+- `knowledge_db/` - Knowledge base vector stores
+- `culture/` - Shared culture state
 - `tracking/` - Response tracking to avoid duplicates
 - `credentials/` - Synchronized secrets from `.env`
 - `logs/` - Application logs

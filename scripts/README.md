@@ -44,7 +44,7 @@ If you're looking for platform deployment scripts (infrastructure, database migr
 
 ## Requirements
 
-- **Python 3.11+**: For Python scripts
+- **Python 3.12+**: For Python scripts
 - **UV/UVX** (optional): For automatic dependency management in Python scripts
 - **Docker**: For Docker-based utilities
 - **PostgreSQL client**: For database cleanup scripts

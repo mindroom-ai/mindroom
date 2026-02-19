@@ -52,6 +52,6 @@ AI response caching is automatically skipped when images are present, since imag
 
 ## Limitations
 
-- **Router does not route image events** -- in multi-agent rooms, you must `@mention` the agent in the image caption. Without a mention, no agent will respond. Tracked in [#154](https://github.com/mindroom-ai/mindroom/issues/154).
-- **Bridge mention detection** relies on `m.mentions` in the event, which some bridges (e.g., mautrix-telegram) do not set. Images sent from bridged platforms may not trigger agent responses.
+- **Routing in multi-agent rooms** -- in multi-agent rooms without an `@mention`, the router selects the best agent based on the image caption.
+- **Bridge mention detection** uses `m.mentions` in the event, falling back to parsing HTML pills from `formatted_body` when `m.mentions` is absent (e.g., mautrix-telegram). Bridges that set neither may not trigger agent responses.
 - **Model support** -- the configured model must support vision. Text-only models will ignore the image or return an error.

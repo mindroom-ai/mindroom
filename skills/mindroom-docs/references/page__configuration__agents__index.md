@@ -145,6 +145,8 @@ defaults:
   max_preload_chars: 50000              # Hard cap for preloaded context from context_files/memory_dir
   show_stop_button: false               # Show a stop button while agent is responding (global-only, cannot be overridden per-agent)
   num_history_runs: null                # Number of prior runs to include (null = all)
+  num_history_messages: null            # Max messages from history (null = use num_history_runs)
+  enable_streaming: true                # Stream agent responses via progressive message edits
   compress_tool_results: true           # Compress tool results in history to save context
   enable_session_summaries: false       # AI summaries of older conversation segments (costs extra LLM call)
   max_tool_calls_from_history: null     # Limit tool call messages replayed from history (null = no limit)
