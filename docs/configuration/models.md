@@ -91,7 +91,7 @@ models:
 
 ## Context Window
 
-When `context_window` is set, MindRoom estimates the total context size before each model call (system prompt + conversation history + current message) using a chars/4 token approximation. If the estimate exceeds 80% of the context window, the number of history runs replayed is automatically reduced to fit within budget. At least 1 history run is always kept.
+When `context_window` is set, MindRoom estimates the total context size before each model call (system prompt + conversation history + current message) using a chars/4 token approximation. If the estimate exceeds 80% of the context window, the number of history runs replayed is automatically reduced to fit within budget. If even a single history run exceeds the remaining budget, history is disabled entirely for that call.
 
 A warning is logged whenever history is trimmed, including the original and reduced run counts.
 
