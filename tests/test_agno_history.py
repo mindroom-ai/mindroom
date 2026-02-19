@@ -9,6 +9,7 @@ import nio
 import pytest
 from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
+from agno.media import Image
 from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
@@ -894,6 +895,7 @@ class TestApplyContextWindowLimit:
         instructions: list[str] | None = None,
         num_history_runs: int | None = None,
         num_history_messages: int | None = None,
+        max_tool_calls_from_history: int | None = None,
     ) -> MagicMock:
         """Create a mock Agent with the given history settings."""
         agent = MagicMock(spec=Agent)
@@ -902,6 +904,7 @@ class TestApplyContextWindowLimit:
         agent.num_history_runs = num_history_runs
         agent.num_history_messages = num_history_messages
         agent.add_history_to_context = True
+        agent.max_tool_calls_from_history = max_tool_calls_from_history
         return agent
 
     @staticmethod
@@ -1036,6 +1039,55 @@ class TestApplyContextWindowLimit:
         _apply_context_window_limit(agent, "test_agent", config, "y" * 40, "sid", tmp_path, session=session)
         assert agent.num_history_runs is None
         assert agent.add_history_to_context is True
+
+    def test_counts_media_messages_in_history_budgeting(self, tmp_path: object) -> None:
+        """History with image payloads should count toward context budget."""
+        config = self._make_config(context_window=40)  # threshold=32
+        agent = self._make_agent(role="x" * 20, num_history_runs=None)
+        media_msg = Message(
+            role="user",
+            content="",
+            images=[Image(url="https://example.com/" + ("a" * 300))],
+        )
+        session = AgentSession(
+            session_id="sid",
+            runs=[RunOutput(run_id="r1", messages=[media_msg], status=RunStatus.running)],
+        )
+        _apply_context_window_limit(agent, "test_agent", config, "y" * 20, "sid", tmp_path, session=session)
+        assert agent.add_history_to_context is False
+
+    def test_respects_max_tool_calls_from_history_when_budgeting(self, tmp_path: object) -> None:
+        """Budgeting should mirror Agno's tool-call filtering."""
+        config = self._make_config(context_window=100)  # threshold=80
+        agent = self._make_agent(
+            role="x" * 40,
+            num_history_runs=None,
+            max_tool_calls_from_history=0,
+        )
+        tool_history_run = RunOutput(
+            run_id="r1",
+            status=RunStatus.running,
+            messages=[
+                Message(role="user", content="hi"),
+                Message(
+                    role="assistant",
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "test_tool", "arguments": "{}"},
+                        },
+                    ],
+                ),
+                Message(role="tool", tool_call_id="call_1", content="x" * 4000),
+                Message(role="assistant", content="done"),
+            ],
+        )
+        session = AgentSession(session_id="sid", runs=[tool_history_run])
+        _apply_context_window_limit(agent, "test_agent", config, "y" * 40, "sid", tmp_path, session=session)
+        assert agent.add_history_to_context is True
+        assert agent.num_history_runs is None
 
     def test_model_config_context_window_field(self) -> None:
         """ModelConfig accepts and stores context_window."""

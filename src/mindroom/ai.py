@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import os
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any, cast
 
 import diskcache
@@ -17,6 +18,7 @@ from agno.models.openai import OpenAIChat
 from agno.models.openrouter import OpenRouter
 from agno.run.agent import RunContentEvent, RunErrorEvent, RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
 from agno.run.base import RunStatus
+from agno.utils.message import filter_tool_calls
 
 from .agents import _get_agent_session, create_agent, create_session_storage, get_seen_event_ids
 from .constants import ENABLE_AI_CACHE, PROVIDER_ENV_KEYS
@@ -49,20 +51,43 @@ logger = get_logger(__name__)
 AIStreamChunk = str | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
 
 
+def _estimate_message_media_chars(message: object) -> int:
+    media_fields = (
+        "images",
+        "audio",
+        "videos",
+        "files",
+        "audio_output",
+        "image_output",
+        "video_output",
+        "file_output",
+    )
+    media_chars = 0
+    for field in media_fields:
+        media_value = getattr(message, field, None)
+        if media_value:
+            media_chars += len(str(media_value))
+    return media_chars
+
+
 def _estimate_messages_tokens(messages: Sequence[Any] | None) -> int:
     """Estimate token count for messages using chars / 4 approximation."""
     if not messages:
         return 0
     total_chars = 0
     for msg in messages:
-        content = msg.compressed_content or msg.content
+        content = getattr(msg, "compressed_content", None) or getattr(msg, "content", None)
         if isinstance(content, str):
             total_chars += len(content)
         elif isinstance(content, list):
             for part in content:
                 total_chars += len(str(part))
-        if msg.tool_calls:
-            total_chars += len(str(msg.tool_calls))
+        elif content is not None:
+            total_chars += len(str(content))
+        tool_calls = getattr(msg, "tool_calls", None)
+        if tool_calls:
+            total_chars += len(str(tool_calls))
+        total_chars += _estimate_message_media_chars(msg)
     return total_chars // 4
 
 
@@ -120,7 +145,12 @@ def _estimate_history_tokens(session: AgentSession, agent: Agent, run_limit: int
         limit=None,
         skip_roles=_get_history_skip_roles(agent),
     )
-    return _estimate_messages_tokens(messages)
+    max_tool_calls_from_history = getattr(agent, "max_tool_calls_from_history", None)
+    if max_tool_calls_from_history is None:
+        return _estimate_messages_tokens(messages)
+    history_copy = [deepcopy(msg) for msg in messages]
+    filter_tool_calls(history_copy, max_tool_calls_from_history)
+    return _estimate_messages_tokens(history_copy)
 
 
 def _find_fitting_run_limit(session: AgentSession, agent: Agent, max_runs: int, budget: int) -> int:
