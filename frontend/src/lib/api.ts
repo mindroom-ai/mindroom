@@ -58,6 +58,13 @@ export const API_ENDPOINTS = {
       `${API_BASE_URL}/api/credentials/${encodeURIComponent(service)}/test`,
   },
 
+  // Google integration
+  google: {
+    status: `${API_BASE_URL}/api/google/status`,
+    connect: `${API_BASE_URL}/api/google/connect`,
+    disconnect: `${API_BASE_URL}/api/google/disconnect`,
+  },
+
   // Other endpoints
   tools: `${API_BASE_URL}/api/tools`,
   rooms: `${API_BASE_URL}/api/rooms`,
