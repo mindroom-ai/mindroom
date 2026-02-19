@@ -28,6 +28,7 @@ Each model configuration supports the following fields:
 | `host` | No | Host URL for self-hosted models (e.g., Ollama) |
 | `api_key` | No | API key (usually read from environment variables) |
 | `extra_kwargs` | No | Additional provider-specific parameters |
+| `context_window` | No | Context window size in tokens; when set, history is dynamically trimmed to stay within 80% of this limit |
 
 ## Configuration Examples
 
@@ -37,10 +38,12 @@ models:
   sonnet:
     provider: anthropic
     id: claude-sonnet-4-5-latest
+    context_window: 200000
 
   haiku:
     provider: anthropic
     id: claude-haiku-4-5-latest
+    context_window: 200000
 
   # OpenAI
   gpt:
@@ -85,6 +88,22 @@ models:
     extra_kwargs:
       base_url: http://localhost:8080/v1
 ```
+
+## Context Window
+
+When `context_window` is set, MindRoom estimates the total context size before each model call (system prompt + conversation history + current message) using a chars/4 token approximation. If the estimate exceeds 80% of the context window, the number of history runs replayed is automatically reduced to fit within budget. At least 1 history run is always kept.
+
+A warning is logged whenever history is trimmed, including the original and reduced run counts.
+
+```yaml
+models:
+  default:
+    provider: anthropic
+    id: claude-sonnet-4-5-latest
+    context_window: 200000  # 200K tokens
+```
+
+This is useful for models with smaller context windows or agents with long-running conversations that accumulate large histories.
 
 ## Extra Kwargs
 
