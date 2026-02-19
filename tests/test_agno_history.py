@@ -458,6 +458,68 @@ class TestPrepareAgentAndPrompt:
             mock_stuff.assert_called_once()
             assert unseen_ids == []
 
+    @pytest.mark.asyncio
+    async def test_openai_compat_with_prior_runs_skips_stuffing(self, config: Config, tmp_path: object) -> None:
+        """OpenAI-compat path: no reply_to_event_id, prior runs exist → Agno replays history, no stuffing."""
+        thread_history = [
+            {"sender": "user", "body": "Hello"},
+            {"sender": "assistant", "body": "Hi there"},
+            {"sender": "user", "body": "Follow up"},
+        ]
+        run = _make_run_output("r1", metadata=None)
+        with (
+            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
+            patch("mindroom.ai.create_agent") as mock_create,
+            patch("mindroom.ai._get_agent_session", return_value=self._mock_session([run])),
+            patch("mindroom.ai.build_prompt_with_thread_history") as mock_stuff,
+            patch("mindroom.ai.create_session_storage"),
+        ):
+            mock_create.return_value = MagicMock(spec=Agent)
+            _, prompt, unseen_ids = await _prepare_agent_and_prompt(
+                "calculator",
+                "test",
+                tmp_path,
+                None,
+                config,
+                thread_history=thread_history,
+                session_id="sid",
+                reply_to_event_id=None,
+            )
+            # No stuffing — Agno handles history replay natively
+            mock_stuff.assert_not_called()
+            # Bare enhanced prompt (no unseen injection either)
+            assert prompt == "enhanced"
+            assert unseen_ids == []
+
+    @pytest.mark.asyncio
+    async def test_openai_compat_first_turn_uses_stuffing(self, config: Config, tmp_path: object) -> None:
+        """OpenAI-compat path: no reply_to_event_id, no prior runs → fallback to thread stuffing."""
+        thread_history = [
+            {"sender": "user", "body": "Hello"},
+        ]
+        with (
+            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
+            patch("mindroom.ai.create_agent") as mock_create,
+            patch("mindroom.ai._get_agent_session", return_value=None),
+            patch("mindroom.ai.build_prompt_with_thread_history", return_value="stuffed") as mock_stuff,
+            patch("mindroom.ai.create_session_storage"),
+        ):
+            mock_create.return_value = MagicMock(spec=Agent)
+            _, prompt, unseen_ids = await _prepare_agent_and_prompt(
+                "calculator",
+                "test",
+                tmp_path,
+                None,
+                config,
+                thread_history=thread_history,
+                session_id="sid",
+                reply_to_event_id=None,
+            )
+            # First turn with no prior runs → stuffing fallback
+            mock_stuff.assert_called_once()
+            assert prompt == "stuffed"
+            assert unseen_ids == []
+
 
 # ---------------------------------------------------------------------------
 # Metadata passing tests

@@ -336,19 +336,27 @@ async def _prepare_agent_and_prompt(
 
     unseen_event_ids: list[str] = []
 
+    # Check whether Agno already has prior runs for this session.
+    has_prior_runs = False
     if session_id and thread_history:
         storage = create_session_storage(agent_name, storage_path)
         session = _get_agent_session(storage, session_id)
-        if session is not None and session.runs:
-            # Agno has prior runs → use native history, inject only unseen messages
-            seen_ids = get_seen_event_ids(session)
-            unseen = _get_unseen_messages(thread_history, agent_name, config, seen_ids, reply_to_event_id)
-            unseen_event_ids = [msg["event_id"] for msg in unseen if msg.get("event_id")]
-            full_prompt = _build_prompt_with_unseen(enhanced_prompt, unseen)
-        else:
-            # Zero runs (first turn or storage lost) → fallback to Matrix stuffing
-            full_prompt = build_prompt_with_thread_history(enhanced_prompt, thread_history)
+        has_prior_runs = session is not None and bool(session.runs)
+
+    if has_prior_runs and reply_to_event_id:
+        # Matrix bot path: Agno replays history natively, inject only unseen messages.
+        assert session is not None
+        assert thread_history is not None
+        seen_ids = get_seen_event_ids(session)
+        unseen = _get_unseen_messages(thread_history, agent_name, config, seen_ids, reply_to_event_id)
+        unseen_event_ids = [msg["event_id"] for msg in unseen if msg.get("event_id")]
+        full_prompt = _build_prompt_with_unseen(enhanced_prompt, unseen)
+    elif has_prior_runs and not reply_to_event_id:
+        # Non-Matrix path (OpenAI-compat): Agno replays history natively.
+        # No unseen detection (thread_history entries lack event_id fields).
+        full_prompt = enhanced_prompt
     else:
+        # No prior runs (first turn / storage lost / no session_id) → fallback.
         full_prompt = build_prompt_with_thread_history(enhanced_prompt, thread_history)
 
     logger.info("Preparing agent and prompt", agent=agent_name, full_prompt=full_prompt)
