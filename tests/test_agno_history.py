@@ -134,6 +134,85 @@ class TestHistoryConfig:
             agent = create_agent("calculator", config=config)
         assert agent.compress_tool_results is False
 
+    # -- enable_session_summaries --
+
+    def test_enable_session_summaries_default_false(self) -> None:
+        """DefaultsConfig.enable_session_summaries defaults to False."""
+        defaults = DefaultsConfig()
+        assert defaults.enable_session_summaries is False
+
+    def test_agent_config_enable_session_summaries_default_none(self) -> None:
+        """AgentConfig.enable_session_summaries defaults to None (inherit)."""
+        agent = AgentConfig(display_name="Test")
+        assert agent.enable_session_summaries is None
+
+    def test_enable_session_summaries_wired_default(self) -> None:
+        """create_agent() sets enable_session_summaries=False by default."""
+        config = Config.from_yaml()
+        with patch("mindroom.agents.SqliteDb"):
+            agent = create_agent("calculator", config=config)
+        assert agent.enable_session_summaries is False
+
+    def test_enable_session_summaries_defaults_override(self) -> None:
+        """Defaults-level enable_session_summaries=True flows to agent."""
+        config = Config.from_yaml()
+        config.defaults.enable_session_summaries = True
+        with patch("mindroom.agents.SqliteDb"):
+            agent = create_agent("calculator", config=config)
+        assert agent.enable_session_summaries is True
+
+    def test_enable_session_summaries_per_agent_true(self) -> None:
+        """Per-agent enable_session_summaries=True overrides defaults False."""
+        config = Config.from_yaml()
+        config.agents["calculator"].enable_session_summaries = True
+        with patch("mindroom.agents.SqliteDb"):
+            agent = create_agent("calculator", config=config)
+        assert agent.enable_session_summaries is True
+
+    def test_enable_session_summaries_per_agent_false_overrides_defaults_true(self) -> None:
+        """Per-agent enable_session_summaries=False overrides defaults True."""
+        config = Config.from_yaml()
+        config.defaults.enable_session_summaries = True
+        config.agents["calculator"].enable_session_summaries = False
+        with patch("mindroom.agents.SqliteDb"):
+            agent = create_agent("calculator", config=config)
+        assert agent.enable_session_summaries is False
+
+    # -- max_tool_calls_from_history --
+
+    def test_max_tool_calls_from_history_default_none(self) -> None:
+        """DefaultsConfig.max_tool_calls_from_history defaults to None."""
+        defaults = DefaultsConfig()
+        assert defaults.max_tool_calls_from_history is None
+
+    def test_agent_config_max_tool_calls_from_history_default_none(self) -> None:
+        """AgentConfig.max_tool_calls_from_history defaults to None (inherit)."""
+        agent = AgentConfig(display_name="Test")
+        assert agent.max_tool_calls_from_history is None
+
+    def test_max_tool_calls_from_history_wired_default(self) -> None:
+        """create_agent() sets max_tool_calls_from_history=None by default."""
+        config = Config.from_yaml()
+        with patch("mindroom.agents.SqliteDb"):
+            agent = create_agent("calculator", config=config)
+        assert agent.max_tool_calls_from_history is None
+
+    def test_max_tool_calls_from_history_defaults_override(self) -> None:
+        """Defaults-level max_tool_calls_from_history=5 flows to agent."""
+        config = Config.from_yaml()
+        config.defaults.max_tool_calls_from_history = 5
+        with patch("mindroom.agents.SqliteDb"):
+            agent = create_agent("calculator", config=config)
+        assert agent.max_tool_calls_from_history == 5
+
+    def test_max_tool_calls_from_history_per_agent_override(self) -> None:
+        """Per-agent max_tool_calls_from_history=3 overrides defaults None."""
+        config = Config.from_yaml()
+        config.agents["calculator"].max_tool_calls_from_history = 3
+        with patch("mindroom.agents.SqliteDb"):
+            agent = create_agent("calculator", config=config)
+        assert agent.max_tool_calls_from_history == 3
+
 
 # ---------------------------------------------------------------------------
 # Agent helper tests
