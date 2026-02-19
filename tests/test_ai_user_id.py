@@ -232,3 +232,79 @@ class TestUserIdPassthrough:
 
             mock_agent.arun.assert_called_once()
             assert mock_agent.arun.call_args.kwargs["user_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_stream_cache_key_respects_show_tool_calls(self, tmp_path: Path) -> None:
+        """Streaming cache key should include tool-call visibility mode."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+        mock_agent.arun = MagicMock()
+
+        mock_cache = MagicMock()
+        mock_cache.get.return_value = MagicMock(content="cached-response")
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai.get_cache", return_value=mock_cache),
+            patch("mindroom.ai._build_cache_key", return_value="cache-key") as mock_build_cache_key,
+        ):
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
+
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    storage_path=tmp_path,
+                    config=Config.from_yaml(),
+                    show_tool_calls=False,
+                )
+            ]
+
+        assert chunks == ["cached-response"]
+        assert mock_build_cache_key.call_args.kwargs["show_tool_calls"] is False
+
+    @pytest.mark.asyncio
+    async def test_ai_response_collects_tool_trace_when_tool_calls_hidden(self, tmp_path: Path) -> None:
+        """Non-streaming path should still surface structured tool metadata."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        tool = MagicMock()
+        tool.tool_name = "read_file"
+        tool.tool_args = {"path": "README.md"}
+        tool.result = "ok"
+
+        mock_run_output = MagicMock()
+        mock_run_output.content = "Done."
+        mock_run_output.tools = [tool]
+        mock_agent.arun = AsyncMock(return_value=mock_run_output)
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai.get_cache", return_value=None),
+        ):
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
+            tool_trace: list[object] = []
+            response = await ai_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                storage_path=tmp_path,
+                config=Config.from_yaml(),
+                show_tool_calls=False,
+                tool_trace_collector=tool_trace,
+            )
+
+        assert response == "Done."
+        assert "<tool>" not in response
+        assert len(tool_trace) == 1

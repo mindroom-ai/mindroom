@@ -623,6 +623,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     thread_history: list[dict] | None = None,
     model_name: str | None = None,
     images: Sequence[Image] | None = None,
+    show_tool_calls: bool = True,
 ) -> AsyncIterator[TeamStreamChunk]:
     """Aggregate team streaming into a non-stream-style document, live.
 
@@ -684,7 +685,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         elif isinstance(event, AgentToolCallStartedEvent):
             agent_name = event.agent_name
             tool_msg, trace_entry = format_tool_started_event(event.tool)
-            if agent_name and tool_msg:
+            if show_tool_calls and agent_name and tool_msg:
                 if agent_name not in per_member:
                     per_member[agent_name] = ""
                 per_member[agent_name] += tool_msg
@@ -697,13 +698,16 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             info = extract_tool_completed_info(event.tool)
             if agent_name and info:
                 tool_name, result = info
-                if agent_name not in per_member:
-                    per_member[agent_name] = ""
-                per_member[agent_name], trace_entry = complete_pending_tool_block(
-                    per_member[agent_name],
-                    tool_name,
-                    result,
-                )
+                if show_tool_calls:
+                    if agent_name not in per_member:
+                        per_member[agent_name] = ""
+                    per_member[agent_name], trace_entry = complete_pending_tool_block(
+                        per_member[agent_name],
+                        tool_name,
+                        result,
+                    )
+                else:
+                    _, trace_entry = complete_pending_tool_block("", tool_name, result)
                 tool_trace.append(trace_entry)
 
         # Team consensus content event
@@ -716,7 +720,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         # Team-level tool call events (no specific agent context)
         elif isinstance(event, TeamToolCallStartedEvent):
             tool_msg, trace_entry = format_tool_started_event(event.tool)
-            if tool_msg:
+            if show_tool_calls and tool_msg:
                 consensus += tool_msg
             if trace_entry:
                 tool_trace.append(trace_entry)
@@ -725,7 +729,10 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             info = extract_tool_completed_info(event.tool)
             if info:
                 tool_name, result = info
-                consensus, trace_entry = complete_pending_tool_block(consensus, tool_name, result)
+                if show_tool_calls:
+                    consensus, trace_entry = complete_pending_tool_block(consensus, tool_name, result)
+                else:
+                    _, trace_entry = complete_pending_tool_block("", tool_name, result)
                 tool_trace.append(trace_entry)
 
         # Skip other event types

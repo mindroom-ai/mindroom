@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from agno.session.agent import AgentSession
 
     from .config import Config, ModelConfig
+    from .tool_events import ToolTraceEntry
 
 logger = get_logger(__name__)
 
@@ -278,15 +279,15 @@ def _apply_context_window_limit(
         )
 
 
-def _extract_response_content(response: RunOutput) -> str:
+def _extract_response_content(response: RunOutput, *, show_tool_calls: bool = True) -> str:
     response_parts = []
 
     # Add main content if present
     if response.content:
         response_parts.append(response.content)
 
-    # Add formatted tool call sections when present.
-    if response.tools:
+    # Add formatted tool call sections when present (and enabled).
+    if show_tool_calls and response.tools:
         tool_sections: list[str] = []
         for tool in response.tools:
             tool_name = tool.tool_name or "tool"
@@ -297,6 +298,20 @@ def _extract_response_content(response: RunOutput) -> str:
             response_parts.append("\n\n".join(tool_sections))
 
     return "\n".join(response_parts) if response_parts else ""
+
+
+def _extract_tool_trace(response: RunOutput) -> list[ToolTraceEntry]:
+    """Extract structured tool-trace metadata from a RunOutput."""
+    if not response.tools:
+        return []
+
+    trace: list[ToolTraceEntry] = []
+    for tool in response.tools:
+        tool_name = tool.tool_name or "tool"
+        tool_args = {str(k): v for k, v in tool.tool_args.items()} if isinstance(tool.tool_args, dict) else {}
+        _, trace_entry = format_tool_combined(tool_name, tool_args, tool.result)
+        trace.append(trace_entry)
+    return trace
 
 
 @functools.cache
@@ -498,10 +513,20 @@ def _build_run_metadata(reply_to_event_id: str | None, unseen_event_ids: list[st
     }
 
 
-def _build_cache_key(agent: Agent, full_prompt: str, session_id: str) -> str:
+def _build_cache_key(
+    agent: Agent,
+    full_prompt: str,
+    session_id: str,
+    *,
+    show_tool_calls: bool | None = None,
+) -> str:
     model = agent.model
     assert model is not None
-    return f"{agent.name}:{model.__class__.__name__}:{model.id}:{full_prompt}:{session_id}"
+    key = f"{agent.name}:{model.__class__.__name__}:{model.id}:{full_prompt}:{session_id}"
+    if show_tool_calls is None:
+        return key
+    visibility = "show" if show_tool_calls else "hide"
+    return f"{key}:tool_calls={visibility}"
 
 
 async def _cached_agent_run(
@@ -616,6 +641,8 @@ async def ai_response(
     include_interactive_questions: bool = True,
     images: Sequence[Image] | None = None,
     reply_to_event_id: str | None = None,
+    show_tool_calls: bool = True,
+    tool_trace_collector: list[ToolTraceEntry] | None = None,
 ) -> str:
     """Generates a response using the specified agno Agent with memory integration.
 
@@ -635,6 +662,9 @@ async def ai_response(
         images: Optional images to pass to the AI model for vision analysis
         reply_to_event_id: Matrix event ID of the triggering message, stored
             in run metadata for unseen message tracking and edit cleanup.
+        show_tool_calls: Whether to include tool call details inline in the response text.
+        tool_trace_collector: Optional list that receives structured tool-trace
+            entries from this run.
 
     Returns:
         Agent response string
@@ -678,8 +708,11 @@ async def ai_response(
         logger.exception("Error generating AI response", agent=agent_name)
         return get_user_friendly_error_message(e, agent_name)
 
+    if tool_trace_collector is not None:
+        tool_trace_collector.extend(_extract_tool_trace(response))
+
     # Extract response content - this shouldn't fail
-    return _extract_response_content(response)
+    return _extract_response_content(response, show_tool_calls=show_tool_calls)
 
 
 async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
@@ -695,6 +728,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     include_interactive_questions: bool = True,
     images: Sequence[Image] | None = None,
     reply_to_event_id: str | None = None,
+    show_tool_calls: bool = True,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
 
@@ -717,6 +751,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         images: Optional images to pass to the AI model for vision analysis
         reply_to_event_id: Matrix event ID of the triggering message, stored
             in run metadata for unseen message tracking and edit cleanup.
+        show_tool_calls: Whether to include tool call details inline in the streamed response.
 
     Yields:
         Streaming chunks/events as they become available
@@ -750,7 +785,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     if cache is not None:
         model = agent.model
         assert model is not None
-        cache_key = _build_cache_key(agent, full_prompt, session_id)
+        cache_key = _build_cache_key(agent, full_prompt, session_id, show_tool_calls=show_tool_calls)
         cached_result = cache.get(cache_key)
         if cached_result is not None:
             logger.info("Cache hit", agent=agent_name)
@@ -784,16 +819,18 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 full_response += chunk_text
                 yield event
             elif isinstance(event, ToolCallStartedEvent):
-                tool_msg, _ = format_tool_started_event(event.tool)
-                if tool_msg:
-                    full_response += tool_msg
-                    yield event
+                if show_tool_calls:
+                    tool_msg, _ = format_tool_started_event(event.tool)
+                    if tool_msg:
+                        full_response += tool_msg
+                yield event
             elif isinstance(event, ToolCallCompletedEvent):
-                info = extract_tool_completed_info(event.tool)
-                if info:
-                    tool_name, result = info
-                    full_response, _ = complete_pending_tool_block(full_response, tool_name, result)
-                    yield event
+                if show_tool_calls:
+                    info = extract_tool_completed_info(event.tool)
+                    if info:
+                        tool_name, result = info
+                        full_response, _ = complete_pending_tool_block(full_response, tool_name, result)
+                yield event
             elif isinstance(event, RunErrorEvent):
                 error_text = event.content or "Unknown agent error"
                 logger.error("Agent run error during streaming", agent=agent_name, error=error_text)
