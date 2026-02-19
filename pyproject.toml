@@ -123,6 +123,7 @@ optional-dependencies.dalle = [
 optional-dependencies.daytona = [
   "daytona",
 ]
+optional-dependencies.delegate = [  ]
 optional-dependencies.desi_vocal = [
   "requests",
 ]

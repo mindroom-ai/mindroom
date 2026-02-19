@@ -20,6 +20,12 @@ vi.mock('@/hooks/useTools', () => ({
         status: 'available',
       },
       {
+        name: 'delegate',
+        display_name: 'Agent Delegation',
+        setup_type: 'none',
+        status: 'available',
+      },
+      {
         name: 'file',
         display_name: 'File',
         setup_type: 'none',
@@ -289,6 +295,17 @@ describe('AgentEditor', () => {
         knowledge_bases: ['legal'],
       })
     );
+  });
+
+  it('hides delegate from the tools picker', () => {
+    render(<AgentEditor />);
+
+    // calculator and file should appear as checkboxes
+    expect(screen.getByRole('checkbox', { name: /calculator/i })).toBeTruthy();
+    expect(screen.getByRole('checkbox', { name: /file/i })).toBeTruthy();
+
+    // delegate should NOT appear even though useTools returns it
+    expect(screen.queryByRole('checkbox', { name: /agent delegation/i })).toBeNull();
   });
 
   it('updates tools when checkboxes are toggled', () => {
