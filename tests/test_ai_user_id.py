@@ -152,7 +152,7 @@ class TestUserIdPassthrough:
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
             patch("mindroom.ai.get_cache", return_value=None),
         ):
-            mock_prepare.return_value = (mock_agent, "test prompt")
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
 
             await ai_response(
                 agent_name="general",
@@ -184,7 +184,7 @@ class TestUserIdPassthrough:
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
             patch("mindroom.ai.get_cache", return_value=None),
         ):
-            mock_prepare.return_value = (mock_agent, "test prompt")
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
 
             # Consume the async generator to trigger the agent.arun call.
             _chunks = [
@@ -219,7 +219,7 @@ class TestUserIdPassthrough:
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
             patch("mindroom.ai.get_cache", return_value=None),
         ):
-            mock_prepare.return_value = (mock_agent, "test prompt")
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
 
             # Call without user_id
             await ai_response(

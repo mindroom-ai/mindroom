@@ -236,6 +236,7 @@ def test_save_config(test_client: TestClient, temp_config_file: Path) -> None:
         "show_stop_button": False,
         "learning": True,
         "learning_mode": "always",
+        "num_history_runs": 3,
     }
 
 

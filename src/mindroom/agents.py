@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 from zoneinfo import ZoneInfo
 
 from agno.agent import Agent
 from agno.culture.manager import CultureManager
+from agno.db.base import SessionType
 from agno.db.sqlite import SqliteDb
 from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
+from agno.run.agent import RunOutput
+from agno.session.agent import AgentSession
 
 from . import agent_prompts
 from . import tools as _tools_module  # noqa: F401
@@ -198,6 +201,60 @@ def create_culture_storage(culture_name: str, storage_path: Path) -> SqliteDb:
     culture_dir = storage_path / "culture"
     culture_dir.mkdir(parents=True, exist_ok=True)
     return SqliteDb(db_file=str(culture_dir / f"{culture_name}.db"))
+
+
+def _get_agent_session(storage: SqliteDb, session_id: str) -> AgentSession | None:
+    """Retrieve and deserialize an AgentSession from storage."""
+    raw = storage.get_session(session_id, SessionType.AGENT)
+    if raw is None:
+        return None
+    if isinstance(raw, AgentSession):
+        return raw
+    if isinstance(raw, dict):
+        return AgentSession.from_dict(cast("dict[str, Any]", raw))
+    return None
+
+
+def session_has_runs(storage: SqliteDb, session_id: str) -> bool:
+    """Check whether an Agno session has any prior runs."""
+    session = _get_agent_session(storage, session_id)
+    if session is None:
+        return False
+    return bool(session.runs)
+
+
+def get_seen_event_ids(storage: SqliteDb, session_id: str) -> set[str]:
+    """Load Agno session and return union of all matrix_seen_event_ids from run metadata."""
+    session = _get_agent_session(storage, session_id)
+    if session is None or not session.runs:
+        return set()
+    seen: set[str] = set()
+    for run in session.runs:
+        if isinstance(run, RunOutput) and run.metadata:
+            seen_ids = run.metadata.get("matrix_seen_event_ids")
+            if isinstance(seen_ids, list):
+                seen.update(seen_ids)
+    return seen
+
+
+def remove_run_by_event_id(storage: SqliteDb, session_id: str, event_id: str) -> bool:
+    """Remove a run whose matrix_event_id matches, save session.
+
+    Returns True if a run was removed.
+    """
+    session = _get_agent_session(storage, session_id)
+    if session is None or not session.runs:
+        return False
+    original_len = len(session.runs)
+    session.runs = [
+        run
+        for run in session.runs
+        if not (isinstance(run, RunOutput) and run.metadata and run.metadata.get("matrix_event_id") == event_id)
+    ]
+    if len(session.runs) == original_len:
+        return False
+    storage.upsert_session(session)
+    return True
 
 
 def resolve_culture_settings(mode: CultureMode) -> CultureAgentSettings:
@@ -393,6 +450,16 @@ def create_agent(  # noqa: PLR0915
         update_cultural_knowledge = culture_settings.update_cultural_knowledge
         enable_agentic_culture = culture_settings.enable_agentic_culture
 
+    # Resolve history settings: per-agent override → defaults
+    num_history_runs = (
+        agent_config.num_history_runs if agent_config.num_history_runs is not None else defaults.num_history_runs
+    )
+    num_history_messages = (
+        agent_config.num_history_messages
+        if agent_config.num_history_messages is not None
+        else defaults.num_history_messages
+    )
+
     agent = Agent(
         name=agent_config.display_name,
         id=agent_name,
@@ -406,6 +473,9 @@ def create_agent(  # noqa: PLR0915
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         knowledge=knowledge if knowledge_enabled else None,
         search_knowledge=knowledge_enabled,
+        add_history_to_context=True,
+        num_history_runs=num_history_runs,
+        num_history_messages=num_history_messages,
         culture_manager=culture_manager,
         add_culture_to_context=add_culture_to_context,
         update_cultural_knowledge=update_cultural_knowledge,

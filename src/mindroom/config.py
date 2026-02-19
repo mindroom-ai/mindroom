@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -57,6 +57,21 @@ class AgentConfig(BaseModel):
         default=None,
         description="Directory containing MEMORY.md and dated memory files to auto-load into role context",
     )
+    num_history_runs: int | None = Field(
+        default=None,
+        description="Number of prior Agno runs to include as history context (per-agent override)",
+    )
+    num_history_messages: int | None = Field(
+        default=None,
+        description="Max messages from history (mutually exclusive with num_history_runs)",
+    )
+
+    @model_validator(mode="after")
+    def _check_history_config(self) -> Self:
+        if self.num_history_runs is not None and self.num_history_messages is not None:
+            msg = "num_history_runs and num_history_messages are mutually exclusive"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="before")
     @classmethod
@@ -99,6 +114,21 @@ class DefaultsConfig(BaseModel):
     show_stop_button: bool = Field(default=False, description="Whether to automatically show stop button on messages")
     learning: bool = Field(default=True, description="Default Agno Learning setting")
     learning_mode: AgentLearningMode = Field(default="always", description="Default Agno Learning mode")
+    num_history_runs: int = Field(
+        default=3,
+        description="Default number of prior Agno runs to include as history context",
+    )
+    num_history_messages: int | None = Field(
+        default=None,
+        description="Default max messages from history (mutually exclusive with num_history_runs)",
+    )
+
+    @model_validator(mode="after")
+    def _check_history_config(self) -> Self:
+        if self.num_history_runs is not None and self.num_history_messages is not None:
+            msg = "num_history_runs and num_history_messages are mutually exclusive"
+            raise ValueError(msg)
+        return self
 
     @field_validator("tools")
     @classmethod
