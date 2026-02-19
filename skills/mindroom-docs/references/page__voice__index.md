@@ -146,7 +146,7 @@ MindRoom also supports text-to-speech (TTS) through agent tools. These are separ
 - **Cartesia** - Voice AI with optional voice localization via `cartesia` tool
 - **Groq** - Fast speech generation via `groq` tool
 
-See the [Tools documentation](/tools) for configuration details.
+See the [Tools documentation](https://docs.mindroom.chat/tools/index.md) for configuration details.
 
 ## Limitations
 

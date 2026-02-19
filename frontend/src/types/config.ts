@@ -38,18 +38,30 @@ export interface KnowledgeBaseConfig {
 export type LearningMode = 'always' | 'agentic';
 export type CultureMode = 'automatic' | 'agentic' | 'manual';
 
+export type ThreadMode = 'thread' | 'room';
+
 export interface Agent {
   id: string; // The key in the agents object
   display_name: string;
   role: string;
   tools: string[];
+  include_default_tools?: boolean; // Whether to merge defaults.tools into this agent's tools
   skills: string[];
   instructions: string[];
   rooms: string[];
   knowledge_bases?: string[];
+  context_files?: string[]; // File paths read at agent init and prepended to role context
+  memory_dir?: string; // Directory containing MEMORY.md and dated memory files
+  markdown?: boolean; // Per-agent markdown override
   learning?: boolean; // Defaults to true when omitted
   learning_mode?: LearningMode; // Defaults to always when omitted
   model?: string; // Reference to a model in the models section
+  thread_mode?: ThreadMode; // Conversation threading mode
+  num_history_runs?: number | null; // Number of prior runs to include as history
+  num_history_messages?: number | null; // Max messages from history (mutually exclusive with num_history_runs)
+  compress_tool_results?: boolean; // Compress tool results in history
+  enable_session_summaries?: boolean; // Enable session summaries for conversation compaction
+  max_tool_calls_from_history?: number | null; // Max tool call messages replayed from history
 }
 
 export interface Team {
@@ -104,6 +116,14 @@ export interface Config {
     markdown: boolean;
     learning?: boolean;
     learning_mode?: LearningMode;
+    tools?: string[];
+    enable_streaming?: boolean;
+    show_stop_button?: boolean;
+    num_history_runs?: number | null;
+    num_history_messages?: number | null;
+    compress_tool_results?: boolean;
+    enable_session_summaries?: boolean;
+    max_tool_calls_from_history?: number | null;
   };
   router: {
     model: string;
