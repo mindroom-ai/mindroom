@@ -253,6 +253,10 @@ mindroom_user:
 
 defaults:
   markdown: true
+  compress_tool_results: true        # Compress tool results in history to save context
+  enable_session_summaries: false    # AI summaries of older conversation segments (costs extra LLM call)
+  max_tool_calls_from_history: null  # Limit tool call messages replayed from history (null = no limit)
+  num_history_runs: null             # Number of prior runs to include (null = all)
 ```
 
 2. Configure your Matrix homeserver and API keys (optional, defaults shown):
@@ -280,6 +284,11 @@ agents:
     model: default
     rooms: [lobby]
     knowledge_bases: [engineering_docs]
+    # Per-agent overrides for history/context (override defaults above):
+    # compress_tool_results: false
+    # enable_session_summaries: true
+    # max_tool_calls_from_history: 5
+    # num_history_runs: 10
 
 voice:
   enabled: true
