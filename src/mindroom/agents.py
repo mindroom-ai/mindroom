@@ -319,7 +319,7 @@ def resolve_agent_culture(
     return culture_manager, settings
 
 
-def create_agent(  # noqa: PLR0915
+def create_agent(  # noqa: PLR0915, C901, PLR0912
     agent_name: str,
     config: Config,
     *,
@@ -450,15 +450,18 @@ def create_agent(  # noqa: PLR0915
         update_cultural_knowledge = culture_settings.update_cultural_knowledge
         enable_agentic_culture = culture_settings.enable_agentic_culture
 
-    # Resolve history settings: per-agent override → defaults
-    num_history_runs = (
-        agent_config.num_history_runs if agent_config.num_history_runs is not None else defaults.num_history_runs
-    )
-    num_history_messages = (
-        agent_config.num_history_messages
-        if agent_config.num_history_messages is not None
-        else defaults.num_history_messages
-    )
+    # Resolve history settings: per-agent override → defaults.
+    # When agent sets one knob, force the other to None to avoid Agno
+    # receiving both (it warns and drops num_history_messages).
+    if agent_config.num_history_messages is not None:
+        num_history_runs = None
+        num_history_messages = agent_config.num_history_messages
+    elif agent_config.num_history_runs is not None:
+        num_history_runs = agent_config.num_history_runs
+        num_history_messages = None
+    else:
+        num_history_runs = defaults.num_history_runs
+        num_history_messages = defaults.num_history_messages
 
     agent = Agent(
         name=agent_config.display_name,

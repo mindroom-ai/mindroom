@@ -78,6 +78,21 @@ class TestHistoryConfig:
         assert agent_msgs.num_history_runs is None
         assert agent_msgs.num_history_messages == 50
 
+    def test_defaults_num_history_messages_works(self) -> None:
+        """DefaultsConfig can use num_history_messages when num_history_runs is None."""
+        defaults = DefaultsConfig(num_history_runs=None, num_history_messages=50)
+        assert defaults.num_history_messages == 50
+        assert defaults.num_history_runs is None
+
+    def test_defaults_num_history_messages_wired_to_agent(self) -> None:
+        """Defaults-level num_history_messages flows to agent when no per-agent override."""
+        config = Config.from_yaml()
+        config.defaults = DefaultsConfig(num_history_runs=None, num_history_messages=50)
+        with patch("mindroom.agents.SqliteDb"):
+            agent = create_agent("calculator", config=config)
+        assert agent.num_history_messages == 50
+        assert agent.num_history_runs is None
+
     def test_num_history_runs_config_wired_to_agent(self) -> None:
         """Verify num_history_runs from config is wired to Agent constructor."""
         config = Config.from_yaml()
@@ -88,21 +103,22 @@ class TestHistoryConfig:
         assert agent.num_history_runs == 3
 
     def test_num_history_runs_per_agent_override(self) -> None:
-        """Per-agent num_history_runs overrides defaults."""
+        """Per-agent num_history_runs overrides defaults and clears num_history_messages."""
         config = Config.from_yaml()
         config.agents["calculator"].num_history_runs = 7
         with patch("mindroom.agents.SqliteDb"):
             agent = create_agent("calculator", config=config)
         assert agent.num_history_runs == 7
+        assert agent.num_history_messages is None
 
     def test_num_history_messages_per_agent_override(self) -> None:
-        """Per-agent num_history_messages overrides defaults."""
+        """Per-agent num_history_messages overrides defaults and clears num_history_runs."""
         config = Config.from_yaml()
         config.agents["calculator"].num_history_messages = 50
-        config.defaults.num_history_runs = None  # clear default to avoid Agno warning
         with patch("mindroom.agents.SqliteDb"):
             agent = create_agent("calculator", config=config)
         assert agent.num_history_messages == 50
+        assert agent.num_history_runs is None
 
 
 # ---------------------------------------------------------------------------

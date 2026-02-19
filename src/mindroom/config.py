@@ -114,7 +114,7 @@ class DefaultsConfig(BaseModel):
     show_stop_button: bool = Field(default=False, description="Whether to automatically show stop button on messages")
     learning: bool = Field(default=True, description="Default Agno Learning setting")
     learning_mode: AgentLearningMode = Field(default="always", description="Default Agno Learning mode")
-    num_history_runs: int = Field(
+    num_history_runs: int | None = Field(
         default=3,
         description="Default number of prior Agno runs to include as history context",
     )
