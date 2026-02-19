@@ -9,7 +9,9 @@ import nio
 import pytest
 from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
+from agno.models.message import Message
 from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 from pydantic import ValidationError
 
@@ -20,13 +22,14 @@ from mindroom.agents import (
     remove_run_by_event_id,
 )
 from mindroom.ai import (
+    _apply_context_window_limit,
     _build_prompt_with_unseen,
     _get_unseen_messages,
     _prepare_agent_and_prompt,
     ai_response,
 )
 from mindroom.bot import AgentBot
-from mindroom.config import AgentConfig, Config, DefaultsConfig
+from mindroom.config import AgentConfig, Config, DefaultsConfig, ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 
@@ -464,7 +467,7 @@ class TestPrepareAgentAndPrompt:
             patch("mindroom.ai.create_session_storage"),
         ):
             mock_create.return_value = MagicMock(spec=Agent)
-            agent, prompt, unseen_ids = await _prepare_agent_and_prompt(
+            _agent, prompt, unseen_ids = await _prepare_agent_and_prompt(
                 "calculator",
                 "test",
                 tmp_path,
@@ -494,7 +497,7 @@ class TestPrepareAgentAndPrompt:
             patch("mindroom.ai.create_session_storage"),
         ):
             mock_create.return_value = MagicMock(spec=Agent)
-            agent, prompt, unseen_ids = await _prepare_agent_and_prompt(
+            _agent, _prompt, unseen_ids = await _prepare_agent_and_prompt(
                 "calculator",
                 "test",
                 tmp_path,
@@ -524,7 +527,7 @@ class TestPrepareAgentAndPrompt:
         ):
             mock_create.return_value = MagicMock(spec=Agent)
             # $u1 is current, so no unseen, but Agno path used
-            _, prompt, unseen_ids = await _prepare_agent_and_prompt(
+            _, _prompt, unseen_ids = await _prepare_agent_and_prompt(
                 "calculator",
                 "test",
                 tmp_path,
@@ -547,7 +550,7 @@ class TestPrepareAgentAndPrompt:
             patch("mindroom.ai.build_prompt_with_thread_history", return_value="stuffed") as mock_stuff,
         ):
             mock_create.return_value = MagicMock(spec=Agent)
-            _, prompt, unseen_ids = await _prepare_agent_and_prompt(
+            _, _prompt, unseen_ids = await _prepare_agent_and_prompt(
                 "calculator",
                 "test",
                 tmp_path,
@@ -867,3 +870,184 @@ class TestFullScenario:
         restart_seen = {"$a1", "$b1", "$c1", "$a2", "$b2", "$a3"}
         unseen_after_restart = _get_unseen_messages(thread_history, "bot", config, restart_seen, "$a3")
         assert unseen_after_restart == []
+
+
+# ---------------------------------------------------------------------------
+# Token-aware context window pre-check tests
+# ---------------------------------------------------------------------------
+
+
+class TestApplyContextWindowLimit:
+    """Test dynamic history reduction based on context window."""
+
+    @staticmethod
+    def _make_config(context_window: int | None = None) -> Config:
+        """Create a Config with the given context_window on the default model."""
+        return Config(
+            agents={"test_agent": AgentConfig(display_name="Test")},
+            models={"default": {"provider": "openai", "id": "test", "context_window": context_window}},
+        )
+
+    @staticmethod
+    def _make_agent(
+        role: str = "Short role.",
+        instructions: list[str] | None = None,
+        num_history_runs: int | None = None,
+        num_history_messages: int | None = None,
+    ) -> MagicMock:
+        """Create a mock Agent with the given history settings."""
+        agent = MagicMock(spec=Agent)
+        agent.role = role
+        agent.instructions = instructions or []
+        agent.num_history_runs = num_history_runs
+        agent.num_history_messages = num_history_messages
+        agent.add_history_to_context = True
+        return agent
+
+    @staticmethod
+    def _make_msg(content: str, *, from_history: bool = False, role: str = "user") -> Message:
+        """Create a real Agno Message with text content."""
+        return Message(role=role, content=content, from_history=from_history)
+
+    def _make_session(
+        self,
+        run_contents: list[str],
+        *,
+        from_history_indices: set[int] | None = None,
+        statuses: list[RunStatus] | None = None,
+    ) -> AgentSession:
+        """Create a session with runs containing the given content strings."""
+        history_indices = from_history_indices or set()
+        runs = []
+        for i, content in enumerate(run_contents):
+            msg = self._make_msg(content, from_history=i in history_indices)
+            status = statuses[i] if statuses is not None else RunStatus.running
+            runs.append(RunOutput(run_id=f"r{i}", messages=[msg], status=status))
+        return AgentSession(session_id="sid", runs=runs)
+
+    def test_no_context_window(self, tmp_path: object) -> None:
+        """No context_window configured -> num_history_runs unchanged."""
+        config = self._make_config(context_window=None)
+        agent = self._make_agent(num_history_runs=5)
+        _apply_context_window_limit(agent, "test_agent", config, "Hello", "sid", tmp_path)
+        assert agent.num_history_runs == 5
+
+    def test_no_session_id(self, tmp_path: object) -> None:
+        """No session_id -> num_history_runs unchanged."""
+        config = self._make_config(context_window=1000)
+        agent = self._make_agent(num_history_runs=5)
+        _apply_context_window_limit(agent, "test_agent", config, "Hello", None, tmp_path)
+        assert agent.num_history_runs == 5
+
+    def test_skips_when_num_history_messages_set(self, tmp_path: object) -> None:
+        """When num_history_messages is set, skip run-based reduction."""
+        config = self._make_config(context_window=100)
+        agent = self._make_agent(num_history_messages=10)
+        _apply_context_window_limit(agent, "test_agent", config, "Hello", "sid", tmp_path)
+        assert agent.num_history_messages == 10
+
+    def test_no_session_no_change(self, tmp_path: object) -> None:
+        """No existing session -> num_history_runs unchanged."""
+        config = self._make_config(context_window=100)
+        agent = self._make_agent(num_history_runs=5)
+        with (
+            patch("mindroom.ai.create_session_storage"),
+            patch("mindroom.ai._get_agent_session", return_value=None),
+        ):
+            _apply_context_window_limit(agent, "test_agent", config, "Hello", "sid", tmp_path)
+        assert agent.num_history_runs == 5
+
+    def test_within_budget_no_change(self, tmp_path: object) -> None:
+        """Under threshold -> num_history_runs unchanged."""
+        # context_window=10000, threshold=8000
+        # Static: ~10 tokens, history: ~50 tokens -> well under 8000
+        config = self._make_config(context_window=10000)
+        agent = self._make_agent(role="Short role.", num_history_runs=None)
+        session = self._make_session(["a" * 100, "b" * 100])
+        _apply_context_window_limit(agent, "test_agent", config, "Hello", "sid", tmp_path, session=session)
+        assert agent.num_history_runs is None  # Unchanged
+
+    def test_reduces_history_over_budget(self, tmp_path: object) -> None:
+        """Over threshold -> num_history_runs reduced."""
+        # context_window=100, threshold=80
+        # Static: role(40 chars = 10 tokens) + prompt(40 chars = 10 tokens) = 20 tokens
+        # History: 5 runs x 100 chars = 25 tokens each, total = 125 tokens
+        # Grand total: 20 + 125 = 145 > 80
+        # Budget for history: 80 - 20 = 60 tokens
+        # Each run ~ 25 tokens -> fits 2 runs (50 <= 60)
+        config = self._make_config(context_window=100)
+        agent = self._make_agent(role="x" * 40, num_history_runs=None)
+        session = self._make_session(["a" * 100] * 5)
+        _apply_context_window_limit(agent, "test_agent", config, "y" * 40, "sid", tmp_path, session=session)
+        assert agent.num_history_runs == 2
+
+    def test_reduces_with_explicit_limit(self, tmp_path: object) -> None:
+        """When num_history_runs is already set but still too high, it gets reduced."""
+        config = self._make_config(context_window=100)
+        agent = self._make_agent(role="x" * 40, num_history_runs=5)
+        session = self._make_session(["a" * 100] * 10)
+        _apply_context_window_limit(agent, "test_agent", config, "y" * 40, "sid", tmp_path, session=session)
+        assert agent.num_history_runs == 2
+
+    def test_disables_history_when_latest_run_exceeds_budget(self, tmp_path: object) -> None:
+        """If no runs fit budget, history is disabled for this run."""
+        config = self._make_config(context_window=10)
+        agent = self._make_agent(role="x" * 100, num_history_runs=5)
+        session = self._make_session(["a" * 1000] * 5)
+        _apply_context_window_limit(agent, "test_agent", config, "y" * 100, "sid", tmp_path, session=session)
+        assert agent.add_history_to_context is False
+
+    def test_disables_history_when_static_prompt_exhausts_budget(self, tmp_path: object) -> None:
+        """If static prompt exceeds threshold, history is disabled for this run."""
+        config = self._make_config(context_window=50)  # threshold=40
+        agent = self._make_agent(role="x" * 200, num_history_runs=3)
+        session = self._make_session(["a" * 20] * 3)
+        _apply_context_window_limit(agent, "test_agent", config, "y" * 200, "sid", tmp_path, session=session)
+        assert agent.add_history_to_context is False
+
+    def test_no_change_when_already_within_limit(self, tmp_path: object) -> None:
+        """With explicit num_history_runs that fits within budget, no change."""
+        config = self._make_config(context_window=10000)
+        agent = self._make_agent(role="Short.", num_history_runs=2)
+        session = self._make_session(["a" * 100, "b" * 100])
+        _apply_context_window_limit(agent, "test_agent", config, "Hello", "sid", tmp_path, session=session)
+        assert agent.num_history_runs == 2  # Unchanged
+
+    def test_ignores_messages_already_tagged_as_history(self, tmp_path: object) -> None:
+        """Messages tagged with from_history should not be counted again."""
+        config = self._make_config(context_window=100)  # threshold=80
+        agent = self._make_agent(role="x" * 40, num_history_runs=None)
+        session = self._make_session(
+            ["a" * 100, "b" * 1000],
+            from_history_indices={1},
+        )
+        _apply_context_window_limit(agent, "test_agent", config, "y" * 40, "sid", tmp_path, session=session)
+        assert agent.num_history_runs is None
+        assert agent.add_history_to_context is True
+
+    def test_ignores_non_replayable_error_runs(self, tmp_path: object) -> None:
+        """Errored runs should not influence history budgeting."""
+        config = self._make_config(context_window=100)  # threshold=80
+        agent = self._make_agent(role="x" * 40, num_history_runs=None)
+        session = self._make_session(
+            ["a" * 100, "b" * 1000],
+            statuses=[RunStatus.running, RunStatus.error],
+        )
+        _apply_context_window_limit(agent, "test_agent", config, "y" * 40, "sid", tmp_path, session=session)
+        assert agent.num_history_runs is None
+        assert agent.add_history_to_context is True
+
+    def test_model_config_context_window_field(self) -> None:
+        """ModelConfig accepts and stores context_window."""
+        mc = ModelConfig(provider="openai", id="gpt-4", context_window=128000)
+        assert mc.context_window == 128000
+
+    def test_model_config_context_window_defaults_none(self) -> None:
+        """context_window defaults to None."""
+        mc = ModelConfig(provider="openai", id="gpt-4")
+        assert mc.context_window is None
+
+    def test_model_config_context_window_must_be_positive(self) -> None:
+        """context_window rejects zero values."""
+        with pytest.raises(ValidationError):
+            ModelConfig(provider="openai", id="gpt-4", context_window=0)
