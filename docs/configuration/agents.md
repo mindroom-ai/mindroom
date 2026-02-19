@@ -86,7 +86,7 @@ agents:
 | `display_name` | string | *required* | Human-readable name shown in Matrix as the bot's display name |
 | `role` | string | `""` | System prompt describing the agent's purpose — guides its behavior and expertise |
 | `model` | string | `"default"` | Model name (must match a key in the `models` section) |
-| `tools` | list | `[]` | Agent-specific tool names (see [Tools](../tools/index.md)); effective tools are `defaults.tools + tools` with duplicates removed |
+| `tools` | list | `[]` | Agent-specific tool names (see [Tools](../tools/index.md)); effective tools are `tools + defaults.tools` with duplicates removed |
 | `include_default_tools` | bool | `true` | When `true`, append `defaults.tools` to this agent's `tools`; set to `false` to opt this agent out |
 | `skills` | list | `[]` | Skill names the agent can use (see [Skills](../skills.md)) |
 | `instructions` | list | `[]` | Extra lines appended to the system prompt after the role |

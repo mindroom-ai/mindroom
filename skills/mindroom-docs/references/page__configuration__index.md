@@ -232,8 +232,8 @@ timezone: America/Los_Angeles      # Default: UTC
 
 ## Notes
 
-- All top-level sections are optional with sensible defaults, but you need at least one agent
-- A model named `default` is required unless all agents/teams specify explicit models
+- All top-level sections are optional with sensible defaults, but at least one agent is recommended for Matrix interactions
+- A model named `default` is required unless agents, teams, and the router all specify explicit non-`default` models
 - Agents can set `knowledge_bases`, but each entry must exist in the top-level `knowledge_bases` section
 - `agents.<name>.context_files` and `agents.<name>.memory_dir` inject file-based context at agent creation/reload (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md))
 - `defaults.max_preload_chars` caps preloaded file context (`context_files` + `memory_dir`)
