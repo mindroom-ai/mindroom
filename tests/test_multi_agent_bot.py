@@ -744,6 +744,84 @@ class TestAgentBot:
         tracker.mark_responded.assert_called_once_with("$img_event_fail")
 
     @pytest.mark.asyncio
+    async def test_router_routes_image_messages_in_multi_agent_rooms(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Router should call _handle_ai_routing for images in multi-agent rooms."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+
+        config = Config.from_yaml()
+        config.ids = {
+            "general": MatrixID.from_username("mindroom_general", "localhost"),
+            "calculator": MatrixID.from_username("mindroom_calculator", "localhost"),
+            "router": MatrixID.from_username("mindroom_router", "localhost"),
+        }
+
+        bot = AgentBot(agent_user, tmp_path, config=config)
+        bot.client = AsyncMock()
+        bot.logger = MagicMock()
+        bot._handle_ai_routing = AsyncMock()
+        bot.response_tracker = MagicMock()
+        bot.response_tracker.has_responded.return_value = False
+
+        mock_context = MagicMock()
+        mock_context.am_i_mentioned = False
+        mock_context.mentioned_agents = []
+        mock_context.has_non_agent_mentions = False
+        mock_context.is_thread = False
+        mock_context.thread_id = None
+        mock_context.thread_history = []
+        bot._extract_message_context = AsyncMock(return_value=mock_context)
+
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
+        room.users = {
+            "@mindroom_router:localhost": None,
+            "@mindroom_general:localhost": None,
+            "@mindroom_calculator:localhost": None,
+            "@user:localhost": None,
+        }
+
+        event = nio.RoomMessageImage.from_dict(
+            {
+                "event_id": "$img_route",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.image",
+                    "body": "photo.jpg",
+                    "url": "mxc://localhost/test_image",
+                    "info": {"mimetype": "image/jpeg"},
+                },
+            },
+        )
+
+        with (
+            patch("mindroom.bot.extract_agent_name", return_value=None),
+            patch("mindroom.bot.get_agents_in_thread", return_value=[]),
+            patch("mindroom.bot.has_multiple_non_agent_users_in_thread", return_value=False),
+            patch("mindroom.bot.get_available_agents_in_room") as mock_get_available,
+            patch("mindroom.bot.is_authorized_sender", return_value=True),
+            patch("mindroom.bot.image_handler.extract_caption", return_value="[Attached image]"),
+        ):
+            mock_get_available.return_value = [config.ids["general"], config.ids["calculator"]]
+            await bot._on_image_message(room, event)
+
+        bot._handle_ai_routing.assert_called_once_with(
+            room,
+            event,
+            [],
+            None,
+            message="[Attached image]",
+        )
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])
     @patch("mindroom.config.Config.from_yaml")
     @patch("mindroom.teams.get_model_instance")
