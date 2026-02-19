@@ -8,9 +8,9 @@ from mindroom.config import AgentConfig, Config, DefaultsConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.teams import TeamMode, decide_team_formation
 from mindroom.thread_utils import (
+    check_agent_mentioned,
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
-    get_mentioned_agents,
 )
 
 
@@ -59,20 +59,23 @@ def mock_config() -> Config:
 class TestAgentOrderPreservation:
     """Test that agent order is preserved in various functions."""
 
-    def test_get_mentioned_agents_preserves_order(self, mock_config: Config) -> None:
-        """Test that get_mentioned_agents preserves the order from user_ids."""
-        mentions = {
-            "user_ids": [
-                "@mindroom_phone:localhost",
-                "@mindroom_email:localhost",
-                "@mindroom_research:localhost",
-            ],
+    def test_check_agent_mentioned_preserves_order(self, mock_config: Config) -> None:
+        """Test that check_agent_mentioned preserves the order from user_ids."""
+        event_source = {
+            "content": {
+                "m.mentions": {
+                    "user_ids": [
+                        "@mindroom_phone:localhost",
+                        "@mindroom_email:localhost",
+                        "@mindroom_research:localhost",
+                    ],
+                },
+            },
         }
 
-        agents = get_mentioned_agents(mentions, mock_config)
+        agents, _, _ = check_agent_mentioned(event_source, None, mock_config)
 
         # Order should be preserved as phone, email, research
-        # Convert MatrixID objects to agent names for comparison
         agent_names = [mid.agent_name(mock_config) for mid in agents]
         assert agent_names == ["phone", "email", "research"]
 
@@ -189,21 +192,25 @@ class TestAgentOrderPreservation:
 
     def test_order_matters_for_coordinate_mode(self, mock_config: Config) -> None:
         """Test that order preservation is important for sequential execution."""
-        # Simulate a user message: "@email @phone Send details then call"
-        mentions_order1 = {
-            "user_ids": ["@mindroom_email:localhost", "@mindroom_phone:localhost"],
+        event_source1 = {
+            "content": {
+                "m.mentions": {
+                    "user_ids": ["@mindroom_email:localhost", "@mindroom_phone:localhost"],
+                },
+            },
+        }
+        event_source2 = {
+            "content": {
+                "m.mentions": {
+                    "user_ids": ["@mindroom_phone:localhost", "@mindroom_email:localhost"],
+                },
+            },
         }
 
-        # Simulate a different order: "@phone @email Call then send details"
-        mentions_order2 = {
-            "user_ids": ["@mindroom_phone:localhost", "@mindroom_email:localhost"],
-        }
-
-        agents1 = get_mentioned_agents(mentions_order1, mock_config)
-        agents2 = get_mentioned_agents(mentions_order2, mock_config)
+        agents1, _, _ = check_agent_mentioned(event_source1, None, mock_config)
+        agents2, _, _ = check_agent_mentioned(event_source2, None, mock_config)
 
         # Different orders should be preserved
-        # Convert MatrixID objects to agent names for comparison
         agent_names1 = [mid.agent_name(mock_config) for mid in agents1]
         agent_names2 = [mid.agent_name(mock_config) for mid in agents2]
         assert agent_names1 == ["email", "phone"]

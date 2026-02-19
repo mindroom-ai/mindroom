@@ -16,7 +16,8 @@ if TYPE_CHECKING:
 
 # Matches <a href="https://matrix.to/#/@user:domain">...</a> pills used by bridges.
 # Accepts both single and double quotes (mautrix bridges use single quotes).
-_MATRIX_PILL_RE = re.compile(r"""href=["']https://matrix\.to/#/(@[^"']+)["']""")
+# Requires @localpart:domain format to avoid feeding malformed IDs to MatrixID.parse.
+_MATRIX_PILL_RE = re.compile(r"""href=["']https://matrix\.to/#/(@[^"':]+:[^"']+)["']""")
 
 
 def _extract_mentioned_user_ids(content: dict[str, Any]) -> list[str]:
@@ -110,11 +111,6 @@ def _agents_from_user_ids(user_ids: list[str], config: Config) -> list[MatrixID]
         if mid.agent_name(config):
             agents.append(mid)
     return agents
-
-
-def get_mentioned_agents(mentions: dict[str, Any], config: Config) -> list[MatrixID]:
-    """Extract agent MatrixIDs from an ``m.mentions`` dict."""
-    return _agents_from_user_ids(mentions.get("user_ids", []), config)
 
 
 def has_user_responded_after_message(
