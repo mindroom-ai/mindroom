@@ -14,14 +14,13 @@ from agno.session.agent import AgentSession
 from pydantic import ValidationError
 
 from mindroom.agents import (
+    _get_agent_session,
     create_agent,
     get_seen_event_ids,
     remove_run_by_event_id,
-    session_has_runs,
 )
 from mindroom.ai import (
     _build_prompt_with_unseen,
-    _get_agent_sender_id,
     _get_unseen_messages,
     _prepare_agent_and_prompt,
     ai_response,
@@ -94,13 +93,13 @@ class TestHistoryConfig:
         assert agent.num_history_runs is None
 
     def test_num_history_runs_config_wired_to_agent(self) -> None:
-        """Default config includes all history (sentinel value bypasses Agno's default of 3)."""
+        """Default config includes all history (None bypasses Agno's default of 3)."""
         config = Config.from_yaml()
         with patch("mindroom.agents.SqliteDb"):
             agent = create_agent("calculator", config=config)
         assert agent.add_history_to_context is True
-        # Both defaults are None → sentinel 1_000_000 to bypass Agno's hardcoded default of 3
-        assert agent.num_history_runs == 1_000_000
+        # Both defaults are None → post-construction override to None (all history)
+        assert agent.num_history_runs is None
 
     def test_num_history_runs_per_agent_override(self) -> None:
         """Per-agent num_history_runs overrides defaults and clears num_history_messages."""
@@ -142,55 +141,58 @@ def _make_run_output(
     return RunOutput(run_id=run_id, metadata=metadata)
 
 
-class TestSessionHasRuns:
-    """Test session_has_runs helper."""
+class TestGetAgentSession:
+    """Test _get_agent_session helper."""
 
     def test_no_session(self) -> None:
-        """Return False when session does not exist."""
+        """Return None when session does not exist."""
         storage = MagicMock(spec=SqliteDb)
         storage.get_session.return_value = None
-        assert session_has_runs(storage, "sid") is False
+        assert _get_agent_session(storage, "sid") is None
 
     def test_empty_runs(self) -> None:
-        """Return False when session has empty runs list."""
+        """Return session with empty runs list."""
         storage = _make_storage_with_session("sid", runs=[])
-        assert session_has_runs(storage, "sid") is False
+        session = _get_agent_session(storage, "sid")
+        assert session is not None
+        assert not session.runs
 
     def test_has_runs(self) -> None:
-        """Return True when session has at least one run."""
+        """Return session with runs."""
         run = _make_run_output()
         storage = _make_storage_with_session("sid", runs=[run])
-        assert session_has_runs(storage, "sid") is True
+        session = _get_agent_session(storage, "sid")
+        assert session is not None
+        assert len(session.runs) == 1
 
 
 class TestGetSeenEventIds:
     """Test get_seen_event_ids helper."""
 
-    def test_no_session(self) -> None:
-        """Return empty set when session does not exist."""
-        storage = MagicMock(spec=SqliteDb)
-        storage.get_session.return_value = None
-        assert get_seen_event_ids(storage, "sid") == set()
+    def test_empty_runs(self) -> None:
+        """Return empty set when session has no runs."""
+        session = AgentSession(session_id="sid", runs=[])
+        assert get_seen_event_ids(session) == set()
 
     def test_runs_without_metadata(self) -> None:
         """Return empty set when runs have no metadata."""
         run = _make_run_output(metadata=None)
-        storage = _make_storage_with_session("sid", runs=[run])
-        assert get_seen_event_ids(storage, "sid") == set()
+        session = AgentSession(session_id="sid", runs=[run])
+        assert get_seen_event_ids(session) == set()
 
     def test_runs_with_seen_ids(self) -> None:
         """Return union of all matrix_seen_event_ids across runs."""
         run1 = _make_run_output("r1", metadata={"matrix_seen_event_ids": ["$e1", "$e2"]})
         run2 = _make_run_output("r2", metadata={"matrix_seen_event_ids": ["$e2", "$e3"]})
-        storage = _make_storage_with_session("sid", runs=[run1, run2])
-        assert get_seen_event_ids(storage, "sid") == {"$e1", "$e2", "$e3"}
+        session = AgentSession(session_id="sid", runs=[run1, run2])
+        assert get_seen_event_ids(session) == {"$e1", "$e2", "$e3"}
 
     def test_runs_with_mixed_metadata(self) -> None:
         """Runs without matrix_seen_event_ids are skipped gracefully."""
         run1 = _make_run_output("r1", metadata={"other_key": "val"})
         run2 = _make_run_output("r2", metadata={"matrix_seen_event_ids": ["$e1"]})
-        storage = _make_storage_with_session("sid", runs=[run1, run2])
-        assert get_seen_event_ids(storage, "sid") == {"$e1"}
+        session = AgentSession(session_id="sid", runs=[run1, run2])
+        assert get_seen_event_ids(session) == {"$e1"}
 
 
 class TestRemoveRunByEventId:
@@ -242,7 +244,7 @@ class TestGetUnseenMessages:
     def test_filters_agent_messages(self) -> None:
         """Messages from this agent are excluded."""
         config = self._make_config()
-        agent_id = _get_agent_sender_id("test_agent", config)
+        agent_id = config.ids["test_agent"].full_id
         thread_history = [
             {"sender": agent_id, "body": "I am the agent", "event_id": "$a1"},
             {"sender": "@user:example.com", "body": "Hello", "event_id": "$u1"},
@@ -280,7 +282,7 @@ class TestGetUnseenMessages:
     def test_multi_user_scenario(self) -> None:
         """Multiple users/agents in thread, only unseen from non-self returned."""
         config = self._make_config()
-        agent_id = _get_agent_sender_id("test_agent", config)
+        agent_id = config.ids["test_agent"].full_id
         thread_history = [
             {"sender": "@alice:example.com", "body": "Hi", "event_id": "$a1"},
             {"sender": agent_id, "body": "Hello Alice", "event_id": "$bot1"},
@@ -338,6 +340,12 @@ class TestPrepareAgentAndPrompt:
         """Load config for testing."""
         return Config.from_yaml()
 
+    def _mock_session(self, runs: list[RunOutput] | None = None) -> AgentSession | None:
+        """Create a mock AgentSession or None."""
+        if runs is None:
+            return None
+        return AgentSession(session_id="sid", runs=runs)
+
     @pytest.mark.asyncio
     async def test_fallback_when_no_session(self, config: Config, tmp_path: object) -> None:
         """When session has no runs, build_prompt_with_thread_history IS called."""
@@ -347,7 +355,7 @@ class TestPrepareAgentAndPrompt:
         with (
             patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
             patch("mindroom.ai.create_agent") as mock_create,
-            patch("mindroom.ai.session_has_runs", return_value=False),
+            patch("mindroom.ai._get_agent_session", return_value=None),
             patch("mindroom.ai.build_prompt_with_thread_history", return_value="stuffed") as mock_stuff,
             patch("mindroom.ai.create_session_storage"),
         ):
@@ -373,11 +381,11 @@ class TestPrepareAgentAndPrompt:
             {"sender": "@user:example.com", "body": "Old", "event_id": "$u1"},
             {"sender": "@user:example.com", "body": "New", "event_id": "$u2"},
         ]
+        run = _make_run_output("r1", metadata={"matrix_seen_event_ids": ["$u1"]})
         with (
             patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
             patch("mindroom.ai.create_agent") as mock_create,
-            patch("mindroom.ai.session_has_runs", return_value=True),
-            patch("mindroom.ai.get_seen_event_ids", return_value={"$u1"}),
+            patch("mindroom.ai._get_agent_session", return_value=self._mock_session([run])),
             patch("mindroom.ai.build_prompt_with_thread_history") as mock_stuff,
             patch("mindroom.ai.create_session_storage"),
         ):
@@ -400,16 +408,16 @@ class TestPrepareAgentAndPrompt:
     async def test_session_has_runs_but_no_metadata_uses_agno_path(self, config: Config, tmp_path: object) -> None:
         """Prevent double-history for pre-migration runs that lack metadata.
 
-        session_has_runs=True + seen_event_ids=set() still uses Agno history (no stuffing).
+        Session has runs but no matrix metadata → still uses Agno history (no stuffing).
         """
         thread_history = [
             {"sender": "@user:example.com", "body": "Msg", "event_id": "$u1"},
         ]
+        run = _make_run_output("r1", metadata=None)
         with (
             patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
             patch("mindroom.ai.create_agent") as mock_create,
-            patch("mindroom.ai.session_has_runs", return_value=True),
-            patch("mindroom.ai.get_seen_event_ids", return_value=set()),
+            patch("mindroom.ai._get_agent_session", return_value=self._mock_session([run])),
             patch("mindroom.ai.build_prompt_with_thread_history") as mock_stuff,
             patch("mindroom.ai.create_session_storage"),
         ):
@@ -661,7 +669,7 @@ class TestFullScenario:
             agents={"bot": AgentConfig(display_name="Bot")},
             models={"default": {"provider": "openai", "id": "test"}},
         )
-        agent_id = _get_agent_sender_id("bot", config)
+        agent_id = config.ids["bot"].full_id
 
         # Simulate a thread with multiple users
         thread_history = [

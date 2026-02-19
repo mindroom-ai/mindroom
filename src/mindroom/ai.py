@@ -17,7 +17,7 @@ from agno.models.openai import OpenAIChat
 from agno.models.openrouter import OpenRouter
 from agno.run.agent import RunContentEvent, RunErrorEvent, RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
 
-from .agents import create_agent, create_session_storage, get_seen_event_ids, session_has_runs
+from .agents import _get_agent_session, create_agent, create_session_storage, get_seen_event_ids
 from .constants import ENABLE_AI_CACHE, PROVIDER_ENV_KEYS
 from .credentials import get_credentials_manager
 from .credentials_sync import get_api_key_for_provider, get_ollama_host
@@ -192,29 +192,25 @@ def get_model_instance(config: Config, model_name: str = "default") -> Model:
     return _create_model_for_provider(provider, model_id, model_config, extra_kwargs)
 
 
+def _format_messages_context(messages: list[dict[str, Any]], header: str, prompt: str) -> str:
+    """Format messages as context prepended to a prompt."""
+    context_lines: list[str] = []
+    for msg in messages:
+        sender = msg.get("sender")
+        body = msg.get("body")
+        if sender and body:
+            context_lines.append(f"{sender}: {body}")
+    if not context_lines:
+        return prompt
+    context = "\n".join(context_lines)
+    return f"{header}\n{context}\n\nCurrent message:\n{prompt}"
+
+
 def build_prompt_with_thread_history(prompt: str, thread_history: list[dict[str, Any]] | None = None) -> str:
     """Build a prompt with thread history context when available."""
     if not thread_history:
         return prompt
-
-    context_lines: list[str] = []
-    for message in thread_history:
-        sender = message.get("sender")
-        body = message.get("body")
-        if sender and body:
-            context_lines.append(f"{sender}: {body}")
-
-    if not context_lines:
-        return prompt
-
-    context = "\n".join(context_lines)
-    return f"Previous conversation in this thread:\n{context}\n\nCurrent message:\n{prompt}"
-
-
-def _get_agent_sender_id(agent_name: str, config: Config) -> str | None:
-    """Return the Matrix user ID for an agent, or None if not found."""
-    matrix_id = config.ids.get(agent_name)
-    return matrix_id.full_id if matrix_id else None
+    return _format_messages_context(thread_history, "Previous conversation in this thread:", prompt)
 
 
 def _get_unseen_messages(
@@ -231,7 +227,8 @@ def _get_unseen_messages(
     - Messages whose event_id is in seen_event_ids
     - The current triggering message (current_event_id)
     """
-    agent_sender_id = _get_agent_sender_id(agent_name, config)
+    matrix_id = config.ids.get(agent_name)
+    agent_sender_id = matrix_id.full_id if matrix_id else None
     unseen: list[dict[str, Any]] = []
     for msg in thread_history:
         event_id = msg.get("event_id")
@@ -253,16 +250,21 @@ def _build_prompt_with_unseen(prompt: str, unseen_messages: list[dict[str, Any]]
     """Prepend unseen messages from other participants to the prompt."""
     if not unseen_messages:
         return prompt
-    context_lines: list[str] = []
-    for msg in unseen_messages:
-        sender = msg.get("sender")
-        body = msg.get("body")
-        if sender and body:
-            context_lines.append(f"{sender}: {body}")
-    if not context_lines:
-        return prompt
-    context = "\n".join(context_lines)
-    return f"Messages from other participants since your last response:\n{context}\n\nCurrent message:\n{prompt}"
+    return _format_messages_context(
+        unseen_messages,
+        "Messages from other participants since your last response:",
+        prompt,
+    )
+
+
+def _build_run_metadata(reply_to_event_id: str | None, unseen_event_ids: list[str]) -> dict[str, Any] | None:
+    """Build metadata dict for a run, tracking consumed Matrix event_ids."""
+    if not reply_to_event_id:
+        return None
+    return {
+        "matrix_event_id": reply_to_event_id,
+        "matrix_seen_event_ids": [reply_to_event_id, *unseen_event_ids],
+    }
 
 
 def _build_cache_key(agent: Agent, full_prompt: str, session_id: str) -> str:
@@ -336,9 +338,10 @@ async def _prepare_agent_and_prompt(
 
     if session_id and thread_history:
         storage = create_session_storage(agent_name, storage_path)
-        if session_has_runs(storage, session_id):
+        session = _get_agent_session(storage, session_id)
+        if session is not None and session.runs:
             # Agno has prior runs → use native history, inject only unseen messages
-            seen_ids = get_seen_event_ids(storage, session_id)
+            seen_ids = get_seen_event_ids(session)
             unseen = _get_unseen_messages(thread_history, agent_name, config, seen_ids, reply_to_event_id)
             unseen_event_ids = [msg["event_id"] for msg in unseen if msg.get("event_id")]
             full_prompt = _build_prompt_with_unseen(enhanced_prompt, unseen)
@@ -416,16 +419,7 @@ async def ai_response(
         logger.exception("Error preparing agent", agent=agent_name)
         return get_user_friendly_error_message(e, agent_name)
 
-    # Build metadata for this run: track which Matrix event_ids were consumed
-    # so they aren't re-injected as "unseen" on subsequent turns.
-    # matrix_event_id: the triggering user message (used by edit cleanup)
-    # matrix_seen_event_ids: all consumed IDs (triggering + unseen)
-    metadata: dict[str, Any] | None = None
-    if reply_to_event_id:
-        metadata = {
-            "matrix_event_id": reply_to_event_id,
-            "matrix_seen_event_ids": [reply_to_event_id, *unseen_event_ids],
-        }
+    metadata = _build_run_metadata(reply_to_event_id, unseen_event_ids)
 
     # Execute the AI call - this can fail for network, rate limits, etc.
     try:
@@ -508,13 +502,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         yield get_user_friendly_error_message(e, agent_name)
         return
 
-    # Build metadata for this run (same as non-streaming path)
-    metadata: dict[str, Any] | None = None
-    if reply_to_event_id:
-        metadata = {
-            "matrix_event_id": reply_to_event_id,
-            "matrix_seen_event_ids": [reply_to_event_id, *unseen_event_ids],
-        }
+    metadata = _build_run_metadata(reply_to_event_id, unseen_event_ids)
 
     # Check cache (skip when images are present or history is enabled)
     cache = None if (images or agent.add_history_to_context) else get_cache(storage_path)

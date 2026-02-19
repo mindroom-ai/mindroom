@@ -215,18 +215,9 @@ def _get_agent_session(storage: SqliteDb, session_id: str) -> AgentSession | Non
     return None
 
 
-def session_has_runs(storage: SqliteDb, session_id: str) -> bool:
-    """Check whether an Agno session has any prior runs."""
-    session = _get_agent_session(storage, session_id)
-    if session is None:
-        return False
-    return bool(session.runs)
-
-
-def get_seen_event_ids(storage: SqliteDb, session_id: str) -> set[str]:
-    """Load Agno session and return union of all matrix_seen_event_ids from run metadata."""
-    session = _get_agent_session(storage, session_id)
-    if session is None or not session.runs:
+def get_seen_event_ids(session: AgentSession) -> set[str]:
+    """Return union of all matrix_seen_event_ids from run metadata."""
+    if not session.runs:
         return set()
     seen: set[str] = set()
     for run in session.runs:
@@ -463,11 +454,8 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         num_history_runs = defaults.num_history_runs
         num_history_messages = defaults.num_history_messages
 
-    # Agno hardcodes num_history_runs=3 when both are None.  We want
-    # "include everything" as the default, so use a large sentinel that
-    # get_messages handles via ``runs[-last_n_runs:]`` (safe for any N > len).
-    if num_history_runs is None and num_history_messages is None:
-        num_history_runs = 1_000_000
+    # Track whether we want "all history" to bypass Agno's default after construction
+    include_all_history = num_history_runs is None and num_history_messages is None
 
     agent = Agent(
         name=agent_config.display_name,
@@ -490,6 +478,11 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         update_cultural_knowledge=update_cultural_knowledge,
         enable_agentic_culture=enable_agentic_culture,
     )
+    # Agno hardcodes num_history_runs=3 when both are None. Override after
+    # construction so get_messages receives None and returns all runs.
+    if include_all_history:
+        agent.num_history_runs = None
+
     logger.info(f"Created agent '{agent_name}' ({agent_config.display_name}) with {len(tools)} tools")
 
     return agent
