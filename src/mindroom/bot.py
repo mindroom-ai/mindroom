@@ -643,6 +643,18 @@ class AgentBot:
         """Get or create the StopManager for this agent."""
         return StopManager()
 
+    async def _fetch_thread_images(self, room_id: str, thread_id: str) -> list[Image]:
+        """Download images from the thread root event, if it is an image message."""
+        assert self.client is not None
+        response = await self.client.room_get_event(room_id, thread_id)
+        if not isinstance(response, nio.RoomGetEventResponse):
+            return []
+        event = response.event
+        if not isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage):
+            return []
+        img = await image_handler.download_image(self.client, event)
+        return [img] if img else []
+
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
         assert self.client is not None
@@ -1055,6 +1067,11 @@ class AgentBot:
 
         # Generate and send response
         self.logger.info("Processing", event_id=event.event_id)
+
+        # If responding in a thread, check whether the thread root is an image
+        # so the model can actually see it (e.g. after router routes an image).
+        thread_images = await self._fetch_thread_images(room.room_id, context.thread_id) if context.thread_id else []
+
         response_event_id = await self._generate_response(
             room_id=room.room_id,
             prompt=event.body,
@@ -1062,6 +1079,7 @@ class AgentBot:
             thread_id=context.thread_id,
             thread_history=context.thread_history,
             user_id=event.sender,
+            images=thread_images or None,
         )
         self.response_tracker.mark_responded(event.event_id, response_event_id)
 
