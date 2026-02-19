@@ -145,6 +145,11 @@ defaults:
   learning_mode: always            # Default: always (or agentic)
   max_preload_chars: 50000         # Hard cap for preloaded context from context_files/memory_dir
   show_stop_button: false          # Default: false (global only, cannot be overridden per-agent)
+  num_history_runs: null           # Number of prior runs to include (null = all)
+  num_history_messages: null       # Max messages from history (null = use num_history_runs)
+  compress_tool_results: true      # Compress tool results in history to save context
+  enable_session_summaries: false  # AI summaries of older conversation segments (costs extra LLM call)
+  max_tool_calls_from_history: null  # Limit tool call messages replayed from history (null = no limit)
 
 # defaults.tools are appended to each agent's tools list with duplicates removed.
 # Set agents.<name>.include_default_tools: false to opt out a specific agent.

@@ -30,11 +30,11 @@ cultures:
 
 ## Configuration Fields
 
-| Field         | Required | Default       | Description                                                               |
-| ------------- | -------- | ------------- | ------------------------------------------------------------------------- |
-| `description` | No       | `""`          | Description of the shared principles and practices the culture captures   |
-| `agents`      | No       | `[]`          | Agent names assigned to this culture (must exist in the `agents` section) |
-| `mode`        | No       | `"automatic"` | How culture knowledge is updated (see modes below)                        |
+| Field         | Required | Default       | Description                                                                                                             |
+| ------------- | -------- | ------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `description` | No       | `""`          | Description of the shared principles and practices the culture captures                                                 |
+| `agents`      | No       | `[]`          | Agent names assigned to this culture (must exist in the `agents` section). Each agent can belong to at most one culture |
+| `mode`        | No       | `"automatic"` | How culture knowledge is updated (see modes below)                                                                      |
 
 ## Culture Modes
 
