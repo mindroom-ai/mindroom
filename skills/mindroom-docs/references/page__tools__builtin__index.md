@@ -1,6 +1,6 @@
 # Built-in Tools
 
-MindRoom includes 100+ built-in tool integrations organized by category.
+MindRoom includes 90+ built-in tool integrations organized by category.
 
 ## File & System
 
@@ -178,10 +178,11 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 
 ## Custom & Config
 
-| Icon                        | Tool             | Description                       | Config Required |
-| --------------------------- | ---------------- | --------------------------------- | --------------- |
-| :lucide-sliders-horizontal: | `custom_api`     | Custom API calls                  | Varies          |
-| :lucide-sliders-horizontal: | `config_manager` | MindRoom configuration management | -               |
+| Icon                        | Tool              | Description                                                                                     | Config Required |
+| --------------------------- | ----------------- | ----------------------------------------------------------------------------------------------- | --------------- |
+| :lucide-sliders-horizontal: | `custom_api`      | Custom API calls                                                                                | Varies          |
+| :lucide-sliders-horizontal: | `config_manager`  | MindRoom configuration management                                                               | -               |
+| :lucide-sliders-horizontal: | `openclaw_compat` | OpenClaw-compatible tool aliases (see [OpenClaw](https://docs.mindroom.chat/openclaw/index.md)) | -               |
 
 ## Claude Agent Sessions
 
