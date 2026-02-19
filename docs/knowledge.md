@@ -63,7 +63,7 @@ knowledge_bases:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `path` | string | `./knowledge_docs` | Folder path (relative to working directory or absolute) |
+| `path` | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute) |
 | `watch` | bool | `true` | Watch for filesystem changes and reindex automatically |
 | `git` | object | `null` | Optional Git repository sync settings |
 

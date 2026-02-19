@@ -145,6 +145,11 @@ defaults:
   learning_mode: always            # Default: always (or agentic)
   max_preload_chars: 50000         # Hard cap for preloaded context from context_files/memory_dir
   show_stop_button: false          # Default: false (global only, cannot be overridden per-agent)
+  num_history_runs: null           # Number of prior runs to include (null = all)
+  num_history_messages: null       # Max messages from history (null = use num_history_runs)
+  compress_tool_results: true      # Compress tool results in history to save context
+  enable_session_summaries: false  # AI summaries of older conversation segments (costs extra LLM call)
+  max_tool_calls_from_history: null  # Limit tool call messages replayed from history (null = no limit)
   show_tool_calls: true            # Default: true (show tool call details inline in responses)
 
 # defaults.tools are appended to each agent's tools list with duplicates removed.
@@ -237,8 +242,8 @@ timezone: America/Los_Angeles      # Default: UTC
 
 ## Notes
 
-- All top-level sections are optional with sensible defaults, but you need at least one agent
-- A model named `default` is required unless all agents/teams specify explicit models
+- All top-level sections are optional with sensible defaults, but at least one agent is recommended for Matrix interactions
+- A model named `default` is required unless agents, teams, and the router all specify explicit non-`default` models
 - Agents can set `knowledge_bases`, but each entry must exist in the top-level `knowledge_bases` section
 - `agents.<name>.context_files` and `agents.<name>.memory_dir` inject file-based context at agent creation/reload (see [Agents](agents.md))
 - `defaults.max_preload_chars` caps preloaded file context (`context_files` + `memory_dir`)

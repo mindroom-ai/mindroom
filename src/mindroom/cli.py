@@ -72,6 +72,7 @@ def run(
         "-l",
         help="Set the logging level (DEBUG, INFO, WARNING, ERROR)",
         case_sensitive=False,
+        envvar="LOG_LEVEL",
     ),
     storage_path: Path = typer.Option(  # noqa: B008
         Path(STORAGE_PATH),
