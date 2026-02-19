@@ -919,11 +919,7 @@ class TestApplyContextWindowLimit:
         config = self._make_config(context_window=10000)
         agent = self._make_agent(role="Short role.", num_history_runs=None)
         session = self._make_session(["a" * 100, "b" * 100])
-        with (
-            patch("mindroom.ai.create_session_storage"),
-            patch("mindroom.ai._get_agent_session", return_value=session),
-        ):
-            _apply_context_window_limit(agent, "test_agent", config, "Hello", "sid", tmp_path)
+        _apply_context_window_limit(agent, "test_agent", config, "Hello", "sid", tmp_path, session=session)
         assert agent.num_history_runs is None  # Unchanged
 
     def test_reduces_history_over_budget(self, tmp_path: object) -> None:
@@ -937,11 +933,7 @@ class TestApplyContextWindowLimit:
         config = self._make_config(context_window=100)
         agent = self._make_agent(role="x" * 40, num_history_runs=None)
         session = self._make_session(["a" * 100] * 5)
-        with (
-            patch("mindroom.ai.create_session_storage"),
-            patch("mindroom.ai._get_agent_session", return_value=session),
-        ):
-            _apply_context_window_limit(agent, "test_agent", config, "y" * 40, "sid", tmp_path)
+        _apply_context_window_limit(agent, "test_agent", config, "y" * 40, "sid", tmp_path, session=session)
         assert agent.num_history_runs == 2
 
     def test_reduces_with_explicit_limit(self, tmp_path: object) -> None:
@@ -949,11 +941,7 @@ class TestApplyContextWindowLimit:
         config = self._make_config(context_window=100)
         agent = self._make_agent(role="x" * 40, num_history_runs=5)
         session = self._make_session(["a" * 100] * 10)
-        with (
-            patch("mindroom.ai.create_session_storage"),
-            patch("mindroom.ai._get_agent_session", return_value=session),
-        ):
-            _apply_context_window_limit(agent, "test_agent", config, "y" * 40, "sid", tmp_path)
+        _apply_context_window_limit(agent, "test_agent", config, "y" * 40, "sid", tmp_path, session=session)
         assert agent.num_history_runs == 2
 
     def test_keeps_at_least_one_run(self, tmp_path: object) -> None:
@@ -961,11 +949,7 @@ class TestApplyContextWindowLimit:
         config = self._make_config(context_window=10)
         agent = self._make_agent(role="x" * 100, num_history_runs=5)
         session = self._make_session(["a" * 1000] * 5)
-        with (
-            patch("mindroom.ai.create_session_storage"),
-            patch("mindroom.ai._get_agent_session", return_value=session),
-        ):
-            _apply_context_window_limit(agent, "test_agent", config, "y" * 100, "sid", tmp_path)
+        _apply_context_window_limit(agent, "test_agent", config, "y" * 100, "sid", tmp_path, session=session)
         assert agent.num_history_runs == 1
 
     def test_no_change_when_already_within_limit(self, tmp_path: object) -> None:
@@ -973,11 +957,7 @@ class TestApplyContextWindowLimit:
         config = self._make_config(context_window=10000)
         agent = self._make_agent(role="Short.", num_history_runs=2)
         session = self._make_session(["a" * 100, "b" * 100])
-        with (
-            patch("mindroom.ai.create_session_storage"),
-            patch("mindroom.ai._get_agent_session", return_value=session),
-        ):
-            _apply_context_window_limit(agent, "test_agent", config, "Hello", "sid", tmp_path)
+        _apply_context_window_limit(agent, "test_agent", config, "Hello", "sid", tmp_path, session=session)
         assert agent.num_history_runs == 2  # Unchanged
 
     def test_model_config_context_window_field(self) -> None:

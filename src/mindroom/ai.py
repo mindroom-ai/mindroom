@@ -69,7 +69,9 @@ def _estimate_static_tokens(agent: Agent, full_prompt: str) -> int:
     """Estimate tokens for the system prompt and current user message (chars / 4)."""
     static_chars = len(agent.role or "")
     instructions = agent.instructions
-    if isinstance(instructions, list):
+    if isinstance(instructions, str):
+        static_chars += len(instructions)
+    elif isinstance(instructions, list):
         for instruction in instructions:
             static_chars += len(str(instruction))
     static_chars += len(full_prompt)
