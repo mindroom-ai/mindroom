@@ -602,6 +602,18 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         else defaults.compress_tool_results
     )
 
+    enable_session_summaries = (
+        agent_config.enable_session_summaries
+        if agent_config.enable_session_summaries is not None
+        else defaults.enable_session_summaries
+    )
+
+    max_tool_calls_from_history = (
+        agent_config.max_tool_calls_from_history
+        if agent_config.max_tool_calls_from_history is not None
+        else defaults.max_tool_calls_from_history
+    )
+
     agent = Agent(
         name=agent_config.display_name,
         id=agent_name,
@@ -623,6 +635,8 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         update_cultural_knowledge=update_cultural_knowledge,
         enable_agentic_culture=enable_agentic_culture,
         compress_tool_results=compress_tool_results,
+        enable_session_summaries=enable_session_summaries,
+        max_tool_calls_from_history=max_tool_calls_from_history,
     )
     # Agno hardcodes num_history_runs=3 when both are None. Override after
     # construction so get_messages receives None and returns all runs.
