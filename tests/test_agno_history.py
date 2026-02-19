@@ -119,6 +119,21 @@ class TestHistoryConfig:
         assert agent.num_history_messages == 50
         assert agent.num_history_runs is None
 
+    def test_compress_tool_results_default(self) -> None:
+        """create_agent() sets compress_tool_results=True by default."""
+        config = Config.from_yaml()
+        with patch("mindroom.agents.SqliteDb"):
+            agent = create_agent("calculator", config=config)
+        assert agent.compress_tool_results is True
+
+    def test_compress_tool_results_per_agent_override(self) -> None:
+        """Per-agent compress_tool_results=False overrides the default."""
+        config = Config.from_yaml()
+        config.agents["calculator"].compress_tool_results = False
+        with patch("mindroom.agents.SqliteDb"):
+            agent = create_agent("calculator", config=config)
+        assert agent.compress_tool_results is False
+
 
 # ---------------------------------------------------------------------------
 # Agent helper tests

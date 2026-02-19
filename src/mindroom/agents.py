@@ -457,6 +457,12 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     # Track whether we want "all history" to bypass Agno's default after construction
     include_all_history = num_history_runs is None and num_history_messages is None
 
+    compress_tool_results = (
+        agent_config.compress_tool_results
+        if agent_config.compress_tool_results is not None
+        else defaults.compress_tool_results
+    )
+
     agent = Agent(
         name=agent_config.display_name,
         id=agent_name,
@@ -477,6 +483,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         add_culture_to_context=add_culture_to_context,
         update_cultural_knowledge=update_cultural_knowledge,
         enable_agentic_culture=enable_agentic_culture,
+        compress_tool_results=compress_tool_results,
     )
     # Agno hardcodes num_history_runs=3 when both are None. Override after
     # construction so get_messages receives None and returns all runs.
