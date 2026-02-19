@@ -57,6 +57,10 @@ class AgentConfig(BaseModel):
         default=None,
         description="Directory containing MEMORY.md and dated memory files to auto-load into role context",
     )
+    thread_mode: Literal["thread", "room"] = Field(
+        default="thread",
+        description="Conversation threading mode: 'thread' creates Matrix threads per conversation, 'room' uses a single continuous conversation per room (ideal for bridges/mobile)",
+    )
     num_history_runs: int | None = Field(
         default=None,
         description="Number of prior Agno runs to include as history context (per-agent override)",
