@@ -8,7 +8,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import nio
 import uvicorn
@@ -596,6 +596,12 @@ class AgentBot:
     def matrix_id(self) -> MatrixID:
         """Get the Matrix ID for this agent bot."""
         return self.agent_user.matrix_id
+
+    @property
+    def thread_mode(self) -> Literal["thread", "room"]:
+        """Get the thread mode for this agent."""
+        agent_config = self.config.agents.get(self.agent_name)
+        return agent_config.thread_mode if agent_config else "thread"
 
     def _get_shared_knowledge(self, base_id: str) -> Knowledge | None:
         """Get shared knowledge instance for a configured knowledge base."""
@@ -1377,10 +1383,15 @@ class AgentBot:
             self.logger.info("Mentioned", event_id=event.event_id, room_name=room.name)
 
         event_info = EventInfo.from_event(event.source)
-        is_thread, thread_id, thread_history = await self._derive_conversation_context(
-            room.room_id,
-            event_info,
-        )
+        if self.thread_mode == "room":
+            is_thread = False
+            thread_id = None
+            thread_history: list[dict[str, Any]] = []
+        else:
+            is_thread, thread_id, thread_history = await self._derive_conversation_context(
+                room.room_id,
+                event_info,
+            )
 
         return MessageContext(
             am_i_mentioned=am_i_mentioned,
@@ -1412,7 +1423,7 @@ class AgentBot:
             client=self.client,
             room=room,
             room_id=room_id,
-            thread_id=thread_id or reply_to_event_id,
+            thread_id=None if self.thread_mode == "room" else thread_id or reply_to_event_id,
             requester_id=user_id or self.matrix_id.full_id,
             config=self.config,
         )
@@ -1514,6 +1525,7 @@ class AgentBot:
                             streaming_cls=ReplacementStreamingResponse,
                             header=None,
                             existing_event_id=message_id,
+                            room_mode=self.thread_mode == "room",
                         )
 
                 # Handle interactive questions in team responses
@@ -1744,7 +1756,7 @@ class AgentBot:
             # - If already in a thread, use that thread_id
             # - If not in a thread, use reply_to_event_id (the user's message) as thread root
             # This ensures consistency with how the bot creates threads
-            thread_root_for_registration = thread_id if thread_id else reply_to_event_id
+            thread_root_for_registration = None if self.thread_mode == "room" else thread_id or reply_to_event_id
             interactive.register_interactive_question(
                 event_id,
                 room_id,
@@ -1808,7 +1820,7 @@ class AgentBot:
         )
 
         if event_id and response.option_map and response.options_list:
-            thread_root_for_registration = thread_id if thread_id else reply_to_event_id
+            thread_root_for_registration = None if self.thread_mode == "room" else thread_id or reply_to_event_id
             interactive.register_interactive_question(
                 event_id,
                 room_id,
@@ -1868,7 +1880,7 @@ class AgentBot:
         if interactive.should_create_interactive_question(content):
             response = interactive.parse_and_format_interactive(content, extract_mapping=True)
             if response.option_map and response.options_list:
-                thread_root_for_registration = thread_id if thread_id else reply_to_event_id
+                thread_root_for_registration = None if self.thread_mode == "room" else thread_id or reply_to_event_id
                 interactive.register_interactive_question(
                     event_id,
                     room_id,
@@ -1937,6 +1949,7 @@ class AgentBot:
                         response_stream,
                         streaming_cls=StreamingResponse,
                         existing_event_id=existing_event_id,
+                        room_mode=self.thread_mode == "room",
                     )
 
             # Handle interactive questions if present
@@ -2091,27 +2104,38 @@ class AgentBot:
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
 
-        # Always ensure we have a thread_id - use the original message as thread root if needed
-        # This ensures agents always respond in threads, even when mentioned in main room
-        event_info = EventInfo.from_event(reply_to_event.source if reply_to_event else None)
-        effective_thread_id = thread_id or event_info.safe_thread_root or reply_to_event_id
+        if self.thread_mode == "room":
+            # Room mode: plain message, no thread metadata
+            content = format_message_with_mentions(
+                self.config,
+                response_text,
+                sender_domain=sender_domain,
+                thread_event_id=None,
+                reply_to_event_id=None,
+                latest_thread_event_id=None,
+            )
+        else:
+            # Always ensure we have a thread_id - use the original message as thread root if needed
+            # This ensures agents always respond in threads, even when mentioned in main room
+            event_info = EventInfo.from_event(reply_to_event.source if reply_to_event else None)
+            effective_thread_id = thread_id or event_info.safe_thread_root or reply_to_event_id
 
-        # Get the latest message in thread for MSC3440 fallback compatibility
-        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
-            self.client,
-            room_id,
-            effective_thread_id,
-            reply_to_event_id,
-        )
+            # Get the latest message in thread for MSC3440 fallback compatibility
+            latest_thread_event_id = await get_latest_thread_event_id_if_needed(
+                self.client,
+                room_id,
+                effective_thread_id,
+                reply_to_event_id,
+            )
 
-        content = format_message_with_mentions(
-            self.config,
-            response_text,
-            sender_domain=sender_domain,
-            thread_event_id=effective_thread_id,
-            reply_to_event_id=reply_to_event_id,
-            latest_thread_event_id=latest_thread_event_id,
-        )
+            content = format_message_with_mentions(
+                self.config,
+                response_text,
+                sender_domain=sender_domain,
+                thread_event_id=effective_thread_id,
+                reply_to_event_id=reply_to_event_id,
+                latest_thread_event_id=latest_thread_event_id,
+            )
 
         # Add metadata to indicate mentions should be ignored for responses
         if skip_mentions:
@@ -2135,26 +2159,34 @@ class AgentBot:
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
 
-        # For edits in threads, we need to get the latest thread event ID for MSC3440 compliance
-        # When editing, we still need the latest thread event for the fallback behavior
-        # So we fetch it directly rather than using get_latest_thread_event_id_if_needed
-        latest_thread_event_id = None
-        if thread_id:
-            assert self.client is not None
-            # For edits, we always need the latest thread event ID
-            # We can use the event being edited as the fallback if we can't get the latest
-            latest_thread_event_id = await _latest_thread_event_id(self.client, room_id, thread_id)
-            # If we couldn't get the latest, use the event being edited as fallback
-            if latest_thread_event_id is None:
-                latest_thread_event_id = event_id
+        if self.thread_mode == "room":
+            # Room mode: no thread metadata on edits
+            content = format_message_with_mentions(
+                self.config,
+                new_text,
+                sender_domain=sender_domain,
+            )
+        else:
+            # For edits in threads, we need to get the latest thread event ID for MSC3440 compliance
+            # When editing, we still need the latest thread event for the fallback behavior
+            # So we fetch it directly rather than using get_latest_thread_event_id_if_needed
+            latest_thread_event_id = None
+            if thread_id:
+                assert self.client is not None
+                # For edits, we always need the latest thread event ID
+                # We can use the event being edited as the fallback if we can't get the latest
+                latest_thread_event_id = await _latest_thread_event_id(self.client, room_id, thread_id)
+                # If we couldn't get the latest, use the event being edited as fallback
+                if latest_thread_event_id is None:
+                    latest_thread_event_id = event_id
 
-        content = format_message_with_mentions(
-            self.config,
-            new_text,
-            sender_domain=sender_domain,
-            thread_event_id=thread_id,
-            latest_thread_event_id=latest_thread_event_id,
-        )
+            content = format_message_with_mentions(
+                self.config,
+                new_text,
+                sender_domain=sender_domain,
+                thread_event_id=thread_id,
+                latest_thread_event_id=latest_thread_event_id,
+            )
 
         assert self.client is not None
         response = await edit_message(self.client, room_id, event_id, content, new_text)

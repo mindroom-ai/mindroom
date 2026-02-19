@@ -80,6 +80,7 @@ class StreamingResponse:
     min_update_interval: float = 0.5
     interval_ramp_seconds: float = 15.0
     latest_thread_event_id: str | None = None  # For MSC3440 compliance
+    room_mode: bool = False  # When True, skip all thread relations (for bridges/mobile)
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
     stream_started_at: float | None = None
 
@@ -128,8 +129,7 @@ class StreamingResponse:
         if not self.accumulated_text.strip():
             return
 
-        # Always ensure we have a thread_id - use the original message as thread root if needed
-        effective_thread_id = self.thread_id if self.thread_id else self.reply_to_event_id
+        effective_thread_id = None if self.room_mode else self.thread_id if self.thread_id else self.reply_to_event_id
 
         # Add in-progress marker during streaming (not on final update)
         text_to_send = self.accumulated_text
@@ -141,14 +141,14 @@ class StreamingResponse:
         display_text = response.formatted_text
 
         # Only use latest_thread_event_id for the initial message (not edits)
-        latest_for_message = self.latest_thread_event_id if self.event_id is None else None
+        latest_for_message = self.latest_thread_event_id if self.event_id is None and not self.room_mode else None
 
         content = format_message_with_mentions(
             config=self.config,
             text=display_text,
             sender_domain=self.sender_domain,
             thread_event_id=effective_thread_id,
-            reply_to_event_id=self.reply_to_event_id,
+            reply_to_event_id=None if self.room_mode else self.reply_to_event_id,
             latest_thread_event_id=latest_for_message,
             tool_trace=self.tool_trace,
         )
@@ -194,6 +194,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912
     streaming_cls: type[StreamingResponse] = StreamingResponse,
     header: str | None = None,
     existing_event_id: str | None = None,
+    room_mode: bool = False,
 ) -> tuple[str | None, str]:
     """Stream chunks to a Matrix room, returning (event_id, accumulated_text).
 
@@ -208,18 +209,22 @@ async def send_streaming_response(  # noqa: C901, PLR0912
         streaming_cls: StreamingResponse class to use (default: StreamingResponse, alternative: ReplacementStreamingResponse)
         header: Optional text prefix to send before chunks
         existing_event_id: If editing an existing message, pass its ID
+        room_mode: If True, skip thread relations (for bridges/mobile)
 
     Returns:
         Tuple of (final event_id or None, full accumulated text)
 
     """
-    latest_thread_event_id = await get_latest_thread_event_id_if_needed(
-        client,
-        room_id,
-        thread_id,
-        reply_to_event_id,
-        existing_event_id,
-    )
+    if room_mode:
+        latest_thread_event_id = None
+    else:
+        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
+            client,
+            room_id,
+            thread_id,
+            reply_to_event_id,
+            existing_event_id,
+        )
 
     streaming = streaming_cls(
         room_id=room_id,
@@ -228,6 +233,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912
         sender_domain=sender_domain,
         config=config,
         latest_thread_event_id=latest_thread_event_id,
+        room_mode=room_mode,
     )
 
     # Ensure the first chunk triggers an initial send immediately
