@@ -97,6 +97,11 @@ agents:
 | `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents |
 | `context_files` | list | `[]` | File paths loaded at agent init/reload and prepended to role context (under `Personality Context`) |
 | `memory_dir` | string | `null` | Directory loaded at agent init/reload for `MEMORY.md` and dated files (under `Memory Context`) |
+| `num_history_runs` | int | `null` | Number of prior Agno runs to include as history context (`null` = all). Mutually exclusive with `num_history_messages` |
+| `num_history_messages` | int | `null` | Max messages from history. Mutually exclusive with `num_history_runs` |
+| `compress_tool_results` | bool | `true` | Compress tool results in history to save context |
+| `enable_session_summaries` | bool | `false` | Generate AI summaries of older conversation segments for compaction (each summary costs an extra LLM call) |
+| `max_tool_calls_from_history` | int | `null` | Limit tool call messages replayed from history (`null` = no limit) |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
 
@@ -138,12 +143,16 @@ The `defaults` section sets fallback values for all agents. Any agent that omits
 
 ```yaml
 defaults:
-  tools: [scheduler]        # Tools added to every agent by default (set [] to disable)
-  markdown: true             # Format responses as Markdown
-  learning: true             # Enable Agno Learning
-  learning_mode: always      # "always" or "agentic"
-  max_preload_chars: 50000   # Hard cap for preloaded context from context_files/memory_dir
-  show_stop_button: false    # Show a stop button while agent is responding (global-only, cannot be overridden per-agent)
+  tools: [scheduler]                   # Tools added to every agent by default (set [] to disable)
+  markdown: true                        # Format responses as Markdown
+  learning: true                        # Enable Agno Learning
+  learning_mode: always                 # "always" or "agentic"
+  max_preload_chars: 50000              # Hard cap for preloaded context from context_files/memory_dir
+  show_stop_button: false               # Show a stop button while agent is responding (global-only, cannot be overridden per-agent)
+  num_history_runs: null                # Number of prior runs to include (null = all)
+  compress_tool_results: true           # Compress tool results in history to save context
+  enable_session_summaries: false       # AI summaries of older conversation segments (costs extra LLM call)
+  max_tool_calls_from_history: null     # Limit tool call messages replayed from history (null = no limit)
 ```
 
 To opt out a specific agent:
