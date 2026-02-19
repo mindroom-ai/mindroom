@@ -393,10 +393,9 @@ async def prepare_large_message(
     if final_size > 64000:
         logger.warning(f"Large message still exceeds 64KB after preparation ({final_size} bytes)")
 
-    final_content = modified_content.get("m.new_content", modified_content)
-    assert isinstance(final_content, dict)
+    inner: dict[str, Any] = modified_content.get("m.new_content", modified_content)  # type: ignore[assignment]
     logger.info(
-        f"Large message prepared: {len(full_text)} bytes -> {len(final_content['body'])} preview + MXC attachment",
+        f"Large message prepared: {len(full_text)} bytes -> {len(inner['body'])} preview + MXC attachment",
     )
 
     return modified_content
