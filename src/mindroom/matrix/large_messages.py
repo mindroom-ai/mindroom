@@ -95,6 +95,8 @@ async def _upload_text_as_mxc(
     client: nio.AsyncClient,
     text: str,
     room_id: str | None = None,
+    *,
+    mimetype: str = "text/plain",
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Upload text content as an MXC file.
 
@@ -102,6 +104,7 @@ async def _upload_text_as_mxc(
         client: The Matrix client
         text: The text content to upload
         room_id: Optional room ID to check for encryption
+        mimetype: MIME type for the uploaded content (default: "text/plain")
 
     Returns:
         Tuple of (mxc_uri, file_info_dict) or (None, None) on failure
@@ -110,8 +113,11 @@ async def _upload_text_as_mxc(
     text_bytes = text.encode("utf-8")
     file_info = {
         "size": len(text_bytes),
-        "mimetype": "text/plain",
+        "mimetype": mimetype,
     }
+
+    is_html = mimetype == "text/html"
+    filename = "message.html" if is_html else "message.txt"
 
     # Check if room is encrypted
     room_encrypted = False
@@ -131,7 +137,7 @@ async def _upload_text_as_mxc(
                 "iv": encryption_keys["iv"],
                 "hashes": encryption_keys["hashes"],
                 "v": "v2",
-                "mimetype": "text/plain",
+                "mimetype": mimetype,
                 "size": len(text_bytes),
             }
         except Exception:
@@ -144,12 +150,14 @@ async def _upload_text_as_mxc(
     def data_provider(_monitor: object, _data: object) -> io.BytesIO:
         return io.BytesIO(upload_data)
 
+    enc_filename = f"{filename}.enc" if room_encrypted else filename
+
     try:
         # nio.upload returns Tuple[Union[UploadResponse, UploadError], Optional[Dict[str, Any]]]
         upload_result, encryption_dict = await client.upload(
             data_provider=data_provider,
-            content_type="application/octet-stream" if room_encrypted else "text/plain",
-            filename="message.txt.enc" if room_encrypted else "message.txt",
+            content_type="application/octet-stream" if room_encrypted else mimetype,
+            filename=enc_filename,
             filesize=len(upload_data),
         )
 
@@ -203,10 +211,24 @@ async def prepare_large_message(
 
     source_content = content["m.new_content"] if is_edit and "m.new_content" in content else content
     full_text = source_content["body"]
+    has_html = source_content.get("format") == "org.matrix.custom.html" and isinstance(
+        source_content.get("formatted_body"),
+        str,
+    )
 
     logger.info(f"Message too large ({current_size} bytes), uploading to MXC")
 
-    mxc_uri, file_info = await _upload_text_as_mxc(client, full_text, room_id)
+    # Upload the formatted HTML when available so the Element fork can render
+    # custom tags like <tool> as actual HTML elements.  Fall back to the plain
+    # text body otherwise.
+    if has_html:
+        upload_text = source_content["formatted_body"]
+        upload_mimetype = "text/html"
+    else:
+        upload_text = full_text
+        upload_mimetype = "text/plain"
+
+    mxc_uri, file_info = await _upload_text_as_mxc(client, upload_text, room_id, mimetype=upload_mimetype)
 
     # Calculate how much space we have for preview
     # The structure adds: filename, url, info object, custom metadata
@@ -215,12 +237,20 @@ async def prepare_large_message(
 
     preview = _create_preview(full_text, available_for_preview)
 
+    filename = "message.html" if has_html else "message.txt"
     modified_content: dict[str, Any] = {
         "msgtype": "m.file",
         "body": preview,
-        "filename": "message.txt",
+        "filename": filename,
         "info": file_info,
     }
+
+    # Preserve HTML format metadata so the Element fork treats the downloaded
+    # file as HTML and renders <tool> elements via the collapsible renderer.
+    if has_html:
+        formatted_preview = _create_preview(source_content["formatted_body"], available_for_preview)
+        modified_content["format"] = "org.matrix.custom.html"
+        modified_content["formatted_body"] = formatted_preview
 
     for key in PASSTHROUGH_CONTENT_KEYS:
         if key in source_content:

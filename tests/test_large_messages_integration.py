@@ -25,6 +25,7 @@ class MockClient:
     def __init__(self, should_upload_succeed: bool = True) -> None:
         self.rooms = {}
         self.messages_sent = []
+        self.uploads: list[dict] = []
         self.should_upload_succeed = should_upload_succeed
 
     async def room_send(self, room_id: str, message_type: str, content: dict) -> MagicMock:  # noqa: ARG002
@@ -36,11 +37,16 @@ class MockClient:
         response.event_id = f"$event_{len(self.messages_sent)}"
         return response
 
-    async def upload(self, **kwargs) -> tuple:  # noqa: ANN003, ARG002
+    async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
         """Mock file upload - returns tuple like nio."""
         if not self.should_upload_succeed:
             msg = "Upload failed"
             raise Exception(msg)  # noqa: TRY002
+
+        # Capture the uploaded data for test inspection
+        data_provider = kwargs.get("data_provider")
+        data = data_provider(None, None) if data_provider else None
+        self.uploads.append({"data": data, **{k: v for k, v in kwargs.items() if k != "data_provider"}})
 
         # Create a mock UploadResponse
         response = nio.UploadResponse.from_dict({"content_uri": f"mxc://server/file_{len(self.messages_sent)}"})
@@ -356,6 +362,51 @@ async def test_message_with_formatted_body() -> None:
     assert result["msgtype"] == "m.file"
     assert len(result["body"]) < len(large_text)
     assert "io.mindroom.long_text" in result
+
+    # Should preserve HTML format so Element fork renders <tool> tags correctly
+    assert result["format"] == "org.matrix.custom.html"
+    assert "formatted_body" in result
+
+    # Uploaded file should be HTML
+    assert result["info"]["mimetype"] == "text/html"
+    assert result["filename"] == "message.html"
+
+
+@pytest.mark.asyncio
+async def test_large_message_with_tool_tags_preserves_html() -> None:
+    """Test that <tool> tags in formatted_body are preserved for long text upload.
+
+    When a message with tool calls becomes a long text attachment, the uploaded
+    file must contain the formatted_body (HTML) so the Element fork can render
+    <tool> as actual HTML elements via the collapsible renderer.
+    """
+    client = MockClient()
+
+    body = "Here is the result:\n\n<tool>web_search(query=test)\n{&quot;title&quot;: &quot;Result&quot;}</tool>\n"
+    body = body * 500  # Make it large enough to trigger long text
+    formatted_body = (
+        "<p>Here is the result:</p>\n\n<tool>web_search(query=test)\n{&quot;title&quot;: &quot;Result&quot;}</tool>\n"
+    )
+    formatted_body = formatted_body * 500
+
+    content = {
+        "body": body,
+        "formatted_body": formatted_body,
+        "msgtype": "m.text",
+        "format": "org.matrix.custom.html",
+    }
+
+    result = await prepare_large_message(client, "!room:server", content)
+
+    assert result["msgtype"] == "m.file"
+    assert result["format"] == "org.matrix.custom.html"
+    assert result["info"]["mimetype"] == "text/html"
+
+    # The uploaded content should be the formatted_body (HTML), not plain body
+    uploaded_data = client.uploads[0]["data"]
+    uploaded_text = uploaded_data.read().decode("utf-8")
+    assert "<tool>" in uploaded_text
+    assert "<p>Here is the result:</p>" in uploaded_text
 
 
 @pytest.mark.asyncio
