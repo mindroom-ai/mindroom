@@ -377,6 +377,103 @@ class TestThreadUtils:
         assert has_non_agent is True
 
 
+class TestBridgeMentionFallback:
+    """Tests for detecting mentions from bridged messages (HTML pills fallback)."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self) -> None:
+        self.config = Config(
+            agents={
+                "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
+                "general": AgentConfig(display_name="General", rooms=["#test:example.org"]),
+            },
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        )
+
+    def test_html_pill_agent_mention(self) -> None:
+        """Bridge HTML pill mentioning an agent is detected."""
+        event_source = {
+            "content": {
+                "body": "@mindroom_calculator do the math",
+                "formatted_body": '<a href="https://matrix.to/#/@mindroom_calculator:localhost">@mindroom_calculator</a> do the math',
+            },
+        }
+        agent_id = MatrixID.from_username("mindroom_calculator", "localhost")
+        mentioned_agents, am_i_mentioned, _ = check_agent_mentioned(event_source, agent_id, self.config)
+        assert am_i_mentioned is True
+        assert len(mentioned_agents) == 1
+        assert mentioned_agents[0].full_id == "@mindroom_calculator:localhost"
+
+    def test_html_pill_non_agent_mention(self) -> None:
+        """Bridge HTML pill mentioning a non-agent sets has_non_agent_mentions."""
+        event_source = {
+            "content": {
+                "body": "@alice hey",
+                "formatted_body": '<a href="https://matrix.to/#/@alice:localhost">@alice</a> hey',
+            },
+        }
+        agent_id = MatrixID.from_username("mindroom_calculator", "localhost")
+        _, am_i_mentioned, has_non_agent = check_agent_mentioned(event_source, agent_id, self.config)
+        assert am_i_mentioned is False
+        assert has_non_agent is True
+
+    def test_m_mentions_takes_precedence_over_pills(self) -> None:
+        """When m.mentions is present, formatted_body pills are not parsed."""
+        event_source = {
+            "content": {
+                "m.mentions": {"user_ids": ["@mindroom_general:localhost"]},
+                "formatted_body": '<a href="https://matrix.to/#/@mindroom_calculator:localhost">@mindroom_calculator</a>',
+            },
+        }
+        agent_id = MatrixID.from_username("mindroom_calculator", "localhost")
+        mentioned_agents, am_i_mentioned, _ = check_agent_mentioned(event_source, agent_id, self.config)
+        # m.mentions wins — only general is mentioned, not calculator
+        assert am_i_mentioned is False
+        assert len(mentioned_agents) == 1
+        assert mentioned_agents[0].full_id == "@mindroom_general:localhost"
+
+    def test_html_pill_in_thread_history(self) -> None:
+        """Bridge pills in thread history are detected by has_any_agent_mentions_in_thread."""
+        thread_history = [
+            {
+                "sender": "@alice:localhost",
+                "content": {
+                    "body": "@mindroom_calculator compute",
+                    "formatted_body": '<a href="https://matrix.to/#/@mindroom_calculator:localhost">@mindroom_calculator</a> compute',
+                },
+            },
+        ]
+        assert has_any_agent_mentions_in_thread(thread_history, self.config) is True
+
+    def test_no_pills_no_mentions(self) -> None:
+        """No m.mentions and no pills means no mentions detected."""
+        event_source = {
+            "content": {
+                "body": "just a normal message",
+            },
+        }
+        agent_id = MatrixID.from_username("mindroom_calculator", "localhost")
+        mentioned_agents, am_i_mentioned, has_non_agent = check_agent_mentioned(event_source, agent_id, self.config)
+        assert mentioned_agents == []
+        assert am_i_mentioned is False
+        assert has_non_agent is False
+
+    def test_multiple_pills(self) -> None:
+        """Multiple HTML pills in one message are all detected."""
+        event_source = {
+            "content": {
+                "formatted_body": (
+                    '<a href="https://matrix.to/#/@mindroom_calculator:localhost">calc</a> and '
+                    '<a href="https://matrix.to/#/@mindroom_general:localhost">general</a>'
+                ),
+            },
+        }
+        agent_id = MatrixID.from_username("mindroom_calculator", "localhost")
+        mentioned_agents, am_i_mentioned, _ = check_agent_mentioned(event_source, agent_id, self.config)
+        assert am_i_mentioned is True
+        assert len(mentioned_agents) == 2
+
+
 class TestAgentDescription:
     """Test agent description functionality."""
 
