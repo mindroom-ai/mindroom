@@ -79,8 +79,12 @@ agents:
     knowledge_bases: [docs]         # Optional: Assign one or more configured knowledge bases
     context_files:                 # Optional: Load files into role context at init/reload
       - ./openclaw_data/SOUL.md
-      - ./openclaw_data/USER.md
       - ./openclaw_data/AGENTS.md
+      - ./openclaw_data/USER.md
+      - ./openclaw_data/IDENTITY.md
+      - ./openclaw_data/MEMORY.md
+      - ./openclaw_data/TOOLS.md
+      - ./openclaw_data/HEARTBEAT.md
     memory_dir: ./openclaw_data/memory  # Optional: Load MEMORY.md + dated files from this dir
 
 # Model configurations (at least a "default" model is recommended)
@@ -121,9 +125,10 @@ defaults:
   tools: [scheduler]               # Default: ["scheduler"] (added to every agent; set [] to disable)
   markdown: true                   # Default: true
   enable_streaming: true           # Default: true (stream responses via message edits)
-  show_stop_button: false          # Default: false (global only, cannot be overridden per-agent)
   learning: true                   # Default: true
   learning_mode: always            # Default: always (or agentic)
+  max_preload_chars: 50000         # Hard cap for preloaded context from context_files/memory_dir
+  show_stop_button: false          # Default: false (global only, cannot be overridden per-agent)
 
 # defaults.tools are appended to each agent's tools list with duplicates removed.
 # Set agents.<name>.include_default_tools: false to opt out a specific agent.
@@ -219,5 +224,6 @@ timezone: America/Los_Angeles      # Default: UTC
 - A model named `default` is required unless all agents/teams specify explicit models
 - Agents can set `knowledge_bases`, but each entry must exist in the top-level `knowledge_bases` section
 - `agents.<name>.context_files` and `agents.<name>.memory_dir` inject file-based context at agent creation/reload (see [Agents](agents.md))
+- `defaults.max_preload_chars` caps preloaded file context (`context_files` + `memory_dir`)
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
 - The `memory` system works out of the box with OpenAI; use `memory.llm` for memory summarization with a different provider

@@ -52,10 +52,12 @@ agents:
     rooms: [personal]
 
     instructions:
-      - Load identity and behavior from context files before acting.
-      - Persist new context to daily memory files and curate long-term memory.
-      - Use knowledge search for older history beyond recent daily files.
-      - Ask before external/public actions and destructive shell operations.
+      - You wake up fresh each session with no memory of previous conversations. Your context files are already loaded into your system prompt.
+      - Today's and yesterday's daily memory files from `memory_dir` are pre-loaded. For older history, use `search_knowledge_base`.
+      - IMPORTANT: If you want to remember something, write it to `./openclaw_data/memory/YYYY-MM-DD.md` (append, never overwrite).
+      - Curate long-term memory in `MEMORY.md` by distilling important points from recent daily files.
+      - Ask before external/public actions and destructive operations.
+      - Before answering prior-history questions, search memory files first with `search_knowledge_base`.
 
     context_files:
       - ./openclaw_data/SOUL.md
@@ -86,6 +88,14 @@ knowledge_bases:
   openclaw_memory:
     path: ./openclaw_data/memory
     watch: true
+
+defaults:
+  max_preload_chars: 50000
+
+models:
+  opus:
+    provider: anthropic
+    id: claude-opus-4-6-latest
 ```
 
 ## Recommended workspace layout
@@ -116,11 +126,17 @@ openclaw_data/
 
 For older history, use `knowledge_bases` on your memory folder — this provides semantic search across all files regardless of date.
 
+## Context Management
+
+MindRoom includes built-in context controls for OpenClaw-style agents:
+
+- **Conversation history** is managed by Agno's session system — previous turns (including tool calls and results) are automatically replayed. Control depth with `num_history_runs` or `num_history_messages` (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md)).
+- **Preloaded role context** from `context_files` + `memory_dir` is hard-capped by `defaults.max_preload_chars`.
+- If preload exceeds the cap, truncation priority is: daily files → `MEMORY.md` → personality files (`SOUL.md`, etc.), with a truncation marker appended.
+
 ## Known limitations
 
 **Threading model:** MindRoom responds in Matrix threads by default. OpenClaw uses continuous room-level conversations. On mobile or via bridges (Telegram, Signal, WhatsApp), this means you must navigate into threads to continue a conversation. See [#169](https://github.com/mindroom-ai/mindroom/issues/169) for the planned `thread_mode: room` option.
-
-**Context length:** Long conversations have no automatic truncation or compaction. If a thread exceeds the model's context window, the request will fail. See [#170](https://github.com/mindroom-ai/mindroom/issues/170) for the planned context management feature.
 
 ## Privacy guidance
 

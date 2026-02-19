@@ -54,6 +54,15 @@ class CultureAgentSettings:
     enable_agentic_culture: bool
 
 
+@dataclass
+class AdditionalContextChunk:
+    """Chunk of preload context with truncation priority metadata."""
+
+    kind: str
+    title: str
+    body: str
+
+
 _CULTURE_MANAGER_CACHE: dict[tuple[str, str], CachedCultureManager] = {}
 
 
@@ -81,65 +90,191 @@ The current time is {time_str} ({timezone_str} timezone).
 """
 
 
-def _load_context_files(context_files: list[str]) -> str:
-    """Load configured context files and return a formatted block."""
-    loaded_parts: list[str] = []
+def _load_context_files(context_files: list[str]) -> list[AdditionalContextChunk]:
+    """Load configured context files."""
+    loaded_parts: list[AdditionalContextChunk] = []
     for raw_path in context_files:
         resolved_path = resolve_config_relative_path(raw_path)
         if resolved_path.is_file():
-            loaded_parts.append(f"### {resolved_path.name}\n{resolved_path.read_text(encoding='utf-8').strip()}")
+            loaded_parts.append(
+                AdditionalContextChunk(
+                    kind="personality",
+                    title=resolved_path.name,
+                    body=resolved_path.read_text(encoding="utf-8").strip(),
+                ),
+            )
         else:
             logger.warning(f"Context file not found: {resolved_path}")
-    if not loaded_parts:
-        return ""
-    return "\n\n".join(loaded_parts) + "\n\n"
+    return loaded_parts
 
 
-def _load_memory_dir_context(memory_dir: str, timezone_str: str) -> str:
+def _load_memory_dir_context(memory_dir: str, timezone_str: str) -> list[AdditionalContextChunk]:
     """Load MEMORY.md plus today's and yesterday's dated memory files."""
     resolved_dir = resolve_config_relative_path(memory_dir)
     if not resolved_dir.is_dir():
         logger.warning(f"Memory directory not found: {resolved_dir}")
-        return ""
+        return []
 
-    memory_parts: list[str] = []
+    memory_parts: list[AdditionalContextChunk] = []
     memory_md = resolved_dir / "MEMORY.md"
     if memory_md.is_file():
-        memory_parts.append(f"### MEMORY.md\n{memory_md.read_text(encoding='utf-8').strip()}")
+        memory_parts.append(
+            AdditionalContextChunk(
+                kind="memory",
+                title="MEMORY.md",
+                body=memory_md.read_text(encoding="utf-8").strip(),
+            ),
+        )
 
     today = datetime.now(ZoneInfo(timezone_str)).date()
     yesterday = today - timedelta(days=1)
     for target_date in (yesterday, today):
         target_file = resolved_dir / f"{target_date.isoformat()}.md"
         if target_file.is_file():
-            memory_parts.append(f"### {target_file.name}\n{target_file.read_text(encoding='utf-8').strip()}")
+            memory_parts.append(
+                AdditionalContextChunk(
+                    kind="daily",
+                    title=target_file.name,
+                    body=target_file.read_text(encoding="utf-8").strip(),
+                ),
+            )
 
-    if not memory_parts:
+    return memory_parts
+
+
+def _render_context_chunks(section_heading: str, chunks: list[AdditionalContextChunk]) -> str:
+    """Render context chunks into a markdown section."""
+    rendered = [f"### {chunk.title}\n{chunk.body.strip()}" for chunk in chunks if chunk.body.strip()]
+    if not rendered:
         return ""
-    return "\n\n".join(memory_parts) + "\n\n"
+    return f"{section_heading}\n" + "\n\n".join(rendered) + "\n\n"
+
+
+def _render_additional_context(
+    personality_chunks: list[AdditionalContextChunk],
+    memory_chunks: list[AdditionalContextChunk],
+) -> str:
+    """Render full additional context from personality and memory chunks."""
+    parts = [
+        _render_context_chunks("## Personality Context", personality_chunks),
+        _render_context_chunks("## Memory Context", memory_chunks),
+    ]
+    return "".join(part for part in parts if part)
+
+
+def _build_preload_truncation_groups(
+    personality_chunks: list[AdditionalContextChunk],
+    memory_chunks: list[AdditionalContextChunk],
+) -> list[list[AdditionalContextChunk]]:
+    """Return truncation groups ordered from least to most critical context."""
+    return [
+        [chunk for chunk in memory_chunks if chunk.kind == "daily"],
+        [chunk for chunk in memory_chunks if chunk.kind == "memory"],
+        [chunk for chunk in personality_chunks if chunk.kind == "personality"],
+    ]
+
+
+def _drop_whole_chunks(
+    groups: list[list[AdditionalContextChunk]],
+    personality_chunks: list[AdditionalContextChunk],
+    memory_chunks: list[AdditionalContextChunk],
+    max_preload_chars: int,
+) -> int:
+    """Drop entire chunk bodies (least critical first) until under the cap."""
+    omitted = 0
+    for group in groups:
+        for chunk in group:
+            if len(_render_additional_context(personality_chunks, memory_chunks)) <= max_preload_chars:
+                return omitted
+            if not chunk.body:
+                continue
+            omitted += len(chunk.body)
+            chunk.body = ""
+    return omitted
+
+
+def _trim_chunk_tails(
+    groups: list[list[AdditionalContextChunk]],
+    personality_chunks: list[AdditionalContextChunk],
+    memory_chunks: list[AdditionalContextChunk],
+    max_preload_chars: int,
+) -> int:
+    """Trim from the *end* of chunks to preserve headers/identity at the top."""
+    omitted = 0
+    for group in groups:
+        for chunk in group:
+            overflow = len(_render_additional_context(personality_chunks, memory_chunks)) - max_preload_chars
+            if overflow <= 0:
+                return omitted
+            if not chunk.body:
+                continue
+            remove_count = min(overflow, len(chunk.body))
+            chunk.body = chunk.body[: len(chunk.body) - remove_count].rstrip()
+            omitted += remove_count
+    return omitted
+
+
+def _apply_preload_cap(
+    personality_chunks: list[AdditionalContextChunk],
+    memory_chunks: list[AdditionalContextChunk],
+    max_preload_chars: int,
+) -> tuple[str, int]:
+    """Apply hard preload cap with deterministic truncation priority.
+
+    Truncation order (least → most critical): daily → memory → personality.
+    First drops whole chunks, then trims from the *end* of remaining chunks.
+    """
+    rendered = _render_additional_context(personality_chunks, memory_chunks)
+    if len(rendered) <= max_preload_chars:
+        return rendered, 0
+
+    groups = _build_preload_truncation_groups(personality_chunks, memory_chunks)
+    omitted_chars = _drop_whole_chunks(groups, personality_chunks, memory_chunks, max_preload_chars)
+    omitted_chars += _trim_chunk_tails(groups, personality_chunks, memory_chunks, max_preload_chars)
+
+    rendered = _render_additional_context(personality_chunks, memory_chunks)
+    if omitted_chars <= 0:
+        return rendered, 0
+
+    marker = f"[Content truncated - {omitted_chars} chars omitted. Use search_knowledge_base for older history.]"
+    marker_block = f"\n\n{marker}\n\n"
+    budget = max_preload_chars - len(marker_block)
+    if budget <= 0:
+        return marker_block[:max_preload_chars], omitted_chars
+    if len(rendered) > budget:
+        rendered = rendered[len(rendered) - budget :]
+    return rendered.rstrip("\n") + marker_block, omitted_chars
 
 
 def _build_additional_context(
     agent_config: AgentConfig,
     timezone_str: str,
+    max_preload_chars: int,
 ) -> str:
     """Build additional role context from configured files/directories.
 
     This is evaluated when the agent is created (and re-created on config
     reload), so file content snapshots update on agent hot-reload.
     """
-    additional_context = ""
-
+    personality_chunks: list[AdditionalContextChunk] = []
     if agent_config.context_files:
-        context_files_block = _load_context_files(agent_config.context_files)
-        if context_files_block:
-            additional_context += "## Personality Context\n" + context_files_block
+        personality_chunks = _load_context_files(agent_config.context_files)
 
+    memory_chunks: list[AdditionalContextChunk] = []
     if agent_config.memory_dir:
-        memory_context_block = _load_memory_dir_context(agent_config.memory_dir, timezone_str)
-        if memory_context_block:
-            additional_context += "## Memory Context\n" + memory_context_block
+        memory_chunks = _load_memory_dir_context(agent_config.memory_dir, timezone_str)
 
+    additional_context, omitted_chars = _apply_preload_cap(
+        personality_chunks,
+        memory_chunks,
+        max_preload_chars,
+    )
+    if omitted_chars > 0:
+        logger.warning(
+            "Preload context exceeded max_preload_chars and was truncated",
+            omitted_chars=omitted_chars,
+            max_preload_chars=max_preload_chars,
+        )
     return additional_context
 
 
@@ -400,7 +535,11 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     # Combine identity and datetime contexts
     full_context = identity_context + datetime_context
 
-    full_context += _build_additional_context(agent_config, config.timezone)
+    full_context += _build_additional_context(
+        agent_config,
+        config.timezone,
+        config.defaults.max_preload_chars,
+    )
 
     # Use rich prompt if available, otherwise use YAML config
     if agent_name in RICH_PROMPTS:
