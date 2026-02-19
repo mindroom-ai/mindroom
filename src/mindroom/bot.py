@@ -1389,7 +1389,7 @@ class AgentBot:
             client=self.client,
             room=room,
             room_id=room_id,
-            thread_id=thread_id or reply_to_event_id,
+            thread_id=None if self.thread_mode == "room" else thread_id or reply_to_event_id,
             requester_id=user_id or self.matrix_id.full_id,
             config=self.config,
         )
@@ -1722,7 +1722,7 @@ class AgentBot:
             # - If already in a thread, use that thread_id
             # - If not in a thread, use reply_to_event_id (the user's message) as thread root
             # This ensures consistency with how the bot creates threads
-            thread_root_for_registration = thread_id if thread_id else reply_to_event_id
+            thread_root_for_registration = None if self.thread_mode == "room" else thread_id or reply_to_event_id
             interactive.register_interactive_question(
                 event_id,
                 room_id,
@@ -1786,7 +1786,7 @@ class AgentBot:
         )
 
         if event_id and response.option_map and response.options_list:
-            thread_root_for_registration = thread_id if thread_id else reply_to_event_id
+            thread_root_for_registration = None if self.thread_mode == "room" else thread_id or reply_to_event_id
             interactive.register_interactive_question(
                 event_id,
                 room_id,
@@ -1846,7 +1846,7 @@ class AgentBot:
         if interactive.should_create_interactive_question(content):
             response = interactive.parse_and_format_interactive(content, extract_mapping=True)
             if response.option_map and response.options_list:
-                thread_root_for_registration = thread_id if thread_id else reply_to_event_id
+                thread_root_for_registration = None if self.thread_mode == "room" else thread_id or reply_to_event_id
                 interactive.register_interactive_question(
                     event_id,
                     room_id,
