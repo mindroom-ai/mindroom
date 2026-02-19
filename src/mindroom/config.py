@@ -244,7 +244,7 @@ class ModelConfig(BaseModel):
     )
     context_window: int | None = Field(
         default=None,
-        description="Context window size in tokens; when set, history is dynamically trimmed to stay within 80%% of this limit",
+        description="Context window size in tokens; when set, history is dynamically trimmed to stay within 80% of this limit",
     )
 
 

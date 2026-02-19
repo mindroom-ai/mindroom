@@ -26,7 +26,6 @@ from mindroom.ai import (
     _get_unseen_messages,
     _prepare_agent_and_prompt,
     ai_response,
-    estimate_tokens,
 )
 from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, DefaultsConfig, ModelConfig
@@ -786,26 +785,6 @@ class TestFullScenario:
 # ---------------------------------------------------------------------------
 # Token-aware context window pre-check tests
 # ---------------------------------------------------------------------------
-
-
-class TestEstimateTokens:
-    """Test the chars/4 token estimation function."""
-
-    def test_empty_string(self) -> None:
-        """Empty string yields 0 tokens."""
-        assert estimate_tokens("") == 0
-
-    def test_basic(self) -> None:
-        """Four chars yields 1 token."""
-        assert estimate_tokens("abcd") == 1
-
-    def test_longer_text(self) -> None:
-        """100 chars yields 25 tokens."""
-        assert estimate_tokens("a" * 100) == 25
-
-    def test_rounding_down(self) -> None:
-        """Partial chars round down (3 // 4 == 0)."""
-        assert estimate_tokens("abc") == 0
 
 
 class TestEstimateRunTokens:

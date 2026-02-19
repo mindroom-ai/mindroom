@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from agno.knowledge.knowledge import Knowledge
     from agno.media import Image
     from agno.models.base import Model
+    from agno.session.agent import AgentSession
 
     from .config import Config, ModelConfig
 
@@ -47,13 +48,8 @@ logger = get_logger(__name__)
 AIStreamChunk = str | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
 
 
-def estimate_tokens(text: str) -> int:
-    """Estimate token count from text using chars/4 approximation."""
-    return len(text) // 4
-
-
 def _estimate_run_tokens(run: RunOutput) -> int:
-    """Estimate token count for all messages in a single Agno run."""
+    """Estimate token count for all messages in a single Agno run (chars / 4)."""
     if not run.messages:
         return 0
     total_chars = 0
@@ -70,7 +66,7 @@ def _estimate_run_tokens(run: RunOutput) -> int:
 
 
 def _estimate_static_tokens(agent: Agent, full_prompt: str) -> int:
-    """Estimate tokens for the system prompt and current user message."""
+    """Estimate tokens for the system prompt and current user message (chars / 4)."""
     static_chars = len(agent.role or "")
     instructions = agent.instructions
     if isinstance(instructions, list):
@@ -99,12 +95,16 @@ def _apply_context_window_limit(
     full_prompt: str,
     session_id: str | None,
     storage_path: Path,
+    session: AgentSession | None = None,
 ) -> None:
     """Dynamically reduce ``agent.num_history_runs`` when the estimated context approaches the model's context window.
 
     Uses chars/4 token estimation and an 80 % threshold to leave headroom
     for the model response and tool definitions.  Only applies to run-based
     history limits (skipped when ``num_history_messages`` is set).
+
+    Pass a pre-loaded *session* to avoid a redundant SQLite read when the
+    caller already loaded it.
     """
     if agent.num_history_messages is not None or not session_id:
         return
@@ -118,9 +118,10 @@ def _apply_context_window_limit(
     threshold = int(context_window * 0.8)
     static_tokens = _estimate_static_tokens(agent, full_prompt)
 
-    # Load session to estimate history size
-    storage = create_session_storage(agent_name, storage_path)
-    session = _get_agent_session(storage, session_id)
+    # Use pre-loaded session or load from storage
+    if session is None:
+        storage = create_session_storage(agent_name, storage_path)
+        session = _get_agent_session(storage, session_id)
     if not session or not session.runs:
         return
 
@@ -444,6 +445,7 @@ async def _prepare_agent_and_prompt(
     unseen_event_ids: list[str] = []
 
     # Check whether Agno already has prior runs for this session.
+    session = None
     has_prior_runs = False
     if session_id and thread_history:
         storage = create_session_storage(agent_name, storage_path)
@@ -474,7 +476,7 @@ async def _prepare_agent_and_prompt(
         knowledge=knowledge,
         include_interactive_questions=include_interactive_questions,
     )
-    _apply_context_window_limit(agent, agent_name, config, full_prompt, session_id, storage_path)
+    _apply_context_window_limit(agent, agent_name, config, full_prompt, session_id, storage_path, session=session)
     return agent, full_prompt, unseen_event_ids
 
 
