@@ -5,7 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/components/ui/use-toast';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { API_BASE } from '@/lib/api';
+import { API_ENDPOINTS } from '@/lib/api';
 
 interface GoogleStatus {
   connected: boolean;
@@ -63,7 +63,7 @@ export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
 
   const checkGoogleStatus = async () => {
     try {
-      const response = await fetch(`${API_BASE}/api/google/status`);
+      const response = await fetch(API_ENDPOINTS.google.status);
       const data = await response.json();
       setStatus({
         connected: data.connected,
@@ -82,7 +82,7 @@ export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
   const connectGoogle = async () => {
     setLoading(true);
     try {
-      const response = await fetch(`${API_BASE}/api/google/connect`, {
+      const response = await fetch(API_ENDPOINTS.google.connect, {
         method: 'POST',
       });
 
@@ -146,7 +146,7 @@ export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
   const disconnectGoogle = async () => {
     setLoading(true);
     try {
-      const response = await fetch(`${API_BASE}/api/google/disconnect`, {
+      const response = await fetch(API_ENDPOINTS.google.disconnect, {
         method: 'POST',
       });
 
