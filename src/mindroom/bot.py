@@ -15,7 +15,7 @@ import uvicorn
 from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
 
 from . import config_confirmation, image_handler, interactive, voice_handler
-from .agents import create_agent, get_rooms_for_entity
+from .agents import create_agent, create_session_storage, get_rooms_for_entity, remove_run_by_event_id
 from .ai import ai_response, stream_agent_response
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .commands import (
@@ -1685,6 +1685,7 @@ class AgentBot:
                         knowledge=knowledge,
                         user_id=user_id,
                         images=images,
+                        reply_to_event_id=reply_to_event_id,
                     )
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
@@ -1759,6 +1760,7 @@ class AgentBot:
                     thread_history=thread_history,
                     room_id=room_id,
                     knowledge=knowledge,
+                    reply_to_event_id=reply_to_event_id,
                 )
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
@@ -1888,6 +1890,7 @@ class AgentBot:
                         knowledge=knowledge,
                         user_id=user_id,
                         images=images,
+                        reply_to_event_id=reply_to_event_id,
                     )
 
                     event_id, accumulated = await send_streaming_response(
@@ -2235,6 +2238,15 @@ class AgentBot:
         # These keys must be present according to MSC2676
         # https://github.com/matrix-org/matrix-spec-proposals/blob/main/proposals/2676-message-editing.md
         edited_content = event.source["content"]["m.new_content"]["body"]
+
+        # Remove the stale run from Agno history before regenerating.
+        # The original run stored reply_to_event_id (= original_event_id) as
+        # matrix_event_id in its metadata, so we look up by that key.
+        session_id = create_session_id(room.room_id, context.thread_id)
+        storage = create_session_storage(self.agent_name, self.storage_path)
+        removed = remove_run_by_event_id(storage, session_id, event_info.original_event_id)
+        if removed:
+            self.logger.info("Removed stale run for edited message", event_id=event_info.original_event_id)
 
         # Generate new response
         await self._generate_response(

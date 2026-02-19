@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 from zoneinfo import ZoneInfo
 
 from agno.agent import Agent
 from agno.culture.manager import CultureManager
+from agno.db.base import SessionType
 from agno.db.sqlite import SqliteDb
 from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
+from agno.run.agent import RunOutput
+from agno.session.agent import AgentSession
 
 from . import agent_prompts
 from . import tools as _tools_module  # noqa: F401
@@ -200,6 +203,51 @@ def create_culture_storage(culture_name: str, storage_path: Path) -> SqliteDb:
     return SqliteDb(db_file=str(culture_dir / f"{culture_name}.db"))
 
 
+def _get_agent_session(storage: SqliteDb, session_id: str) -> AgentSession | None:
+    """Retrieve and deserialize an AgentSession from storage."""
+    raw = storage.get_session(session_id, SessionType.AGENT)
+    if raw is None:
+        return None
+    if isinstance(raw, AgentSession):
+        return raw
+    if isinstance(raw, dict):
+        return AgentSession.from_dict(cast("dict[str, Any]", raw))
+    return None
+
+
+def get_seen_event_ids(session: AgentSession) -> set[str]:
+    """Return union of all matrix_seen_event_ids from run metadata."""
+    if not session.runs:
+        return set()
+    seen: set[str] = set()
+    for run in session.runs:
+        if isinstance(run, RunOutput) and run.metadata:
+            seen_ids = run.metadata.get("matrix_seen_event_ids")
+            if isinstance(seen_ids, list):
+                seen.update(seen_ids)
+    return seen
+
+
+def remove_run_by_event_id(storage: SqliteDb, session_id: str, event_id: str) -> bool:
+    """Remove a run whose matrix_event_id matches, save session.
+
+    Returns True if a run was removed.
+    """
+    session = _get_agent_session(storage, session_id)
+    if session is None or not session.runs:
+        return False
+    original_len = len(session.runs)
+    session.runs = [
+        run
+        for run in session.runs
+        if not (isinstance(run, RunOutput) and run.metadata and run.metadata.get("matrix_event_id") == event_id)
+    ]
+    if len(session.runs) == original_len:
+        return False
+    storage.upsert_session(session)
+    return True
+
+
 def resolve_culture_settings(mode: CultureMode) -> CultureAgentSettings:
     """Map a culture mode to Agno culture feature flags."""
     if mode == "automatic":
@@ -262,7 +310,7 @@ def resolve_agent_culture(
     return culture_manager, settings
 
 
-def create_agent(  # noqa: PLR0915
+def create_agent(  # noqa: PLR0915, C901, PLR0912
     agent_name: str,
     config: Config,
     *,
@@ -393,6 +441,22 @@ def create_agent(  # noqa: PLR0915
         update_cultural_knowledge = culture_settings.update_cultural_knowledge
         enable_agentic_culture = culture_settings.enable_agentic_culture
 
+    # Resolve history settings: per-agent override → defaults.
+    # When agent sets one knob, force the other to None to avoid Agno
+    # receiving both (it warns and drops num_history_messages).
+    if agent_config.num_history_messages is not None:
+        num_history_runs = None
+        num_history_messages = agent_config.num_history_messages
+    elif agent_config.num_history_runs is not None:
+        num_history_runs = agent_config.num_history_runs
+        num_history_messages = None
+    else:
+        num_history_runs = defaults.num_history_runs
+        num_history_messages = defaults.num_history_messages
+
+    # Track whether we want "all history" to bypass Agno's default after construction
+    include_all_history = num_history_runs is None and num_history_messages is None
+
     agent = Agent(
         name=agent_config.display_name,
         id=agent_name,
@@ -406,11 +470,19 @@ def create_agent(  # noqa: PLR0915
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         knowledge=knowledge if knowledge_enabled else None,
         search_knowledge=knowledge_enabled,
+        add_history_to_context=True,
+        num_history_runs=num_history_runs,
+        num_history_messages=num_history_messages,
         culture_manager=culture_manager,
         add_culture_to_context=add_culture_to_context,
         update_cultural_knowledge=update_cultural_knowledge,
         enable_agentic_culture=enable_agentic_culture,
     )
+    # Agno hardcodes num_history_runs=3 when both are None. Override after
+    # construction so get_messages receives None and returns all runs.
+    if include_all_history:
+        agent.num_history_runs = None
+
     logger.info(f"Created agent '{agent_name}' ({agent_config.display_name}) with {len(tools)} tools")
 
     return agent

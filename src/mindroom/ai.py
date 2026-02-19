@@ -17,7 +17,7 @@ from agno.models.openai import OpenAIChat
 from agno.models.openrouter import OpenRouter
 from agno.run.agent import RunContentEvent, RunErrorEvent, RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
 
-from .agents import create_agent
+from .agents import _get_agent_session, create_agent, create_session_storage, get_seen_event_ids
 from .constants import ENABLE_AI_CACHE, PROVIDER_ENV_KEYS
 from .credentials import get_credentials_manager
 from .credentials_sync import get_api_key_for_provider, get_ollama_host
@@ -192,23 +192,79 @@ def get_model_instance(config: Config, model_name: str = "default") -> Model:
     return _create_model_for_provider(provider, model_id, model_config, extra_kwargs)
 
 
+def _format_messages_context(messages: list[dict[str, Any]], header: str, prompt: str) -> str:
+    """Format messages as context prepended to a prompt."""
+    context_lines: list[str] = []
+    for msg in messages:
+        sender = msg.get("sender")
+        body = msg.get("body")
+        if sender and body:
+            context_lines.append(f"{sender}: {body}")
+    if not context_lines:
+        return prompt
+    context = "\n".join(context_lines)
+    return f"{header}\n{context}\n\nCurrent message:\n{prompt}"
+
+
 def build_prompt_with_thread_history(prompt: str, thread_history: list[dict[str, Any]] | None = None) -> str:
     """Build a prompt with thread history context when available."""
     if not thread_history:
         return prompt
+    return _format_messages_context(thread_history, "Previous conversation in this thread:", prompt)
 
-    context_lines: list[str] = []
-    for message in thread_history:
-        sender = message.get("sender")
-        body = message.get("body")
-        if sender and body:
-            context_lines.append(f"{sender}: {body}")
 
-    if not context_lines:
+def _get_unseen_messages(
+    thread_history: list[dict[str, Any]],
+    agent_name: str,
+    config: Config,
+    seen_event_ids: set[str],
+    current_event_id: str | None,
+) -> list[dict[str, Any]]:
+    """Filter thread_history to messages not yet consumed by this agent.
+
+    Excludes:
+    - Messages from this agent (by Matrix user ID)
+    - Messages whose event_id is in seen_event_ids
+    - The current triggering message (current_event_id)
+    """
+    matrix_id = config.ids.get(agent_name)
+    agent_sender_id = matrix_id.full_id if matrix_id else None
+    unseen: list[dict[str, Any]] = []
+    for msg in thread_history:
+        event_id = msg.get("event_id")
+        sender = msg.get("sender")
+        # Skip messages from this agent
+        if agent_sender_id and sender == agent_sender_id:
+            continue
+        # Skip already-seen messages
+        if event_id and event_id in seen_event_ids:
+            continue
+        # Skip the current triggering message
+        if current_event_id and event_id == current_event_id:
+            continue
+        unseen.append(msg)
+    return unseen
+
+
+def _build_prompt_with_unseen(prompt: str, unseen_messages: list[dict[str, Any]]) -> str:
+    """Prepend unseen messages from other participants to the prompt."""
+    if not unseen_messages:
         return prompt
+    return _format_messages_context(
+        unseen_messages,
+        "Messages from other participants since your last response:",
+        prompt,
+    )
 
-    context = "\n".join(context_lines)
-    return f"Previous conversation in this thread:\n{context}\n\nCurrent message:\n{prompt}"
+
+def _build_run_metadata(reply_to_event_id: str | None, unseen_event_ids: list[str]) -> dict[str, Any] | None:
+    """Build metadata dict for a run, tracking consumed Matrix event_ids."""
+    if not reply_to_event_id:
+        return None
+    return {
+        "matrix_event_id": reply_to_event_id,
+        "matrix_seen_event_ids": [reply_to_event_id, *unseen_event_ids],
+    }
 
 
 def _build_cache_key(agent: Agent, full_prompt: str, session_id: str) -> str:
@@ -225,12 +281,20 @@ async def _cached_agent_run(
     storage_path: Path,
     user_id: str | None = None,
     images: Sequence[Image] | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> RunOutput:
     """Cached wrapper for agent.arun() calls."""
     # Skip cache when images are present (large bytes, unlikely to repeat)
-    cache = None if images else get_cache(storage_path)
+    # or when Agno history is enabled (prompt can be identical but replayed history differs)
+    cache = None if (images or agent.add_history_to_context) else get_cache(storage_path)
     if cache is None:
-        return await agent.arun(full_prompt, session_id=session_id, user_id=user_id, images=images)
+        return await agent.arun(
+            full_prompt,
+            session_id=session_id,
+            user_id=user_id,
+            images=images,
+            metadata=metadata,
+        )
 
     model = agent.model
     assert model is not None
@@ -240,7 +304,7 @@ async def _cached_agent_run(
         logger.info("Cache hit", agent=agent_name)
         return cast("RunOutput", cached_result)
 
-    response = await agent.arun(full_prompt, session_id=session_id, user_id=user_id)
+    response = await agent.arun(full_prompt, session_id=session_id, user_id=user_id, metadata=metadata)
 
     cache.set(cache_key, response)
     logger.info("Response cached", agent=agent_name)
@@ -257,15 +321,44 @@ async def _prepare_agent_and_prompt(
     thread_history: list[dict[str, Any]] | None = None,
     knowledge: Knowledge | None = None,
     include_interactive_questions: bool = True,
-) -> tuple[Agent, str]:
+    session_id: str | None = None,
+    reply_to_event_id: str | None = None,
+) -> tuple[Agent, str, list[str]]:
     """Prepare agent and full prompt for AI processing.
 
     Returns:
-        Tuple of (agent, full_prompt, session_id)
+        Tuple of (agent, full_prompt, unseen_event_ids).
+        unseen_event_ids is the list of event_ids injected as unseen context
+        (empty when using the fallback path).
 
     """
     enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, storage_path, config, room_id)
-    full_prompt = build_prompt_with_thread_history(enhanced_prompt, thread_history)
+
+    unseen_event_ids: list[str] = []
+
+    # Check whether Agno already has prior runs for this session.
+    has_prior_runs = False
+    if session_id and thread_history:
+        storage = create_session_storage(agent_name, storage_path)
+        session = _get_agent_session(storage, session_id)
+        has_prior_runs = session is not None and bool(session.runs)
+
+    if has_prior_runs and reply_to_event_id:
+        # Matrix bot path: Agno replays history natively, inject only unseen messages.
+        assert session is not None
+        assert thread_history is not None
+        seen_ids = get_seen_event_ids(session)
+        unseen = _get_unseen_messages(thread_history, agent_name, config, seen_ids, reply_to_event_id)
+        unseen_event_ids = [msg["event_id"] for msg in unseen if msg.get("event_id")]
+        full_prompt = _build_prompt_with_unseen(enhanced_prompt, unseen)
+    elif has_prior_runs and not reply_to_event_id:
+        # Non-Matrix path (OpenAI-compat): Agno replays history natively.
+        # No unseen detection (thread_history entries lack event_id fields).
+        full_prompt = enhanced_prompt
+    else:
+        # No prior runs (first turn / storage lost / no session_id) → fallback.
+        full_prompt = build_prompt_with_thread_history(enhanced_prompt, thread_history)
+
     logger.info("Preparing agent and prompt", agent=agent_name, full_prompt=full_prompt)
     agent = create_agent(
         agent_name,
@@ -274,7 +367,7 @@ async def _prepare_agent_and_prompt(
         knowledge=knowledge,
         include_interactive_questions=include_interactive_questions,
     )
-    return agent, full_prompt
+    return agent, full_prompt, unseen_event_ids
 
 
 async def ai_response(
@@ -289,6 +382,7 @@ async def ai_response(
     user_id: str | None = None,
     include_interactive_questions: bool = True,
     images: Sequence[Image] | None = None,
+    reply_to_event_id: str | None = None,
 ) -> str:
     """Generates a response using the specified agno Agent with memory integration.
 
@@ -306,6 +400,8 @@ async def ai_response(
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
         images: Optional images to pass to the AI model for vision analysis
+        reply_to_event_id: Matrix event ID of the triggering message, stored
+            in run metadata for unseen message tracking and edit cleanup.
 
     Returns:
         Agent response string
@@ -315,7 +411,7 @@ async def ai_response(
 
     # Prepare agent and prompt - this can fail if agent creation fails (e.g., missing API key)
     try:
-        agent, full_prompt = await _prepare_agent_and_prompt(
+        agent, full_prompt, unseen_event_ids = await _prepare_agent_and_prompt(
             agent_name,
             prompt,
             storage_path,
@@ -324,10 +420,14 @@ async def ai_response(
             thread_history,
             knowledge,
             include_interactive_questions=include_interactive_questions,
+            session_id=session_id,
+            reply_to_event_id=reply_to_event_id,
         )
     except Exception as e:
         logger.exception("Error preparing agent", agent=agent_name)
         return get_user_friendly_error_message(e, agent_name)
+
+    metadata = _build_run_metadata(reply_to_event_id, unseen_event_ids)
 
     # Execute the AI call - this can fail for network, rate limits, etc.
     try:
@@ -339,6 +439,7 @@ async def ai_response(
             storage_path,
             user_id=user_id,
             images=images,
+            metadata=metadata,
         )
     except Exception as e:
         logger.exception("Error generating AI response", agent=agent_name)
@@ -360,6 +461,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     user_id: str | None = None,
     include_interactive_questions: bool = True,
     images: Sequence[Image] | None = None,
+    reply_to_event_id: str | None = None,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
 
@@ -380,6 +482,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
         images: Optional images to pass to the AI model for vision analysis
+        reply_to_event_id: Matrix event ID of the triggering message, stored
+            in run metadata for unseen message tracking and edit cleanup.
 
     Yields:
         Streaming chunks/events as they become available
@@ -389,7 +493,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
 
     # Prepare agent and prompt - this can fail if agent creation fails
     try:
-        agent, full_prompt = await _prepare_agent_and_prompt(
+        agent, full_prompt, unseen_event_ids = await _prepare_agent_and_prompt(
             agent_name,
             prompt,
             storage_path,
@@ -398,14 +502,18 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             thread_history,
             knowledge,
             include_interactive_questions=include_interactive_questions,
+            session_id=session_id,
+            reply_to_event_id=reply_to_event_id,
         )
     except Exception as e:
         logger.exception("Error preparing agent for streaming", agent=agent_name)
         yield get_user_friendly_error_message(e, agent_name)
         return
 
-    # Check cache (skip when images are present)
-    cache = None if images else get_cache(storage_path)
+    metadata = _build_run_metadata(reply_to_event_id, unseen_event_ids)
+
+    # Check cache (skip when images are present or history is enabled)
+    cache = None if (images or agent.add_history_to_context) else get_cache(storage_path)
     if cache is not None:
         model = agent.model
         assert model is not None
@@ -428,6 +536,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             images=images,
             stream=True,
             stream_events=True,
+            metadata=metadata,
         )
     except Exception as e:
         logger.exception("Error starting streaming AI response")

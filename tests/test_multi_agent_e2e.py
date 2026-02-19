@@ -136,6 +136,7 @@ async def test_agent_processes_direct_mention(
                     knowledge=None,
                     user_id=test_user_id,
                     images=None,
+                    reply_to_event_id="$test_event:localhost",
                 )
 
                 # Verify message was sent (thinking + streaming updates)
@@ -421,6 +422,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 knowledge=None,
                 user_id=test_user_id,
                 images=None,
+                reply_to_event_id=f"$test_event2:{domain}",
             )
 
             # Verify thread response format (team response with mocking issue)
