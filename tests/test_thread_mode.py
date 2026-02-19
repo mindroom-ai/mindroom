@@ -23,7 +23,7 @@ from .conftest import TEST_PASSWORD
 
 
 @pytest.fixture
-def room_modestreaming_config() -> Config:
+def room_mode_config() -> Config:
     """Config with one agent in room mode and one in default thread mode."""
     return Config(
         agents={
@@ -95,13 +95,13 @@ class TestAgentBotThreadMode:
 
     def test_thread_mode_room(
         self,
-        room_modestreaming_config: Config,
+        room_mode_config: Config,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
         """Agent configured with thread_mode=room should report room mode."""
         bot = AgentBot(
-            config=room_modestreaming_config,
+            config=room_mode_config,
             agent_user=assistant_user,
             storage_path=tmp_path,
         )
@@ -109,13 +109,13 @@ class TestAgentBotThreadMode:
 
     def test_thread_mode_default(
         self,
-        room_modestreaming_config: Config,
+        room_mode_config: Config,
         coder_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
         """Agent with default config should report thread mode."""
         bot = AgentBot(
-            config=room_modestreaming_config,
+            config=room_mode_config,
             agent_user=coder_user,
             storage_path=tmp_path,
         )
@@ -142,13 +142,13 @@ class TestExtractMessageContextRoomMode:
     @pytest.mark.asyncio
     async def test_room_mode_skips_derive(
         self,
-        room_modestreaming_config: Config,
+        room_mode_config: Config,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
         """In room mode, _extract_message_context should return empty thread context."""
         bot = AgentBot(
-            config=room_modestreaming_config,
+            config=room_mode_config,
             agent_user=assistant_user,
             storage_path=tmp_path,
         )
@@ -182,13 +182,13 @@ class TestSendResponseRoomMode:
     @pytest.mark.asyncio
     async def test_room_mode_no_thread_metadata(
         self,
-        room_modestreaming_config: Config,
+        room_mode_config: Config,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
         """In room mode, _send_response should not add thread relation metadata."""
         bot = AgentBot(
-            config=room_modestreaming_config,
+            config=room_mode_config,
             agent_user=assistant_user,
             storage_path=tmp_path,
         )
