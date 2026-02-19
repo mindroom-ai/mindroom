@@ -93,7 +93,6 @@ models:
     id: claude-sonnet-4-5-latest     # Required: Model ID for the provider
     host: null                     # Optional: Host URL (e.g., for Ollama)
     api_key: null                  # Optional: API key (usually from env vars)
-    context_window: null           # Optional: Context window size; defaults to 128000 if unset
     extra_kwargs: null             # Optional: Provider-specific parameters
 
 # Team configurations (optional)
