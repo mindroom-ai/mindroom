@@ -823,27 +823,28 @@ agents:
 
 ## Configuration Options
 
-| Option                        | Type   | Default     | Description                                                                                                                                              |
-| ----------------------------- | ------ | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `display_name`                | string | *required*  | Human-readable name shown in Matrix as the bot's display name                                                                                            |
-| `role`                        | string | `""`        | System prompt describing the agent's purpose — guides its behavior and expertise                                                                         |
-| `model`                       | string | `"default"` | Model name (must match a key in the `models` section)                                                                                                    |
-| `tools`                       | list   | `[]`        | Agent-specific tool names (see [Tools](https://docs.mindroom.chat/tools/index.md)); effective tools are `defaults.tools + tools` with duplicates removed |
-| `include_default_tools`       | bool   | `true`      | When `true`, append `defaults.tools` to this agent's `tools`; set to `false` to opt this agent out                                                       |
-| `skills`                      | list   | `[]`        | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/index.md))                                                                 |
-| `instructions`                | list   | `[]`        | Extra lines appended to the system prompt after the role                                                                                                 |
-| `rooms`                       | list   | `[]`        | Room aliases to auto-join; rooms are created if they don't exist                                                                                         |
-| `markdown`                    | bool   | `true`      | When enabled, the agent is instructed to format responses as Markdown                                                                                    |
-| `learning`                    | bool   | `true`      | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time           |
-| `learning_mode`               | string | `"always"`  | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call                                      |
-| `knowledge_bases`             | list   | `[]`        | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                                |
-| `context_files`               | list   | `[]`        | File paths loaded at agent init/reload and prepended to role context (under `Personality Context`)                                                       |
-| `memory_dir`                  | string | `null`      | Directory loaded at agent init/reload for `MEMORY.md` and dated files (under `Memory Context`)                                                           |
-| `num_history_runs`            | int    | `null`      | Number of prior Agno runs to include as history context (`null` = all). Mutually exclusive with `num_history_messages`                                   |
-| `num_history_messages`        | int    | `null`      | Max messages from history. Mutually exclusive with `num_history_runs`                                                                                    |
-| `compress_tool_results`       | bool   | `true`      | Compress tool results in history to save context                                                                                                         |
-| `enable_session_summaries`    | bool   | `false`     | Generate AI summaries of older conversation segments for compaction (each summary costs an extra LLM call)                                               |
-| `max_tool_calls_from_history` | int    | `null`      | Limit tool call messages replayed from history (`null` = no limit)                                                                                       |
+| Option                        | Type   | Default     | Description                                                                                                                                                                                                       |
+| ----------------------------- | ------ | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `display_name`                | string | *required*  | Human-readable name shown in Matrix as the bot's display name                                                                                                                                                     |
+| `role`                        | string | `""`        | System prompt describing the agent's purpose — guides its behavior and expertise                                                                                                                                  |
+| `model`                       | string | `"default"` | Model name (must match a key in the `models` section)                                                                                                                                                             |
+| `tools`                       | list   | `[]`        | Agent-specific tool names (see [Tools](https://docs.mindroom.chat/tools/index.md)); effective tools are `defaults.tools + tools` with duplicates removed                                                          |
+| `include_default_tools`       | bool   | `true`      | When `true`, append `defaults.tools` to this agent's `tools`; set to `false` to opt this agent out                                                                                                                |
+| `skills`                      | list   | `[]`        | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/index.md))                                                                                                                          |
+| `instructions`                | list   | `[]`        | Extra lines appended to the system prompt after the role                                                                                                                                                          |
+| `rooms`                       | list   | `[]`        | Room aliases to auto-join; rooms are created if they don't exist                                                                                                                                                  |
+| `markdown`                    | bool   | `true`      | When enabled, the agent is instructed to format responses as Markdown                                                                                                                                             |
+| `learning`                    | bool   | `true`      | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time                                                                    |
+| `learning_mode`               | string | `"always"`  | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call                                                                                               |
+| `knowledge_bases`             | list   | `[]`        | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                                                                                         |
+| `context_files`               | list   | `[]`        | File paths loaded at agent init/reload and prepended to role context (under `Personality Context`)                                                                                                                |
+| `memory_dir`                  | string | `null`      | Directory loaded at agent init/reload for `MEMORY.md` and dated files (under `Memory Context`)                                                                                                                    |
+| `thread_mode`                 | string | `"thread"`  | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
+| `num_history_runs`            | int    | `null`      | Number of prior Agno runs to include as history context (`null` = all). Mutually exclusive with `num_history_messages`                                                                                            |
+| `num_history_messages`        | int    | `null`      | Max messages from history. Mutually exclusive with `num_history_runs`                                                                                                                                             |
+| `compress_tool_results`       | bool   | `true`      | Compress tool results in history to save context                                                                                                                                                                  |
+| `enable_session_summaries`    | bool   | `false`     | Generate AI summaries of older conversation segments for compaction (each summary costs an extra LLM call)                                                                                                        |
+| `max_tool_calls_from_history` | int    | `null`      | Limit tool call messages replayed from history (`null` = no limit)                                                                                                                                                |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
 
@@ -1871,7 +1872,7 @@ MindRoom includes built-in context controls for OpenClaw-style agents:
 
 ## Known limitations
 
-**Threading model:** MindRoom responds in Matrix threads by default. OpenClaw uses continuous room-level conversations. On mobile or via bridges (Telegram, Signal, WhatsApp), this means you must navigate into threads to continue a conversation. See [#169](https://github.com/mindroom-ai/mindroom/issues/169) for the planned `thread_mode: room` option.
+**Threading model:** MindRoom responds in Matrix threads by default. OpenClaw uses continuous room-level conversations. To match this behavior on mobile or via bridges (Telegram, Signal, WhatsApp), set `thread_mode: room` on the agent — this sends plain room messages with a single persistent session per room instead of creating threads.
 
 ## Privacy guidance
 
