@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -17,9 +18,10 @@ from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
 
 from mindroom.bot import AgentBot, MessageContext, MultiAgentOrchestrator, MultiKnowledgeVectorDb
-from mindroom.config import AgentConfig, Config, KnowledgeBaseConfig, ModelConfig
+from mindroom.config import AgentConfig, Config, DefaultsConfig, KnowledgeBaseConfig, ModelConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.tool_events import ToolTraceEntry
 
 from .conftest import TEST_PASSWORD
 
@@ -608,10 +610,128 @@ class TestAgentBot:
                 images=None,
                 reply_to_event_id="event123",
                 show_tool_calls=True,
+                tool_trace_collector=ANY,
             )
             mock_stream_agent_response.assert_not_called()
             # With stop button support: initial + reaction + final
             assert bot.client.room_send.call_count >= 2
+
+    @pytest.mark.asyncio
+    async def test_non_streaming_hidden_tool_calls_still_send_tool_trace(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Hidden inline tool calls should still propagate structured tool metadata."""
+
+        @asynccontextmanager
+        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
+            yield
+
+        config = Config(
+            agents={
+                "calculator": AgentConfig(
+                    display_name="CalculatorAgent",
+                    rooms=["!test:localhost"],
+                    show_tool_calls=False,
+                ),
+            },
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot.client = AsyncMock()
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._build_scheduling_tool_context = MagicMock(return_value=None)
+        bot._build_openclaw_context = MagicMock(return_value=None)
+        bot._send_response = AsyncMock(return_value="$response")
+
+        async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+            collector = kwargs["tool_trace_collector"]
+            collector.append(
+                ToolTraceEntry(
+                    type="tool_call_completed",
+                    tool_name="read_file",
+                    args_preview="path=README.md",
+                ),
+            )
+            return "Hidden tool call output"
+
+        with (
+            patch("mindroom.bot.typing_indicator", noop_typing_indicator),
+            patch("mindroom.bot.ai_response", side_effect=fake_ai_response) as mock_ai,
+        ):
+            event_id = await bot._process_and_respond(
+                room_id="!test:localhost",
+                prompt="Summarize README",
+                reply_to_event_id="$event",
+                thread_id=None,
+                thread_history=[],
+                user_id="@user:localhost",
+            )
+
+        assert event_id == "$response"
+        assert mock_ai.call_args.kwargs["show_tool_calls"] is False
+        tool_trace = bot._send_response.call_args.kwargs["tool_trace"]
+        assert tool_trace is not None
+        assert len(tool_trace) == 1
+        assert tool_trace[0].tool_name == "read_file"
+
+    @pytest.mark.asyncio
+    async def test_skill_command_uses_target_agent_show_tool_calls_setting(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Skill command responses should use the target agent's show_tool_calls setting."""
+
+        @asynccontextmanager
+        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
+            yield
+
+        def discard_background_task(coro: object, *, _name: str) -> None:
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+
+        config = Config(
+            agents={
+                "calculator": AgentConfig(
+                    display_name="CalculatorAgent",
+                    rooms=["!test:localhost"],
+                    show_tool_calls=False,
+                ),
+                "general": AgentConfig(
+                    display_name="GeneralAgent",
+                    rooms=["!test:localhost"],
+                    show_tool_calls=True,
+                ),
+            },
+            defaults=DefaultsConfig(show_tool_calls=False),
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot.client = AsyncMock()
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._build_scheduling_tool_context = MagicMock(return_value=None)
+        bot._build_openclaw_context = MagicMock(return_value=None)
+        bot._send_response = AsyncMock(return_value="$response")
+
+        with (
+            patch("mindroom.bot.typing_indicator", noop_typing_indicator),
+            patch("mindroom.bot.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch("mindroom.bot.create_background_task", side_effect=discard_background_task),
+        ):
+            mock_ai.return_value = "Skill response"
+            await bot._send_skill_command_response(
+                room_id="!test:localhost",
+                reply_to_event_id="$event",
+                thread_id=None,
+                thread_history=[],
+                prompt="Use research skill",
+                agent_name="general",
+                user_id="@user:localhost",
+                reply_to_event=None,
+            )
+
+        assert mock_ai.call_args.kwargs["show_tool_calls"] is True
 
     @pytest.mark.asyncio
     async def test_agent_bot_on_message_not_mentioned(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:

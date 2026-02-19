@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -425,6 +425,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 images=None,
                 reply_to_event_id=f"$test_event2:{domain}",
                 show_tool_calls=True,
+                tool_trace_collector=ANY,
             )
 
             # Verify thread response format (team response with mocking issue)

@@ -126,6 +126,7 @@ if TYPE_CHECKING:
     from agno.tools.toolkit import Toolkit
 
     from .knowledge import KnowledgeManager
+    from .tool_events import ToolTraceEntry
 
 logger = get_logger(__name__)
 
@@ -606,7 +607,11 @@ class AgentBot:
     @property
     def show_tool_calls(self) -> bool:
         """Whether to show tool call details inline in responses."""
-        agent_config = self.config.agents.get(self.agent_name)
+        return self._show_tool_calls_for_agent(self.agent_name)
+
+    def _show_tool_calls_for_agent(self, agent_name: str) -> bool:
+        """Resolve tool-call visibility for a specific agent."""
+        agent_config = self.config.agents.get(agent_name)
         if agent_config and agent_config.show_tool_calls is not None:
             return agent_config.show_tool_calls
         return self.config.defaults.show_tool_calls
@@ -1725,6 +1730,7 @@ class AgentBot:
             user_id=user_id,
         )
         openclaw_context = self._build_openclaw_context(room_id, thread_id, user_id)
+        tool_trace: list[ToolTraceEntry] = []
 
         try:
             # Show typing indicator while generating response
@@ -1743,6 +1749,7 @@ class AgentBot:
                         images=images,
                         reply_to_event_id=reply_to_event_id,
                         show_tool_calls=self.show_tool_calls,
+                        tool_trace_collector=tool_trace,
                     )
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
@@ -1757,11 +1764,17 @@ class AgentBot:
 
         if existing_event_id:
             # Edit the existing message
-            await self._edit_message(room_id, existing_event_id, response_text, thread_id)
+            await self._edit_message(room_id, existing_event_id, response_text, thread_id, tool_trace=tool_trace)
             return existing_event_id
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
-        event_id = await self._send_response(room_id, reply_to_event_id, response.formatted_text, thread_id)
+        event_id = await self._send_response(
+            room_id,
+            reply_to_event_id,
+            response.formatted_text,
+            thread_id,
+            tool_trace=tool_trace,
+        )
         if event_id and response.option_map and response.options_list:
             # For interactive questions, use the same thread root that _send_response uses:
             # - If already in a thread, use that thread_id
@@ -1805,6 +1818,8 @@ class AgentBot:
             user_id=user_id,
         )
         openclaw_context = self._build_openclaw_context(room_id, thread_id, user_id, agent_name=agent_name)
+        show_tool_calls = self._show_tool_calls_for_agent(agent_name)
+        tool_trace: list[ToolTraceEntry] = []
 
         async with typing_indicator(self.client, room_id):
             with scheduling_tool_context(scheduler_context), openclaw_tool_context(openclaw_context):
@@ -1818,7 +1833,8 @@ class AgentBot:
                     room_id=room_id,
                     knowledge=knowledge,
                     reply_to_event_id=reply_to_event_id,
-                    show_tool_calls=self.show_tool_calls,
+                    show_tool_calls=show_tool_calls,
+                    tool_trace_collector=tool_trace,
                 )
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
@@ -1829,6 +1845,7 @@ class AgentBot:
             thread_id,
             reply_to_event=reply_to_event,
             skip_mentions=True,
+            tool_trace=tool_trace,
         )
 
         if event_id and response.option_map and response.options_list:
@@ -2100,6 +2117,7 @@ class AgentBot:
         thread_id: str | None,
         reply_to_event: nio.RoomMessageText | None = None,
         skip_mentions: bool = False,
+        tool_trace: list[ToolTraceEntry] | None = None,
     ) -> str | None:
         """Send a response message to a room.
 
@@ -2110,6 +2128,7 @@ class AgentBot:
             thread_id: The thread ID if already in a thread
             reply_to_event: Optional event object for the message we're replying to (used to check for safe thread root)
             skip_mentions: If True, add metadata to indicate mentions should not trigger responses
+            tool_trace: Optional structured tool trace metadata for message content
 
         Returns:
             Event ID if message was sent successfully, None otherwise.
@@ -2127,6 +2146,7 @@ class AgentBot:
                 thread_event_id=None,
                 reply_to_event_id=None,
                 latest_thread_event_id=None,
+                tool_trace=tool_trace,
             )
         else:
             # Always ensure we have a thread_id - use the original message as thread root if needed
@@ -2149,6 +2169,7 @@ class AgentBot:
                 thread_event_id=effective_thread_id,
                 reply_to_event_id=reply_to_event_id,
                 latest_thread_event_id=latest_thread_event_id,
+                tool_trace=tool_trace,
             )
 
         # Add metadata to indicate mentions should be ignored for responses
@@ -2163,7 +2184,14 @@ class AgentBot:
         self.logger.error("Failed to send response to room", room_id=room_id)
         return None
 
-    async def _edit_message(self, room_id: str, event_id: str, new_text: str, thread_id: str | None) -> bool:
+    async def _edit_message(
+        self,
+        room_id: str,
+        event_id: str,
+        new_text: str,
+        thread_id: str | None,
+        tool_trace: list[ToolTraceEntry] | None = None,
+    ) -> bool:
         """Edit an existing message.
 
         Returns:
@@ -2179,6 +2207,7 @@ class AgentBot:
                 self.config,
                 new_text,
                 sender_domain=sender_domain,
+                tool_trace=tool_trace,
             )
         else:
             # For edits in threads, we need to get the latest thread event ID for MSC3440 compliance
@@ -2200,6 +2229,7 @@ class AgentBot:
                 sender_domain=sender_domain,
                 thread_event_id=thread_id,
                 latest_thread_event_id=latest_thread_event_id,
+                tool_trace=tool_trace,
             )
 
         assert self.client is not None
