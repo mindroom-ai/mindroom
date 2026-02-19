@@ -17,13 +17,14 @@ Models define the AI providers and model IDs used by agents.
 
 Each model configuration supports the following fields:
 
-| Field          | Required | Description                                       |
-| -------------- | -------- | ------------------------------------------------- |
-| `provider`     | Yes      | The AI provider (see supported providers above)   |
-| `id`           | Yes      | Model ID specific to the provider                 |
-| `host`         | No       | Host URL for self-hosted models (e.g., Ollama)    |
-| `api_key`      | No       | API key (usually read from environment variables) |
-| `extra_kwargs` | No       | Additional provider-specific parameters           |
+| Field            | Required | Description                                                           |
+| ---------------- | -------- | --------------------------------------------------------------------- |
+| `provider`       | Yes      | The AI provider (see supported providers above)                       |
+| `id`             | Yes      | Model ID specific to the provider                                     |
+| `host`           | No       | Host URL for self-hosted models (e.g., Ollama)                        |
+| `api_key`        | No       | API key (usually read from environment variables)                     |
+| `extra_kwargs`   | No       | Additional provider-specific parameters                               |
+| `context_window` | No       | Context window size (informational; defaults to 128 000 when omitted) |
 
 ## Configuration Examples
 
@@ -33,6 +34,7 @@ models:
   sonnet:
     provider: anthropic
     id: claude-sonnet-4-5-latest
+    context_window: 200000  # Optional; defaults to 128000 when omitted
 
   haiku:
     provider: anthropic
@@ -78,6 +80,7 @@ models:
   custom:
     provider: openai
     id: my-model
+    context_window: 128000
     extra_kwargs:
       base_url: http://localhost:8080/v1
 ```
@@ -89,6 +92,11 @@ The `extra_kwargs` field passes additional parameters directly to the underlying
 - `base_url` - Custom API endpoint (useful for OpenAI-compatible servers)
 - `temperature` - Sampling temperature
 - `max_tokens` - Maximum tokens in response
+
+## Context Window
+
+- If `context_window` is not set, MindRoom uses `128000` as a conservative default.
+- Conversation history is managed by Agno's built-in session system (`num_history_runs` / `num_history_messages`); see [Agents](https://docs.mindroom.chat/configuration/agents/index.md) for details.
 
 ## Environment Variables
 

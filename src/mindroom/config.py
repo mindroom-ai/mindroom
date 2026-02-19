@@ -130,6 +130,11 @@ class DefaultsConfig(BaseModel):
         default=True,
         description="Compress tool results in history to save context",
     )
+    max_preload_chars: int = Field(
+        default=50000,
+        ge=1,
+        description="Hard cap for extra role preload context loaded from context_files and memory_dir",
+    )
 
     @model_validator(mode="after")
     def _check_history_config(self) -> Self:

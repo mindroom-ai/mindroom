@@ -63,8 +63,12 @@ agents:
     # Optional: additional files loaded into role context at agent init/reload
     context_files:
       - ./openclaw_data/SOUL.md
-      - ./openclaw_data/USER.md
       - ./openclaw_data/AGENTS.md
+      - ./openclaw_data/USER.md
+      - ./openclaw_data/IDENTITY.md
+      - ./openclaw_data/MEMORY.md
+      - ./openclaw_data/TOOLS.md
+      - ./openclaw_data/HEARTBEAT.md
 
     # Optional: directory-based memory context (MEMORY.md + dated files)
     memory_dir: ./openclaw_data/memory
@@ -111,6 +115,7 @@ You can inject file content directly into an agent's role context without using 
 - Loads `MEMORY.md` (uppercase) if present
 - Loads dated files named `YYYY-MM-DD.md` for yesterday and today
 - Content is added under `Memory Context`
+- Preloaded context is capped by `defaults.max_preload_chars`; if exceeded, truncation drops daily files first, then `MEMORY.md`, then personality files
 
 This loading happens when the agent is created (and on config reload), not continuously on every message.
 
@@ -132,6 +137,7 @@ defaults:
   markdown: true             # Format responses as Markdown
   learning: true             # Enable Agno Learning
   learning_mode: always      # "always" or "agentic"
+  max_preload_chars: 50000   # Hard cap for preloaded context from context_files/memory_dir
   show_stop_button: false    # Show a stop button while agent is responding (global-only, cannot be overridden per-agent)
 ```
 
