@@ -14,7 +14,7 @@ The bridge enables two main use cases:
 
 2. **Access Telegram chats from Matrix** -- Your existing Telegram conversations appear as Matrix rooms in Element, so you can use one client for everything.
 
-Most users want use case 1. See [Bridging Matrix Rooms to Telegram](#bridging-matrix-rooms-to-telegram) after setup.
+Most users want use case 1. See [Bridging Matrix rooms to Telegram](#step-2-bridge-matrix-rooms-to-telegram) after setup.
 
 ## Architecture
 

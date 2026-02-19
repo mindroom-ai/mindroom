@@ -9,7 +9,7 @@ The bridge enables two main use cases:
 1. **Talk to MindRoom agents from Telegram** -- Link a Telegram group to a Matrix room (like Lobby) so you can chat with AI agents directly from the Telegram app, without opening Element.
 1. **Access Telegram chats from Matrix** -- Your existing Telegram conversations appear as Matrix rooms in Element, so you can use one client for everything.
 
-Most users want use case 1. See [Bridging Matrix Rooms to Telegram](#bridging-matrix-rooms-to-telegram) after setup.
+Most users want use case 1. See [Bridging Matrix rooms to Telegram](#step-2-bridge-matrix-rooms-to-telegram) after setup.
 
 ## Architecture
 

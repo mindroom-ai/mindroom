@@ -66,6 +66,7 @@ Start MindRoom with your configuration.
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --log-level     -l              TEXT     Set the logging level (DEBUG, INFO, WARNING,  │
 │                                          ERROR)                                        │
+│                                          [env var: LOG_LEVEL]                          │
 │                                          [default: INFO]                               │
 │ --storage-path  -s              PATH     Base directory for persistent MindRoom data   │
 │                                          (state, sessions, tracking)                   │
