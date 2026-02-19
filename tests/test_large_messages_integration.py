@@ -410,6 +410,47 @@ async def test_large_message_with_tool_tags_preserves_html() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tool_aware_preview_preserves_non_tool_text() -> None:
+    """Non-tool text is kept intact while tool blocks are middle-truncated."""
+    client = MockClient()
+
+    # Non-tool text that should survive in full
+    intro = "Important analysis result:\n" * 20  # ~520 bytes
+    conclusion = "\nFinal conclusion here.\n"
+
+    # A single huge tool result
+    tool_result = "x" * 80000
+    body = f'{intro}<tool>search(q=test)\n{tool_result}\n{{"done": true}}</tool>{conclusion}'
+    formatted_body = f'<p>{intro}</p><tool>search(q=test)\n{tool_result}\n{{"done": true}}</tool><p>{conclusion}</p>'
+
+    content = {
+        "body": body,
+        "formatted_body": formatted_body,
+        "msgtype": "m.text",
+        "format": "org.matrix.custom.html",
+    }
+
+    result = await prepare_large_message(client, "!room:server", content)
+
+    assert result["msgtype"] == "m.file"
+
+    # Non-tool text must survive in the body preview
+    assert "Important analysis result:" in result["body"]
+    assert "Final conclusion here." in result["body"]
+
+    # Tool block should be middle-truncated
+    assert "[…]" in result["body"]
+
+    # The tool block should keep its start (function signature) and end
+    assert "search(q=test)" in result["body"]
+    assert '"done": true' in result["body"]
+
+    # Same for formatted_body
+    assert "Important analysis result:" in result["formatted_body"]
+    assert "[…]" in result["formatted_body"]
+
+
+@pytest.mark.asyncio
 async def test_streaming_finalize() -> None:
     """Test that streaming finalize properly handles large messages."""
     client = MockClient()
