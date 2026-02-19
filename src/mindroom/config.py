@@ -242,6 +242,11 @@ class ModelConfig(BaseModel):
         default=None,
         description="Additional provider-specific parameters passed directly to the model",
     )
+    context_window: int = Field(
+        default=128000,
+        ge=1,
+        description="Context window size in tokens (informational)",
+    )
 
 
 class RouterConfig(BaseModel):

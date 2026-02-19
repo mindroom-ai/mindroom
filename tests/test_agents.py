@@ -260,11 +260,11 @@ def test_agent_preload_cap_truncates_daily_before_memory_and_personality(
     config.defaults.max_preload_chars = 620
 
     soul_path = tmp_path / "SOUL.md"
-    soul_path.write_text("P" * 140, encoding="utf-8")
+    soul_path.write_text("START_SOUL " + "P" * 120 + " END_SOUL", encoding="utf-8")
 
     memory_dir = tmp_path / "memory"
     memory_dir.mkdir(parents=True, exist_ok=True)
-    (memory_dir / "MEMORY.md").write_text("M" * 140, encoding="utf-8")
+    (memory_dir / "MEMORY.md").write_text("START_MEM " + "M" * 120 + " END_MEM", encoding="utf-8")
     today = datetime.now(ZoneInfo(config.timezone)).date()
     yesterday = today - timedelta(days=1)
     (memory_dir / f"{yesterday.isoformat()}.md").write_text("Y" * 140, encoding="utf-8")
@@ -280,6 +280,9 @@ def test_agent_preload_cap_truncates_daily_before_memory_and_personality(
     assert f"### {today.isoformat()}.md" in agent.role
     assert "### MEMORY.md" in agent.role
     assert "### SOUL.md" in agent.role
+    # Verify trimming preserves the start (identity) and removes from the end
+    assert "START_SOUL" in agent.role
+    assert "START_MEM" in agent.role
 
 
 @patch("mindroom.agents.SqliteDb")

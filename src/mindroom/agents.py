@@ -24,7 +24,6 @@ from .skills import build_agent_skills
 from .tools_metadata import get_tool_by_name
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
 
     from agno.knowledge.protocol import KnowledgeProtocol
@@ -175,52 +174,44 @@ def _build_preload_truncation_groups(
     ]
 
 
-def _drop_full_chunks_until_limit(
-    chunks: list[AdditionalContextChunk],
-    render: Callable[[], str],
+def _drop_whole_chunks(
+    groups: list[list[AdditionalContextChunk]],
+    personality_chunks: list[AdditionalContextChunk],
+    memory_chunks: list[AdditionalContextChunk],
     max_preload_chars: int,
 ) -> int:
-    """Drop whole chunk bodies until under the cap or chunks are exhausted."""
-    omitted_chars = 0
-    for chunk in chunks:
-        if len(render()) <= max_preload_chars:
-            break
-        if not chunk.body:
-            continue
-        omitted_chars += len(chunk.body)
-        chunk.body = ""
-    return omitted_chars
+    """Drop entire chunk bodies (least critical first) until under the cap."""
+    omitted = 0
+    for group in groups:
+        for chunk in group:
+            if len(_render_additional_context(personality_chunks, memory_chunks)) <= max_preload_chars:
+                return omitted
+            if not chunk.body:
+                continue
+            omitted += len(chunk.body)
+            chunk.body = ""
+    return omitted
 
 
-def _trim_chunks_until_limit(
-    chunks: list[AdditionalContextChunk],
-    render: Callable[[], str],
+def _trim_chunk_tails(
+    groups: list[list[AdditionalContextChunk]],
+    personality_chunks: list[AdditionalContextChunk],
+    memory_chunks: list[AdditionalContextChunk],
     max_preload_chars: int,
 ) -> int:
-    """Trim chunk prefixes until rendered context fits within cap."""
-    omitted_chars = 0
-    for chunk in chunks:
-        overflow = len(render()) - max_preload_chars
-        if overflow <= 0:
-            break
-        if not chunk.body:
-            continue
-        remove_count = min(overflow, len(chunk.body))
-        chunk.body = chunk.body[remove_count:].lstrip()
-        omitted_chars += remove_count
-    return omitted_chars
-
-
-def _append_truncation_marker(rendered: str, omitted_chars: int, max_preload_chars: int) -> str:
-    """Append truncation marker while respecting cap."""
-    marker = f"[Content truncated - {omitted_chars} chars omitted. Use search_knowledge_base for older history.]"
-    marker_block = f"{marker}\n\n"
-    if len(rendered) + len(marker_block) > max_preload_chars:
-        allowed = max(max_preload_chars - len(marker_block), 0)
-        rendered = rendered[-allowed:] if allowed > 0 else ""
-    if rendered and not rendered.endswith("\n\n"):
-        rendered += "\n\n"
-    return rendered + marker_block
+    """Trim from the *end* of chunks to preserve headers/identity at the top."""
+    omitted = 0
+    for group in groups:
+        for chunk in group:
+            overflow = len(_render_additional_context(personality_chunks, memory_chunks)) - max_preload_chars
+            if overflow <= 0:
+                return omitted
+            if not chunk.body:
+                continue
+            remove_count = min(overflow, len(chunk.body))
+            chunk.body = chunk.body[: len(chunk.body) - remove_count].rstrip()
+            omitted += remove_count
+    return omitted
 
 
 def _apply_preload_cap(
@@ -228,33 +219,31 @@ def _apply_preload_cap(
     memory_chunks: list[AdditionalContextChunk],
     max_preload_chars: int,
 ) -> tuple[str, int]:
-    """Apply hard preload cap with deterministic truncation priority."""
+    """Apply hard preload cap with deterministic truncation priority.
 
-    def render() -> str:
-        return _render_additional_context(personality_chunks, memory_chunks)
-
-    rendered = render()
+    Truncation order (least → most critical): daily → memory → personality.
+    First drops whole chunks, then trims from the *end* of remaining chunks.
+    """
+    rendered = _render_additional_context(personality_chunks, memory_chunks)
     if len(rendered) <= max_preload_chars:
         return rendered, 0
 
-    omitted_chars = 0
-    truncation_groups = _build_preload_truncation_groups(personality_chunks, memory_chunks)
+    groups = _build_preload_truncation_groups(personality_chunks, memory_chunks)
+    omitted_chars = _drop_whole_chunks(groups, personality_chunks, memory_chunks, max_preload_chars)
+    omitted_chars += _trim_chunk_tails(groups, personality_chunks, memory_chunks, max_preload_chars)
 
-    for group in truncation_groups:
-        omitted_chars += _drop_full_chunks_until_limit(group, render, max_preload_chars)
-        if len(render()) <= max_preload_chars:
-            break
-
-    if len(render()) > max_preload_chars:
-        for group in truncation_groups:
-            omitted_chars += _trim_chunks_until_limit(group, render, max_preload_chars)
-            if len(render()) <= max_preload_chars:
-                break
-
-    rendered = render()
+    rendered = _render_additional_context(personality_chunks, memory_chunks)
     if omitted_chars <= 0:
         return rendered, 0
-    return _append_truncation_marker(rendered, omitted_chars, max_preload_chars), omitted_chars
+
+    marker = f"[Content truncated - {omitted_chars} chars omitted. Use search_knowledge_base for older history.]"
+    marker_block = f"\n\n{marker}\n\n"
+    budget = max_preload_chars - len(marker_block)
+    if budget <= 0:
+        return marker_block[:max_preload_chars], omitted_chars
+    if len(rendered) > budget:
+        rendered = rendered[len(rendered) - budget :]
+    return rendered.rstrip("\n") + marker_block, omitted_chars
 
 
 def _build_additional_context(
