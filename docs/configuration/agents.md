@@ -97,6 +97,7 @@ agents:
 | `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents |
 | `context_files` | list | `[]` | File paths loaded at agent init/reload and prepended to role context (under `Personality Context`) |
 | `memory_dir` | string | `null` | Directory loaded at agent init/reload for `MEMORY.md` and dated files (under `Memory Context`) |
+| `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
 

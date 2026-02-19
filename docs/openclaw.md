@@ -140,7 +140,7 @@ MindRoom includes built-in context controls for OpenClaw-style agents:
 
 ## Known limitations
 
-**Threading model:** MindRoom responds in Matrix threads by default. OpenClaw uses continuous room-level conversations. On mobile or via bridges (Telegram, Signal, WhatsApp), this means you must navigate into threads to continue a conversation. See [#169](https://github.com/mindroom-ai/mindroom/issues/169) for the planned `thread_mode: room` option.
+**Threading model:** MindRoom responds in Matrix threads by default. OpenClaw uses continuous room-level conversations. To match this behavior on mobile or via bridges (Telegram, Signal, WhatsApp), set `thread_mode: room` on the agent — this sends plain room messages with a single persistent session per room instead of creating threads.
 
 ## Privacy guidance
 
