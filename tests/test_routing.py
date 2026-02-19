@@ -473,6 +473,18 @@ class TestBridgeMentionFallback:
         assert am_i_mentioned is True
         assert len(mentioned_agents) == 2
 
+    def test_single_quote_pills(self) -> None:
+        """Mautrix bridges use single-quoted href attributes."""
+        event_source = {
+            "content": {
+                "formatted_body": "<a href='https://matrix.to/#/@mindroom_calculator:localhost'>@mindroom_calculator</a> compute",
+            },
+        }
+        agent_id = MatrixID.from_username("mindroom_calculator", "localhost")
+        mentioned_agents, am_i_mentioned, _ = check_agent_mentioned(event_source, agent_id, self.config)
+        assert am_i_mentioned is True
+        assert len(mentioned_agents) == 1
+
 
 class TestAgentDescription:
     """Test agent description functionality."""

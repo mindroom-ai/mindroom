@@ -14,8 +14,9 @@ if TYPE_CHECKING:
 
     from .config import Config
 
-# Matches <a href="https://matrix.to/#/@user:domain">...</a> pills used by bridges
-_MATRIX_PILL_RE = re.compile(r'href="https://matrix\.to/#/(@[^"]+)"')
+# Matches <a href="https://matrix.to/#/@user:domain">...</a> pills used by bridges.
+# Accepts both single and double quotes (mautrix bridges use single quotes).
+_MATRIX_PILL_RE = re.compile(r"""href=["']https://matrix\.to/#/(@[^"']+)["']""")
 
 
 def _extract_mentioned_user_ids(content: dict[str, Any]) -> list[str]:
