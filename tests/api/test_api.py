@@ -239,6 +239,7 @@ def test_save_config(test_client: TestClient, temp_config_file: Path) -> None:
         "compress_tool_results": True,
         "enable_session_summaries": False,
         "show_tool_calls": True,
+        "allow_self_config": False,
         "max_preload_chars": 50000,
     }
 

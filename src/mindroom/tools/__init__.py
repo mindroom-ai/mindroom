@@ -12,6 +12,7 @@ from mindroom.tools_metadata import ConfigField, SetupType, ToolCategory, ToolSt
 
 from . import delegate as _delegate_registration  # noqa: F401
 from . import memory as _memory_registration  # noqa: F401
+from . import self_config as _self_config_registration  # noqa: F401
 from .agentql import agentql_tools
 from .airflow import airflow_tools
 from .apify import apify_tools

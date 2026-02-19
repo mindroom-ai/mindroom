@@ -170,6 +170,7 @@ agents:
 - **context_files**: File paths loaded into role context when the agent is created/reloaded
 - **memory_dir**: Directory loaded into role context for `MEMORY.md` plus yesterday/today `YYYY-MM-DD.md` files
 - **model**: (Optional) Specific model to use for this agent, overrides the default model
+- **allow_self_config**: (Optional) When `true`, gives the agent a scoped tool to read and modify its own configuration at runtime (default: inherits from `defaults.allow_self_config`, which defaults to `false`)
 
 ### File-Based Context Loading
 

@@ -453,6 +453,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     knowledge: KnowledgeProtocol | None = None,
     include_interactive_questions: bool = True,
     delegation_depth: int = 0,
+    config_path: Path | None = None,
 ) -> Agent:
     """Create an agent instance from configuration.
 
@@ -467,6 +468,9 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             support Matrix reaction-based question flows.
         delegation_depth: Current delegation nesting depth. Used to prevent
             infinite recursion when agents delegate to each other.
+        config_path: Path to the YAML config file used by tools that
+            read/write config at runtime (e.g. ``self_config``).  Falls back
+            to the module-level ``CONFIG_PATH`` when *None*.
 
     Returns:
         Configured Agent instance
@@ -525,6 +529,10 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                             delegation_depth=delegation_depth,
                         ),
                     )
+            elif tool_name == "self_config":
+                from .custom_tools.self_config import SelfConfigTools  # noqa: PLC0415
+
+                tools.append(SelfConfigTools(agent_name=agent_name, config_path=config_path))
             else:
                 tools.append(get_tool_by_name(tool_name, sandbox_tools_override=sandbox_tools))
         except ValueError as e:
@@ -543,6 +551,15 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 delegation_depth=delegation_depth,
             ),
         )
+
+    # Auto-inject self-config tool when allow_self_config is enabled
+    allow_self_config = (
+        agent_config.allow_self_config if agent_config.allow_self_config is not None else defaults.allow_self_config
+    )
+    if allow_self_config and not any(getattr(tool, "name", None) == "self_config" for tool in tools):
+        from .custom_tools.self_config import SelfConfigTools  # noqa: PLC0415
+
+        tools.append(SelfConfigTools(agent_name=agent_name, config_path=config_path))
 
     storage = create_session_storage(agent_name, resolved_storage_path)
     learning_storage = (
