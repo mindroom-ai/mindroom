@@ -60,3 +60,16 @@ Authorization checks are performed in order:
 
 > [!TIP]
 > Set `default_room_access: false` and explicitly grant access via `global_users` or `room_permissions` for better security.
+
+## Bot Accounts
+
+The `bot_accounts` field is a **top-level** config option (not under `authorization:`). It lists Matrix user IDs of non-MindRoom bots — such as bridge bots for Telegram, Slack, or other platforms — that should be treated like agents for response logic. Bots in this list won't trigger the multi-human-thread mention requirement.
+
+```yaml
+# Top-level config, not under authorization:
+bot_accounts:
+  - "@telegram_bot:example.com"
+  - "@slack_bot:example.com"
+```
+
+For more details on how `bot_accounts` affects routing behavior, see the [Router configuration](configuration/router.md) page.

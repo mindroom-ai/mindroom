@@ -69,7 +69,7 @@ Key environment variables (set in `.env` or pass directly):
 | `MATRIX_SERVER_NAME` | Server name for federation (optional) | - |
 | `MINDROOM_STORAGE_PATH` | Data storage directory | Relative to config file |
 | `LOG_LEVEL` | Logging level | `INFO` |
-| `MINDROOM_CONFIG_PATH` | Path to config.yaml | `./config.yaml` |
+| `MINDROOM_CONFIG_PATH` | Path to config.yaml | `./config.yaml`, then `~/.mindroom/config.yaml` |
 | `ANTHROPIC_API_KEY` | Anthropic API key (if using Claude models) | - |
 | `OPENAI_API_KEY` | OpenAI API key (if using OpenAI models) | - |
 | `MINDROOM_API_KEY` | API key for dashboard auth (standalone) | - (open access) |
@@ -85,6 +85,8 @@ docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.backend .
 ```
 
 The Dockerfile uses a multi-stage build with `uv` for dependency management and runs as a non-root user (UID 1000).
+
+A `Dockerfile.backend-minimal` variant is also available, which builds a smaller image without pre-installed tool extras -- useful for sandbox runners.
 
 ## With Local Matrix
 
@@ -121,7 +123,9 @@ MindRoom stores data in the `mindroom_data` directory:
 
 - `sessions/` - Per-agent conversation history (SQLite)
 - `learning/` - Per-agent Agno Learning state (SQLite, persistent across restarts)
-- `memory/` - Vector store for agent/room memories
+- `chroma/` - ChromaDB vector store for agent/room memories
+- `knowledge_db/` - Knowledge base vector stores
+- `culture/` - Shared culture state
 - `tracking/` - Response tracking to avoid duplicates
 - `credentials/` - Synchronized secrets from `.env`
 - `logs/` - Application logs

@@ -4,7 +4,7 @@
 
 ### Prerequisites
 - Docker and Docker Compose installed
-- Python 3.10+ installed
+- Python 3.12+ installed
 - API keys for LLM providers (OpenAI, Anthropic, etc.)
 
 ### Using the Instance Manager

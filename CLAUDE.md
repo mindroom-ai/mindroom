@@ -45,6 +45,14 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 | `sandbox_proxy.py` | Container sandbox proxy for isolating shell/python tools |
 | `streaming.py` | Response streaming via progressive message edits |
 | `agent_prompts.py` | Rich built-in prompts for named agents (code, research, etc.) |
+| `image_handler.py` | Image message download, decryption, and AI processing |
+| `api/` | FastAPI REST API (dashboard, credentials, OpenAI-compatible endpoint) |
+| `custom_tools/` | Built-in custom tool implementations (gmail, calendar, scheduler, etc.) |
+| `background_tasks.py` | Background task management for non-blocking operations |
+| `tool_events.py` | Tool-event formatting and metadata for Matrix messages |
+| `constants.py` | Shared constants, paths, and environment variable defaults |
+| `error_handling.py` | User-friendly error message extraction |
+| `openclaw_context.py` | Runtime context for OpenClaw-compatible tool calls |
 
 **Persistent state** lives under `mindroom_data/` (next to `config.yaml`, overridable via `MINDROOM_STORAGE_PATH`):
 - `sessions/` – Per-agent SQLite event history for Agno conversations
@@ -55,6 +63,8 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 - `credentials/` – JSON secrets synchronized from `.env`
 - `encryption_keys/` – Matrix E2E encryption keys
 - `culture/` – Shared culture state
+- `logs/` – Log files
+- `matrix_state.yaml` – Matrix sync state
 
 ### SaaS Platform (`saas-platform/`)
 - **Platform Backend**: Modular FastAPI app with routes in `saas-platform/platform-backend/src/backend/routes/`
@@ -93,6 +103,7 @@ agents:
 
 defaults:
   markdown: true
+  enable_streaming: true
 
 models:
   default:

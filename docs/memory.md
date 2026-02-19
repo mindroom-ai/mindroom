@@ -41,6 +41,8 @@ memory:
 
 The `host` field is converted internally to `openai_base_url` or `ollama_base_url` depending on the provider.
 
+**Default**: When the `llm` section is omitted, MindRoom falls back to Ollama with `llama3.2` at `http://localhost:11434`.
+
 ## How Memory Works
 
 1. **Semantic Retrieval**: Before responding, agents search for relevant memories (limit: 3 per scope)
