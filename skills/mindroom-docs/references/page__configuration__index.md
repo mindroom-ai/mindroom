@@ -146,6 +146,7 @@ defaults:
   compress_tool_results: true      # Compress tool results in history to save context
   enable_session_summaries: false  # AI summaries of older conversation segments (costs extra LLM call)
   max_tool_calls_from_history: null  # Limit tool call messages replayed from history (null = no limit)
+  show_tool_calls: true            # Default: true (show tool call details inline in responses)
 
 # defaults.tools are appended to each agent's tools list with duplicates removed.
 # Set agents.<name>.include_default_tools: false to opt out a specific agent.

@@ -40,6 +40,7 @@ class TestAIErrorDisplay:
             event_id: str,
             text: str,
             thread_id: str | None,  # noqa: ARG001
+            tool_trace: object | None = None,  # noqa: ARG001
         ) -> None:
             edited_messages.append((event_id, text))
 
@@ -200,6 +201,7 @@ class TestAIErrorDisplay:
             event_id: str,  # noqa: ARG001
             text: str,
             thread_id: str | None,  # noqa: ARG001
+            tool_trace: object | None = None,  # noqa: ARG001
         ) -> None:
             edited_messages.append(text)
 

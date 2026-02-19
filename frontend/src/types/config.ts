@@ -56,6 +56,7 @@ export interface Agent {
   learning?: boolean; // Defaults to true when omitted
   learning_mode?: LearningMode; // Defaults to always when omitted
   model?: string; // Reference to a model in the models section
+  show_tool_calls?: boolean; // Show tool call details inline in responses (defaults to true)
   thread_mode?: ThreadMode; // Conversation threading mode
   num_history_runs?: number | null; // Number of prior runs to include as history
   num_history_messages?: number | null; // Max messages from history (mutually exclusive with num_history_runs)
@@ -116,6 +117,7 @@ export interface Config {
     markdown: boolean;
     learning?: boolean;
     learning_mode?: LearningMode;
+    show_tool_calls?: boolean;
     tools?: string[];
     enable_streaming?: boolean;
     show_stop_button?: boolean;

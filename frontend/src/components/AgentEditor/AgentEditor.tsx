@@ -45,6 +45,7 @@ export function AgentEditor() {
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
   const defaultLearning = config?.defaults.learning ?? true;
   const defaultLearningMode = config?.defaults.learning_mode ?? 'always';
+  const defaultShowToolCalls = config?.defaults.show_tool_calls ?? true;
   const defaultMarkdown = config?.defaults.markdown ?? true;
   const defaultCompressToolResults = config?.defaults.compress_tool_results ?? true;
   const defaultEnableSessionSummaries = config?.defaults.enable_session_summaries ?? false;
@@ -758,6 +759,37 @@ export function AgentEditor() {
                 <SelectItem value="agentic">Agentic (tool-driven)</SelectItem>
               </SelectContent>
             </Select>
+          )}
+        />
+      </FieldGroup>
+
+      {/* Show Tool Calls */}
+      <FieldGroup
+        label="Show Tool Calls"
+        helperText="Display tool call details inline in agent responses"
+        htmlFor="show_tool_calls"
+      >
+        <Controller
+          name="show_tool_calls"
+          control={control}
+          render={({ field }) => (
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="show_tool_calls"
+                checked={field.value ?? defaultShowToolCalls}
+                onCheckedChange={checked => {
+                  const value = checked === true;
+                  field.onChange(value);
+                  handleFieldChange('show_tool_calls', value);
+                }}
+              />
+              <label
+                htmlFor="show_tool_calls"
+                className="text-sm font-medium cursor-pointer select-none"
+              >
+                Show tool calls inline
+              </label>
+            </div>
           )}
         />
       </FieldGroup>

@@ -82,6 +82,10 @@ class AgentConfig(BaseModel):
         ge=0,
         description="Max tool call messages replayed from history (per-agent override)",
     )
+    show_tool_calls: bool | None = Field(
+        default=None,
+        description="Whether to show tool call details inline in responses (per-agent override)",
+    )
 
     @model_validator(mode="after")
     def _check_history_config(self) -> Self:
@@ -151,6 +155,10 @@ class DefaultsConfig(BaseModel):
         default=None,
         ge=0,
         description="Max tool call messages replayed from history (None = no limit)",
+    )
+    show_tool_calls: bool = Field(
+        default=True,
+        description="Whether to show tool call details inline in responses",
     )
     max_preload_chars: int = Field(
         default=50000,
