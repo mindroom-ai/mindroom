@@ -603,6 +603,14 @@ class AgentBot:
         agent_config = self.config.agents.get(self.agent_name)
         return agent_config.thread_mode if agent_config else "thread"
 
+    @property
+    def show_tool_calls(self) -> bool:
+        """Whether to show tool call details inline in responses."""
+        agent_config = self.config.agents.get(self.agent_name)
+        if agent_config and agent_config.show_tool_calls is not None:
+            return agent_config.show_tool_calls
+        return self.config.defaults.show_tool_calls
+
     def _get_shared_knowledge(self, base_id: str) -> Knowledge | None:
         """Get shared knowledge instance for a configured knowledge base."""
         orchestrator = self.orchestrator
@@ -1512,6 +1520,7 @@ class AgentBot:
                             thread_history=thread_history,
                             model_name=model_name,
                             images=images,
+                            show_tool_calls=self.show_tool_calls,
                         )
 
                         event_id, accumulated = await send_streaming_response(
@@ -1524,6 +1533,7 @@ class AgentBot:
                             response_stream,
                             streaming_cls=ReplacementStreamingResponse,
                             header=None,
+                            show_tool_calls=self.show_tool_calls,
                             existing_event_id=message_id,
                             room_mode=self.thread_mode == "room",
                         )
@@ -1732,6 +1742,7 @@ class AgentBot:
                         user_id=user_id,
                         images=images,
                         reply_to_event_id=reply_to_event_id,
+                        show_tool_calls=self.show_tool_calls,
                     )
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
@@ -1807,6 +1818,7 @@ class AgentBot:
                     room_id=room_id,
                     knowledge=knowledge,
                     reply_to_event_id=reply_to_event_id,
+                    show_tool_calls=self.show_tool_calls,
                 )
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
@@ -1937,6 +1949,7 @@ class AgentBot:
                         user_id=user_id,
                         images=images,
                         reply_to_event_id=reply_to_event_id,
+                        show_tool_calls=self.show_tool_calls,
                     )
 
                     event_id, accumulated = await send_streaming_response(
@@ -1950,6 +1963,7 @@ class AgentBot:
                         streaming_cls=StreamingResponse,
                         existing_event_id=existing_event_id,
                         room_mode=self.thread_mode == "room",
+                        show_tool_calls=self.show_tool_calls,
                     )
 
             # Handle interactive questions if present

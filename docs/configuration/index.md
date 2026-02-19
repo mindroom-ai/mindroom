@@ -145,6 +145,7 @@ defaults:
   learning_mode: always            # Default: always (or agentic)
   max_preload_chars: 50000         # Hard cap for preloaded context from context_files/memory_dir
   show_stop_button: false          # Default: false (global only, cannot be overridden per-agent)
+  show_tool_calls: true            # Default: true (show tool call details inline in responses)
 
 # defaults.tools are appended to each agent's tools list with duplicates removed.
 # Set agents.<name>.include_default_tools: false to opt out a specific agent.

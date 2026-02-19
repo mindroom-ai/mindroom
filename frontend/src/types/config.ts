@@ -50,6 +50,7 @@ export interface Agent {
   learning?: boolean; // Defaults to true when omitted
   learning_mode?: LearningMode; // Defaults to always when omitted
   model?: string; // Reference to a model in the models section
+  show_tool_calls?: boolean; // Show tool call details inline in responses (defaults to true)
 }
 
 export interface Team {
@@ -104,6 +105,7 @@ export interface Config {
     markdown: boolean;
     learning?: boolean;
     learning_mode?: LearningMode;
+    show_tool_calls?: boolean;
   };
   router: {
     model: string;

@@ -588,6 +588,7 @@ class TestAgentBot:
                 user_id="@user:localhost",
                 images=None,
                 reply_to_event_id="event123",
+                show_tool_calls=True,
             )
             mock_ai_response.assert_not_called()
             # With streaming and stop button: initial message + reaction + edits
@@ -606,6 +607,7 @@ class TestAgentBot:
                 user_id="@user:localhost",
                 images=None,
                 reply_to_event_id="event123",
+                show_tool_calls=True,
             )
             mock_stream_agent_response.assert_not_called()
             # With stop button support: initial + reaction + final

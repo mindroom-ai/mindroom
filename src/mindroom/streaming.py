@@ -81,6 +81,7 @@ class StreamingResponse:
     interval_ramp_seconds: float = 15.0
     latest_thread_event_id: str | None = None  # For MSC3440 compliance
     room_mode: bool = False  # When True, skip all thread relations (for bridges/mobile)
+    show_tool_calls: bool = True  # When False, omit inline tool call text (metadata still tracked)
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
     stream_started_at: float | None = None
 
@@ -195,6 +196,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912
     header: str | None = None,
     existing_event_id: str | None = None,
     room_mode: bool = False,
+    show_tool_calls: bool = True,
 ) -> tuple[str | None, str]:
     """Stream chunks to a Matrix room, returning (event_id, accumulated_text).
 
@@ -210,6 +212,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912
         header: Optional text prefix to send before chunks
         existing_event_id: If editing an existing message, pass its ID
         room_mode: If True, skip thread relations (for bridges/mobile)
+        show_tool_calls: Whether to include tool call text inline in the streamed message
 
     Returns:
         Tuple of (final event_id or None, full accumulated text)
@@ -234,6 +237,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912
         config=config,
         latest_thread_event_id=latest_thread_event_id,
         room_mode=room_mode,
+        show_tool_calls=show_tool_calls,
     )
 
     # Ensure the first chunk triggers an initial send immediately
@@ -260,17 +264,23 @@ async def send_streaming_response(  # noqa: C901, PLR0912
             text_chunk, trace_entry = format_tool_started_event(chunk.tool)
             if trace_entry is not None:
                 streaming.tool_trace.append(trace_entry)
+            if not streaming.show_tool_calls:
+                text_chunk = ""
         elif isinstance(chunk, ToolCallCompletedEvent):
             info = extract_tool_completed_info(chunk.tool)
             if info:
                 tool_name, result = info
-                streaming.accumulated_text, trace_entry = complete_pending_tool_block(
-                    streaming.accumulated_text,
-                    tool_name,
-                    result,
-                )
+                if streaming.show_tool_calls:
+                    streaming.accumulated_text, trace_entry = complete_pending_tool_block(
+                        streaming.accumulated_text,
+                        tool_name,
+                        result,
+                    )
+                else:
+                    _, trace_entry = complete_pending_tool_block("", tool_name, result)
                 streaming.tool_trace.append(trace_entry)
-                await streaming._throttled_send(client)
+                if streaming.show_tool_calls:
+                    await streaming._throttled_send(client)
                 continue
             text_chunk = ""
         else:
