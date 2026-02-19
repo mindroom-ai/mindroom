@@ -273,13 +273,17 @@ async def _build_file_content(
     room_id: str,
     source_content: dict[str, Any],
     full_text: str,
-    has_html: bool,
+    has_tool_html: bool,
     size_limit: int,
 ) -> tuple[str | None, dict[str, Any] | None, dict[str, Any]]:
-    """Upload the full text and build the ``m.file`` content dict with previews."""
-    # Upload formatted HTML when available so the Element fork can render
-    # custom tags like <tool> as actual HTML elements.
-    if has_html:
+    """Upload the full text and build the ``m.file`` content dict with previews.
+
+    When *has_tool_html* is True the formatted_body (HTML) is uploaded so the
+    Element fork can render ``<tool>`` as real HTML elements.  Otherwise plain
+    text is uploaded so that thread-history replay feeds clean text into AI
+    prompts instead of raw HTML markup.
+    """
+    if has_tool_html:
         upload_text = source_content["formatted_body"]
         upload_mimetype = "text/html"
     else:
@@ -288,24 +292,24 @@ async def _build_file_content(
 
     mxc_uri, file_info = await _upload_text_as_mxc(client, upload_text, room_id, mimetype=upload_mimetype)
 
-    # When HTML is present both body and formatted_body are included in the
-    # event, so each preview gets half the budget to stay under the limit.
+    # When tool-HTML is present both body and formatted_body are included in
+    # the event, so each preview gets half the budget to stay under the limit.
     attachment_overhead = 5000  # Conservative estimate for attachment JSON structure
-    available = (size_limit - attachment_overhead) // 2 if has_html else size_limit - attachment_overhead
+    available = (size_limit - attachment_overhead) // 2 if has_tool_html else size_limit - attachment_overhead
 
-    preview_fn = _create_tool_aware_preview if has_html else _create_preview
+    preview_fn = _create_tool_aware_preview if has_tool_html else _create_preview
     preview = preview_fn(full_text, available)
 
     modified_content: dict[str, Any] = {
         "msgtype": "m.file",
         "body": preview,
-        "filename": "message.html" if has_html else "message.txt",
+        "filename": "message.html" if has_tool_html else "message.txt",
         "info": file_info,
     }
 
     # Preserve HTML format metadata so the Element fork treats the downloaded
     # file as HTML and renders <tool> elements via the collapsible renderer.
-    if has_html:
+    if has_tool_html:
         modified_content["format"] = "org.matrix.custom.html"
         modified_content["formatted_body"] = _create_tool_aware_preview(
             source_content["formatted_body"],
@@ -346,9 +350,11 @@ async def prepare_large_message(
 
     source_content = content["m.new_content"] if is_edit and "m.new_content" in content else content
     full_text = source_content["body"]
-    has_html = source_content.get("format") == "org.matrix.custom.html" and isinstance(
-        source_content.get("formatted_body"),
-        str,
+    formatted_body = source_content.get("formatted_body")
+    has_tool_html = (
+        source_content.get("format") == "org.matrix.custom.html"
+        and isinstance(formatted_body, str)
+        and _TOOL_BLOCK_RE.search(formatted_body) is not None
     )
 
     logger.info(f"Message too large ({current_size} bytes), uploading to MXC")
@@ -358,7 +364,7 @@ async def prepare_large_message(
         room_id,
         source_content,
         full_text,
-        has_html,
+        has_tool_html,
         size_limit,
     )
 

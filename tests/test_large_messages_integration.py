@@ -342,11 +342,11 @@ async def test_message_exactly_at_limit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_message_with_formatted_body() -> None:
-    """Test that formatted_body is handled correctly."""
+async def test_message_with_formatted_body_no_tools() -> None:
+    """HTML without <tool> tags uploads plain text to avoid polluting AI context."""
     client = MockClient()
 
-    # Large message with HTML
+    # Large message with HTML but NO <tool> tags
     large_text = "f" * 100000
     large_html = f"<p>{'f' * 100000}</p>"
     content = {
@@ -363,13 +363,12 @@ async def test_message_with_formatted_body() -> None:
     assert len(result["body"]) < len(large_text)
     assert "io.mindroom.long_text" in result
 
-    # Should preserve HTML format so Element fork renders <tool> tags correctly
-    assert result["format"] == "org.matrix.custom.html"
-    assert "formatted_body" in result
-
-    # Uploaded file should be HTML
-    assert result["info"]["mimetype"] == "text/html"
-    assert result["filename"] == "message.html"
+    # Without <tool> tags the upload should be plain text so that
+    # thread-history replay feeds clean text into AI prompts.
+    assert result["info"]["mimetype"] == "text/plain"
+    assert result["filename"] == "message.txt"
+    assert "format" not in result
+    assert "formatted_body" not in result
 
 
 @pytest.mark.asyncio
