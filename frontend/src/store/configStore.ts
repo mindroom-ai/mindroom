@@ -108,6 +108,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         ...agent,
         skills: agent.skills ?? [],
         knowledge_bases: agent.knowledge_bases || [],
+        context_files: agent.context_files ?? [],
         learning: agent.learning ?? defaultLearning,
         learning_mode: agent.learning_mode ?? defaultLearningMode,
       }));

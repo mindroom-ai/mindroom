@@ -46,6 +46,9 @@ export function AgentEditor() {
   const defaultLearning = config?.defaults.learning ?? true;
   const defaultLearningMode = config?.defaults.learning_mode ?? 'always';
   const defaultShowToolCalls = config?.defaults.show_tool_calls ?? true;
+  const defaultMarkdown = config?.defaults.markdown ?? true;
+  const defaultCompressToolResults = config?.defaults.compress_tool_results ?? true;
+  const defaultEnableSessionSummaries = config?.defaults.enable_session_summaries ?? false;
   const knowledgeBaseNames = useMemo(
     () => Object.keys(config?.knowledge_bases || {}).sort(),
     [config?.knowledge_bases]
@@ -94,12 +97,15 @@ export function AgentEditor() {
       instructions: [],
       rooms: [],
       knowledge_bases: [],
+      context_files: [],
       learning: defaultLearning,
       learning_mode: defaultLearningMode,
     },
   });
   const learningEnabled = useWatch({ name: 'learning', control });
   const effectiveLearningEnabled = learningEnabled ?? defaultLearning;
+  const numHistoryRuns = useWatch({ name: 'num_history_runs', control });
+  const numHistoryMessages = useWatch({ name: 'num_history_messages', control });
 
   // Prepare checkbox items for skills (includes orphaned selected skills)
   const skillItems: CheckboxListItem[] = useMemo(() => {
@@ -142,6 +148,7 @@ export function AgentEditor() {
       reset({
         ...selectedAgent,
         knowledge_bases: selectedAgent.knowledge_bases ?? [],
+        context_files: selectedAgent.context_files ?? [],
         learning: selectedAgent.learning ?? defaultLearning,
         learning_mode: selectedAgent.learning_mode ?? defaultLearningMode,
       });
@@ -180,6 +187,27 @@ export function AgentEditor() {
     const updated = current.filter((_, i) => i !== index);
     setValue('instructions', updated);
     handleFieldChange('instructions', updated);
+  };
+
+  const handleAddContextFile = () => {
+    const current = getValues('context_files') ?? [];
+    const updated = [...current, ''];
+    setValue('context_files', updated);
+    handleFieldChange('context_files', updated);
+  };
+
+  const handleRemoveContextFile = (index: number) => {
+    const current = getValues('context_files') ?? [];
+    const updated = current.filter((_, i) => i !== index);
+    setValue('context_files', updated);
+    handleFieldChange('context_files', updated);
+  };
+
+  /** Parse a string to a non-negative integer or return null for empty/invalid input. */
+  const parseOptionalInt = (raw: string): number | null => {
+    if (raw.trim() === '') return null;
+    const n = parseInt(raw, 10);
+    return Number.isNaN(n) || n < 0 ? null : n;
   };
 
   if (!selectedAgent) {
@@ -275,6 +303,35 @@ export function AgentEditor() {
         />
       </FieldGroup>
 
+      {/* Thread Mode */}
+      <FieldGroup
+        label="Thread Mode"
+        helperText="'thread' creates Matrix threads per conversation; 'room' uses a single continuous conversation per room (ideal for bridges/mobile)"
+        htmlFor="thread_mode"
+      >
+        <Controller
+          name="thread_mode"
+          control={control}
+          render={({ field }) => (
+            <Select
+              value={field.value ?? 'thread'}
+              onValueChange={value => {
+                field.onChange(value);
+                handleFieldChange('thread_mode', value);
+              }}
+            >
+              <SelectTrigger id="thread_mode">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="thread">Thread (default)</SelectItem>
+                <SelectItem value="room">Room (continuous)</SelectItem>
+              </SelectContent>
+            </Select>
+          )}
+        />
+      </FieldGroup>
+
       {/* Knowledge Bases */}
       <FieldGroup
         label="Knowledge Bases"
@@ -289,6 +346,106 @@ export function AgentEditor() {
           idPrefix="knowledge-base"
           emptyMessage="No knowledge bases available. Add one in the Knowledge tab."
           className="space-y-2 max-h-48 overflow-y-auto border rounded-lg p-2"
+        />
+      </FieldGroup>
+
+      {/* Context Files */}
+      <FieldGroup
+        label="Context Files"
+        helperText="File paths read at agent init and prepended to role context"
+        actions={
+          <Button variant="outline" size="sm" onClick={handleAddContextFile} className="h-9 px-3">
+            <Plus className="h-4 w-4 sm:mr-1" />
+            <span className="hidden sm:inline">Add</span>
+          </Button>
+        }
+      >
+        <Controller
+          name="context_files"
+          control={control}
+          render={({ field }) => (
+            <div className="space-y-2">
+              {(field.value ?? []).map((filePath, index) => (
+                <div key={index} className="flex gap-2">
+                  <Input
+                    value={filePath}
+                    onChange={e => {
+                      const updated = [...(field.value ?? [])];
+                      updated[index] = e.target.value;
+                      field.onChange(updated);
+                      handleFieldChange('context_files', updated);
+                    }}
+                    placeholder="./path/to/file.md"
+                    className="min-h-[40px]"
+                  />
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => handleRemoveContextFile(index)}
+                    className="h-10 w-10 flex-shrink-0"
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        />
+      </FieldGroup>
+
+      {/* Memory Directory */}
+      <FieldGroup
+        label="Memory Directory"
+        helperText="Directory containing MEMORY.md and dated memory files to auto-load into role context"
+        htmlFor="memory_dir"
+      >
+        <Controller
+          name="memory_dir"
+          control={control}
+          render={({ field }) => (
+            <Input
+              {...field}
+              value={field.value ?? ''}
+              id="memory_dir"
+              placeholder="./memories/agent_name"
+              onChange={e => {
+                const value = e.target.value || undefined;
+                field.onChange(value);
+                handleFieldChange('memory_dir', value);
+              }}
+            />
+          )}
+        />
+      </FieldGroup>
+
+      {/* Include Default Tools */}
+      <FieldGroup
+        label="Include Default Tools"
+        helperText="Whether to merge the global default tools into this agent's tools"
+        htmlFor="include_default_tools"
+      >
+        <Controller
+          name="include_default_tools"
+          control={control}
+          render={({ field }) => (
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="include_default_tools"
+                checked={field.value ?? true}
+                onCheckedChange={checked => {
+                  const value = checked === true;
+                  field.onChange(value);
+                  handleFieldChange('include_default_tools', value);
+                }}
+              />
+              <label
+                htmlFor="include_default_tools"
+                className="text-sm font-medium cursor-pointer select-none"
+              >
+                Include default tools
+              </label>
+            </div>
+          )}
         />
       </FieldGroup>
 
@@ -519,6 +676,36 @@ export function AgentEditor() {
         />
       </FieldGroup>
 
+      {/* Markdown */}
+      <FieldGroup
+        label="Markdown"
+        helperText={`Use markdown formatting in responses (global default: ${
+          defaultMarkdown ? 'on' : 'off'
+        })`}
+        htmlFor="markdown"
+      >
+        <Controller
+          name="markdown"
+          control={control}
+          render={({ field }) => (
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="markdown"
+                checked={field.value ?? defaultMarkdown}
+                onCheckedChange={checked => {
+                  const value = checked === true;
+                  field.onChange(value);
+                  handleFieldChange('markdown', value);
+                }}
+              />
+              <label htmlFor="markdown" className="text-sm font-medium cursor-pointer select-none">
+                Enable markdown
+              </label>
+            </div>
+          )}
+        />
+      </FieldGroup>
+
       {/* Learning */}
       <FieldGroup
         label="Learning"
@@ -606,6 +793,195 @@ export function AgentEditor() {
           )}
         />
       </FieldGroup>
+
+      {/* History & Context Settings */}
+      <div className="border-t border-gray-200 dark:border-gray-700 pt-4 mt-2">
+        <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-4">
+          History & Context
+        </h3>
+
+        {/* Num History Runs */}
+        <div className="space-y-4">
+          <FieldGroup
+            label="History Runs"
+            helperText={`Number of prior conversation runs to include as history context. Leave empty to use default${
+              config?.defaults.num_history_runs != null
+                ? ` (${config.defaults.num_history_runs})`
+                : ' (all)'
+            }.`}
+            htmlFor="num_history_runs"
+          >
+            <Controller
+              name="num_history_runs"
+              control={control}
+              render={({ field }) => (
+                <Input
+                  id="num_history_runs"
+                  type="number"
+                  min={0}
+                  value={field.value ?? ''}
+                  placeholder={
+                    config?.defaults.num_history_runs != null
+                      ? `Default: ${config.defaults.num_history_runs}`
+                      : 'Default: all'
+                  }
+                  disabled={numHistoryMessages != null}
+                  onChange={e => {
+                    const value = parseOptionalInt(e.target.value);
+                    field.onChange(value);
+                    handleFieldChange('num_history_runs', value);
+                  }}
+                />
+              )}
+            />
+            {numHistoryMessages != null && (
+              <p className="text-xs text-amber-600 dark:text-amber-400">
+                Disabled because History Messages is set (mutually exclusive).
+              </p>
+            )}
+          </FieldGroup>
+
+          {/* Num History Messages */}
+          <FieldGroup
+            label="History Messages"
+            helperText={`Max messages from history (mutually exclusive with History Runs). Leave empty to use default${
+              config?.defaults.num_history_messages != null
+                ? ` (${config.defaults.num_history_messages})`
+                : ' (all)'
+            }.`}
+            htmlFor="num_history_messages"
+          >
+            <Controller
+              name="num_history_messages"
+              control={control}
+              render={({ field }) => (
+                <Input
+                  id="num_history_messages"
+                  type="number"
+                  min={0}
+                  value={field.value ?? ''}
+                  placeholder={
+                    config?.defaults.num_history_messages != null
+                      ? `Default: ${config.defaults.num_history_messages}`
+                      : 'Default: all'
+                  }
+                  disabled={numHistoryRuns != null}
+                  onChange={e => {
+                    const value = parseOptionalInt(e.target.value);
+                    field.onChange(value);
+                    handleFieldChange('num_history_messages', value);
+                  }}
+                />
+              )}
+            />
+            {numHistoryRuns != null && (
+              <p className="text-xs text-amber-600 dark:text-amber-400">
+                Disabled because History Runs is set (mutually exclusive).
+              </p>
+            )}
+          </FieldGroup>
+
+          {/* Max Tool Calls From History */}
+          <FieldGroup
+            label="Max Tool Calls from History"
+            helperText={`Max tool call messages replayed from history. Leave empty to use default${
+              config?.defaults.max_tool_calls_from_history != null
+                ? ` (${config.defaults.max_tool_calls_from_history})`
+                : ' (no limit)'
+            }.`}
+            htmlFor="max_tool_calls_from_history"
+          >
+            <Controller
+              name="max_tool_calls_from_history"
+              control={control}
+              render={({ field }) => (
+                <Input
+                  id="max_tool_calls_from_history"
+                  type="number"
+                  min={0}
+                  value={field.value ?? ''}
+                  placeholder={
+                    config?.defaults.max_tool_calls_from_history != null
+                      ? `Default: ${config.defaults.max_tool_calls_from_history}`
+                      : 'Default: no limit'
+                  }
+                  onChange={e => {
+                    const value = parseOptionalInt(e.target.value);
+                    field.onChange(value);
+                    handleFieldChange('max_tool_calls_from_history', value);
+                  }}
+                />
+              )}
+            />
+          </FieldGroup>
+
+          {/* Compress Tool Results */}
+          <FieldGroup
+            label="Compress Tool Results"
+            helperText={`Compress tool results in history to save context (global default: ${
+              defaultCompressToolResults ? 'on' : 'off'
+            })`}
+            htmlFor="compress_tool_results"
+          >
+            <Controller
+              name="compress_tool_results"
+              control={control}
+              render={({ field }) => (
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    id="compress_tool_results"
+                    checked={field.value ?? defaultCompressToolResults}
+                    onCheckedChange={checked => {
+                      const value = checked === true;
+                      field.onChange(value);
+                      handleFieldChange('compress_tool_results', value);
+                    }}
+                  />
+                  <label
+                    htmlFor="compress_tool_results"
+                    className="text-sm font-medium cursor-pointer select-none"
+                  >
+                    Compress tool results
+                  </label>
+                </div>
+              )}
+            />
+          </FieldGroup>
+
+          {/* Enable Session Summaries */}
+          <FieldGroup
+            label="Session Summaries"
+            helperText={`Enable Agno session summaries for conversation compaction (global default: ${
+              defaultEnableSessionSummaries ? 'on' : 'off'
+            })`}
+            htmlFor="enable_session_summaries"
+          >
+            <Controller
+              name="enable_session_summaries"
+              control={control}
+              render={({ field }) => (
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    id="enable_session_summaries"
+                    checked={field.value ?? defaultEnableSessionSummaries}
+                    onCheckedChange={checked => {
+                      const value = checked === true;
+                      field.onChange(value);
+                      handleFieldChange('enable_session_summaries', value);
+                    }}
+                  />
+                  <label
+                    htmlFor="enable_session_summaries"
+                    className="text-sm font-medium cursor-pointer select-none"
+                  >
+                    Enable session summaries
+                  </label>
+                </div>
+              )}
+            />
+          </FieldGroup>
+        </div>
+      </div>
 
       {/* Tool Configuration Dialog */}
       {configDialogTool && (
