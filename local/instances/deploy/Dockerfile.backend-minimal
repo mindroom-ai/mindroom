@@ -1,0 +1,76 @@
+# Minimal MindRoom Backend - no tool extras pre-installed.
+# Tools auto-install their dependencies at runtime via tool_dependencies.py.
+# Good target for sandbox runners where image size matters.
+FROM ghcr.io/astral-sh/uv:latest AS uv
+
+# Builder stage with uv for dependencies
+FROM public.ecr.aws/docker/library/python:3.12-slim AS builder
+# Copy uv from the uv image
+COPY --from=uv /uv /uvx /bin/
+
+WORKDIR /app
+
+# Copy project files
+COPY pyproject.toml uv.lock README.md /app/
+
+# Install dependencies (base only, no extras)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-install-project --no-dev
+
+# Copy source code
+COPY src /app/src
+COPY skills /app/skills
+
+# Install the project itself (base only, no extras)
+# Set pretend version for setuptools-scm (no .git in container)
+ARG VERSION=0.0.0
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=${VERSION}
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev
+
+# Final production stage
+FROM public.ecr.aws/docker/library/python:3.12-slim AS final
+# Copy uv for runtime (needed for auto-installing tool extras)
+COPY --from=uv /uv /uvx /bin/
+
+# Set version for setuptools-scm at runtime (no .git in container)
+ARG VERSION=0.0.0
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=${VERSION}
+
+WORKDIR /app
+
+# Install runtime dependencies:
+# - curl for health checks
+# - git for remote knowledge base cloning/sync
+# - bash for shell tooling
+RUN apt-get update && apt-get install -y bash curl git \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user before copying files
+RUN useradd -u 1000 -U -m mindroom
+
+# Copy the app with venv from builder (owned by mindroom)
+COPY --from=builder --chown=1000:1000 /app /app
+
+# Copy additional files needed by MindRoom
+COPY --chown=1000:1000 config.yaml /app/
+COPY --chown=1000:1000 run-sandbox-runner.sh /app/
+COPY --chown=1000:1000 scripts /app/scripts/
+COPY --chown=1000:1000 tools /app/tools/
+COPY --chown=1000:1000 avatars /app/avatars/
+
+# Make startup scripts executable and ensure runtime/cache directories
+# are writable by the non-root runtime user.
+RUN chmod +x /app/run-sandbox-runner.sh \
+    && mkdir -p /app/logs /app/mindroom_data /app/.cache/uv \
+    && chown 1000:1000 /app /app/logs /app/mindroom_data /app/.cache /app/.cache/uv
+
+# Set environment variable to indicate Docker mode
+ENV DOCKER_CONTAINER=1
+
+# Run as non-root user
+USER 1000:1000
+
+EXPOSE 8765
+# Run the app
+CMD ["uv", "run", "mindroom", "run"]
