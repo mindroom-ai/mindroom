@@ -65,6 +65,10 @@ class AgentConfig(BaseModel):
         default=None,
         description="Max messages from history (mutually exclusive with num_history_runs)",
     )
+    compress_tool_results: bool | None = Field(
+        default=None,
+        description="Compress tool results in history to save context (per-agent override)",
+    )
 
     @model_validator(mode="after")
     def _check_history_config(self) -> Self:
@@ -121,6 +125,10 @@ class DefaultsConfig(BaseModel):
     num_history_messages: int | None = Field(
         default=None,
         description="Default max messages from history (mutually exclusive with num_history_runs)",
+    )
+    compress_tool_results: bool = Field(
+        default=True,
+        description="Compress tool results in history to save context",
     )
 
     @model_validator(mode="after")
