@@ -16,11 +16,13 @@ from pathlib import Path
 
 from agno.tools import Toolkit
 
-MAX_LINES = 500
+MAX_LINES = 2000
 MAX_BYTES = 50 * 1024  # 50KB
+MAX_LINE_CHARS = 500  # Per-line truncation for grep output
 DEFAULT_GREP_LIMIT = 100
 DEFAULT_FIND_LIMIT = 1000
 DEFAULT_LS_LIMIT = 500
+DIFF_CONTEXT_LINES = 4
 
 
 @dataclass
@@ -86,20 +88,41 @@ def _truncate_tail(
 
 # ── Fuzzy matching helpers ──────────────────────────────────────────
 
-# Smart quotes / dashes / special spaces → ASCII equivalents
-_QUOTE_MAP = str.maketrans(
+# Smart quotes / dashes / special spaces -> ASCII equivalents
+# Matches PI coding editor's normalization (edit.ts)
+_NORMALIZE_MAP = str.maketrans(
     {
-        "\u2018": "'",  # '
-        "\u2019": "'",  # '
-        "\u201c": '"',  # "
-        "\u201d": '"',  # "
+        # Quotes
+        "\u2018": "'",  # left single curly
+        "\u2019": "'",  # right single curly
+        "\u201c": '"',  # left double curly
+        "\u201d": '"',  # right double curly
+        "\u201e": '"',  # double low-9
+        "\u201f": '"',  # double high-reversed-9
+        # Dashes
+        "\u2010": "-",  # hyphen
+        "\u2011": "-",  # non-breaking hyphen
+        "\u2012": "-",  # figure dash
         "\u2013": "-",  # en dash
         "\u2014": "-",  # em dash
+        "\u2015": "-",  # horizontal bar
+        "\u2212": "-",  # minus sign
+        # Special spaces
         "\u00a0": " ",  # non-breaking space
         "\u2002": " ",  # en space
         "\u2003": " ",  # em space
+        "\u2004": " ",  # three-per-em space
+        "\u2005": " ",  # four-per-em space
+        "\u2006": " ",  # six-per-em space
+        "\u2007": " ",  # figure space
+        "\u2008": " ",  # punctuation space
         "\u2009": " ",  # thin space
-        "\ufeff": "",  # BOM
+        "\u200a": " ",  # hair space
+        "\u202f": " ",  # narrow no-break space
+        "\u205f": " ",  # medium mathematical space
+        "\u3000": " ",  # ideographic space
+        # BOM
+        "\ufeff": "",
     },
 )
 
@@ -112,7 +135,7 @@ def _normalize_for_fuzzy(text: str) -> str:
     - Normalize NFC
     """
     text = unicodedata.normalize("NFC", text)
-    text = text.translate(_QUOTE_MAP)
+    text = text.translate(_NORMALIZE_MAP)
     lines = text.splitlines()
     return "\n".join(line.rstrip() for line in lines)
 
@@ -195,12 +218,41 @@ def _count_occurrences(content: str, old_text: str) -> int:
     return norm_content.count(norm_old)
 
 
-def _make_diff(old_text: str, new_text: str) -> str:
-    """Create a simple diff showing what changed."""
+def _make_diff(
+    content: str,
+    match_start: int,
+    old_text: str,
+    new_text: str,
+    context: int = DIFF_CONTEXT_LINES,
+) -> str:
+    """Create a diff with context lines, like PI's unified diff format."""
+    all_lines = content.splitlines()
     old_lines = old_text.splitlines()
     new_lines = new_text.splitlines()
-    result = [f"- {line}" for line in old_lines]
-    result.extend(f"+ {line}" for line in new_lines)
+
+    # Find line range of the edit
+    start_line = content[:match_start].count("\n")
+    end_line = start_line + len(old_lines)
+
+    # Context window
+    ctx_start = max(0, start_line - context)
+    ctx_end = min(len(all_lines), end_line + context)
+    width = len(str(ctx_end))
+
+    result: list[str] = []
+    # Before context
+    if ctx_start > 0:
+        result.append("  ...")
+    result.extend(f"  {i + 1:>{width}}| {all_lines[i]}" for i in range(ctx_start, start_line))
+    # Old lines
+    result.extend(f"- {start_line + i + 1:>{width}}| {line}" for i, line in enumerate(old_lines))
+    # New lines
+    result.extend(f"+     {'':>{width - 4}}| {line}" if width > 4 else f"+ | {line}" for line in new_lines)
+    # After context
+    result.extend(f"  {i + 1:>{width}}| {all_lines[i]}" for i in range(end_line, ctx_end))
+    if ctx_end < len(all_lines):
+        result.append("  ...")
+
     return "\n".join(result)
 
 
@@ -278,7 +330,7 @@ class CodingTools(Toolkit):
         Args:
             path: File path (relative to working directory or absolute).
             offset: Starting line number (1-based). Use this to paginate through large files.
-            limit: Maximum number of lines to return. Defaults to 500.
+            limit: Maximum number of lines to return. Defaults to 2000.
 
         Returns:
             Line-numbered file content with pagination hints if truncated.
@@ -380,9 +432,8 @@ class CodingTools(Toolkit):
             return f"Error writing file: {e}"
 
         # Build result
-        diff = _make_diff(match.matched_text, new_text)
+        diff = _make_diff(content, match.start, match.matched_text, new_text)
         fuzzy_note = " (fuzzy match: whitespace/Unicode normalized)" if match.was_fuzzy else ""
-        # Find the line number of the edit
         line_num = content[: match.start].count("\n") + 1
         return f"Applied edit at line {line_num}{fuzzy_note}:\n\n{diff}"
 
@@ -418,16 +469,18 @@ class CodingTools(Toolkit):
         path: str | None = None,
         glob: str | None = None,
         ignore_case: bool = False,
+        literal: bool = False,
         context: int = 0,
         limit: int = DEFAULT_GREP_LIMIT,
     ) -> str:
-        """Search file contents using regex patterns. Uses ripgrep if available, falls back to Python re.
+        """Search file contents for a pattern. Uses ripgrep if available, falls back to Python re.
 
         Args:
-            pattern: Regex pattern to search for.
+            pattern: Regex pattern (or literal string if literal=True) to search for.
             path: Directory or file to search in. Defaults to working directory.
             glob: File glob pattern to filter (e.g., "*.py", "*.ts").
             ignore_case: Whether to ignore case in matching.
+            literal: Treat pattern as a literal string instead of regex.
             context: Number of context lines before and after each match.
             limit: Maximum number of matches to return. Defaults to 100.
 
@@ -444,12 +497,12 @@ class CodingTools(Toolkit):
             return f"Error: Path not found: {path or '.'}"
 
         # Try ripgrep first
-        rg_result = _run_ripgrep(pattern, search_path, glob, ignore_case, context, limit)
+        rg_result = _run_ripgrep(pattern, search_path, glob, ignore_case, literal, context, limit)
         if rg_result is not None:
             return rg_result
 
         # Python fallback
-        return _python_grep_fallback(pattern, search_path, glob, ignore_case, context, limit)
+        return _python_grep_fallback(pattern, search_path, glob, ignore_case, literal, context, limit)
 
     def find_files(
         self,
@@ -518,9 +571,7 @@ class CodingTools(Toolkit):
 
         entries: list[str] = []
         try:
-            for item in sorted(target.iterdir()):
-                if item.name.startswith("."):
-                    continue
+            for item in sorted(target.iterdir(), key=lambda p: p.name.lower()):
                 name = item.name + ("/" if item.is_dir() else "")
                 entries.append(name)
                 if len(entries) >= limit:
@@ -540,11 +591,19 @@ class CodingTools(Toolkit):
 # ── Grep helpers ────────────────────────────────────────────────────
 
 
+def _truncate_line(line: str, max_chars: int = MAX_LINE_CHARS) -> str:
+    """Truncate a single line if it exceeds max_chars."""
+    if len(line) <= max_chars:
+        return line
+    return line[:max_chars] + " [truncated]"
+
+
 def _run_ripgrep(
     pattern: str,
     search_path: Path,
     glob_filter: str | None,
     ignore_case: bool,
+    literal: bool,
     context: int,
     limit: int,
 ) -> str | None:
@@ -552,6 +611,8 @@ def _run_ripgrep(
     args = ["rg", "--no-heading", "--line-number", "--color=never"]
     if ignore_case:
         args.append("-i")
+    if literal:
+        args.append("-F")
     if context > 0:
         args.extend(["-C", str(context)])
     if glob_filter:
@@ -577,7 +638,11 @@ def _run_ripgrep(
         stderr = result.stderr.strip()
         return f"Error running grep: {stderr}" if stderr else "Error running grep."
 
-    output = result.stdout
+    # Truncate long individual lines
+    raw_lines = result.stdout.splitlines()
+    output_lines = [_truncate_line(line) for line in raw_lines]
+    output = "\n".join(output_lines)
+
     trunc = _truncate_tail(output)
     if trunc.was_truncated:
         return trunc.content + f"\n\n[Output truncated. {trunc.total_lines} total lines.]"
@@ -616,10 +681,10 @@ def _grep_file(
             end = min(len(lines), i + context + 1)
             for j in range(start, end):
                 marker = ":" if j == i else "-"
-                results.append(f"{rel}{marker}{j + 1}{marker}{lines[j]}")
+                results.append(f"{rel}{marker}{j + 1}{marker}{_truncate_line(lines[j])}")
             results.append("--")
         else:
-            results.append(f"{rel}:{i + 1}:{line}")
+            results.append(f"{rel}:{i + 1}:{_truncate_line(line)}")
     return match_count
 
 
@@ -628,10 +693,13 @@ def _python_grep_fallback(
     search_path: Path,
     glob_filter: str | None,
     ignore_case: bool,
+    literal: bool,
     context: int,
     limit: int,
 ) -> str:
     """Pure Python grep fallback when ripgrep is not available."""
+    if literal:
+        pattern = re.escape(pattern)
     flags = re.IGNORECASE if ignore_case else 0
     try:
         regex = re.compile(pattern, flags)

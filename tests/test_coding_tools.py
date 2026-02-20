@@ -12,6 +12,7 @@ from mindroom.custom_tools.coding import (
     _fuzzy_find,
     _normalize_for_fuzzy,
     _truncate_head,
+    _truncate_line,
     _truncate_tail,
 )
 
@@ -86,9 +87,14 @@ class TestFuzzyMatching:
         assert result == '"hello"'
 
     def test_normalize_dashes(self) -> None:
-        """Unicode dashes are normalized to hyphens."""
-        result = _normalize_for_fuzzy("a\u2013b\u2014c")
-        assert result == "a-b-c"
+        """Unicode dashes (U+2010-2015, U+2212) are normalized to hyphens."""
+        result = _normalize_for_fuzzy("a\u2013b\u2014c\u2010d\u2212e")
+        assert result == "a-b-c-d-e"
+
+    def test_normalize_extended_spaces(self) -> None:
+        """Extended Unicode spaces are normalized to regular spaces."""
+        result = _normalize_for_fuzzy("a\u202fb\u205fc\u3000d")
+        assert result == "a b c d"
 
     def test_exact_match_preferred(self) -> None:
         """Exact match is preferred over fuzzy."""
@@ -162,8 +168,8 @@ class TestReadFile:
         assert "exceeds" in result
 
     def test_read_truncation_hint(self, tools: CodingTools, tmp_base: Path) -> None:
-        """Shows pagination hint for large files."""
-        content = "\n".join(f"line {i}" for i in range(1, 1001))
+        """Shows pagination hint for large files (>2000 lines)."""
+        content = "\n".join(f"line {i}" for i in range(1, 3001))
         (tmp_base / "big.txt").write_text(content)
         result = tools.read_file("big.txt")
         assert "offset=" in result
@@ -179,11 +185,13 @@ class TestEditFile:
     """Tests for CodingTools.edit_file."""
 
     def test_exact_edit(self, tools: CodingTools, tmp_base: Path) -> None:
-        """Performs exact text replacement."""
+        """Performs exact text replacement with context diff."""
         result = tools.edit_file("hello.py", "print('hello')", "print('hi')")
         assert "Applied edit" in result
-        assert "- print('hello')" in result
-        assert "+ print('hi')" in result
+        assert "print('hello')" in result  # old line shown in diff
+        assert "print('hi')" in result  # new line shown in diff
+        # Context line should be present
+        assert "print('world')" in result
         content = (tmp_base / "hello.py").read_text()
         assert "print('hi')" in content
         assert "print('hello')" not in content
@@ -277,6 +285,34 @@ class TestGrep:
         result = tools.grep("match", path="repeat.txt", limit=5)
         assert isinstance(result, str)
 
+    def test_grep_literal(self, tools: CodingTools, tmp_base: Path) -> None:
+        """Literal mode escapes regex special chars."""
+        (tmp_base / "regex.txt").write_text("foo[bar]\nfoo.bar\n")
+        result = tools.grep("[bar]", path="regex.txt", literal=True)
+        assert "foo[bar]" in result
+
+    def test_grep_line_truncation(self, tools: CodingTools, tmp_base: Path) -> None:
+        """Long match lines are truncated at 500 chars."""
+        long_line = "x" * 600
+        (tmp_base / "long.txt").write_text(long_line + "\n")
+        result = tools.grep("x", path="long.txt")
+        assert "[truncated]" in result
+
+
+class TestLineTruncation:
+    """Tests for per-line truncation in grep output."""
+
+    def test_short_line_unchanged(self) -> None:
+        """Lines under 500 chars are not modified."""
+        assert _truncate_line("short") == "short"
+
+    def test_long_line_truncated(self) -> None:
+        """Lines over 500 chars get truncated with marker."""
+        line = "a" * 600
+        result = _truncate_line(line)
+        assert len(result) < 600
+        assert result.endswith("[truncated]")
+
 
 class TestFindFiles:
     """Tests for CodingTools.find_files."""
@@ -329,11 +365,11 @@ class TestLs:
         assert "Error" in result
         assert "Not a directory" in result
 
-    def test_ls_skips_hidden(self, tools: CodingTools, tmp_base: Path) -> None:
-        """Skips hidden files (dotfiles)."""
+    def test_ls_includes_dotfiles(self, tools: CodingTools, tmp_base: Path) -> None:
+        """Includes dotfiles like PI's ls tool."""
         (tmp_base / ".hidden").write_text("secret")
         result = tools.ls()
-        assert ".hidden" not in result
+        assert ".hidden" in result
 
     def test_ls_with_limit(self, tools: CodingTools, tmp_base: Path) -> None:
         """Respects entry limit."""
