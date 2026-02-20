@@ -5439,6 +5439,21 @@
     {
       "auth_provider": null,
       "category": "productivity",
+      "config_fields": [],
+      "dependencies": [],
+      "description": "Delegate tasks to other configured agents",
+      "display_name": "Agent Delegation",
+      "docs_url": null,
+      "helper_text": null,
+      "icon": "Users",
+      "icon_color": "text-blue-500",
+      "name": "delegate",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "auth_provider": null,
+      "category": "productivity",
       "config_fields": [
         {
           "default": null,

@@ -452,6 +452,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     storage_path: Path | None = None,
     knowledge: KnowledgeProtocol | None = None,
     include_interactive_questions: bool = True,
+    delegation_depth: int = 0,
     config_path: Path | None = None,
 ) -> Agent:
     """Create an agent instance from configuration.
@@ -465,6 +466,8 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
+        delegation_depth: Current delegation nesting depth. Used to prevent
+            infinite recursion when agents delegate to each other.
         config_path: Path to the YAML config file used by tools that
             read/write config at runtime (e.g. ``self_config``).  Falls back
             to the module-level ``CONFIG_PATH`` when *None*.
@@ -503,6 +506,29 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                         config=config,
                     ),
                 )
+            elif tool_name == "delegate":
+                from .custom_tools.delegate import MAX_DELEGATION_DEPTH as _MAX_DEPTH  # noqa: PLC0415
+                from .custom_tools.delegate import DelegateTools  # noqa: PLC0415
+
+                if not agent_config.delegate_to:
+                    logger.warning(
+                        f"Skipping 'delegate' tool for agent '{agent_name}': delegate_to is empty",
+                    )
+                elif delegation_depth >= _MAX_DEPTH:
+                    logger.warning(
+                        f"Skipping explicit 'delegate' tool for agent '{agent_name}': "
+                        f"delegation depth {delegation_depth} >= max {_MAX_DEPTH}",
+                    )
+                else:
+                    tools.append(
+                        DelegateTools(
+                            agent_name=agent_name,
+                            delegate_to=agent_config.delegate_to,
+                            storage_path=resolved_storage_path,
+                            config=config,
+                            delegation_depth=delegation_depth,
+                        ),
+                    )
             elif tool_name == "self_config":
                 from .custom_tools.self_config import SelfConfigTools  # noqa: PLC0415
 
@@ -511,6 +537,20 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 tools.append(get_tool_by_name(tool_name, sandbox_tools_override=sandbox_tools))
         except ValueError as e:
             logger.warning(f"Could not load tool '{tool_name}' for agent '{agent_name}': {e}")
+
+    # Auto-inject delegation tool when delegate_to is configured
+    from .custom_tools.delegate import MAX_DELEGATION_DEPTH, DelegateTools  # noqa: PLC0415
+
+    if agent_config.delegate_to and "delegate" not in tool_names and delegation_depth < MAX_DELEGATION_DEPTH:
+        tools.append(
+            DelegateTools(
+                agent_name=agent_name,
+                delegate_to=agent_config.delegate_to,
+                storage_path=resolved_storage_path,
+                config=config,
+                delegation_depth=delegation_depth,
+            ),
+        )
 
     # Auto-inject self-config tool when allow_self_config is enabled
     allow_self_config = (
@@ -711,6 +751,11 @@ def describe_agent(agent_name: str, config: Config) -> str:
     if effective_tools:
         tool_list = ", ".join(effective_tools)
         parts.append(f"- Tools: {tool_list}")
+
+    # Add delegation targets if any
+    if agent_config.delegate_to:
+        delegate_list = ", ".join(agent_config.delegate_to)
+        parts.append(f"- Can delegate to: {delegate_list}")
 
     # Add key instructions if any
     if agent_config.instructions:
