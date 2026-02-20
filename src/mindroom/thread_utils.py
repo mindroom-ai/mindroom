@@ -245,13 +245,16 @@ def is_authorized_sender(sender_id: str, config: Config, room_id: str) -> bool:
         # Agent is either in config.agents, config.teams, or is the router
         return agent_name in config.agents or agent_name in config.teams or agent_name == ROUTER_AGENT_NAME
 
+    # Resolve bridge aliases to canonical user ID before permission checks.
+    resolved_id = config.authorization.resolve_alias(sender_id)
+
     # Check global authorized users (they have access to all rooms)
-    if sender_id in config.authorization.global_users:
+    if resolved_id in config.authorization.global_users:
         return True
 
     # Check room-specific permissions
     if room_id in config.authorization.room_permissions:
-        return sender_id in config.authorization.room_permissions[room_id]
+        return resolved_id in config.authorization.room_permissions[room_id]
 
     # Use default access for rooms not explicitly configured
     return config.authorization.default_room_access
