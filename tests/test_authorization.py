@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from mindroom.config import Config
+from mindroom.config import AuthorizationConfig, Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.thread_utils import is_authorized_sender
 
@@ -293,3 +293,81 @@ def test_default_room_access(monkeypatch: pytest.MonkeyPatch) -> None:
         "!room1:example.com",
     )  # Explicit empty list
     assert is_authorized_sender("@charlie:example.com", config_allow_default, "!room2:example.com")  # Default access
+
+
+@pytest.fixture
+def mock_config_with_aliases() -> Config:
+    """Config with bridge aliases mapping."""
+    return Config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={
+            "global_users": ["@alice:example.com"],
+            "room_permissions": {
+                "!room1:example.com": ["@bob:example.com"],
+            },
+            "default_room_access": False,
+            "aliases": {
+                "@alice:example.com": ["@telegram_111:example.com", "@signal_111:example.com"],
+                "@bob:example.com": ["@telegram_222:example.com"],
+            },
+        },
+    )
+
+
+def test_bridge_alias_global_user(mock_config_with_aliases: Config) -> None:
+    """Test that a bridge alias of a global user gets global access."""
+    # Alice's Telegram alias should have global access
+    assert is_authorized_sender("@telegram_111:example.com", mock_config_with_aliases, "!room1:example.com")
+    assert is_authorized_sender("@telegram_111:example.com", mock_config_with_aliases, "!any_room:example.com")
+
+    # Alice's Signal alias should also work
+    assert is_authorized_sender("@signal_111:example.com", mock_config_with_aliases, "!room1:example.com")
+
+
+def test_bridge_alias_room_permission(mock_config_with_aliases: Config) -> None:
+    """Test that a bridge alias inherits room-specific permissions."""
+    # Bob's Telegram alias should have access to room1
+    assert is_authorized_sender("@telegram_222:example.com", mock_config_with_aliases, "!room1:example.com")
+
+    # But not to other rooms
+    assert not is_authorized_sender("@telegram_222:example.com", mock_config_with_aliases, "!room2:example.com")
+
+
+def test_unknown_bridge_alias_rejected(mock_config_with_aliases: Config) -> None:
+    """Test that an unknown alias is not authorized."""
+    assert not is_authorized_sender("@telegram_999:example.com", mock_config_with_aliases, "!room1:example.com")
+
+
+def test_canonical_user_still_works_with_aliases(mock_config_with_aliases: Config) -> None:
+    """Test that the canonical user ID still works when aliases are configured."""
+    assert is_authorized_sender("@alice:example.com", mock_config_with_aliases, "!room1:example.com")
+    assert is_authorized_sender("@bob:example.com", mock_config_with_aliases, "!room1:example.com")
+
+
+def test_resolve_alias_method() -> None:
+    """Test the resolve_alias helper directly."""
+    auth = AuthorizationConfig(
+        aliases={
+            "@alice:example.com": ["@telegram_111:example.com"],
+        },
+    )
+    assert auth.resolve_alias("@telegram_111:example.com") == "@alice:example.com"
+    assert auth.resolve_alias("@alice:example.com") == "@alice:example.com"
+    assert auth.resolve_alias("@unknown:example.com") == "@unknown:example.com"
+
+
+def test_duplicate_bridge_alias_rejected() -> None:
+    """Test that aliases cannot be mapped to multiple canonical users."""
+    with pytest.raises(ValueError, match="Duplicate bridge aliases are not allowed"):
+        AuthorizationConfig(
+            aliases={
+                "@alice:example.com": ["@telegram_111:example.com"],
+                "@bob:example.com": ["@telegram_111:example.com"],
+            },
+        )

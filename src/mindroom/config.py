@@ -384,6 +384,38 @@ class AuthorizationConfig(BaseModel):
         default=False,
         description="Default permission for rooms not explicitly configured",
     )
+    aliases: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Map canonical Matrix user IDs to bridge aliases. "
+            "A message from any alias is treated as if sent by the canonical user. "
+            "E.g., {'@alice:example.com': ['@telegram_123:example.com']}"
+        ),
+    )
+
+    @field_validator("aliases")
+    @classmethod
+    def validate_unique_aliases(cls, aliases: dict[str, list[str]]) -> dict[str, list[str]]:
+        """Ensure each alias is assigned to at most one canonical user."""
+        seen_aliases: set[str] = set()
+        duplicates: list[str] = []
+        for alias_list in aliases.values():
+            for alias in alias_list:
+                if alias in seen_aliases and alias not in duplicates:
+                    duplicates.append(alias)
+                seen_aliases.add(alias)
+
+        if duplicates:
+            msg = f"Duplicate bridge aliases are not allowed: {', '.join(duplicates)}"
+            raise ValueError(msg)
+        return aliases
+
+    def resolve_alias(self, sender_id: str) -> str:
+        """Return the canonical user ID for a bridge alias, or the sender_id itself."""
+        for canonical, alias_list in self.aliases.items():
+            if sender_id in alias_list:
+                return canonical
+        return sender_id
 
 
 class MindRoomUserConfig(BaseModel):

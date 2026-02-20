@@ -2969,11 +2969,33 @@ Authorization checks are performed in order:
 
 1. **Internal system user** - `@{mindroom_user.username}:{domain}` is always authorized (default: `@mindroom_user:{domain}`). Note: that user ID from a different domain is NOT authorized.
 1. **MindRoom agents/teams/router** - Configured agents, teams, and the router are authorized
+1. **Alias resolution** - If the sender matches a bridge alias in `aliases`, it is resolved to the canonical user ID for the remaining checks
 1. **Global users** - Users in `global_users` have access to all rooms
 1. **Room permissions** - If room is in `room_permissions`, user must be in that room's list (does NOT fall through to `default_room_access`)
 1. **Default access** - Rooms not in `room_permissions` use `default_room_access`
 
 > [!TIP] Set `default_room_access: false` and explicitly grant access via `global_users` or `room_permissions` for better security.
+
+## Bridge Aliases
+
+When using Matrix bridges (e.g., mautrix-telegram, mautrix-signal), messages from the bridged platform arrive with a different Matrix user ID. Use `aliases` to map these bridge-created IDs to a canonical user so they inherit the same permissions:
+
+```
+authorization:
+  global_users:
+    - "@alice:example.com"
+  room_permissions:
+    "!room1:example.com":
+      - "@bob:example.com"
+  aliases:
+    "@alice:example.com":
+      - "@telegram_123:example.com"
+      - "@signal_456:example.com"
+    "@bob:example.com":
+      - "@telegram_789:example.com"
+```
+
+In this example, messages from `@telegram_123:example.com` are treated as `@alice:example.com` (global access), and messages from `@telegram_789:example.com` are treated as `@bob:example.com` (access to `!room1:example.com` only).
 
 ## Bot Accounts
 
