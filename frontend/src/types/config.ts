@@ -64,6 +64,7 @@ export interface Agent {
   compress_tool_results?: boolean; // Compress tool results in history
   enable_session_summaries?: boolean; // Enable session summaries for conversation compaction
   max_tool_calls_from_history?: number | null; // Max tool call messages replayed from history
+  allow_self_config?: boolean; // Allow agent to modify its own configuration via a tool
 }
 
 export interface Team {
@@ -128,6 +129,7 @@ export interface Config {
     compress_tool_results?: boolean;
     enable_session_summaries?: boolean;
     max_tool_calls_from_history?: number | null;
+    allow_self_config?: boolean;
   };
   router: {
     model: string;

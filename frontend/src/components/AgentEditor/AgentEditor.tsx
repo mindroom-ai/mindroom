@@ -869,6 +869,37 @@ export function AgentEditor() {
         </FieldGroup>
       )}
 
+      {/* Allow Self Config */}
+      <FieldGroup
+        label="Allow Self Config"
+        helperText="Let this agent read and modify its own configuration at runtime"
+        htmlFor="allow_self_config"
+      >
+        <Controller
+          name="allow_self_config"
+          control={control}
+          render={({ field }) => (
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="allow_self_config"
+                checked={field.value ?? config?.defaults.allow_self_config ?? false}
+                onCheckedChange={checked => {
+                  const value = checked === true;
+                  field.onChange(value);
+                  handleFieldChange('allow_self_config', value);
+                }}
+              />
+              <label
+                htmlFor="allow_self_config"
+                className="text-sm font-medium cursor-pointer select-none"
+              >
+                Enable self-configuration
+              </label>
+            </div>
+          )}
+        />
+      </FieldGroup>
+
       {/* History & Context Settings */}
       <div className="border-t border-gray-200 dark:border-gray-700 pt-4 mt-2">
         <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-4">

@@ -452,6 +452,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     storage_path: Path | None = None,
     knowledge: KnowledgeProtocol | None = None,
     include_interactive_questions: bool = True,
+    config_path: Path | None = None,
 ) -> Agent:
     """Create an agent instance from configuration.
 
@@ -464,6 +465,9 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
+        config_path: Path to the YAML config file used by tools that
+            read/write config at runtime (e.g. ``self_config``).  Falls back
+            to the module-level ``CONFIG_PATH`` when *None*.
 
     Returns:
         Configured Agent instance
@@ -499,10 +503,23 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                         config=config,
                     ),
                 )
+            elif tool_name == "self_config":
+                from .custom_tools.self_config import SelfConfigTools  # noqa: PLC0415
+
+                tools.append(SelfConfigTools(agent_name=agent_name, config_path=config_path))
             else:
                 tools.append(get_tool_by_name(tool_name, sandbox_tools_override=sandbox_tools))
         except ValueError as e:
             logger.warning(f"Could not load tool '{tool_name}' for agent '{agent_name}': {e}")
+
+    # Auto-inject self-config tool when allow_self_config is enabled
+    allow_self_config = (
+        agent_config.allow_self_config if agent_config.allow_self_config is not None else defaults.allow_self_config
+    )
+    if allow_self_config and not any(getattr(tool, "name", None) == "self_config" for tool in tools):
+        from .custom_tools.self_config import SelfConfigTools  # noqa: PLC0415
+
+        tools.append(SelfConfigTools(agent_name=agent_name, config_path=config_path))
 
     storage = create_session_storage(agent_name, resolved_storage_path)
     learning_storage = (

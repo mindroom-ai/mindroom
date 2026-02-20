@@ -90,6 +90,10 @@ class AgentConfig(BaseModel):
         default=None,
         description="Tool names to execute through sandbox proxy (overrides defaults; None = inherit)",
     )
+    allow_self_config: bool | None = Field(
+        default=None,
+        description="Allow this agent to modify its own configuration via a tool",
+    )
 
     @model_validator(mode="after")
     def _check_history_config(self) -> Self:
@@ -167,6 +171,10 @@ class DefaultsConfig(BaseModel):
     sandbox_tools: list[str] | None = Field(
         default=None,
         description="Tool names to sandbox by default for all agents (None = use env var config)",
+    )
+    allow_self_config: bool = Field(
+        default=False,
+        description="Default setting for allowing agents to modify their own configuration",
     )
     max_preload_chars: int = Field(
         default=50000,

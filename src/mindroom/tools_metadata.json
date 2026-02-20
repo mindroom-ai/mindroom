@@ -4177,6 +4177,21 @@
     {
       "auth_provider": null,
       "category": "development",
+      "config_fields": [],
+      "dependencies": [],
+      "description": "Allow an agent to read and modify its own configuration",
+      "display_name": "Self Config",
+      "docs_url": null,
+      "helper_text": null,
+      "icon": "Settings",
+      "icon_color": "text-indigo-500",
+      "name": "self_config",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "auth_provider": null,
+      "category": "development",
       "config_fields": [
         {
           "default": null,
