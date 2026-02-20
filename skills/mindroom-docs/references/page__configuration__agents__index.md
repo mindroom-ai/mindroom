@@ -82,6 +82,11 @@ agents:
     # Tools to execute through the sandbox proxy (optional, inherits from defaults)
     sandbox_tools: [shell, file]
 
+    # Delegate tasks to other agents via tool calls
+    delegate_to:
+      - research
+      - finance
+
     # History context controls (all optional, inherit from defaults)
     num_history_runs: null
     num_history_messages: null
@@ -116,6 +121,7 @@ agents:
 | `max_tool_calls_from_history` | int    | `null`      | Limit tool call messages replayed from history (`null` = no limit)                                                                                                                                                                                          |
 | `show_tool_calls`             | bool   | `null`      | Show tool call details inline in responses. Inherits from `defaults.show_tool_calls` (default: `true`). Set to `false` to hide `<tool>…</tool>` blocks (metadata is still tracked)                                                                          |
 | `sandbox_tools`               | list   | `null`      | Tool names to execute through the [sandbox proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md). Inherits from `defaults.sandbox_tools` (default: `null` — defers to env vars). Set to `[]` to explicitly disable sandboxing for this agent |
+| `delegate_to`                 | list   | `[]`        | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation))                                                                                                                                                     |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
 
@@ -142,6 +148,43 @@ You can inject file content directly into an agent's role context without using 
 - Preloaded context is capped by `defaults.max_preload_chars`; if exceeded, truncation drops daily files first, then `MEMORY.md`, then personality files
 
 This loading happens when the agent is created (and on config reload), not continuously on every message.
+
+## Agent Delegation
+
+Agents can delegate tasks to other agents using the `delegate_to` field. When configured, a delegation tool is automatically added to the agent — no need to include `"delegate"` in the `tools` list.
+
+The delegated agent runs as a fresh, one-shot instance with no shared session or history. It executes the task and returns its response as the tool result.
+
+```
+agents:
+  leader:
+    display_name: Leader
+    role: Orchestrate tasks by delegating to specialist agents
+    model: sonnet
+    delegate_to: [code, research]
+    rooms: [lobby]
+
+  code:
+    display_name: CodeAgent
+    role: Generate code, manage files
+    model: sonnet
+    tools: [file, shell]
+    delegate_to: [research]  # can further delegate
+    rooms: [lobby]
+
+  research:
+    display_name: ResearchAgent
+    role: Research topics and provide summaries
+    model: sonnet
+    tools: [duckduckgo]
+    rooms: [lobby]
+```
+
+**Constraints:**
+
+- Targets must reference existing agent names in the config
+- An agent cannot delegate to itself
+- Recursive delegation is supported (agent A delegates to B, B delegates to C) up to a maximum depth of 3
 
 ## Rich Prompt Agents
 
