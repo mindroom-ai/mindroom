@@ -64,6 +64,8 @@ export function AgentEditor() {
     const unconfigured: typeof backendTools = [];
 
     backendTools.forEach(tool => {
+      // delegate is managed via delegate_to, not the tools picker
+      if (tool.name === 'delegate') return;
       // Tools that don't require configuration are "unconfigured but usable"
       if (tool.setup_type === 'none') {
         unconfigured.push(tool);
@@ -97,6 +99,7 @@ export function AgentEditor() {
       instructions: [],
       rooms: [],
       knowledge_bases: [],
+      delegate_to: [],
       context_files: [],
       learning: defaultLearning,
       learning_mode: defaultLearningMode,
@@ -155,12 +158,26 @@ export function AgentEditor() {
     [knowledgeBaseNames]
   );
 
+  // Prepare checkbox items for delegation targets (all agents except current)
+  const delegateItems: CheckboxListItem[] = useMemo(
+    () =>
+      agents
+        .filter(a => a.id !== selectedAgentId)
+        .map(a => ({
+          value: a.id,
+          label: a.display_name,
+          description: a.role,
+        })),
+    [agents, selectedAgentId]
+  );
+
   // Reset form when selected agent changes
   useEffect(() => {
     if (selectedAgent) {
       reset({
         ...selectedAgent,
         knowledge_bases: selectedAgent.knowledge_bases ?? [],
+        delegate_to: selectedAgent.delegate_to ?? [],
         context_files: selectedAgent.context_files ?? [],
         learning: selectedAgent.learning ?? defaultLearning,
         learning_mode: selectedAgent.learning_mode ?? defaultLearningMode,
@@ -358,6 +375,23 @@ export function AgentEditor() {
           onFieldChange={handleFieldChange}
           idPrefix="knowledge-base"
           emptyMessage="No knowledge bases available. Add one in the Knowledge tab."
+          className="space-y-2 max-h-48 overflow-y-auto border rounded-lg p-2"
+        />
+      </FieldGroup>
+
+      {/* Delegate To */}
+      <FieldGroup
+        label="Delegate To"
+        helperText="Allow this agent to delegate tasks to other agents via tool calls"
+      >
+        <CheckboxListField
+          name="delegate_to"
+          control={control}
+          items={delegateItems}
+          fieldName="delegate_to"
+          onFieldChange={handleFieldChange}
+          idPrefix="delegate"
+          emptyMessage="No other agents available to delegate to."
           className="space-y-2 max-h-48 overflow-y-auto border rounded-lg p-2"
         />
       </FieldGroup>

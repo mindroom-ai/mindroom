@@ -108,6 +108,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         ...agent,
         skills: agent.skills ?? [],
         knowledge_bases: agent.knowledge_bases || [],
+        delegate_to: agent.delegate_to || [],
         context_files: agent.context_files ?? [],
         learning: agent.learning ?? defaultLearning,
         learning_mode: agent.learning_mode ?? defaultLearningMode,
@@ -253,6 +254,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       id,
       ...agentData,
       knowledge_bases: agentData.knowledge_bases ?? [],
+      delegate_to: agentData.delegate_to ?? [],
       learning: agentData.learning ?? defaultLearning,
       learning_mode: agentData.learning_mode ?? defaultLearningMode,
     };
@@ -266,7 +268,17 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   // Delete an agent
   deleteAgent: agentId => {
     set(state => ({
-      agents: state.agents.filter(agent => agent.id !== agentId),
+      agents: state.agents
+        .filter(agent => agent.id !== agentId)
+        .map(agent => {
+          if (!agent.delegate_to?.includes(agentId)) {
+            return agent;
+          }
+          return {
+            ...agent,
+            delegate_to: agent.delegate_to.filter(id => id !== agentId),
+          };
+        }),
       cultures: state.cultures.map(culture => ({
         ...culture,
         agents: culture.agents.filter(id => id !== agentId),
