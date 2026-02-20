@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.tools_metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
 
+from . import delegate as _delegate_registration  # noqa: F401
 from . import memory as _memory_registration  # noqa: F401
 from .agentql import agentql_tools
 from .airflow import airflow_tools

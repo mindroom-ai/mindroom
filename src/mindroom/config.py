@@ -90,6 +90,10 @@ class AgentConfig(BaseModel):
         default=None,
         description="Tool names to execute through sandbox proxy (overrides defaults; None = inherit)",
     )
+    delegate_to: list[str] = Field(
+        default_factory=list,
+        description="List of agent names this agent can delegate tasks to via tool calls",
+    )
 
     @model_validator(mode="after")
     def _check_history_config(self) -> Self:
@@ -489,6 +493,19 @@ class Config(BaseModel):
         if invalid:
             msg = f"Agent/team names must be alphanumeric/underscore only, got: {', '.join(invalid)}"
             raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_delegate_to(self) -> Config:
+        """Ensure delegate_to targets exist and agents don't delegate to themselves."""
+        for agent_name, agent_config in self.agents.items():
+            for target in agent_config.delegate_to:
+                if target == agent_name:
+                    msg = f"Agent '{agent_name}' cannot delegate to itself"
+                    raise ValueError(msg)
+                if target not in self.agents:
+                    msg = f"Agent '{agent_name}' delegates to unknown agent '{target}'"
+                    raise ValueError(msg)
         return self
 
     @model_validator(mode="after")
