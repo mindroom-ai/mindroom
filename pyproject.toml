@@ -285,6 +285,10 @@ optional-dependencies.scrapegraph = [
   "scrapegraph-py",
 ]
 optional-dependencies.searxng = [  ]
+optional-dependencies.self_config = [
+  "pydantic>=2",
+  "pyyaml>=6",
+]
 optional-dependencies.serpapi = [
   "google-search-results>=2.4.2",
 ]
