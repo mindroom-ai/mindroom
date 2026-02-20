@@ -50,6 +50,7 @@ def _build_tool_instance(
     *,
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
+    sandbox_tools_override: list[str] | None = None,
 ) -> Toolkit:
     """Instantiate a tool from the registry, applying credentials and sandbox proxy."""
     tool_class = TOOL_REGISTRY[tool_name]()
@@ -68,7 +69,7 @@ def _build_tool_instance(
     toolkit = tool_class(**init_kwargs)
     if disable_sandbox_proxy:
         return toolkit
-    return maybe_wrap_toolkit_for_sandbox_proxy(tool_name, toolkit)
+    return maybe_wrap_toolkit_for_sandbox_proxy(tool_name, toolkit, sandbox_tools_override=sandbox_tools_override)
 
 
 def get_tool_by_name(
@@ -76,6 +77,7 @@ def get_tool_by_name(
     *,
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
+    sandbox_tools_override: list[str] | None = None,
 ) -> Toolkit:
     """Get a tool instance by its registered name."""
     if tool_name not in TOOL_REGISTRY:
@@ -88,6 +90,7 @@ def get_tool_by_name(
         tool_name,
         disable_sandbox_proxy=disable_sandbox_proxy,
         credential_overrides=credential_overrides,
+        sandbox_tools_override=sandbox_tools_override,
     )
 
     # Pre-check dependencies using find_spec (no side effects) before importing
