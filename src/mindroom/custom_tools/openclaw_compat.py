@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import inspect
 import json
+import re
 import shlex
 import sqlite3
 from datetime import UTC, datetime, timedelta
@@ -36,6 +38,10 @@ class OpenClawCompatTools(Toolkit):
     """OpenClaw-style tool names exposed as a single toolkit."""
 
     _registry_lock: Lock = Lock()
+    RETRY_GUIDANCE_SUFFIX = " Supply correct parameters before retrying."
+    READ_PAGE_LINE_LIMIT = 200
+    READ_MAX_OUTPUT_BYTES = 50 * 1024
+    READ_MAX_PAGES = 8
 
     def __init__(self) -> None:
         """Initialize the OpenClaw compatibility toolkit."""
@@ -1230,11 +1236,17 @@ class OpenClawCompatTools(Toolkit):
         return cls._extract_structured_text_from_mapping(cast("dict[str, object]", value), depth)
 
     @staticmethod
-    def _normalize_file_path(path: str | None, file_path: str | None) -> str | None:
+    def _normalize_file_path(
+        path: str | None,
+        file_path: str | None,
+        file_path_camel: str | None = None,
+    ) -> str | None:
         if isinstance(path, str) and path.strip():
             return path.strip()
         if isinstance(file_path, str) and file_path.strip():
             return file_path.strip()
+        if isinstance(file_path_camel, str) and file_path_camel.strip():
+            return file_path_camel.strip()
         return None
 
     @staticmethod
@@ -1242,6 +1254,170 @@ class OpenClawCompatTools(Toolkit):
         if isinstance(value, str):
             return value
         return OpenClawCompatTools._extract_structured_text(value)
+
+    @classmethod
+    def _parameter_validation_error(cls, message: str) -> str:
+        return f"{message}{cls.RETRY_GUIDANCE_SUFFIX}"
+
+    @staticmethod
+    def _format_bytes(size_bytes: int) -> str:
+        if size_bytes >= 1024 * 1024:
+            return f"{size_bytes / (1024 * 1024):.1f}MB"
+        if size_bytes >= 1024:
+            return f"{round(size_bytes / 1024)}KB"
+        return f"{size_bytes}B"
+
+    @classmethod
+    def _extract_file_tool_text(
+        cls,
+        result: object,
+        *,
+        operation: str,
+    ) -> tuple[str | None, str | None]:
+        if not isinstance(result, str):
+            return None, f"{operation} failed: file tool returned a non-text response."
+
+        lowered = result.strip().lower()
+        if lowered.startswith("error "):
+            return None, result
+
+        return result, None
+
+    @staticmethod
+    def _detect_line_ending(content: str) -> str:
+        crlf_index = content.find("\r\n")
+        lf_index = content.find("\n")
+        if lf_index == -1:
+            return "\n"
+        if crlf_index != -1 and crlf_index < lf_index:
+            return "\r\n"
+        return "\n"
+
+    @staticmethod
+    def _normalize_to_lf(text: str) -> str:
+        return text.replace("\r\n", "\n").replace("\r", "\n")
+
+    @staticmethod
+    def _restore_line_endings(text: str, ending: str) -> str:
+        return text.replace("\n", "\r\n") if ending == "\r\n" else text
+
+    @staticmethod
+    def _normalize_for_fuzzy_match(text: str) -> str:
+        normalized = "\n".join(line.rstrip() for line in text.split("\n"))
+        normalized = re.sub(r"[\u2018\u2019\u201A\u201B]", "'", normalized)
+        normalized = re.sub(r"[\u201C\u201D\u201E\u201F]", '"', normalized)
+        normalized = re.sub(r"[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]", "-", normalized)
+        return re.sub(r"[\u00A0\u2002-\u200A\u202F\u205F\u3000]", " ", normalized)
+
+    @classmethod
+    def _fuzzy_find_text(
+        cls,
+        content: str,
+        old_text: str,
+    ) -> tuple[bool, int, int, bool, str]:
+        exact_index = content.find(old_text)
+        if exact_index != -1:
+            return True, exact_index, len(old_text), False, content
+
+        fuzzy_content = cls._normalize_for_fuzzy_match(content)
+        fuzzy_old_text = cls._normalize_for_fuzzy_match(old_text)
+        fuzzy_index = fuzzy_content.find(fuzzy_old_text)
+        if fuzzy_index == -1:
+            return False, -1, 0, False, content
+        return True, fuzzy_index, len(fuzzy_old_text), True, fuzzy_content
+
+    @classmethod
+    def _strip_bom(cls, content: str) -> tuple[str, str]:
+        if content.startswith("\ufeff"):
+            return "\ufeff", content[1:]
+        return "", content
+
+    @classmethod
+    def _first_changed_line(cls, old_content: str, new_content: str) -> int | None:
+        old_lines = old_content.split("\n")
+        new_lines = new_content.split("\n")
+        max_lines = max(len(old_lines), len(new_lines))
+        for index in range(max_lines):
+            old_line = old_lines[index] if index < len(old_lines) else None
+            new_line = new_lines[index] if index < len(new_lines) else None
+            if old_line != new_line:
+                return index + 1
+        return None
+
+    @classmethod
+    def _generate_diff(cls, old_content: str, new_content: str) -> tuple[str, int | None]:
+        diff_lines = list(
+            difflib.unified_diff(
+                old_content.split("\n"),
+                new_content.split("\n"),
+                fromfile="before",
+                tofile="after",
+                lineterm="",
+                n=4,
+            ),
+        )
+        return "\n".join(diff_lines), cls._first_changed_line(old_content, new_content)
+
+    async def _read_with_adaptive_paging(
+        self,
+        resolved_path: str,
+        *,
+        start_offset: int,
+    ) -> tuple[str, int | None, bool]:
+        pages: list[str] = []
+        total_bytes = 0
+        next_offset = start_offset
+        has_more = False
+
+        for page_index in range(self.READ_MAX_PAGES):
+            start_line = next_offset - 1
+            end_line = start_line + self.READ_PAGE_LINE_LIMIT - 1
+            raw_chunk = await self._run_file_tool("read_file_chunk", resolved_path, start_line, end_line)
+            chunk, chunk_error = self._extract_file_tool_text(raw_chunk, operation="read")
+            if chunk_error is not None:
+                msg = f"read failed: {chunk_error}"
+                raise RuntimeError(msg)
+            assert chunk is not None
+
+            if chunk == "":
+                has_more = False
+                break
+
+            separator = "\n\n" if pages else ""
+            chunk_bytes = len(f"{separator}{chunk}".encode())
+            if pages and total_bytes + chunk_bytes > self.READ_MAX_OUTPUT_BYTES:
+                has_more = True
+                break
+            if not pages and chunk_bytes > self.READ_MAX_OUTPUT_BYTES:
+                encoded = chunk.encode("utf-8")
+                truncated_chunk = encoded[: self.READ_MAX_OUTPUT_BYTES].decode("utf-8", errors="ignore")
+                pages.append(truncated_chunk)
+                total_bytes = len(truncated_chunk.encode("utf-8"))
+                next_offset += max(1, len(chunk.splitlines()))
+                has_more = True
+                break
+
+            pages.append(chunk)
+            total_bytes += chunk_bytes
+
+            line_count = len(chunk.splitlines())
+            if line_count < self.READ_PAGE_LINE_LIMIT:
+                has_more = False
+                break
+
+            next_offset += line_count
+            if page_index == self.READ_MAX_PAGES - 1:
+                has_more = True
+
+        result_text = "\n\n".join(pages)
+        continuation_offset = next_offset if has_more else None
+        if continuation_offset is not None:
+            cap = self._format_bytes(self.READ_MAX_OUTPUT_BYTES)
+            result_text += (
+                f"\n\n[Read output capped at {cap} for this call. Use offset={continuation_offset} to continue.]"
+            )
+
+        return result_text, continuation_offset, has_more
 
     @classmethod
     def _normalize_edit_replacements(
@@ -1259,9 +1435,21 @@ class OpenClawCompatTools(Toolkit):
         normalized_old = cls._normalize_text_like(old_value)
         normalized_new = cls._normalize_text_like(new_value)
         if normalized_old is None or not normalized_old.strip():
-            return None, None, "Missing required parameter: oldText (oldText or old_string)."
+            return (
+                None,
+                None,
+                cls._parameter_validation_error(
+                    "Missing required parameter: oldText (oldText or old_string).",
+                ),
+            )
         if normalized_new is None:
-            return None, None, "Missing required parameter: newText (newText or new_string)."
+            return (
+                None,
+                None,
+                cls._parameter_validation_error(
+                    "Missing required parameter: newText (newText or new_string).",
+                ),
+            )
         return normalized_old, normalized_new, None
 
     async def _run_file_tool(self, function_name: str, *args: object) -> object:
@@ -1280,6 +1468,7 @@ class OpenClawCompatTools(Toolkit):
         file_path: str | None = None,
         offset: int | None = None,
         limit: int | None = None,
+        **kwargs: object,
     ) -> str:
         """Read file content with optional offset/limit paging."""
         context = get_openclaw_tool_context()
@@ -1290,28 +1479,42 @@ class OpenClawCompatTools(Toolkit):
                 message=f"file tool is not enabled for agent '{context.agent_name}'.",
             )
 
-        resolved_path = self._normalize_file_path(path, file_path)
+        resolved_path = self._normalize_file_path(
+            path,
+            file_path,
+            cast("str | None", kwargs.get("filePath")),
+        )
         if resolved_path is None:
             return self._payload(
                 "read",
                 "error",
-                message="Missing required parameter: path (path or file_path).",
+                message=self._parameter_validation_error("Missing required parameter: path (path or file_path)."),
             )
 
         try:
-            if offset is not None or limit is not None:
+            if limit is not None:
                 start_offset = 1 if offset is None else max(1, offset)
-                chunk_limit = 200 if limit is None else max(1, limit)
+                chunk_limit = max(1, limit)
                 start_line = start_offset - 1
                 end_line = start_line + chunk_limit - 1
-                result = await self._run_file_tool(
+                raw_result = await self._run_file_tool(
                     "read_file_chunk",
                     resolved_path,
                     start_line,
                     end_line,
                 )
+                result, read_error = self._extract_file_tool_text(raw_result, operation="read")
+                if read_error is not None:
+                    return self._payload("read", "error", path=resolved_path, message=read_error)
+                assert result is not None
+                continuation_offset = None
+                output_capped = False
             else:
-                result = await self._run_file_tool("read_file", resolved_path)
+                start_offset = 1 if offset is None else max(1, offset)
+                result, continuation_offset, output_capped = await self._read_with_adaptive_paging(
+                    resolved_path,
+                    start_offset=start_offset,
+                )
         except Exception:
             logger.exception(f"Read failed: {resolved_path}")
             return self._payload("read", "error", path=resolved_path, message="read failed")
@@ -1323,6 +1526,8 @@ class OpenClawCompatTools(Toolkit):
             offset=offset,
             limit=limit,
             result=result,
+            continuation_offset=continuation_offset,
+            output_capped=output_capped,
         )
 
     async def write(
@@ -1330,6 +1535,7 @@ class OpenClawCompatTools(Toolkit):
         path: str | None = None,
         file_path: str | None = None,
         content: object | None = None,
+        **kwargs: object,
     ) -> str:
         """Write content to a file."""
         context = get_openclaw_tool_context()
@@ -1340,27 +1546,107 @@ class OpenClawCompatTools(Toolkit):
                 message=f"file tool is not enabled for agent '{context.agent_name}'.",
             )
 
-        resolved_path = self._normalize_file_path(path, file_path)
+        resolved_path = self._normalize_file_path(
+            path,
+            file_path,
+            cast("str | None", kwargs.get("filePath")),
+        )
         if resolved_path is None:
             return self._payload(
                 "write",
                 "error",
-                message="Missing required parameter: path (path or file_path).",
+                message=self._parameter_validation_error("Missing required parameter: path (path or file_path)."),
             )
 
         normalized_content = self._normalize_text_like(content)
         if normalized_content is None:
-            return self._payload("write", "error", message="Missing required parameter: content.")
+            return self._payload(
+                "write",
+                "error",
+                message=self._parameter_validation_error("Missing required parameter: content."),
+            )
 
         try:
-            result = await self._run_file_tool("save_file", normalized_content, resolved_path, True)
+            raw_result = await self._run_file_tool("save_file", normalized_content, resolved_path, True)
         except Exception:
             logger.exception(f"Write failed: {resolved_path}")
             return self._payload("write", "error", path=resolved_path, message="write failed")
+        result, write_error = self._extract_file_tool_text(raw_result, operation="write")
+        if write_error is not None:
+            return self._payload("write", "error", path=resolved_path, message=write_error)
+        assert result is not None
 
         return self._payload("write", "ok", path=resolved_path, result=result)
 
-    async def edit(
+    def _build_edit_plan(
+        self,
+        *,
+        resolved_path: str,
+        content: str,
+        normalized_old: str,
+        normalized_new: str,
+        replace_all: bool,
+    ) -> tuple[dict[str, object] | None, str | None]:
+        bom, content_without_bom = self._strip_bom(content)
+        original_line_ending = self._detect_line_ending(content_without_bom)
+        normalized_content = self._normalize_to_lf(content_without_bom)
+        normalized_old_text = self._normalize_to_lf(normalized_old)
+        normalized_new_text = self._normalize_to_lf(normalized_new)
+
+        found, match_index, match_length, used_fuzzy_match, replacement_base = self._fuzzy_find_text(
+            normalized_content,
+            normalized_old_text,
+        )
+        if not found:
+            return (
+                None,
+                f"Could not find the exact text in {resolved_path}. "
+                "The old text must match exactly including all whitespace and newlines.",
+            )
+
+        fuzzy_content = self._normalize_for_fuzzy_match(normalized_content)
+        fuzzy_old_text = self._normalize_for_fuzzy_match(normalized_old_text)
+        occurrences = len(fuzzy_content.split(fuzzy_old_text)) - 1 if fuzzy_old_text else 0
+
+        if not replace_all and occurrences > 1:
+            return (
+                None,
+                f"Found {occurrences} occurrences of the text in {resolved_path}. "
+                "The text must be unique. Please provide more context to make it unique.",
+            )
+
+        if replace_all:
+            replace_target = fuzzy_old_text if used_fuzzy_match else normalized_old_text
+            replacements = replacement_base.count(replace_target) if replace_target else 0
+            updated_content = replacement_base.replace(replace_target, normalized_new_text)
+        else:
+            replacements = 1
+            updated_content = (
+                replacement_base[:match_index] + normalized_new_text + replacement_base[match_index + match_length :]
+            )
+
+        if replacement_base == updated_content:
+            return (
+                None,
+                f"No changes made to {resolved_path}. The replacement produced identical content. "
+                "This might indicate an issue with special characters or the text not existing as expected.",
+            )
+
+        final_content = bom + self._restore_line_endings(updated_content, original_line_ending)
+        diff, first_changed_line = self._generate_diff(replacement_base, updated_content)
+
+        return (
+            {
+                "final_content": final_content,
+                "replacements": replacements,
+                "used_fuzzy_match": used_fuzzy_match,
+                "diff": diff,
+                "first_changed_line": first_changed_line,
+            },
+            None,
+        )
+
+    async def edit(  # noqa: C901, PLR0912
         self,
         path: str | None = None,
         file_path: str | None = None,
@@ -1380,7 +1666,11 @@ class OpenClawCompatTools(Toolkit):
                 message=f"file tool is not enabled for agent '{context.agent_name}'.",
             )
 
-        resolved_path = self._normalize_file_path(path, file_path)
+        resolved_path = self._normalize_file_path(
+            path,
+            file_path,
+            cast("str | None", kwargs.get("filePath")),
+        )
         normalized_old, normalized_new, validation_error = self._normalize_edit_replacements(
             old_text,
             new_text,
@@ -1389,51 +1679,74 @@ class OpenClawCompatTools(Toolkit):
             kwargs,
         )
         if resolved_path is None:
-            validation_error = "Missing required parameter: path (path or file_path)."
+            validation_error = self._parameter_validation_error("Missing required parameter: path (path or file_path).")
         if validation_error is not None:
             return self._payload("edit", "error", message=validation_error)
         assert resolved_path is not None
         assert normalized_old is not None
         assert normalized_new is not None
 
-        current_content: str | None = None
-        read_error_message: str | None = None
+        error_payload: str | None = None
+        success_payload: str | None = None
         try:
             raw_content = await self._run_file_tool("read_file", resolved_path)
         except Exception:
             logger.exception(f"Edit read failed: {resolved_path}")
-            read_error_message = "edit failed while reading"
+            error_payload = self._payload("edit", "error", path=resolved_path, message="edit failed while reading")
         else:
-            if not isinstance(raw_content, str):
-                read_error_message = "edit failed while reading"
-            elif normalized_old not in raw_content:
-                read_error_message = "oldText not found in file content."
+            content, read_error = self._extract_file_tool_text(raw_content, operation="read")
+            if read_error is not None:
+                error_payload = self._payload("edit", "error", path=resolved_path, message=read_error)
             else:
-                current_content = raw_content
-        if read_error_message is not None:
-            return self._payload("edit", "error", path=resolved_path, message=read_error_message)
-        assert current_content is not None
+                assert content is not None
+                plan, plan_error = self._build_edit_plan(
+                    resolved_path=resolved_path,
+                    content=content,
+                    normalized_old=normalized_old,
+                    normalized_new=normalized_new,
+                    replace_all=replace_all,
+                )
+                if plan_error is not None:
+                    error_payload = self._payload("edit", "error", path=resolved_path, message=plan_error)
+                else:
+                    assert plan is not None
+                    try:
+                        raw_result = await self._run_file_tool("save_file", plan["final_content"], resolved_path, True)
+                    except Exception:
+                        logger.exception(f"Edit write failed: {resolved_path}")
+                        error_payload = self._payload(
+                            "edit",
+                            "error",
+                            path=resolved_path,
+                            message="edit failed while writing",
+                        )
+                    else:
+                        result, write_error = self._extract_file_tool_text(raw_result, operation="write")
+                        if write_error is not None:
+                            error_payload = self._payload(
+                                "edit",
+                                "error",
+                                path=resolved_path,
+                                message=write_error,
+                            )
+                        else:
+                            assert result is not None
+                            success_payload = self._payload(
+                                "edit",
+                                "ok",
+                                path=resolved_path,
+                                replace_all=replace_all,
+                                replacements=plan["replacements"],
+                                used_fuzzy_match=plan["used_fuzzy_match"],
+                                diff=plan["diff"],
+                                first_changed_line=plan["first_changed_line"],
+                                result=result,
+                            )
 
-        replacements = current_content.count(normalized_old) if replace_all else 1
-        updated_content = (
-            current_content.replace(normalized_old, normalized_new)
-            if replace_all
-            else current_content.replace(normalized_old, normalized_new, 1)
-        )
-        try:
-            result = await self._run_file_tool("save_file", updated_content, resolved_path, True)
-        except Exception:
-            logger.exception(f"Edit write failed: {resolved_path}")
-            return self._payload("edit", "error", path=resolved_path, message="edit failed while writing")
-
-        return self._payload(
-            "edit",
-            "ok",
-            path=resolved_path,
-            replace_all=replace_all,
-            replacements=replacements,
-            result=result,
-        )
+        if success_payload is not None:
+            return success_payload
+        assert error_payload is not None
+        return error_payload
 
     async def exec(self, command: str) -> str:
         """Execute a shell command via shell tool alias."""

@@ -248,3 +248,4 @@ wgcf-profile.conf
 
 # Local AI-agent artifacts
 .claude/REPORT.md
+.claude/TASK.md

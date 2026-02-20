@@ -7,7 +7,7 @@ import sqlite3
 from itertools import count
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
@@ -168,6 +168,101 @@ async def test_openclaw_compat_aliases_return_structured_results() -> None:
     tool._file.functions["read_file_chunk"].entrypoint.assert_called_once_with("README.md", 1, 3)
     tool._file.functions["save_file"].entrypoint.assert_any_call("hello world", "notes.txt", True)
     tool._file.functions["save_file"].entrypoint.assert_any_call("hi world", "notes.txt", True)
+
+
+@pytest.mark.asyncio
+async def test_openclaw_compat_read_adaptive_paging_emits_continuation_hint() -> None:
+    """Verify read auto-pages chunks and returns continuation hints when capped."""
+    tool = OpenClawCompatTools()
+    tool.READ_PAGE_LINE_LIMIT = 2
+    tool.READ_MAX_PAGES = 2
+    tool.READ_MAX_OUTPUT_BYTES = 1024
+
+    read_chunk = MagicMock(side_effect=["a1\na2", "b1\nb2", "c1\nc2"])
+    tool._file.functions["read_file_chunk"].entrypoint = read_chunk
+
+    payload = json.loads(await tool.read(file_path="README.md"))
+
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "read"
+    assert payload["output_capped"] is True
+    assert payload["continuation_offset"] == 5
+    assert "Use offset=5 to continue." in payload["result"]
+    read_chunk.assert_has_calls(
+        [
+            call("README.md", 0, 1),
+            call("README.md", 2, 3),
+        ],
+    )
+    assert read_chunk.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_openclaw_compat_read_validation_includes_retry_guidance() -> None:
+    """Verify read validation errors include retry guidance to avoid call loops."""
+    tool = OpenClawCompatTools()
+
+    payload = json.loads(await tool.read())
+
+    assert payload["status"] == "error"
+    assert payload["tool"] == "read"
+    assert payload["message"].endswith("Supply correct parameters before retrying.")
+
+
+@pytest.mark.asyncio
+async def test_openclaw_compat_edit_handles_bom_crlf_and_fuzzy_match() -> None:
+    """Verify edit handles BOM/CRLF and fuzzy unicode punctuation matching."""
+    tool = OpenClawCompatTools()
+    tool._file.functions["read_file"].entrypoint = MagicMock(return_value="\ufeffalpha\r\nbeta\u2019s\r\ngamma\r\n")
+    save_file = MagicMock(return_value="saved")
+    tool._file.functions["save_file"].entrypoint = save_file
+
+    payload = json.loads(
+        await tool.edit(
+            file_path="notes.txt",
+            old_string="beta's",
+            new_string="delta",
+        ),
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "edit"
+    assert payload["used_fuzzy_match"] is True
+    assert payload["first_changed_line"] == 2
+    assert isinstance(payload["diff"], str)
+    assert payload["diff"]
+    save_file.assert_called_once_with("\ufeffalpha\r\ndelta\r\ngamma\r\n", "notes.txt", True)
+
+
+@pytest.mark.asyncio
+async def test_openclaw_compat_edit_rejects_ambiguous_match_without_replace_all() -> None:
+    """Verify edit requires unique oldText unless replace_all is explicitly set."""
+    tool = OpenClawCompatTools()
+    tool._file.functions["read_file"].entrypoint = MagicMock(return_value="x\nx\n")
+    tool._file.functions["save_file"].entrypoint = MagicMock(return_value="saved")
+
+    payload = json.loads(await tool.edit(path="dup.txt", old_text="x", new_text="z"))
+
+    assert payload["status"] == "error"
+    assert payload["tool"] == "edit"
+    assert "must be unique" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_openclaw_compat_edit_replace_all_applies_all_matches() -> None:
+    """Verify edit replace_all updates every matching occurrence."""
+    tool = OpenClawCompatTools()
+    tool._file.functions["read_file"].entrypoint = MagicMock(return_value="x\nx\n")
+    save_file = MagicMock(return_value="saved")
+    tool._file.functions["save_file"].entrypoint = save_file
+
+    payload = json.loads(await tool.edit(path="dup.txt", old_text="x", new_text="z", replace_all=True))
+
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "edit"
+    assert payload["replace_all"] is True
+    assert payload["replacements"] == 2
+    save_file.assert_called_once_with("z\nz\n", "dup.txt", True)
 
 
 @pytest.mark.asyncio
