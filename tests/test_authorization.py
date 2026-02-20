@@ -360,3 +360,14 @@ def test_resolve_alias_method() -> None:
     assert auth.resolve_alias("@telegram_111:example.com") == "@alice:example.com"
     assert auth.resolve_alias("@alice:example.com") == "@alice:example.com"
     assert auth.resolve_alias("@unknown:example.com") == "@unknown:example.com"
+
+
+def test_duplicate_bridge_alias_rejected() -> None:
+    """Test that aliases cannot be mapped to multiple canonical users."""
+    with pytest.raises(ValueError, match="Duplicate bridge aliases are not allowed"):
+        AuthorizationConfig(
+            aliases={
+                "@alice:example.com": ["@telegram_111:example.com"],
+                "@bob:example.com": ["@telegram_111:example.com"],
+            },
+        )
