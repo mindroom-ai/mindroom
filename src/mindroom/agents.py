@@ -483,6 +483,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     load_plugins(config)
 
     tool_names = config.get_agent_tools(agent_name)
+    sandbox_tools = config.get_agent_sandbox_tools(agent_name)
 
     # Create tools
     tools: list = []  # Use list type to satisfy Agent's parameter type
@@ -499,7 +500,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                     ),
                 )
             else:
-                tools.append(get_tool_by_name(tool_name))
+                tools.append(get_tool_by_name(tool_name, sandbox_tools_override=sandbox_tools))
         except ValueError as e:
             logger.warning(f"Could not load tool '{tool_name}' for agent '{agent_name}': {e}")
 
