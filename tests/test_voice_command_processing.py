@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -9,16 +10,19 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.constants import ROUTER_AGENT_NAME
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 
 @pytest.mark.asyncio
-async def test_router_processes_own_voice_transcriptions() -> None:
+async def test_router_processes_own_voice_transcriptions(tmp_path: Path) -> None:
     """Test that router processes voice transcriptions it sends on behalf of users."""
     # Create a mock router bot
     agent_user = MagicMock()
     agent_user.user_id = "@mindroom_router:example.com"
     agent_user.agent_name = ROUTER_AGENT_NAME
 
-    storage_path = MagicMock()
+    storage_path = tmp_path
     config = MagicMock()
     config.agents = {"calculator": MagicMock()}
 
@@ -59,14 +63,14 @@ async def test_router_processes_own_voice_transcriptions() -> None:
 
 
 @pytest.mark.asyncio
-async def test_router_ignores_non_voice_self_messages() -> None:
+async def test_router_ignores_non_voice_self_messages(tmp_path: Path) -> None:
     """Test that router still ignores its own non-voice messages."""
     # Create a mock router bot
     agent_user = MagicMock()
     agent_user.user_id = "@mindroom_router:example.com"
     agent_user.agent_name = ROUTER_AGENT_NAME
 
-    storage_path = MagicMock()
+    storage_path = tmp_path
     config = MagicMock()
 
     bot = AgentBot(

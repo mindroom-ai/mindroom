@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -11,12 +12,15 @@ from mindroom.config import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.scheduling import CronSchedule, ScheduledWorkflow, parse_workflow_schedule
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 
 class TestDynamicConfigUpdate:
     """Test that dynamic config updates propagate to all existing bots."""
 
     @pytest.mark.asyncio
-    async def test_config_update_propagates_to_existing_bots(self) -> None:
+    async def test_config_update_propagates_to_existing_bots(self, tmp_path: Path) -> None:
         """Test that when config is updated, all existing bots get the new config."""
         # Create initial config with just one agent
         initial_config = Config(
@@ -32,7 +36,7 @@ class TestDynamicConfigUpdate:
         )
 
         # Create orchestrator and set initial config
-        orchestrator = MultiAgentOrchestrator(storage_path=MagicMock())
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
         orchestrator.config = initial_config
 
         # Create a mock bot for the general agent
@@ -157,7 +161,7 @@ class TestDynamicConfigUpdate:
                 assert result.description == "Monitor for urgent emails and send text notification"
 
     @pytest.mark.asyncio
-    async def test_defaults_streaming_toggle_updates_existing_bots_without_restart(self) -> None:
+    async def test_defaults_streaming_toggle_updates_existing_bots_without_restart(self, tmp_path: Path) -> None:
         """Changing defaults.enable_streaming should update existing bots on config reload."""
         initial_config = Config(
             agents={
@@ -184,7 +188,7 @@ class TestDynamicConfigUpdate:
             defaults={"enable_streaming": False},
         )
 
-        orchestrator = MultiAgentOrchestrator(storage_path=MagicMock())
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
         orchestrator.config = initial_config
 
         mock_bot = MagicMock(spec=AgentBot)
@@ -210,7 +214,7 @@ class TestDynamicConfigUpdate:
         assert router_bot.enable_streaming is False
 
     @pytest.mark.asyncio
-    async def test_mindroom_user_display_name_change_updates_user_account(self) -> None:
+    async def test_mindroom_user_display_name_change_updates_user_account(self, tmp_path: Path) -> None:
         """Changing mindroom_user.display_name should refresh the internal user account."""
         initial_config = Config(
             agents={
@@ -236,7 +240,7 @@ class TestDynamicConfigUpdate:
             mindroom_user={"username": "mindroom_user", "display_name": "Alice Internal"},
         )
 
-        orchestrator = MultiAgentOrchestrator(storage_path=MagicMock())
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
         orchestrator.config = initial_config
         mock_bot = MagicMock(spec=AgentBot)
         mock_bot.config = initial_config
@@ -264,7 +268,7 @@ class TestDynamicConfigUpdate:
         mock_setup.assert_awaited_once_with([])
 
     @pytest.mark.asyncio
-    async def test_mindroom_user_username_change_is_rejected_without_partial_update(self) -> None:
+    async def test_mindroom_user_username_change_is_rejected_without_partial_update(self, tmp_path: Path) -> None:
         """Reject changing mindroom_user.username and keep the current runtime config."""
         initial_config = Config(
             agents={
@@ -290,7 +294,7 @@ class TestDynamicConfigUpdate:
             mindroom_user={"username": "alice_internal", "display_name": "Alice Internal"},
         )
 
-        orchestrator = MultiAgentOrchestrator(storage_path=MagicMock())
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
         orchestrator.config = initial_config
         mock_bot = MagicMock(spec=AgentBot)
         mock_bot.config = initial_config

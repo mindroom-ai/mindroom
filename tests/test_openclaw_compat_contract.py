@@ -38,6 +38,9 @@ OPENCLAW_COMPAT_ALIAS_TOOLS = {
     "cron",
     "web_search",
     "web_fetch",
+    "read",
+    "write",
+    "edit",
     "exec",
     "process",
 }
@@ -113,6 +116,9 @@ async def test_openclaw_compat_aliases_return_structured_results() -> None:
     tool = OpenClawCompatTools()
     tool._duckduckgo.web_search = MagicMock(return_value='{"results": []}')
     tool._website.read_url = MagicMock(return_value='{"docs": []}')
+    tool._file.functions["read_file"].entrypoint = MagicMock(return_value="hello world")
+    tool._file.functions["read_file_chunk"].entrypoint = MagicMock(return_value="hello")
+    tool._file.functions["save_file"].entrypoint = MagicMock(return_value="saved")
     tool._shell.functions["run_shell_command"].entrypoint = MagicMock(return_value="ok")
     tool._scheduler.schedule = AsyncMock(return_value="scheduled")
 
@@ -123,6 +129,29 @@ async def test_openclaw_compat_aliases_return_structured_results() -> None:
     web_fetch_payload = json.loads(await tool.web_fetch("https://example.com"))
     assert web_fetch_payload["status"] == "ok"
     assert web_fetch_payload["tool"] == "web_fetch"
+
+    read_payload = json.loads(await tool.read(file_path="README.md", offset=2, limit=3))
+    assert read_payload["status"] == "ok"
+    assert read_payload["tool"] == "read"
+
+    write_payload = json.loads(
+        await tool.write(
+            file_path="notes.txt",
+            content=[{"type": "text", "text": "hello"}, {"kind": "text", "value": " world"}],
+        ),
+    )
+    assert write_payload["status"] == "ok"
+    assert write_payload["tool"] == "write"
+
+    edit_payload = json.loads(
+        await tool.edit(
+            file_path="notes.txt",
+            old_string=[{"type": "text", "text": "hello"}],
+            new_string=[{"kind": "text", "value": "hi"}],
+        ),
+    )
+    assert edit_payload["status"] == "ok"
+    assert edit_payload["tool"] == "edit"
 
     exec_payload = json.loads(await tool.exec("echo hi"))
     assert exec_payload["status"] == "ok"
@@ -135,6 +164,10 @@ async def test_openclaw_compat_aliases_return_structured_results() -> None:
     cron_payload = json.loads(await tool.cron("in 1 minute remind me to test"))
     assert cron_payload["status"] == "ok"
     assert cron_payload["tool"] == "cron"
+
+    tool._file.functions["read_file_chunk"].entrypoint.assert_called_once_with("README.md", 1, 3)
+    tool._file.functions["save_file"].entrypoint.assert_any_call("hello world", "notes.txt", True)
+    tool._file.functions["save_file"].entrypoint.assert_any_call("hi world", "notes.txt", True)
 
 
 @pytest.mark.asyncio
@@ -545,6 +578,30 @@ async def test_openclaw_compat_exec_requires_shell_tool_in_context(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_openclaw_compat_write_requires_file_tool_in_context(tmp_path: Path) -> None:
+    """Verify write is blocked when the active agent does not enable file tool."""
+    tool = OpenClawCompatTools()
+    config = MagicMock()
+    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
+    ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id="$ctx-thread:localhost",
+        requester_id="@user:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+
+    with openclaw_tool_context(ctx):
+        payload = json.loads(await tool.write(path="notes.txt", content="hello"))
+
+    assert payload["status"] == "error"
+    assert payload["tool"] == "write"
+    assert "file tool is not enabled" in payload["message"]
+
+
+@pytest.mark.asyncio
 async def test_openclaw_compat_sessions_history_mixed_timestamp_types_sorted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -639,7 +696,7 @@ def test_openclaw_compat_read_agent_sessions_handles_missing_table(tmp_path: Pat
     assert tool._read_agent_sessions(ctx) == []
 
 
-def test_openclaw_context_readable_inside_context_manager() -> None:
+def test_openclaw_context_readable_inside_context_manager(tmp_path: Path) -> None:
     """Verify the runtime context is accessible inside the context manager."""
     ctx = OpenClawToolContext(
         agent_name="test",
@@ -648,7 +705,7 @@ def test_openclaw_context_readable_inside_context_manager() -> None:
         requester_id="@user:localhost",
         client=MagicMock(),
         config=MagicMock(),
-        storage_path=MagicMock(),
+        storage_path=tmp_path,
     )
     assert get_openclaw_tool_context() is None
     with openclaw_tool_context(ctx):

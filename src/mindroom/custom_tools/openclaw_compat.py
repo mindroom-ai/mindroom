@@ -9,7 +9,7 @@ import shlex
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from threading import Lock
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 import nio
@@ -56,6 +56,9 @@ class OpenClawCompatTools(Toolkit):
                 self.cron,
                 self.web_search,
                 self.web_fetch,
+                self.read,
+                self.write,
+                self.edit,
                 self.exec,
                 self.process,
             ],
@@ -63,6 +66,7 @@ class OpenClawCompatTools(Toolkit):
         self._scheduler = SchedulerTools()
         self._duckduckgo = DuckDuckGoTools()
         self._website = WebsiteTools()
+        self._file = get_tool_by_name("file")
         self._shell = get_tool_by_name("shell")
 
     @staticmethod
@@ -1190,6 +1194,246 @@ class OpenClawCompatTools(Toolkit):
             return self._payload(tool_name, "error", command=command, message="shell command failed")
 
         return self._payload(tool_name, "ok", command=command, result=result)
+
+    @classmethod
+    def _extract_structured_text_from_mapping(cls, value: dict[str, object], depth: int) -> str | None:
+        text_value = value.get("text")
+        if isinstance(text_value, str):
+            return text_value
+
+        for key in ("content", "parts"):
+            nested_value = value.get(key)
+            extracted = cls._extract_structured_text(nested_value, depth + 1)
+            if isinstance(extracted, str):
+                return extracted
+
+        scalar_value = value.get("value")
+        kind = value.get("kind")
+        type_name = value.get("type")
+        kind_text = kind.lower() if isinstance(kind, str) else ""
+        type_text = type_name.lower() if isinstance(type_name, str) else ""
+        if isinstance(scalar_value, str) and (kind_text == "text" or "text" in type_text):
+            return scalar_value
+        return None
+
+    @classmethod
+    def _extract_structured_text(cls, value: object, depth: int = 0) -> str | None:
+        if depth > 6:
+            return None
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            parts = [part for entry in value if isinstance(part := cls._extract_structured_text(entry, depth + 1), str)]
+            return "".join(parts) if parts else None
+        if not isinstance(value, dict):
+            return None
+        return cls._extract_structured_text_from_mapping(cast("dict[str, object]", value), depth)
+
+    @staticmethod
+    def _normalize_file_path(path: str | None, file_path: str | None) -> str | None:
+        if isinstance(path, str) and path.strip():
+            return path.strip()
+        if isinstance(file_path, str) and file_path.strip():
+            return file_path.strip()
+        return None
+
+    @staticmethod
+    def _normalize_text_like(value: object) -> str | None:
+        if isinstance(value, str):
+            return value
+        return OpenClawCompatTools._extract_structured_text(value)
+
+    @classmethod
+    def _normalize_edit_replacements(
+        cls,
+        old_text: object | None,
+        new_text: object | None,
+        old_string: object | None,
+        new_string: object | None,
+        kwargs: dict[str, object],
+    ) -> tuple[str | None, str | None, str | None]:
+        legacy_old_text = kwargs.get("oldText")
+        legacy_new_text = kwargs.get("newText")
+        old_value = old_text if old_text is not None else legacy_old_text if legacy_old_text is not None else old_string
+        new_value = new_text if new_text is not None else legacy_new_text if legacy_new_text is not None else new_string
+        normalized_old = cls._normalize_text_like(old_value)
+        normalized_new = cls._normalize_text_like(new_value)
+        if normalized_old is None or not normalized_old.strip():
+            return None, None, "Missing required parameter: oldText (oldText or old_string)."
+        if normalized_new is None:
+            return None, None, "Missing required parameter: newText (newText or new_string)."
+        return normalized_old, normalized_new, None
+
+    async def _run_file_tool(self, function_name: str, *args: object) -> object:
+        file_function = self._file.functions.get(function_name) or self._file.async_functions.get(function_name)
+        if file_function is None or file_function.entrypoint is None:
+            msg = f"file tool does not expose {function_name}."
+            raise RuntimeError(msg)
+        result = file_function.entrypoint(*args)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    async def read(
+        self,
+        path: str | None = None,
+        file_path: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> str:
+        """Read file content with optional offset/limit paging."""
+        context = get_openclaw_tool_context()
+        if context is not None and not self._tool_enabled_for_agent(context, "file"):
+            return self._payload(
+                "read",
+                "error",
+                message=f"file tool is not enabled for agent '{context.agent_name}'.",
+            )
+
+        resolved_path = self._normalize_file_path(path, file_path)
+        if resolved_path is None:
+            return self._payload(
+                "read",
+                "error",
+                message="Missing required parameter: path (path or file_path).",
+            )
+
+        try:
+            if offset is not None or limit is not None:
+                start_offset = 1 if offset is None else max(1, offset)
+                chunk_limit = 200 if limit is None else max(1, limit)
+                start_line = start_offset - 1
+                end_line = start_line + chunk_limit - 1
+                result = await self._run_file_tool(
+                    "read_file_chunk",
+                    resolved_path,
+                    start_line,
+                    end_line,
+                )
+            else:
+                result = await self._run_file_tool("read_file", resolved_path)
+        except Exception:
+            logger.exception(f"Read failed: {resolved_path}")
+            return self._payload("read", "error", path=resolved_path, message="read failed")
+
+        return self._payload(
+            "read",
+            "ok",
+            path=resolved_path,
+            offset=offset,
+            limit=limit,
+            result=result,
+        )
+
+    async def write(
+        self,
+        path: str | None = None,
+        file_path: str | None = None,
+        content: object | None = None,
+    ) -> str:
+        """Write content to a file."""
+        context = get_openclaw_tool_context()
+        if context is not None and not self._tool_enabled_for_agent(context, "file"):
+            return self._payload(
+                "write",
+                "error",
+                message=f"file tool is not enabled for agent '{context.agent_name}'.",
+            )
+
+        resolved_path = self._normalize_file_path(path, file_path)
+        if resolved_path is None:
+            return self._payload(
+                "write",
+                "error",
+                message="Missing required parameter: path (path or file_path).",
+            )
+
+        normalized_content = self._normalize_text_like(content)
+        if normalized_content is None:
+            return self._payload("write", "error", message="Missing required parameter: content.")
+
+        try:
+            result = await self._run_file_tool("save_file", normalized_content, resolved_path, True)
+        except Exception:
+            logger.exception(f"Write failed: {resolved_path}")
+            return self._payload("write", "error", path=resolved_path, message="write failed")
+
+        return self._payload("write", "ok", path=resolved_path, result=result)
+
+    async def edit(
+        self,
+        path: str | None = None,
+        file_path: str | None = None,
+        old_text: object | None = None,
+        new_text: object | None = None,
+        old_string: object | None = None,
+        new_string: object | None = None,
+        replace_all: bool = False,
+        **kwargs: object,
+    ) -> str:
+        """Edit file content by replacing text."""
+        context = get_openclaw_tool_context()
+        if context is not None and not self._tool_enabled_for_agent(context, "file"):
+            return self._payload(
+                "edit",
+                "error",
+                message=f"file tool is not enabled for agent '{context.agent_name}'.",
+            )
+
+        resolved_path = self._normalize_file_path(path, file_path)
+        normalized_old, normalized_new, validation_error = self._normalize_edit_replacements(
+            old_text,
+            new_text,
+            old_string,
+            new_string,
+            kwargs,
+        )
+        if resolved_path is None:
+            validation_error = "Missing required parameter: path (path or file_path)."
+        if validation_error is not None:
+            return self._payload("edit", "error", message=validation_error)
+        assert resolved_path is not None
+        assert normalized_old is not None
+        assert normalized_new is not None
+
+        current_content: str | None = None
+        read_error_message: str | None = None
+        try:
+            raw_content = await self._run_file_tool("read_file", resolved_path)
+        except Exception:
+            logger.exception(f"Edit read failed: {resolved_path}")
+            read_error_message = "edit failed while reading"
+        else:
+            if not isinstance(raw_content, str):
+                read_error_message = "edit failed while reading"
+            elif normalized_old not in raw_content:
+                read_error_message = "oldText not found in file content."
+            else:
+                current_content = raw_content
+        if read_error_message is not None:
+            return self._payload("edit", "error", path=resolved_path, message=read_error_message)
+        assert current_content is not None
+
+        replacements = current_content.count(normalized_old) if replace_all else 1
+        updated_content = (
+            current_content.replace(normalized_old, normalized_new)
+            if replace_all
+            else current_content.replace(normalized_old, normalized_new, 1)
+        )
+        try:
+            result = await self._run_file_tool("save_file", updated_content, resolved_path, True)
+        except Exception:
+            logger.exception(f"Edit write failed: {resolved_path}")
+            return self._payload("edit", "error", path=resolved_path, message="edit failed while writing")
+
+        return self._payload(
+            "edit",
+            "ok",
+            path=resolved_path,
+            replace_all=replace_all,
+            replacements=replacements,
+            result=result,
+        )
 
     async def exec(self, command: str) -> str:
         """Execute a shell command via shell tool alias."""
