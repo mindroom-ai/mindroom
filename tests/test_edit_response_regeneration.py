@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import nio
 import pytest
 
+from mindroom import interactive
 from mindroom.bot import AgentBot
 from mindroom.config import Config
 from mindroom.matrix.users import AgentMatrixUser
@@ -512,7 +513,7 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> None:
-    """Interactive reactions should not produce replies for disallowed senders."""
+    """Disallowed reactions must not consume interactive questions."""
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
         user_id="@mindroom_test_agent:example.com",
@@ -546,7 +547,16 @@ async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> N
     bot.logger = MagicMock()
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
-    reaction_event = nio.ReactionEvent.from_dict(
+    interactive._active_questions.clear()
+    interactive.register_interactive_question(
+        event_id="$question:example.com",
+        room_id=room.room_id,
+        thread_id=None,
+        option_map={"1️⃣": "Option 1", "1": "Option 1"},
+        agent_name="test_agent",
+    )
+
+    disallowed_reaction = nio.ReactionEvent.from_dict(
         {
             "content": {
                 "m.relates_to": {
@@ -555,28 +565,54 @@ async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> N
                     "rel_type": "m.annotation",
                 },
             },
-            "event_id": "$reaction:example.com",
+            "event_id": "$reaction_bob:example.com",
             "sender": "@bob:example.com",
             "origin_server_ts": 1000000,
             "type": "m.reaction",
             "room_id": "!test:example.com",
         },
     )
-    reaction_event.reacts_to = "$question:example.com"
-    reaction_event.key = "1️⃣"
+    disallowed_reaction.reacts_to = "$question:example.com"
+    disallowed_reaction.key = "1️⃣"
+
+    allowed_reaction = nio.ReactionEvent.from_dict(
+        {
+            "content": {
+                "m.relates_to": {
+                    "event_id": "$question:example.com",
+                    "key": "1️⃣",
+                    "rel_type": "m.annotation",
+                },
+            },
+            "event_id": "$reaction_alice:example.com",
+            "sender": "@alice:example.com",
+            "origin_server_ts": 1000000,
+            "type": "m.reaction",
+            "room_id": "!test:example.com",
+        },
+    )
+    allowed_reaction.reacts_to = "$question:example.com"
+    allowed_reaction.key = "1️⃣"
 
     with (
-        patch("mindroom.bot.interactive.handle_reaction", new_callable=AsyncMock) as mock_handle_reaction,
         patch("mindroom.bot.is_authorized_sender", return_value=True),
         patch("mindroom.bot.config_confirmation.get_pending_change", return_value=None),
         patch.object(bot, "_send_response", new_callable=AsyncMock) as mock_send_response,
         patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate_response,
     ):
-        mock_handle_reaction.return_value = ("Option 1", "thread_id")
-        await bot._on_reaction(room, reaction_event)
+        mock_send_response.return_value = "$ack_event:example.com"
+        mock_generate_response.return_value = "$response_event:example.com"
 
-    mock_send_response.assert_not_called()
-    mock_generate_response.assert_not_called()
+        await bot._on_reaction(room, disallowed_reaction)
+        mock_send_response.assert_not_called()
+        mock_generate_response.assert_not_called()
+
+        await bot._on_reaction(room, allowed_reaction)
+
+    interactive._active_questions.clear()
+
+    mock_send_response.assert_called_once()
+    mock_generate_response.assert_called_once()
 
 
 @pytest.mark.asyncio

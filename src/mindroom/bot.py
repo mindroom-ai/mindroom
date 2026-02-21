@@ -1173,12 +1173,15 @@ class AgentBot:
             return
 
         # Otherwise handle as interactive question
+        # Check permissions before parsing the reaction so disallowed users
+        # cannot consume and clear active interactive questions.
+        if not self._can_reply_to_sender(event.sender):
+            self.logger.debug("Ignoring reaction response due to reply permissions", sender=event.sender)
+            return
+
         result = await interactive.handle_reaction(self.client, event, self.agent_name, self.config)
 
         if result:
-            if not self._can_reply_to_sender(event.sender):
-                self.logger.debug("Ignoring reaction response due to reply permissions", sender=event.sender)
-                return
             selected_value, thread_id = result
             # User selected an option from an interactive question
 
