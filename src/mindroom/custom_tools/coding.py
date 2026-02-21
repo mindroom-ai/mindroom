@@ -162,7 +162,34 @@ def _split_line_body_ending(line: str) -> tuple[str, str]:
 
 
 def _normalize_prefix_map(text: str) -> tuple[str, list[int]]:
-    """Return normalized text and a map from normalized offsets to original offsets."""
+    """Return normalized text and a map from normalized offsets to original offsets.
+
+    Fast path is O(n): when input is already NFC (common for source files), translation
+    is applied per character and offsets are accumulated linearly.
+    Slow path keeps the exact prefix-based behavior for non-NFC inputs.
+    """
+    if unicodedata.is_normalized("NFC", text):
+        return _normalize_prefix_map_linear(text)
+    return _normalize_prefix_map_slow(text)
+
+
+def _normalize_prefix_map_linear(text: str) -> tuple[str, list[int]]:
+    """Build normalized text and offset map in O(n) for NFC input."""
+    normalized_parts: list[str] = []
+    offset_map = [0]
+
+    for i, ch in enumerate(text, 1):
+        mapped = ch.translate(_NORMALIZE_MAP)
+        if not mapped:
+            continue
+        normalized_parts.append(mapped)
+        offset_map.extend([i] * len(mapped))
+
+    return "".join(normalized_parts), offset_map
+
+
+def _normalize_prefix_map_slow(text: str) -> tuple[str, list[int]]:
+    """Exact prefix-based mapping for non-NFC input."""
     normalized = unicodedata.normalize("NFC", text).translate(_NORMALIZE_MAP)
     offset_map = [0] * (len(normalized) + 1)
     prev_len = 0
