@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, safe_replace
 from .logging_config import get_logger
+from .matrix.identity import room_alias_localpart
 
 if TYPE_CHECKING:
     from .matrix.identity import MatrixID
@@ -20,6 +21,10 @@ logger = get_logger(__name__)
 
 AgentLearningMode = Literal["always", "agentic"]
 CultureMode = Literal["automatic", "agentic", "manual"]
+RoomAccessMode = Literal["single_user_private", "multi_user"]
+MultiUserJoinRule = Literal["public", "knock"]
+RoomJoinRule = Literal["invite", "public", "knock"]
+RoomDirectoryVisibility = Literal["public", "private"]
 MATRIX_LOCALPART_PATTERN = re.compile(r"^[a-z0-9._=/-]+$")
 AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
 DEFAULT_DEFAULT_TOOLS = ("scheduler",)
@@ -378,7 +383,10 @@ class AuthorizationConfig(BaseModel):
     )
     room_permissions: dict[str, list[str]] = Field(
         default_factory=dict,
-        description="Room-specific user permissions. Keys are room IDs, values are lists of authorized user IDs",
+        description=(
+            "Room-specific user permissions. Keys may be room IDs ('!room:example.com'), "
+            "full aliases ('#room:example.com'), or managed room keys ('room')"
+        ),
     )
     default_room_access: bool = Field(
         default=False,
@@ -468,6 +476,95 @@ class MindRoomUserConfig(BaseModel):
         return normalized
 
 
+class MatrixRoomAccessConfig(BaseModel):
+    """Configuration for managed Matrix room access and discoverability."""
+
+    mode: RoomAccessMode = Field(
+        default="single_user_private",
+        description=(
+            "Room access mode. 'single_user_private' preserves invite-only/private behavior. "
+            "'multi_user' applies configured join rules and directory visibility."
+        ),
+    )
+    multi_user_join_rule: MultiUserJoinRule = Field(
+        default="public",
+        description="Default join rule for managed rooms in multi_user mode",
+    )
+    publish_to_room_directory: bool = Field(
+        default=False,
+        description="Whether managed rooms should be published to the room directory in multi_user mode",
+    )
+    invite_only_rooms: list[str] = Field(
+        default_factory=list,
+        description=("Managed room keys/aliases/IDs that must remain invite-only and private, even in multi_user mode"),
+    )
+    reconcile_existing_rooms: bool = Field(
+        default=False,
+        description=(
+            "Whether to reconcile existing managed rooms to match current mode/join rule/directory settings "
+            "on startup and config reload"
+        ),
+    )
+
+    @field_validator("invite_only_rooms")
+    @classmethod
+    def validate_unique_invite_only_rooms(cls, invite_only_rooms: list[str]) -> list[str]:
+        """Ensure each invite-only room identifier appears at most once."""
+        if len(invite_only_rooms) != len(set(invite_only_rooms)):
+            seen: set[str] = set()
+            duplicates = {r for r in invite_only_rooms if r in seen or seen.add(r)}
+            msg = f"Duplicate invite_only_rooms are not allowed: {', '.join(sorted(duplicates))}"
+            raise ValueError(msg)
+        return invite_only_rooms
+
+    def is_multi_user_mode(self) -> bool:
+        """Return whether multi-user room access mode is enabled."""
+        return self.mode == "multi_user"
+
+    def is_invite_only_room(
+        self,
+        room_key: str,
+        room_id: str | None = None,
+        room_alias: str | None = None,
+    ) -> bool:
+        """Check whether a managed room should remain invite-only."""
+        identifiers = {room_key}
+        if room_id:
+            identifiers.add(room_id)
+        if room_alias:
+            identifiers.add(room_alias)
+            localpart = room_alias_localpart(room_alias)
+            if localpart:
+                identifiers.add(localpart)
+        return any(identifier in self.invite_only_rooms for identifier in identifiers)
+
+    def get_target_join_rule(
+        self,
+        room_key: str,
+        room_id: str | None = None,
+        room_alias: str | None = None,
+    ) -> RoomJoinRule | None:
+        """Get the configured target join rule for a managed room."""
+        if not self.is_multi_user_mode():
+            return None
+        if self.is_invite_only_room(room_key, room_id=room_id, room_alias=room_alias):
+            return "invite"
+        return self.multi_user_join_rule
+
+    def get_target_directory_visibility(
+        self,
+        room_key: str,
+        room_id: str | None = None,
+        room_alias: str | None = None,
+    ) -> RoomDirectoryVisibility | None:
+        """Get the configured target room directory visibility for a managed room."""
+        if not self.is_multi_user_mode():
+            return None
+        if self.is_invite_only_room(room_key, room_id=room_id, room_alias=room_alias):
+            return "private"
+        return "public" if self.publish_to_room_directory else "private"
+
+
 class Config(BaseModel):
     """Complete configuration from YAML."""
 
@@ -492,6 +589,10 @@ class Config(BaseModel):
     mindroom_user: MindRoomUserConfig = Field(
         default_factory=MindRoomUserConfig,
         description="Configuration for the internal MindRoom user account",
+    )
+    matrix_room_access: MatrixRoomAccessConfig = Field(
+        default_factory=MatrixRoomAccessConfig,
+        description="Managed Matrix room access/discoverability behavior",
     )
     authorization: AuthorizationConfig = Field(
         default_factory=AuthorizationConfig,
@@ -668,6 +769,8 @@ class Config(BaseModel):
             data["plugins"] = []
         if data.get("knowledge_bases") is None:
             data["knowledge_bases"] = {}
+        if data.get("matrix_room_access") is None:
+            data["matrix_room_access"] = {}
 
         config = cls(**data)
         logger.info(f"Loaded agent configuration from {path}")

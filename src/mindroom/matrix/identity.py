@@ -140,6 +140,13 @@ def agent_username_localpart(agent_name: str) -> str:
     return f"{MatrixID.AGENT_PREFIX}{agent_name}"
 
 
+def room_alias_localpart(room_alias: str) -> str | None:
+    """Extract the localpart from a room alias like '#lobby:example.com' → 'lobby'."""
+    if not room_alias.startswith("#") or ":" not in room_alias:
+        return None
+    return room_alias[1:].split(":", 1)[0]
+
+
 def extract_server_name_from_homeserver(homeserver: str) -> str:
     """Extract server name from a homeserver URL like "http://localhost:8008".
 

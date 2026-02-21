@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -11,12 +12,15 @@ from mindroom.config import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.scheduling import CronSchedule, ScheduledWorkflow, parse_workflow_schedule
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 
 class TestDynamicConfigUpdate:
     """Test that dynamic config updates propagate to all existing bots."""
 
     @pytest.mark.asyncio
-    async def test_config_update_propagates_to_existing_bots(self, tmp_path) -> None:  # noqa: ANN001
+    async def test_config_update_propagates_to_existing_bots(self, tmp_path: Path) -> None:
         """Test that when config is updated, all existing bots get the new config."""
         # Create initial config with just one agent
         initial_config = Config(
@@ -157,7 +161,7 @@ class TestDynamicConfigUpdate:
                 assert result.description == "Monitor for urgent emails and send text notification"
 
     @pytest.mark.asyncio
-    async def test_defaults_streaming_toggle_updates_existing_bots_without_restart(self, tmp_path) -> None:  # noqa: ANN001
+    async def test_defaults_streaming_toggle_updates_existing_bots_without_restart(self, tmp_path: Path) -> None:
         """Changing defaults.enable_streaming should update existing bots on config reload."""
         initial_config = Config(
             agents={
@@ -210,7 +214,62 @@ class TestDynamicConfigUpdate:
         assert router_bot.enable_streaming is False
 
     @pytest.mark.asyncio
-    async def test_mindroom_user_display_name_change_updates_user_account(self, tmp_path) -> None:  # noqa: ANN001
+    async def test_matrix_room_access_change_reconciles_rooms_without_restarts(self, tmp_path: Path) -> None:
+        """Changing matrix_room_access should trigger room/invitation reconciliation on config reload."""
+        initial_config = Config(
+            agents={
+                "general": {
+                    "display_name": "GeneralAgent",
+                    "role": "General assistant",
+                    "model": "default",
+                    "rooms": ["lobby"],
+                },
+            },
+            models={"default": {"provider": "test", "id": "test-model"}},
+            matrix_room_access={"mode": "single_user_private"},
+        )
+        updated_config = Config(
+            agents={
+                "general": {
+                    "display_name": "GeneralAgent",
+                    "role": "General assistant",
+                    "model": "default",
+                    "rooms": ["lobby"],
+                },
+            },
+            models={"default": {"provider": "test", "id": "test-model"}},
+            matrix_room_access={
+                "mode": "multi_user",
+                "reconcile_existing_rooms": True,
+            },
+        )
+
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator.config = initial_config
+
+        general_bot = MagicMock(spec=AgentBot)
+        general_bot.config = initial_config
+        general_bot.enable_streaming = True
+        orchestrator.agent_bots["general"] = general_bot
+        router_bot = MagicMock(spec=AgentBot)
+        router_bot.config = initial_config
+        router_bot.enable_streaming = True
+        orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
+
+        with (
+            patch.object(Config, "from_yaml", return_value=updated_config),
+            patch("mindroom.bot._identify_entities_to_restart", return_value=set()),
+            patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
+        ):
+            updated = await orchestrator.update_config()
+
+        assert updated is True
+        assert general_bot.config == updated_config
+        assert router_bot.config == updated_config
+        mock_setup.assert_awaited_once_with([])
+
+    @pytest.mark.asyncio
+    async def test_mindroom_user_display_name_change_updates_user_account(self, tmp_path: Path) -> None:
         """Changing mindroom_user.display_name should refresh the internal user account."""
         initial_config = Config(
             agents={
@@ -264,7 +323,7 @@ class TestDynamicConfigUpdate:
         mock_setup.assert_awaited_once_with([])
 
     @pytest.mark.asyncio
-    async def test_mindroom_user_username_change_is_rejected_without_partial_update(self, tmp_path) -> None:  # noqa: ANN001
+    async def test_mindroom_user_username_change_is_rejected_without_partial_update(self, tmp_path: Path) -> None:
         """Reject changing mindroom_user.username and keep the current runtime config."""
         initial_config = Config(
             agents={

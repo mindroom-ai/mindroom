@@ -54,6 +54,7 @@ async def test_agent_responds_to_voice_transcription_in_thread(mock_home_bot: Ag
     bot = mock_home_bot
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
+    room.canonical_alias = None
 
     # Create a voice transcription message from the router
     voice_transcription_event = MagicMock(spec=nio.RoomMessageText)
@@ -189,6 +190,7 @@ async def test_agent_ignores_non_voice_router_messages(mock_home_bot: AgentBot) 
     bot = mock_home_bot
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
+    room.canonical_alias = None
 
     # Create a regular message from the router (not voice)
     router_message = MagicMock(spec=nio.RoomMessageText)

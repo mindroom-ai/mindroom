@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import nio
@@ -12,12 +13,15 @@ from mindroom.config import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 
 class TestScheduledTaskRestoration:
     """Test scheduled task restoration behavior after bot restart."""
 
     @pytest.mark.asyncio
-    async def test_only_router_restores_tasks(self, tmp_path) -> None:  # noqa: ANN001
+    async def test_only_router_restores_tasks(self, tmp_path: Path) -> None:
         """Test that only the router agent restores scheduled tasks."""
         # Create a mock config with multiple agents
         config = Config(
@@ -66,7 +70,7 @@ class TestScheduledTaskRestoration:
             mock_restore.assert_called_once_with(router_bot.client, "lobby", config)
 
     @pytest.mark.asyncio
-    async def test_non_router_agents_dont_restore_tasks(self, tmp_path) -> None:  # noqa: ANN001
+    async def test_non_router_agents_dont_restore_tasks(self, tmp_path: Path) -> None:
         """Test that non-router agents don't restore scheduled tasks."""
         config = Config(
             agents={
@@ -108,7 +112,7 @@ class TestScheduledTaskRestoration:
             mock_restore.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_multiple_agents_only_router_restores(self, tmp_path) -> None:  # noqa: ANN001
+    async def test_multiple_agents_only_router_restores(self, tmp_path: Path) -> None:
         """Test that when multiple agents join a room, only router restores tasks."""
         config = Config(
             agents={
@@ -145,7 +149,7 @@ class TestScheduledTaskRestoration:
             )
             bot = AgentBot(
                 agent_user=user,
-                storage_path=tmp_path,
+                storage_path=tmp_path / agent_name,
                 config=config,
                 rooms=["lobby"],
             )
