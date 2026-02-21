@@ -126,8 +126,19 @@ def _normalize_for_fuzzy(text: str) -> str:
     """
     text = unicodedata.normalize("NFC", text)
     text = text.translate(_NORMALIZE_MAP)
-    lines = text.splitlines()
-    return "\n".join(line.rstrip() for line in lines)
+    normalized_lines: list[str] = []
+    for line in text.splitlines(keepends=True):
+        if line.endswith("\r\n"):
+            body = line[:-2]
+            line_ending = "\r\n"
+        elif line.endswith(("\n", "\r")):
+            body = line[:-1]
+            line_ending = line[-1]
+        else:
+            body = line
+            line_ending = ""
+        normalized_lines.append(body.rstrip() + line_ending)
+    return "".join(normalized_lines)
 
 
 @dataclass
@@ -164,7 +175,7 @@ def _find_all_matches(content: str, old_text: str) -> list[MatchResult]:
     # Fuzzy: normalize both sides and find in normalized space
     norm_content = _normalize_for_fuzzy(content)
     norm_old = _normalize_for_fuzzy(old_text)
-    if not norm_old:
+    if not norm_old or not norm_old.strip():
         return []
 
     orig_lines = content.splitlines(keepends=True)
@@ -943,4 +954,7 @@ def _python_grep_fallback(
     output = "\n".join(results)
     if match_count >= limit:
         output += f"\n\n[Results limited to {limit} matches.]"
-    return output
+    trunc = _truncate_head(output)
+    if trunc.was_truncated:
+        return trunc.content + f"\n\n[Output truncated. {trunc.total_lines} total lines.]"
+    return output.rstrip()

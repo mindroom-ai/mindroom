@@ -224,6 +224,14 @@ class TestEditFile:
         assert "Applied edit" in result
         assert "fuzzy" in result
 
+    def test_fuzzy_edit_multiline_preserves_line_boundaries(self, tools: CodingTools, tmp_base: Path) -> None:
+        """Fuzzy multiline edits should consume trailing spaces and line ending of matched lines."""
+        (tmp_base / "fuzzy_multiline.py").write_text("foo   \nbar\n")
+        result = tools.edit_file("fuzzy_multiline.py", "foo\n", "X\n")
+        assert "Applied edit" in result
+        assert "fuzzy" in result
+        assert (tmp_base / "fuzzy_multiline.py").read_text() == "X\nbar\n"
+
     def test_edit_not_found(self, tools: CodingTools) -> None:
         """Returns error when old_text is not found."""
         result = tools.edit_file("hello.py", "nonexistent text", "replacement")
@@ -568,6 +576,18 @@ class TestGrep:
         (tmp_base / "long.txt").write_text(long_line + "\n")
         result = tools.grep("x", path="long.txt")
         assert "[truncated]" in result
+
+    def test_grep_python_fallback_applies_global_output_truncation(
+        self,
+        tools: CodingTools,
+        tmp_base: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Python fallback should enforce the same global output truncation limits."""
+        monkeypatch.setattr("mindroom.custom_tools.coding._run_ripgrep", lambda *_args, **_kwargs: None)
+        (tmp_base / "huge.txt").write_text("\n".join(f"match line {i}" for i in range(7000)))
+        result = tools.grep("match", path="huge.txt", limit=7000)
+        assert "[Output truncated." in result
 
 
 class TestLineTruncation:
