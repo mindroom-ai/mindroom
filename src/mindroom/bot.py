@@ -960,37 +960,15 @@ class AgentBot:
         else:
             self.logger.error("Failed to join room", room_id=room.room_id)
 
-    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:  # noqa: C901, PLR0911, PLR0912
+    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:  # noqa: C901, PLR0911
         self.logger.info("Received message", event_id=event.event_id, room_id=room.room_id, sender=event.sender)
         assert self.client is not None
         if event.body.endswith(IN_PROGRESS_MARKER):
             return
 
-        requester_user_id = self._requester_user_id_for_event(event)
-
-        # Skip self-authored messages. Relayed messages resolve to the original
-        # requester before this check.
-        if requester_user_id == self.matrix_id.full_id:
-            return
-
         event_info = EventInfo.from_event(event.source)
-
-        # Check if sender is authorized to interact with agents
-        is_authorized = is_authorized_sender(
-            event.sender,
-            self.config,
-            room.room_id,
-            room_alias=room.canonical_alias,
-        )
-        self.logger.debug(
-            f"Authorization check for {event.sender}: authorized={is_authorized}, room={room.room_id}",
-        )
-        if not is_authorized:
-            # Mark as seen even though we're not responding (prevents reprocessing after permission changes)
-            # Only mark non-edit events as responded
-            if not event_info.is_edit:
-                self.response_tracker.mark_responded(event.event_id)
-            self.logger.debug(f"Ignoring message from unauthorized sender: {event.sender}")
+        requester_user_id = self._precheck_event(room, event, is_edit=event_info.is_edit)
+        if requester_user_id is None:
             return
 
         # Handle edit events
@@ -998,16 +976,8 @@ class AgentBot:
             await self._handle_message_edit(room, event, event_info)
             return
 
-        # Check if we've already seen this message (prevents reprocessing after restart)
-        if self.response_tracker.has_responded(event.event_id):
-            self.logger.debug("Already seen message", event_id=event.event_id)
-            return
-
         # We only receive events from rooms we're in - no need to check access
         _is_dm_room = await is_dm_room(self.client, room.room_id)
-
-        if not self._can_reply_to_sender(requester_user_id):
-            return
 
         await interactive.handle_text_response(self.client, room, event, self.agent_name)
 
@@ -1190,34 +1160,10 @@ class AgentBot:
     ) -> None:
         """Handle voice message events for transcription and processing."""
         assert self.client is not None
-        # Only process if voice handler is enabled
         if not self.config.voice.enabled:
             return
 
-        # Don't process our own voice messages
-        if event.sender == self.matrix_id.full_id:
-            return
-
-        # Check if we've already seen this voice message (prevents reprocessing after restart)
-        if self.response_tracker.has_responded(event.event_id):
-            self.logger.debug("Already processed voice message", event_id=event.event_id)
-            return
-
-        # Check if sender is authorized to interact with agents
-        if not is_authorized_sender(
-            event.sender,
-            self.config,
-            room.room_id,
-            room_alias=room.canonical_alias,
-        ):
-            # Mark as seen even though we're not responding
-            self.response_tracker.mark_responded(event.event_id)
-            self.logger.debug(f"Ignoring voice message from unauthorized sender: {event.sender}")
-            return
-
-        if not self._can_reply_to_sender(event.sender):
-            self.response_tracker.mark_responded(event.event_id)
-            self.logger.debug(f"Ignoring voice message due to reply permissions: {event.sender}")
+        if self._precheck_event(room, event) is None:
             return
 
         self.logger.info("Processing voice message", event_id=event.event_id, sender=event.sender)
@@ -1239,7 +1185,7 @@ class AgentBot:
             # Mark as responded to avoid reprocessing
             self.response_tracker.mark_responded(event.event_id)
 
-    async def _on_image_message(  # noqa: PLR0911
+    async def _on_image_message(
         self,
         room: nio.MatrixRoom,
         event: nio.RoomMessageImage | nio.RoomEncryptedImage,
@@ -1247,34 +1193,13 @@ class AgentBot:
         """Handle image message events by passing the image to the AI model."""
         assert self.client is not None
 
-        requester_user_id = self._requester_user_id_for_event(event)
-
-        # Skip our own messages
-        if requester_user_id == self.matrix_id.full_id:
-            return
-
-        # Check if we've already seen this message
-        if self.response_tracker.has_responded(event.event_id):
-            self.logger.debug("Already processed image message", event_id=event.event_id)
-            return
-
-        # Check if sender is authorized
-        if not is_authorized_sender(
-            event.sender,
-            self.config,
-            room.room_id,
-            room_alias=room.canonical_alias,
-        ):
-            self.response_tracker.mark_responded(event.event_id)
-            self.logger.debug(f"Ignoring image from unauthorized sender: {event.sender}")
+        requester_user_id = self._precheck_event(room, event)
+        if requester_user_id is None:
             return
 
         # Skip messages from other agents unless mentioned
         sender_agent_name = extract_agent_name(requester_user_id, self.config)
         context = await self._extract_message_context(room, event)
-
-        if not self._can_reply_to_sender(requester_user_id):
-            return
 
         if sender_agent_name and not context.am_i_mentioned:
             self.logger.debug("Ignoring image from other agent (not mentioned)")
@@ -1350,10 +1275,59 @@ class AgentBot:
 
     def _requester_user_id_for_event(
         self,
-        event: nio.RoomMessageText | nio.RoomMessageImage | nio.RoomEncryptedImage,
+        event: nio.RoomMessageText
+        | nio.RoomMessageImage
+        | nio.RoomEncryptedImage
+        | nio.RoomMessageAudio
+        | nio.RoomEncryptedAudio,
     ) -> str:
         """Return the effective requester for per-user reply checks."""
         return get_effective_sender_id_for_reply_permissions(event.sender, event.source, self.config)
+
+    def _precheck_event(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageText
+        | nio.RoomMessageImage
+        | nio.RoomEncryptedImage
+        | nio.RoomMessageAudio
+        | nio.RoomEncryptedAudio,
+        *,
+        is_edit: bool = False,
+    ) -> str | None:
+        """Common early-exit checks shared by text, image, and voice handlers.
+
+        Returns the effective requester user ID when the event should be
+        processed, or ``None`` when the event should be skipped.
+
+        Checks (in order): self-authored, already processed (skipped for
+        edits so restart recovery works), sender authorization, and
+        per-agent reply permissions.
+        """
+        requester_user_id = self._requester_user_id_for_event(event)
+
+        if requester_user_id == self.matrix_id.full_id:
+            return None
+
+        # Edits bypass the dedup check: if an edit is redelivered after a
+        # restart the bot should still regenerate the response.
+        if not is_edit and self.response_tracker.has_responded(event.event_id):
+            return None
+
+        if not is_authorized_sender(
+            event.sender,
+            self.config,
+            room.room_id,
+            room_alias=room.canonical_alias,
+        ):
+            self.response_tracker.mark_responded(event.event_id)
+            return None
+
+        if not self._can_reply_to_sender(requester_user_id):
+            self.response_tracker.mark_responded(event.event_id)
+            return None
+
+        return requester_user_id
 
     def _can_reply_to_sender(self, sender_id: str) -> bool:
         """Return whether this entity may reply to *sender_id*."""

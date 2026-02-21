@@ -944,8 +944,8 @@ class TestAgentBot:
     @pytest.mark.parametrize(
         ("handler_name", "marks_responded"),
         [
-            ("message", False),
-            ("image", False),
+            ("message", True),
+            ("image", True),
             ("voice", True),
             ("reaction", False),
         ],

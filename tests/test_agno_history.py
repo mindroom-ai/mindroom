@@ -750,6 +750,7 @@ class TestEditRemovesStaleRun:
         config.domain = "example.com"
         config.ids = {}
         config.get_mindroom_user_id.return_value = "@mindroom:example.com"
+        config.authorization.agent_reply_permissions = {}
 
         bot = AgentBot(
             agent_user=agent_user,

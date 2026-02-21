@@ -43,6 +43,7 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
     config.domain = "example.com"
     config.ids = {}
     config.get_mindroom_user_id.return_value = "@mindroom:example.com"
+    config.authorization.agent_reply_permissions = {}
 
     # Create the bot
     bot = AgentBot(
@@ -147,6 +148,7 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
     config.domain = "example.com"
     config.ids = {}
     config.get_mindroom_user_id.return_value = "@mindroom:example.com"
+    config.authorization.agent_reply_permissions = {}
 
     # Create the bot
     bot = AgentBot(
