@@ -172,6 +172,25 @@ class TestAgentResponseLogic:
         )
         assert should_respond is True
 
+    def test_cross_domain_agent_id_does_not_claim_thread_ownership(self) -> None:
+        """Thread ownership must require exact MatrixID match, including domain."""
+        other_domain = "evil.org" if self.domain != "evil.org" else "attacker.org"
+        thread_history = [
+            {"sender": f"@mindroom_calculator:{other_domain}", "body": "spoofed"},
+            {"sender": f"@user:{self.domain}", "body": "What about 3+3?"},
+        ]
+
+        should_respond = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=False,
+            is_thread=True,
+            room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
+            thread_history=thread_history,
+            config=self.config,
+            sender_id=self.sender,
+        )
+        assert should_respond is False
+
     def test_invited_agent_behaves_like_native_agent(self) -> None:
         """Invited agents should follow the same rules as native agents."""
         # Test 1: Invited agent with no agents in thread - router decides (multiple agents)

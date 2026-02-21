@@ -376,10 +376,11 @@ def should_agent_respond(  # noqa: PLR0911
         return False
 
     available_agents = get_available_agents_for_sender(room, sender_id, config)
+    agent_matrix_id = config.ids[agent_name]
 
     # Non-thread messages: auto-respond if we're the only visible agent in the room.
     if not is_thread:
-        return len(available_agents) == 1 and available_agents[0].agent_name(config) == agent_name
+        return len(available_agents) == 1 and available_agents[0] == agent_matrix_id
 
     # In threads with multiple human participants, always require explicit mention.
     if has_multiple_non_agent_users_in_thread(thread_history, config):
@@ -390,7 +391,7 @@ def should_agent_respond(  # noqa: PLR0911
     agents_in_thread = get_agents_in_thread(thread_history, config)
     agents_in_thread = filter_agents_by_sender_permissions(agents_in_thread, sender_id, config)
     if agents_in_thread:
-        return len(agents_in_thread) == 1 and agents_in_thread[0].agent_name(config) == agent_name
+        return len(agents_in_thread) == 1 and agents_in_thread[0] == agent_matrix_id
 
     # No agents in thread yet — respond if we're the only visible agent.
-    return len(available_agents) == 1 and available_agents[0].agent_name(config) == agent_name
+    return len(available_agents) == 1 and available_agents[0] == agent_matrix_id

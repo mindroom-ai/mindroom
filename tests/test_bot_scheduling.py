@@ -20,12 +20,17 @@ from mindroom.thread_utils import should_agent_respond
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
 
-def create_mock_room(room_id: str = "!test:localhost", agents: list[str] | None = None) -> MagicMock:
+def create_mock_room(
+    room_id: str = "!test:localhost",
+    agents: list[str] | None = None,
+    config: Config | None = None,
+) -> MagicMock:
     """Create a mock room with specified agents."""
     room = MagicMock()
     room.room_id = room_id
     if agents:
-        room.users = {f"@mindroom_{agent}:localhost": None for agent in agents}
+        domain = config.domain if config else "localhost"
+        room.users = {f"@mindroom_{agent}:{domain}": None for agent in agents}
     else:
         room.users = {}
     return room
@@ -713,7 +718,7 @@ class TestCommandHandling:
             agent_name="finance",
             am_i_mentioned=False,
             is_thread=True,
-            room=create_mock_room("!test:localhost", ["finance", "router"]),
+            room=create_mock_room("!test:localhost", ["finance", "router"], self.config),
             thread_history=thread_history,  # Full history including router's error
             config=self.config,
             sender_id="@user:localhost",
@@ -727,7 +732,7 @@ class TestCommandHandling:
             agent_name="finance",
             am_i_mentioned=False,
             is_thread=True,
-            room=create_mock_room("!test:localhost", ["finance", "calculator", "router"]),
+            room=create_mock_room("!test:localhost", ["finance", "calculator", "router"], self.config),
             thread_history=thread_history,  # Include router's error in history
             config=self.config,
             sender_id="@user:localhost",
