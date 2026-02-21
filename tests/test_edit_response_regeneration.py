@@ -750,6 +750,7 @@ async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
 
     room = Mock(spec=nio.MatrixRoom)
     room.room_id = "!test:example.com"
+    room.canonical_alias = None
     room.is_direct = False
 
     # Original message from authorized user
