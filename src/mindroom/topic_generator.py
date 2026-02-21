@@ -101,7 +101,9 @@ Generate the topic:"""
         logger.exception(f"Error generating topic for room {room_key}")
         return None
     content = response.content
-    assert isinstance(content, RoomTopic)  # Type narrowing for mypy
+    if not isinstance(content, RoomTopic):
+        logger.warning(f"Topic generation returned unexpected type: {type(content)}")
+        return str(content) if content else None
     return content.topic
 
 
