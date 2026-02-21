@@ -68,9 +68,13 @@ The router creates and manages rooms:
 
 - Creates configured rooms that don't exist yet
 - Invites agents and users to their configured rooms
+- Applies `matrix_room_access` policy for managed rooms (when enabled)
 - Generates AI-powered room topics based on configured agents
 - Has admin privileges to manage room membership
 - Cleans up orphaned bots on startup
+
+By default (`matrix_room_access.mode: single_user_private`), rooms remain invite-only and private in the room directory.
+In `multi_user` mode, the router can set join rules (`public`/`knock`) and optionally publish rooms to the server directory.
 
 ### Voice Message Processing
 

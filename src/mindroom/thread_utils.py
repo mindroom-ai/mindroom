@@ -6,8 +6,9 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from .constants import ROUTER_AGENT_NAME
-from .matrix.identity import MatrixID, extract_agent_name
+from .matrix.identity import MatrixID, extract_agent_name, room_alias_localpart
 from .matrix.rooms import resolve_room_aliases
+from .matrix.state import MatrixState
 
 if TYPE_CHECKING:
     import nio
@@ -223,13 +224,47 @@ def get_all_mentioned_agents_in_thread(thread_history: list[dict[str, Any]], con
     return mentioned_agents
 
 
-def is_authorized_sender(sender_id: str, config: Config, room_id: str) -> bool:
+def _room_permission_lookup_keys(
+    room_id: str,
+    *,
+    room_alias: str | None = None,
+    room_key: str | None = None,
+) -> list[str]:
+    """Build room identifiers that can be used as authorization map keys."""
+    keys = [room_id]
+    if room_key:
+        keys.append(room_key)
+    if room_alias:
+        keys.append(room_alias)
+        localpart = room_alias_localpart(room_alias)
+        if localpart:
+            keys.append(localpart)
+    return list(dict.fromkeys(keys))
+
+
+def _lookup_managed_room_identifiers(room_id: str) -> tuple[str | None, str | None]:
+    """Return managed room key + alias from persisted Matrix state for a room ID."""
+    state = MatrixState.load()
+    for room_key, room in state.rooms.items():
+        if room.room_id == room_id:
+            return room_key, room.alias
+    return None, None
+
+
+def is_authorized_sender(
+    sender_id: str,
+    config: Config,
+    room_id: str,
+    *,
+    room_alias: str | None = None,
+) -> bool:
     """Check if a sender is authorized to interact with agents.
 
     Args:
         sender_id: Matrix ID of the message sender
         config: Application configuration
         room_id: Room ID for permission checks
+        room_alias: Optional canonical room alias for permission checks
 
     Returns:
         True if the sender is authorized, False otherwise
@@ -252,9 +287,20 @@ def is_authorized_sender(sender_id: str, config: Config, room_id: str) -> bool:
     if resolved_id in config.authorization.global_users:
         return True
 
-    # Check room-specific permissions
-    if room_id in config.authorization.room_permissions:
-        return resolved_id in config.authorization.room_permissions[room_id]
+    room_permissions = config.authorization.room_permissions
+
+    # Check room-specific permissions by direct room identifiers first.
+    for permission_key in _room_permission_lookup_keys(room_id, room_alias=room_alias):
+        if permission_key in room_permissions:
+            return resolved_id in room_permissions[permission_key]
+
+    # If callers didn't provide room_alias, try persisted managed-room identifiers
+    # so room key/alias permissions still work when only room_id is available.
+    if room_id.startswith("!") and not all(key.startswith("!") for key in room_permissions):
+        room_key, persisted_alias = _lookup_managed_room_identifiers(room_id)
+        for permission_key in _room_permission_lookup_keys(room_id, room_alias=persisted_alias, room_key=room_key):
+            if permission_key in room_permissions:
+                return resolved_id in room_permissions[permission_key]
 
     # Use default access for rooms not explicitly configured
     return config.authorization.default_room_access

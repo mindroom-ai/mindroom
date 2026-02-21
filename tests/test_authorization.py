@@ -6,6 +6,7 @@ import pytest
 
 from mindroom.config import AuthorizationConfig, Config
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.matrix.state import MatrixRoom, MatrixState
 from mindroom.thread_utils import is_authorized_sender
 
 
@@ -253,6 +254,71 @@ def test_room_specific_permissions(mock_config_with_room_permissions: Config, mo
     assert not is_authorized_sender("@dave:example.com", mock_config_with_room_permissions, "!room1:example.com")
     assert not is_authorized_sender("@dave:example.com", mock_config_with_room_permissions, "!room2:example.com")
     assert not is_authorized_sender("@dave:example.com", mock_config_with_room_permissions, "!room3:example.com")
+
+
+def test_room_specific_permissions_support_full_alias() -> None:
+    """Room permissions should allow using a full Matrix room alias key."""
+    config = Config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["lobby"],
+            },
+        },
+        authorization={
+            "room_permissions": {
+                "#lobby:example.com": ["@bob:example.com"],
+            },
+            "default_room_access": False,
+        },
+    )
+
+    assert is_authorized_sender(
+        "@bob:example.com",
+        config,
+        "!lobby:example.com",
+        room_alias="#lobby:example.com",
+    )
+    assert not is_authorized_sender(
+        "@eve:example.com",
+        config,
+        "!lobby:example.com",
+        room_alias="#lobby:example.com",
+    )
+
+
+def test_room_specific_permissions_support_managed_room_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Room permissions should allow using a managed room key alias."""
+    config = Config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["lobby"],
+            },
+        },
+        authorization={
+            "room_permissions": {
+                "lobby": ["@bob:example.com"],
+            },
+            "default_room_access": False,
+        },
+    )
+
+    state = MatrixState(
+        rooms={
+            "lobby": MatrixRoom(
+                room_id="!lobby:example.com",
+                alias="#lobby:example.com",
+                name="Lobby",
+            ),
+        },
+    )
+    monkeypatch.setattr("mindroom.thread_utils.MatrixState.load", lambda: state)
+
+    assert is_authorized_sender("@bob:example.com", config, "!lobby:example.com")
+    assert not is_authorized_sender("@eve:example.com", config, "!lobby:example.com")
 
 
 def test_default_room_access(monkeypatch: pytest.MonkeyPatch) -> None:
