@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -19,6 +18,7 @@ from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
+    from pathlib import Path
 
 
 @pytest.mark.asyncio
@@ -181,7 +181,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
                 entity_name: str,
                 agent_user: object,
                 config: object,
-                storage_path: object,
+                storage_path: Path,
             ) -> object:
                 # Update the agent_user with proper user_id
                 if entity_name == "helper":
@@ -192,7 +192,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
                     agent_user.user_id = "@mindroom_router:localhost"
 
                 # Create the actual bot with config
-                return AgentBot(agent_user, Path(str(storage_path)), config, rooms=[test_room_id])
+                return AgentBot(agent_user, storage_path, config, rooms=[test_room_id])
 
             mock_create_bot.side_effect = create_bot_side_effect
             await orchestrator.initialize()

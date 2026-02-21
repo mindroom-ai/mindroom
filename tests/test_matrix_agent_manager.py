@@ -89,11 +89,11 @@ class TestMatrixUserManagement:
         assert "user" in state.accounts
         assert state.accounts["user"].username == DEFAULT_INTERNAL_USERNAME
 
-    @patch("mindroom.matrix.state.MATRIX_STATE_FILE")
-    def test_load_matrix_users_no_file(self, mock_file: MagicMock) -> None:
+    def test_load_matrix_users_no_file(self, tmp_path: Path) -> None:
         """Test loading matrix users when file doesn't exist."""
-        mock_file.exists.return_value = False
-        state = MatrixState.load()
+        missing_file = tmp_path / "missing_matrix_state.yaml"
+        with patch("mindroom.matrix.state.MATRIX_STATE_FILE", missing_file):
+            state = MatrixState.load()
         assert state.accounts == {}
         assert state.rooms == {}
 
