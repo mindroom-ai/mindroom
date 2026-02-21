@@ -24,11 +24,14 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
         password="test_password",  # noqa: S106
     )
 
-    # Create the bot
+    # Create the bot with a config that has empty reply permissions
+    config = MagicMock()
+    config.authorization.agent_reply_permissions = {}
+
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
-        config=MagicMock(),
+        config=config,
         rooms=["!test:example.com"],
     )
 
@@ -105,11 +108,14 @@ async def test_stop_emoji_from_agent_falls_through(tmp_path: Path) -> None:
         password="test_password",  # noqa: S106
     )
 
-    # Create the bot
+    # Create the bot with a config that has empty reply permissions
+    config = MagicMock()
+    config.authorization.agent_reply_permissions = {}
+
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
-        config=MagicMock(),
+        config=config,
         rooms=["!test:example.com"],
     )
 

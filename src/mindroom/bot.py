@@ -996,18 +996,18 @@ class AgentBot:
         _is_dm_room = await is_dm_room(self.client, room.room_id)
         requester_user_id = self._requester_user_id_for_event(event)
 
+        if not self._can_reply_to_sender(requester_user_id):
+            return
+
         await interactive.handle_text_response(self.client, room, event, self.agent_name)
 
         # Router handles commands exclusively
         command = command_parser.parse(event.body)
         if command:
-            if self.agent_name == ROUTER_AGENT_NAME and self._can_reply_to_sender(requester_user_id):
+            if self.agent_name == ROUTER_AGENT_NAME:
                 # Router always handles commands, even in single-agent rooms
                 # Commands like !schedule, !help, etc. need to work regardless
                 await self._handle_command(room, event, command)
-            return
-
-        if not self._can_reply_to_sender(requester_user_id):
             return
 
         context = await self._extract_message_context(room, event)
