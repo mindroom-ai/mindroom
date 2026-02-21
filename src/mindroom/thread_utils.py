@@ -6,7 +6,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from .constants import ROUTER_AGENT_NAME
-from .matrix.identity import MatrixID, extract_agent_name
+from .matrix.identity import MatrixID, extract_agent_name, room_alias_localpart
 from .matrix.rooms import resolve_room_aliases
 from .matrix.state import MatrixState
 
@@ -236,8 +236,9 @@ def _room_permission_lookup_keys(
         keys.append(room_key)
     if room_alias:
         keys.append(room_alias)
-        if room_alias.startswith("#"):
-            keys.append(room_alias[1:].split(":", 1)[0])
+        localpart = room_alias_localpart(room_alias)
+        if localpart:
+            keys.append(localpart)
     return list(dict.fromkeys(keys))
 
 

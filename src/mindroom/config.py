@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, safe_replace
 from .logging_config import get_logger
+from .matrix.identity import room_alias_localpart
 
 if TYPE_CHECKING:
     from .matrix.identity import MatrixID
@@ -529,8 +530,9 @@ class MatrixRoomAccessConfig(BaseModel):
             identifiers.add(room_id)
         if room_alias:
             identifiers.add(room_alias)
-            if room_alias.startswith("#"):
-                identifiers.add(room_alias[1:].split(":", 1)[0])
+            localpart = room_alias_localpart(room_alias)
+            if localpart:
+                identifiers.add(localpart)
         return any(identifier in self.invite_only_rooms for identifier in identifiers)
 
     def get_target_join_rule(

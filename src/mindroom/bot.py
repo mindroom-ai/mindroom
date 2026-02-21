@@ -2746,8 +2746,7 @@ class MultiAgentOrchestrator:
         active_config = config or self.config
         if not self._auto_invites_enabled(active_config):
             return
-        if active_config is None:
-            return
+        assert active_config is not None  # narrowing: _auto_invites_enabled returns False for None
 
         active_router_client = router_client
         if active_router_client is None:

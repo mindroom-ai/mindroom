@@ -22,7 +22,7 @@ from .client import (
     leave_room,
     matrix_client,
 )
-from .identity import MatrixID, extract_server_name_from_homeserver
+from .identity import MatrixID, extract_server_name_from_homeserver, room_alias_localpart
 from .state import MatrixRoom, MatrixState
 from .users import INTERNAL_USER_ACCOUNT_KEY
 
@@ -106,10 +106,11 @@ async def auto_invite_authorized_users(
         candidate_user_ids = set(config.authorization.global_users)
         candidate_user_ids.update(config.authorization.room_permissions.get(room_id, []))
         candidate_user_ids.update(config.authorization.room_permissions.get(room_key, []))
-        candidate_user_ids.update(config.authorization.room_permissions.get(room.alias, []))
-        if room.alias.startswith("#"):
-            room_alias_localpart = room.alias[1:].split(":", 1)[0]
-            candidate_user_ids.update(config.authorization.room_permissions.get(room_alias_localpart, []))
+        if room.alias:
+            candidate_user_ids.update(config.authorization.room_permissions.get(room.alias, []))
+            localpart = room_alias_localpart(room.alias)
+            if localpart:
+                candidate_user_ids.update(config.authorization.room_permissions.get(localpart, []))
         if not candidate_user_ids:
             logger.info(
                 "No configured authorized users available for restricted-room auto-invite",
