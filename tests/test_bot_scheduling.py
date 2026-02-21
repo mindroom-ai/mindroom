@@ -1229,6 +1229,7 @@ class TestRouterSkipsSingleAgent:
             event,
             [],
             None,
+            message=None,
             requester_user_id="@user:localhost",
         )
 
