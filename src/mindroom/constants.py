@@ -111,7 +111,6 @@ def env_flag(name: str, *, default: bool = False) -> bool:
 # Other constants
 VOICE_PREFIX = "🎤 "
 ORIGINAL_SENDER_KEY = "com.mindroom.original_sender"
-LEGACY_VOICE_ORIGINAL_SENDER_KEY = "com.mindroom.voice_original_sender"
 ENABLE_AI_CACHE = env_flag("MINDROOM_ENABLE_AI_CACHE", default=True)
 
 # Matrix

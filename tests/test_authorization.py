@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from mindroom.config import AuthorizationConfig, Config
-from mindroom.constants import LEGACY_VOICE_ORIGINAL_SENDER_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
+from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.matrix.state import MatrixRoom, MatrixState
 from mindroom.thread_utils import (
     get_effective_sender_id_for_reply_permissions,
@@ -724,33 +724,6 @@ def test_effective_sender_uses_original_sender_for_internal_agent_messages() -> 
 
     assert get_effective_sender_id_for_reply_permissions(
         config.ids["assistant"].full_id,
-        event_source,
-        config,
-    ) == ("@alice:example.com")
-
-
-def test_effective_sender_supports_legacy_voice_key_for_router_messages() -> None:
-    """Legacy voice metadata keys should still resolve original sender."""
-    config = Config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={"default_room_access": True},
-    )
-
-    event_source = {
-        "content": {
-            "body": "🎤 help me",
-            LEGACY_VOICE_ORIGINAL_SENDER_KEY: "@alice:example.com",
-        },
-    }
-
-    assert get_effective_sender_id_for_reply_permissions(
-        config.ids[ROUTER_AGENT_NAME].full_id,
         event_source,
         config,
     ) == ("@alice:example.com")
