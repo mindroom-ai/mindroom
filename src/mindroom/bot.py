@@ -1532,23 +1532,42 @@ class AgentBot:
     ) -> SchedulingToolContext | None:
         """Build runtime context for scheduler tool calls during response generation.
 
-        Uses the router's client so that fired scheduled messages are sent by
-        the router, allowing target agents to see and respond to them.
+        Prefer the router's client so fired scheduled messages are sent by the
+        router, but fall back to this bot's client when router context is
+        unavailable.
         """
         router_client = self._get_router_client()
-        if router_client is None:
-            self.logger.warning("Router client not available for scheduling tool context")
+        fallback_client = self.client
+        client = router_client or fallback_client
+        if client is None:
+            self.logger.warning("No Matrix client available for scheduling tool context")
             return None
-        room = router_client.rooms.get(room_id)
+        if router_client is None and fallback_client is not None:
+            self.logger.warning(
+                "Router client not available for scheduling tool context; using current agent client",
+                room_id=room_id,
+            )
+
+        room = client.rooms.get(room_id)
+        if room is None and router_client is not None and fallback_client is not None and client is router_client:
+            fallback_room = fallback_client.rooms.get(room_id)
+            if fallback_room is not None:
+                self.logger.warning(
+                    "Router room cache missing for scheduling tool context; using current agent client",
+                    room_id=room_id,
+                )
+                client = fallback_client
+                room = fallback_room
+
         if room is None:
             self.logger.warning(
-                "Skipping scheduler tool context because room is not cached on router",
+                "Skipping scheduler tool context because room is not cached",
                 room_id=room_id,
             )
             return None
 
         return SchedulingToolContext(
-            client=router_client,
+            client=client,
             room=room,
             room_id=room_id,
             thread_id=None if self.thread_mode == "room" else thread_id or reply_to_event_id,

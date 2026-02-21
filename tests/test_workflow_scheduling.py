@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
+from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling import (
     CronSchedule,
     ScheduledWorkflow,
@@ -204,6 +205,41 @@ class TestParseWorkflowSchedule:
         assert isinstance(result, WorkflowParseError)
         assert "Error parsing schedule" in result.error
         assert result.suggestion is not None
+
+    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.scheduling.Agent")
+    async def test_parse_formats_available_agents_without_double_at(
+        self,
+        mock_agent_class: Mock,
+        mock_get_model: Mock,  # noqa: ARG002
+        mock_config: MagicMock,
+    ) -> None:
+        """Available-agent prompt rendering should never produce @@ mentions."""
+        mock_agent = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.content = ScheduledWorkflow(
+            schedule_type="once",
+            execute_at=datetime.now(UTC) + timedelta(minutes=5),
+            message="Check in",
+            description="Reminder",
+        )
+        mock_agent.arun.return_value = mock_response
+        mock_agent_class.return_value = mock_agent
+
+        await parse_workflow_schedule(
+            "remind me later",
+            config=mock_config,
+            available_agents=[
+                "general",
+                "@research",
+                "@mindroom_finance:localhost",
+                MatrixID(username="mindroom_analyst", domain="localhost"),
+            ],
+        )
+
+        prompt = mock_agent.arun.call_args.args[0]
+        assert "Available agents: @general, @research, @mindroom_finance:localhost, @mindroom_analyst" in prompt
+        assert "@@" not in prompt
 
     @patch("mindroom.scheduling.get_model_instance")
     @patch("mindroom.scheduling.Agent")
