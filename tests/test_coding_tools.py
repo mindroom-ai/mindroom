@@ -613,6 +613,13 @@ class TestGrep:
         result = tools.grep("[bar]", path="regex.txt", literal=True)
         assert "foo[bar]" in result
 
+    def test_grep_dash_prefixed_pattern(self, tools: CodingTools, tmp_base: Path) -> None:
+        """Patterns starting with '-' should not be parsed as ripgrep flags."""
+        (tmp_base / "flags.txt").write_text("--files\n--color\nregular\n")
+        result = tools.grep("--files", path="flags.txt")
+        assert "--files" in result
+        assert "No matches" not in result
+
     def test_grep_line_truncation(self, tools: CodingTools, tmp_base: Path) -> None:
         """Long match lines are truncated at 500 chars."""
         long_line = "x" * 600

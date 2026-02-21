@@ -799,7 +799,7 @@ def _run_ripgrep(
         args.extend(["-C", str(context)])
     if glob_filter:
         args.extend(["--glob", glob_filter])
-    args.extend([pattern, str(search_path)])
+    args.extend(["--", pattern, str(search_path)])
 
     try:
         result = subprocess.run(args, check=False, capture_output=True, text=True, timeout=30)
