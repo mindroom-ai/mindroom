@@ -29,6 +29,7 @@ from .calculator import calculator_tools
 from .cartesia import cartesia_tools
 from .claude_agent import claude_agent_tools
 from .clickup import clickup_tools
+from .coding import coding_tools
 from .composio import composio_tools
 from .config_manager import config_manager_tools
 from .confluence import confluence_tools
@@ -140,6 +141,7 @@ __all__ = [
     "cartesia_tools",
     "claude_agent_tools",
     "clickup_tools",
+    "coding_tools",
     "composio_tools",
     "config_manager_tools",
     "confluence_tools",
