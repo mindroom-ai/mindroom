@@ -1508,6 +1508,21 @@ class AgentBot:
             has_non_agent_mentions=has_non_agent_mentions,
         )
 
+    def _get_router_client(self) -> nio.AsyncClient | None:
+        """Get the router's Matrix client for operations that must be sent as the router.
+
+        Scheduled task execution messages must come from the router so that
+        target agents see them as external messages and actually respond.
+        """
+        if self.agent_name == ROUTER_AGENT_NAME:
+            return self.client
+        if self.orchestrator is None:
+            return None
+        router_bot = self.orchestrator.agent_bots.get(ROUTER_AGENT_NAME)
+        if router_bot is None or router_bot.client is None:
+            return None
+        return router_bot.client
+
     def _build_scheduling_tool_context(
         self,
         room_id: str,
@@ -1515,18 +1530,25 @@ class AgentBot:
         reply_to_event_id: str,
         user_id: str | None,
     ) -> SchedulingToolContext | None:
-        """Build runtime context for scheduler tool calls during response generation."""
-        assert self.client is not None
-        room = self.client.rooms.get(room_id)
+        """Build runtime context for scheduler tool calls during response generation.
+
+        Uses the router's client so that fired scheduled messages are sent by
+        the router, allowing target agents to see and respond to them.
+        """
+        router_client = self._get_router_client()
+        if router_client is None:
+            self.logger.warning("Router client not available for scheduling tool context")
+            return None
+        room = router_client.rooms.get(room_id)
         if room is None:
             self.logger.warning(
-                "Skipping scheduler tool context because room is not cached",
+                "Skipping scheduler tool context because room is not cached on router",
                 room_id=room_id,
             )
             return None
 
         return SchedulingToolContext(
-            client=self.client,
+            client=router_client,
             room=room,
             room_id=room_id,
             thread_id=None if self.thread_mode == "room" else thread_id or reply_to_event_id,
