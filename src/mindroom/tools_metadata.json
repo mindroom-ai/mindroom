@@ -1213,7 +1213,7 @@
         }
       ],
       "dependencies": [],
-      "description": "Ergonomic file read/write/edit, grep, find, and ls for coding agents",
+      "description": "Advanced code-oriented file operations (precise edits, grep, and discovery). Prefer this over file for coding agents; keep file for backward compatibility.",
       "display_name": "Coding Tools",
       "docs_url": null,
       "helper_text": null,

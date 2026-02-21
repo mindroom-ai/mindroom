@@ -232,6 +232,26 @@ class TestEditFile:
         assert "fuzzy" in result
         assert (tmp_base / "fuzzy_multiline.py").read_text() == "X\nbar\n"
 
+    def test_fuzzy_edit_single_line_consumes_trailing_whitespace_and_newline(
+        self,
+        tools: CodingTools,
+        tmp_base: Path,
+    ) -> None:
+        """Fuzzy single-line edits should not leave trailing whitespace artifacts."""
+        (tmp_base / "fuzzy_single_line.py").write_text("foo   \n")
+        result = tools.edit_file("fuzzy_single_line.py", "foo\n", "X\n")
+        assert "Applied edit" in result
+        assert "fuzzy" in result
+        assert (tmp_base / "fuzzy_single_line.py").read_text() == "X\n"
+
+    def test_fuzzy_edit_handles_composed_vs_decomposed_unicode(self, tools: CodingTools, tmp_base: Path) -> None:
+        """Fuzzy edits should replace full graphemes across NFC differences."""
+        (tmp_base / "unicode.py").write_text("Cafe\u0301")
+        result = tools.edit_file("unicode.py", "Café", "Tea")
+        assert "Applied edit" in result
+        assert "fuzzy" in result
+        assert (tmp_base / "unicode.py").read_text() == "Tea"
+
     def test_edit_not_found(self, tools: CodingTools) -> None:
         """Returns error when old_text is not found."""
         result = tools.edit_file("hello.py", "nonexistent text", "replacement")
@@ -368,6 +388,26 @@ class TestGrep:
 
         assert "visible0.txt" in result
         assert run_calls == 1
+
+    def test_grep_python_fallback_does_not_follow_symlink_outside_base(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Fallback grep should ignore files reached via symlinks escaping base_dir."""
+        outside_dir = tmp_path.parent / f"{tmp_path.name}_outside"
+        outside_dir.mkdir(exist_ok=True)
+        (outside_dir / "secret.txt").write_text("needle\n")
+        try:
+            (tmp_path / "link").symlink_to(outside_dir, target_is_directory=True)
+        except (NotImplementedError, OSError):
+            pytest.skip("Symlinks not supported on this platform")
+
+        tools = CodingTools(base_dir=str(tmp_path))
+        monkeypatch.setattr("mindroom.custom_tools.coding._run_ripgrep", lambda *_args, **_kwargs: None)
+        result = tools.grep("needle", glob="link/*.txt")
+        assert "secret.txt" not in result
+        assert "No matches found." in result
 
     def test_run_ripgrep_enforces_global_match_limit(
         self,
@@ -539,6 +579,9 @@ class TestGrep:
         result = tools.grep("match", path="ctx.txt", context=1)
         assert "match" in result
         assert "\n--\n" not in result
+        assert "-2-b" in result
+        assert ":3:match" in result
+        assert "-4-c" in result
         lines = result.strip().splitlines()
         assert all(line != "--" for line in lines)
 
@@ -671,6 +714,20 @@ class TestFindFiles:
         assert "visible0.txt" in result
         assert "ignored0.txt" not in result
         assert run_calls == 1
+
+    def test_find_does_not_follow_symlink_outside_base(self, tools: CodingTools, tmp_base: Path) -> None:
+        """find_files should ignore matches that resolve outside base_dir."""
+        outside_dir = tmp_base.parent / "outside"
+        outside_dir.mkdir()
+        (outside_dir / "secret.txt").write_text("hidden")
+        try:
+            (tmp_base / "link").symlink_to(outside_dir, target_is_directory=True)
+        except (NotImplementedError, OSError):
+            pytest.skip("Symlinks not supported on this platform")
+
+        result = tools.find_files("link/*.txt")
+        assert "secret.txt" not in result
+        assert "No files matching" in result
 
 
 class TestLs:

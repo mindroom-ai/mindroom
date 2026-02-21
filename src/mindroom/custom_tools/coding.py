@@ -6,7 +6,8 @@ smart truncation, fuzzy matching, and actionable pagination hints.
 Unlike the generic ``file`` tool (agno's FileTools), this toolkit is
 optimised for coding agents: line-numbered reads with pagination,
 search-and-replace edits with fuzzy matching, ripgrep-backed grep,
-and gitignore-aware file discovery.
+and gitignore-aware file discovery. Prefer this tool over ``file`` for
+coding-heavy agents; keep ``file`` for backward compatibility.
 """
 
 from __future__ import annotations
@@ -128,15 +129,7 @@ def _normalize_for_fuzzy(text: str) -> str:
     text = text.translate(_NORMALIZE_MAP)
     normalized_lines: list[str] = []
     for line in text.splitlines(keepends=True):
-        if line.endswith("\r\n"):
-            body = line[:-2]
-            line_ending = "\r\n"
-        elif line.endswith(("\n", "\r")):
-            body = line[:-1]
-            line_ending = line[-1]
-        else:
-            body = line
-            line_ending = ""
+        body, line_ending = _split_line_body_ending(line)
         normalized_lines.append(body.rstrip() + line_ending)
     return "".join(normalized_lines)
 
@@ -149,6 +142,68 @@ class MatchResult:
     end: int
     matched_text: str
     was_fuzzy: bool
+
+
+@dataclass
+class _NormalizedLineMap:
+    """Per-line normalized-to-original offset mapping for fuzzy matches."""
+
+    norm_to_orig: list[int]
+    norm_len: int
+
+
+def _split_line_body_ending(line: str) -> tuple[str, str]:
+    """Split a line into body and line ending, preserving CRLF."""
+    if line.endswith("\r\n"):
+        return line[:-2], "\r\n"
+    if line.endswith(("\n", "\r")):
+        return line[:-1], line[-1]
+    return line, ""
+
+
+def _normalize_prefix_map(text: str) -> tuple[str, list[int]]:
+    """Return normalized text and a map from normalized offsets to original offsets."""
+    normalized = unicodedata.normalize("NFC", text).translate(_NORMALIZE_MAP)
+    offset_map = [0] * (len(normalized) + 1)
+    prev_len = 0
+
+    for i in range(1, len(text) + 1):
+        current_len = len(unicodedata.normalize("NFC", text[:i]).translate(_NORMALIZE_MAP))
+        current_len = min(current_len, len(normalized))
+        prev_len = min(prev_len, current_len)
+        for offset in range(prev_len + 1, current_len + 1):
+            offset_map[offset] = i
+        offset_map[current_len] = i
+        prev_len = current_len
+
+    for offset in range(1, len(offset_map)):
+        offset_map[offset] = max(offset_map[offset], offset_map[offset - 1])
+
+    return normalized, offset_map
+
+
+def _build_normalized_line_maps(orig_lines: list[str]) -> list[_NormalizedLineMap]:
+    """Build per-line maps from normalized offsets to original offsets."""
+    line_maps: list[_NormalizedLineMap] = []
+    for line in orig_lines:
+        body, line_ending = _split_line_body_ending(line)
+        normalized_body_full, body_offset_map = _normalize_prefix_map(body)
+        normalized_body = normalized_body_full.rstrip()
+        normalized_body_len = len(normalized_body)
+
+        norm_to_orig = body_offset_map[: normalized_body_len + 1]
+        # Consume stripped trailing whitespace in fuzzy replacements.
+        norm_to_orig[normalized_body_len] = len(body)
+        for i in range(1, len(line_ending) + 1):
+            norm_to_orig.append(len(body) + i)
+
+        line_maps.append(
+            _NormalizedLineMap(
+                norm_to_orig=norm_to_orig,
+                norm_len=normalized_body_len + len(line_ending),
+            ),
+        )
+    return line_maps
 
 
 def _find_all_matches(content: str, old_text: str) -> list[MatchResult]:
@@ -182,6 +237,7 @@ def _find_all_matches(content: str, old_text: str) -> list[MatchResult]:
     norm_lines = norm_content.splitlines(keepends=True)
     orig_offsets = _cumulative_offsets(orig_lines)
     norm_offsets = _cumulative_offsets(norm_lines)
+    line_maps = _build_normalized_line_maps(orig_lines)
 
     pos = 0
     while True:
@@ -189,8 +245,8 @@ def _find_all_matches(content: str, old_text: str) -> list[MatchResult]:
         if idx == -1:
             break
         norm_end = idx + len(norm_old)
-        orig_start = _norm_to_orig_offset(idx, orig_lines, norm_offsets, orig_offsets, len(content))
-        orig_end = _norm_to_orig_offset(norm_end, orig_lines, norm_offsets, orig_offsets, len(content))
+        orig_start = _norm_to_orig_offset(idx, norm_offsets, orig_offsets, line_maps, len(content))
+        orig_end = _norm_to_orig_offset(norm_end, norm_offsets, orig_offsets, line_maps, len(content))
         matches.append(
             MatchResult(
                 start=orig_start,
@@ -214,38 +270,28 @@ def _cumulative_offsets(lines: list[str]) -> list[int]:
 
 def _norm_to_orig_offset(
     norm_offset: int,
-    orig_lines: list[str],
     norm_offsets: list[int],
     orig_offsets: list[int],
+    line_maps: list[_NormalizedLineMap],
     content_len: int,
 ) -> int:
     """Map a character offset in normalized text to the original text.
 
-    Uses line boundaries for reliable mapping, then adjusts within-line
-    offset by counting BOM characters (the only char removed by translate).
+    Uses line boundaries and per-line maps that account for NFC normalization,
+    quote/dash translation, BOM removal, and trailing-whitespace stripping.
     """
-    if not orig_lines:
+    if not line_maps:
         return 0
 
     line_idx = bisect.bisect_right(norm_offsets, norm_offset) - 1
-    line_idx = max(0, min(line_idx, len(orig_lines) - 1))
+    line_idx = max(0, min(line_idx, len(line_maps) - 1))
 
     char_in_norm_line = norm_offset - norm_offsets[line_idx]
+    line_map = line_maps[line_idx]
+    char_in_norm_line = max(0, min(char_in_norm_line, line_map.norm_len))
+    orig_in_line = line_map.norm_to_orig[char_in_norm_line]
 
-    # Within a line, translate is 1:1 except BOM (\ufeff → "").
-    # Count BOMs before the target position to correct the offset.
-    orig_line_body = orig_lines[line_idx].rstrip("\r\n")
-    bom_before = 0
-    non_bom_seen = 0
-    for ch in orig_line_body:
-        if non_bom_seen >= char_in_norm_line:
-            break
-        if ch == "\ufeff":
-            bom_before += 1
-        else:
-            non_bom_seen += 1
-
-    return min(orig_offsets[line_idx] + char_in_norm_line + bom_before, content_len)
+    return min(orig_offsets[line_idx] + orig_in_line, content_len)
 
 
 def _make_diff(
@@ -580,6 +626,7 @@ class CodingTools(Toolkit):
 
         Returns:
             Matching lines with file paths and line numbers.
+            Hidden files/directories and gitignored files are excluded.
 
         """
         try:
@@ -613,6 +660,7 @@ class CodingTools(Toolkit):
 
         Returns:
             List of matching file paths, one per line.
+            Hidden files/directories and gitignored files are excluded.
 
         """
         try:
@@ -636,6 +684,7 @@ class CodingTools(Toolkit):
 
         Returns:
             Sorted directory listing with '/' suffix on directories.
+            Dotfiles are intentionally included.
 
         """
         try:
@@ -806,7 +855,7 @@ def _format_rg_output(stdout: str, limit: int, context: int) -> str:
 
     trunc = _truncate_head(output)
     if trunc.was_truncated:
-        return trunc.content + f"\n\n[Output truncated. {trunc.total_lines} total lines.]"
+        return trunc.content.rstrip() + f"\n\n[Output truncated. {trunc.total_lines} total lines.]"
     return output.rstrip()
 
 
@@ -876,14 +925,24 @@ def _grep_file(
 
 def _filter_hidden_and_ignored(files: list[Path], search_path: Path) -> list[Path]:
     """Filter out hidden files (dotfiles) and gitignored files."""
+    search_root = search_path.resolve()
     visible: list[Path] = []
     for filepath in files:
+        try:
+            resolved = filepath.resolve()
+        except OSError:
+            continue
+        try:
+            resolved.relative_to(search_root)
+        except ValueError:
+            # Ignore files reached through symlinks that escape the search root.
+            continue
         if not filepath.is_file():
             continue
         try:
             rel = filepath.relative_to(search_path)
         except ValueError:
-            rel = filepath
+            rel = resolved
         if any(part.startswith(".") for part in rel.parts):
             continue
         visible.append(filepath)
@@ -900,6 +959,8 @@ def _collect_grep_files(search_path: Path, glob_filter: str | None) -> list[Path
     if glob_filter:
         patterns = [glob_filter]
         if "/" not in glob_filter and "\\" not in glob_filter and not glob_filter.startswith("**/"):
+            # pathlib's "*.ext" only matches the top level, while ripgrep's --glob
+            # applies recursively; include both patterns for parity in fallback mode.
             patterns.append(f"**/{glob_filter}")
     else:
         patterns = ["**/*"]

@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="coding",
     display_name="Coding Tools",
-    description="Ergonomic file read/write/edit, grep, find, and ls for coding agents",
+    description="Advanced code-oriented file operations (precise edits, grep, and discovery). Prefer this over file for coding agents; keep file for backward compatibility.",
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
