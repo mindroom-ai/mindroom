@@ -19,7 +19,6 @@ from agno.run.team import TeamRunOutput
 
 from mindroom.bot import AgentBot, MessageContext, MultiAgentOrchestrator, MultiKnowledgeVectorDb
 from mindroom.config import AgentConfig, AuthorizationConfig, Config, DefaultsConfig, KnowledgeBaseConfig, ModelConfig
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.teams import TeamFormationDecision, TeamMode
@@ -811,12 +810,12 @@ class TestAgentBot:
         # Should not send any response
         bot.client.room_send.assert_not_called()
 
-    def test_build_scheduling_tool_context_prefers_router_client(
+    def test_build_scheduling_tool_context_uses_active_client_when_room_cached(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Scheduler context should use router client when router cache has the room."""
+        """Scheduler context should use the active bot client when room cache is present."""
         config = Config(
             agents={
                 "calculator": AgentConfig(
@@ -827,17 +826,10 @@ class TestAgentBot:
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         room_id = "!test:localhost"
-        router_room = MagicMock(spec=nio.MatrixRoom)
-        router_room.room_id = room_id
         local_room = MagicMock(spec=nio.MatrixRoom)
         local_room.room_id = room_id
         bot.client = MagicMock(rooms={room_id: local_room})
-        router_client = MagicMock(rooms={room_id: router_room})
-        bot.orchestrator = MagicMock(
-            agent_bots={
-                ROUTER_AGENT_NAME: MagicMock(client=router_client),
-            },
-        )
+        bot.orchestrator = MagicMock()
 
         context = bot._build_scheduling_tool_context(
             room_id=room_id,
@@ -847,17 +839,17 @@ class TestAgentBot:
         )
 
         assert context is not None
-        assert context.client is router_client
-        assert context.room is router_room
+        assert context.client is bot.client
+        assert context.room is local_room
         assert context.thread_id == "$thread"
         assert context.requester_id == "@user:localhost"
 
-    def test_build_scheduling_tool_context_falls_back_when_router_room_missing(
+    def test_build_scheduling_tool_context_returns_none_when_room_not_cached(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Scheduler context should fall back to active client if router room cache is stale."""
+        """Scheduler context should be skipped when active client has no room cache entry."""
         config = Config(
             agents={
                 "calculator": AgentConfig(
@@ -868,15 +860,8 @@ class TestAgentBot:
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         room_id = "!test:localhost"
-        local_room = MagicMock(spec=nio.MatrixRoom)
-        local_room.room_id = room_id
-        bot.client = MagicMock(rooms={room_id: local_room})
-        router_client = MagicMock(rooms={})
-        bot.orchestrator = MagicMock(
-            agent_bots={
-                ROUTER_AGENT_NAME: MagicMock(client=router_client),
-            },
-        )
+        bot.client = MagicMock(rooms={})
+        bot.orchestrator = MagicMock()
 
         context = bot._build_scheduling_tool_context(
             room_id=room_id,
@@ -885,16 +870,14 @@ class TestAgentBot:
             user_id="@user:localhost",
         )
 
-        assert context is not None
-        assert context.client is bot.client
-        assert context.room is local_room
+        assert context is None
 
-    def test_build_scheduling_tool_context_falls_back_when_router_unavailable(
+    def test_build_scheduling_tool_context_returns_none_when_client_unavailable(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Scheduler context should use active client if router client is unavailable."""
+        """Scheduler context should be skipped when no Matrix client is available."""
         config = Config(
             agents={
                 "calculator": AgentConfig(
@@ -904,22 +887,16 @@ class TestAgentBot:
             },
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
-        room_id = "!test:localhost"
-        local_room = MagicMock(spec=nio.MatrixRoom)
-        local_room.room_id = room_id
-        bot.client = MagicMock(rooms={room_id: local_room})
-        bot.orchestrator = None
+        bot.client = None
 
         context = bot._build_scheduling_tool_context(
-            room_id=room_id,
+            room_id="!test:localhost",
             thread_id="$thread",
             reply_to_event_id="$event",
             user_id="@user:localhost",
         )
 
-        assert context is not None
-        assert context.client is bot.client
-        assert context.room is local_room
+        assert context is None
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

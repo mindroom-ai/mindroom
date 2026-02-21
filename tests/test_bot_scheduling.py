@@ -12,7 +12,7 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.commands import Command, CommandType
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
-from mindroom.constants import ROUTER_AGENT_NAME, VOICE_PREFIX
+from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, VOICE_PREFIX
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_utils import should_agent_respond
@@ -1470,13 +1470,17 @@ class TestRouterSkipsSingleAgent:
             "@user:localhost": None,
         }
 
-        # Voice transcription from router (self-message with VOICE_PREFIX)
+        # Voice transcription relay from router on behalf of a human user
         voice_event = nio.RoomMessageText.from_dict(
             {
                 "event_id": "$event_voice",
                 "sender": "@mindroom_router:localhost",
                 "origin_server_ts": 1234567890,
-                "content": {"msgtype": "m.text", "body": f"{VOICE_PREFIX}What's the weather today?"},
+                "content": {
+                    "msgtype": "m.text",
+                    "body": f"{VOICE_PREFIX}What's the weather today?",
+                    ORIGINAL_SENDER_KEY: "@user:localhost",
+                },
             },
         )
 

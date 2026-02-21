@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from mindroom.config import AuthorizationConfig, Config
-from mindroom.constants import LEGACY_VOICE_ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, VOICE_ORIGINAL_SENDER_KEY
+from mindroom.constants import LEGACY_VOICE_ORIGINAL_SENDER_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.matrix.state import MatrixRoom, MatrixState
 from mindroom.thread_utils import (
     get_effective_sender_id_for_reply_permissions,
@@ -663,7 +663,7 @@ def test_effective_sender_uses_voice_original_sender_for_router_messages() -> No
     event_source = {
         "content": {
             "body": "🎤 help me",
-            VOICE_ORIGINAL_SENDER_KEY: "@alice:example.com",
+            ORIGINAL_SENDER_KEY: "@alice:example.com",
         },
     }
 
@@ -690,7 +690,7 @@ def test_effective_sender_ignores_voice_original_sender_for_non_internal_message
     event_source = {
         "content": {
             "body": "spoof attempt",
-            VOICE_ORIGINAL_SENDER_KEY: "@alice:example.com",
+            ORIGINAL_SENDER_KEY: "@alice:example.com",
         },
     }
 
@@ -718,7 +718,7 @@ def test_effective_sender_uses_original_sender_for_internal_agent_messages() -> 
     event_source = {
         "content": {
             "body": "automated task",
-            VOICE_ORIGINAL_SENDER_KEY: "@alice:example.com",
+            ORIGINAL_SENDER_KEY: "@alice:example.com",
         },
     }
 
@@ -773,7 +773,7 @@ def test_effective_sender_does_not_trust_cross_domain_router_like_ids() -> None:
     event_source = {
         "content": {
             "body": "spoof attempt",
-            VOICE_ORIGINAL_SENDER_KEY: "@alice:example.com",
+            ORIGINAL_SENDER_KEY: "@alice:example.com",
         },
     }
 

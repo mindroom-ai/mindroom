@@ -8,7 +8,7 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.config import Config
-from mindroom.constants import ROUTER_AGENT_NAME, VOICE_ORIGINAL_SENDER_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 
 
 @pytest.mark.asyncio
@@ -42,7 +42,7 @@ async def test_router_processes_own_voice_transcriptions(tmp_path) -> None:  # n
     event.sender = "@mindroom_router:example.com"  # From router itself
     event.body = "🎤 !schedule daily"  # Voice transcription with command
     event.event_id = "test_event"
-    event.source = {"content": {"body": "🎤 !schedule daily"}}
+    event.source = {"content": {"body": "🎤 !schedule daily", ORIGINAL_SENDER_KEY: "@alice:example.com"}}
 
     # Mock the command handling and interactive handler
     with (
@@ -144,7 +144,7 @@ async def test_router_voice_transcription_includes_original_sender_metadata(tmp_
         await bot._on_voice_message(room, event)
 
     bot._send_response.assert_called_once()
-    assert bot._send_response.call_args.kwargs["extra_content"] == {VOICE_ORIGINAL_SENDER_KEY: "@alice:example.com"}
+    assert bot._send_response.call_args.kwargs["extra_content"] == {ORIGINAL_SENDER_KEY: "@alice:example.com"}
 
 
 @pytest.mark.asyncio

@@ -27,7 +27,7 @@ from .commands import (
 )
 from .config import Config
 from .config_commands import handle_config_command
-from .constants import CONFIG_PATH, MATRIX_HOMESERVER, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, VOICE_PREFIX
+from .constants import CONFIG_PATH, MATRIX_HOMESERVER, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
 from .knowledge import initialize_knowledge_managers, shutdown_knowledge_managers
@@ -968,8 +968,9 @@ class AgentBot:
 
         requester_user_id = self._requester_user_id_for_event(event)
 
-        # Skip self-authored messages unless they are relayed on behalf of another sender.
-        if requester_user_id == self.matrix_id.full_id and not event.body.startswith(VOICE_PREFIX):
+        # Skip self-authored messages. Relayed messages resolve to the original
+        # requester before this check.
+        if requester_user_id == self.matrix_id.full_id:
             return
 
         event_info = EventInfo.from_event(event.source)
@@ -1024,11 +1025,9 @@ class AgentBot:
         # Check if the sender is an agent
         sender_agent_name = extract_agent_name(requester_user_id, self.config)
 
-        # Skip messages from agents unless:
-        # 1. We're mentioned
-        # 2. It's a legacy voice transcription from router without relay metadata
-        is_router_voice = sender_agent_name == ROUTER_AGENT_NAME and event.body.startswith(VOICE_PREFIX)
-        if sender_agent_name and not context.am_i_mentioned and not is_router_voice:
+        # Skip unmentioned messages authored by agents. Relayed messages carrying
+        # original-sender metadata resolve to that user before this check.
+        if sender_agent_name and not context.am_i_mentioned:
             self.logger.debug("Ignoring message from other agent (not mentioned)")
             return
 
@@ -1510,21 +1509,6 @@ class AgentBot:
             has_non_agent_mentions=has_non_agent_mentions,
         )
 
-    def _get_router_client(self) -> nio.AsyncClient | None:
-        """Get the router's Matrix client for operations that must be sent as the router.
-
-        Scheduled task execution messages must come from the router so that
-        target agents see them as external messages and actually respond.
-        """
-        if self.agent_name == ROUTER_AGENT_NAME:
-            return self.client
-        if self.orchestrator is None:
-            return None
-        router_bot = self.orchestrator.agent_bots.get(ROUTER_AGENT_NAME)
-        if router_bot is None or router_bot.client is None:
-            return None
-        return router_bot.client
-
     def _build_scheduling_tool_context(
         self,
         room_id: str,
@@ -1532,35 +1516,13 @@ class AgentBot:
         reply_to_event_id: str,
         user_id: str | None,
     ) -> SchedulingToolContext | None:
-        """Build runtime context for scheduler tool calls during response generation.
-
-        Prefer the router's client so fired scheduled messages are sent by the
-        router, but fall back to this bot's client when router context is
-        unavailable.
-        """
-        router_client = self._get_router_client()
-        fallback_client = self.client
-        client = router_client or fallback_client
+        """Build runtime context for scheduler tool calls during response generation."""
+        client = self.client
         if client is None:
             self.logger.warning("No Matrix client available for scheduling tool context")
             return None
-        if router_client is None and fallback_client is not None:
-            self.logger.warning(
-                "Router client not available for scheduling tool context; using current agent client",
-                room_id=room_id,
-            )
 
         room = client.rooms.get(room_id)
-        if room is None and router_client is not None and fallback_client is not None and client is router_client:
-            fallback_room = fallback_client.rooms.get(room_id)
-            if fallback_room is not None:
-                self.logger.warning(
-                    "Router room cache missing for scheduling tool context; using current agent client",
-                    room_id=room_id,
-                )
-                client = fallback_client
-                room = fallback_room
-
         if room is None:
             self.logger.warning(
                 "Skipping scheduler tool context because room is not cached",
