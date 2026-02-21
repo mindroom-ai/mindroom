@@ -140,67 +140,6 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_refresh_auto_invite_reconciliation_task_starts_when_enabled(tmp_path: Path) -> None:
-    """Periodic auto-invite reconciliation should start when enabled."""
-    orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
-    orchestrator.running = True
-    orchestrator.config = Config(
-        matrix_room_access={
-            "mode": "multi_user",
-            "auto_invite_authorized_users": True,
-        },
-    )
-
-    with patch.object(orchestrator, "_run_auto_invite_reconciliation_loop", new=AsyncMock()):
-        await orchestrator._refresh_auto_invite_reconciliation_task()
-
-    assert orchestrator._auto_invite_reconciliation_task is not None
-    await orchestrator._cancel_auto_invite_reconciliation_task()
-
-
-@pytest.mark.asyncio
-async def test_refresh_auto_invite_reconciliation_task_stops_when_disabled(tmp_path: Path) -> None:
-    """Periodic auto-invite reconciliation should stop when mode/settings disable it."""
-    orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
-    orchestrator.running = True
-    orchestrator.config = Config(matrix_room_access={"mode": "single_user_private"})
-
-    async def wait_forever() -> None:
-        await asyncio.sleep(10)
-
-    task = asyncio.create_task(wait_forever())
-    orchestrator._auto_invite_reconciliation_task = task
-
-    await orchestrator._refresh_auto_invite_reconciliation_task()
-
-    assert task.cancelled()
-    assert orchestrator._auto_invite_reconciliation_task is None
-
-
-@pytest.mark.asyncio
-async def test_reconcile_auto_invites_once_invokes_helper_when_enabled(tmp_path: Path) -> None:
-    """A reconciliation pass should delegate to room auto-invite helper when enabled."""
-    orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
-    config = Config(
-        matrix_room_access={
-            "mode": "multi_user",
-            "auto_invite_authorized_users": True,
-        },
-    )
-    router_client = AsyncMock()
-    joined_rooms = ["!secret:example.com"]
-
-    with patch("mindroom.bot.auto_invite_authorized_users", new=AsyncMock()) as mock_auto_invite:
-        await orchestrator._reconcile_auto_invites_once(
-            joined_rooms=joined_rooms,
-            router_client=router_client,
-            config=config,
-        )
-
-    mock_auto_invite.assert_awaited_once_with(router_client, joined_rooms, config)
-
-
-@pytest.mark.asyncio
 @pytest.mark.requires_matrix  # Requires real Matrix server for sync task management
 @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
 async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> None:
@@ -382,16 +321,12 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
             "agent1": mock_bot1,
             "router": mock_bot2,
         }
-        auto_invite_task = asyncio.create_task(asyncio.sleep(10))
-        orchestrator._auto_invite_reconciliation_task = auto_invite_task
 
         # Stop orchestrator
         await orchestrator.stop()
 
         # Verify all tasks were cancelled
         assert set(cancelled) == {"agent1", "router"}
-        assert auto_invite_task.cancelled()
-        assert orchestrator._auto_invite_reconciliation_task is None
 
         # Verify sync_tasks dict is empty
         assert len(orchestrator._sync_tasks) == 0

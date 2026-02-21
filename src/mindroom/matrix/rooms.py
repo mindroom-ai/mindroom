@@ -16,13 +16,11 @@ from .client import (
     create_room,
     ensure_room_directory_visibility,
     ensure_room_join_rule,
-    get_room_members,
-    invite_to_room,
     join_room,
     leave_room,
     matrix_client,
 )
-from .identity import MatrixID, extract_server_name_from_homeserver, room_alias_localpart
+from .identity import MatrixID, extract_server_name_from_homeserver
 from .state import MatrixRoom, MatrixState
 from .users import INTERNAL_USER_ACCOUNT_KEY
 
@@ -85,59 +83,6 @@ async def configure_managed_room_access(
         context=context,
     )
     return False
-
-
-async def auto_invite_authorized_users(
-    client: nio.AsyncClient,
-    joined_rooms: list[str],
-    config: Config,
-) -> None:
-    """Invite configured authorized users to restricted (invite-only) managed rooms."""
-    managed_rooms = load_rooms()
-    room_by_id = {room.room_id: (room_key, room) for room_key, room in managed_rooms.items()}
-    for room_id in joined_rooms:
-        entry = room_by_id.get(room_id)
-        if entry is None:
-            continue
-        room_key, room = entry
-        if not config.matrix_room_access.is_invite_only_room(room_key, room_id=room_id, room_alias=room.alias):
-            continue
-
-        candidate_user_ids = set(config.authorization.global_users)
-        candidate_user_ids.update(config.authorization.room_permissions.get(room_id, []))
-        candidate_user_ids.update(config.authorization.room_permissions.get(room_key, []))
-        if room.alias:
-            candidate_user_ids.update(config.authorization.room_permissions.get(room.alias, []))
-            localpart = room_alias_localpart(room.alias)
-            if localpart:
-                candidate_user_ids.update(config.authorization.room_permissions.get(localpart, []))
-        if not candidate_user_ids:
-            logger.info(
-                "No configured authorized users available for restricted-room auto-invite",
-                room_key=room_key,
-                room_id=room_id,
-            )
-            continue
-
-        room_members = await get_room_members(client, room_id)
-        for user_id in sorted(candidate_user_ids):
-            if user_id in room_members:
-                continue
-            success = await invite_to_room(client, room_id, user_id)
-            if success:
-                logger.info(
-                    "Auto-invited authorized user to restricted room",
-                    room_key=room_key,
-                    room_id=room_id,
-                    user_id=user_id,
-                )
-            else:
-                logger.warning(
-                    "Failed to auto-invite authorized user to restricted room",
-                    room_key=room_key,
-                    room_id=room_id,
-                    user_id=user_id,
-                )
 
 
 def room_key_to_name(room_key: str) -> str:

@@ -55,7 +55,6 @@ from .matrix.mentions import format_message_with_mentions
 from .matrix.presence import build_agent_status_message, is_user_online, set_presence_status, should_use_streaming
 from .matrix.reply_chain import ReplyChainCaches, derive_conversation_context
 from .matrix.rooms import (
-    auto_invite_authorized_users,
     ensure_all_rooms_exist,
     ensure_user_in_rooms,
     is_dm_room,
@@ -136,7 +135,6 @@ __all__ = ["AgentBot", "MultiAgentOrchestrator", "MultiKnowledgeVectorDb"]
 
 # Constants
 SYNC_TIMEOUT_MS = 30000
-AUTO_INVITE_RECONCILIATION_INTERVAL_SECONDS = 60.0
 
 
 def _create_task_wrapper(
@@ -2673,7 +2671,6 @@ class MultiAgentOrchestrator:
     running: bool = field(default=False, init=False)
     config: Config | None = field(default=None, init=False)
     _sync_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
-    _auto_invite_reconciliation_task: asyncio.Task | None = field(default=None, init=False)
     knowledge_managers: dict[str, KnowledgeManager] = field(default_factory=dict, init=False)
 
     async def _ensure_user_account(self, config: Config) -> None:
@@ -2698,85 +2695,6 @@ class MultiAgentOrchestrator:
             storage_path=self.storage_path,
             start_watchers=start_watcher,
         )
-
-    @staticmethod
-    def _auto_invites_enabled(config: Config | None) -> bool:
-        """Return whether periodic restricted-room auto-invites should run."""
-        if config is None:
-            return False
-        access_config = config.matrix_room_access
-        return access_config.is_multi_user_mode() and access_config.auto_invite_authorized_users
-
-    async def _cancel_auto_invite_reconciliation_task(self) -> None:
-        """Cancel the periodic auto-invite reconciliation task if running."""
-        task = self._auto_invite_reconciliation_task
-        if task is None:
-            return
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
-        self._auto_invite_reconciliation_task = None
-
-    async def _refresh_auto_invite_reconciliation_task(self) -> None:
-        """Start/stop periodic auto-invite reconciliation to match current config."""
-        if not self.running or not self._auto_invites_enabled(self.config):
-            await self._cancel_auto_invite_reconciliation_task()
-            return
-
-        task = self._auto_invite_reconciliation_task
-        if task is not None and not task.done():
-            return
-
-        self._auto_invite_reconciliation_task = asyncio.create_task(
-            self._run_auto_invite_reconciliation_loop(),
-        )
-        logger.info(
-            "Started auto-invite reconciliation loop",
-            interval_seconds=AUTO_INVITE_RECONCILIATION_INTERVAL_SECONDS,
-        )
-
-    async def _reconcile_auto_invites_once(
-        self,
-        *,
-        joined_rooms: list[str] | None = None,
-        router_client: nio.AsyncClient | None = None,
-        config: Config | None = None,
-    ) -> None:
-        """Reconcile restricted-room auto-invites once."""
-        active_config = config or self.config
-        if not self._auto_invites_enabled(active_config):
-            return
-        assert active_config is not None  # narrowing: _auto_invites_enabled returns False for None
-
-        active_router_client = router_client
-        if active_router_client is None:
-            router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-            if router_bot is None or router_bot.client is None:
-                return
-            active_router_client = router_bot.client
-
-        target_rooms = joined_rooms
-        if target_rooms is None:
-            target_rooms = await get_joined_rooms(active_router_client)
-        if not target_rooms:
-            return
-
-        await auto_invite_authorized_users(active_router_client, target_rooms, active_config)
-
-    async def _run_auto_invite_reconciliation_loop(self) -> None:
-        """Continuously reconcile restricted-room invites for newly created users."""
-        try:
-            while self.running:
-                try:
-                    await self._reconcile_auto_invites_once()
-                except Exception:
-                    logger.exception("Auto-invite reconciliation iteration failed")
-                await asyncio.sleep(AUTO_INVITE_RECONCILIATION_INTERVAL_SECONDS)
-        except asyncio.CancelledError:
-            logger.info("Auto-invite reconciliation loop cancelled")
-            raise
-        finally:
-            self._auto_invite_reconciliation_task = None
 
     async def initialize(self) -> None:
         """Initialize all agent bots with self-management.
@@ -2866,7 +2784,6 @@ class MultiAgentOrchestrator:
 
         # Setup rooms and have all bots join them
         await self._setup_rooms_and_memberships(list(self.agent_bots.values()))
-        await self._refresh_auto_invite_reconciliation_task()
 
         # Create sync tasks for each bot with automatic restart on failure
         for entity_name, bot in self.agent_bots.items():
@@ -2994,7 +2911,6 @@ class MultiAgentOrchestrator:
 
         if bots_to_setup or mindroom_user_changed or matrix_room_access_changed:
             await self._setup_rooms_and_memberships(bots_to_setup)
-        await self._refresh_auto_invite_reconciliation_task()
 
         logger.info(f"Configuration update complete: {len(entities_to_restart) + len(new_entities)} bots affected")
         return True
@@ -3002,7 +2918,6 @@ class MultiAgentOrchestrator:
     async def stop(self) -> None:
         """Stop all agent bots."""
         self.running = False
-        await self._cancel_auto_invite_reconciliation_task()
         await shutdown_knowledge_managers()
         self.knowledge_managers = {}
 
@@ -3142,12 +3057,6 @@ class MultiAgentOrchestrator:
                         logger.info(f"Invited {bot_username} to room {room_id}")
                     else:
                         logger.warning(f"Failed to invite {bot_username} to room {room_id}")
-
-        await self._reconcile_auto_invites_once(
-            joined_rooms=joined_rooms,
-            router_client=router_bot.client,
-            config=config,
-        )
 
         logger.info("Ensured room invitations for all configured agents")
 

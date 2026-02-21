@@ -39,7 +39,6 @@ matrix_room_access:
   publish_to_room_directory: false  # In multi_user mode: publish managed rooms to directory
   invite_only_rooms: []             # Room keys/aliases/IDs that stay invite-only/private
   reconcile_existing_rooms: false   # When true, migrate current managed rooms to target policy
-  auto_invite_authorized_users: false  # Optional: auto-invite configured authorized users to restricted rooms
 
 # Default settings for all agents
 defaults:

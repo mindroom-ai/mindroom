@@ -202,7 +202,6 @@ matrix_room_access:
   publish_to_room_directory: false # Publish managed rooms in server room directory
   invite_only_rooms: []            # Room keys/aliases/IDs that stay invite-only/private
   reconcile_existing_rooms: false  # Explicit migration of existing managed rooms
-  auto_invite_authorized_users: false  # Optional auto-invite for restricted rooms
 
 # Authorization (optional)
 authorization:

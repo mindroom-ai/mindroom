@@ -495,13 +495,6 @@ class MatrixRoomAccessConfig(BaseModel):
             "on startup and config reload"
         ),
     )
-    auto_invite_authorized_users: bool = Field(
-        default=False,
-        description=(
-            "When true, automatically invite configured authorized users to restricted managed rooms "
-            "(invite-only rooms only)"
-        ),
-    )
 
     @field_validator("invite_only_rooms")
     @classmethod

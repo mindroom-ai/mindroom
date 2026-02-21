@@ -11,7 +11,6 @@ import pytest
 from mindroom.config import Config
 from mindroom.matrix import client as matrix_client
 from mindroom.matrix import rooms as matrix_rooms
-from mindroom.matrix.state import MatrixRoom
 from tests.conftest import TEST_ACCESS_TOKEN
 
 if TYPE_CHECKING:
@@ -42,7 +41,6 @@ def test_matrix_room_access_defaults() -> None:
     assert config.matrix_room_access.publish_to_room_directory is False
     assert config.matrix_room_access.invite_only_rooms == []
     assert config.matrix_room_access.reconcile_existing_rooms is False
-    assert config.matrix_room_access.auto_invite_authorized_users is False
 
 
 def test_matrix_room_access_yaml_null_uses_defaults(tmp_path: Path) -> None:
@@ -357,145 +355,3 @@ async def test_configure_managed_room_access_respects_alias_invite_only(monkeypa
     assert result is True
     ensure_join_rule.assert_awaited_once_with(mock_client, "!secret:example.com", "invite")
     ensure_directory_visibility.assert_awaited_once_with(mock_client, "!secret:example.com", "private")
-
-
-@pytest.mark.asyncio
-async def test_auto_invite_authorized_users_invites_missing_members(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Auto-invite should invite authorized users who are not yet room members."""
-    config = Config(
-        matrix_room_access={
-            "mode": "multi_user",
-            "auto_invite_authorized_users": True,
-            "invite_only_rooms": ["secret"],
-        },
-        authorization={
-            "global_users": ["@alice:example.com"],
-            "room_permissions": {"secret": ["@bob:example.com"]},
-        },
-    )
-    mock_client = AsyncMock()
-
-    managed_rooms = {
-        "secret": MatrixRoom(room_id="!secret:example.com", alias="#secret:example.com", name="Secret"),
-        "public": MatrixRoom(room_id="!public:example.com", alias="#public:example.com", name="Public"),
-    }
-    monkeypatch.setattr(matrix_rooms, "load_rooms", lambda: managed_rooms)
-
-    get_members = AsyncMock(return_value={"@router:example.com"})
-    monkeypatch.setattr(matrix_rooms, "get_room_members", get_members)
-    invite = AsyncMock(return_value=True)
-    monkeypatch.setattr(matrix_rooms, "invite_to_room", invite)
-
-    await matrix_rooms.auto_invite_authorized_users(
-        client=mock_client,
-        joined_rooms=["!secret:example.com", "!public:example.com"],
-        config=config,
-    )
-
-    invited_user_ids = sorted(call.args[2] for call in invite.call_args_list)
-    assert invited_user_ids == ["@alice:example.com", "@bob:example.com"]
-    assert all(call.args[1] == "!secret:example.com" for call in invite.call_args_list)
-
-
-@pytest.mark.asyncio
-async def test_auto_invite_skips_already_joined_members(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Auto-invite should not re-invite users who are already room members."""
-    config = Config(
-        matrix_room_access={
-            "mode": "multi_user",
-            "auto_invite_authorized_users": True,
-            "invite_only_rooms": ["secret"],
-        },
-        authorization={"global_users": ["@alice:example.com"]},
-    )
-    mock_client = AsyncMock()
-
-    managed_rooms = {
-        "secret": MatrixRoom(room_id="!secret:example.com", alias="#secret:example.com", name="Secret"),
-    }
-    monkeypatch.setattr(matrix_rooms, "load_rooms", lambda: managed_rooms)
-    monkeypatch.setattr(
-        matrix_rooms,
-        "get_room_members",
-        AsyncMock(return_value={"@router:example.com", "@alice:example.com"}),
-    )
-    invite = AsyncMock(return_value=True)
-    monkeypatch.setattr(matrix_rooms, "invite_to_room", invite)
-
-    await matrix_rooms.auto_invite_authorized_users(
-        client=mock_client,
-        joined_rooms=["!secret:example.com"],
-        config=config,
-    )
-
-    invite.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_auto_invite_includes_room_permission_alias_keys(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Auto-invite should include users granted via room_permissions alias keys."""
-    config = Config(
-        matrix_room_access={
-            "mode": "multi_user",
-            "auto_invite_authorized_users": True,
-            "invite_only_rooms": ["secret"],
-        },
-        authorization={
-            "room_permissions": {"#secret:example.com": ["@bob:example.com"]},
-        },
-    )
-    mock_client = AsyncMock()
-
-    managed_rooms = {
-        "secret": MatrixRoom(room_id="!secret:example.com", alias="#secret:example.com", name="Secret"),
-    }
-    monkeypatch.setattr(matrix_rooms, "load_rooms", lambda: managed_rooms)
-    monkeypatch.setattr(
-        matrix_rooms,
-        "get_room_members",
-        AsyncMock(return_value={"@router:example.com"}),
-    )
-    invite = AsyncMock(return_value=True)
-    monkeypatch.setattr(matrix_rooms, "invite_to_room", invite)
-
-    await matrix_rooms.auto_invite_authorized_users(
-        client=mock_client,
-        joined_rooms=["!secret:example.com"],
-        config=config,
-    )
-
-    invite.assert_awaited_once_with(mock_client, "!secret:example.com", "@bob:example.com")
-
-
-@pytest.mark.asyncio
-async def test_auto_invite_matches_invite_only_by_alias(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Auto-invite should match invite_only_rooms by alias when the alias is configured."""
-    config = Config(
-        matrix_room_access={
-            "mode": "multi_user",
-            "auto_invite_authorized_users": True,
-            "invite_only_rooms": ["#secret:example.com"],
-        },
-        authorization={"global_users": ["@alice:example.com"]},
-    )
-    mock_client = AsyncMock()
-
-    managed_rooms = {
-        "secret": MatrixRoom(room_id="!secret:example.com", alias="#secret:example.com", name="Secret"),
-    }
-    monkeypatch.setattr(matrix_rooms, "load_rooms", lambda: managed_rooms)
-    monkeypatch.setattr(
-        matrix_rooms,
-        "get_room_members",
-        AsyncMock(return_value={"@router:example.com"}),
-    )
-    invite = AsyncMock(return_value=True)
-    monkeypatch.setattr(matrix_rooms, "invite_to_room", invite)
-
-    await matrix_rooms.auto_invite_authorized_users(
-        client=mock_client,
-        joined_rooms=["!secret:example.com"],
-        config=config,
-    )
-
-    invite.assert_awaited_once_with(mock_client, "!secret:example.com", "@alice:example.com")
