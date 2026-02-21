@@ -748,6 +748,8 @@ class TestEditRemovesStaleRun:
         config = Mock()
         config.agents = {"test_agent": Mock(knowledge_bases=[])}
         config.domain = "example.com"
+        config.ids = {}
+        config.get_mindroom_user_id.return_value = "@mindroom:example.com"
 
         bot = AgentBot(
             agent_user=agent_user,

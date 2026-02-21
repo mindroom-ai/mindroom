@@ -41,6 +41,8 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
     config = Mock()
     config.agents = {"test_agent": Mock()}
     config.domain = "example.com"
+    config.ids = {}
+    config.get_mindroom_user_id.return_value = "@mindroom:example.com"
 
     # Create the bot
     bot = AgentBot(
@@ -143,6 +145,8 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
     config = Mock()
     config.agents = {"test_agent": Mock()}
     config.domain = "example.com"
+    config.ids = {}
+    config.get_mindroom_user_id.return_value = "@mindroom:example.com"
 
     # Create the bot
     bot = AgentBot(

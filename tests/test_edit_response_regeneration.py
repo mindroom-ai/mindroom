@@ -31,6 +31,8 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
     config = Mock()
     config.agents = {"test_agent": Mock(knowledge_bases=[])}
     config.domain = "example.com"
+    config.ids = {}
+    config.get_mindroom_user_id.return_value = "@mindroom:example.com"
 
     # Create the bot
     bot = AgentBot(
@@ -176,6 +178,8 @@ async def test_bot_ignores_edit_without_previous_response(tmp_path: Path) -> Non
     config = Mock()
     config.agents = {"test_agent": Mock(knowledge_bases=[])}
     config.domain = "example.com"
+    config.ids = {}
+    config.get_mindroom_user_id.return_value = "@mindroom:example.com"
 
     # Create the bot
     bot = AgentBot(
@@ -269,6 +273,8 @@ async def test_bot_ignores_agent_edits(tmp_path: Path) -> None:
         "helper_agent": Mock(knowledge_bases=[]),
     }
     config.domain = "example.com"
+    config.ids = {}
+    config.get_mindroom_user_id.return_value = "@mindroom:example.com"
 
     # Create the bot
     bot = AgentBot(

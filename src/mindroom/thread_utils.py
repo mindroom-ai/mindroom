@@ -349,16 +349,8 @@ def get_effective_sender_id_for_reply_permissions(
     transcriptions, scheduled task fires, etc.) and include the original sender
     in event content. For trusted internal senders, use that embedded sender.
     """
-    config_ids = getattr(config, "ids", None)
-    known_internal_ids: set[str] = set()
-    if isinstance(config_ids, Mapping):
-        known_internal_ids = {
-            matrix_id.full_id
-            for matrix_id in config_ids.values()
-            if isinstance(getattr(matrix_id, "full_id", None), str)
-        }
-
-    mindroom_user_id = getattr(config, "get_mindroom_user_id", lambda: "")()
+    known_internal_ids = {matrix_id.full_id for matrix_id in config.ids.values()}
+    mindroom_user_id = config.get_mindroom_user_id()
     is_internal_mindroom_sender = sender_id == mindroom_user_id or sender_id in known_internal_ids
     if not is_internal_mindroom_sender:
         return sender_id
