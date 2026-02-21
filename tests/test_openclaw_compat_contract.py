@@ -193,6 +193,18 @@ def test_openclaw_compat_coding_grep(tmp_path: Path) -> None:
     assert "hello" in payload["result"]
 
 
+def test_openclaw_compat_coding_grep_error_prefixed_filename_is_ok(tmp_path: Path) -> None:
+    """Verify grep does not misclassify successful results from Error* filenames."""
+    tool = OpenClawCompatTools()
+    tool._coding.base_dir = tmp_path
+    (tmp_path / "Error.py").write_text("needle\n")
+
+    payload = json.loads(tool.grep("needle", literal=True))
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "grep"
+    assert "Error.py" in payload["result"]
+
+
 def test_openclaw_compat_coding_find_files(tmp_path: Path) -> None:
     """Verify find_files delegates to CodingTools and returns structured payload."""
     tool = OpenClawCompatTools()
@@ -203,6 +215,18 @@ def test_openclaw_compat_coding_find_files(tmp_path: Path) -> None:
     assert payload["status"] == "ok"
     assert payload["tool"] == "find_files"
     assert "foo.py" in payload["result"]
+
+
+def test_openclaw_compat_coding_find_files_error_prefixed_filename_is_ok(tmp_path: Path) -> None:
+    """Verify find_files does not misclassify successful Error* filename matches."""
+    tool = OpenClawCompatTools()
+    tool._coding.base_dir = tmp_path
+    (tmp_path / "Error.py").write_text("")
+
+    payload = json.loads(tool.find_files("*.py"))
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "find_files"
+    assert "Error.py" in payload["result"]
 
 
 def test_openclaw_compat_coding_ls(tmp_path: Path) -> None:
@@ -217,6 +241,18 @@ def test_openclaw_compat_coding_ls(tmp_path: Path) -> None:
     assert payload["tool"] == "ls"
     assert "a.txt" in payload["result"]
     assert "subdir/" in payload["result"]
+
+
+def test_openclaw_compat_coding_ls_error_prefixed_filename_is_ok(tmp_path: Path) -> None:
+    """Verify ls does not misclassify successful results from Error* filenames."""
+    tool = OpenClawCompatTools()
+    tool._coding.base_dir = tmp_path
+    (tmp_path / "Error notes.txt").write_text("")
+
+    payload = json.loads(tool.ls())
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "ls"
+    assert "Error notes.txt" in payload["result"]
 
 
 def test_openclaw_compat_coding_read_file_error() -> None:

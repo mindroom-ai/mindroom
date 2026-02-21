@@ -37,6 +37,13 @@ class OpenClawCompatTools(Toolkit):
     """OpenClaw-style tool names exposed as a single toolkit."""
 
     _registry_lock: Lock = Lock()
+    _CODING_ERROR_PREFIXES = (
+        "Error:",
+        "Error reading file:",
+        "Error writing file:",
+        "Error listing directory:",
+        "Error running grep",
+    )
 
     def __init__(self) -> None:
         """Initialize the OpenClaw compatibility toolkit."""
@@ -91,6 +98,11 @@ class OpenClawCompatTools(Toolkit):
             "error",
             message="OpenClaw tool context is unavailable in this runtime path.",
         )
+
+    @classmethod
+    def _coding_status(cls, result: str) -> str:
+        """Map CodingTools string results to stable status values."""
+        return "error" if result.startswith(cls._CODING_ERROR_PREFIXES) else "ok"
 
     @staticmethod
     def _now_iso() -> str:
@@ -1217,19 +1229,19 @@ class OpenClawCompatTools(Toolkit):
     ) -> str:
         """Read a file with line numbers and pagination hints."""
         result = self._coding.read_file(path, offset, limit)
-        status = "error" if result.startswith("Error") else "ok"
+        status = self._coding_status(result)
         return self._payload("read_file", status, result=result)
 
     def edit_file(self, path: str, old_text: str, new_text: str) -> str:
         """Replace a specific text occurrence in a file using fuzzy matching."""
         result = self._coding.edit_file(path, old_text, new_text)
-        status = "error" if result.startswith("Error") else "ok"
+        status = self._coding_status(result)
         return self._payload("edit_file", status, result=result)
 
     def write_file(self, path: str, content: str) -> str:
         """Write content to a file, creating parent directories if needed."""
         result = self._coding.write_file(path, content)
-        status = "error" if result.startswith("Error") else "ok"
+        status = self._coding_status(result)
         return self._payload("write_file", status, result=result)
 
     def grep(
@@ -1244,7 +1256,7 @@ class OpenClawCompatTools(Toolkit):
     ) -> str:
         """Search file contents for a pattern."""
         result = self._coding.grep(pattern, path, glob, ignore_case, literal, context, limit)
-        status = "error" if result.startswith("Error") else "ok"
+        status = self._coding_status(result)
         return self._payload("grep", status, result=result)
 
     def find_files(
@@ -1255,11 +1267,11 @@ class OpenClawCompatTools(Toolkit):
     ) -> str:
         """Find files matching a glob pattern."""
         result = self._coding.find_files(pattern, path, limit)
-        status = "error" if result.startswith("Error") else "ok"
+        status = self._coding_status(result)
         return self._payload("find_files", status, result=result)
 
     def ls(self, path: str | None = None, limit: int = 500) -> str:
         """List directory contents."""
         result = self._coding.ls(path, limit)
-        status = "error" if result.startswith("Error") else "ok"
+        status = self._coding_status(result)
         return self._payload("ls", status, result=result)
