@@ -111,7 +111,10 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
     }
 
     # Mock the routing method that would be called for the router
-    with patch.object(bot, "_handle_ai_routing", new_callable=AsyncMock) as mock_routing:
+    with (
+        patch.object(bot, "_handle_ai_routing", new_callable=AsyncMock) as mock_routing,
+        patch.object(bot, "_can_reply_to_sender", return_value=True),
+    ):
         # Process the original message - this should trigger routing
         await bot._on_message(room, original_event)
 

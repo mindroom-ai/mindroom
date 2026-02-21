@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any
 
@@ -12,6 +12,8 @@ from .matrix.identity import MatrixID, extract_agent_name
 from .matrix.rooms import resolve_room_aliases
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     import nio
 
     from .config import Config
@@ -269,15 +271,10 @@ def is_sender_allowed_for_agent_reply(sender_id: str, agent_name: str, config: C
     system participants, not end users.
     """
     agent_reply_permissions = config.authorization.agent_reply_permissions
-    if not isinstance(agent_reply_permissions, Mapping):
-        return True
-
     allowed_users = agent_reply_permissions.get(agent_name)
     if allowed_users is None:
         allowed_users = agent_reply_permissions.get("*")
     if allowed_users is None:
-        return True
-    if not isinstance(allowed_users, Sequence) or isinstance(allowed_users, str):
         return True
     if "*" in allowed_users:
         return True

@@ -940,7 +940,7 @@ class TestAgentBot:
             patch("mindroom.bot.extract_agent_name", return_value=None),
             patch("mindroom.bot.get_agents_in_thread", return_value=[]),
             patch("mindroom.bot.has_multiple_non_agent_users_in_thread", return_value=False),
-            patch("mindroom.bot.get_available_agents_in_room") as mock_get_available,
+            patch("mindroom.bot.get_available_agents_for_sender") as mock_get_available,
             patch("mindroom.bot.is_authorized_sender", return_value=True),
             patch("mindroom.bot.image_handler.extract_caption", return_value="[Attached image]"),
         ):
@@ -1007,7 +1007,7 @@ class TestAgentBot:
             patch("mindroom.bot.interactive.handle_text_response"),
             patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.bot.get_agents_in_thread", return_value=[]),
-            patch("mindroom.bot.get_available_agents_in_room", return_value=[]),
+            patch("mindroom.bot.get_available_agents_for_sender", return_value=[]),
             patch(
                 "mindroom.bot.decide_team_formation",
                 new_callable=AsyncMock,

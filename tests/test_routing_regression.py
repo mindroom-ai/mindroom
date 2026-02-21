@@ -252,6 +252,83 @@ class TestRoutingRegression:
                     display_name="MindRoomNews",
                     rooms=[test_room_id],
                 ),
+            },
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="test", id="test-model")},
+            router=RouterConfig(model="default"),
+            authorization={
+                "default_room_access": True,
+                "agent_reply_permissions": {
+                    "research": ["@alice:localhost"],
+                },
+            },
+        )
+
+        router_agent = AgentMatrixUser(
+            agent_name="router",
+            password=TEST_PASSWORD,
+            display_name="RouterAgent",
+            user_id="@mindroom_router:localhost",
+        )
+        router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
+
+        mock_suggest_agent.return_value = "news"
+        mock_send_response = MagicMock()
+        mock_send_response.__class__ = nio.RoomSendResponse
+        mock_send_response.event_id = "$response_789"
+        router_bot.client.room_send.return_value = mock_send_response
+
+        mock_room = MagicMock()
+        mock_room.room_id = test_room_id
+        mock_room.users = {
+            router_agent.user_id: MagicMock(),
+            mock_research_agent.user_id: MagicMock(),
+            mock_news_agent.user_id: MagicMock(),
+        }
+
+        message_event = MagicMock(spec=nio.RoomMessageText)
+        message_event.sender = "@bob:localhost"
+        message_event.body = "What's new today?"
+        message_event.event_id = "$user_msg_789"
+        message_event.source = {
+            "content": {
+                "body": "What's new today?",
+            },
+        }
+
+        await router_bot._handle_ai_routing(
+            mock_room,
+            message_event,
+            thread_history=[],
+            requester_user_id="@bob:localhost",
+        )
+
+        mock_suggest_agent.assert_called_once()
+        available_agents = mock_suggest_agent.call_args.args[1]
+        assert [agent.agent_name(test_config) for agent in available_agents] == ["news"]
+
+    @pytest.mark.asyncio
+    @patch("mindroom.bot.suggest_agent_for_message")
+    async def test_router_filters_by_agent_reply_permissions_with_multiple_allowed(
+        self,
+        mock_suggest_agent: AsyncMock,
+        mock_research_agent: AgentMatrixUser,
+        mock_news_agent: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Router should pass all sender-allowed agents to routing when multiple are eligible."""
+        test_room_id = "!research:localhost"
+        test_config = Config(
+            agents={
+                "research": AgentConfig(
+                    display_name="MindRoomResearch",
+                    rooms=[test_room_id],
+                ),
+                "news": AgentConfig(
+                    display_name="MindRoomNews",
+                    rooms=[test_room_id],
+                ),
                 "facts": AgentConfig(
                     display_name="MindRoomFacts",
                     rooms=[test_room_id],
@@ -281,7 +358,7 @@ class TestRoutingRegression:
         mock_suggest_agent.return_value = "news"
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
-        mock_send_response.event_id = "$response_789"
+        mock_send_response.event_id = "$response_789_multi"
         router_bot.client.room_send.return_value = mock_send_response
 
         mock_room = MagicMock()
@@ -296,7 +373,7 @@ class TestRoutingRegression:
         message_event = MagicMock(spec=nio.RoomMessageText)
         message_event.sender = "@bob:localhost"
         message_event.body = "What's new today?"
-        message_event.event_id = "$user_msg_789"
+        message_event.event_id = "$user_msg_789_multi"
         message_event.source = {
             "content": {
                 "body": "What's new today?",

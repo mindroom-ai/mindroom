@@ -432,6 +432,7 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
     config.domain = "example.com"
     config.authorization = Mock()
     config.authorization.is_authorized = Mock(return_value=True)
+    config.authorization.agent_reply_permissions = {}
 
     # Create the bot
     bot = AgentBot(
@@ -510,6 +511,75 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> None:
+    """Interactive reactions should not produce replies for disallowed senders."""
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@mindroom_test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+
+    config = Config(
+        agents={
+            "test_agent": {
+                "display_name": "Test Agent",
+                "rooms": ["!test:example.com"],
+            },
+        },
+        authorization={
+            "default_room_access": True,
+            "agent_reply_permissions": {"test_agent": ["@alice:example.com"]},
+        },
+    )
+
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        rooms=["!test:example.com"],
+    )
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
+    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.response_tracker = ResponseTracker(agent_name="test_agent", base_path=tmp_path)
+    bot.logger = MagicMock()
+
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
+    reaction_event = nio.ReactionEvent.from_dict(
+        {
+            "content": {
+                "m.relates_to": {
+                    "event_id": "$question:example.com",
+                    "key": "1️⃣",
+                    "rel_type": "m.annotation",
+                },
+            },
+            "event_id": "$reaction:example.com",
+            "sender": "@bob:example.com",
+            "origin_server_ts": 1000000,
+            "type": "m.reaction",
+            "room_id": "!test:example.com",
+        },
+    )
+    reaction_event.reacts_to = "$question:example.com"
+    reaction_event.key = "1️⃣"
+
+    with (
+        patch("mindroom.bot.interactive.handle_reaction", new_callable=AsyncMock) as mock_handle_reaction,
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch("mindroom.bot.config_confirmation.get_pending_change", return_value=None),
+        patch.object(bot, "_send_response", new_callable=AsyncMock) as mock_send_response,
+        patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate_response,
+    ):
+        mock_handle_reaction.return_value = ("Option 1", "thread_id")
+        await bot._on_reaction(room, reaction_event)
+
+    mock_send_response.assert_not_called()
+    mock_generate_response.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_on_voice_message_tracks_response_event_id(tmp_path: Path) -> None:
     """Test that _on_voice_message properly tracks the response event ID."""
     # Create a mock agent user
@@ -528,6 +598,7 @@ async def test_on_voice_message_tracks_response_event_id(tmp_path: Path) -> None
     config.voice.enabled = True
     config.authorization = Mock()
     config.authorization.is_authorized = Mock(return_value=True)
+    config.authorization.agent_reply_permissions = {}
 
     # Create the bot
     bot = AgentBot(
@@ -627,6 +698,7 @@ async def test_on_voice_message_no_transcription_still_marks_responded(tmp_path:
     config.voice.enabled = True
     config.authorization = Mock()
     config.authorization.is_authorized = Mock(return_value=True)
+    config.authorization.agent_reply_permissions = {}
 
     # Create the bot
     bot = AgentBot(

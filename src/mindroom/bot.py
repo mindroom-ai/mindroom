@@ -109,7 +109,6 @@ from .thread_utils import (
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
     get_available_agents_for_sender,
-    get_available_agents_in_room,
     get_configured_agents_for_room,
     get_effective_sender_id_for_reply_permissions,
     has_multiple_non_agent_users_in_thread,
@@ -268,6 +267,7 @@ def _resolve_skill_command_agent(  # noqa: C901
     config: Config,
     room: nio.MatrixRoom,
     mentioned_agents: list[MatrixID],
+    requester_user_id: str,
 ) -> tuple[str | None, str | None]:
     requested = skill_name.strip().lower()
     mentioned_names: list[str] = []
@@ -280,7 +280,7 @@ def _resolve_skill_command_agent(  # noqa: C901
     if len(unique_mentions) > 1:
         return None, f"❌ Multiple agents mentioned: {', '.join(unique_mentions)}. Mention only one."
 
-    agents_in_room = get_available_agents_in_room(room, config)
+    agents_in_room = get_available_agents_for_sender(room, requester_user_id, config)
     candidate_names: list[str] = []
     for mid in agents_in_room:
         name = mid.agent_name(config)
@@ -1002,10 +1002,10 @@ class AgentBot:
                 await self._handle_command(room, event, command)
             return
 
-        context = await self._extract_message_context(room, event)
-
         if not self._can_reply_to_sender(requester_user_id):
             return
+
+        context = await self._extract_message_context(room, event)
 
         # Check if the sender is an agent
         sender_agent_name = extract_agent_name(event.sender, self.config)
@@ -1166,6 +1166,9 @@ class AgentBot:
         result = await interactive.handle_reaction(self.client, event, self.agent_name, self.config)
 
         if result:
+            if not self._can_reply_to_sender(event.sender):
+                self.logger.debug("Ignoring reaction response due to reply permissions", sender=event.sender)
+                return
             selected_value, thread_id = result
             # User selected an option from an interactive question
 
@@ -2464,6 +2467,7 @@ class AgentBot:
 
         event_info = EventInfo.from_event(event.source)
         _, thread_id, thread_history = await self._derive_conversation_context(room.room_id, event_info)
+        requester_user_id = self._requester_user_id_for_event(event)
 
         # Widget command modifies room state, so it doesn't need a thread
         if command.type == CommandType.WIDGET:
@@ -2606,6 +2610,7 @@ class AgentBot:
                     config=self.config,
                     room=room,
                     mentioned_agents=mentioned_agents,
+                    requester_user_id=requester_user_id,
                 )
                 if error:
                     response_text = error
@@ -2637,7 +2642,7 @@ class AgentBot:
                             thread_history=thread_history,
                             prompt=prompt,
                             agent_name=target_agent,
-                            user_id=event.sender,
+                            user_id=requester_user_id,
                             reply_to_event=event,
                         )
                         if event_id:
