@@ -91,6 +91,7 @@ class TestDMResponseLogic:
             thread_history=[],  # No previous messages
             config=config,
             mentioned_agents=None,  # No agents mentioned
+            sender_id="@user:localhost",
         )
 
         assert should_respond is True
@@ -116,6 +117,7 @@ class TestDMResponseLogic:
             room=room,
             thread_history=[],
             config=config,
+            sender_id="@user:localhost",
         )
 
         assert should_respond is True
@@ -145,6 +147,7 @@ class TestDMResponseLogic:
             thread_history=[],
             config=config,
             mentioned_agents=[config.ids["other_agent"]],  # Other agent mentioned with correct domain
+            sender_id="@user:localhost",
         )
 
         assert should_respond is False
@@ -174,6 +177,7 @@ class TestDMResponseLogic:
             thread_history=[],
             config=config,
             mentioned_agents=None,  # No agents mentioned
+            sender_id="@user:localhost",
         )
 
         should_respond_other = should_agent_respond(
@@ -184,6 +188,7 @@ class TestDMResponseLogic:
             thread_history=[],
             config=config,
             mentioned_agents=None,  # No agents mentioned
+            sender_id="@user:localhost",
         )
 
         # Agents should not respond individually - team formation is handled at bot level

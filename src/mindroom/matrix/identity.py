@@ -42,7 +42,14 @@ class MatrixID:
         return f"@{self.username}:{self.domain}"
 
     def agent_name(self, config: Config) -> str | None:
-        """Extract agent name if this is a configured agent ID."""
+        """Extract agent name if this is a configured agent ID.
+
+        Only IDs whose domain matches ``config.domain`` are recognised.
+        A cross-domain ID like ``@mindroom_assistant:evil.com`` is never
+        treated as a local agent, even if the localpart matches.
+        """
+        if self.domain != config.domain:
+            return None
         if not self.username.startswith(self.AGENT_PREFIX):
             return None
 

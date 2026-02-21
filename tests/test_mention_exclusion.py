@@ -10,12 +10,13 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.teams import TeamFormationDecision, TeamMode
 
 from .conftest import TEST_PASSWORD
 
 
 @pytest.mark.asyncio
-async def test_agent_ignores_user_message_mentioning_other_agents() -> None:
+async def test_agent_ignores_user_message_mentioning_other_agents(tmp_path) -> None:  # noqa: ANN001
     """Test that an agent doesn't respond when a user mentions other agents."""
     # Create test config
     config = Config(
@@ -27,23 +28,24 @@ async def test_agent_ignores_user_message_mentioning_other_agents() -> None:
         room_models={},
         models={"default": ModelConfig(provider="ollama", id="test-model")},
     )
+    domain = config.domain
 
     # Create GeneralAgent bot
     general_bot = AgentBot(
         agent_user=AgentMatrixUser(
             agent_name="general",
-            user_id="@mindroom_general:localhost",
+            user_id=f"@mindroom_general:{domain}",
             display_name="General",
             password=TEST_PASSWORD,
         ),
-        storage_path=Mock(),
+        storage_path=tmp_path,
         config=config,
         rooms=["!room:localhost"],
     )
 
     # Mock the client
     general_bot.client = AsyncMock(spec=nio.AsyncClient)
-    general_bot.client.user_id = "@mindroom_general:localhost"
+    general_bot.client.user_id = f"@mindroom_general:{domain}"
 
     # Mock response tracker
     general_bot.response_tracker = Mock()
@@ -62,7 +64,7 @@ async def test_agent_ignores_user_message_mentioning_other_agents() -> None:
         "content": {
             "body": "@research find the latest news",
             "m.mentions": {
-                "user_ids": ["@mindroom_research:localhost"],  # ResearchAgent is mentioned
+                "user_ids": [f"@mindroom_research:{domain}"],  # ResearchAgent is mentioned
             },
             "m.relates_to": {
                 "rel_type": "m.thread",
@@ -85,7 +87,7 @@ async def test_agent_ignores_user_message_mentioning_other_agents() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_responds_when_mentioned_along_with_others() -> None:
+async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None:  # noqa: ANN001
     """Test that an agent DOES respond when mentioned, even if other agents are also mentioned."""
     # Create test config
     config = Config(
@@ -97,23 +99,24 @@ async def test_agent_responds_when_mentioned_along_with_others() -> None:
         room_models={},
         models={"default": ModelConfig(provider="ollama", id="test-model")},
     )
+    domain = config.domain
 
     # Create GeneralAgent bot
     general_bot = AgentBot(
         agent_user=AgentMatrixUser(
             agent_name="general",
-            user_id="@mindroom_general:localhost",
+            user_id=f"@mindroom_general:{domain}",
             display_name="General",
             password=TEST_PASSWORD,
         ),
-        storage_path=Mock(),
+        storage_path=tmp_path,
         config=config,
         rooms=["!room:localhost"],
     )
 
     # Mock the client
     general_bot.client = AsyncMock(spec=nio.AsyncClient)
-    general_bot.client.user_id = "@mindroom_general:localhost"
+    general_bot.client.user_id = f"@mindroom_general:{domain}"
 
     # Mock response tracker
     general_bot.response_tracker = Mock()
@@ -132,8 +135,8 @@ async def test_agent_responds_when_mentioned_along_with_others() -> None:
             "body": "@general @research help me with this",
             "m.mentions": {
                 "user_ids": [
-                    "@mindroom_general:localhost",  # GeneralAgent is mentioned
-                    "@mindroom_research:localhost",  # ResearchAgent is also mentioned
+                    f"@mindroom_general:{domain}",  # GeneralAgent is mentioned
+                    f"@mindroom_research:{domain}",  # ResearchAgent is also mentioned
                 ],
             },
             "m.relates_to": {
@@ -149,7 +152,11 @@ async def test_agent_responds_when_mentioned_along_with_others() -> None:
 
         # Mock decide_team_formation to return False (no team formation)
         with patch("mindroom.bot.decide_team_formation") as mock_decide_team_formation:
-            mock_decide_team_formation.return_value = Mock(decide_team_formation=False, agents=[], mode=None)
+            mock_decide_team_formation.return_value = TeamFormationDecision(
+                should_form_team=False,
+                agents=[],
+                mode=TeamMode.COLLABORATE,
+            )
 
             # Mock the generate_response method to track if it's called
             with patch.object(general_bot, "_generate_response") as mock_generate:

@@ -208,6 +208,7 @@ authorization:
   global_users: []                 # Users with access to all rooms
   room_permissions: {}             # Keys: room ID (!id), full alias (#alias:domain), or managed room key (alias)
   default_room_access: false       # Default: false
+  agent_reply_permissions: {}      # Per-agent/team/router (or '*') reply allowlists; supports globs like '*:example.com'
 
 # Room-specific model overrides (optional)
 # Keys are room aliases, values are model names from the models section
@@ -254,6 +255,7 @@ timezone: America/Los_Angeles      # Default: UTC
 - `agents.<name>.context_files` and `agents.<name>.memory_dir` inject file-based context at agent creation/reload (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md))
 - `defaults.max_preload_chars` caps preloaded file context (`context_files` + `memory_dir`)
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
+- `authorization.agent_reply_permissions` can further restrict which users specific agents/teams/router will reply to
 - `authorization.room_permissions` accepts room IDs, full room aliases, and managed room keys
 - `matrix_room_access.mode` defaults to `single_user_private`; this preserves current private/invite-only behavior
 - In `multi_user` mode, MindRoom sets managed room join rules and directory visibility from config

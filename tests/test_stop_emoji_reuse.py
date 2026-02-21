@@ -9,6 +9,7 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot
+from mindroom.config import Config
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.stop import StopManager
 
@@ -24,11 +25,14 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
         password="test_password",  # noqa: S106
     )
 
-    # Create the bot
+    # Create the bot with a config that has empty reply permissions
+    config = MagicMock()
+    config.authorization.agent_reply_permissions = {}
+
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
-        config=MagicMock(),
+        config=config,
         rooms=["!test:example.com"],
     )
 
@@ -105,11 +109,14 @@ async def test_stop_emoji_from_agent_falls_through(tmp_path: Path) -> None:
         password="test_password",  # noqa: S106
     )
 
-    # Create the bot
+    # Create the bot with a config that has empty reply permissions
+    config = MagicMock()
+    config.authorization.agent_reply_permissions = {}
+
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
-        config=MagicMock(),
+        config=config,
         rooms=["!test:example.com"],
     )
 
@@ -165,3 +172,78 @@ async def test_stop_emoji_from_agent_falls_through(tmp_path: Path) -> None:
 
         # Task should NOT have been cancelled (agents can't stop generation)
         task.cancel.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stop_reaction_blocked_by_reply_permissions(tmp_path: Path) -> None:
+    """Disallowed senders must not trigger stop or send confirmation via 🛑 reaction."""
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@mindroom_test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+
+    config = Config(
+        agents={
+            "test_agent": {
+                "display_name": "Test Agent",
+                "rooms": ["!test:example.com"],
+            },
+        },
+        authorization={
+            "default_room_access": True,
+            "agent_reply_permissions": {"test_agent": ["@alice:example.com"]},
+        },
+    )
+
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        rooms=["!test:example.com"],
+    )
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.response_tracker = MagicMock()
+    bot.logger = MagicMock()
+    bot.stop_manager = StopManager()
+
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
+
+    # Track a message as being generated
+    task = MagicMock()
+    task.done = MagicMock(return_value=False)
+    bot.stop_manager.set_current(
+        message_id="$message:example.com",
+        room_id="!test:example.com",
+        task=task,
+    )
+
+    # Disallowed sender reacts with stop emoji
+    reaction_event = nio.ReactionEvent.from_dict(
+        {
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$message:example.com",
+                    "key": "🛑",
+                },
+            },
+            "event_id": "$reaction_bob:example.com",
+            "sender": "@bob:example.com",
+            "origin_server_ts": 1000000,
+            "type": "m.reaction",
+            "room_id": "!test:example.com",
+        },
+    )
+
+    bot._send_response = AsyncMock()
+
+    with patch("mindroom.bot.is_authorized_sender", return_value=True):
+        await bot._on_reaction(room, reaction_event)
+
+    # Task should NOT have been cancelled — sender is disallowed
+    task.cancel.assert_not_called()
+    # No confirmation message should have been sent
+    bot._send_response.assert_not_called()

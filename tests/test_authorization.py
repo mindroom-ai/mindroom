@@ -5,9 +5,13 @@ from __future__ import annotations
 import pytest
 
 from mindroom.config import AuthorizationConfig, Config
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, VOICE_ORIGINAL_SENDER_KEY
 from mindroom.matrix.state import MatrixRoom, MatrixState
-from mindroom.thread_utils import is_authorized_sender
+from mindroom.thread_utils import (
+    get_effective_sender_id_for_reply_permissions,
+    is_authorized_sender,
+    is_sender_allowed_for_agent_reply,
+)
 
 
 @pytest.fixture
@@ -414,6 +418,307 @@ def test_canonical_user_still_works_with_aliases(mock_config_with_aliases: Confi
     """Test that the canonical user ID still works when aliases are configured."""
     assert is_authorized_sender("@alice:example.com", mock_config_with_aliases, "!room1:example.com")
     assert is_authorized_sender("@bob:example.com", mock_config_with_aliases, "!room1:example.com")
+
+
+def test_agent_reply_permissions_with_aliases() -> None:
+    """Per-agent reply allowlists should use canonical IDs after alias resolution."""
+    config = Config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+            "analyst": {
+                "display_name": "Analyst",
+                "role": "Test analyst",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={
+            "default_room_access": True,
+            "aliases": {
+                "@alice:example.com": ["@telegram_111:example.com"],
+            },
+            "agent_reply_permissions": {
+                "assistant": ["@alice:example.com"],
+            },
+        },
+    )
+
+    assert is_sender_allowed_for_agent_reply("@alice:example.com", "assistant", config)
+    assert is_sender_allowed_for_agent_reply("@telegram_111:example.com", "assistant", config)
+    assert not is_sender_allowed_for_agent_reply("@bob:example.com", "assistant", config)
+    assert is_sender_allowed_for_agent_reply("@bob:example.com", "analyst", config)
+
+
+def test_agent_reply_permissions_do_not_bypass_bot_accounts() -> None:
+    """Bridge bot accounts should still respect per-agent reply allowlists."""
+    config = Config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        bot_accounts=["@bridgebot:example.com"],
+        authorization={
+            "default_room_access": True,
+            "agent_reply_permissions": {
+                "assistant": ["@alice:example.com"],
+            },
+        },
+    )
+
+    assert not is_sender_allowed_for_agent_reply("@bridgebot:example.com", "assistant", config)
+
+
+def test_agent_reply_permissions_do_not_bypass_cross_domain_agent_like_ids() -> None:
+    """Only configured internal IDs may bypass reply permissions."""
+    config = Config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={
+            "default_room_access": True,
+            "agent_reply_permissions": {
+                "assistant": ["@alice:example.com"],
+            },
+        },
+    )
+
+    assert not is_sender_allowed_for_agent_reply("@mindroom_assistant:evil.com", "assistant", config)
+
+
+def test_agent_reply_permissions_wildcard_entity_applies_to_all() -> None:
+    """A '*' entity key should act as default allowlist for all entities."""
+    config = Config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+            "analyst": {
+                "display_name": "Analyst",
+                "role": "Test analyst",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={
+            "default_room_access": True,
+            "agent_reply_permissions": {
+                "*": ["@alice:example.com"],
+            },
+        },
+    )
+
+    assert is_sender_allowed_for_agent_reply("@alice:example.com", "assistant", config)
+    assert is_sender_allowed_for_agent_reply("@alice:example.com", "analyst", config)
+    assert not is_sender_allowed_for_agent_reply("@bob:example.com", "assistant", config)
+    assert not is_sender_allowed_for_agent_reply("@bob:example.com", "analyst", config)
+
+
+def test_agent_reply_permissions_entity_override_beats_wildcard() -> None:
+    """An explicit entity entry should override the '*' entity default."""
+    config = Config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+            "analyst": {
+                "display_name": "Analyst",
+                "role": "Test analyst",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={
+            "default_room_access": True,
+            "agent_reply_permissions": {
+                "*": ["@alice:example.com"],
+                "analyst": ["@bob:example.com"],
+            },
+        },
+    )
+
+    assert is_sender_allowed_for_agent_reply("@alice:example.com", "assistant", config)
+    assert not is_sender_allowed_for_agent_reply("@alice:example.com", "analyst", config)
+    assert is_sender_allowed_for_agent_reply("@bob:example.com", "analyst", config)
+
+
+def test_agent_reply_permissions_wildcard_user_allows_everyone() -> None:
+    """A '*' user entry should disable sender restriction for that entity."""
+    config = Config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+            "analyst": {
+                "display_name": "Analyst",
+                "role": "Test analyst",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={
+            "default_room_access": True,
+            "agent_reply_permissions": {
+                "*": ["@alice:example.com"],
+                "analyst": ["*"],
+            },
+        },
+    )
+
+    assert not is_sender_allowed_for_agent_reply("@bob:example.com", "assistant", config)
+    assert is_sender_allowed_for_agent_reply("@bob:example.com", "analyst", config)
+
+
+def test_agent_reply_permissions_support_domain_pattern() -> None:
+    """Allowlist entries should support glob patterns like '*:example.com'."""
+    config = Config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={
+            "default_room_access": True,
+            "agent_reply_permissions": {
+                "assistant": ["*:example.com"],
+            },
+        },
+    )
+
+    assert is_sender_allowed_for_agent_reply("@alice:example.com", "assistant", config)
+    assert not is_sender_allowed_for_agent_reply("@alice:other.com", "assistant", config)
+
+
+def test_agent_reply_permissions_domain_pattern_after_alias_resolution() -> None:
+    """Domain patterns should match after aliases resolve to canonical IDs."""
+    config = Config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={
+            "default_room_access": True,
+            "aliases": {
+                "@alice:example.com": ["@telegram_111:example.com"],
+            },
+            "agent_reply_permissions": {
+                "assistant": ["*:example.com"],
+            },
+        },
+    )
+
+    assert is_sender_allowed_for_agent_reply("@telegram_111:example.com", "assistant", config)
+
+
+def test_agent_reply_permissions_reject_unknown_entity() -> None:
+    """Unknown keys in agent_reply_permissions should fail config validation."""
+    with pytest.raises(ValueError, match="authorization.agent_reply_permissions contains unknown entities"):
+        Config(
+            agents={
+                "assistant": {
+                    "display_name": "Assistant",
+                    "role": "Test assistant",
+                    "rooms": ["test_room"],
+                },
+            },
+            authorization={
+                "default_room_access": True,
+                "agent_reply_permissions": {
+                    "missing_agent": ["@alice:example.com"],
+                },
+            },
+        )
+
+
+def test_effective_sender_uses_voice_original_sender_for_router_messages() -> None:
+    """Router transcriptions should use embedded original sender for permission checks."""
+    config = Config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={"default_room_access": True},
+    )
+
+    event_source = {
+        "content": {
+            "body": "🎤 help me",
+            VOICE_ORIGINAL_SENDER_KEY: "@alice:example.com",
+        },
+    }
+
+    assert get_effective_sender_id_for_reply_permissions(
+        config.ids[ROUTER_AGENT_NAME].full_id,
+        event_source,
+        config,
+    ) == ("@alice:example.com")
+
+
+def test_effective_sender_ignores_voice_original_sender_for_non_router_messages() -> None:
+    """Only router-originated messages may override requester identity."""
+    config = Config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={"default_room_access": True},
+    )
+
+    event_source = {
+        "content": {
+            "body": "spoof attempt",
+            VOICE_ORIGINAL_SENDER_KEY: "@alice:example.com",
+        },
+    }
+
+    assert get_effective_sender_id_for_reply_permissions("@bob:example.com", event_source, config) == "@bob:example.com"
+
+
+def test_effective_sender_does_not_trust_cross_domain_router_like_ids() -> None:
+    """Router sender override must require exact configured router ID."""
+    config = Config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={"default_room_access": True},
+    )
+
+    spoofed_router = "@mindroom_router:evil.com"
+    event_source = {
+        "content": {
+            "body": "spoof attempt",
+            VOICE_ORIGINAL_SENDER_KEY: "@alice:example.com",
+        },
+    }
+
+    assert get_effective_sender_id_for_reply_permissions(spoofed_router, event_source, config) == spoofed_router
 
 
 def test_resolve_alias_method() -> None:

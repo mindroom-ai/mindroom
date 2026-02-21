@@ -54,6 +54,7 @@ class TestAgentResponseLogic:
         )
         # Helper for generating agent IDs with correct domain
         self.domain = self.config.domain
+        self.sender = f"@user:{self.domain}"
 
     def agent_id(self, agent_name: str) -> str:
         """Generate agent Matrix ID with correct domain."""
@@ -68,8 +69,90 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],
             config=self.config,
+            sender_id=self.sender,
         )
         assert should_respond is True
+
+    def test_mentioned_agent_blocked_by_reply_permissions(self) -> None:
+        """Per-agent reply allowlist should block disallowed senders even when mentioned."""
+        self.config.authorization.agent_reply_permissions = {
+            "calculator": [f"@alice:{self.domain}"],
+        }
+        should_respond = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=True,
+            is_thread=False,
+            room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
+            thread_history=[],
+            config=self.config,
+            sender_id=f"@bob:{self.domain}",
+        )
+        assert should_respond is False
+
+    def test_mentioned_agent_reply_permissions_honor_aliases(self) -> None:
+        """Bridge aliases should inherit per-agent reply permissions."""
+        canonical_user = f"@alice:{self.domain}"
+        alias_user = f"@telegram_111:{self.domain}"
+        self.config.authorization.agent_reply_permissions = {
+            "calculator": [canonical_user],
+        }
+        self.config.authorization.aliases = {canonical_user: [alias_user]}
+        should_respond = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=True,
+            is_thread=False,
+            room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
+            thread_history=[],
+            config=self.config,
+            sender_id=alias_user,
+        )
+        assert should_respond is True
+
+    def test_mentioned_agent_reply_permissions_support_domain_pattern(self) -> None:
+        """Per-agent reply patterns should allow domain-scoped sender matching."""
+        self.config.authorization.agent_reply_permissions = {
+            "calculator": [f"*:{self.domain}"],
+        }
+        should_respond = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=True,
+            is_thread=False,
+            room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
+            thread_history=[],
+            config=self.config,
+            sender_id=f"@bob:{self.domain}",
+        )
+        assert should_respond is True
+
+    def test_single_visible_agent_can_respond_without_mentions(self) -> None:
+        """When permissions hide other agents, the only visible agent should respond."""
+        self.config.authorization.agent_reply_permissions = {
+            "calculator": [f"@alice:{self.domain}"],
+            "general": [f"@bob:{self.domain}"],
+        }
+        room = create_mock_room("!room:localhost", ["calculator", "general"], self.config)
+
+        should_respond_calculator = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=False,
+            is_thread=False,
+            room=room,
+            thread_history=[],
+            config=self.config,
+            sender_id=f"@alice:{self.domain}",
+        )
+        should_respond_general = should_agent_respond(
+            agent_name="general",
+            am_i_mentioned=False,
+            is_thread=False,
+            room=room,
+            thread_history=[],
+            config=self.config,
+            sender_id=f"@alice:{self.domain}",
+        )
+
+        assert should_respond_calculator is True
+        assert should_respond_general is False
 
     def test_only_agent_in_thread_continues(self) -> None:
         """If agent is the only one in thread, it continues."""
@@ -85,8 +168,28 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=thread_history,
             config=self.config,
+            sender_id=self.sender,
         )
         assert should_respond is True
+
+    def test_cross_domain_agent_id_does_not_claim_thread_ownership(self) -> None:
+        """Thread ownership must require exact MatrixID match, including domain."""
+        other_domain = "evil.org" if self.domain != "evil.org" else "attacker.org"
+        thread_history = [
+            {"sender": f"@mindroom_calculator:{other_domain}", "body": "spoofed"},
+            {"sender": f"@user:{self.domain}", "body": "What about 3+3?"},
+        ]
+
+        should_respond = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=False,
+            is_thread=True,
+            room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
+            thread_history=thread_history,
+            config=self.config,
+            sender_id=self.sender,
+        )
+        assert should_respond is False
 
     def test_invited_agent_behaves_like_native_agent(self) -> None:
         """Invited agents should follow the same rules as native agents."""
@@ -98,6 +201,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],
             config=self.config,
+            sender_id=self.sender,
         )
         assert should_respond is False  # Router decides when multiple agents available
 
@@ -113,6 +217,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=thread_history,
             config=self.config,
+            sender_id=self.sender,
         )
         assert should_respond is True
 
@@ -129,6 +234,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=thread_history,
             config=self.config,
+            sender_id=self.sender,
         )
         assert should_respond is False
 
@@ -142,6 +248,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],  # No one has spoken
             config=self.config,
+            sender_id=self.sender,
         )
         assert should_respond is False  # Router decides when multiple agents available
 
@@ -154,6 +261,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],  # No one has spoken
             config=self.config,
+            sender_id=self.sender,
         )
         assert should_respond is False  # Router decides when multiple agents available
 
@@ -165,6 +273,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],  # No one has spoken
             config=self.config,
+            sender_id=self.sender,
         )
         assert should_respond is True  # Can respond when mentioned even if not configured
 
@@ -177,6 +286,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],
             config=self.config,
+            sender_id=self.sender,
         )
         assert should_respond is False  # Router decides when multiple agents available
 
@@ -195,8 +305,32 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=thread_history,
             config=self.config,
+            sender_id=self.sender,
         )
         assert should_respond is False
+
+    def test_only_permitted_agent_in_thread_continues(self) -> None:
+        """A permitted agent should continue when other thread participants are disallowed."""
+        self.config.authorization.agent_reply_permissions = {
+            "calculator": [f"@alice:{self.domain}"],
+            "general": [f"@bob:{self.domain}"],
+        }
+        thread_history = [
+            {"sender": self.agent_id("calculator"), "body": "2+2=4"},
+            {"sender": self.agent_id("general"), "body": "I'll help too"},
+            {"sender": f"@alice:{self.domain}", "body": "What about 3+3?"},
+        ]
+
+        should_respond = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=False,
+            is_thread=True,
+            room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
+            thread_history=thread_history,
+            config=self.config,
+            sender_id=f"@alice:{self.domain}",
+        )
+        assert should_respond is True
 
     def test_not_in_thread_uses_router(self) -> None:
         """If not in a thread, use router to determine response."""
@@ -207,6 +341,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],
             config=self.config,
+            sender_id=self.sender,
         )
         assert should_respond is False
 
@@ -219,6 +354,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],
             config=self.config,
+            sender_id=self.sender,
         )
         assert should_respond is False
 
@@ -231,6 +367,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],
             config=self.config,
+            sender_id=self.sender,
         )
         assert should_respond is True
 
@@ -255,6 +392,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=thread_history,
             config=self.config,
+            sender_id=self.sender,
         )
         assert should_respond is False
 
@@ -268,6 +406,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],
             config=self.config,
+            sender_id=self.sender,
         )
         assert should_respond is False
 
@@ -283,6 +422,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=thread_history,
             config=self.config,
+            sender_id=self.sender,
         )
         assert should_respond is False
 
@@ -295,6 +435,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],
             config=self.config,
+            sender_id=self.sender,
         )
         assert should_respond is False
 
@@ -308,6 +449,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],
             config=self.config,
+            sender_id=self.sender,
         )
         assert should_respond is False
 
@@ -330,6 +472,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=thread_history,
             config=self.config,
+            sender_id=self.sender,
         )
         assert should_respond is False
 
@@ -343,6 +486,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!test:example.org", ["agent1", "calculator", "general"], self.config),
             thread_history=[],
             config=self.config,
+            sender_id=self.sender,
         )
         # Agent1 should not respond and should NOT use router
         assert not should_respond
@@ -355,6 +499,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!test:example.org", ["agent1", "calculator", "general"], self.config),
             thread_history=[],
             config=self.config,
+            sender_id=self.sender,
             # No agents mentioned
         )
         # Agent1 should not respond but SHOULD use router
@@ -368,6 +513,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!test:example.org", ["agent1", "calculator", "general"], self.config),
             thread_history=[],
             config=self.config,
+            sender_id=self.sender,
         )
         # Agent1 SHOULD respond and should NOT use router
         assert should_respond
@@ -382,6 +528,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator"], self.config),  # Only calculator in room
             thread_history=[],  # Empty thread
             config=self.config,
+            sender_id=self.sender,
         )
         assert should_respond is True  # Single agent takes ownership
 
@@ -397,6 +544,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator"], self.config),  # Only calculator
             thread_history=thread_history,
             config=self.config,
+            sender_id=self.sender,
         )
         assert should_respond is True  # Single agent takes ownership when only users have spoken
 
@@ -417,6 +565,7 @@ class TestAgentResponseLogic:
                 room=room,
                 thread_history=multi_human_thread,
                 config=self.config,
+                sender_id=self.sender,
             )
             is False
         )
@@ -430,6 +579,7 @@ class TestAgentResponseLogic:
                 room=room,
                 thread_history=multi_human_thread,
                 config=self.config,
+                sender_id=self.sender,
             )
             is True
         )
@@ -446,6 +596,7 @@ class TestAgentResponseLogic:
                 room=room,
                 thread_history=single_human_thread,
                 config=self.config,
+                sender_id=self.sender,
             )
             is True
         )
@@ -465,6 +616,7 @@ class TestAgentResponseLogic:
                 room=room,
                 thread_history=owned_thread_history,
                 config=self.config,
+                sender_id=self.sender,
             )
             is False
         )
@@ -482,6 +634,7 @@ class TestAgentResponseLogic:
                 thread_history=[],
                 config=self.config,
                 has_non_agent_mentions=True,
+                sender_id=self.sender,
             )
             is False
         )
@@ -500,6 +653,7 @@ class TestAgentResponseLogic:
                 room=room,
                 thread_history=[],
                 config=self.config,
+                sender_id=self.sender,
             )
             is True
         )
@@ -528,6 +682,7 @@ class TestAgentResponseLogic:
                 room=room,
                 thread_history=thread_with_bot,
                 config=config,
+                sender_id="@alice:localhost",
             )
             is True
         )
@@ -554,6 +709,7 @@ class TestAgentResponseLogic:
             thread_history=thread_history,
             config=self.config,
             mentioned_agents=[self.config.ids["research"]],  # ResearchAgent is mentioned
+            sender_id=self.sender,
         )
         assert should_respond is False  # Should NOT respond when another agent is mentioned
 
@@ -566,5 +722,6 @@ class TestAgentResponseLogic:
             thread_history=thread_history,
             config=self.config,
             mentioned_agents=[],  # No agents mentioned
+            sender_id=self.sender,
         )
         assert should_respond is True  # Should continue when no one is mentioned
