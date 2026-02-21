@@ -464,6 +464,7 @@ class TestGrep:
         result = _run_ripgrep(
             "match",
             tmp_path,
+            tmp_path,
             None,
             ignore_case=False,
             literal=False,
@@ -551,6 +552,7 @@ class TestGrep:
 
         result = _run_ripgrep(
             "match",
+            tmp_path,
             tmp_path,
             None,
             ignore_case=False,
@@ -651,6 +653,53 @@ class TestGrep:
         (tmp_base / "huge.txt").write_text("\n".join(f"match line {i}" for i in range(7000)))
         result = tools.grep("match", path="huge.txt", limit=7000)
         assert "[Output truncated." in result
+
+    def test_grep_explicit_hidden_path_returns_matches(self, tools: CodingTools, tmp_base: Path) -> None:
+        """Explicit hidden path targets are not filtered — only recursive discovery excludes dotfiles."""
+        (tmp_base / ".hidden_dir").mkdir()
+        (tmp_base / ".hidden_dir" / "secret.txt").write_text("needle\n")
+        result = tools.grep("needle", path=".hidden_dir")
+        assert "needle" in result
+        assert "No matches" not in result
+
+    def test_grep_rg_and_fallback_emit_same_relative_paths(
+        self,
+        tools: CodingTools,
+        tmp_base: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Ripgrep and Python fallback must emit the same relative path format."""
+        (tmp_base / "parity.txt").write_text("needle\n")
+
+        # Capture rg output (mocked with absolute paths like real rg)
+        abs_path = str((tmp_base / "parity.txt").resolve())
+        rg_stdout = json.dumps(
+            {
+                "type": "match",
+                "data": {
+                    "path": {"text": abs_path},
+                    "lines": {"text": "needle\n"},
+                    "line_number": 1,
+                },
+            },
+        )
+        monkeypatch.setattr("mindroom.custom_tools.coding.shutil.which", lambda _name: "rg")
+        monkeypatch.setattr(
+            "mindroom.custom_tools.coding.subprocess.run",
+            lambda *_args, **_kwargs: subprocess.CompletedProcess(
+                args=["rg"],
+                returncode=0,
+                stdout=rg_stdout,
+                stderr="",
+            ),
+        )
+        rg_result = tools.grep("needle", path="parity.txt")
+
+        # Capture fallback output
+        monkeypatch.setattr("mindroom.custom_tools.coding.shutil.which", lambda _name: None)
+        fallback_result = tools.grep("needle", path="parity.txt")
+
+        assert rg_result == fallback_result
 
 
 class TestLineTruncation:

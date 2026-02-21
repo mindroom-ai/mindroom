@@ -653,7 +653,9 @@ class CodingTools(Toolkit):
 
         Returns:
             Matching lines with file paths and line numbers.
-            Hidden files/directories and gitignored files are excluded.
+            During recursive search, hidden files/directories and gitignored
+            files are automatically excluded. Explicit path targets are not
+            filtered.
 
         """
         try:
@@ -666,7 +668,7 @@ class CodingTools(Toolkit):
             return validation_error
 
         # Try ripgrep first
-        rg_result = _run_ripgrep(pattern, search_path, glob, ignore_case, literal, context, limit)
+        rg_result = _run_ripgrep(pattern, search_path, self.base_dir, glob, ignore_case, literal, context, limit)
         if rg_result is None:
             # Python fallback
             return _python_grep_fallback(pattern, search_path, glob, ignore_case, literal, context, limit)
@@ -687,7 +689,8 @@ class CodingTools(Toolkit):
 
         Returns:
             List of matching file paths, one per line.
-            Hidden files/directories and gitignored files are excluded.
+            Hidden files/directories and gitignored files are automatically
+            excluded from results.
 
         """
         try:
@@ -779,6 +782,7 @@ def _parse_rg_event(raw: str) -> _RgEvent | None:
 def _run_ripgrep(
     pattern: str,
     search_path: Path,
+    base_dir: Path,
     glob_filter: str | None,
     ignore_case: bool,
     literal: bool,
@@ -812,13 +816,22 @@ def _run_ripgrep(
         stderr = result.stderr.strip()
         return f"Error running grep: {stderr}" if stderr else "Error running grep."
 
-    return _format_rg_output(result.stdout, limit, context)
+    return _format_rg_output(result.stdout, limit, context, base_dir)
 
 
-def _format_rg_line(event: _RgEvent) -> str:
+def _relativize_path(path_text: str, base_dir: Path) -> str:
+    """Make an absolute path relative to base_dir for consistent output."""
+    try:
+        return str(Path(path_text).relative_to(base_dir))
+    except ValueError:
+        return path_text
+
+
+def _format_rg_line(event: _RgEvent, base_dir: Path) -> str:
     """Format a ripgrep event as one output line."""
     marker = ":" if event.event_type == "match" else "-"
-    return f"{event.path_text}{marker}{event.line_number}{marker}{_truncate_line(event.line_text.rstrip())}"
+    rel_path = _relativize_path(event.path_text, base_dir)
+    return f"{rel_path}{marker}{event.line_number}{marker}{_truncate_line(event.line_text.rstrip())}"
 
 
 def _append_trailing_context(
@@ -826,6 +839,7 @@ def _append_trailing_context(
     pending_context: list[_RgEvent],
     last_match: _RgEvent | None,
     context: int,
+    base_dir: Path,
 ) -> None:
     """Append only after-context for the last accepted match."""
     if context <= 0 or last_match is None:
@@ -836,11 +850,11 @@ def _append_trailing_context(
         if event.path_text != last_match.path_text:
             continue
         if last_match.line_number < event.line_number <= last_match.line_number + context:
-            output_lines.append(_format_rg_line(event))
+            output_lines.append(_format_rg_line(event, base_dir))
     pending_context.clear()
 
 
-def _format_rg_output(stdout: str, limit: int, context: int) -> str:
+def _format_rg_output(stdout: str, limit: int, context: int, base_dir: Path) -> str:
     """Parse ripgrep JSON output and format as text lines."""
     output_lines: list[str] = []
     pending_context: list[_RgEvent] = []
@@ -859,19 +873,19 @@ def _format_rg_output(stdout: str, limit: int, context: int) -> str:
 
         if match_count >= limit:
             was_limited = True
-            _append_trailing_context(output_lines, pending_context, last_match, context)
+            _append_trailing_context(output_lines, pending_context, last_match, context, base_dir)
             break
 
         if pending_context:
-            output_lines.extend(_format_rg_line(context_event) for context_event in pending_context)
+            output_lines.extend(_format_rg_line(context_event, base_dir) for context_event in pending_context)
             pending_context.clear()
 
         match_count += 1
         last_match = event
-        output_lines.append(_format_rg_line(event))
+        output_lines.append(_format_rg_line(event, base_dir))
 
     if not was_limited:
-        _append_trailing_context(output_lines, pending_context, last_match, context)
+        _append_trailing_context(output_lines, pending_context, last_match, context, base_dir)
 
     if not output_lines:
         return "No matches found."
