@@ -810,6 +810,94 @@ class TestAgentBot:
         # Should not send any response
         bot.client.room_send.assert_not_called()
 
+    def test_build_scheduling_tool_context_uses_active_client_when_room_cached(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Scheduler context should use the active bot client when room cache is present."""
+        config = Config(
+            agents={
+                "calculator": AgentConfig(
+                    display_name="CalculatorAgent",
+                    rooms=["!test:localhost"],
+                ),
+            },
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        room_id = "!test:localhost"
+        local_room = MagicMock(spec=nio.MatrixRoom)
+        local_room.room_id = room_id
+        bot.client = MagicMock(rooms={room_id: local_room})
+        bot.orchestrator = MagicMock()
+
+        context = bot._build_scheduling_tool_context(
+            room_id=room_id,
+            thread_id="$thread",
+            reply_to_event_id="$event",
+            user_id="@user:localhost",
+        )
+
+        assert context is not None
+        assert context.client is bot.client
+        assert context.room is local_room
+        assert context.thread_id == "$thread"
+        assert context.requester_id == "@user:localhost"
+
+    def test_build_scheduling_tool_context_returns_none_when_room_not_cached(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Scheduler context should be skipped when active client has no room cache entry."""
+        config = Config(
+            agents={
+                "calculator": AgentConfig(
+                    display_name="CalculatorAgent",
+                    rooms=["!test:localhost"],
+                ),
+            },
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        room_id = "!test:localhost"
+        bot.client = MagicMock(rooms={})
+        bot.orchestrator = MagicMock()
+
+        context = bot._build_scheduling_tool_context(
+            room_id=room_id,
+            thread_id="$thread",
+            reply_to_event_id="$event",
+            user_id="@user:localhost",
+        )
+
+        assert context is None
+
+    def test_build_scheduling_tool_context_returns_none_when_client_unavailable(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Scheduler context should be skipped when no Matrix client is available."""
+        config = Config(
+            agents={
+                "calculator": AgentConfig(
+                    display_name="CalculatorAgent",
+                    rooms=["!test:localhost"],
+                ),
+            },
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot.client = None
+
+        context = bot._build_scheduling_tool_context(
+            room_id="!test:localhost",
+            thread_id="$thread",
+            reply_to_event_id="$event",
+            user_id="@user:localhost",
+        )
+
+        assert context is None
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("handler_name", "marks_responded"),
@@ -856,8 +944,8 @@ class TestAgentBot:
     @pytest.mark.parametrize(
         ("handler_name", "marks_responded"),
         [
-            ("message", False),
-            ("image", False),
+            ("message", True),
+            ("image", True),
             ("voice", True),
             ("reaction", False),
         ],

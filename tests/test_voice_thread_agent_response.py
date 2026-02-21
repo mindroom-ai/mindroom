@@ -11,7 +11,7 @@ import pytest
 
 from mindroom.bot import ROUTER_AGENT_NAME, AgentBot
 from mindroom.config import Config
-from mindroom.constants import VOICE_ORIGINAL_SENDER_KEY, VOICE_PREFIX
+from mindroom.constants import ORIGINAL_SENDER_KEY, VOICE_PREFIX
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.teams import TeamFormationDecision, TeamMode
@@ -64,6 +64,7 @@ async def test_agent_responds_to_voice_transcription_in_thread(mock_home_bot: Ag
     voice_transcription_event.source = {
         "content": {
             "body": f"{VOICE_PREFIX}turn on the guest room lights",
+            ORIGINAL_SENDER_KEY: "@user:example.com",
             "m.relates_to": {
                 "rel_type": "m.thread",
                 "event_id": "$thread_root",
@@ -138,7 +139,7 @@ async def test_voice_transcription_permissions_use_original_sender(mock_home_bot
     voice_transcription_event.source = {
         "content": {
             "body": f"{VOICE_PREFIX}turn on the guest room lights",
-            VOICE_ORIGINAL_SENDER_KEY: "@bob:localhost",
+            ORIGINAL_SENDER_KEY: "@bob:localhost",
             "m.relates_to": {
                 "rel_type": "m.thread",
                 "event_id": "$thread_root",

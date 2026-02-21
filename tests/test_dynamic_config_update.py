@@ -10,6 +10,7 @@ import pytest
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.config import Config
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling import CronSchedule, ScheduledWorkflow, parse_workflow_schedule
 
 if TYPE_CHECKING:
@@ -151,7 +152,10 @@ class TestDynamicConfigUpdate:
                 result = await parse_workflow_schedule(
                     request,
                     updated_config,
-                    available_agents=["email_assistant", "callagent"],  # Both agents available
+                    available_agents=[
+                        MatrixID(username="email_assistant", domain="localhost"),
+                        MatrixID(username="callagent", domain="localhost"),
+                    ],
                 )
 
                 # Verify the workflow was parsed correctly and includes both agents

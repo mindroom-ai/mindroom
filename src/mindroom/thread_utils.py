@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any
 
-from .constants import ROUTER_AGENT_NAME, VOICE_ORIGINAL_SENDER_KEY
+from .constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from .matrix.identity import MatrixID, extract_agent_name, room_alias_localpart
 from .matrix.rooms import resolve_room_aliases
 from .matrix.state import MatrixState
@@ -341,10 +341,14 @@ def get_effective_sender_id_for_reply_permissions(
 ) -> str:
     """Return the sender ID used for per-agent reply permission checks.
 
-    Voice transcriptions are posted by the router on behalf of a user. For
-    those events, use the embedded original sender ID instead of the router ID.
+    Internal MindRoom senders may relay user-originated messages (voice
+    transcriptions, scheduled task fires, etc.) and include the original sender
+    in event content. For trusted internal senders, use that embedded sender.
     """
-    if extract_agent_name(sender_id, config) != ROUTER_AGENT_NAME:
+    known_internal_ids = {matrix_id.full_id for matrix_id in config.ids.values()}
+    mindroom_user_id = config.get_mindroom_user_id()
+    is_internal_mindroom_sender = sender_id == mindroom_user_id or sender_id in known_internal_ids
+    if not is_internal_mindroom_sender:
         return sender_id
     if not event_source:
         return sender_id
@@ -353,7 +357,7 @@ def get_effective_sender_id_for_reply_permissions(
     if not isinstance(content, Mapping):
         return sender_id
 
-    original_sender = content.get(VOICE_ORIGINAL_SENDER_KEY)
+    original_sender = content.get(ORIGINAL_SENDER_KEY)
     if isinstance(original_sender, str) and original_sender:
         return original_sender
     return sender_id

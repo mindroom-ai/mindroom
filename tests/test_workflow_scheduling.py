@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
+from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling import (
     CronSchedule,
     ScheduledWorkflow,
@@ -16,6 +18,10 @@ from mindroom.scheduling import (
     parse_workflow_schedule,
     schedule_task,
 )
+
+
+def _mid(name: str) -> MatrixID:
+    return MatrixID(username=name, domain="localhost")
 
 
 @pytest.fixture
@@ -117,7 +123,7 @@ class TestParseWorkflowSchedule:
         result = await parse_workflow_schedule(
             "Every Monday at 9am, research AI news and email me a summary",
             config=mock_config,
-            available_agents=["research", "email_assistant"],
+            available_agents=[_mid("research"), _mid("email_assistant")],
         )
 
         assert isinstance(result, ScheduledWorkflow)
@@ -149,7 +155,7 @@ class TestParseWorkflowSchedule:
         result = await parse_workflow_schedule(
             "ping me in 5 minutes to check the deployment",
             config=mock_config,
-            available_agents=["general"],  # At least one agent required
+            available_agents=[_mid("general")],
         )
 
         assert isinstance(result, ScheduledWorkflow)
@@ -174,7 +180,7 @@ class TestParseWorkflowSchedule:
         result = await parse_workflow_schedule(
             "Daily at 9am, give me a market analysis",
             config=mock_config,
-            available_agents=["finance"],  # Finance agent available
+            available_agents=[_mid("finance")],
         )
 
         assert isinstance(result, ScheduledWorkflow)
@@ -198,12 +204,47 @@ class TestParseWorkflowSchedule:
         result = await parse_workflow_schedule(
             "Schedule something",
             config=mock_config,
-            available_agents=["general"],  # At least one agent required
+            available_agents=[_mid("general")],
         )
 
         assert isinstance(result, WorkflowParseError)
         assert "Error parsing schedule" in result.error
         assert result.suggestion is not None
+
+    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.scheduling.Agent")
+    async def test_parse_formats_available_agents_without_double_at(
+        self,
+        mock_agent_class: Mock,
+        mock_get_model: Mock,  # noqa: ARG002
+        mock_config: MagicMock,
+    ) -> None:
+        """Available-agent prompt rendering should never produce @@ mentions."""
+        mock_agent = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.content = ScheduledWorkflow(
+            schedule_type="once",
+            execute_at=datetime.now(UTC) + timedelta(minutes=5),
+            message="Check in",
+            description="Reminder",
+        )
+        mock_agent.arun.return_value = mock_response
+        mock_agent_class.return_value = mock_agent
+
+        await parse_workflow_schedule(
+            "remind me later",
+            config=mock_config,
+            available_agents=[
+                _mid("general"),
+                _mid("research"),
+                _mid("mindroom_finance"),
+                MatrixID(username="mindroom_analyst", domain="localhost"),
+            ],
+        )
+
+        prompt = mock_agent.arun.call_args.args[0]
+        assert "Available agents: @general, @research, @mindroom_finance, @mindroom_analyst" in prompt
+        assert "@@" not in prompt
 
     @patch("mindroom.scheduling.get_model_instance")
     @patch("mindroom.scheduling.Agent")
@@ -238,12 +279,12 @@ class TestParseWorkflowSchedule:
         mock_agent.arun.side_effect = [resp_once, resp_cron]
         mock_agent_class.return_value = mock_agent
 
-        result_once = await parse_workflow_schedule("remind me later", mock_config, ["general"])
+        result_once = await parse_workflow_schedule("remind me later", mock_config, [_mid("general")])
         assert isinstance(result_once, ScheduledWorkflow)
         assert result_once.schedule_type == "once"
         assert result_once.execute_at is not None
 
-        result_cron = await parse_workflow_schedule("every day", mock_config, ["general"])
+        result_cron = await parse_workflow_schedule("every day", mock_config, [_mid("general")])
         assert isinstance(result_cron, ScheduledWorkflow)
         assert result_cron.schedule_type == "cron"
         assert result_cron.cron_schedule is not None
@@ -283,6 +324,7 @@ class TestExecuteScheduledWorkflow:
             assert "@research" in content["body"]
             assert "@analyst" in content["body"]
             assert content["m.relates_to"]["event_id"] == "$thread123"
+            assert content[ORIGINAL_SENDER_KEY] == "@user:server"
 
     async def test_execute_workflow_simple_reminder(self) -> None:
         """Test executing a simple reminder without agents."""
@@ -305,6 +347,7 @@ class TestExecuteScheduledWorkflow:
             content = call_args[0][2]
             assert "Check the server status" in content["body"]
             assert "m.relates_to" not in content  # No thread
+            assert ORIGINAL_SENDER_KEY not in content
 
     async def test_execute_workflow_error_handling(self) -> None:
         """Test error handling in execute_scheduled_workflow."""

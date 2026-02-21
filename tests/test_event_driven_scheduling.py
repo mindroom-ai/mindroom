@@ -7,11 +7,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling import (
     CronSchedule,
     ScheduledWorkflow,
     parse_workflow_schedule,
 )
+
+
+def _mid(name: str) -> MatrixID:
+    return MatrixID(username=name, domain="localhost")
 
 
 @pytest.fixture
@@ -69,7 +74,7 @@ class TestEventDrivenScheduling:
         result = await parse_workflow_schedule(
             "If I get an email about 'urgent', call me",
             mock_config,
-            available_agents=["email_assistant", "phone_agent"],
+            available_agents=[_mid("email_assistant"), _mid("phone_agent")],
         )
 
         # Verify the result is a workflow (not an error)
@@ -111,7 +116,7 @@ class TestEventDrivenScheduling:
         result = await parse_workflow_schedule(
             "When Bitcoin drops below $40k, notify me",
             mock_config,
-            available_agents=["crypto_agent", "notification_agent"],  # Agents for this workflow
+            available_agents=[_mid("crypto_agent"), _mid("notification_agent")],
         )
 
         # Verify
@@ -146,7 +151,7 @@ class TestEventDrivenScheduling:
         result = await parse_workflow_schedule(
             "If server CPU goes above 80%, scale up",
             mock_config,
-            available_agents=["monitoring_agent", "ops_agent"],
+            available_agents=[_mid("monitoring_agent"), _mid("ops_agent")],
         )
 
         # Verify
@@ -181,7 +186,7 @@ class TestEventDrivenScheduling:
         result = await parse_workflow_schedule(
             "When the build fails, create a ticket",
             mock_config,
-            available_agents=["ci_agent", "ticket_agent"],
+            available_agents=[_mid("ci_agent"), _mid("ticket_agent")],
         )
 
         # Verify
@@ -216,7 +221,7 @@ class TestEventDrivenScheduling:
         result = await parse_workflow_schedule(
             "When someone mentions our product on Reddit, analyze it",
             mock_config,
-            available_agents=["reddit_agent", "analyst"],
+            available_agents=[_mid("reddit_agent"), _mid("analyst")],
         )
 
         # Verify
@@ -251,7 +256,7 @@ class TestEventDrivenScheduling:
         result = await parse_workflow_schedule(
             "Whenever I get an email from my boss, notify me immediately",
             mock_config,
-            available_agents=["email_assistant", "notification_agent"],
+            available_agents=[_mid("email_assistant"), _mid("notification_agent")],
         )
 
         # Verify
@@ -287,7 +292,7 @@ class TestEventDrivenScheduling:
         await parse_workflow_schedule(
             "Test request",
             mock_config,
-            available_agents=["test_agent"],  # Need at least one agent
+            available_agents=[_mid("test_agent")],
         )
 
         # Verify the prompt contains event-driven guidance
