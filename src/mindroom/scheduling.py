@@ -19,6 +19,7 @@ from croniter import croniter
 from pydantic import BaseModel, Field
 
 from .ai import get_model_instance
+from .constants import ORIGINAL_SENDER_KEY
 from .logging_config import get_logger
 from .matrix.client import (
     fetch_thread_history,
@@ -493,6 +494,8 @@ async def execute_scheduled_workflow(
             thread_event_id=workflow.thread_id,
             latest_thread_event_id=latest_thread_event_id,
         )
+        if workflow.created_by:
+            content[ORIGINAL_SENDER_KEY] = workflow.created_by
         await send_message(client, workflow.room_id, content)
         logger.info("Executed scheduled workflow", description=workflow.description, thread_id=workflow.thread_id)
     except Exception as e:

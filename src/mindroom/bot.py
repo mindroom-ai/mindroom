@@ -27,7 +27,7 @@ from .commands import (
 )
 from .config import Config
 from .config_commands import handle_config_command
-from .constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, VOICE_ORIGINAL_SENDER_KEY, VOICE_PREFIX
+from .constants import CONFIG_PATH, MATRIX_HOMESERVER, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, VOICE_PREFIX
 from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
 from .knowledge import initialize_knowledge_managers, shutdown_knowledge_managers
@@ -966,8 +966,10 @@ class AgentBot:
         if event.body.endswith(IN_PROGRESS_MARKER):
             return
 
-        # Skip our own messages (unless voice transcription from router)
-        if event.sender == self.matrix_id.full_id and not event.body.startswith(VOICE_PREFIX):
+        requester_user_id = self._requester_user_id_for_event(event)
+
+        # Skip self-authored messages unless they are relayed on behalf of another sender.
+        if requester_user_id == self.matrix_id.full_id and not event.body.startswith(VOICE_PREFIX):
             return
 
         event_info = EventInfo.from_event(event.source)
@@ -1002,7 +1004,6 @@ class AgentBot:
 
         # We only receive events from rooms we're in - no need to check access
         _is_dm_room = await is_dm_room(self.client, room.room_id)
-        requester_user_id = self._requester_user_id_for_event(event)
 
         if not self._can_reply_to_sender(requester_user_id):
             return
@@ -1021,11 +1022,11 @@ class AgentBot:
         context = await self._extract_message_context(room, event)
 
         # Check if the sender is an agent
-        sender_agent_name = extract_agent_name(event.sender, self.config)
+        sender_agent_name = extract_agent_name(requester_user_id, self.config)
 
         # Skip messages from agents unless:
         # 1. We're mentioned
-        # 2. It's a voice transcription from router (treated as user message)
+        # 2. It's a legacy voice transcription from router without relay metadata
         is_router_voice = sender_agent_name == ROUTER_AGENT_NAME and event.body.startswith(VOICE_PREFIX)
         if sender_agent_name and not context.am_i_mentioned and not is_router_voice:
             self.logger.debug("Ignoring message from other agent (not mentioned)")
@@ -1232,7 +1233,7 @@ class AgentBot:
                 reply_to_event_id=event.event_id,
                 response_text=transcribed_message,
                 thread_id=thread_id,
-                extra_content={VOICE_ORIGINAL_SENDER_KEY: event.sender},
+                extra_content={ORIGINAL_SENDER_KEY: event.sender},
             )
             self.response_tracker.mark_responded(event.event_id, response_event_id)
         else:
@@ -1247,8 +1248,10 @@ class AgentBot:
         """Handle image message events by passing the image to the AI model."""
         assert self.client is not None
 
+        requester_user_id = self._requester_user_id_for_event(event)
+
         # Skip our own messages
-        if event.sender == self.matrix_id.full_id:
+        if requester_user_id == self.matrix_id.full_id:
             return
 
         # Check if we've already seen this message
@@ -1268,9 +1271,8 @@ class AgentBot:
             return
 
         # Skip messages from other agents unless mentioned
-        sender_agent_name = extract_agent_name(event.sender, self.config)
+        sender_agent_name = extract_agent_name(requester_user_id, self.config)
         context = await self._extract_message_context(room, event)
-        requester_user_id = self._requester_user_id_for_event(event)
 
         if not self._can_reply_to_sender(requester_user_id):
             return

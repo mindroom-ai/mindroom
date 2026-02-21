@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
+from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling import (
     CronSchedule,
@@ -323,6 +324,7 @@ class TestExecuteScheduledWorkflow:
             assert "@research" in content["body"]
             assert "@analyst" in content["body"]
             assert content["m.relates_to"]["event_id"] == "$thread123"
+            assert content[ORIGINAL_SENDER_KEY] == "@user:server"
 
     async def test_execute_workflow_simple_reminder(self) -> None:
         """Test executing a simple reminder without agents."""
@@ -345,6 +347,7 @@ class TestExecuteScheduledWorkflow:
             content = call_args[0][2]
             assert "Check the server status" in content["body"]
             assert "m.relates_to" not in content  # No thread
+            assert ORIGINAL_SENDER_KEY not in content
 
     async def test_execute_workflow_error_handling(self) -> None:
         """Test error handling in execute_scheduled_workflow."""
