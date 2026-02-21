@@ -30,8 +30,6 @@ class TestRouterAgentSelection:
             room_models={},
             models={"default": ModelConfig(provider="test", id="test-model")},
         )
-        # Keep these tests stable even when MATRIX_HOMESERVER points elsewhere.
-        self.config.domain = "localhost"
 
     def test_get_configured_agents_returns_only_configured(self) -> None:
         """Test that get_configured_agents_for_room only returns configured agents."""

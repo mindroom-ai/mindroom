@@ -65,7 +65,6 @@ class TestStreamingEdits:
             models={"default": ModelConfig(provider="ollama", id="test-model")},
             router=RouterConfig(model="default"),
         )
-        self.config.domain = "localhost"
 
     @pytest.mark.asyncio
     @patch("mindroom.bot.ai_response")

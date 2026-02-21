@@ -34,7 +34,6 @@ def setup_test_bot(
     """Set up a test bot with all required mocks."""
     if config is None:
         config = Config.from_yaml()
-    config.domain = "localhost"
 
     bot = AgentBot(agent, storage_path, rooms=[room_id], enable_streaming=enable_streaming, config=config)
     bot.client = AsyncMock()
@@ -584,7 +583,6 @@ class TestRoutingRegression:
             room_models={},
             models={"default": ModelConfig(provider="anthropic", id="claude-3-5-haiku-latest")},
         )
-        mock_config.domain = "localhost"
         mock_from_yaml.return_value = mock_config
 
         # Get the actual domain from config
