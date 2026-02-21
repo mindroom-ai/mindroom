@@ -386,6 +386,28 @@ def test_agent_reply_permissions_with_aliases() -> None:
     assert is_sender_allowed_for_agent_reply("@bob:example.com", "analyst", config)
 
 
+def test_agent_reply_permissions_do_not_bypass_bot_accounts() -> None:
+    """Bridge bot accounts should still respect per-agent reply allowlists."""
+    config = Config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        bot_accounts=["@bridgebot:example.com"],
+        authorization={
+            "default_room_access": True,
+            "agent_reply_permissions": {
+                "assistant": ["@alice:example.com"],
+            },
+        },
+    )
+
+    assert not is_sender_allowed_for_agent_reply("@bridgebot:example.com", "assistant", config)
+
+
 def test_agent_reply_permissions_wildcard_entity_applies_to_all() -> None:
     """A '*' entity key should act as default allowlist for all entities."""
     config = Config(

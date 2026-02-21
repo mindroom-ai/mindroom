@@ -267,8 +267,8 @@ def is_authorized_sender(sender_id: str, config: Config, room_id: str) -> bool:
 def is_sender_allowed_for_agent_reply(sender_id: str, agent_name: str, config: Config) -> bool:
     """Check whether *agent_name* is allowed to reply to *sender_id*.
 
-    Agent/team/router senders bypass this allowlist because they are internal
-    system participants, not end users.
+    Internal MindRoom identities (agents/teams/router and internal user) bypass
+    this allowlist because they are system participants, not end users.
     """
     agent_reply_permissions = config.authorization.agent_reply_permissions
     allowed_users = agent_reply_permissions.get(agent_name)
@@ -279,8 +279,9 @@ def is_sender_allowed_for_agent_reply(sender_id: str, agent_name: str, config: C
     if "*" in allowed_users:
         return True
 
-    # Internal system participants are not restricted by per-user reply lists.
-    if sender_id == config.get_mindroom_user_id() or _is_bot_or_agent(sender_id, config):
+    # Internal MindRoom participants are not restricted by per-user reply lists.
+    # Bridge bot accounts are intentionally not exempt.
+    if sender_id == config.get_mindroom_user_id() or extract_agent_name(sender_id, config):
         return True
 
     resolved_sender = config.authorization.resolve_alias(sender_id)
