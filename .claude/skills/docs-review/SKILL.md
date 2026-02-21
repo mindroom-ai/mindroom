@@ -1,3 +1,8 @@
+---
+name: docs-review
+description: Review documentation for accuracy, completeness, and consistency against the actual codebase.
+---
+
 Review documentation for accuracy, completeness, and consistency. Focus on things that require judgment—automated checks handle the rest.
 
 ## What's Already Automated

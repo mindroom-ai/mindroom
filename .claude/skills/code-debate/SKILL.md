@@ -1,3 +1,9 @@
+---
+name: code-debate
+description: Two coding agents debate code changes through a shared DEBATE.md file. Use when you want adversarial review of a commit, diff, or PR.
+argument-hint: "[subject: commit, diff, PR, or file to debate]"
+---
+
 # Code Debate Protocol
 
 A protocol for two coding agents (Claude Code, Gemini CLI, Codex, or any other) to debate code changes through a shared file (`DEBATE.md`). Both agents receive this same prompt. Role is determined by explicit designation when provided, otherwise by file existence.
