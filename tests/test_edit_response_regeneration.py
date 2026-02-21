@@ -8,9 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import nio
 import pytest
 
-from mindroom import interactive
+from mindroom import config_confirmation, interactive
 from mindroom.bot import AgentBot
 from mindroom.config import Config
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 
@@ -613,6 +614,84 @@ async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> N
 
     mock_send_response.assert_called_once()
     mock_generate_response.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_config_confirmation_blocked_by_reply_permissions(tmp_path: Path) -> None:
+    """Disallowed senders must not trigger config confirmation reactions."""
+    agent_user = AgentMatrixUser(
+        agent_name=ROUTER_AGENT_NAME,
+        user_id=f"@mindroom_{ROUTER_AGENT_NAME}:example.com",
+        display_name="Router",
+        password="test_password",  # noqa: S106
+    )
+
+    config = Config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "rooms": ["!test:example.com"],
+            },
+        },
+        authorization={
+            "default_room_access": True,
+            "agent_reply_permissions": {ROUTER_AGENT_NAME: ["@alice:example.com"]},
+        },
+    )
+
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        rooms=["!test:example.com"],
+    )
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.user_id = f"@mindroom_{ROUTER_AGENT_NAME}:example.com"
+    bot.response_tracker = MagicMock()
+    bot.logger = MagicMock()
+
+    room = nio.MatrixRoom(
+        room_id="!test:example.com",
+        own_user_id=f"@mindroom_{ROUTER_AGENT_NAME}:example.com",
+    )
+
+    # Register a pending config change
+    config_confirmation._pending_changes["$config_msg:example.com"] = config_confirmation.PendingConfigChange(
+        requester="@bob:example.com",
+        room_id=room.room_id,
+        thread_id=None,
+        config_path="agents.assistant.role",
+        old_value="old",
+        new_value="new",
+    )
+
+    reaction_event = nio.ReactionEvent.from_dict(
+        {
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$config_msg:example.com",
+                    "key": "✅",
+                },
+            },
+            "event_id": "$reaction_bob:example.com",
+            "sender": "@bob:example.com",
+            "origin_server_ts": 1000000,
+            "type": "m.reaction",
+            "room_id": "!test:example.com",
+        },
+    )
+
+    with (
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch("mindroom.bot.config_confirmation.handle_confirmation_reaction", new_callable=AsyncMock) as mock_confirm,
+    ):
+        await bot._on_reaction(room, reaction_event)
+
+    config_confirmation._pending_changes.clear()
+
+    # Bob is disallowed for the router — the confirmation handler must not run.
+    mock_confirm.assert_not_called()
 
 
 @pytest.mark.asyncio

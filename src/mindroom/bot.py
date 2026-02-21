@@ -1140,6 +1140,13 @@ class AgentBot:
             self.logger.debug(f"Ignoring reaction from unauthorized sender: {event.sender}")
             return
 
+        # Check per-agent reply permissions before handling any reaction type
+        # so disallowed senders cannot trigger stop confirmations, config
+        # confirmations, or consume interactive questions.
+        if not self._can_reply_to_sender(event.sender):
+            self.logger.debug("Ignoring reaction due to reply permissions", sender=event.sender)
+            return
+
         # Check if this is a stop button reaction for a message currently being generated
         # Only process stop functionality if:
         # 1. The reaction is 🛑
@@ -1170,13 +1177,6 @@ class AgentBot:
         if pending_change and self.agent_name == ROUTER_AGENT_NAME:
             # Only router handles config confirmations
             await config_confirmation.handle_confirmation_reaction(self, room, event, pending_change)
-            return
-
-        # Otherwise handle as interactive question
-        # Check permissions before parsing the reaction so disallowed users
-        # cannot consume and clear active interactive questions.
-        if not self._can_reply_to_sender(event.sender):
-            self.logger.debug("Ignoring reaction response due to reply permissions", sender=event.sender)
             return
 
         result = await interactive.handle_reaction(self.client, event, self.agent_name, self.config)
