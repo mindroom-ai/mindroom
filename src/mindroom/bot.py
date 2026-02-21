@@ -2523,7 +2523,7 @@ class AgentBot:
                 client=self.client,
                 room_id=room.room_id,
                 thread_id=effective_thread_id,
-                scheduled_by=event.sender,
+                scheduled_by=requester_user_id,
                 full_text=full_text,
                 config=self.config,
                 room=room,
@@ -2567,7 +2567,7 @@ class AgentBot:
                 room_id=room.room_id,
                 task_id=task_id,
                 full_text=full_text,
-                scheduled_by=event.sender,
+                scheduled_by=requester_user_id,
                 config=self.config,
                 room=room,
                 thread_id=effective_thread_id,
@@ -2599,7 +2599,7 @@ class AgentBot:
                         config_path=change_info["config_path"],
                         old_value=change_info["old_value"],
                         new_value=change_info["new_value"],
-                        requester=event.sender,
+                        requester=requester_user_id,
                     )
 
                     # Get the pending change we just registered
