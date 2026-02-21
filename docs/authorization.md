@@ -109,6 +109,10 @@ Use `authorization.agent_reply_permissions` to restrict which users each agent c
 - A `*` user entry means "allow any sender" for that specific entity.
 - If an entity is not present in the map, it has no extra reply restriction.
 - Alias mapping from `authorization.aliases` is applied before matching, so bridged IDs inherit canonical user permissions.
+- Internal MindRoom identities (agents, teams, router, and the internal `mindroom_user`) always bypass reply permissions — they are system participants, not end users.
+- `bot_accounts` are **not** exempt. Bridge bots listed in `bot_accounts` are still subject to reply permission checks.
+- Keys that do not match any configured agent, team, `router`, or `*` are rejected at config load time.
+- For voice messages, the permission check uses the original human sender, not the router that posted the transcription.
 
 ```yaml
 authorization:
