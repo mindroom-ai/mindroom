@@ -71,17 +71,10 @@ jobs:
       shell: bash
       run: |
         set -euo pipefail
-
-        pointer_files=()
-        while IFS= read -r -d '' file; do
-          if head -n 1 "$file" | grep -q '^version https://git-lfs.github.com/spec/v1$'; then
-            pointer_files+=("$file")
-          fi
-        done < <(find avatars -type f -name '*.png' -print0)
-
-        if [ "${#pointer_files[@]}" -gt 0 ]; then
+        pointer_files="$(grep -RIl --include='*.png' '^version https://git-lfs.github.com/spec/v1$' avatars || true)"
+        if [ -n "$pointer_files" ]; then
           echo "Found avatar PNGs that are still Git LFS pointer files:"
-          printf '%s\n' "${pointer_files[@]}"
+          echo "$pointer_files"
           exit 1
         fi
 
