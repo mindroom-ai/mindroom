@@ -701,6 +701,78 @@ class TestGrep:
 
         assert rg_result == fallback_result
 
+    def test_grep_rg_and_fallback_parity_subdirectory(
+        self,
+        tools: CodingTools,
+        tmp_base: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Parity for subdirectory targets: paths must include the subdirectory prefix."""
+        abs_path = str((tmp_base / "sub" / "nested.txt").resolve())
+        rg_stdout = json.dumps(
+            {
+                "type": "match",
+                "data": {
+                    "path": {"text": abs_path},
+                    "lines": {"text": "nested content\n"},
+                    "line_number": 1,
+                },
+            },
+        )
+        monkeypatch.setattr("mindroom.custom_tools.coding.shutil.which", lambda _name: "rg")
+        monkeypatch.setattr(
+            "mindroom.custom_tools.coding.subprocess.run",
+            lambda *_args, **_kwargs: subprocess.CompletedProcess(
+                args=["rg"],
+                returncode=0,
+                stdout=rg_stdout,
+                stderr="",
+            ),
+        )
+        rg_result = tools.grep("nested", path="sub")
+
+        monkeypatch.setattr("mindroom.custom_tools.coding.shutil.which", lambda _name: None)
+        fallback_result = tools.grep("nested", path="sub")
+
+        assert rg_result == fallback_result
+        assert "sub/nested.txt" in rg_result
+
+    def test_grep_rg_and_fallback_parity_nested_single_file(
+        self,
+        tools: CodingTools,
+        tmp_base: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Parity for single-file targets in subdirectories."""
+        abs_path = str((tmp_base / "sub" / "nested.txt").resolve())
+        rg_stdout = json.dumps(
+            {
+                "type": "match",
+                "data": {
+                    "path": {"text": abs_path},
+                    "lines": {"text": "nested content\n"},
+                    "line_number": 1,
+                },
+            },
+        )
+        monkeypatch.setattr("mindroom.custom_tools.coding.shutil.which", lambda _name: "rg")
+        monkeypatch.setattr(
+            "mindroom.custom_tools.coding.subprocess.run",
+            lambda *_args, **_kwargs: subprocess.CompletedProcess(
+                args=["rg"],
+                returncode=0,
+                stdout=rg_stdout,
+                stderr="",
+            ),
+        )
+        rg_result = tools.grep("nested", path="sub/nested.txt")
+
+        monkeypatch.setattr("mindroom.custom_tools.coding.shutil.which", lambda _name: None)
+        fallback_result = tools.grep("nested", path="sub/nested.txt")
+
+        assert rg_result == fallback_result
+        assert "sub/nested.txt" in rg_result
+
 
 class TestLineTruncation:
     """Tests for per-line truncation in grep output."""

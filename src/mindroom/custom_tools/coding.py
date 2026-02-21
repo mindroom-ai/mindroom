@@ -671,7 +671,16 @@ class CodingTools(Toolkit):
         rg_result = _run_ripgrep(pattern, search_path, self.base_dir, glob, ignore_case, literal, context, limit)
         if rg_result is None:
             # Python fallback
-            return _python_grep_fallback(pattern, search_path, glob, ignore_case, literal, context, limit)
+            return _python_grep_fallback(
+                pattern,
+                search_path,
+                self.base_dir,
+                glob,
+                ignore_case,
+                literal,
+                context,
+                limit,
+            )
         return rg_result
 
     def find_files(
@@ -928,7 +937,7 @@ def _validate_grep_request(
 
 def _grep_file(
     filepath: Path,
-    search_path: Path,
+    base_dir: Path,
     regex: re.Pattern[str],
     context: int,
     limit: int,
@@ -941,13 +950,10 @@ def _grep_file(
     except (OSError, UnicodeDecodeError):
         return match_count
 
-    if search_path.is_file():
-        rel = filepath.relative_to(search_path.parent)
-    else:
-        try:
-            rel = filepath.relative_to(search_path)
-        except ValueError:
-            rel = filepath
+    try:
+        rel = filepath.relative_to(base_dir)
+    except ValueError:
+        rel = filepath
 
     lines = text.splitlines()
     for i, line in enumerate(lines):
@@ -1027,6 +1033,7 @@ def _collect_grep_files(search_path: Path, glob_filter: str | None) -> list[Path
 def _python_grep_fallback(
     pattern: str,
     search_path: Path,
+    base_dir: Path,
     glob_filter: str | None,
     ignore_case: bool,
     literal: bool,
@@ -1049,7 +1056,7 @@ def _python_grep_fallback(
     results: list[str] = []
     match_count = 0
     for filepath in files_or_error:
-        match_count = _grep_file(filepath, search_path, regex, context, limit, results, match_count)
+        match_count = _grep_file(filepath, base_dir, regex, context, limit, results, match_count)
         if match_count >= limit:
             break
 
