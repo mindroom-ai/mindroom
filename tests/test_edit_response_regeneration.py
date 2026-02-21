@@ -784,7 +784,7 @@ async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
     ):
         await bot._on_message(room, edit_event)
         # Verify authorization was checked
-        mock_is_auth.assert_called_once_with(edit_event.sender, config, room.room_id)
+        mock_is_auth.assert_called_once_with(edit_event.sender, config, room.room_id, room_alias=None)
         # Should not handle edit for unauthorized user
         mock_handle_edit.assert_not_called()
 

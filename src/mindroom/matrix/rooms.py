@@ -11,7 +11,17 @@ import nio
 from mindroom.logging_config import get_logger
 from mindroom.topic_generator import ensure_room_has_topic, generate_room_topic_ai
 
-from .client import check_and_set_avatar, create_room, join_room, leave_room, matrix_client
+from .client import (
+    check_and_set_avatar,
+    create_room,
+    ensure_room_directory_visibility,
+    ensure_room_join_rule,
+    get_room_members,
+    invite_to_room,
+    join_room,
+    leave_room,
+    matrix_client,
+)
 from .identity import MatrixID, extract_server_name_from_homeserver
 from .state import MatrixRoom, MatrixState
 from .users import INTERNAL_USER_ACCOUNT_KEY
@@ -20,6 +30,113 @@ if TYPE_CHECKING:
     from mindroom.config import Config
 
 logger = get_logger(__name__)
+
+
+async def configure_managed_room_access(
+    client: nio.AsyncClient,
+    room_key: str,
+    room_id: str,
+    config: Config,
+    *,
+    room_alias: str | None = None,
+    context: str,
+) -> bool:
+    """Apply configured room joinability/discoverability policy for one managed room."""
+    access_config = config.matrix_room_access
+    target_join_rule = access_config.get_target_join_rule(room_key, room_id=room_id, room_alias=room_alias)
+    target_directory_visibility = access_config.get_target_directory_visibility(
+        room_key,
+        room_id=room_id,
+        room_alias=room_alias,
+    )
+
+    if target_join_rule is None or target_directory_visibility is None:
+        logger.info(
+            "Skipping managed room access policy",
+            room_key=room_key,
+            room_id=room_id,
+            mode=access_config.mode,
+            reason="single_user_private mode keeps invite-only/private behavior",
+            context=context,
+        )
+        return True
+
+    logger.info(
+        "Applying managed room access policy",
+        room_key=room_key,
+        room_id=room_id,
+        join_rule=target_join_rule,
+        directory_visibility=target_directory_visibility,
+        publish_to_room_directory=access_config.publish_to_room_directory,
+        context=context,
+    )
+
+    join_rule_updated = await ensure_room_join_rule(client, room_id, target_join_rule)
+    directory_visibility_updated = await ensure_room_directory_visibility(client, room_id, target_directory_visibility)
+    if join_rule_updated and directory_visibility_updated:
+        return True
+
+    logger.warning(
+        "Managed room access policy was only partially applied",
+        room_key=room_key,
+        room_id=room_id,
+        join_rule_success=join_rule_updated,
+        directory_visibility_success=directory_visibility_updated,
+        context=context,
+    )
+    return False
+
+
+async def auto_invite_authorized_users(
+    client: nio.AsyncClient,
+    joined_rooms: list[str],
+    config: Config,
+) -> None:
+    """Invite configured authorized users to restricted (invite-only) managed rooms."""
+    managed_rooms = load_rooms()
+    room_by_id = {room.room_id: (room_key, room) for room_key, room in managed_rooms.items()}
+    for room_id in joined_rooms:
+        entry = room_by_id.get(room_id)
+        if entry is None:
+            continue
+        room_key, room = entry
+        if not config.matrix_room_access.is_invite_only_room(room_key, room_id=room_id, room_alias=room.alias):
+            continue
+
+        candidate_user_ids = set(config.authorization.global_users)
+        candidate_user_ids.update(config.authorization.room_permissions.get(room_id, []))
+        candidate_user_ids.update(config.authorization.room_permissions.get(room_key, []))
+        candidate_user_ids.update(config.authorization.room_permissions.get(room.alias, []))
+        if room.alias.startswith("#"):
+            room_alias_localpart = room.alias[1:].split(":", 1)[0]
+            candidate_user_ids.update(config.authorization.room_permissions.get(room_alias_localpart, []))
+        if not candidate_user_ids:
+            logger.info(
+                "No configured authorized users available for restricted-room auto-invite",
+                room_key=room_key,
+                room_id=room_id,
+            )
+            continue
+
+        room_members = await get_room_members(client, room_id)
+        for user_id in sorted(candidate_user_ids):
+            if user_id in room_members:
+                continue
+            success = await invite_to_room(client, room_id, user_id)
+            if success:
+                logger.info(
+                    "Auto-invited authorized user to restricted room",
+                    room_key=room_key,
+                    room_id=room_id,
+                    user_id=user_id,
+                )
+            else:
+                logger.warning(
+                    "Failed to auto-invite authorized user to restricted room",
+                    room_key=room_key,
+                    room_id=room_id,
+                    user_id=user_id,
+                )
 
 
 def room_key_to_name(room_key: str) -> str:
@@ -102,7 +219,7 @@ def get_room_alias_from_id(room_id: str) -> str | None:
     return None
 
 
-async def ensure_room_exists(  # noqa: C901
+async def ensure_room_exists(  # noqa: C901, PLR0912
     client: nio.AsyncClient,
     room_key: str,
     config: Config,
@@ -142,16 +259,34 @@ async def ensure_room_exists(  # noqa: C901
             logger.info(f"Updated state with existing room {room_key} (ID: {room_id})")
 
         # Try to join the room
-        if await join_room(client, room_id):
+        joined_room = await join_room(client, room_id)
+        if joined_room:
             # For existing rooms, ensure they have a topic set
             if room_name is None:
                 room_name = room_key_to_name(room_key)
             await ensure_room_has_topic(client, room_id, room_key, room_name, config)
-            return str(room_id)
-        # Room exists but we can't join - this means the room was created
-        # but this user isn't a member. Return the room ID anyway since
-        # the room does exist and invitations will be handled separately
-        logger.debug(f"Room {room_key} exists but user not a member, returning room ID for invitation handling")
+
+            if config.matrix_room_access.is_multi_user_mode() and config.matrix_room_access.reconcile_existing_rooms:
+                await configure_managed_room_access(
+                    client=client,
+                    room_key=room_key,
+                    room_id=str(room_id),
+                    config=config,
+                    room_alias=full_alias,
+                    context="existing_room_reconciliation",
+                )
+            elif config.matrix_room_access.is_multi_user_mode():
+                logger.info(
+                    "Skipping existing room access reconciliation",
+                    room_key=room_key,
+                    room_id=str(room_id),
+                    reason="matrix_room_access.reconcile_existing_rooms is false",
+                )
+        else:
+            # Room exists but we can't join - this means the room was created
+            # but this user isn't a member. Return the room ID anyway since
+            # the room does exist and invitations will be handled separately.
+            logger.debug(f"Room {room_key} exists but user not a member, returning room ID for invitation handling")
         return str(room_id)
 
     # Room alias doesn't exist on server, so we can create it
@@ -180,6 +315,25 @@ async def ensure_room_exists(  # noqa: C901
         # Save room info
         add_room(room_key, created_room_id, full_alias, room_name)
         logger.info(f"Created room {room_key} with ID {created_room_id}")
+
+        if config.matrix_room_access.is_multi_user_mode():
+            await configure_managed_room_access(
+                client=client,
+                room_key=room_key,
+                room_id=created_room_id,
+                config=config,
+                room_alias=full_alias,
+                context="new_room_creation",
+            )
+        else:
+            logger.info(
+                "Created room with single-user/private defaults",
+                room_key=room_key,
+                room_id=created_room_id,
+                mode=config.matrix_room_access.mode,
+                join_rule="invite",
+                directory_visibility="private",
+            )
 
         # Set room avatar if available (for newly created rooms)
         # Note: Avatars can also be updated later using scripts/generate_avatars.py

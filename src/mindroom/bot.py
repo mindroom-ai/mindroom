@@ -55,6 +55,7 @@ from .matrix.mentions import format_message_with_mentions
 from .matrix.presence import build_agent_status_message, is_user_online, set_presence_status, should_use_streaming
 from .matrix.reply_chain import ReplyChainCaches, derive_conversation_context
 from .matrix.rooms import (
+    auto_invite_authorized_users,
     ensure_all_rooms_exist,
     ensure_user_in_rooms,
     is_dm_room,
@@ -960,7 +961,12 @@ class AgentBot:
         event_info = EventInfo.from_event(event.source)
 
         # Check if sender is authorized to interact with agents
-        is_authorized = is_authorized_sender(event.sender, self.config, room.room_id)
+        is_authorized = is_authorized_sender(
+            event.sender,
+            self.config,
+            room.room_id,
+            room_alias=getattr(room, "canonical_alias", None),
+        )
         self.logger.debug(
             f"Authorization check for {event.sender}: authorized={is_authorized}, room={room.room_id}",
         )
@@ -1108,7 +1114,12 @@ class AgentBot:
         assert self.client is not None
 
         # Check if sender is authorized to interact with agents
-        if not is_authorized_sender(event.sender, self.config, room.room_id):
+        if not is_authorized_sender(
+            event.sender,
+            self.config,
+            room.room_id,
+            room_alias=getattr(room, "canonical_alias", None),
+        ):
             self.logger.debug(f"Ignoring reaction from unauthorized sender: {event.sender}")
             return
 
@@ -1213,7 +1224,12 @@ class AgentBot:
             return
 
         # Check if sender is authorized to interact with agents
-        if not is_authorized_sender(event.sender, self.config, room.room_id):
+        if not is_authorized_sender(
+            event.sender,
+            self.config,
+            room.room_id,
+            room_alias=getattr(room, "canonical_alias", None),
+        ):
             # Mark as seen even though we're not responding
             self.response_tracker.mark_responded(event.event_id)
             self.logger.debug(f"Ignoring voice message from unauthorized sender: {event.sender}")
@@ -1255,7 +1271,12 @@ class AgentBot:
             return
 
         # Check if sender is authorized
-        if not is_authorized_sender(event.sender, self.config, room.room_id):
+        if not is_authorized_sender(
+            event.sender,
+            self.config,
+            room.room_id,
+            room_alias=getattr(room, "canonical_alias", None),
+        ):
             self.response_tracker.mark_responded(event.event_id)
             self.logger.debug(f"Ignoring image from unauthorized sender: {event.sender}")
             return
@@ -3031,6 +3052,9 @@ class MultiAgentOrchestrator:
                         logger.info(f"Invited {bot_username} to room {room_id}")
                     else:
                         logger.warning(f"Failed to invite {bot_username} to room {room_id}")
+
+        if config.matrix_room_access.is_multi_user_mode() and config.matrix_room_access.auto_invite_authorized_users:
+            await auto_invite_authorized_users(router_bot.client, joined_rooms, config)
 
         logger.info("Ensured room invitations for all configured agents")
 

@@ -1,6 +1,7 @@
 """Matrix client operations and utilities."""
 
 import io
+import json
 import os
 import re
 import ssl as ssl_module
@@ -13,6 +14,7 @@ from typing import Any
 import markdown
 import nio
 
+from mindroom.config import RoomDirectoryVisibility, RoomJoinRule
 from mindroom.constants import ENCRYPTION_KEYS_DIR
 from mindroom.logging_config import get_logger
 
@@ -274,6 +276,156 @@ async def create_room(
         return room_id
     logger.error(f"Failed to create room {name}: {response}")
     return None
+
+
+def _describe_matrix_response_error(response: object) -> str:
+    """Convert a Matrix response object into a concise error string."""
+    status_code = getattr(response, "status_code", None)
+    message = getattr(response, "message", None)
+    if status_code and message:
+        return f"{status_code}: {message}"
+    if status_code:
+        return str(status_code)
+    if message:
+        return str(message)
+    return str(response)
+
+
+async def get_room_join_rule(client: nio.AsyncClient, room_id: str) -> str | None:
+    """Read the current join rule from room state."""
+    response = await client.room_get_state_event(room_id, "m.room.join_rules")
+    if isinstance(response, nio.RoomGetStateEventResponse):
+        join_rule = response.content.get("join_rule")
+        if isinstance(join_rule, str):
+            return join_rule
+        logger.warning(
+            "Room join rule state missing expected 'join_rule' field",
+            room_id=room_id,
+            content=response.content,
+        )
+        return None
+
+    logger.warning(
+        "Failed to read room join rule",
+        room_id=room_id,
+        error=_describe_matrix_response_error(response),
+    )
+    return None
+
+
+async def set_room_join_rule(
+    client: nio.AsyncClient,
+    room_id: str,
+    join_rule: RoomJoinRule,
+) -> bool:
+    """Write the room join rule state event."""
+    response = await client.room_put_state(
+        room_id=room_id,
+        event_type="m.room.join_rules",
+        content={"join_rule": join_rule},
+    )
+    if isinstance(response, nio.RoomPutStateResponse):
+        logger.info("Updated room join rule", room_id=room_id, join_rule=join_rule)
+        return True
+
+    logger.warning(
+        "Failed to set room join rule",
+        room_id=room_id,
+        join_rule=join_rule,
+        error=_describe_matrix_response_error(response),
+        hint=(
+            "Ensure the service account is joined to the room and has enough power "
+            "to send m.room.join_rules state events."
+        ),
+    )
+    return False
+
+
+async def ensure_room_join_rule(
+    client: nio.AsyncClient,
+    room_id: str,
+    target_join_rule: RoomJoinRule,
+) -> bool:
+    """Ensure a room has the desired join rule."""
+    current_join_rule = await get_room_join_rule(client, room_id)
+    if current_join_rule == target_join_rule:
+        logger.debug("Room join rule already configured", room_id=room_id, join_rule=target_join_rule)
+        return True
+    return await set_room_join_rule(client, room_id, target_join_rule)
+
+
+async def get_room_directory_visibility(client: nio.AsyncClient, room_id: str) -> str | None:
+    """Read the current room directory visibility."""
+    response = await client.room_get_visibility(room_id)
+    if isinstance(response, nio.RoomGetVisibilityResponse):
+        return str(response.visibility)
+
+    logger.warning(
+        "Failed to read room directory visibility",
+        room_id=room_id,
+        error=_describe_matrix_response_error(response),
+    )
+    return None
+
+
+async def set_room_directory_visibility(
+    client: nio.AsyncClient,
+    room_id: str,
+    visibility: RoomDirectoryVisibility,
+) -> bool:
+    """Set room visibility in the server room directory."""
+    if not client.access_token:
+        logger.warning(
+            "Cannot set room directory visibility without access token",
+            room_id=room_id,
+            visibility=visibility,
+        )
+        return False
+
+    _method, path = nio.Api.room_get_visibility(room_id)
+    payload = json.dumps({"visibility": visibility})
+    response = await client.send(
+        "PUT",
+        path,
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {client.access_token}",
+            "Content-Type": "application/json",
+        },
+    )
+    if 200 <= response.status < 300:
+        logger.info("Updated room directory visibility", room_id=room_id, visibility=visibility)
+        return True
+
+    error_text = await response.text()
+    hint = (
+        "Ensure the service account is a room moderator/admin; Synapse requires sufficient "
+        "power in the room to edit directory entries."
+        if response.status == 403
+        else "Check homeserver logs and Matrix API response for details."
+    )
+    logger.warning(
+        "Failed to set room directory visibility",
+        room_id=room_id,
+        visibility=visibility,
+        http_status=response.status,
+        error=error_text,
+        hint=hint,
+    )
+    return False
+
+
+async def ensure_room_directory_visibility(
+    client: nio.AsyncClient,
+    room_id: str,
+    target_visibility: RoomDirectoryVisibility,
+) -> bool:
+    """Ensure a room has the desired directory visibility."""
+    current_visibility = await get_room_directory_visibility(client, room_id)
+    if current_visibility == target_visibility:
+        logger.debug("Room directory visibility already configured", room_id=room_id, visibility=target_visibility)
+        return True
+    return await set_room_directory_visibility(client, room_id, target_visibility)
 
 
 async def create_dm_room(

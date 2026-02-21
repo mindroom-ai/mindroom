@@ -31,6 +31,16 @@ mindroom_user:
   username: mindroom_user
   display_name: MindRoomUser
 
+# Matrix room access/discoverability (optional)
+# Default keeps current private behavior. Enable multi_user for OIDC/multi-human onboarding.
+matrix_room_access:
+  mode: single_user_private         # Options: single_user_private, multi_user
+  multi_user_join_rule: public      # In multi_user mode: public or knock
+  publish_to_room_directory: false  # In multi_user mode: publish managed rooms to directory
+  invite_only_rooms: []             # Room keys/aliases/IDs that stay invite-only/private
+  reconcile_existing_rooms: false   # When true, migrate current managed rooms to target policy
+  auto_invite_authorized_users: false  # Optional: auto-invite configured authorized users to restricted rooms
+
 # Default settings for all agents
 defaults:
   tools:

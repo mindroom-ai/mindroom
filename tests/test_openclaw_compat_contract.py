@@ -639,7 +639,7 @@ def test_openclaw_compat_read_agent_sessions_handles_missing_table(tmp_path: Pat
     assert tool._read_agent_sessions(ctx) == []
 
 
-def test_openclaw_context_readable_inside_context_manager() -> None:
+def test_openclaw_context_readable_inside_context_manager(tmp_path: Path) -> None:
     """Verify the runtime context is accessible inside the context manager."""
     ctx = OpenClawToolContext(
         agent_name="test",
@@ -648,7 +648,7 @@ def test_openclaw_context_readable_inside_context_manager() -> None:
         requester_id="@user:localhost",
         client=MagicMock(),
         config=MagicMock(),
-        storage_path=MagicMock(),
+        storage_path=tmp_path,
     )
     assert get_openclaw_tool_context() is None
     with openclaw_tool_context(ctx):
