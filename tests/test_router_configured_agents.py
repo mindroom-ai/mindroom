@@ -2,8 +2,7 @@
 
 from unittest.mock import MagicMock
 
-from mindroom.config import MATRIX_HOMESERVER, AgentConfig, Config, ModelConfig
-from mindroom.matrix.identity import extract_server_name_from_homeserver
+from mindroom.config import AgentConfig, Config, ModelConfig
 from mindroom.thread_utils import get_available_agents_in_room, get_configured_agents_for_room
 
 
@@ -99,16 +98,11 @@ class TestRouterAgentSelection:
 
     def test_router_excludes_itself(self) -> None:
         """Test that router agent is excluded from available agents."""
-        # Get the domain first to ensure consistency
-        domain = extract_server_name_from_homeserver(MATRIX_HOMESERVER)
-
-        # Note: Don't add "router" to config.agents as it's automatically handled
-        # The router agent is always present via ROUTER_AGENT_NAME constant
         config_with_router = Config(
             agents={
                 "calculator": AgentConfig(
                     display_name="Calculator",
-                    rooms=[f"#general:{domain}"],  # Use the actual domain
+                    rooms=["#general:localhost"],
                 ),
             },
             teams={},
@@ -117,10 +111,10 @@ class TestRouterAgentSelection:
         )
 
         room = MagicMock()
-        room.room_id = f"#general:{domain}"
+        room.room_id = "#general:localhost"
         room.users = {
-            f"@mindroom_calculator:{domain}": None,
-            f"@mindroom_router:{domain}": None,  # Router is present in the room
+            "@mindroom_calculator:localhost": None,
+            "@mindroom_router:localhost": None,  # Router is present in the room
         }
 
         # Router should be excluded from configured agents (it's not in config.agents)

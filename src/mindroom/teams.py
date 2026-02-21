@@ -307,6 +307,7 @@ async def decide_team_formation(
     use_ai_decision: bool = True,
     is_dm_room: bool = False,
     is_thread: bool = False,
+    available_agents_in_room: list[MatrixID] | None = None,
 ) -> TeamFormationDecision:
     """Determine if a team should form and with which mode.
 
@@ -321,6 +322,7 @@ async def decide_team_formation(
         use_ai_decision: Whether to use AI for mode selection
         is_dm_room: Whether this is a DM room
         is_thread: Whether the current message is in a thread
+        available_agents_in_room: Optional pre-filtered room agents for DM fallback logic
 
     Returns:
         TeamFormationDecision with team formation decision
@@ -347,7 +349,9 @@ async def decide_team_formation(
     # We avoid forming a team inside an existing thread to preserve
     # single-agent ownership unless the thread itself involves multiple agents
     elif is_dm_room and not is_thread and not tagged_agents and room and config:
-        available_agents = get_available_agents_in_room(room, config)
+        available_agents = available_agents_in_room
+        if available_agents is None:
+            available_agents = get_available_agents_in_room(room, config)
         if len(available_agents) > 1:
             logger.info(f"Team formation needed for DM room with multiple agents: {available_agents}")
             team_agents = available_agents

@@ -28,6 +28,20 @@ authorization:
   # Default for rooms not in room_permissions
   default_room_access: false
 
+  # Optional: per-agent/team/router reply allowlists
+  # Keys must match an agent name, team name, "router", or "*"
+  # Values are canonical Matrix user IDs or glob patterns (aliases are resolved)
+  # Examples: "*:example.com", "@admin:*", "*"
+  agent_reply_permissions:
+    "*":
+      - "@admin:example.com"
+    code:
+      - "@admin:example.com"
+    research:
+      - "@developer:example.com"
+    router:
+      - "*"
+
 # Optional: configure the internal MindRoom user identity
 mindroom_user:
   username: mindroom_user          # Set before first startup (cannot be changed later)
@@ -47,6 +61,7 @@ matrix_room_access:
 - `global_users: []`
 - `room_permissions: {}`
 - `default_room_access: false`
+- `agent_reply_permissions: {}`
 
 This means only MindRoom system users (agents, teams, router, and the configured internal user, default `@mindroom_user`) can interact with agents by default.
 
@@ -133,6 +148,43 @@ authorization:
 ```
 
 In this example, messages from `@telegram_123:example.com` are treated as `@alice:example.com` (global access), and messages from `@telegram_789:example.com` are treated as `@bob:example.com` (access to `!room1:example.com` only).
+
+## Per-Agent Reply Permissions
+
+Use `authorization.agent_reply_permissions` to restrict which users each agent can reply to.
+
+- The map key is an entity name: agent name, team name, `router`, or `*`.
+- The `*` key is a default rule for entities that do not have an explicit entry.
+- The value is a list of allowed Matrix user IDs.
+- Values support glob-style matching (for example `*:example.com`).
+- A `*` user entry means "allow any sender" for that specific entity.
+- If an entity is not present in the map, it has no extra reply restriction.
+- Alias mapping from `authorization.aliases` is applied before matching, so bridged IDs inherit canonical user permissions.
+- Internal MindRoom identities (agents, teams, router, and the internal `mindroom_user`) always bypass reply permissions — they are system participants, not end users.
+- `bot_accounts` are **not** exempt. Bridge bots listed in `bot_accounts` are still subject to reply permission checks.
+- Keys that do not match any configured agent, team, `router`, or `*` are rejected at config load time.
+- For voice messages, the permission check uses the original human sender, not the router that posted the transcription.
+
+```
+authorization:
+  global_users:
+    - "@alice:example.com"
+    - "@bob:example.com"
+  aliases:
+    "@alice:example.com":
+      - "@telegram_111:example.com"
+  agent_reply_permissions:
+    "*":
+      - "@alice:example.com"
+    code:
+      - "@alice:example.com"
+    research:
+      - "@bob:example.com"
+    router:
+      - "*"
+```
+
+In this example, `*` restricts all entities to Alice by default, `research` overrides that and replies only to Bob, and `router` can reply to anyone.
 
 ## Bot Accounts
 

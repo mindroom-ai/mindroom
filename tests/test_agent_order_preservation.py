@@ -61,13 +61,14 @@ class TestAgentOrderPreservation:
 
     def test_check_agent_mentioned_preserves_order(self, mock_config: Config) -> None:
         """Test that check_agent_mentioned preserves the order from user_ids."""
+        domain = mock_config.domain
         event_source = {
             "content": {
                 "m.mentions": {
                     "user_ids": [
-                        "@mindroom_phone:localhost",
-                        "@mindroom_email:localhost",
-                        "@mindroom_research:localhost",
+                        f"@mindroom_phone:{domain}",
+                        f"@mindroom_email:{domain}",
+                        f"@mindroom_research:{domain}",
                     ],
                 },
             },
@@ -81,12 +82,13 @@ class TestAgentOrderPreservation:
 
     def test_get_agents_in_thread_preserves_order(self, mock_config: Config) -> None:
         """Test that get_agents_in_thread preserves order of first participation."""
+        domain = mock_config.domain
         thread_history = [
-            {"sender": "@mindroom_research:localhost", "content": {"body": "Starting research"}},
-            {"sender": "@mindroom_email:localhost", "content": {"body": "Sending email"}},
-            {"sender": "@mindroom_phone:localhost", "content": {"body": "Making call"}},
-            {"sender": "@mindroom_email:localhost", "content": {"body": "Another email"}},  # Duplicate
-            {"sender": "@mindroom_analyst:localhost", "content": {"body": "Analyzing"}},
+            {"sender": f"@mindroom_research:{domain}", "content": {"body": "Starting research"}},
+            {"sender": f"@mindroom_email:{domain}", "content": {"body": "Sending email"}},
+            {"sender": f"@mindroom_phone:{domain}", "content": {"body": "Making call"}},
+            {"sender": f"@mindroom_email:{domain}", "content": {"body": "Another email"}},  # Duplicate
+            {"sender": f"@mindroom_analyst:{domain}", "content": {"body": "Analyzing"}},
         ]
 
         agents = get_agents_in_thread(thread_history, mock_config)
@@ -98,10 +100,11 @@ class TestAgentOrderPreservation:
 
     def test_get_agents_in_thread_excludes_router(self, mock_config: Config) -> None:
         """Test that router agent is excluded from thread participants."""
+        domain = mock_config.domain
         thread_history = [
-            {"sender": "@mindroom_email:localhost", "content": {"body": "Email"}},
-            {"sender": f"@mindroom_{ROUTER_AGENT_NAME}:localhost", "content": {"body": "Routing"}},
-            {"sender": "@mindroom_phone:localhost", "content": {"body": "Phone"}},
+            {"sender": f"@mindroom_email:{domain}", "content": {"body": "Email"}},
+            {"sender": f"@mindroom_{ROUTER_AGENT_NAME}:{domain}", "content": {"body": "Routing"}},
+            {"sender": f"@mindroom_phone:{domain}", "content": {"body": "Phone"}},
         ]
 
         agents = get_agents_in_thread(thread_history, mock_config)
@@ -114,12 +117,13 @@ class TestAgentOrderPreservation:
 
     def test_get_all_mentioned_agents_preserves_order(self, mock_config: Config) -> None:
         """Test that get_all_mentioned_agents_in_thread preserves order of first mention."""
+        domain = mock_config.domain
         thread_history = [
             {
                 "content": {
                     "body": "First message",
                     "m.mentions": {
-                        "user_ids": ["@mindroom_phone:localhost", "@mindroom_email:localhost"],
+                        "user_ids": [f"@mindroom_phone:{domain}", f"@mindroom_email:{domain}"],
                     },
                 },
             },
@@ -127,7 +131,7 @@ class TestAgentOrderPreservation:
                 "content": {
                     "body": "Second message",
                     "m.mentions": {
-                        "user_ids": ["@mindroom_research:localhost", "@mindroom_phone:localhost"],  # phone is duplicate
+                        "user_ids": [f"@mindroom_research:{domain}", f"@mindroom_phone:{domain}"],  # phone is duplicate
                     },
                 },
             },
@@ -135,7 +139,7 @@ class TestAgentOrderPreservation:
                 "content": {
                     "body": "Third message",
                     "m.mentions": {
-                        "user_ids": ["@mindroom_analyst:localhost", "@mindroom_email:localhost"],  # email is duplicate
+                        "user_ids": [f"@mindroom_analyst:{domain}", f"@mindroom_email:{domain}"],  # email is duplicate
                     },
                 },
             },
@@ -150,15 +154,16 @@ class TestAgentOrderPreservation:
 
     def test_no_duplicates_in_mentioned_agents(self, mock_config: Config) -> None:
         """Test that duplicates are removed while preserving order."""
+        domain = mock_config.domain
         thread_history = [
             {
                 "content": {
                     "body": "Message 1",
                     "m.mentions": {
                         "user_ids": [
-                            "@mindroom_email:localhost",
-                            "@mindroom_phone:localhost",
-                            "@mindroom_email:localhost",
+                            f"@mindroom_email:{domain}",
+                            f"@mindroom_phone:{domain}",
+                            f"@mindroom_email:{domain}",
                         ],
                     },
                 },
@@ -168,9 +173,9 @@ class TestAgentOrderPreservation:
                     "body": "Message 2",
                     "m.mentions": {
                         "user_ids": [
-                            "@mindroom_phone:localhost",
-                            "@mindroom_research:localhost",
-                            "@mindroom_email:localhost",
+                            f"@mindroom_phone:{domain}",
+                            f"@mindroom_research:{domain}",
+                            f"@mindroom_email:{domain}",
                         ],
                     },
                 },
@@ -192,17 +197,18 @@ class TestAgentOrderPreservation:
 
     def test_order_matters_for_coordinate_mode(self, mock_config: Config) -> None:
         """Test that order preservation is important for sequential execution."""
+        domain = mock_config.domain
         event_source1 = {
             "content": {
                 "m.mentions": {
-                    "user_ids": ["@mindroom_email:localhost", "@mindroom_phone:localhost"],
+                    "user_ids": [f"@mindroom_email:{domain}", f"@mindroom_phone:{domain}"],
                 },
             },
         }
         event_source2 = {
             "content": {
                 "m.mentions": {
-                    "user_ids": ["@mindroom_phone:localhost", "@mindroom_email:localhost"],
+                    "user_ids": [f"@mindroom_phone:{domain}", f"@mindroom_email:{domain}"],
                 },
             },
         }

@@ -48,6 +48,17 @@ async def aioresponse() -> AsyncGenerator[aioresponses, None]:
 
 
 @pytest.fixture(autouse=True)
+def _pin_matrix_homeserver(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure config.domain resolves to 'localhost' for all tests.
+
+    Tests use ':localhost' Matrix IDs.  Without this, an env-level
+    MATRIX_HOMESERVER (e.g. pointing at a staging server) would cause
+    agent_name() domain checks to fail.
+    """
+    monkeypatch.setattr("mindroom.config.MATRIX_HOMESERVER", "http://localhost:8008")
+
+
+@pytest.fixture(autouse=True)
 def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None, None]:
     """Bypass authorization checks in tests by default.
 
