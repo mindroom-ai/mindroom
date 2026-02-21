@@ -960,7 +960,12 @@ class AgentBot:
         event_info = EventInfo.from_event(event.source)
 
         # Check if sender is authorized to interact with agents
-        is_authorized = is_authorized_sender(event.sender, self.config, room.room_id)
+        is_authorized = is_authorized_sender(
+            event.sender,
+            self.config,
+            room.room_id,
+            room_alias=room.canonical_alias,
+        )
         self.logger.debug(
             f"Authorization check for {event.sender}: authorized={is_authorized}, room={room.room_id}",
         )
@@ -1108,7 +1113,12 @@ class AgentBot:
         assert self.client is not None
 
         # Check if sender is authorized to interact with agents
-        if not is_authorized_sender(event.sender, self.config, room.room_id):
+        if not is_authorized_sender(
+            event.sender,
+            self.config,
+            room.room_id,
+            room_alias=room.canonical_alias,
+        ):
             self.logger.debug(f"Ignoring reaction from unauthorized sender: {event.sender}")
             return
 
@@ -1213,7 +1223,12 @@ class AgentBot:
             return
 
         # Check if sender is authorized to interact with agents
-        if not is_authorized_sender(event.sender, self.config, room.room_id):
+        if not is_authorized_sender(
+            event.sender,
+            self.config,
+            room.room_id,
+            room_alias=room.canonical_alias,
+        ):
             # Mark as seen even though we're not responding
             self.response_tracker.mark_responded(event.event_id)
             self.logger.debug(f"Ignoring voice message from unauthorized sender: {event.sender}")
@@ -1255,7 +1270,12 @@ class AgentBot:
             return
 
         # Check if sender is authorized
-        if not is_authorized_sender(event.sender, self.config, room.room_id):
+        if not is_authorized_sender(
+            event.sender,
+            self.config,
+            room.room_id,
+            room_alias=room.canonical_alias,
+        ):
             self.response_tracker.mark_responded(event.event_id)
             self.logger.debug(f"Ignoring image from unauthorized sender: {event.sender}")
             return
@@ -2798,6 +2818,7 @@ class MultiAgentOrchestrator:
         # Identify what changed - we can keep using the existing helper functions
         entities_to_restart = await _identify_entities_to_restart(current_config, new_config, self.agent_bots)
         mindroom_user_changed = current_config.mindroom_user != new_config.mindroom_user
+        matrix_room_access_changed = current_config.matrix_room_access != new_config.matrix_room_access
 
         # Also check for new entities that didn't exist before
         all_new_entities = set(new_config.agents.keys()) | set(new_config.teams.keys()) | {ROUTER_AGENT_NAME}
@@ -2822,7 +2843,12 @@ class MultiAgentOrchestrator:
                 await bot._set_presence_with_model_info()
                 logger.debug(f"Updated config for {entity_name}")
 
-        if not entities_to_restart and not new_entities and not mindroom_user_changed:
+        if (
+            not entities_to_restart
+            and not new_entities
+            and not mindroom_user_changed
+            and not matrix_room_access_changed
+        ):
             # No entities to restart or create, we're done
             return False
 
@@ -2883,7 +2909,7 @@ class MultiAgentOrchestrator:
             if entity_name in self.agent_bots
         ]
 
-        if bots_to_setup or mindroom_user_changed:
+        if bots_to_setup or mindroom_user_changed or matrix_room_access_changed:
             await self._setup_rooms_and_memberships(bots_to_setup)
 
         logger.info(f"Configuration update complete: {len(entities_to_restart) + len(new_entities)} bots affected")

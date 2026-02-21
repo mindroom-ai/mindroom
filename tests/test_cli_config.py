@@ -91,8 +91,9 @@ class TestConfigInit:
         target.write_text("existing")
         result = runner.invoke(app, ["config", "init", "--path", str(target), "--force"])
         assert result.exit_code == 0
-        assert "existing" not in target.read_text()
-        assert "agents:" in target.read_text()
+        content = target.read_text()
+        assert content != "existing"
+        assert "agents:" in content
 
 
 # ---------------------------------------------------------------------------
