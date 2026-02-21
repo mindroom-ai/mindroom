@@ -394,6 +394,7 @@ async def set_room_directory_visibility(
         },
     )
     if 200 <= response.status < 300:
+        response.release()
         logger.info("Updated room directory visibility", room_id=room_id, visibility=visibility)
         return True
 

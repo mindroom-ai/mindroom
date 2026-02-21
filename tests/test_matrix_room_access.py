@@ -24,9 +24,13 @@ class _FakeHttpResponse:
     def __init__(self, status: int, body: str) -> None:
         self.status = status
         self._body = body
+        self.released = False
 
     async def text(self) -> str:
         return self._body
+
+    def release(self) -> None:
+        self.released = True
 
 
 def test_matrix_room_access_defaults() -> None:
@@ -273,6 +277,20 @@ async def test_set_room_directory_visibility_logs_actionable_permission_error(
     _, kwargs = warning.call_args
     assert kwargs["http_status"] == 403
     assert "moderator/admin" in kwargs["hint"]
+
+
+@pytest.mark.asyncio
+async def test_set_room_directory_visibility_releases_response_on_success() -> None:
+    """Successful updates should release the underlying HTTP response."""
+    mock_client = AsyncMock()
+    mock_client.access_token = TEST_ACCESS_TOKEN
+    response = _FakeHttpResponse(status=200, body="")
+    mock_client.send.return_value = response
+
+    result = await matrix_client.set_room_directory_visibility(mock_client, "!room:example.com", "public")
+
+    assert result is True
+    assert response.released is True
 
 
 @pytest.mark.asyncio
