@@ -161,6 +161,54 @@ class TestAgentBot:
         return mock_config
 
     @staticmethod
+    def _make_handler_event(handler_name: str, *, sender: str, event_id: str) -> MagicMock:
+        """Create a minimal event object for a specific handler type."""
+        if handler_name == "message":
+            event = MagicMock(spec=nio.RoomMessageText)
+            event.body = "hello"
+            event.source = {"content": {"body": "hello"}}
+        elif handler_name == "image":
+            event = MagicMock(spec=nio.RoomMessageImage)
+            event.body = "image.jpg"
+            event.source = {"content": {"body": "image.jpg"}}
+        elif handler_name == "voice":
+            event = MagicMock(spec=nio.RoomMessageAudio)
+            event.body = "voice"
+            event.source = {"content": {"body": "voice"}}
+        elif handler_name == "reaction":
+            event = MagicMock(spec=nio.ReactionEvent)
+            event.key = "👍"
+            event.reacts_to = "$question"
+            event.source = {"content": {}}
+        else:  # pragma: no cover - defensive guard for test helper misuse
+            msg = f"Unsupported handler: {handler_name}"
+            raise ValueError(msg)
+
+        event.sender = sender
+        event.event_id = event_id
+        return event
+
+    @staticmethod
+    async def _invoke_handler(
+        bot: AgentBot,
+        handler_name: str,
+        room: nio.MatrixRoom,
+        event: MagicMock,
+    ) -> None:
+        """Invoke the target handler by name."""
+        if handler_name == "message":
+            await bot._on_message(room, event)
+        elif handler_name == "image":
+            await bot._on_image_message(room, event)
+        elif handler_name == "voice":
+            await bot._on_voice_message(room, event)
+        elif handler_name == "reaction":
+            await bot._on_reaction(room, event)
+        else:  # pragma: no cover - defensive guard for test helper misuse
+            msg = f"Unsupported handler: {handler_name}"
+            raise ValueError(msg)
+
+    @staticmethod
     def create_config_with_knowledge_bases(
         *,
         assigned_bases: list[str] | None,
@@ -763,6 +811,106 @@ class TestAgentBot:
         bot.client.room_send.assert_not_called()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("handler_name", "marks_responded"),
+        [
+            ("message", True),
+            ("image", True),
+            ("voice", True),
+            ("reaction", False),
+        ],
+    )
+    async def test_sender_unauthorized_parity_across_handlers(
+        self,
+        handler_name: str,
+        marks_responded: bool,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Unauthorized senders should follow the expected per-handler tracking behavior."""
+        config = Config(
+            agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
+            voice={"enabled": True},
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot.client = AsyncMock()
+        bot.response_tracker = MagicMock()
+        bot.response_tracker.has_responded.return_value = False
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.canonical_alias = None
+        room.users = {"@mindroom_calculator:localhost": MagicMock(), "@user:localhost": MagicMock()}
+
+        event = self._make_handler_event(handler_name, sender="@user:localhost", event_id=f"${handler_name}_unauth")
+
+        with patch("mindroom.bot.is_authorized_sender", return_value=False):
+            await self._invoke_handler(bot, handler_name, room, event)
+
+        if marks_responded:
+            bot.response_tracker.mark_responded.assert_called_once_with(event.event_id)
+        else:
+            bot.response_tracker.mark_responded.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("handler_name", "marks_responded"),
+        [
+            ("message", False),
+            ("image", False),
+            ("voice", True),
+            ("reaction", False),
+        ],
+    )
+    async def test_reply_permissions_denied_parity_across_handlers(
+        self,
+        handler_name: str,
+        marks_responded: bool,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Reply-permission denial should follow the expected per-handler tracking behavior."""
+        config = Config(
+            agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
+            voice={"enabled": True},
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot.client = AsyncMock()
+        bot.response_tracker = MagicMock()
+        bot.response_tracker.has_responded.return_value = False
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.canonical_alias = None
+        room.users = {"@mindroom_calculator:localhost": MagicMock(), "@user:localhost": MagicMock()}
+
+        event = self._make_handler_event(handler_name, sender="@user:localhost", event_id=f"${handler_name}_denied")
+
+        if handler_name == "image":
+            bot._extract_message_context = AsyncMock(
+                return_value=MessageContext(
+                    am_i_mentioned=False,
+                    is_thread=False,
+                    thread_id=None,
+                    thread_history=[],
+                    mentioned_agents=[],
+                    has_non_agent_mentions=False,
+                ),
+            )
+
+        with (
+            patch("mindroom.bot.is_authorized_sender", return_value=True),
+            patch.object(bot, "_can_reply_to_sender", return_value=False),
+            patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
+        ):
+            await self._invoke_handler(bot, handler_name, room, event)
+
+        if marks_responded:
+            bot.response_tracker.mark_responded.assert_called_once_with(event.event_id)
+        else:
+            bot.response_tracker.mark_responded.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_agent_bot_on_image_message_forwards_image_to_generate_response(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -962,6 +1110,138 @@ class TestAgentBot:
             message="[Attached image]",
             requester_user_id="@user:localhost",
         )
+
+    @pytest.mark.asyncio
+    async def test_router_dispatch_parity_text_and_image_route_under_same_conditions(self, tmp_path: Path) -> None:
+        """Router should route both text and image when the decision context is equivalent."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+        config = Config(
+            agents={
+                "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+                "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
+            },
+            authorization={"default_room_access": True},
+        )
+        bot = AgentBot(agent_user, tmp_path, config=config)
+        bot.client = AsyncMock()
+        bot._handle_ai_routing = AsyncMock()
+        bot.response_tracker = MagicMock()
+        bot.response_tracker.has_responded.return_value = False
+        bot._extract_message_context = AsyncMock(
+            return_value=MessageContext(
+                am_i_mentioned=False,
+                is_thread=False,
+                thread_id=None,
+                thread_history=[],
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+            ),
+        )
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.canonical_alias = None
+        room.users = {
+            "@mindroom_router:localhost": MagicMock(),
+            "@mindroom_calculator:localhost": MagicMock(),
+            "@mindroom_general:localhost": MagicMock(),
+            "@user:localhost": MagicMock(),
+        }
+
+        text_event = self._make_handler_event("message", sender="@user:localhost", event_id="$route_text")
+        text_event.body = "help me"
+        text_event.source = {"content": {"body": "help me"}}
+
+        image_event = self._make_handler_event("image", sender="@user:localhost", event_id="$route_img")
+        image_event.body = "image.jpg"
+        image_event.source = {"content": {"body": "image.jpg"}}
+
+        with (
+            patch("mindroom.bot.extract_agent_name", return_value=None),
+            patch("mindroom.bot.get_agents_in_thread", return_value=[]),
+            patch("mindroom.bot.has_multiple_non_agent_users_in_thread", return_value=False),
+            patch(
+                "mindroom.bot.get_available_agents_for_sender",
+                return_value=[config.ids["calculator"], config.ids["general"]],
+            ),
+            patch("mindroom.bot.is_authorized_sender", return_value=True),
+            patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
+            patch("mindroom.bot.image_handler.extract_caption", return_value="[Attached image]"),
+            patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
+        ):
+            await bot._on_message(room, text_event)
+            await bot._on_image_message(room, image_event)
+
+        assert bot._handle_ai_routing.await_count == 2
+        first_call = bot._handle_ai_routing.await_args_list[0].kwargs
+        second_call = bot._handle_ai_routing.await_args_list[1].kwargs
+        assert first_call["requester_user_id"] == "@user:localhost"
+        assert first_call["message"] is None
+        assert second_call["requester_user_id"] == "@user:localhost"
+        assert second_call["message"] == "[Attached image]"
+
+    @pytest.mark.asyncio
+    async def test_router_dispatch_parity_text_and_image_skip_under_same_conditions(self, tmp_path: Path) -> None:
+        """Router should skip routing both text and image in single-agent-visible rooms."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+        config = Config(
+            agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
+            authorization={"default_room_access": True},
+        )
+        bot = AgentBot(agent_user, tmp_path, config=config)
+        bot.client = AsyncMock()
+        bot._handle_ai_routing = AsyncMock()
+        bot.response_tracker = MagicMock()
+        bot.response_tracker.has_responded.return_value = False
+        bot._extract_message_context = AsyncMock(
+            return_value=MessageContext(
+                am_i_mentioned=False,
+                is_thread=False,
+                thread_id=None,
+                thread_history=[],
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+            ),
+        )
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.canonical_alias = None
+        room.users = {
+            "@mindroom_router:localhost": MagicMock(),
+            "@mindroom_calculator:localhost": MagicMock(),
+            "@user:localhost": MagicMock(),
+        }
+
+        text_event = self._make_handler_event("message", sender="@user:localhost", event_id="$skip_text")
+        image_event = self._make_handler_event("image", sender="@user:localhost", event_id="$skip_img")
+
+        with (
+            patch("mindroom.bot.extract_agent_name", return_value=None),
+            patch("mindroom.bot.get_agents_in_thread", return_value=[]),
+            patch("mindroom.bot.has_multiple_non_agent_users_in_thread", return_value=False),
+            patch("mindroom.bot.get_available_agents_for_sender", return_value=[config.ids["calculator"]]),
+            patch("mindroom.bot.is_authorized_sender", return_value=True),
+            patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
+            patch("mindroom.bot.image_handler.extract_caption", return_value="[Attached image]"),
+            patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
+        ):
+            await bot._on_message(room, text_event)
+            await bot._on_image_message(room, image_event)
+
+        bot._handle_ai_routing.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_agent_receives_images_from_thread_root_after_routing(
