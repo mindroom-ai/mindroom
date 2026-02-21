@@ -449,6 +449,48 @@ class TestCommandHandling:
             bot._handle_command.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_router_command_blocked_by_reply_permissions(self) -> None:
+        """Router should ignore commands from senders disallowed by router reply rules."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
+        )
+
+        config = Config(
+            router=RouterConfig(model="default"),
+            authorization={
+                "default_room_access": True,
+                "agent_reply_permissions": {"router": ["@alice:server"]},
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
+            bot.client = AsyncMock()
+            bot.logger = MagicMock()
+            bot._handle_command = AsyncMock()
+
+            room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
+            event = nio.RoomMessageText.from_dict(
+                {
+                    "event_id": "$event123",
+                    "sender": "@bob:server",
+                    "origin_server_ts": 1234567890,
+                    "content": {
+                        "msgtype": "m.text",
+                        "body": "!help",
+                    },
+                },
+            )
+
+            await bot._on_message(room, event)
+
+            bot._handle_command.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_non_router_agent_responds_to_non_commands(self) -> None:
         """Test that non-router agents still respond to regular messages."""
         # Create a calculator agent (not router)

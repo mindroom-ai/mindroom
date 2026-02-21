@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any
 
@@ -12,8 +12,6 @@ from .matrix.identity import MatrixID, extract_agent_name
 from .matrix.rooms import resolve_room_aliases
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     import nio
 
     from .config import Config
@@ -271,11 +269,15 @@ def is_sender_allowed_for_agent_reply(sender_id: str, agent_name: str, config: C
     system participants, not end users.
     """
     agent_reply_permissions = config.authorization.agent_reply_permissions
+    if not isinstance(agent_reply_permissions, Mapping):
+        return True
 
     allowed_users = agent_reply_permissions.get(agent_name)
     if allowed_users is None:
         allowed_users = agent_reply_permissions.get("*")
     if allowed_users is None:
+        return True
+    if not isinstance(allowed_users, Sequence) or isinstance(allowed_users, str):
         return True
     if "*" in allowed_users:
         return True
@@ -327,6 +329,15 @@ def filter_agents_by_sender_permissions(
     return result
 
 
+def get_available_agents_for_sender(
+    room: nio.MatrixRoom,
+    sender_id: str,
+    config: Config,
+) -> list[MatrixID]:
+    """Return room agents that may reply to *sender_id*."""
+    return filter_agents_by_sender_permissions(get_available_agents_in_room(room, config), sender_id, config)
+
+
 def should_agent_respond(  # noqa: PLR0911
     agent_name: str,
     am_i_mentioned: bool,
@@ -366,23 +377,22 @@ def should_agent_respond(  # noqa: PLR0911
     if mentioned_agents or has_non_agent_mentions:
         return False
 
-    # Non-thread messages: auto-respond if we're the only agent in the room.
+    available_agents = get_available_agents_for_sender(room, sender_id, config)
+
+    # Non-thread messages: auto-respond if we're the only visible agent in the room.
     if not is_thread:
-        return len(get_available_agents_in_room(room, config)) == 1
+        return len(available_agents) == 1 and available_agents[0].agent_name(config) == agent_name
 
     # In threads with multiple human participants, always require explicit mention.
     if has_multiple_non_agent_users_in_thread(thread_history, config):
         return False
-
-    agent_matrix_id = config.ids[agent_name]
 
     # For threads, continue only if we're the single participating agent
     # that may reply to this sender.
     agents_in_thread = get_agents_in_thread(thread_history, config)
     agents_in_thread = filter_agents_by_sender_permissions(agents_in_thread, sender_id, config)
     if agents_in_thread:
-        return len(agents_in_thread) == 1 and agents_in_thread[0] == agent_matrix_id
+        return len(agents_in_thread) == 1 and agents_in_thread[0].agent_name(config) == agent_name
 
-    # No agents in thread yet — respond if we're the only available agent.
-    available_agents = get_available_agents_in_room(room, config)
-    return len(available_agents) == 1
+    # No agents in thread yet — respond if we're the only visible agent.
+    return len(available_agents) == 1 and available_agents[0].agent_name(config) == agent_name

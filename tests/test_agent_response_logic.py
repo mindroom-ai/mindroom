@@ -124,6 +124,36 @@ class TestAgentResponseLogic:
         )
         assert should_respond is True
 
+    def test_single_visible_agent_can_respond_without_mentions(self) -> None:
+        """When permissions hide other agents, the only visible agent should respond."""
+        self.config.authorization.agent_reply_permissions = {
+            "calculator": [f"@alice:{self.domain}"],
+            "general": [f"@bob:{self.domain}"],
+        }
+        room = create_mock_room("!room:localhost", ["calculator", "general"], self.config)
+
+        should_respond_calculator = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=False,
+            is_thread=False,
+            room=room,
+            thread_history=[],
+            config=self.config,
+            sender_id=f"@alice:{self.domain}",
+        )
+        should_respond_general = should_agent_respond(
+            agent_name="general",
+            am_i_mentioned=False,
+            is_thread=False,
+            room=room,
+            thread_history=[],
+            config=self.config,
+            sender_id=f"@alice:{self.domain}",
+        )
+
+        assert should_respond_calculator is True
+        assert should_respond_general is False
+
     def test_only_agent_in_thread_continues(self) -> None:
         """If agent is the only one in thread, it continues."""
         thread_history = [

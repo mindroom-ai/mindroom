@@ -252,6 +252,10 @@ class TestRoutingRegression:
                     display_name="MindRoomNews",
                     rooms=[test_room_id],
                 ),
+                "facts": AgentConfig(
+                    display_name="MindRoomFacts",
+                    rooms=[test_room_id],
+                ),
             },
             teams={},
             room_models={},
@@ -261,6 +265,7 @@ class TestRoutingRegression:
                 "default_room_access": True,
                 "agent_reply_permissions": {
                     "research": ["@alice:localhost"],
+                    "facts": ["@bob:localhost"],
                 },
             },
         )
@@ -285,6 +290,7 @@ class TestRoutingRegression:
             router_agent.user_id: MagicMock(),
             mock_research_agent.user_id: MagicMock(),
             mock_news_agent.user_id: MagicMock(),
+            "@mindroom_facts:localhost": MagicMock(),
         }
 
         message_event = MagicMock(spec=nio.RoomMessageText)
@@ -301,7 +307,80 @@ class TestRoutingRegression:
 
         mock_suggest_agent.assert_called_once()
         available_agents = mock_suggest_agent.call_args.args[1]
-        assert [agent.agent_name(test_config) for agent in available_agents] == ["news"]
+        assert [agent.agent_name(test_config) for agent in available_agents] == ["facts", "news"]
+
+    @pytest.mark.asyncio
+    @patch("mindroom.bot.suggest_agent_for_message")
+    async def test_router_reply_permissions_block_router_response(
+        self,
+        mock_suggest_agent: AsyncMock,
+        mock_research_agent: AgentMatrixUser,
+        mock_news_agent: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Router should not respond when sender is disallowed for router replies."""
+        test_room_id = "!research:localhost"
+        test_config = Config(
+            agents={
+                "research": AgentConfig(
+                    display_name="MindRoomResearch",
+                    rooms=[test_room_id],
+                ),
+                "news": AgentConfig(
+                    display_name="MindRoomNews",
+                    rooms=[test_room_id],
+                ),
+            },
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="test", id="test-model")},
+            router=RouterConfig(model="default"),
+            authorization={
+                "default_room_access": True,
+                "agent_reply_permissions": {
+                    "router": ["@alice:localhost"],
+                    "research": ["*"],
+                    "news": ["*"],
+                },
+            },
+        )
+
+        router_agent = AgentMatrixUser(
+            agent_name="router",
+            password=TEST_PASSWORD,
+            display_name="RouterAgent",
+            user_id="@mindroom_router:localhost",
+        )
+        router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
+
+        mock_suggest_agent.return_value = "research"
+        mock_send_response = MagicMock()
+        mock_send_response.__class__ = nio.RoomSendResponse
+        mock_send_response.event_id = "$response_791"
+        router_bot.client.room_send.return_value = mock_send_response
+
+        mock_room = MagicMock()
+        mock_room.room_id = test_room_id
+        mock_room.users = {
+            router_agent.user_id: MagicMock(),
+            mock_research_agent.user_id: MagicMock(),
+            mock_news_agent.user_id: MagicMock(),
+        }
+
+        message_event = MagicMock(spec=nio.RoomMessageText)
+        message_event.sender = "@bob:localhost"
+        message_event.body = "What's new today?"
+        message_event.event_id = "$user_msg_791"
+        message_event.source = {
+            "content": {
+                "body": "What's new today?",
+            },
+        }
+
+        await router_bot._on_message(mock_room, message_event)
+
+        mock_suggest_agent.assert_not_called()
+        router_bot.client.room_send.assert_not_called()
 
     @pytest.mark.asyncio
     @patch("mindroom.bot.suggest_agent_for_message")
@@ -324,6 +403,10 @@ class TestRoutingRegression:
                     display_name="MindRoomNews",
                     rooms=[test_room_id],
                 ),
+                "facts": AgentConfig(
+                    display_name="MindRoomFacts",
+                    rooms=[test_room_id],
+                ),
             },
             teams={},
             room_models={},
@@ -334,6 +417,7 @@ class TestRoutingRegression:
                 "agent_reply_permissions": {
                     "research": ["@alice:localhost"],
                     "news": ["@bob:localhost"],
+                    "facts": ["@alice:localhost"],
                 },
             },
         )
@@ -358,6 +442,7 @@ class TestRoutingRegression:
             router_agent.user_id: MagicMock(),
             mock_research_agent.user_id: MagicMock(),
             mock_news_agent.user_id: MagicMock(),
+            "@mindroom_facts:localhost": MagicMock(),
         }
 
         message_event = MagicMock(spec=nio.RoomMessageText)
@@ -393,7 +478,7 @@ class TestRoutingRegression:
 
         mock_suggest_agent.assert_called_once()
         available_agents = mock_suggest_agent.call_args.args[1]
-        assert [agent.agent_name(test_config) for agent in available_agents] == ["research"]
+        assert [agent.agent_name(test_config) for agent in available_agents] == ["facts", "research"]
 
     @pytest.mark.asyncio
     @patch("mindroom.teams.Team.arun")

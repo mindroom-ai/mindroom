@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.bot import AgentBot
+from mindroom.config import Config
 from mindroom.constants import ROUTER_AGENT_NAME, VOICE_ORIGINAL_SENDER_KEY
 
 
@@ -18,8 +19,9 @@ async def test_router_processes_own_voice_transcriptions(tmp_path) -> None:  # n
     agent_user.user_id = "@mindroom_router:example.com"
     agent_user.agent_name = ROUTER_AGENT_NAME
 
-    config = MagicMock()
-    config.agents = {"calculator": MagicMock()}
+    config = Config(
+        authorization={"default_room_access": True},
+    )
 
     bot = AgentBot(
         agent_user=agent_user,
@@ -108,8 +110,10 @@ async def test_router_voice_transcription_includes_original_sender_metadata(tmp_
     agent_user.user_id = "@mindroom_router:example.com"
     agent_user.agent_name = ROUTER_AGENT_NAME
 
-    config = MagicMock()
-    config.voice.enabled = True
+    config = Config(
+        authorization={"default_room_access": True},
+        voice={"enabled": True},
+    )
 
     bot = AgentBot(
         agent_user=agent_user,
@@ -141,3 +145,45 @@ async def test_router_voice_transcription_includes_original_sender_metadata(tmp_
 
     bot._send_response.assert_called_once()
     assert bot._send_response.call_args.kwargs["extra_content"] == {VOICE_ORIGINAL_SENDER_KEY: "@alice:example.com"}
+
+
+@pytest.mark.asyncio
+async def test_router_voice_transcription_blocked_by_router_reply_permissions(tmp_path) -> None:  # noqa: ANN001
+    """Router should not send transcription when sender is disallowed for router replies."""
+    agent_user = MagicMock()
+    agent_user.user_id = "@mindroom_router:example.com"
+    agent_user.agent_name = ROUTER_AGENT_NAME
+
+    config = Config(
+        authorization={
+            "default_room_access": True,
+            "agent_reply_permissions": {"router": ["@alice:example.com"]},
+        },
+        voice={"enabled": True},
+    )
+
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        rooms=["!test:example.com"],
+    )
+    bot.response_tracker = MagicMock()
+    bot.response_tracker.has_responded.return_value = False
+    bot.logger = MagicMock()
+    bot.client = MagicMock()
+    bot._send_response = AsyncMock(return_value="$response")
+
+    room = MagicMock()
+    room.room_id = "!test:example.com"
+
+    event = MagicMock()
+    event.sender = "@bob:example.com"
+    event.event_id = "$voice_event"
+    event.source = {"content": {"body": "voice.ogg"}}
+
+    with patch("mindroom.bot.is_authorized_sender", return_value=True):
+        await bot._on_voice_message(room, event)
+
+    bot._send_response.assert_not_called()
+    bot.response_tracker.mark_responded.assert_called_once_with("$voice_event")

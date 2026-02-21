@@ -108,12 +108,14 @@ from .thread_utils import (
     filter_agents_by_sender_permissions,
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
+    get_available_agents_for_sender,
     get_available_agents_in_room,
     get_configured_agents_for_room,
     get_effective_sender_id_for_reply_permissions,
     has_multiple_non_agent_users_in_thread,
     has_user_responded_after_message,
     is_authorized_sender,
+    is_sender_allowed_for_agent_reply,
     should_agent_respond,
 )
 from .tools_metadata import get_tool_by_name
@@ -987,20 +989,23 @@ class AgentBot:
 
         # We only receive events from rooms we're in - no need to check access
         _is_dm_room = await is_dm_room(self.client, room.room_id)
+        requester_user_id = self._requester_user_id_for_event(event)
 
         await interactive.handle_text_response(self.client, room, event, self.agent_name)
 
         # Router handles commands exclusively
         command = command_parser.parse(event.body)
         if command:
-            if self.agent_name == ROUTER_AGENT_NAME:
+            if self.agent_name == ROUTER_AGENT_NAME and self._can_reply_to_sender(requester_user_id):
                 # Router always handles commands, even in single-agent rooms
                 # Commands like !schedule, !help, etc. need to work regardless
                 await self._handle_command(room, event, command)
             return
 
         context = await self._extract_message_context(room, event)
-        requester_user_id = self._requester_user_id_for_event(event)
+
+        if not self._can_reply_to_sender(requester_user_id):
+            return
 
         # Check if the sender is an agent
         sender_agent_name = extract_agent_name(event.sender, self.config)
@@ -1031,7 +1036,7 @@ class AgentBot:
                 if context.is_thread and has_multiple_non_agent_users_in_thread(context.thread_history, self.config):
                     self.logger.info("Skipping routing: multiple non-agent users in thread (mention required)")
                 else:
-                    available_agents = get_available_agents_in_room(room, self.config)
+                    available_agents = get_available_agents_for_sender(room, requester_user_id, self.config)
                     if len(available_agents) == 1:
                         # Skip routing in single-agent rooms - the agent will handle it directly
                         self.logger.info("Skipping routing: only one agent present")
@@ -1232,6 +1237,11 @@ class AgentBot:
             self.logger.debug(f"Ignoring voice message from unauthorized sender: {event.sender}")
             return
 
+        if not self._can_reply_to_sender(event.sender):
+            self.response_tracker.mark_responded(event.event_id)
+            self.logger.debug(f"Ignoring voice message due to reply permissions: {event.sender}")
+            return
+
         self.logger.info("Processing voice message", event_id=event.event_id, sender=event.sender)
 
         transcribed_message = await voice_handler.handle_voice_message(self.client, room, event, self.config)
@@ -1279,6 +1289,9 @@ class AgentBot:
         context = await self._extract_message_context(room, event)
         requester_user_id = self._requester_user_id_for_event(event)
 
+        if not self._can_reply_to_sender(requester_user_id):
+            return
+
         if sender_agent_name and not context.am_i_mentioned:
             self.logger.debug("Ignoring image from other agent (not mentioned)")
             return
@@ -1301,7 +1314,7 @@ class AgentBot:
                 if context.is_thread and has_multiple_non_agent_users_in_thread(context.thread_history, self.config):
                     self.logger.info("Skipping routing: multiple non-agent users in thread (mention required)")
                 else:
-                    available_agents = get_available_agents_in_room(room, self.config)
+                    available_agents = get_available_agents_for_sender(room, requester_user_id, self.config)
                     if len(available_agents) == 1:
                         self.logger.info("Skipping routing: only one agent present")
                     else:
@@ -1404,6 +1417,10 @@ class AgentBot:
         """Return the effective requester for per-user reply checks."""
         return get_effective_sender_id_for_reply_permissions(event.sender, event.source, self.config)
 
+    def _can_reply_to_sender(self, sender_id: str) -> bool:
+        """Return whether this entity may reply to *sender_id*."""
+        return is_sender_allowed_for_agent_reply(sender_id, self.agent_name, self.config)
+
     async def _decide_team_for_sender(
         self,
         agents_in_thread: list[MatrixID],
@@ -1417,11 +1434,7 @@ class AgentBot:
         all_mentioned_in_thread = get_all_mentioned_agents_in_thread(context.thread_history, self.config)
         available_agents_in_room: list[MatrixID] | None = None
         if is_dm:
-            available_agents_in_room = filter_agents_by_sender_permissions(
-                get_available_agents_in_room(room, self.config),
-                requester_user_id,
-                self.config,
-            )
+            available_agents_in_room = get_available_agents_for_sender(room, requester_user_id, self.config)
         return await decide_team_formation(
             self.matrix_id,
             filter_agents_by_sender_permissions(context.mentioned_agents, requester_user_id, self.config),
