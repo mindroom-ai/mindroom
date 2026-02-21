@@ -387,7 +387,7 @@ async def save_edited_scheduled_task(
 async def parse_workflow_schedule(
     request: str,
     config: Config,
-    available_agents: typing.Sequence[MatrixID | str],
+    available_agents: typing.Sequence[MatrixID],
     current_time: datetime | None = None,
 ) -> ScheduledWorkflow | WorkflowParseError:
     """Parse natural language into structured workflow using AI."""
@@ -395,7 +395,7 @@ async def parse_workflow_schedule(
         current_time = datetime.now(UTC)
 
     assert available_agents, "No agents available for scheduling"
-    agent_list = ", ".join(_format_available_agent_for_prompt(agent) for agent in available_agents)
+    agent_list = ", ".join(f"@{a.username}" for a in available_agents)
 
     prompt = f"""Parse this scheduling request into a structured workflow.
 
@@ -465,16 +465,6 @@ Examples of event/condition phrasing to include in the message (do not include t
             error=f"Error parsing schedule: {e!s}",
             suggestion="Try a simpler format like 'Daily at 9am, check my email'",
         )
-
-
-def _format_available_agent_for_prompt(agent: MatrixID | str) -> str:
-    """Format available-agent values as prompt-safe @mentions."""
-    if isinstance(agent, MatrixID):
-        return f"@{agent.username}"
-    normalized = agent.strip()
-    if normalized.startswith("@"):
-        return normalized
-    return f"@{normalized}"
 
 
 async def execute_scheduled_workflow(

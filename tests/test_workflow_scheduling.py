@@ -19,6 +19,10 @@ from mindroom.scheduling import (
 )
 
 
+def _mid(name: str) -> MatrixID:
+    return MatrixID(username=name, domain="localhost")
+
+
 @pytest.fixture
 def mock_config() -> MagicMock:
     """Create a mock config with test agents."""
@@ -118,7 +122,7 @@ class TestParseWorkflowSchedule:
         result = await parse_workflow_schedule(
             "Every Monday at 9am, research AI news and email me a summary",
             config=mock_config,
-            available_agents=["research", "email_assistant"],
+            available_agents=[_mid("research"), _mid("email_assistant")],
         )
 
         assert isinstance(result, ScheduledWorkflow)
@@ -150,7 +154,7 @@ class TestParseWorkflowSchedule:
         result = await parse_workflow_schedule(
             "ping me in 5 minutes to check the deployment",
             config=mock_config,
-            available_agents=["general"],  # At least one agent required
+            available_agents=[_mid("general")],
         )
 
         assert isinstance(result, ScheduledWorkflow)
@@ -175,7 +179,7 @@ class TestParseWorkflowSchedule:
         result = await parse_workflow_schedule(
             "Daily at 9am, give me a market analysis",
             config=mock_config,
-            available_agents=["finance"],  # Finance agent available
+            available_agents=[_mid("finance")],
         )
 
         assert isinstance(result, ScheduledWorkflow)
@@ -199,7 +203,7 @@ class TestParseWorkflowSchedule:
         result = await parse_workflow_schedule(
             "Schedule something",
             config=mock_config,
-            available_agents=["general"],  # At least one agent required
+            available_agents=[_mid("general")],
         )
 
         assert isinstance(result, WorkflowParseError)
@@ -230,15 +234,15 @@ class TestParseWorkflowSchedule:
             "remind me later",
             config=mock_config,
             available_agents=[
-                "general",
-                "@research",
-                "@mindroom_finance:localhost",
+                _mid("general"),
+                _mid("research"),
+                _mid("mindroom_finance"),
                 MatrixID(username="mindroom_analyst", domain="localhost"),
             ],
         )
 
         prompt = mock_agent.arun.call_args.args[0]
-        assert "Available agents: @general, @research, @mindroom_finance:localhost, @mindroom_analyst" in prompt
+        assert "Available agents: @general, @research, @mindroom_finance, @mindroom_analyst" in prompt
         assert "@@" not in prompt
 
     @patch("mindroom.scheduling.get_model_instance")
@@ -274,12 +278,12 @@ class TestParseWorkflowSchedule:
         mock_agent.arun.side_effect = [resp_once, resp_cron]
         mock_agent_class.return_value = mock_agent
 
-        result_once = await parse_workflow_schedule("remind me later", mock_config, ["general"])
+        result_once = await parse_workflow_schedule("remind me later", mock_config, [_mid("general")])
         assert isinstance(result_once, ScheduledWorkflow)
         assert result_once.schedule_type == "once"
         assert result_once.execute_at is not None
 
-        result_cron = await parse_workflow_schedule("every day", mock_config, ["general"])
+        result_cron = await parse_workflow_schedule("every day", mock_config, [_mid("general")])
         assert isinstance(result_cron, ScheduledWorkflow)
         assert result_cron.schedule_type == "cron"
         assert result_cron.cron_schedule is not None
