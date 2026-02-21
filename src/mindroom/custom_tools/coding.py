@@ -966,10 +966,13 @@ def _grep_file(
     lines = text.splitlines()
     emitted_lines: set[int] = set()
     for i, line in enumerate(lines):
-        if match_count >= limit:
+        if match_count > limit:
             break
         if not regex.search(line):
             continue
+        if match_count >= limit:
+            # Signal truncation without emitting output for the extra match.
+            return match_count + 1
         match_count += 1
         if context > 0:
             start = max(0, i - context)
@@ -1067,11 +1070,9 @@ def _python_grep_fallback(
 
     results: list[str] = []
     match_count = 0
-    # Collect one extra match to detect whether results were truly truncated.
-    detect_limit = limit + 1
     for filepath in files_or_error:
-        match_count = _grep_file(filepath, base_dir, regex, context, detect_limit, results, match_count)
-        if match_count >= detect_limit:
+        match_count = _grep_file(filepath, base_dir, regex, context, limit, results, match_count)
+        if match_count > limit:
             break
 
     if not results:

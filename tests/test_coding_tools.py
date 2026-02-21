@@ -624,6 +624,22 @@ class TestGrep:
         result = tools.grep("match", path="repeat.txt", limit=5)
         assert isinstance(result, str)
 
+    def test_grep_python_fallback_limit_does_not_emit_extra_match(
+        self,
+        tools: CodingTools,
+        tmp_base: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Python fallback should not emit the (limit+1)th match while detecting truncation."""
+        (tmp_base / "limit.txt").write_text("match1\nmatch2\nmatch3\n")
+        monkeypatch.setattr("mindroom.custom_tools.coding._run_ripgrep", lambda *_args, **_kwargs: None)
+        result = tools.grep("match", path="limit.txt", limit=2)
+
+        match_lines = [line for line in result.splitlines() if line.startswith("limit.txt:")]
+        assert len(match_lines) == 2
+        assert "limit.txt:3:match3" not in result
+        assert "Results limited to 2 matches" in result
+
     def test_grep_limit_banner_not_shown_at_exact_count(
         self,
         tools: CodingTools,
