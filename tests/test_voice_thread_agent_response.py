@@ -121,6 +121,7 @@ async def test_voice_transcription_permissions_use_original_sender(mock_home_bot
     bot = mock_home_bot
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
+    room.canonical_alias = None
     room.users = {
         "@mindroom_home:localhost": MagicMock(),
         f"@mindroom_{ROUTER_AGENT_NAME}:localhost": MagicMock(),
