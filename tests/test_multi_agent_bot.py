@@ -18,9 +18,10 @@ from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
 
 from mindroom.bot import AgentBot, MessageContext, MultiAgentOrchestrator, MultiKnowledgeVectorDb
-from mindroom.config import AgentConfig, Config, DefaultsConfig, KnowledgeBaseConfig, ModelConfig
+from mindroom.config import AgentConfig, AuthorizationConfig, Config, DefaultsConfig, KnowledgeBaseConfig, ModelConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.teams import TeamFormationDecision, TeamMode
 from mindroom.tool_events import ToolTraceEntry
 
 from .conftest import TEST_PASSWORD
@@ -154,6 +155,8 @@ class TestAgentBot:
             "router": MatrixID(username="mindroom_router", domain="localhost"),
         }
         mock_config.domain = "localhost"
+        mock_config.authorization = AuthorizationConfig(default_room_access=True)
+        mock_config.get_mindroom_user_id = MagicMock(return_value="@mindroom_user:localhost")
 
         return mock_config
 
@@ -796,7 +799,11 @@ class TestAgentBot:
             patch(
                 "mindroom.bot.decide_team_formation",
                 new_callable=AsyncMock,
-                return_value=MagicMock(should_form_team=False, agents=[]),
+                return_value=TeamFormationDecision(
+                    should_form_team=False,
+                    agents=[],
+                    mode=TeamMode.COLLABORATE,
+                ),
             ),
             patch("mindroom.bot.should_agent_respond", return_value=True),
             patch("mindroom.bot.image_handler.download_image", new_callable=AsyncMock, return_value=image),
@@ -856,7 +863,11 @@ class TestAgentBot:
             patch(
                 "mindroom.bot.decide_team_formation",
                 new_callable=AsyncMock,
-                return_value=MagicMock(should_form_team=False, agents=[]),
+                return_value=TeamFormationDecision(
+                    should_form_team=False,
+                    agents=[],
+                    mode=TeamMode.COLLABORATE,
+                ),
             ),
             patch("mindroom.bot.should_agent_respond", return_value=True),
             patch("mindroom.bot.image_handler.download_image", new_callable=AsyncMock, return_value=None),
@@ -942,6 +953,7 @@ class TestAgentBot:
             [],
             None,
             message="[Attached image]",
+            requester_user_id="@user:localhost",
         )
 
     @pytest.mark.asyncio
@@ -999,7 +1011,11 @@ class TestAgentBot:
             patch(
                 "mindroom.bot.decide_team_formation",
                 new_callable=AsyncMock,
-                return_value=MagicMock(should_form_team=False, agents=[]),
+                return_value=TeamFormationDecision(
+                    should_form_team=False,
+                    agents=[],
+                    mode=TeamMode.COLLABORATE,
+                ),
             ),
             patch("mindroom.bot.should_agent_respond", return_value=True),
         ):
@@ -1009,6 +1025,63 @@ class TestAgentBot:
         bot._generate_response.assert_awaited_once()
         call_kwargs = bot._generate_response.call_args.kwargs
         assert call_kwargs["images"] == [fake_image]
+
+    @pytest.mark.asyncio
+    async def test_decide_team_for_sender_passes_sender_filtered_dm_agents(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """DM team fallback should only see agents allowed for the requester."""
+        config = Config(
+            agents={
+                "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!dm:localhost"]),
+                "general": AgentConfig(display_name="GeneralAgent", rooms=["!dm:localhost"]),
+            },
+            authorization={
+                "default_room_access": True,
+                "agent_reply_permissions": {
+                    "calculator": ["@alice:localhost"],
+                    "general": ["@bob:localhost"],
+                },
+            },
+        )
+
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        context = MessageContext(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        )
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!dm:localhost"
+        room.users = {
+            config.ids["calculator"].full_id: MagicMock(),
+            config.ids["general"].full_id: MagicMock(),
+        }
+
+        with patch("mindroom.bot.decide_team_formation", new_callable=AsyncMock) as mock_decide:
+            mock_decide.return_value = TeamFormationDecision(
+                should_form_team=False,
+                agents=[],
+                mode=TeamMode.COLLABORATE,
+            )
+
+            await bot._decide_team_for_sender(
+                agents_in_thread=[],
+                context=context,
+                room=room,
+                requester_user_id="@alice:localhost",
+                message="help me",
+                is_dm=True,
+            )
+
+        assert mock_decide.await_count == 1
+        assert mock_decide.call_args.kwargs["available_agents_in_room"] == [config.ids["calculator"]]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])

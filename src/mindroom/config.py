@@ -392,6 +392,16 @@ class AuthorizationConfig(BaseModel):
             "E.g., {'@alice:example.com': ['@telegram_123:example.com']}"
         ),
     )
+    agent_reply_permissions: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Per-agent reply allowlists keyed by agent/team name. "
+            "A '*' key applies to all entities without an explicit override. "
+            "A '*' user entry allows all senders for that entity. "
+            "When set for an entity, it only replies to these user IDs "
+            "(after alias resolution)."
+        ),
+    )
 
     @field_validator("aliases")
     @classmethod
@@ -500,6 +510,17 @@ class Config(BaseModel):
         invalid = sorted(invalid_agents + invalid_teams)
         if invalid:
             msg = f"Agent/team names must be alphanumeric/underscore only, got: {', '.join(invalid)}"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_agent_reply_permissions(self) -> Config:
+        """Ensure per-agent reply permissions reference known entities."""
+        known_entities = set(self.agents) | set(self.teams) | {ROUTER_AGENT_NAME}
+        known_entities.add("*")
+        unknown_entities = sorted(set(self.authorization.agent_reply_permissions) - known_entities)
+        if unknown_entities:
+            msg = f"authorization.agent_reply_permissions contains unknown entities: {', '.join(unknown_entities)}"
             raise ValueError(msg)
         return self
 

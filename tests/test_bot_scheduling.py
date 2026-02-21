@@ -605,6 +605,7 @@ class TestCommandHandling:
             room=create_mock_room("!test:localhost", ["finance", "router"]),
             thread_history=thread_history,  # Full history including router's error
             config=self.config,
+            sender_id="@user:localhost",
         )
 
         # With new logic: Single agent takes ownership (router excluded)
@@ -618,6 +619,7 @@ class TestCommandHandling:
             room=create_mock_room("!test:localhost", ["finance", "calculator", "router"]),
             thread_history=thread_history,  # Include router's error in history
             config=self.config,
+            sender_id="@user:localhost",
         )
 
         assert not should_respond, "Multiple agents wait for routing"
@@ -1106,7 +1108,13 @@ class TestRouterSkipsSingleAgent:
             await bot._on_message(room, event)
 
         # Verify router DID attempt to route
-        bot._handle_ai_routing.assert_called_once_with(room, event, [], None)
+        bot._handle_ai_routing.assert_called_once_with(
+            room,
+            event,
+            [],
+            None,
+            requester_user_id="@user:localhost",
+        )
 
         # Verify it didn't log about skipping
         info_calls = [call[0][0] for call in bot.logger.info.call_args_list]

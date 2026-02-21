@@ -10,12 +10,13 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.teams import TeamFormationDecision, TeamMode
 
 from .conftest import TEST_PASSWORD
 
 
 @pytest.mark.asyncio
-async def test_agent_ignores_user_message_mentioning_other_agents() -> None:
+async def test_agent_ignores_user_message_mentioning_other_agents(tmp_path) -> None:  # noqa: ANN001
     """Test that an agent doesn't respond when a user mentions other agents."""
     # Create test config
     config = Config(
@@ -36,7 +37,7 @@ async def test_agent_ignores_user_message_mentioning_other_agents() -> None:
             display_name="General",
             password=TEST_PASSWORD,
         ),
-        storage_path=Mock(),
+        storage_path=tmp_path,
         config=config,
         rooms=["!room:localhost"],
     )
@@ -85,7 +86,7 @@ async def test_agent_ignores_user_message_mentioning_other_agents() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_responds_when_mentioned_along_with_others() -> None:
+async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None:  # noqa: ANN001
     """Test that an agent DOES respond when mentioned, even if other agents are also mentioned."""
     # Create test config
     config = Config(
@@ -106,7 +107,7 @@ async def test_agent_responds_when_mentioned_along_with_others() -> None:
             display_name="General",
             password=TEST_PASSWORD,
         ),
-        storage_path=Mock(),
+        storage_path=tmp_path,
         config=config,
         rooms=["!room:localhost"],
     )
@@ -149,7 +150,11 @@ async def test_agent_responds_when_mentioned_along_with_others() -> None:
 
         # Mock decide_team_formation to return False (no team formation)
         with patch("mindroom.bot.decide_team_formation") as mock_decide_team_formation:
-            mock_decide_team_formation.return_value = Mock(decide_team_formation=False, agents=[], mode=None)
+            mock_decide_team_formation.return_value = TeamFormationDecision(
+                should_form_team=False,
+                agents=[],
+                mode=TeamMode.COLLABORATE,
+            )
 
             # Mock the generate_response method to track if it's called
             with patch.object(general_bot, "_generate_response") as mock_generate:

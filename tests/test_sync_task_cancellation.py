@@ -89,7 +89,7 @@ async def test_stop_entities_cancels_sync_tasks() -> None:
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_tracks_sync_tasks() -> None:
+async def test_orchestrator_tracks_sync_tasks(tmp_path) -> None:  # noqa: ANN001
     """Test that MultiAgentOrchestrator properly tracks sync tasks."""
     with (
         patch("mindroom.bot.create_bot_for_entity") as mock_create_bot,
@@ -117,7 +117,7 @@ async def test_orchestrator_tracks_sync_tasks() -> None:
         config.get_all_configured_rooms.return_value = []
 
         # Create orchestrator
-        orchestrator = MultiAgentOrchestrator(storage_path=MagicMock())
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
         orchestrator.config = config
 
         # Initialize bots
@@ -138,7 +138,7 @@ async def test_orchestrator_tracks_sync_tasks() -> None:
 @pytest.mark.asyncio
 @pytest.mark.requires_matrix  # Requires real Matrix server for sync task management
 @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-async def test_orchestrator_update_config_cancels_old_tasks() -> None:
+async def test_orchestrator_update_config_cancels_old_tasks(tmp_path) -> None:  # noqa: ANN001
     """Test that update_config properly cancels old sync tasks."""
     with (
         patch("mindroom.bot.Config.from_yaml") as mock_from_yaml,
@@ -150,7 +150,7 @@ async def test_orchestrator_update_config_cancels_old_tasks() -> None:
         patch("mindroom.bot.MultiAgentOrchestrator._setup_rooms_and_memberships", new=AsyncMock()),
     ):
         # Create orchestrator with existing agent
-        orchestrator = MultiAgentOrchestrator(storage_path=MagicMock())
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
 
         # Setup existing config and bot
         old_config = MagicMock(spec=Config)
@@ -198,7 +198,7 @@ async def test_orchestrator_update_config_cancels_old_tasks() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(10)
-async def test_new_agent_not_started_twice() -> None:
+async def test_new_agent_not_started_twice(tmp_path) -> None:  # noqa: ANN001
     """Regression: a brand-new agent must only be started once.
 
     Before the fix, _get_changed_agents treated a new agent (old=None,
@@ -216,7 +216,7 @@ async def test_new_agent_not_started_twice() -> None:
         patch.object(MultiAgentOrchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
     ):
         # --- existing orchestrator with one agent running ---
-        orchestrator = MultiAgentOrchestrator(storage_path=MagicMock())
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
 
         old_config = Config(
             agents={
@@ -286,10 +286,10 @@ async def test_new_agent_not_started_twice() -> None:
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_stop_cancels_all_tasks() -> None:
+async def test_orchestrator_stop_cancels_all_tasks(tmp_path) -> None:  # noqa: ANN001
     """Test that stop() cancels all sync tasks."""
     with patch("mindroom.bot._cancel_sync_task") as mock_cancel:
-        orchestrator = MultiAgentOrchestrator(storage_path=MagicMock())
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
 
         # Track which tasks are cancelled
         cancelled = []

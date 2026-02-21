@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
@@ -17,7 +17,7 @@ class TestScheduledTaskRestoration:
     """Test scheduled task restoration behavior after bot restart."""
 
     @pytest.mark.asyncio
-    async def test_only_router_restores_tasks(self) -> None:
+    async def test_only_router_restores_tasks(self, tmp_path) -> None:  # noqa: ANN001
         """Test that only the router agent restores scheduled tasks."""
         # Create a mock config with multiple agents
         config = Config(
@@ -47,7 +47,7 @@ class TestScheduledTaskRestoration:
         )
         router_bot = AgentBot(
             agent_user=router_user,
-            storage_path=MagicMock(),
+            storage_path=tmp_path,
             config=config,
             rooms=["lobby"],
         )
@@ -66,7 +66,7 @@ class TestScheduledTaskRestoration:
             mock_restore.assert_called_once_with(router_bot.client, "lobby", config)
 
     @pytest.mark.asyncio
-    async def test_non_router_agents_dont_restore_tasks(self) -> None:
+    async def test_non_router_agents_dont_restore_tasks(self, tmp_path) -> None:  # noqa: ANN001
         """Test that non-router agents don't restore scheduled tasks."""
         config = Config(
             agents={
@@ -89,7 +89,7 @@ class TestScheduledTaskRestoration:
         )
         regular_bot = AgentBot(
             agent_user=regular_user,
-            storage_path=MagicMock(),
+            storage_path=tmp_path,
             config=config,
             rooms=["lobby"],
         )
@@ -108,7 +108,7 @@ class TestScheduledTaskRestoration:
             mock_restore.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_multiple_agents_only_router_restores(self) -> None:
+    async def test_multiple_agents_only_router_restores(self, tmp_path) -> None:  # noqa: ANN001
         """Test that when multiple agents join a room, only router restores tasks."""
         config = Config(
             agents={
@@ -145,7 +145,7 @@ class TestScheduledTaskRestoration:
             )
             bot = AgentBot(
                 agent_user=user,
-                storage_path=MagicMock(),
+                storage_path=tmp_path,
                 config=config,
                 rooms=["lobby"],
             )
