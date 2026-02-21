@@ -927,10 +927,13 @@ def _grep_file(
     except (OSError, UnicodeDecodeError):
         return match_count
 
-    try:
-        rel = filepath.relative_to(search_path)
-    except ValueError:
-        rel = filepath
+    if search_path.is_file():
+        rel = filepath.relative_to(search_path.parent)
+    else:
+        try:
+            rel = filepath.relative_to(search_path)
+        except ValueError:
+            rel = filepath
 
     lines = text.splitlines()
     for i, line in enumerate(lines):

@@ -620,6 +620,19 @@ class TestGrep:
         result = tools.grep("x", path="long.txt")
         assert "[truncated]" in result
 
+    def test_grep_python_fallback_single_file_shows_filename(
+        self,
+        tools: CodingTools,
+        tmp_base: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Python fallback should show the filename, not '.', when path points to a single file."""
+        (tmp_base / "a.txt").write_text("needle\n")
+        monkeypatch.setattr("mindroom.custom_tools.coding._run_ripgrep", lambda *_args, **_kwargs: None)
+        result = tools.grep("needle", path="a.txt")
+        assert "a.txt:1:" in result
+        assert ".:1:" not in result
+
     def test_grep_python_fallback_applies_global_output_truncation(
         self,
         tools: CodingTools,
