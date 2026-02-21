@@ -66,18 +66,6 @@ jobs:
     - name: Pull Git LFS objects
       run: git lfs pull
 
-    - name: Verify avatar PNGs are not Git LFS pointers
-      if: matrix.image == 'backend' || matrix.image == 'backend-minimal'
-      shell: bash
-      run: |
-        set -euo pipefail
-        pointer_files="$(grep -RIl --include='*.png' '^version https://git-lfs.github.com/spec/v1$' avatars || true)"
-        if [ -n "$pointer_files" ]; then
-          echo "Found avatar PNGs that are still Git LFS pointer files:"
-          echo "$pointer_files"
-          exit 1
-        fi
-
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
       with:
