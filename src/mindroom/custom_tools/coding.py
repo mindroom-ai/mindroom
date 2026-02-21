@@ -456,7 +456,7 @@ def _list_directory(target: Path, limit: int) -> str:
         for item in sorted(target.iterdir(), key=lambda p: p.name.lower()):
             name = item.name + ("/" if item.is_dir() else "")
             entries.append(name)
-            if len(entries) >= limit:
+            if len(entries) > limit:
                 break
     except OSError as e:
         return f"Error listing directory: {e}"
@@ -464,8 +464,12 @@ def _list_directory(target: Path, limit: int) -> str:
     if not entries:
         return "Directory is empty."
 
+    was_limited = len(entries) > limit
+    if was_limited:
+        entries = entries[:limit]
+
     result = "\n".join(entries)
-    if len(entries) >= limit:
+    if was_limited:
         result += f"\n\n[Listing limited to {limit} entries.]"
     return result
 
@@ -489,14 +493,18 @@ def _find_files_in(search_path: Path, base_dir: Path, pattern: str, limit: int) 
         except ValueError:
             rel = candidate
         matches.append(str(rel))
-        if len(matches) >= limit:
+        if len(matches) > limit:
             break
 
     if not matches:
         return f"No files matching '{pattern}' found."
 
+    was_limited = len(matches) > limit
+    if was_limited:
+        matches = matches[:limit]
+
     result = "\n".join(matches)
-    if len(matches) >= limit:
+    if was_limited:
         result += f"\n\n[Results limited to {limit}. Narrow the pattern to see more.]"
     return result
 
@@ -956,6 +964,7 @@ def _grep_file(
         rel = filepath
 
     lines = text.splitlines()
+    emitted_lines: set[int] = set()
     for i, line in enumerate(lines):
         if match_count >= limit:
             break
@@ -966,6 +975,9 @@ def _grep_file(
             start = max(0, i - context)
             end = min(len(lines), i + context + 1)
             for j in range(start, end):
+                if j in emitted_lines:
+                    continue
+                emitted_lines.add(j)
                 marker = ":" if j == i else "-"
                 results.append(f"{rel}{marker}{j + 1}{marker}{_truncate_line(lines[j])}")
         else:
@@ -1055,16 +1067,19 @@ def _python_grep_fallback(
 
     results: list[str] = []
     match_count = 0
+    # Collect one extra match to detect whether results were truly truncated.
+    detect_limit = limit + 1
     for filepath in files_or_error:
-        match_count = _grep_file(filepath, base_dir, regex, context, limit, results, match_count)
-        if match_count >= limit:
+        match_count = _grep_file(filepath, base_dir, regex, context, detect_limit, results, match_count)
+        if match_count >= detect_limit:
             break
 
     if not results:
         return "No matches found."
 
+    was_limited = match_count > limit
     output = "\n".join(results)
-    if match_count >= limit:
+    if was_limited:
         output += f"\n\n[Results limited to {limit} matches.]"
     trunc = _truncate_head(output)
     if trunc.was_truncated:

@@ -569,6 +569,21 @@ class TestGrep:
         assert "a.txt:7:second" not in result
         assert "Results limited to 1 matches" in result
 
+    def test_grep_context_deduplicates_overlapping_lines(
+        self,
+        tools: CodingTools,
+        tmp_base: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Nearby matches with overlapping context should not duplicate shared lines."""
+        (tmp_base / "overlap.txt").write_text("a\nmatch1\nb\nmatch2\nc\n")
+        monkeypatch.setattr("mindroom.custom_tools.coding._run_ripgrep", lambda *_args, **_kwargs: None)
+        result = tools.grep("match", path="overlap.txt", context=1)
+        lines = result.strip().splitlines()
+        # Line "b" (line 3) is shared context — must appear exactly once.
+        b_lines = [line for line in lines if "-3-b" in line or ":3:b" in line]
+        assert len(b_lines) == 1
+
     def test_grep_context_no_separator_lines(
         self,
         tools: CodingTools,
@@ -608,6 +623,19 @@ class TestGrep:
         (tmp_base / "repeat.txt").write_text("\n".join(f"match{i}" for i in range(50)))
         result = tools.grep("match", path="repeat.txt", limit=5)
         assert isinstance(result, str)
+
+    def test_grep_limit_banner_not_shown_at_exact_count(
+        self,
+        tools: CodingTools,
+        tmp_base: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Limit banner should not appear when total matches exactly equal the limit."""
+        (tmp_base / "exact.txt").write_text("match\nmatch\nmatch\n")
+        monkeypatch.setattr("mindroom.custom_tools.coding._run_ripgrep", lambda *_args, **_kwargs: None)
+        result = tools.grep("match", path="exact.txt", limit=3)
+        assert "match" in result
+        assert "limited" not in result.lower()
 
     def test_grep_literal(self, tools: CodingTools, tmp_base: Path) -> None:
         """Literal mode escapes regex special chars."""
@@ -814,6 +842,14 @@ class TestFindFiles:
         result = tools.find_files("*.txt", limit=5)
         assert "limited" in result.lower() or result.count("\n") <= 5
 
+    def test_find_limit_banner_not_shown_at_exact_count(self, tmp_path: Path) -> None:
+        """Limit banner should not appear when total files exactly equal the limit."""
+        for i in range(3):
+            (tmp_path / f"file{i}.txt").write_text("")
+        tools = CodingTools(base_dir=str(tmp_path))
+        result = tools.find_files("*.txt", limit=3)
+        assert "limited" not in result.lower()
+
     def test_find_with_absolute_glob_returns_error(self, tools: CodingTools) -> None:
         """Invalid absolute glob patterns should return an error, not raise."""
         result = tools.find_files("/absolute/path/*.txt")
@@ -908,6 +944,14 @@ class TestLs:
             (tmp_base / f"item{i}.txt").write_text("")
         result = tools.ls(limit=5)
         assert "limited" in result.lower()
+
+    def test_ls_limit_banner_not_shown_at_exact_count(self, tmp_path: Path) -> None:
+        """Limit banner should not appear when total entries exactly equal the limit."""
+        for i in range(3):
+            (tmp_path / f"file{i}.txt").write_text("")
+        tools = CodingTools(base_dir=str(tmp_path))
+        result = tools.ls(limit=3)
+        assert "limited" not in result.lower()
 
     def test_ls_rejects_non_positive_limit(self, tools: CodingTools) -> None:
         """Rejects invalid non-positive entry limits."""
