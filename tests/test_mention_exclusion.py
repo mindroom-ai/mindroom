@@ -28,12 +28,13 @@ async def test_agent_ignores_user_message_mentioning_other_agents(tmp_path) -> N
         room_models={},
         models={"default": ModelConfig(provider="ollama", id="test-model")},
     )
+    domain = config.domain
 
     # Create GeneralAgent bot
     general_bot = AgentBot(
         agent_user=AgentMatrixUser(
             agent_name="general",
-            user_id="@mindroom_general:localhost",
+            user_id=f"@mindroom_general:{domain}",
             display_name="General",
             password=TEST_PASSWORD,
         ),
@@ -44,7 +45,7 @@ async def test_agent_ignores_user_message_mentioning_other_agents(tmp_path) -> N
 
     # Mock the client
     general_bot.client = AsyncMock(spec=nio.AsyncClient)
-    general_bot.client.user_id = "@mindroom_general:localhost"
+    general_bot.client.user_id = f"@mindroom_general:{domain}"
 
     # Mock response tracker
     general_bot.response_tracker = Mock()
@@ -63,7 +64,7 @@ async def test_agent_ignores_user_message_mentioning_other_agents(tmp_path) -> N
         "content": {
             "body": "@research find the latest news",
             "m.mentions": {
-                "user_ids": ["@mindroom_research:localhost"],  # ResearchAgent is mentioned
+                "user_ids": [f"@mindroom_research:{domain}"],  # ResearchAgent is mentioned
             },
             "m.relates_to": {
                 "rel_type": "m.thread",
@@ -98,12 +99,13 @@ async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None
         room_models={},
         models={"default": ModelConfig(provider="ollama", id="test-model")},
     )
+    domain = config.domain
 
     # Create GeneralAgent bot
     general_bot = AgentBot(
         agent_user=AgentMatrixUser(
             agent_name="general",
-            user_id="@mindroom_general:localhost",
+            user_id=f"@mindroom_general:{domain}",
             display_name="General",
             password=TEST_PASSWORD,
         ),
@@ -114,7 +116,7 @@ async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None
 
     # Mock the client
     general_bot.client = AsyncMock(spec=nio.AsyncClient)
-    general_bot.client.user_id = "@mindroom_general:localhost"
+    general_bot.client.user_id = f"@mindroom_general:{domain}"
 
     # Mock response tracker
     general_bot.response_tracker = Mock()
@@ -133,8 +135,8 @@ async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None
             "body": "@general @research help me with this",
             "m.mentions": {
                 "user_ids": [
-                    "@mindroom_general:localhost",  # GeneralAgent is mentioned
-                    "@mindroom_research:localhost",  # ResearchAgent is also mentioned
+                    f"@mindroom_general:{domain}",  # GeneralAgent is mentioned
+                    f"@mindroom_research:{domain}",  # ResearchAgent is also mentioned
                 ],
             },
             "m.relates_to": {

@@ -505,7 +505,7 @@ class TestAgentBot:
         mock_ai_response: AsyncMock,
         mock_get_latest_thread: AsyncMock,
         enable_streaming: bool,
-        mock_agent_user: AgentMatrixUser,
+        mock_agent_user: AgentMatrixUser,  # noqa: ARG002
         tmp_path: Path,
     ) -> None:
         """Test agent bot responding to mentions with both streaming and non-streaming modes."""
@@ -524,9 +524,16 @@ class TestAgentBot:
         mock_get_latest_thread.return_value = "latest_thread_event"
 
         config = Config.from_yaml()
+        mention_id = f"@mindroom_calculator:{config.domain}"
+        agent_user = AgentMatrixUser(
+            agent_name="calculator",
+            password=TEST_PASSWORD,
+            display_name="CalculatorAgent",
+            user_id=mention_id,
+        )
 
         bot = AgentBot(
-            mock_agent_user,
+            agent_user,
             tmp_path,
             rooms=["!test:localhost"],
             enable_streaming=enable_streaming,
@@ -567,12 +574,12 @@ class TestAgentBot:
 
         mock_event = MagicMock()
         mock_event.sender = "@user:localhost"
-        mock_event.body = "@mindroom_calculator:localhost: What's 2+2?"
+        mock_event.body = f"{mention_id}: What's 2+2?"
         mock_event.event_id = "event123"
         mock_event.source = {
             "content": {
-                "body": "@mindroom_calculator:localhost: What's 2+2?",
-                "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
+                "body": f"{mention_id}: What's 2+2?",
+                "m.mentions": {"user_ids": [mention_id]},
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root_id"},
             },
         }
@@ -583,7 +590,7 @@ class TestAgentBot:
         if enable_streaming:
             mock_stream_agent_response.assert_called_once_with(
                 agent_name="calculator",
-                prompt="@mindroom_calculator:localhost: What's 2+2?",
+                prompt=f"{mention_id}: What's 2+2?",
                 session_id="!test:localhost:$thread_root_id",
                 storage_path=tmp_path,
                 config=config,
@@ -602,7 +609,7 @@ class TestAgentBot:
         else:
             mock_ai_response.assert_called_once_with(
                 agent_name="calculator",
-                prompt="@mindroom_calculator:localhost: What's 2+2?",
+                prompt=f"{mention_id}: What's 2+2?",
                 session_id="!test:localhost:$thread_root_id",
                 storage_path=tmp_path,
                 config=config,

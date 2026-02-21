@@ -408,6 +408,27 @@ def test_agent_reply_permissions_do_not_bypass_bot_accounts() -> None:
     assert not is_sender_allowed_for_agent_reply("@bridgebot:example.com", "assistant", config)
 
 
+def test_agent_reply_permissions_do_not_bypass_cross_domain_agent_like_ids() -> None:
+    """Only configured internal IDs may bypass reply permissions."""
+    config = Config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={
+            "default_room_access": True,
+            "agent_reply_permissions": {
+                "assistant": ["@alice:example.com"],
+            },
+        },
+    )
+
+    assert not is_sender_allowed_for_agent_reply("@mindroom_assistant:evil.com", "assistant", config)
+
+
 def test_agent_reply_permissions_wildcard_entity_applies_to_all() -> None:
     """A '*' entity key should act as default allowlist for all entities."""
     config = Config(
@@ -580,10 +601,11 @@ def test_effective_sender_uses_voice_original_sender_for_router_messages() -> No
         },
     }
 
-    assert (
-        get_effective_sender_id_for_reply_permissions("@mindroom_router:example.com", event_source, config)
-        == "@alice:example.com"
-    )
+    assert get_effective_sender_id_for_reply_permissions(
+        config.ids[ROUTER_AGENT_NAME].full_id,
+        event_source,
+        config,
+    ) == ("@alice:example.com")
 
 
 def test_effective_sender_ignores_voice_original_sender_for_non_router_messages() -> None:
@@ -607,6 +629,30 @@ def test_effective_sender_ignores_voice_original_sender_for_non_router_messages(
     }
 
     assert get_effective_sender_id_for_reply_permissions("@bob:example.com", event_source, config) == "@bob:example.com"
+
+
+def test_effective_sender_does_not_trust_cross_domain_router_like_ids() -> None:
+    """Router sender override must require exact configured router ID."""
+    config = Config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={"default_room_access": True},
+    )
+
+    spoofed_router = "@mindroom_router:evil.com"
+    event_source = {
+        "content": {
+            "body": "spoof attempt",
+            VOICE_ORIGINAL_SENDER_KEY: "@alice:example.com",
+        },
+    }
+
+    assert get_effective_sender_id_for_reply_permissions(spoofed_router, event_source, config) == spoofed_router
 
 
 def test_resolve_alias_method() -> None:

@@ -86,6 +86,7 @@ class TestTeamFormation:
             room_models={},
             models={"default": ModelConfig(provider="ollama", id="test-model")},
         )
+        self.config.domain = "localhost"
 
     @pytest.mark.asyncio
     async def test_multiple_agents_tagged_form_team(
@@ -287,6 +288,7 @@ class TestTeamResponseBehavior:
             room_models={},
             models={"default": ModelConfig(provider="ollama", id="test-model")},
         )
+        self.config.domain = "localhost"
 
     @pytest.mark.asyncio
     async def test_single_agent_still_continues_conversation(
@@ -472,6 +474,7 @@ class TestRouterTeamFormation:
             },
             models={"default": ModelConfig(provider="ollama", id="test-model")},
         )
+        config.domain = "localhost"
 
         # Mock room with multiple agents
         room = MagicMock(spec=nio.MatrixRoom)
@@ -530,6 +533,7 @@ class TestRouterTeamFormation:
             },
             models={"default": ModelConfig(provider="ollama", id="test-model")},
         )
+        config.domain = "localhost"
 
         # DM room with multiple agents
         room = MagicMock(spec=nio.MatrixRoom)

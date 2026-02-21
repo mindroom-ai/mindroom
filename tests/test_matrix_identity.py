@@ -48,24 +48,27 @@ class TestMatrixID:
 
     def test_agent_name_extraction(self) -> None:
         """Test extracting agent name."""
+        domain = self.config.domain
+
         # Valid agent
-        mid = MatrixID.parse("@mindroom_calculator:localhost")
+        mid = MatrixID.parse(f"@mindroom_calculator:{domain}")
         assert mid.agent_name(self.config) == "calculator"
 
         # Not an agent
-        mid = MatrixID.parse("@user:localhost")
+        mid = MatrixID.parse(f"@user:{domain}")
         assert mid.agent_name(self.config) is None
 
         # Agent prefix but not in config
-        mid = MatrixID.parse("@mindroom_unknown:localhost")
+        mid = MatrixID.parse(f"@mindroom_unknown:{domain}")
         assert mid.agent_name(self.config) is None
 
     def test_parse_router(self) -> None:
         """Test parsing a router agent ID."""
-        mid = MatrixID.parse("@mindroom_router:localhost")
+        domain = self.config.domain
+        mid = MatrixID.parse(f"@mindroom_router:{domain}")
         assert mid.username == "mindroom_router"
-        assert mid.domain == "localhost"
-        assert mid.full_id == "@mindroom_router:localhost"
+        assert mid.domain == domain
+        assert mid.full_id == f"@mindroom_router:{domain}"
         assert mid.agent_name(self.config) == "router"
 
 
@@ -109,15 +112,17 @@ class TestHelperFunctions:
 
     def test_is_agent_id(self) -> None:
         """Test quick agent ID check."""
-        assert is_agent_id("@mindroom_calculator:localhost", self.config) is True
-        assert is_agent_id("@mindroom_general:localhost", self.config) is True
-        assert is_agent_id("@user:localhost", self.config) is False
+        domain = self.config.domain
+        assert is_agent_id(f"@mindroom_calculator:{domain}", self.config) is True
+        assert is_agent_id(f"@mindroom_general:{domain}", self.config) is True
+        assert is_agent_id(f"@user:{domain}", self.config) is False
         # Note: is_agent_id expects valid Matrix IDs - invalid IDs should never reach this function
-        assert is_agent_id("@mindroom_unknown:localhost", self.config) is False
+        assert is_agent_id(f"@mindroom_unknown:{domain}", self.config) is False
 
     def test_extract_agent_name(self) -> None:
         """Test agent name extraction."""
-        assert extract_agent_name("@mindroom_calculator:localhost", self.config) == "calculator"
-        assert extract_agent_name("@mindroom_general:localhost", self.config) == "general"
-        assert extract_agent_name("@user:localhost", self.config) is None
+        domain = self.config.domain
+        assert extract_agent_name(f"@mindroom_calculator:{domain}", self.config) == "calculator"
+        assert extract_agent_name(f"@mindroom_general:{domain}", self.config) == "general"
+        assert extract_agent_name(f"@user:{domain}", self.config) is None
         assert extract_agent_name("invalid", self.config) is None

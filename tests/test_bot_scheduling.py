@@ -372,6 +372,7 @@ class TestCommandHandling:
             room_models={},
             models={"default": ModelConfig(provider="ollama", id="test-model")},
         )
+        self.config.domain = "localhost"
 
     @pytest.mark.asyncio
     async def test_non_router_agent_ignores_commands(self) -> None:

@@ -36,6 +36,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
         models={"default": ModelConfig(provider="ollama", id="test-model")},
         router=RouterConfig(model="default"),
     )
+    config.domain = "localhost"
 
     bot = AgentBot(
         agent_user=agent_user,

@@ -73,6 +73,7 @@ class TestRoutingIntegration:
             models={"default": ModelConfig(provider="ollama", id="test-model")},
             router=RouterConfig(model="default"),
         )
+        config.domain = "localhost"
 
         research_bot = AgentBot(
             research_agent,

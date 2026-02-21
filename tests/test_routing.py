@@ -37,6 +37,7 @@ class TestAIRouting:
             },
             router=RouterConfig(model="default"),
         )
+        config.domain = "localhost"
 
         with patch("mindroom.routing.get_model_instance"):
             # Mock the Agent and response
@@ -72,6 +73,7 @@ class TestAIRouting:
             },
             router=RouterConfig(model="default"),
         )
+        config.domain = "localhost"
         thread_context = [
             {"sender": "@user:localhost", "body": "I need help with my taxes"},
             {"sender": "@mindroom_finance:localhost", "body": "I can help with that"},
@@ -114,6 +116,7 @@ class TestAIRouting:
             },
             router=RouterConfig(model="default"),
         )
+        config.domain = "localhost"
 
         with patch("mindroom.routing.get_model_instance"):
             mock_agent = AsyncMock()
@@ -149,6 +152,7 @@ class TestAIRouting:
             },
             router=RouterConfig(model="default"),
         )
+        config.domain = "localhost"
 
         with patch("mindroom.routing.get_model_instance") as mock_model:
             mock_model.side_effect = ValueError("Model error")
@@ -171,6 +175,7 @@ class TestAIRouting:
         )
 
         config = Config(router=RouterConfig(model="default"))
+        config.domain = "localhost"
 
         bot = AgentBot(agent, tmp_path, config=config)
 
@@ -208,6 +213,7 @@ class TestThreadUtils:
             room_models={},
             models={"default": ModelConfig(provider="ollama", id="test-model")},
         )
+        self.config.domain = "localhost"
 
     def test_has_any_agent_mentions_in_thread_with_mentions(self) -> None:
         """Test detecting agent mentions in thread."""
@@ -326,6 +332,7 @@ class TestThreadUtils:
             models={"default": ModelConfig(provider="ollama", id="test-model")},
             bot_accounts=["@telegram:localhost"],
         )
+        config.domain = "localhost"
         history = [
             {"sender": "@alice:localhost", "body": "hello"},
             {"sender": "@telegram:localhost", "body": "relayed message"},
@@ -349,6 +356,7 @@ class TestThreadUtils:
             models={"default": ModelConfig(provider="ollama", id="test-model")},
             bot_accounts=["@telegram:localhost"],
         )
+        config.domain = "localhost"
         event_source = {
             "content": {
                 "m.mentions": {"user_ids": ["@telegram:localhost"]},
@@ -367,6 +375,7 @@ class TestThreadUtils:
             models={"default": ModelConfig(provider="ollama", id="test-model")},
             bot_accounts=["@telegram:localhost"],
         )
+        config.domain = "localhost"
         event_source = {
             "content": {
                 "m.mentions": {"user_ids": ["@telegram:localhost", "@bob:localhost"]},
@@ -389,6 +398,7 @@ class TestBridgeMentionFallback:
             },
             models={"default": ModelConfig(provider="ollama", id="test-model")},
         )
+        self.config.domain = "localhost"
 
     def test_html_pill_agent_mention(self) -> None:
         """Bridge HTML pill mentioning an agent is detected."""
