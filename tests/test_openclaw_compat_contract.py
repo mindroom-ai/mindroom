@@ -40,6 +40,12 @@ OPENCLAW_COMPAT_ALIAS_TOOLS = {
     "web_fetch",
     "exec",
     "process",
+    "read_file",
+    "edit_file",
+    "write_file",
+    "grep",
+    "find_files",
+    "ls",
 }
 
 
@@ -135,6 +141,126 @@ async def test_openclaw_compat_aliases_return_structured_results() -> None:
     cron_payload = json.loads(await tool.cron("in 1 minute remind me to test"))
     assert cron_payload["status"] == "ok"
     assert cron_payload["tool"] == "cron"
+
+
+def test_openclaw_compat_coding_read_file(tmp_path: Path) -> None:
+    """Verify read_file delegates to CodingTools and returns structured payload."""
+    tool = OpenClawCompatTools()
+    test_file = tmp_path / "hello.txt"
+    test_file.write_text("line1\nline2\n")
+    tool._coding.base_dir = tmp_path
+
+    payload = json.loads(tool.read_file(str(test_file)))
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "read_file"
+    assert "line1" in payload["result"]
+
+
+def test_openclaw_compat_coding_write_file(tmp_path: Path) -> None:
+    """Verify write_file delegates to CodingTools and returns structured payload."""
+    tool = OpenClawCompatTools()
+    tool._coding.base_dir = tmp_path
+    target = tmp_path / "out.txt"
+
+    payload = json.loads(tool.write_file(str(target), "hello"))
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "write_file"
+    assert target.read_text() == "hello"
+
+
+def test_openclaw_compat_coding_edit_file(tmp_path: Path) -> None:
+    """Verify edit_file delegates to CodingTools and returns structured payload."""
+    tool = OpenClawCompatTools()
+    tool._coding.base_dir = tmp_path
+    target = tmp_path / "edit.txt"
+    target.write_text("old content here")
+
+    payload = json.loads(tool.edit_file(str(target), "old content", "new content"))
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "edit_file"
+    assert "new content here" in target.read_text()
+
+
+def test_openclaw_compat_coding_grep(tmp_path: Path) -> None:
+    """Verify grep delegates to CodingTools and returns structured payload."""
+    tool = OpenClawCompatTools()
+    tool._coding.base_dir = tmp_path
+    (tmp_path / "sample.py").write_text("def hello():\n    pass\n")
+
+    payload = json.loads(tool.grep("hello", literal=True))
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "grep"
+    assert "hello" in payload["result"]
+
+
+def test_openclaw_compat_coding_grep_error_prefixed_filename_is_ok(tmp_path: Path) -> None:
+    """Verify grep does not misclassify successful results from Error* filenames."""
+    tool = OpenClawCompatTools()
+    tool._coding.base_dir = tmp_path
+    (tmp_path / "Error.py").write_text("needle\n")
+
+    payload = json.loads(tool.grep("needle", literal=True))
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "grep"
+    assert "Error.py" in payload["result"]
+
+
+def test_openclaw_compat_coding_find_files(tmp_path: Path) -> None:
+    """Verify find_files delegates to CodingTools and returns structured payload."""
+    tool = OpenClawCompatTools()
+    tool._coding.base_dir = tmp_path
+    (tmp_path / "foo.py").write_text("")
+
+    payload = json.loads(tool.find_files("*.py"))
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "find_files"
+    assert "foo.py" in payload["result"]
+
+
+def test_openclaw_compat_coding_find_files_error_prefixed_filename_is_ok(tmp_path: Path) -> None:
+    """Verify find_files does not misclassify successful Error* filename matches."""
+    tool = OpenClawCompatTools()
+    tool._coding.base_dir = tmp_path
+    (tmp_path / "Error.py").write_text("")
+
+    payload = json.loads(tool.find_files("*.py"))
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "find_files"
+    assert "Error.py" in payload["result"]
+
+
+def test_openclaw_compat_coding_ls(tmp_path: Path) -> None:
+    """Verify ls delegates to CodingTools and returns structured payload."""
+    tool = OpenClawCompatTools()
+    tool._coding.base_dir = tmp_path
+    (tmp_path / "a.txt").write_text("")
+    (tmp_path / "subdir").mkdir()
+
+    payload = json.loads(tool.ls())
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "ls"
+    assert "a.txt" in payload["result"]
+    assert "subdir/" in payload["result"]
+
+
+def test_openclaw_compat_coding_ls_error_prefixed_filename_is_ok(tmp_path: Path) -> None:
+    """Verify ls does not misclassify successful results from Error* filenames."""
+    tool = OpenClawCompatTools()
+    tool._coding.base_dir = tmp_path
+    (tmp_path / "Error notes.txt").write_text("")
+
+    payload = json.loads(tool.ls())
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "ls"
+    assert "Error notes.txt" in payload["result"]
+
+
+def test_openclaw_compat_coding_read_file_error() -> None:
+    """Verify read_file returns error payload for missing files."""
+    tool = OpenClawCompatTools()
+    payload = json.loads(tool.read_file("/nonexistent/path/file.txt"))
+    assert payload["status"] == "error"
+    assert payload["tool"] == "read_file"
 
 
 @pytest.mark.asyncio

@@ -17,6 +17,7 @@ from agno.tools import Toolkit
 from agno.tools.duckduckgo import DuckDuckGoTools
 from agno.tools.website import WebsiteTools
 
+from mindroom.custom_tools.coding import CodingTools
 from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import fetch_thread_history, send_message
@@ -36,6 +37,13 @@ class OpenClawCompatTools(Toolkit):
     """OpenClaw-style tool names exposed as a single toolkit."""
 
     _registry_lock: Lock = Lock()
+    _CODING_ERROR_PREFIXES = (
+        "Error:",
+        "Error reading file:",
+        "Error writing file:",
+        "Error listing directory:",
+        "Error running grep",
+    )
 
     def __init__(self) -> None:
         """Initialize the OpenClaw compatibility toolkit."""
@@ -58,12 +66,19 @@ class OpenClawCompatTools(Toolkit):
                 self.web_fetch,
                 self.exec,
                 self.process,
+                self.read_file,
+                self.edit_file,
+                self.write_file,
+                self.grep,
+                self.find_files,
+                self.ls,
             ],
         )
         self._scheduler = SchedulerTools()
         self._duckduckgo = DuckDuckGoTools()
         self._website = WebsiteTools()
         self._shell = get_tool_by_name("shell")
+        self._coding = CodingTools()
 
     @staticmethod
     def _payload(tool_name: str, status: str, **kwargs: object) -> str:
@@ -83,6 +98,11 @@ class OpenClawCompatTools(Toolkit):
             "error",
             message="OpenClaw tool context is unavailable in this runtime path.",
         )
+
+    @classmethod
+    def _coding_status(cls, result: str) -> str:
+        """Map CodingTools string results to stable status values."""
+        return "error" if result.startswith(cls._CODING_ERROR_PREFIXES) else "ok"
 
     @staticmethod
     def _now_iso() -> str:
@@ -1198,3 +1218,60 @@ class OpenClawCompatTools(Toolkit):
     async def process(self, command: str) -> str:
         """Execute a shell command (alias for exec)."""
         return await self._run_shell(command, "process")
+
+    # ── Coding tool aliases ────────────────────────────────────────────
+
+    def read_file(
+        self,
+        path: str,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> str:
+        """Read a file with line numbers and pagination hints."""
+        result = self._coding.read_file(path, offset, limit)
+        status = self._coding_status(result)
+        return self._payload("read_file", status, result=result)
+
+    def edit_file(self, path: str, old_text: str, new_text: str) -> str:
+        """Replace a specific text occurrence in a file using fuzzy matching."""
+        result = self._coding.edit_file(path, old_text, new_text)
+        status = self._coding_status(result)
+        return self._payload("edit_file", status, result=result)
+
+    def write_file(self, path: str, content: str) -> str:
+        """Write content to a file, creating parent directories if needed."""
+        result = self._coding.write_file(path, content)
+        status = self._coding_status(result)
+        return self._payload("write_file", status, result=result)
+
+    def grep(
+        self,
+        pattern: str,
+        path: str | None = None,
+        glob: str | None = None,
+        ignore_case: bool = False,
+        literal: bool = False,
+        context: int = 0,
+        limit: int = 100,
+    ) -> str:
+        """Search file contents for a pattern."""
+        result = self._coding.grep(pattern, path, glob, ignore_case, literal, context, limit)
+        status = self._coding_status(result)
+        return self._payload("grep", status, result=result)
+
+    def find_files(
+        self,
+        pattern: str,
+        path: str | None = None,
+        limit: int = 1000,
+    ) -> str:
+        """Find files matching a glob pattern."""
+        result = self._coding.find_files(pattern, path, limit)
+        status = self._coding_status(result)
+        return self._payload("find_files", status, result=result)
+
+    def ls(self, path: str | None = None, limit: int = 500) -> str:
+        """List directory contents."""
+        result = self._coding.ls(path, limit)
+        status = self._coding_status(result)
+        return self._payload("ls", status, result=result)
