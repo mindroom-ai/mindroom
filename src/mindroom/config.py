@@ -850,6 +850,33 @@ class Config(BaseModel):
             all_room_aliases.update(team_config.rooms)
         return all_room_aliases
 
+    def get_entity_thread_mode(self, entity_name: str) -> Literal["thread", "room"]:
+        """Get effective thread mode for an agent, team, or router.
+
+        Agents use their explicit per-agent setting.
+        Teams inherit a mode only when all member agents share it.
+        Router inherits a mode only when all configured agents share it.
+        In ambiguous cases, default to "thread".
+        """
+        if entity_name in self.agents:
+            return self.agents[entity_name].thread_mode
+
+        if entity_name in self.teams:
+            team_modes: set[Literal["thread", "room"]] = {
+                self.agents[name].thread_mode for name in self.teams[entity_name].agents if name in self.agents
+            }
+            if len(team_modes) == 1:
+                return next(iter(team_modes))
+
+        if entity_name == ROUTER_AGENT_NAME:
+            configured_modes: set[Literal["thread", "room"]] = {
+                agent_cfg.thread_mode for agent_cfg in self.agents.values()
+            }
+            if len(configured_modes) == 1:
+                return next(iter(configured_modes))
+
+        return "thread"
+
     def get_entity_model_name(self, entity_name: str) -> str:
         """Get the model name for an agent, team, or router.
 
