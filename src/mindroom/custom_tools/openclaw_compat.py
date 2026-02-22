@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 import shlex
 import sqlite3
+import subprocess
 from datetime import UTC, datetime, timedelta
 from threading import Lock
 from typing import TYPE_CHECKING, Any
@@ -37,6 +39,11 @@ class OpenClawCompatTools(Toolkit):
     """OpenClaw-style tool names exposed as a single toolkit."""
 
     _registry_lock: Lock = Lock()
+    _shell_path_lock: Lock = Lock()
+    _login_shell_path: str | None = None
+    _login_shell_path_loaded = False
+    _login_shell_path_applied = False
+    _LOGIN_SHELL_TIMEOUT_SECONDS = 15
     _CODING_ERROR_PREFIXES = (
         "Error:",
         "Error reading file:",
@@ -111,6 +118,81 @@ class OpenClawCompatTools(Toolkit):
     @staticmethod
     def _now_epoch() -> int:
         return int(datetime.now(UTC).timestamp())
+
+    @staticmethod
+    def _merge_paths(existing_path: str, shell_path: str) -> str:
+        """Prepend login-shell PATH entries while keeping order and deduplicating."""
+        merged_parts: list[str] = []
+        seen: set[str] = set()
+        for part in [*shell_path.split(os.pathsep), *existing_path.split(os.pathsep)]:
+            normalized = part.strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            merged_parts.append(normalized)
+        return os.pathsep.join(merged_parts)
+
+    @classmethod
+    def _read_login_shell_path(cls) -> str | None:
+        """Read PATH from the user's login shell."""
+        if os.name == "nt":
+            return None
+
+        shell = os.environ.get("SHELL", "").strip() or "/bin/sh"
+        try:
+            result = subprocess.run(
+                [shell, "-l", "-c", "env -0"],
+                capture_output=True,
+                check=False,
+                timeout=cls._LOGIN_SHELL_TIMEOUT_SECONDS,
+                env=os.environ.copy(),
+                stdin=subprocess.DEVNULL,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.debug(f"Login shell PATH probe failed: {exc}")
+            return None
+
+        if result.returncode != 0:
+            stderr = result.stderr.decode("utf-8", errors="ignore").strip()
+            message = f"Login shell PATH probe exited with {result.returncode}"
+            if stderr:
+                message = f"{message}: {stderr}"
+            logger.debug(message)
+            return None
+
+        for env_entry in result.stdout.decode("utf-8", errors="ignore").split("\0"):
+            key, sep, value = env_entry.partition("=")
+            if sep and key == "PATH":
+                resolved_path = value.strip()
+                return resolved_path or None
+        return None
+
+    @classmethod
+    def _ensure_login_shell_path(cls) -> None:
+        """Apply login-shell PATH to this process once for OpenClaw shell aliases."""
+        if os.name == "nt":
+            return
+
+        with cls._shell_path_lock:
+            if cls._login_shell_path_applied:
+                return
+
+            if not cls._login_shell_path_loaded:
+                shell_path = cls._read_login_shell_path()
+                if not shell_path:
+                    return
+                cls._login_shell_path = shell_path
+                cls._login_shell_path_loaded = True
+
+            shell_path = cls._login_shell_path
+            if not shell_path:
+                cls._login_shell_path_loaded = False
+                return
+
+            merged = cls._merge_paths(os.environ.get("PATH", ""), shell_path)
+            if merged:
+                os.environ["PATH"] = merged
+            cls._login_shell_path_applied = True
 
     @staticmethod
     def _registry_path(context: OpenClawToolContext) -> Path:
@@ -1200,6 +1282,11 @@ class OpenClawCompatTools(Toolkit):
                 "error",
                 message="shell tool does not expose run_shell_command.",
             )
+
+        # Agno ShellTools doesn't accept per-call env overrides, so for OpenClaw
+        # compatibility we intentionally enrich process-wide PATH once before exec aliases.
+        # Subsequent subprocess calls in this process observe the merged PATH.
+        self._ensure_login_shell_path()
 
         try:
             result = shell_function.entrypoint(args)
