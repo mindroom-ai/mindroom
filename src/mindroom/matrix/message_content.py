@@ -38,6 +38,14 @@ def _attachment_mimetype(content: dict[str, Any]) -> str | None:
         if isinstance(mimetype, str):
             return mimetype
 
+    filename = content.get("filename")
+    if isinstance(filename, str):
+        normalized_filename = filename.lower()
+        if normalized_filename.endswith((".html", ".htm")):
+            return "text/html"
+        if normalized_filename.endswith(".txt"):
+            return "text/plain"
+
     return None
 
 

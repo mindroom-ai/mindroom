@@ -105,6 +105,60 @@ class TestGetFullMessageBody:
         assert result == "Title\nHello world\nSecond line"
 
     @pytest.mark.asyncio
+    async def test_large_message_with_tool_html_attachment_converts_to_text(self) -> None:
+        """HTML with tool markup should resolve to plain text for prompt history."""
+        client = AsyncMock()
+        client.download = AsyncMock()
+
+        response = MagicMock(spec=nio.DownloadResponse)
+        response.body = b"<p>Before tool</p><tool><p>name: shell</p><p>cmd: ls -la</p></tool><p>After tool</p>"
+        client.download.return_value = response
+
+        message = {
+            "body": "Preview...",
+            "content": {
+                "msgtype": "m.file",
+                "body": "Preview...",
+                "info": {"mimetype": "text/html"},
+                "io.mindroom.long_text": {
+                    "version": 1,
+                    "original_size": 100000,
+                },
+                "url": "mxc://server/file-tool-html",
+            },
+        }
+
+        result = await _get_full_message_body(message, client)
+        assert result == "Before tool\nname: shell\ncmd: ls -la\nAfter tool"
+
+    @pytest.mark.asyncio
+    async def test_large_message_with_html_filename_fallback_converts_to_text(self) -> None:
+        """Missing mimetype falls back to filename extension."""
+        client = AsyncMock()
+        client.download = AsyncMock()
+
+        response = MagicMock(spec=nio.DownloadResponse)
+        response.body = b"<h2>Converted</h2><p>From filename fallback</p>"
+        client.download.return_value = response
+
+        message = {
+            "body": "Preview...",
+            "content": {
+                "msgtype": "m.file",
+                "body": "Preview...",
+                "filename": "message.html",
+                "io.mindroom.long_text": {
+                    "version": 1,
+                    "original_size": 100000,
+                },
+                "url": "mxc://server/file-filename-html",
+            },
+        }
+
+        result = await _get_full_message_body(message, client)
+        assert result == "Converted\nFrom filename fallback"
+
+    @pytest.mark.asyncio
     async def test_large_message_with_encryption(self) -> None:
         """Test handling of encrypted large message."""
         client = AsyncMock()
