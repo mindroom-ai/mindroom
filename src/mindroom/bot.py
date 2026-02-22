@@ -615,8 +615,25 @@ class AgentBot:
     @property
     def thread_mode(self) -> Literal["thread", "room"]:
         """Get the thread mode for this agent."""
-        agent_config = self.config.agents.get(self.agent_name)
-        return agent_config.thread_mode if agent_config else "thread"
+        return self.config.get_entity_thread_mode(self.agent_name)
+
+    def _resolve_reply_thread_id(
+        self,
+        thread_id: str | None,
+        reply_to_event_id: str | None = None,
+        *,
+        event_source: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Resolve the effective thread root for outgoing replies.
+
+        In room mode this always returns ``None`` so callers send plain room
+        messages and store room-level state. In thread mode, this prefers an
+        existing thread ID and falls back to a safe root/reply target.
+        """
+        if self.thread_mode == "room":
+            return None
+        event_info = EventInfo.from_event(event_source)
+        return thread_id or event_info.safe_thread_root or reply_to_event_id
 
     @property
     def show_tool_calls(self) -> bool:
@@ -1508,7 +1525,7 @@ class AgentBot:
             client=client,
             room=room,
             room_id=room_id,
-            thread_id=None if self.thread_mode == "room" else thread_id or reply_to_event_id,
+            thread_id=self._resolve_reply_thread_id(thread_id, reply_to_event_id),
             requester_id=user_id or self.matrix_id.full_id,
             config=self.config,
         )
@@ -1852,7 +1869,7 @@ class AgentBot:
             # - If already in a thread, use that thread_id
             # - If not in a thread, use reply_to_event_id (the user's message) as thread root
             # This ensures consistency with how the bot creates threads
-            thread_root_for_registration = None if self.thread_mode == "room" else thread_id or reply_to_event_id
+            thread_root_for_registration = self._resolve_reply_thread_id(thread_id, reply_to_event_id)
             interactive.register_interactive_question(
                 event_id,
                 room_id,
@@ -1921,7 +1938,7 @@ class AgentBot:
         )
 
         if event_id and response.option_map and response.options_list:
-            thread_root_for_registration = None if self.thread_mode == "room" else thread_id or reply_to_event_id
+            thread_root_for_registration = self._resolve_reply_thread_id(thread_id, reply_to_event_id)
             interactive.register_interactive_question(
                 event_id,
                 room_id,
@@ -1981,7 +1998,7 @@ class AgentBot:
         if interactive.should_create_interactive_question(content):
             response = interactive.parse_and_format_interactive(content, extract_mapping=True)
             if response.option_map and response.options_list:
-                thread_root_for_registration = None if self.thread_mode == "room" else thread_id or reply_to_event_id
+                thread_root_for_registration = self._resolve_reply_thread_id(thread_id, reply_to_event_id)
                 interactive.register_interactive_question(
                     event_id,
                     room_id,
@@ -2211,7 +2228,13 @@ class AgentBot:
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
 
-        if self.thread_mode == "room":
+        effective_thread_id = self._resolve_reply_thread_id(
+            thread_id,
+            reply_to_event_id,
+            event_source=reply_to_event.source if reply_to_event else None,
+        )
+
+        if effective_thread_id is None:
             # Room mode: plain message, no thread metadata
             content = format_message_with_mentions(
                 self.config,
@@ -2223,11 +2246,6 @@ class AgentBot:
                 tool_trace=tool_trace,
             )
         else:
-            # Always ensure we have a thread_id - use the original message as thread root if needed
-            # This ensures agents always respond in threads, even when mentioned in main room
-            event_info = EventInfo.from_event(reply_to_event.source if reply_to_event else None)
-            effective_thread_id = thread_id or event_info.safe_thread_root or reply_to_event_id
-
             # Get the latest message in thread for MSC3440 fallback compatibility
             latest_thread_event_id = await get_latest_thread_event_id_if_needed(
                 self.client,
@@ -2355,7 +2373,7 @@ class AgentBot:
             # Router mentions the suggested agent and asks them to help
             response_text = f"@{suggested_agent} could you help with this?"
 
-        thread_event_id = thread_id or event.event_id
+        thread_event_id = self._resolve_reply_thread_id(thread_id, event.event_id)
 
         event_id = await self._send_response(
             room_id=room.room_id,
@@ -2472,9 +2490,9 @@ class AgentBot:
             await self._send_response(room.room_id, event.event_id, response_text, thread_id)
             return
 
-        # For commands that need thread context, use the existing thread or the event will start a new one
-        # The _send_response method will automatically create a thread if needed
-        effective_thread_id = thread_id or event.event_id
+        # Commands/tools that persist conversation context should use the same
+        # thread-root policy as outgoing replies.
+        effective_thread_id = self._resolve_reply_thread_id(thread_id, event.event_id)
 
         response_text = ""
 
