@@ -353,14 +353,16 @@ class TestDoctor:
         monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
         monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(storage))
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")  # for default memory embedder
         _patch_homeserver_ok(monkeypatch)
 
         result = runner.invoke(app, ["doctor"])
         assert result.exit_code == 0
         assert "✓" in result.output
         assert "✗" not in result.output
-        assert "5 passed" in result.output
+        assert "6 passed" in result.output
         assert "0 failed" in result.output
+        assert "1 warning" in result.output  # memory LLM not configured
         assert "Providers:" in result.output
         assert "anthropic (1 model)" in result.output
         assert "API key valid" in result.output
@@ -373,6 +375,7 @@ class TestDoctor:
         monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
         monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(storage))
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
 
         status_messages: list[str] = []
@@ -392,8 +395,9 @@ class TestDoctor:
 
         result = runner.invoke(app, ["doctor"])
         assert result.exit_code == 0
-        assert len(status_messages) == 5
+        assert len(status_messages) == 6
         assert any("Matrix homeserver" in msg for msg in status_messages)
+        assert any("memory config" in msg for msg in status_messages)
 
     def test_missing_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor reports failure when config file is missing."""
@@ -426,12 +430,13 @@ class TestDoctor:
         monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
         monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(storage))
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         _patch_homeserver_ok(monkeypatch)
 
         result = runner.invoke(app, ["doctor"])
         assert result.exit_code == 0
         assert "ANTHROPIC_API_KEY not set" in result.output
-        assert "1 warning" in result.output
+        assert "3 warnings" in result.output
 
     def test_homeserver_unreachable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor reports failure when Matrix homeserver is unreachable."""
@@ -547,3 +552,88 @@ class TestDoctor:
         assert "API key valid" in result.output
         # Should validate against the custom base_url, not api.openai.com
         assert any("localhost:9292" in u for u in called_urls)
+
+    def test_memory_ollama_embedder_checks_reachability(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor checks ollama embedder reachability via /api/tags."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "memory:\n"
+            "  embedder:\n"
+            "    provider: ollama\n"
+            "    config:\n"
+            "      model: nomic-embed-text\n"
+            "      host: http://localhost:11434\n",
+        )
+        storage = tmp_path / "storage"
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(storage))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0
+        assert "Memory embedder: ollama reachable" in result.output
+
+    def test_memory_configured_llm_validates_key(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor validates configured memory LLM API key."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "memory:\n"
+            "  llm:\n"
+            "    provider: openai\n"
+            "    config:\n"
+            "      model: gpt-4o-mini\n",
+        )
+        storage = tmp_path / "storage"
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(storage))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0
+        assert "Memory LLM: openai/gpt-4o-mini API key valid" in result.output
+        assert "Memory embedder:" in result.output
+
+    def test_memory_llm_missing_key_is_warning(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor warns when memory LLM API key is not set."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "memory:\n"
+            "  llm:\n"
+            "    provider: openai\n"
+            "    config:\n"
+            "      model: gpt-4o-mini\n",
+        )
+        storage = tmp_path / "storage"
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(storage))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        _patch_homeserver_ok(monkeypatch)
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0
+        assert "Memory LLM (openai): OPENAI_API_KEY not set" in result.output
