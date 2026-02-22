@@ -343,7 +343,7 @@ async def test_message_exactly_at_limit() -> None:
 
 @pytest.mark.asyncio
 async def test_message_with_formatted_body_no_tools() -> None:
-    """HTML without <tool> tags uploads plain text to avoid polluting AI context."""
+    """HTML without <tool> tags still uploads HTML so markdown renders in clients."""
     client = MockClient()
 
     # Large message with HTML but NO <tool> tags
@@ -363,12 +363,16 @@ async def test_message_with_formatted_body_no_tools() -> None:
     assert len(result["body"]) < len(large_text)
     assert "io.mindroom.long_text" in result
 
-    # Without <tool> tags the upload should be plain text so that
-    # thread-history replay feeds clean text into AI prompts.
-    assert result["info"]["mimetype"] == "text/plain"
-    assert result["filename"] == "message.txt"
+    # Without <tool> tags we still upload HTML so long-text attachments render
+    # with markdown formatting in clients.
+    assert result["info"]["mimetype"] == "text/html"
+    assert result["filename"] == "message.html"
     assert "format" not in result
     assert "formatted_body" not in result
+
+    uploaded_data = client.uploads[0]["data"]
+    uploaded_text = uploaded_data.read().decode("utf-8")
+    assert uploaded_text == large_html
 
 
 @pytest.mark.asyncio

@@ -78,6 +78,141 @@ class TestGetFullMessageBody:
         client.download.assert_called_once_with("server", "file123")
 
     @pytest.mark.asyncio
+    async def test_large_message_with_html_attachment_converts_to_text(self) -> None:
+        """HTML attachments should resolve to plain text for prompt history."""
+        client = AsyncMock()
+        client.download = AsyncMock()
+
+        response = MagicMock(spec=nio.DownloadResponse)
+        response.body = b"<h1>Title</h1><p>Hello <strong>world</strong></p><p>Second line</p>"
+        client.download.return_value = response
+
+        message = {
+            "body": "Preview...",
+            "content": {
+                "msgtype": "m.file",
+                "body": "Preview...",
+                "info": {"mimetype": "text/html"},
+                "io.mindroom.long_text": {
+                    "version": 1,
+                    "original_size": 100000,
+                },
+                "url": "mxc://server/file-html",
+            },
+        }
+
+        result = await _get_full_message_body(message, client)
+        assert result == "Title\nHello world\nSecond line"
+
+    @pytest.mark.asyncio
+    async def test_large_message_with_html_link_preserves_url(self) -> None:
+        """HTML links should preserve both label and URL for prompt history."""
+        client = AsyncMock()
+        client.download = AsyncMock()
+
+        response = MagicMock(spec=nio.DownloadResponse)
+        response.body = b'<p>See <a href="https://example.com/docs">the docs</a> now.</p>'
+        client.download.return_value = response
+
+        message = {
+            "body": "Preview...",
+            "content": {
+                "msgtype": "m.file",
+                "body": "Preview...",
+                "info": {"mimetype": "text/html"},
+                "io.mindroom.long_text": {
+                    "version": 1,
+                    "original_size": 100000,
+                },
+                "url": "mxc://server/file-html-link",
+            },
+        }
+
+        result = await _get_full_message_body(message, client)
+        assert result == "See the docs (https://example.com/docs) now."
+
+    @pytest.mark.asyncio
+    async def test_large_message_with_html_single_quoted_link_preserves_url(self) -> None:
+        """Single-quoted href links should also preserve URLs."""
+        client = AsyncMock()
+        client.download = AsyncMock()
+
+        response = MagicMock(spec=nio.DownloadResponse)
+        response.body = b"<p>Docs: <a href='https://example.com/guide'>guide</a></p>"
+        client.download.return_value = response
+
+        message = {
+            "body": "Preview...",
+            "content": {
+                "msgtype": "m.file",
+                "body": "Preview...",
+                "info": {"mimetype": "text/html"},
+                "io.mindroom.long_text": {
+                    "version": 1,
+                    "original_size": 100000,
+                },
+                "url": "mxc://server/file-html-single-quote-link",
+            },
+        }
+
+        result = await _get_full_message_body(message, client)
+        assert result == "Docs: guide (https://example.com/guide)"
+
+    @pytest.mark.asyncio
+    async def test_large_message_with_tool_html_attachment_converts_to_text(self) -> None:
+        """HTML with tool markup should resolve to plain text for prompt history."""
+        client = AsyncMock()
+        client.download = AsyncMock()
+
+        response = MagicMock(spec=nio.DownloadResponse)
+        response.body = b"<p>Before tool</p><tool><p>name: shell</p><p>cmd: ls -la</p></tool><p>After tool</p>"
+        client.download.return_value = response
+
+        message = {
+            "body": "Preview...",
+            "content": {
+                "msgtype": "m.file",
+                "body": "Preview...",
+                "info": {"mimetype": "text/html"},
+                "io.mindroom.long_text": {
+                    "version": 1,
+                    "original_size": 100000,
+                },
+                "url": "mxc://server/file-tool-html",
+            },
+        }
+
+        result = await _get_full_message_body(message, client)
+        assert result == "Before tool\nname: shell\ncmd: ls -la\nAfter tool"
+
+    @pytest.mark.asyncio
+    async def test_large_message_with_html_filename_fallback_converts_to_text(self) -> None:
+        """Missing mimetype falls back to filename extension."""
+        client = AsyncMock()
+        client.download = AsyncMock()
+
+        response = MagicMock(spec=nio.DownloadResponse)
+        response.body = b"<h2>Converted</h2><p>From filename fallback</p>"
+        client.download.return_value = response
+
+        message = {
+            "body": "Preview...",
+            "content": {
+                "msgtype": "m.file",
+                "body": "Preview...",
+                "filename": "message.html",
+                "io.mindroom.long_text": {
+                    "version": 1,
+                    "original_size": 100000,
+                },
+                "url": "mxc://server/file-filename-html",
+            },
+        }
+
+        result = await _get_full_message_body(message, client)
+        assert result == "Converted\nFrom filename fallback"
+
+    @pytest.mark.asyncio
     async def test_large_message_with_encryption(self) -> None:
         """Test handling of encrypted large message."""
         client = AsyncMock()

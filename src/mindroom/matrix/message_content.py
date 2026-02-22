@@ -6,7 +6,9 @@ including handling large messages that are stored as MXC attachments.
 
 from __future__ import annotations
 
+import re
 import time
+from html import unescape
 from typing import Any
 
 import nio
@@ -20,6 +22,56 @@ logger = get_logger(__name__)
 # Key: mxc_url, Value: (content, timestamp)
 _mxc_cache: dict[str, tuple[str, float]] = {}
 _cache_ttl = 3600.0  # 1 hour TTL
+
+
+def _attachment_mimetype(content: dict[str, Any]) -> str | None:
+    """Return attachment mimetype when available."""
+    info = content.get("info")
+    if isinstance(info, dict):
+        mimetype = info.get("mimetype")
+        if isinstance(mimetype, str):
+            return mimetype
+
+    file_info = content.get("file")
+    if isinstance(file_info, dict):
+        mimetype = file_info.get("mimetype")
+        if isinstance(mimetype, str):
+            return mimetype
+
+    filename = content.get("filename")
+    if isinstance(filename, str):
+        normalized_filename = filename.lower()
+        if normalized_filename.endswith((".html", ".htm")):
+            return "text/html"
+        if normalized_filename.endswith(".txt"):
+            return "text/plain"
+
+    return None
+
+
+def _html_to_text(html_text: str) -> str:
+    """Convert HTML attachment content back to plain text for prompt history."""
+
+    def _anchor_to_text(match: re.Match[str]) -> str:
+        href = match.group(1) or match.group(2) or match.group(3) or ""
+        label = match.group(4).strip()
+        if not label:
+            return href
+        if label == href:
+            return href
+        return f"{label} ({href})"
+
+    text = re.sub(
+        r"""(?is)<a\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`]+))[^>]*>(.*?)</a>""",
+        _anchor_to_text,
+        html_text,
+    )
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?i)</(p|div|li|tr|h1|h2|h3|h4|h5|h6|pre|blockquote)>", "\n", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = unescape(text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 async def _get_full_message_body(
@@ -62,7 +114,12 @@ async def _get_full_message_body(
             return body
 
         # Download the full content
-        full_text = await _download_mxc_text(client, mxc_url, content.get("file"))
+        full_text = await _download_mxc_text(
+            client,
+            mxc_url,
+            content.get("file"),
+            mimetype=_attachment_mimetype(content),
+        )
         if full_text:
             return full_text
         logger.warning("Failed to download large message, returning preview")
@@ -72,10 +129,11 @@ async def _get_full_message_body(
     return body
 
 
-async def _download_mxc_text(  # noqa: PLR0911, C901
+async def _download_mxc_text(  # noqa: PLR0911, PLR0912, C901
     client: nio.AsyncClient,
     mxc_url: str,
     file_info: dict[str, Any] | None = None,
+    mimetype: str | None = None,
 ) -> str | None:
     """Download text content from an MXC URL with caching.
 
@@ -83,6 +141,7 @@ async def _download_mxc_text(  # noqa: PLR0911, C901
         client: Matrix client
         mxc_url: The MXC URL to download from
         file_info: Optional encryption info for E2EE rooms
+        mimetype: Optional attachment MIME type
 
     Returns:
         The downloaded text content, or None if download failed
@@ -142,21 +201,22 @@ async def _download_mxc_text(  # noqa: PLR0911, C901
         except UnicodeDecodeError:
             logger.exception("Downloaded content is not valid UTF-8 text")
             return None
+        if mimetype == "text/html":
+            decoded_text = _html_to_text(decoded_text)
 
-        else:
-            # Cache the result
-            _mxc_cache[mxc_url] = (decoded_text, time.time())
-            logger.debug(f"Cached MXC content for: {mxc_url}")
+        # Cache the result
+        _mxc_cache[mxc_url] = (decoded_text, time.time())
+        logger.debug(f"Cached MXC content for: {mxc_url}")
 
-            # Clean old entries if cache is getting large
-            if len(_mxc_cache) > 100:
-                _clean_expired_cache()
-
-            return decoded_text
+        # Clean old entries if cache is getting large
+        if len(_mxc_cache) > 100:
+            _clean_expired_cache()
 
     except Exception:
         logger.exception("Error downloading MXC content")
         return None
+    else:
+        return decoded_text
 
 
 async def extract_and_resolve_message(
