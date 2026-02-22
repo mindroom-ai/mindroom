@@ -80,6 +80,9 @@ optional-dependencies.brandfetch = [
 optional-dependencies.brightdata = [
   "requests",
 ]
+optional-dependencies.browser = [
+  "playwright",
+]
 optional-dependencies.browserbase = [
   "browserbase",
   "playwright",

@@ -23,6 +23,7 @@ from .baidusearch import baidusearch_tools
 from .bitbucket import bitbucket_tools
 from .brandfetch import brandfetch_tools
 from .brightdata import brightdata_tools
+from .browser import browser_tools
 from .browserbase import browserbase_tools
 from .cal_com import cal_com_tools
 from .calculator import calculator_tools
@@ -135,6 +136,7 @@ __all__ = [
     "bitbucket_tools",
     "brandfetch_tools",
     "brightdata_tools",
+    "browser_tools",
     "browserbase_tools",
     "cal_com_tools",
     "calculator_tools",
