@@ -2753,6 +2753,10 @@ class MultiAgentOrchestrator:
     _sync_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     knowledge_managers: dict[str, KnowledgeManager] = field(default_factory=dict, init=False)
 
+    def __post_init__(self) -> None:
+        """Store a canonical absolute storage path to survive runtime cwd changes."""
+        self.storage_path = self.storage_path.expanduser().resolve()
+
     async def _ensure_user_account(self, config: Config) -> None:
         """Ensure a user account exists, creating one if necessary.
 
@@ -3400,6 +3404,9 @@ async def main(
     """
     # Set up logging with the specified level
     setup_logging(level=log_level)
+
+    # Canonicalize once at startup so all downstream storage paths are cwd-stable.
+    storage_path = storage_path.expanduser().resolve()
 
     # Sync API keys from environment to CredentialsManager
     logger.info("Syncing API keys from environment to CredentialsManager...")

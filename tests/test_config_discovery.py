@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 from typing import TYPE_CHECKING
 
 import mindroom.constants as constants_mod
@@ -139,3 +140,34 @@ class TestResolveConfigRelativePath:
         absolute_path = tmp_path / "knowledge"
         resolved = constants_mod.resolve_config_relative_path(absolute_path, config_path=tmp_path / "config.yaml")
         assert resolved == absolute_path.resolve()
+
+
+class TestStoragePathResolution:
+    """Tests for STORAGE_PATH_OBJ import-time canonicalization."""
+
+    def test_storage_path_obj_from_env_is_absolute_and_cwd_stable(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Relative MINDROOM_STORAGE_PATH is anchored at import time and stays stable after cwd changes."""
+        first_cwd = tmp_path / "first"
+        first_cwd.mkdir(parents=True)
+        second_cwd = tmp_path / "second"
+        second_cwd.mkdir(parents=True)
+
+        with monkeypatch.context() as m:
+            m.chdir(first_cwd)
+            m.setenv("MINDROOM_STORAGE_PATH", "mindroom_data")
+
+            importlib.reload(constants_mod)
+            expected_storage_path = (first_cwd / "mindroom_data").resolve()
+
+            assert expected_storage_path == constants_mod.STORAGE_PATH_OBJ
+            assert constants_mod.STORAGE_PATH_OBJ.is_absolute()
+
+            m.chdir(second_cwd)
+            assert expected_storage_path == constants_mod.STORAGE_PATH_OBJ
+
+        # Restore module globals to environment defaults for subsequent tests.
+        importlib.reload(constants_mod)
