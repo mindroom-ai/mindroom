@@ -113,12 +113,12 @@ Returns content with `m.mentions` and `formatted_body` containing clickable link
 
 Messages exceeding the 64KB Matrix event limit are automatically handled by `prepare_large_message()`:
 
-- Messages > 55,000 bytes: Uploaded as `message.txt` attachment
+- Messages > 55,000 bytes: Uploaded as attachment (`message.txt` for plain text, `message.html` for formatted HTML)
 - Edits > 27,000 bytes: Lower threshold since edit structure roughly doubles size
 - Preview text included in message body (maximum that fits)
 - Custom metadata (`io.mindroom.long_text`) for reconstruction
 - Preserves essential metadata (for example mentions) while dropping bulky optional fields to stay within event limits
-- Encrypted rooms: Content encrypted before upload as `message.txt.enc`
+- Encrypted rooms: Content encrypted before upload (`message.txt.enc` for plain text, `message.html.enc` for formatted HTML)
 
 ## Identity Management
 
