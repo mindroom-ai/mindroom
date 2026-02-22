@@ -10,7 +10,9 @@ import pytest
 from pydantic import ValidationError
 
 from mindroom.bot import AgentBot
-from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
+from mindroom.commands import Command, CommandType
+from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig, TeamConfig
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.streaming import StreamingResponse, send_streaming_response
 from mindroom.thread_utils import create_session_id
@@ -120,6 +122,64 @@ class TestAgentBotThreadMode:
             storage_path=tmp_path,
         )
         assert bot.thread_mode == "thread"
+
+
+class TestConfigThreadModeResolution:
+    """Test thread-mode resolution for non-agent entities."""
+
+    def test_router_inherits_uniform_room_mode(self) -> None:
+        """Router should use room mode when all configured agents use room mode."""
+        config = Config(
+            agents={
+                "assistant": AgentConfig(display_name="Assistant", thread_mode="room"),
+                "coder": AgentConfig(display_name="Coder", thread_mode="room"),
+            },
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        )
+        assert config.get_entity_thread_mode(ROUTER_AGENT_NAME) == "room"
+
+    def test_team_uses_member_mode_when_uniform(self) -> None:
+        """Team should inherit room mode when all member agents are room mode."""
+        config = Config(
+            agents={
+                "assistant": AgentConfig(display_name="Assistant", thread_mode="room"),
+                "coder": AgentConfig(display_name="Coder", thread_mode="room"),
+            },
+            teams={
+                "ops": TeamConfig(
+                    display_name="Ops Team",
+                    role="Operations",
+                    agents=["assistant", "coder"],
+                ),
+            },
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        )
+        assert config.get_entity_thread_mode("ops") == "room"
+
+    def test_team_defaults_to_thread_when_members_mixed(self) -> None:
+        """Team should default to thread mode when member modes differ."""
+        config = Config(
+            agents={
+                "assistant": AgentConfig(display_name="Assistant", thread_mode="room"),
+                "coder": AgentConfig(display_name="Coder", thread_mode="thread"),
+            },
+            teams={
+                "ops": TeamConfig(
+                    display_name="Ops Team",
+                    role="Operations",
+                    agents=["assistant", "coder"],
+                ),
+            },
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        )
+        assert config.get_entity_thread_mode("ops") == "thread"
 
 
 class TestCreateSessionIdWithNoneThread:
@@ -336,3 +396,66 @@ class TestSendStreamingResponseRoomMode:
 
         mock_get_latest.assert_not_called()
         assert "m.relates_to" not in captured
+
+
+class TestCommandThreadContextRoomMode:
+    """Test command handling uses room context in room mode."""
+
+    @pytest.mark.asyncio
+    async def test_schedule_command_uses_no_thread_id_in_room_mode(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Router command scheduling should persist room-level (not thread) context."""
+        config = Config(
+            agents={"assistant": AgentConfig(display_name="Assistant", thread_mode="room")},
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        )
+        router_user = AgentMatrixUser(
+            agent_name=ROUTER_AGENT_NAME,
+            password=TEST_PASSWORD,
+            display_name="Router",
+            user_id="@mindroom_router:localhost",
+        )
+        bot = AgentBot(
+            config=config,
+            agent_user=router_user,
+            storage_path=tmp_path,
+        )
+        bot.client = AsyncMock()
+        bot.response_tracker = MagicMock()
+        bot._send_response = AsyncMock(return_value="$reply")
+        bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$event123",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {"msgtype": "m.text", "body": "!schedule in 5 minutes ping"},
+            },
+        )
+        command = Command(
+            type=CommandType.SCHEDULE,
+            args={"full_text": "in 5 minutes ping"},
+            raw_text="!schedule in 5 minutes ping",
+        )
+
+        with (
+            patch("mindroom.bot.check_agent_mentioned", return_value=([], False, False)),
+            patch(
+                "mindroom.bot.schedule_task",
+                new_callable=AsyncMock,
+                return_value=("task123", "scheduled"),
+            ) as mock_schedule,
+        ):
+            await bot._handle_command(room, event, command)
+
+        assert mock_schedule.await_args.kwargs["thread_id"] is None
+        assert bot._send_response.await_args.args[3] is None

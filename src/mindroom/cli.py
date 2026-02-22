@@ -209,13 +209,22 @@ def doctor() -> None:
             failed += f
             warnings += w
 
-    # 4. Matrix homeserver reachable
+            # 4. Memory LLM & embedder
+            p, f, w = _run_doctor_step(
+                "Checking memory config...",
+                lambda: _check_memory_config(config),
+            )
+            passed += p
+            failed += f
+            warnings += w
+
+    # 5. Matrix homeserver reachable
     p, f, w = _run_doctor_step("Checking Matrix homeserver...", _check_matrix_homeserver)
     passed += p
     failed += f
     warnings += w
 
-    # 5. Storage directory writable
+    # 6. Storage directory writable
     p, f, w = _run_doctor_step("Checking storage...", _check_storage_writable)
     passed += p
     failed += f
@@ -432,6 +441,95 @@ def _check_single_provider(
         f"{provider} API key valid",
         f"{provider} API key invalid",
         f"{provider}: could not validate key",
+    )
+
+
+def _check_memory_config(config: Config) -> tuple[int, int, int]:
+    """Check memory LLM and embedder configuration. Returns (passed, failed, warnings)."""
+    p1, f1, w1 = _check_memory_llm(config)
+    p2, f2, w2 = _check_memory_embedder(config)
+    return p1 + p2, f1 + f2, w1 + w2
+
+
+def _check_memory_llm(config: Config) -> tuple[int, int, int]:
+    """Check memory LLM configuration. Returns (passed, failed, warnings)."""
+    if config.memory.llm is None:
+        ollama_host = _get_ollama_host(config)
+        console.print(
+            "[yellow]![/yellow] Memory LLM not configured"
+            f" (defaults to ollama at {ollama_host};"
+            " see memory/config.py fallback)",
+        )
+        # Check if default Ollama is reachable
+        valid, detail = _http_check(f"{ollama_host.rstrip('/')}/api/tags")
+        if valid is not True:
+            console.print(
+                f"[red]✗[/red] Default Ollama for memory LLM unreachable ({ollama_host}: {detail})",
+            )
+            return 0, 1, 0
+        return 0, 0, 1
+
+    llm_provider = config.memory.llm.provider
+    llm_host = config.memory.llm.config.get("host")
+    if llm_provider == "ollama":
+        host = llm_host or _get_ollama_host(config)
+        valid, detail = _http_check(f"{host.rstrip('/')}/api/tags")
+        return _print_validation(
+            valid,
+            detail,
+            f"Memory LLM: ollama reachable ({host})",
+            f"Memory LLM: ollama unreachable ({host})",
+            f"Memory LLM: could not reach ollama ({host})",
+        )
+
+    llm_model = config.memory.llm.config.get("model", "default")
+    env_key = env_key_for_provider(llm_provider)
+    api_key = os.getenv(env_key) if env_key else None
+    if env_key and not api_key:
+        console.print(
+            f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set",
+        )
+        return 0, 0, 1
+    base_url = llm_host
+    valid, detail = _validate_provider_key(llm_provider, api_key or "", base_url)
+    return _print_validation(
+        valid,
+        detail,
+        f"Memory LLM: {llm_provider}/{llm_model} API key valid",
+        f"Memory LLM: {llm_provider}/{llm_model} API key invalid",
+        f"Memory LLM: {llm_provider}/{llm_model} could not validate",
+    )
+
+
+def _check_memory_embedder(config: Config) -> tuple[int, int, int]:
+    """Check memory embedder configuration. Returns (passed, failed, warnings)."""
+    emb = config.memory.embedder
+    if emb.provider == "ollama":
+        host = emb.config.host or _get_ollama_host(config)
+        valid, detail = _http_check(f"{host.rstrip('/')}/api/tags")
+        return _print_validation(
+            valid,
+            detail,
+            f"Memory embedder: ollama reachable ({host})",
+            f"Memory embedder: ollama unreachable ({host})",
+            f"Memory embedder: could not reach ollama ({host})",
+        )
+
+    env_key = env_key_for_provider(emb.provider)
+    api_key = os.getenv(env_key) if env_key else None
+    if env_key and not api_key:
+        console.print(
+            f"[yellow]![/yellow] Memory embedder ({emb.provider}): {env_key} not set",
+        )
+        return 0, 0, 1
+    base_url = emb.config.host
+    valid, detail = _validate_provider_key(emb.provider, api_key or "", base_url)
+    return _print_validation(
+        valid,
+        detail,
+        f"Memory embedder: {emb.provider}/{emb.config.model} API key valid",
+        f"Memory embedder: {emb.provider}/{emb.config.model} API key invalid",
+        f"Memory embedder: {emb.provider}/{emb.config.model} could not validate",
     )
 
 

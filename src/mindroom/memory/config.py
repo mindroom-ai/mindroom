@@ -27,8 +27,11 @@ def get_memory_config(storage_path: Path, config: Config) -> dict:  # noqa: C901
     app_config = config
     creds_manager = get_credentials_manager()
 
+    # Canonicalize once so Chroma path is independent of runtime cwd changes.
+    resolved_storage_path = storage_path.expanduser().resolve()
+
     # Ensure storage directories exist
-    chroma_path = storage_path / "chroma"
+    chroma_path = resolved_storage_path / "chroma"
     chroma_path.mkdir(parents=True, exist_ok=True)
 
     # Build embedder config from config.yaml
@@ -136,5 +139,5 @@ async def create_memory_instance(storage_path: Path, config: Config) -> AsyncMem
     # Mem0 expects a dict for configuration, not config objects
     memory = await AsyncMemory.from_config(config_dict)
 
-    logger.info(f"Created memory instance with ChromaDB at {storage_path}")
+    logger.info(f"Created memory instance with ChromaDB at {config_dict['vector_store']['config']['path']}")
     return memory

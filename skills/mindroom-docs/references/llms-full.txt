@@ -1863,12 +1863,12 @@ Works well:
 
 - File-based identity and memory documents
 - OpenClaw-inspired behavior and instructions
-- `sessions_*`, `message`, `subagents`, `web_*`, `exec/process`, `cron` compatibility surface
+- `sessions_*`, `message`, `subagents`, `web_*`, `exec/process`, `cron`, `browser` compatibility surface
 
 Not included:
 
 - OpenClaw gateway control plane (`gateway` returns `not_configured`)
-- Device nodes, canvas, and browser platform tools
+- Device nodes and canvas platform tools
 - `tts` and `image` tool aliases (use MindRoom's native TTS/image tools directly)
 - Heartbeat runtime — schedule heartbeats via `cron`/`scheduler` instead
 
@@ -1876,14 +1876,15 @@ Not included:
 
 The `openclaw_compat` tool provides OpenClaw-named aliases so prompts and skills written for OpenClaw work without rewriting tool calls:
 
-| OpenClaw tool                | MindRoom backend                  |
-| ---------------------------- | --------------------------------- |
-| `exec`, `process`            | `ShellTools`                      |
-| `web_search`, `web_fetch`    | `DuckDuckGoTools`, `WebsiteTools` |
-| `cron`                       | `SchedulerTools`                  |
-| `message`, `sessions_*`      | Matrix client calls               |
-| `subagents`, `agents_list`   | Agent registry lookup             |
-| `gateway`, `nodes`, `canvas` | Stubs (`not_configured`)          |
+| OpenClaw tool                | MindRoom backend                              |
+| ---------------------------- | --------------------------------------------- |
+| `exec`, `process`            | `ShellTools`                                  |
+| `web_search`, `web_fetch`    | `DuckDuckGoTools`, `WebsiteTools`             |
+| `cron`                       | `SchedulerTools`                              |
+| `message`, `sessions_*`      | Matrix client calls                           |
+| `subagents`, `agents_list`   | Agent registry lookup                         |
+| `browser`                    | `BrowserTools` (Playwright, host target only) |
+| `gateway`, `nodes`, `canvas` | Stubs (`not_configured`)                      |
 
 ## Drop-in config
 
@@ -1926,6 +1927,7 @@ agents:
       - duckduckgo
       - website
       - openclaw_compat
+      - browser
       - python
       - calculator
 
@@ -3480,12 +3482,12 @@ Returns content with `m.mentions` and `formatted_body` containing clickable link
 
 Messages exceeding the 64KB Matrix event limit are automatically handled by `prepare_large_message()`:
 
-- Messages > 55,000 bytes: Uploaded as `message.txt` attachment
+- Messages > 55,000 bytes: Uploaded as attachment (`message.txt` for plain text, `message.html` for formatted HTML)
 - Edits > 27,000 bytes: Lower threshold since edit structure roughly doubles size
 - Preview text included in message body (maximum that fits)
 - Custom metadata (`io.mindroom.long_text`) for reconstruction
 - Preserves essential metadata (for example mentions) while dropping bulky optional fields to stay within event limits
-- Encrypted rooms: Content encrypted before upload as `message.txt.enc`
+- Encrypted rooms: Content encrypted before upload (`message.txt.enc` for plain text, `message.html.enc` for formatted HTML)
 
 ## Identity Management
 
