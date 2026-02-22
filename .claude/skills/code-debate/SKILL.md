@@ -1,29 +1,32 @@
 ---
 name: code-debate
 description: Two coding agents debate code changes through a shared DEBATE.md file. Use when you want adversarial review of a commit, diff, or PR.
-argument-hint: "[subject: commit, diff, PR, or file to debate]"
+argument-hint: "[A|B] [subject: commit, diff, PR, or file to debate]"
 ---
 
 # Code Debate Protocol
 
-A protocol for two coding agents (Claude Code, Gemini CLI, Codex, or any other) to debate code changes through a shared file (`DEBATE.md`). Both agents receive this same prompt. Role is determined by explicit designation when provided, otherwise by file existence.
+A protocol for two coding agents (Claude Code, Gemini CLI, Codex, or any other) to debate code changes through a shared file (`DEBATE.md`). Both agents receive this same prompt. Role is determined by the first argument.
 
 ## How to use
 
-Open two terminal tabs with coding agents (same or different). Give both this prompt along with a subject to discuss — e.g., a commit, a diff, a PR, or one agent's review of another agent's work.
+Open two terminal tabs with coding agents (same or different). Invoke this skill in each, specifying role and subject:
 
-You may send this prompt to both agents at the same time. If you designate one agent as **Agent B**, that agent must immediately start polling and wait for `DEBATE.md` to exist, then read it and continue as Agent B.
-
-Without designation, the first agent to run will create `DEBATE.md` and become the opener. The second agent will find the file already exists and become the responder.
+- `/code-debate A <subject>` — opener, creates `DEBATE.md` with the first analysis
+- `/code-debate B <subject>` — responder, waits for `DEBATE.md` then replies
 
 ## Role detection
 
-- If the user explicitly designates you as **Agent B** → you are **Agent B**, even if `DEBATE.md` does not exist yet. Start polling and wait for file creation.
-- Otherwise, use file existence:
-  - If `DEBATE.md` does **not** exist → you are **Agent A** (opener). Write the opening position.
-  - If `DEBATE.md` **already exists** → you are **Agent B** (responder). Read what's there and respond.
+Your role is determined by the first argument (`$0`):
 
-Do not ask the user which role to play. Respect explicit Agent B designation if provided; otherwise detect from file existence.
+- **`A`** → you are **Agent A** (opener). Create `DEBATE.md` and write the opening position.
+- **`B`** → you are **Agent B** (responder). Poll and wait for `DEBATE.md` to exist, then read it and respond.
+
+If no role argument is provided, fall back to file existence:
+  - If `DEBATE.md` does **not** exist → you are **Agent A** (opener).
+  - If `DEBATE.md` **already exists** → you are **Agent B** (responder).
+
+Do not ask the user which role to play.
 
 ## Non-simulation guardrails (MUST)
 
@@ -115,7 +118,7 @@ Before appending, also verify the last signature line role:
 
 ## Agent A (opener) flow
 
-1. Analyze the subject the user specified (run `git show`, `git diff`, `gh pr view`, read files, etc. as appropriate).
+1. The debate subject is: **$1** (the arguments after the role). Analyze it (run `git show`, `git diff`, `gh pr view`, read files, etc. as appropriate).
 2. Write your analysis to `DEBATE.md` using the file format below.
 3. Compute the file's checksum using `CKSUM DEBATE.md`.
 4. Poll for changes (5-second interval, 10-minute timeout):
@@ -139,7 +142,7 @@ Before appending, also verify the last signature line role:
    ```bash
    SECONDS=0; while [ ! -f DEBATE.md ]; do sleep 5; if [ "$SECONDS" -ge 600 ]; then echo "TIMEOUT waiting for DEBATE.md"; exit 0; fi; done
    ```
-2. Analyze the same subject the user specified.
+2. The debate subject is: **$1** (the arguments after the role). Analyze it (run `git show`, `git diff`, `gh pr view`, read files, etc. as appropriate).
 3. Verify it is your turn (check the last `## ` heading). Example:
    ```bash
    LAST=$(grep -E '^## ' DEBATE.md | tail -n1)
