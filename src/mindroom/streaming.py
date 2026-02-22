@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -33,7 +34,16 @@ logger = get_logger(__name__)
 
 # Global constant for the in-progress marker
 IN_PROGRESS_MARKER = " ⋯"
+PROGRESS_PLACEHOLDER = "Thinking..."
 StreamInputChunk = str | StructuredStreamChunk | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+_IN_PROGRESS_MESSAGE_PATTERN = re.compile(rf"{re.escape(IN_PROGRESS_MARKER)}\.*$")
+
+
+def is_in_progress_message(text: object) -> bool:
+    """Return True when a message ends with an in-progress marker."""
+    if not isinstance(text, str):
+        return False
+    return bool(_IN_PROGRESS_MESSAGE_PATTERN.search(text))
 
 
 def _longest_common_prefix_len(first: list[ToolTraceEntry], second: list[ToolTraceEntry]) -> int:
@@ -79,15 +89,22 @@ class StreamingResponse:
     update_interval: float = 5.0
     min_update_interval: float = 0.5
     interval_ramp_seconds: float = 15.0
+    update_char_threshold: int = 240
+    min_update_char_threshold: int = 48
+    min_char_update_interval: float = 0.35
+    progress_update_interval: float = 1.0
     latest_thread_event_id: str | None = None  # For MSC3440 compliance
     room_mode: bool = False  # When True, skip all thread relations (for bridges/mobile)
     show_tool_calls: bool = True  # When False, omit inline tool call text (metadata still tracked)
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
     stream_started_at: float | None = None
+    chars_since_last_update: int = 0
+    in_progress_update_count: int = 0
 
     def _update(self, new_chunk: str) -> None:
         """Append new chunk to accumulated text."""
         self.accumulated_text += new_chunk
+        self.chars_since_last_update += len(new_chunk)
 
     def _current_update_interval(self, current_time: float) -> float:
         """Return the current throttling interval.
@@ -106,15 +123,42 @@ class StreamingResponse:
         progress = elapsed / self.interval_ramp_seconds
         return fast_interval + (self.update_interval - fast_interval) * progress
 
-    async def _throttled_send(self, client: nio.AsyncClient) -> None:
-        """Send/edit the message if enough time has passed since the last update."""
+    def _current_char_threshold(self, current_time: float) -> int:
+        """Return the current character threshold for triggering updates."""
+        steady_threshold = max(1, self.update_char_threshold)
+        if self.stream_started_at is None or self.interval_ramp_seconds <= 0:
+            return steady_threshold
+
+        fast_threshold = max(1, min(self.min_update_char_threshold, self.update_char_threshold))
+        elapsed = max(0.0, current_time - self.stream_started_at)
+        if elapsed >= self.interval_ramp_seconds:
+            return steady_threshold
+
+        progress = elapsed / self.interval_ramp_seconds
+        threshold = fast_threshold + (self.update_char_threshold - fast_threshold) * progress
+        return max(1, round(threshold))
+
+    async def _throttled_send(self, client: nio.AsyncClient, *, progress_hint: bool = False) -> None:
+        """Send/edit when either time or character thresholds are met."""
         current_time = time.time()
         if self.stream_started_at is None:
             self.stream_started_at = current_time
         current_interval = self._current_update_interval(current_time)
-        if current_time - self.last_update >= current_interval:
-            await self._send_or_edit_message(client)
+        if progress_hint:
+            current_interval = min(current_interval, self.progress_update_interval)
+
+        elapsed_since_last_update = current_time - self.last_update
+        time_triggered = elapsed_since_last_update >= current_interval
+        char_triggered = (
+            self.chars_since_last_update >= self._current_char_threshold(current_time)
+            and elapsed_since_last_update >= self.min_char_update_interval
+        )
+        should_send = time_triggered or char_triggered
+        allow_empty_progress = progress_hint and self.event_id is not None and not self.accumulated_text.strip()
+        if should_send and (self.accumulated_text.strip() or allow_empty_progress):
+            await self._send_or_edit_message(client, allow_empty_progress=allow_empty_progress)
             self.last_update = current_time
+            self.chars_since_last_update = 0
 
     async def update_content(self, new_chunk: str, client: nio.AsyncClient) -> None:
         """Add new content and potentially update the message."""
@@ -125,17 +169,24 @@ class StreamingResponse:
         """Send final message update."""
         await self._send_or_edit_message(client, is_final=True)
 
-    async def _send_or_edit_message(self, client: nio.AsyncClient, is_final: bool = False) -> None:
+    async def _send_or_edit_message(
+        self,
+        client: nio.AsyncClient,
+        is_final: bool = False,
+        *,
+        allow_empty_progress: bool = False,
+    ) -> None:
         """Send new message or edit existing one."""
-        if not self.accumulated_text.strip():
+        if not self.accumulated_text.strip() and not allow_empty_progress:
             return
 
         effective_thread_id = None if self.room_mode else self.thread_id if self.thread_id else self.reply_to_event_id
 
         # Add in-progress marker during streaming (not on final update)
-        text_to_send = self.accumulated_text
+        text_to_send = self.accumulated_text if self.accumulated_text.strip() else PROGRESS_PLACEHOLDER
         if not is_final:
-            text_to_send += IN_PROGRESS_MARKER
+            marker_suffix = "." * (self.in_progress_update_count % 3)
+            text_to_send += f"{IN_PROGRESS_MARKER}{marker_suffix}"
 
         # Format the text (handles interactive questions if present)
         response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=False)
@@ -170,6 +221,9 @@ class StreamingResponse:
             if not response_event_id:
                 logger.error("Failed to edit streaming message")
 
+        if not is_final:
+            self.in_progress_update_count += 1
+
 
 class ReplacementStreamingResponse(StreamingResponse):
     """StreamingResponse variant that replaces content instead of appending.
@@ -182,6 +236,7 @@ class ReplacementStreamingResponse(StreamingResponse):
     def _update(self, new_chunk: str) -> None:
         """Replace accumulated text with new chunk."""
         self.accumulated_text = new_chunk
+        self.chars_since_last_update += len(new_chunk)
 
 
 async def send_streaming_response(  # noqa: C901, PLR0912
@@ -266,6 +321,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912
                 streaming.tool_trace.append(trace_entry)
             if not streaming.show_tool_calls:
                 text_chunk = ""
+                await streaming._throttled_send(client, progress_hint=True)
         elif isinstance(chunk, ToolCallCompletedEvent):
             info = extract_tool_completed_info(chunk.tool)
             if info:
@@ -281,6 +337,8 @@ async def send_streaming_response(  # noqa: C901, PLR0912
                 streaming.tool_trace.append(trace_entry)
                 if streaming.show_tool_calls:
                     await streaming._throttled_send(client)
+                else:
+                    await streaming._throttled_send(client, progress_hint=True)
                 continue
             text_chunk = ""
         else:
