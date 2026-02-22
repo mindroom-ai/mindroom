@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 from mindroom.bot import MultiAgentOrchestrator
+
+if TYPE_CHECKING:
+    import pytest
 from mindroom.config import (
     Config,
     EmbedderConfig,
@@ -181,7 +185,7 @@ class TestMemoryConfig:
         self,
         mock_get_creds_manager: MagicMock,
         tmp_path: Path,
-        monkeypatch: object,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Relative storage paths should be anchored once and survive later cwd changes."""
         mock_creds_manager = MagicMock()

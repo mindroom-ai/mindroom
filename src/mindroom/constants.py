@@ -90,7 +90,7 @@ CONFIG_TEMPLATE_PATH = Path(_CONFIG_TEMPLATE_ENV).expanduser() if _CONFIG_TEMPLA
 
 _STORAGE_PATH_ENV = os.getenv("MINDROOM_STORAGE_PATH")
 STORAGE_PATH = _STORAGE_PATH_ENV or str(CONFIG_PATH.parent / "mindroom_data")
-STORAGE_PATH_OBJ = Path(STORAGE_PATH)
+STORAGE_PATH_OBJ = Path(STORAGE_PATH).expanduser().resolve()
 
 # Specific files and directories
 MATRIX_STATE_FILE = STORAGE_PATH_OBJ / "matrix_state.yaml"
