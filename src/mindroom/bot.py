@@ -2211,6 +2211,7 @@ class AgentBot:
         skip_mentions: bool = False,
         tool_trace: list[ToolTraceEntry] | None = None,
         extra_content: dict[str, Any] | None = None,
+        show_tool_calls: bool | None = None,
     ) -> str | None:
         """Send a response message to a room.
 
@@ -2223,6 +2224,7 @@ class AgentBot:
             skip_mentions: If True, add metadata to indicate mentions should not trigger responses
             tool_trace: Optional structured tool trace metadata for message content
             extra_content: Optional content fields merged into the outgoing Matrix event
+            show_tool_calls: Whether tool trace should be displayed by clients (defaults to agent setting)
 
         Returns:
             Event ID if message was sent successfully, None otherwise.
@@ -2230,6 +2232,7 @@ class AgentBot:
         """
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
+        effective_show_tool_calls = show_tool_calls if show_tool_calls is not None else self.show_tool_calls
 
         effective_thread_id = self._resolve_reply_thread_id(
             thread_id,
@@ -2247,6 +2250,7 @@ class AgentBot:
                 reply_to_event_id=None,
                 latest_thread_event_id=None,
                 tool_trace=tool_trace,
+                show_tool_calls=effective_show_tool_calls,
             )
         else:
             # Get the latest message in thread for MSC3440 fallback compatibility
@@ -2265,6 +2269,7 @@ class AgentBot:
                 reply_to_event_id=reply_to_event_id,
                 latest_thread_event_id=latest_thread_event_id,
                 tool_trace=tool_trace,
+                show_tool_calls=effective_show_tool_calls,
             )
 
         # Add metadata to indicate mentions should be ignored for responses
@@ -2288,6 +2293,7 @@ class AgentBot:
         new_text: str,
         thread_id: str | None,
         tool_trace: list[ToolTraceEntry] | None = None,
+        show_tool_calls: bool | None = None,
     ) -> bool:
         """Edit an existing message.
 
@@ -2297,6 +2303,7 @@ class AgentBot:
         """
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
+        effective_show_tool_calls = show_tool_calls if show_tool_calls is not None else self.show_tool_calls
 
         if self.thread_mode == "room":
             # Room mode: no thread metadata on edits
@@ -2305,6 +2312,7 @@ class AgentBot:
                 new_text,
                 sender_domain=sender_domain,
                 tool_trace=tool_trace,
+                show_tool_calls=effective_show_tool_calls,
             )
         else:
             # For edits in threads, we need to get the latest thread event ID for MSC3440 compliance
@@ -2327,6 +2335,7 @@ class AgentBot:
                 thread_event_id=thread_id,
                 latest_thread_event_id=latest_thread_event_id,
                 tool_trace=tool_trace,
+                show_tool_calls=effective_show_tool_calls,
             )
 
         assert self.client is not None

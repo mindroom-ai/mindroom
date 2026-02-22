@@ -209,6 +209,7 @@ class StreamingResponse:
             reply_to_event_id=None if self.room_mode else self.reply_to_event_id,
             latest_thread_event_id=latest_for_message,
             tool_trace=self.tool_trace,
+            show_tool_calls=self.show_tool_calls,
         )
 
         send_succeeded = False

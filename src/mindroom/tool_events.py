@@ -221,7 +221,11 @@ def extract_tool_completed_info(tool: ToolExecution | None) -> tuple[str, str | 
     return tool_name, tool.result
 
 
-def build_tool_trace_content(tool_trace: Sequence[ToolTraceEntry] | None) -> dict[str, object] | None:
+def build_tool_trace_content(
+    tool_trace: Sequence[ToolTraceEntry] | None,
+    *,
+    show_tool_calls: bool = True,
+) -> dict[str, object] | None:
     """Build message content payload for tool trace metadata."""
     if not tool_trace:
         return None
@@ -251,6 +255,8 @@ def build_tool_trace_content(tool_trace: Sequence[ToolTraceEntry] | None) -> dic
         "version": TOOL_TRACE_VERSION,
         "events": events,
     }
+    if not show_tool_calls:
+        payload["display"] = False
     if overflow:
         payload["events_truncated"] = overflow
     if has_truncated_content:
