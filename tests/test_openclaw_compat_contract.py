@@ -136,10 +136,22 @@ async def test_openclaw_compat_aliases_return_structured_results() -> None:
     assert web_fetch_payload["status"] == "ok"
     assert web_fetch_payload["tool"] == "web_fetch"
 
-    browser_payload = json.loads(await tool.browser(action="status"))
+    browser_payload = json.loads(
+        await tool.browser(
+            action="status",
+            target="node",
+            node="node-1",
+            profile="openclaw",
+        ),
+    )
     assert browser_payload["status"] == "ok"
     assert browser_payload["tool"] == "browser"
-    browser_entrypoint.assert_awaited_once()
+    browser_entrypoint.assert_awaited_once_with(
+        action="status",
+        node="node-1",
+        profile="openclaw",
+        target="node",
+    )
 
     exec_payload = json.loads(await tool.exec("echo hi"))
     assert exec_payload["status"] == "ok"
