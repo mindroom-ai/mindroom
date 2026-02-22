@@ -301,6 +301,42 @@ def test_openclaw_compat_ensure_login_shell_path_applies_once(monkeypatch: pytes
     assert os.environ["PATH"] == first_path
 
 
+def test_openclaw_compat_ensure_login_shell_path_retries_after_probe_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify transient probe failures do not permanently disable future PATH bootstrap."""
+    original_path = f"/existing/bin{os.pathsep}/usr/bin"
+    monkeypatch.setenv("PATH", original_path)
+    monkeypatch.setattr(OpenClawCompatTools, "_login_shell_path_loaded", False)
+    monkeypatch.setattr(OpenClawCompatTools, "_login_shell_path_applied", False)
+    monkeypatch.setattr(OpenClawCompatTools, "_login_shell_path", None)
+
+    call_counter = {"count": 0}
+    responses = [None, f"/custom/bin{os.pathsep}/other/bin"]
+
+    def _fake_read_login_shell_path(_cls: type[OpenClawCompatTools]) -> str | None:
+        call_counter["count"] += 1
+        return responses.pop(0)
+
+    monkeypatch.setattr(
+        OpenClawCompatTools,
+        "_read_login_shell_path",
+        classmethod(_fake_read_login_shell_path),
+    )
+
+    OpenClawCompatTools._ensure_login_shell_path()
+    assert call_counter["count"] == 1
+    assert os.environ["PATH"] == original_path
+    assert OpenClawCompatTools._login_shell_path_loaded is False
+    assert OpenClawCompatTools._login_shell_path_applied is False
+
+    OpenClawCompatTools._ensure_login_shell_path()
+    assert call_counter["count"] == 2
+    assert os.environ["PATH"] == f"/custom/bin{os.pathsep}/other/bin{os.pathsep}/existing/bin{os.pathsep}/usr/bin"
+    assert OpenClawCompatTools._login_shell_path_loaded is True
+    assert OpenClawCompatTools._login_shell_path_applied is True
+
+
 @pytest.mark.asyncio
 async def test_openclaw_compat_exec_uses_shell_tool_entrypoint() -> None:
     """Verify exec dispatches via shell toolkit function entrypoint."""

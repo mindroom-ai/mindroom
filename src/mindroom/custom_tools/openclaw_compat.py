@@ -178,14 +178,20 @@ class OpenClawCompatTools(Toolkit):
                 return
 
             if not cls._login_shell_path_loaded:
-                cls._login_shell_path = cls._read_login_shell_path()
+                shell_path = cls._read_login_shell_path()
+                if not shell_path:
+                    return
+                cls._login_shell_path = shell_path
                 cls._login_shell_path_loaded = True
 
             shell_path = cls._login_shell_path
-            if shell_path:
-                merged = cls._merge_paths(os.environ.get("PATH", ""), shell_path)
-                if merged:
-                    os.environ["PATH"] = merged
+            if not shell_path:
+                cls._login_shell_path_loaded = False
+                return
+
+            merged = cls._merge_paths(os.environ.get("PATH", ""), shell_path)
+            if merged:
+                os.environ["PATH"] = merged
             cls._login_shell_path_applied = True
 
     @staticmethod
@@ -1278,7 +1284,8 @@ class OpenClawCompatTools(Toolkit):
             )
 
         # Agno ShellTools doesn't accept per-call env overrides, so for OpenClaw
-        # compatibility we intentionally enrich process PATH once before exec aliases.
+        # compatibility we intentionally enrich process-wide PATH once before exec aliases.
+        # Subsequent subprocess calls in this process observe the merged PATH.
         self._ensure_login_shell_path()
 
         try:
