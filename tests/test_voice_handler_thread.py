@@ -33,6 +33,7 @@ async def test_voice_handler_returns_transcription() -> None:
     voice_event.event_id = "$voice123"
     voice_event.sender = "@user:example.com"
     voice_event.url = "mxc://example.com/audio"
+    voice_event.source = {"content": {"info": {"mimetype": "audio/ogg"}}}
 
     # Mock config
     config = Config.from_yaml()
