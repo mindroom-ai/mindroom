@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import httpx
 import nio
 from agno.agent import Agent
+from agno.media import Audio
 from nio import crypto
 
 from .ai import get_model_instance
@@ -27,6 +28,7 @@ async def handle_voice_message(
     room: nio.MatrixRoom,  # noqa: ARG001
     event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
     config: Config,
+    audio: Audio | None = None,
 ) -> str | None:
     """Handle a voice message event.
 
@@ -35,6 +37,7 @@ async def handle_voice_message(
         room: Matrix room
         event: Voice message event
         config: Application configuration
+        audio: Optional pre-downloaded audio payload to reuse across fallbacks
 
     Returns:
         The transcribed and formatted message, or None if transcription failed
@@ -44,14 +47,13 @@ async def handle_voice_message(
         return None
 
     try:
-        # Download the audio file
-        audio_data = await _download_audio(client, event)
-        if not audio_data:
+        voice_audio = audio or await download_audio(client, event)
+        if voice_audio is None or voice_audio.content is None:
             logger.error("Failed to download audio file")
             return None
 
         # Transcribe the audio
-        transcription = await _transcribe_audio(audio_data, config)
+        transcription = await _transcribe_audio(voice_audio.content, config)
         if not transcription:
             logger.warning("Failed to transcribe audio or empty transcription")
             return None
@@ -71,6 +73,39 @@ async def handle_voice_message(
         logger.exception("Error handling voice message")
         return None
     return None
+
+
+def extract_caption(event: nio.RoomMessageAudio | nio.RoomEncryptedAudio) -> str:
+    """Extract user caption from an audio event using MSC2530 semantics."""
+    content = event.source.get("content", {})
+    filename = content.get("filename")
+    body = event.body
+    if filename and filename != body and body:
+        return body
+    return "[Attached voice message]"
+
+
+async def download_audio(
+    client: nio.AsyncClient,
+    event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
+) -> Audio | None:
+    """Download Matrix audio and convert it to an agno Audio media object."""
+    audio_data = await _download_audio(client, event)
+    if audio_data is None:
+        return None
+    if not isinstance(audio_data, bytes):
+        logger.error("Downloaded audio payload is not bytes")
+        return None
+
+    if isinstance(event, nio.RoomEncryptedAudio):
+        mime_type = event.mimetype
+    else:
+        source = getattr(event, "source", {})
+        content = source.get("content", {}) if isinstance(source, dict) else {}
+        info = content.get("info", {}) if isinstance(content, dict) else {}
+        mime_type = info.get("mimetype") if isinstance(info, dict) else None
+
+    return Audio(content=audio_data, mime_type=mime_type)
 
 
 async def _download_audio(

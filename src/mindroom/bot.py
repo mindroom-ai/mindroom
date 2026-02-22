@@ -27,7 +27,14 @@ from .commands import (
 )
 from .config import Config
 from .config_commands import handle_config_command
-from .constants import CONFIG_PATH, MATRIX_HOMESERVER, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
+from .constants import (
+    CONFIG_PATH,
+    MATRIX_HOMESERVER,
+    ORIGINAL_SENDER_KEY,
+    ROUTER_AGENT_NAME,
+    VOICE_PREFIX,
+    VOICE_RAW_AUDIO_FALLBACK_KEY,
+)
 from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
 from .knowledge import initialize_knowledge_managers, shutdown_knowledge_managers
@@ -126,7 +133,7 @@ if TYPE_CHECKING:
     import structlog
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
-    from agno.media import Image
+    from agno.media import Audio, Image
     from agno.tools.function import Function
     from agno.tools.toolkit import Toolkit
 
@@ -521,6 +528,12 @@ def _should_skip_mentions(event_source: dict) -> bool:
     return bool(content.get("com.mindroom.skip_mentions", False))
 
 
+def _is_voice_raw_audio_fallback(event_source: dict) -> bool:
+    """Return whether this message carries raw-audio fallback metadata."""
+    content = event_source.get("content", {})
+    return bool(content.get(VOICE_RAW_AUDIO_FALLBACK_KEY, False))
+
+
 def create_bot_for_entity(
     entity_name: str,
     agent_user: AgentMatrixUser,
@@ -707,6 +720,18 @@ class AgentBot:
             return []
         img = await image_handler.download_image(self.client, event)
         return [img] if img else []
+
+    async def _fetch_thread_audio(self, room_id: str, thread_id: str) -> list[Audio]:
+        """Download audio from the thread root event, if it is an audio message."""
+        assert self.client is not None
+        response = await self.client.room_get_event(room_id, thread_id)
+        if not isinstance(response, nio.RoomGetEventResponse):
+            return []
+        event = response.event
+        if not isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio):
+            return []
+        audio = await voice_handler.download_audio(self.client, event)
+        return [audio] if audio else []
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
@@ -1036,6 +1061,15 @@ class AgentBot:
         if action.kind == "skip":
             return
 
+        # If responding in a thread, include supported media from the thread
+        # root event so routed relay messages can forward original attachments.
+        thread_images = await self._fetch_thread_images(room.room_id, context.thread_id) if context.thread_id else []
+        thread_audio = (
+            await self._fetch_thread_audio(room.room_id, context.thread_id)
+            if context.thread_id and _is_voice_raw_audio_fallback(event.source)
+            else []
+        )
+
         if action.kind == "team":
             assert action.form_team is not None
             response_event_id = await self._generate_team_response_helper(
@@ -1048,6 +1082,8 @@ class AgentBot:
                 thread_history=context.thread_history,
                 requester_user_id=requester_user_id,
                 existing_event_id=None,
+                audio=thread_audio or None,
+                images=thread_images or None,
             )
             self.response_tracker.mark_responded(event.event_id, response_event_id)
             return
@@ -1058,10 +1094,6 @@ class AgentBot:
 
         self.logger.info("Processing", event_id=event.event_id)
 
-        # If responding in a thread, check whether the thread root is an image
-        # so the model can actually see it (e.g. after router routes an image).
-        thread_images = await self._fetch_thread_images(room.room_id, context.thread_id) if context.thread_id else []
-
         response_event_id = await self._generate_response(
             room_id=room.room_id,
             prompt=event.body,
@@ -1069,6 +1101,7 @@ class AgentBot:
             thread_id=context.thread_id,
             thread_history=context.thread_history,
             user_id=requester_user_id,
+            audio=thread_audio or None,
             images=thread_images or None,
         )
         self.response_tracker.mark_responded(event.event_id, response_event_id)
@@ -1188,11 +1221,18 @@ class AgentBot:
 
         self.logger.info("Processing voice message", event_id=event.event_id, sender=event.sender)
 
-        transcribed_message = await voice_handler.handle_voice_message(self.client, room, event, self.config)
+        voice_audio = await voice_handler.download_audio(self.client, event)
+        transcribed_message = await voice_handler.handle_voice_message(
+            self.client,
+            room,
+            event,
+            self.config,
+            audio=voice_audio,
+        )
+        event_info = EventInfo.from_event(event.source)
+        _, thread_id, _ = await self._derive_conversation_context(room.room_id, event_info)
 
         if transcribed_message:
-            event_info = EventInfo.from_event(event.source)
-            _, thread_id, _ = await self._derive_conversation_context(room.room_id, event_info)
             response_event_id = await self._send_response(
                 room_id=room.room_id,
                 reply_to_event_id=event.event_id,
@@ -1201,9 +1241,30 @@ class AgentBot:
                 extra_content={ORIGINAL_SENDER_KEY: event.sender},
             )
             self.response_tracker.mark_responded(event.event_id, response_event_id)
-        else:
-            # Mark as responded to avoid reprocessing
+            return
+
+        if voice_audio is None:
+            # Mark as responded to avoid reprocessing when we cannot relay audio.
             self.response_tracker.mark_responded(event.event_id)
+            return
+
+        self.logger.info(
+            "Voice transcription unavailable, relaying raw audio fallback",
+            event_id=event.event_id,
+            sender=event.sender,
+        )
+        fallback_message = f"{VOICE_PREFIX}{voice_handler.extract_caption(event)}"
+        response_event_id = await self._send_response(
+            room_id=room.room_id,
+            reply_to_event_id=event.event_id,
+            response_text=fallback_message,
+            thread_id=thread_id,
+            extra_content={
+                ORIGINAL_SENDER_KEY: event.sender,
+                VOICE_RAW_AUDIO_FALLBACK_KEY: True,
+            },
+        )
+        self.response_tracker.mark_responded(event.event_id, response_event_id)
 
     async def _on_image_message(
         self,
@@ -1565,6 +1626,7 @@ class AgentBot:
         thread_history: list[dict],
         requester_user_id: str,
         existing_event_id: str | None = None,
+        audio: Sequence[Audio] | None = None,
         images: Sequence[Image] | None = None,
     ) -> str | None:
         """Generate a team response (shared between preformed teams and TeamBot).
@@ -1616,6 +1678,7 @@ class AgentBot:
                             mode=mode,
                             thread_history=thread_history,
                             model_name=model_name,
+                            audio=audio,
                             images=images,
                             show_tool_calls=self.show_tool_calls,
                         )
@@ -1655,6 +1718,7 @@ class AgentBot:
                             orchestrator=orchestrator,
                             thread_history=thread_history,
                             model_name=model_name,
+                            audio=audio,
                             images=images,
                         )
 
@@ -1806,6 +1870,7 @@ class AgentBot:
         thread_history: list[dict],
         existing_event_id: str | None = None,
         user_id: str | None = None,
+        audio: Sequence[Audio] | None = None,
         images: Sequence[Image] | None = None,
     ) -> str | None:
         """Process a message and send a response (non-streaming)."""
@@ -1838,6 +1903,7 @@ class AgentBot:
                         room_id=room_id,
                         knowledge=knowledge,
                         user_id=user_id,
+                        audio=audio,
                         images=images,
                         reply_to_event_id=reply_to_event_id,
                         show_tool_calls=self.show_tool_calls,
@@ -2025,6 +2091,7 @@ class AgentBot:
         thread_history: list[dict],
         existing_event_id: str | None = None,
         user_id: str | None = None,
+        audio: Sequence[Audio] | None = None,
         images: Sequence[Image] | None = None,
     ) -> str | None:
         """Process a message and send a response (streaming)."""
@@ -2056,6 +2123,7 @@ class AgentBot:
                         room_id=room_id,
                         knowledge=knowledge,
                         user_id=user_id,
+                        audio=audio,
                         images=images,
                         reply_to_event_id=reply_to_event_id,
                         show_tool_calls=self.show_tool_calls,
@@ -2107,6 +2175,7 @@ class AgentBot:
         thread_history: list[dict],
         existing_event_id: str | None = None,
         user_id: str | None = None,
+        audio: Sequence[Audio] | None = None,
         images: Sequence[Image] | None = None,
     ) -> str | None:
         """Generate and send/edit a response using AI.
@@ -2120,6 +2189,7 @@ class AgentBot:
             existing_event_id: If provided, edit this message instead of sending a new one
                              (only used for interactive question responses)
             user_id: User ID of the sender for identifying user messages in history
+            audio: Optional audio clips to pass to the AI model
             images: Optional images to pass to the AI model
 
         Returns:
@@ -2150,6 +2220,7 @@ class AgentBot:
                     thread_history,
                     message_id,  # Edit the thinking message or existing
                     user_id=user_id,
+                    audio=audio,
                     images=images,
                 )
             else:
@@ -2161,6 +2232,7 @@ class AgentBot:
                     thread_history,
                     message_id,  # Edit the thinking message or existing
                     user_id=user_id,
+                    audio=audio,
                     images=images,
                 )
 
@@ -2376,9 +2448,7 @@ class AgentBot:
             # Router mentions the suggested agent and asks them to help
             response_text = f"@{suggested_agent} could you help with this?"
 
-        target_thread_mode = (
-            self.config.get_entity_thread_mode(suggested_agent) if suggested_agent else None
-        )
+        target_thread_mode = self.config.get_entity_thread_mode(suggested_agent) if suggested_agent else None
         thread_event_id = self._resolve_reply_thread_id(
             thread_id,
             event.event_id,
@@ -2711,6 +2781,7 @@ class TeamBot(AgentBot):
         thread_history: list[dict],
         existing_event_id: str | None = None,
         user_id: str | None = None,
+        audio: Sequence[Audio] | None = None,
         images: Sequence[Image] | None = None,
     ) -> None:
         """Generate a team response instead of individual agent response."""
@@ -2749,6 +2820,7 @@ class TeamBot(AgentBot):
             thread_history=thread_history,
             requester_user_id=user_id or "",
             existing_event_id=existing_event_id,
+            audio=audio,
             images=images,
         )
 
