@@ -146,6 +146,7 @@ class OpenClawCompatTools(Toolkit):
                 check=False,
                 timeout=cls._LOGIN_SHELL_TIMEOUT_SECONDS,
                 env=os.environ.copy(),
+                stdin=subprocess.DEVNULL,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             logger.debug(f"Login shell PATH probe failed: {exc}")
@@ -1276,8 +1277,11 @@ class OpenClawCompatTools(Toolkit):
                 message="shell tool does not expose run_shell_command.",
             )
 
+        # Agno ShellTools doesn't accept per-call env overrides, so for OpenClaw
+        # compatibility we intentionally enrich process PATH once before exec aliases.
+        self._ensure_login_shell_path()
+
         try:
-            self._ensure_login_shell_path()
             result = shell_function.entrypoint(args)
             if inspect.isawaitable(result):
                 result = await result

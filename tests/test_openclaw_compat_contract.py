@@ -275,7 +275,7 @@ def test_openclaw_compat_merge_paths_prepends_and_dedupes() -> None:
 
 def test_openclaw_compat_ensure_login_shell_path_applies_once(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify PATH bootstrap probes login shell once and caches the result."""
-    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("PATH", f"/existing/bin{os.pathsep}/usr/bin")
     monkeypatch.setattr(OpenClawCompatTools, "_login_shell_path_loaded", False)
     monkeypatch.setattr(OpenClawCompatTools, "_login_shell_path_applied", False)
     monkeypatch.setattr(OpenClawCompatTools, "_login_shell_path", None)
@@ -284,7 +284,7 @@ def test_openclaw_compat_ensure_login_shell_path_applies_once(monkeypatch: pytes
 
     def _fake_read_login_shell_path(_cls: type[OpenClawCompatTools]) -> str:
         call_counter["count"] += 1
-        return f"/custom/bin{os.pathsep}/usr/bin"
+        return f"/custom/bin{os.pathsep}/other/bin"
 
     monkeypatch.setattr(
         OpenClawCompatTools,
@@ -297,7 +297,7 @@ def test_openclaw_compat_ensure_login_shell_path_applies_once(monkeypatch: pytes
     OpenClawCompatTools._ensure_login_shell_path()
 
     assert call_counter["count"] == 1
-    assert first_path == f"/custom/bin{os.pathsep}/usr/bin"
+    assert first_path == f"/custom/bin{os.pathsep}/other/bin{os.pathsep}/existing/bin{os.pathsep}/usr/bin"
     assert os.environ["PATH"] == first_path
 
 
