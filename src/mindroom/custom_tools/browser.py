@@ -407,7 +407,7 @@ class BrowserTools(Toolkit):
     def _validate_target(*, target: str | None, node: str | None) -> None:
         normalized_target = _clean_str(target)
         if node is not None and normalized_target not in {None, "node"}:
-            msg = 'node is only supported with target="node".'
+            msg = "node parameter is not supported in MindRoom."
             raise ValueError(msg)
         if normalized_target in {"sandbox", "node"} or node is not None:
             msg = "MindRoom browser tool currently supports host target only."
@@ -863,6 +863,9 @@ class BrowserTools(Toolkit):
                 value = str(field.get("value", ""))
                 await tab.page.locator(selector).first.fill(value)
                 updated.append({"selector": selector, "value": value})
+            if not updated:
+                msg = "fill requires at least one field with a valid ref or selector"
+                raise ValueError(msg)
             return self._act_result(profile_name, resolved_target_id, kind, fields=updated)
 
         if kind == "resize":

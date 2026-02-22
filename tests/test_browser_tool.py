@@ -22,6 +22,7 @@ from mindroom.custom_tools.browser import (
     [
         ("hello", "hello"),
         ("  hello  ", "hello"),
+        ("", None),
         ("   ", None),
         (123, None),
         (None, None),
@@ -40,7 +41,7 @@ def test_validate_target_accepts_none_and_host() -> None:
 
 def test_validate_target_rejects_invalid_node_and_non_host_targets() -> None:
     """MindRoom browser target validation rejects unsupported modes."""
-    with pytest.raises(ValueError, match='node is only supported with target="node"'):
+    with pytest.raises(ValueError, match="node parameter is not supported in MindRoom"):
         BrowserTools._validate_target(target="host", node="node-1")
 
     with pytest.raises(ValueError, match="host target only"):
@@ -124,7 +125,7 @@ async def test_browser_rejects_non_host_targets() -> None:
     with pytest.raises(ValueError, match="host target only"):
         await tool.browser(action="status", target="node")
 
-    with pytest.raises(ValueError, match='node is only supported with target="node"'):
+    with pytest.raises(ValueError, match="node parameter is not supported in MindRoom"):
         await tool.browser(action="status", target="host", node="node-1")
 
 
@@ -184,3 +185,22 @@ async def test_act_click_uses_resolved_selector(monkeypatch: pytest.MonkeyPatch)
     assert payload["kind"] == "click"
     assert payload["status"] == "ok"
     assert payload["targetId"] == "tab-1"
+
+
+@pytest.mark.asyncio
+async def test_act_fill_requires_at_least_one_valid_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fill act fails when no field resolves to a usable selector."""
+    tool = BrowserTools()
+    mock_state = object()
+    page: Any = SimpleNamespace(locator=MagicMock())
+    tab = BrowserTabState(target_id="tab-1", page=page, refs={})
+
+    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=mock_state))
+    monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
+
+    with pytest.raises(ValueError, match="valid ref or selector"):
+        await tool._act(
+            profile_name="openclaw",
+            request={"kind": "fill", "fields": [{"value": "hello"}]},
+            fallback_target_id=None,
+        )
