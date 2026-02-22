@@ -727,10 +727,6 @@ async def get_latest_thread_event_id_if_needed(
     return None
 
 
-_CONSECUTIVE_TOOL_BLOCKS = re.compile(
-    r"(<tool>[\s\S]*?</tool>)(\s*<tool>[\s\S]*?</tool>)+",
-)
-
 _HTML_TAG_PATTERN = re.compile(r"</?([A-Za-z][A-Za-z0-9-]*)(?:\s+[^<>]*)?\s*/?>")
 
 # Standard Matrix-safe HTML tags.
@@ -778,22 +774,14 @@ _GENERAL_FORMATTED_BODY_TAGS = frozenset(
     },
 )
 
-# MindRoom custom tags intentionally rendered by custom Element forks.
-_MINDROOM_CUSTOM_TAGS = (
-    "tool",  # MindRoom: single tool call block (call + optional result), rendered as a collapsible entry.
-    "tool-group",  # MindRoom: wrapper for consecutive tool blocks so the UI renders one grouped collapsible.
-)
-_MINDROOM_FORMATTED_BODY_TAGS = frozenset(_MINDROOM_CUSTOM_TAGS)
-
-_ALLOWED_FORMATTED_BODY_TAGS = _GENERAL_FORMATTED_BODY_TAGS | _MINDROOM_FORMATTED_BODY_TAGS
+_ALLOWED_FORMATTED_BODY_TAGS = _GENERAL_FORMATTED_BODY_TAGS
 
 
 def _escape_unsupported_html_tags(html_text: str) -> str:
     """Escape raw tags that Matrix clients commonly strip entirely.
 
     Unknown tags from model output (e.g. ``<search>``) can disappear in some
-    clients. Escaping only the unsupported tags keeps them visible while still
-    preserving intentional tags like ``<tool>`` for custom renderers.
+    clients. Escaping unsupported tags keeps them visible as literal text.
     """
 
     def _replace_tag(match: re.Match[str]) -> str:
@@ -815,13 +803,6 @@ def markdown_to_html(text: str) -> str:
         HTML formatted text
 
     """
-    # Group consecutive <tool> blocks into <tool-group> so the frontend
-    # can render them as a single merged collapsible.
-    text = _CONSECUTIVE_TOOL_BLOCKS.sub(
-        lambda m: f"<tool-group>{m.group(0)}</tool-group>",
-        text,
-    )
-
     # Configure markdown with common extensions
     md = markdown.Markdown(
         extensions=[
@@ -837,9 +818,6 @@ def markdown_to_html(text: str) -> str:
             },
         },
     )
-    # Register custom elements as block-level so markdown doesn't wrap them
-    # in <p> tags or convert \n to <br /> inside them.
-    md.block_level_elements.extend(_MINDROOM_CUSTOM_TAGS)
     html_text: str = md.convert(text)
     return _escape_unsupported_html_tags(html_text)
 

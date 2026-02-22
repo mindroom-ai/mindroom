@@ -1856,7 +1856,13 @@ class AgentBot:
 
         if existing_event_id:
             # Edit the existing message
-            await self._edit_message(room_id, existing_event_id, response_text, thread_id, tool_trace=tool_trace)
+            await self._edit_message(
+                room_id,
+                existing_event_id,
+                response_text,
+                thread_id,
+                tool_trace=tool_trace if self.show_tool_calls else None,
+            )
             return existing_event_id
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
@@ -1865,7 +1871,7 @@ class AgentBot:
             reply_to_event_id,
             response.formatted_text,
             thread_id,
-            tool_trace=tool_trace,
+            tool_trace=tool_trace if self.show_tool_calls else None,
         )
         if event_id and response.option_map and response.options_list:
             # For interactive questions, use the same thread root that _send_response uses:
@@ -1937,7 +1943,7 @@ class AgentBot:
             thread_id,
             reply_to_event=reply_to_event,
             skip_mentions=True,
-            tool_trace=tool_trace,
+            tool_trace=tool_trace if show_tool_calls else None,
         )
 
         if event_id and response.option_map and response.options_list:

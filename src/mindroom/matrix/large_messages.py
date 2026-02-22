@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import io
 import json
-import re
 from typing import Any
 
 import nio
@@ -22,10 +21,6 @@ logger = get_logger(__name__)
 NORMAL_MESSAGE_LIMIT = 55000  # ~55KB for regular messages
 EDIT_MESSAGE_LIMIT = 27000  # ~27KB for edits (they roughly double in size)
 PASSTHROUGH_CONTENT_KEYS = ("m.mentions", "com.mindroom.skip_mentions")
-
-_TOOL_BLOCK_RE = re.compile(r"<tool>.*?</tool>", re.DOTALL)
-_TOOL_TRUNCATION_MARKER = "\n[…]\n"
-
 
 def _calculate_event_size(content: dict[str, Any]) -> int:
     """Calculate the approximate size of a Matrix event.
@@ -103,80 +98,6 @@ def _create_preview(text: str, max_bytes: int) -> str:
         return _CONTINUATION_INDICATOR.lstrip()
 
     return _prefix_by_bytes(text, target_bytes) + _CONTINUATION_INDICATOR
-
-
-def _truncate_tool_block(tool_text: str, max_bytes: int) -> str:
-    """Truncate a ``<tool>…</tool>`` block, cutting from the middle symmetrically."""
-    if len(tool_text.encode("utf-8")) <= max_bytes:
-        return tool_text
-
-    tag_open, tag_close = "<tool>", "</tool>"
-    marker = _TOOL_TRUNCATION_MARKER
-    shell = f"{tag_open}{marker}{tag_close}"
-    shell_bytes = len(shell.encode("utf-8"))
-
-    if max_bytes < shell_bytes:
-        return ""
-
-    inner = tool_text[len(tag_open) : -len(tag_close)]
-    inner_budget = max_bytes - shell_bytes
-    if inner_budget <= 0:
-        return shell
-
-    half = inner_budget // 2
-    start = _prefix_by_bytes(inner, half)
-    end = _suffix_by_bytes(inner, inner_budget - len(start.encode("utf-8")))
-    return f"{tag_open}{start}{marker}{end}{tag_close}"
-
-
-def _create_tool_aware_preview(text: str, max_bytes: int) -> str:
-    """Create a preview that prioritises non-tool content.
-
-    ``<tool>…</tool>`` blocks are shrunk first (middle-out) so that the
-    surrounding human-readable text survives as long as possible.
-    Falls back to :func:`_create_preview` when there are no tool blocks
-    or when even the non-tool text exceeds the budget.
-    """
-    if len(text.encode("utf-8")) <= max_bytes:
-        return text
-
-    indicator_bytes = len(_CONTINUATION_INDICATOR.encode("utf-8"))
-    target = max_bytes - indicator_bytes
-    if target <= 0:
-        return _CONTINUATION_INDICATOR.lstrip()
-
-    matches = list(_TOOL_BLOCK_RE.finditer(text))
-    if not matches:
-        return _create_preview(text, max_bytes)
-
-    # Split into (kind, content) segments
-    segments: list[tuple[str, str]] = []
-    pos = 0
-    for m in matches:
-        if m.start() > pos:
-            segments.append(("text", text[pos : m.start()]))
-        segments.append(("tool", m.group()))
-        pos = m.end()
-    if pos < len(text):
-        segments.append(("text", text[pos:]))
-
-    non_tool_bytes = sum(len(content.encode("utf-8")) for kind, content in segments if kind == "text")
-    if non_tool_bytes >= target:
-        # Non-tool content alone exceeds budget; fall back to simple truncation
-        return _create_preview(text, max_bytes)
-
-    tool_budget = target - non_tool_bytes
-    tool_entries = [(i, len(segments[i][1].encode("utf-8"))) for i, (kind, _) in enumerate(segments) if kind == "tool"]
-    total_tool = sum(size for _, size in tool_entries)
-
-    result_parts = [content for _, content in segments]
-    for idx, size in tool_entries:
-        alloc = int(tool_budget * size / total_tool) if total_tool else 0
-        result_parts[idx] = _truncate_tool_block(segments[idx][1], alloc)
-
-    result = "".join(result_parts)
-    # Safety: hard-trim if rounding pushed us over
-    return _prefix_by_bytes(result, target) + _CONTINUATION_INDICATOR
 
 
 async def _upload_text_as_mxc(
@@ -274,15 +195,13 @@ async def _build_file_content(
     source_content: dict[str, Any],
     full_text: str,
     has_formatted_html: bool,
-    has_tool_html: bool,
     size_limit: int,
 ) -> tuple[str | None, dict[str, Any] | None, dict[str, Any]]:
     """Upload the full text and build the ``m.file`` content dict with previews.
 
     When *has_formatted_html* is True, the uploaded attachment uses
     ``formatted_body`` (HTML) so clients can render the full long message with
-    markdown formatting preserved. ``has_tool_html`` further controls whether we
-    also keep an HTML preview in the event body for custom ``<tool>`` rendering.
+    markdown formatting preserved.
     """
     if has_formatted_html:
         upload_text = source_content["formatted_body"]
@@ -293,13 +212,9 @@ async def _build_file_content(
 
     mxc_uri, file_info = await _upload_text_as_mxc(client, upload_text, room_id, mimetype=upload_mimetype)
 
-    # When tool-HTML is present both body and formatted_body are included in
-    # the event, so each preview gets half the budget to stay under the limit.
     attachment_overhead = 5000  # Conservative estimate for attachment JSON structure
-    available = (size_limit - attachment_overhead) // 2 if has_tool_html else size_limit - attachment_overhead
-
-    preview_fn = _create_tool_aware_preview if has_tool_html else _create_preview
-    preview = preview_fn(full_text, available)
+    available = size_limit - attachment_overhead
+    preview = _create_preview(full_text, available)
 
     modified_content: dict[str, Any] = {
         "msgtype": "m.file",
@@ -307,15 +222,6 @@ async def _build_file_content(
         "filename": "message.html" if has_formatted_html else "message.txt",
         "info": file_info,
     }
-
-    # Preserve HTML format metadata so the Element fork treats the downloaded
-    # file as HTML and renders <tool> elements via the collapsible renderer.
-    if has_tool_html:
-        modified_content["format"] = "org.matrix.custom.html"
-        modified_content["formatted_body"] = _create_tool_aware_preview(
-            source_content["formatted_body"],
-            available,
-        )
 
     return mxc_uri, file_info, modified_content
 
@@ -354,10 +260,6 @@ async def prepare_large_message(
     formatted_body = source_content.get("formatted_body")
     formatted_body_text = formatted_body if isinstance(formatted_body, str) else None
     has_formatted_html = source_content.get("format") == "org.matrix.custom.html" and formatted_body_text is not None
-    has_tool_html = False
-    if has_formatted_html and formatted_body_text is not None:
-        has_tool_html = _TOOL_BLOCK_RE.search(formatted_body_text) is not None
-
     logger.info(f"Message too large ({current_size} bytes), uploading to MXC")
 
     mxc_uri, file_info, modified_content = await _build_file_content(
@@ -366,7 +268,6 @@ async def prepare_large_message(
         source_content,
         full_text,
         has_formatted_html,
-        has_tool_html,
         size_limit,
     )
 

@@ -289,10 +289,10 @@ def _extract_response_content(response: RunOutput, *, show_tool_calls: bool = Tr
     # Add formatted tool call sections when present (and enabled).
     if show_tool_calls and response.tools:
         tool_sections: list[str] = []
-        for tool in response.tools:
+        for tool_index, tool in enumerate(response.tools, start=1):
             tool_name = tool.tool_name or "tool"
             tool_args = tool.tool_args or {}
-            combined, _ = format_tool_combined(tool_name, tool_args, tool.result)
+            combined, _ = format_tool_combined(tool_name, tool_args, tool.result, tool_index=tool_index)
             tool_sections.append(combined.strip())
         if tool_sections:
             response_parts.append("\n\n".join(tool_sections))
@@ -794,6 +794,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             return
 
     full_response = ""
+    tool_count = 0
+    pending_tools: list[tuple[str, int]] = []
 
     # Execute the streaming AI call - this can fail for network, rate limits, etc.
     try:
@@ -820,16 +822,32 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 yield event
             elif isinstance(event, ToolCallStartedEvent):
                 if show_tool_calls:
-                    tool_msg, _ = format_tool_started_event(event.tool)
+                    tool_count += 1
+                    tool_msg, trace_entry = format_tool_started_event(event.tool, tool_index=tool_count)
                     if tool_msg:
                         full_response += tool_msg
+                    if trace_entry is not None:
+                        pending_tools.append((trace_entry.tool_name, tool_count))
                 yield event
             elif isinstance(event, ToolCallCompletedEvent):
                 if show_tool_calls:
                     info = extract_tool_completed_info(event.tool)
                     if info:
                         tool_name, result = info
-                        full_response, _ = complete_pending_tool_block(full_response, tool_name, result)
+                        tool_index = next(
+                            (idx for name, idx in reversed(pending_tools) if name == tool_name),
+                            tool_count + 1,
+                        )
+                        for pos in range(len(pending_tools) - 1, -1, -1):
+                            if pending_tools[pos][0] == tool_name and pending_tools[pos][1] == tool_index:
+                                pending_tools.pop(pos)
+                                break
+                        full_response, _ = complete_pending_tool_block(
+                            full_response,
+                            tool_name,
+                            result,
+                            tool_index=tool_index,
+                        )
                 yield event
             elif isinstance(event, RunErrorEvent):
                 error_text = event.content or "Unknown agent error"

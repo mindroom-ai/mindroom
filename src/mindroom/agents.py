@@ -609,7 +609,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         logger.info(f"Using YAML config for agent: {agent_name}")
         # For YAML agents, prepend full context to role and keep original instructions
         role = full_context + agent_config.role
-        instructions = agent_config.instructions
+        instructions = list(agent_config.instructions)
 
     # Create agent with defaults applied
     model = get_model_instance(config, agent_config.model)
@@ -618,6 +618,10 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     skills = build_agent_skills(agent_name, config)
     if skills and skills.get_skill_names():
         instructions.append(agent_prompts.SKILLS_TOOL_USAGE_PROMPT)
+
+    show_tool_calls = agent_config.show_tool_calls if agent_config.show_tool_calls is not None else defaults.show_tool_calls
+    if not show_tool_calls:
+        instructions.append(agent_prompts.HIDDEN_TOOL_CALLS_PROMPT)
 
     if include_interactive_questions:
         instructions.append(agent_prompts.INTERACTIVE_QUESTION_PROMPT)

@@ -343,10 +343,10 @@ async def test_message_exactly_at_limit() -> None:
 
 @pytest.mark.asyncio
 async def test_message_with_formatted_body_no_tools() -> None:
-    """HTML without <tool> tags still uploads HTML so markdown renders in clients."""
+    """HTML without legacy tool tags still uploads HTML so markdown renders in clients."""
     client = MockClient()
 
-    # Large message with HTML but NO <tool> tags
+    # Large message with HTML but no legacy tool tags
     large_text = "f" * 100000
     large_html = f"<p>{'f' * 100000}</p>"
     content = {
@@ -363,7 +363,7 @@ async def test_message_with_formatted_body_no_tools() -> None:
     assert len(result["body"]) < len(large_text)
     assert "io.mindroom.long_text" in result
 
-    # Without <tool> tags we still upload HTML so long-text attachments render
+    # Without legacy tool tags we still upload HTML so long-text attachments render
     # with markdown formatting in clients.
     assert result["info"]["mimetype"] == "text/html"
     assert result["filename"] == "message.html"
@@ -376,19 +376,14 @@ async def test_message_with_formatted_body_no_tools() -> None:
 
 
 @pytest.mark.asyncio
-async def test_large_message_with_tool_tags_preserves_html() -> None:
-    """Test that <tool> tags in formatted_body are preserved for long text upload.
-
-    When a message with tool calls becomes a long text attachment, the uploaded
-    file must contain the formatted_body (HTML) so the Element fork can render
-    <tool> as actual HTML elements via the collapsible renderer.
-    """
+async def test_large_message_with_plain_tool_markers_uploads_html() -> None:
+    """Formatted HTML with plain tool markers should still upload HTML for long text attachments."""
     client = MockClient()
 
-    body = "Here is the result:\n\n<tool>web_search(query=test)\n{&quot;title&quot;: &quot;Result&quot;}</tool>\n"
+    body = "Here is the result:\n\n🔧 `web_search` [1]\n"
     body = body * 500  # Make it large enough to trigger long text
     formatted_body = (
-        "<p>Here is the result:</p>\n\n<tool>web_search(query=test)\n{&quot;title&quot;: &quot;Result&quot;}</tool>\n"
+        "<p>Here is the result:</p>\n<p>🔧 <code>web_search</code> [1]</p>\n"
     )
     formatted_body = formatted_body * 500
 
@@ -402,29 +397,30 @@ async def test_large_message_with_tool_tags_preserves_html() -> None:
     result = await prepare_large_message(client, "!room:server", content)
 
     assert result["msgtype"] == "m.file"
-    assert result["format"] == "org.matrix.custom.html"
     assert result["info"]["mimetype"] == "text/html"
+    assert "format" not in result
+    assert "formatted_body" not in result
 
     # The uploaded content should be the formatted_body (HTML), not plain body
     uploaded_data = client.uploads[0]["data"]
     uploaded_text = uploaded_data.read().decode("utf-8")
-    assert "<tool>" in uploaded_text
+    assert "<code>web_search</code>" in uploaded_text
     assert "<p>Here is the result:</p>" in uploaded_text
 
 
 @pytest.mark.asyncio
-async def test_tool_aware_preview_preserves_non_tool_text() -> None:
-    """Non-tool text is kept intact while tool blocks are middle-truncated."""
+async def test_large_message_preview_uses_generic_truncation_with_plain_markers() -> None:
+    """Plain-marker messages use generic truncation (no special tool-block shrinking)."""
     client = MockClient()
 
     # Non-tool text that should survive in full
     intro = "Important analysis result:\n" * 20  # ~520 bytes
     conclusion = "\nFinal conclusion here.\n"
 
-    # A single huge tool result
+    # A single huge plain-text body section that includes a visible tool marker
     tool_result = "x" * 80000
-    body = f'{intro}<tool>search(q=test)\n{tool_result}\n{{"done": true}}</tool>{conclusion}'
-    formatted_body = f'<p>{intro}</p><tool>search(q=test)\n{tool_result}\n{{"done": true}}</tool><p>{conclusion}</p>'
+    body = f"{intro}🔧 `search` [1]\n{tool_result}\n{conclusion}"
+    formatted_body = f"<p>{intro}</p><p>🔧 <code>search</code> [1]</p><p>{tool_result}</p><p>{conclusion}</p>"
 
     content = {
         "body": body,
@@ -437,20 +433,14 @@ async def test_tool_aware_preview_preserves_non_tool_text() -> None:
 
     assert result["msgtype"] == "m.file"
 
-    # Non-tool text must survive in the body preview
+    # Intro text and the visible tool marker should survive in the body preview.
     assert "Important analysis result:" in result["body"]
-    assert "Final conclusion here." in result["body"]
+    assert "[Message continues in attached file]" in result["body"]
+    assert "🔧 `search` [1]" in result["body"]
 
-    # Tool block should be middle-truncated
-    assert "[…]" in result["body"]
-
-    # The tool block should keep its start (function signature) and end
-    assert "search(q=test)" in result["body"]
-    assert '"done": true' in result["body"]
-
-    # Same for formatted_body
-    assert "Important analysis result:" in result["formatted_body"]
-    assert "[…]" in result["formatted_body"]
+    # Generic truncation is used now (no special tool-aware middle truncation),
+    # so the tail conclusion is not guaranteed to survive.
+    assert "formatted_body" not in result
 
 
 @pytest.mark.asyncio
@@ -490,7 +480,7 @@ async def test_structured_stream_chunk_adds_tool_trace_metadata() -> None:
 
     async def stream() -> AsyncIterator[StreamInputChunk]:
         trace = [ToolTraceEntry(type="tool_call_started", tool_name="save_file", args_preview="file_name=a.py")]
-        yield StructuredStreamChunk(content="<tool>save_file(file_name=a.py)</tool>", tool_trace=trace)
+        yield StructuredStreamChunk(content="🔧 `save_file` [1] ⏳", tool_trace=trace)
 
     event_id, _ = await send_streaming_response(
         client=client,
@@ -524,8 +514,8 @@ async def test_structured_stream_chunk_does_not_drop_trace_on_stale_snapshot() -
     trace_stale = [ToolTraceEntry(type="tool_call_started", tool_name="save_file")]
 
     async def stream() -> AsyncIterator[StreamInputChunk]:
-        yield StructuredStreamChunk(content="<tool>save_file()</tool>", tool_trace=trace_full)
-        yield StructuredStreamChunk(content="<tool>save_file()</tool>", tool_trace=trace_stale)
+        yield StructuredStreamChunk(content="🔧 `save_file` [1]", tool_trace=trace_full)
+        yield StructuredStreamChunk(content="🔧 `save_file` [1]", tool_trace=trace_stale)
 
     event_id, _ = await send_streaming_response(
         client=client,
@@ -568,6 +558,6 @@ async def test_replacement_streaming_preserves_text_on_tool_completion() -> None
     )
 
     assert event_id is not None
-    # The accumulated text must still contain the tool block, not be empty
+    # The accumulated text must still contain the tool marker, not be empty
     assert "save_file" in accumulated
     assert accumulated.strip() != ""

@@ -41,7 +41,6 @@ from mindroom.knowledge_utils import resolve_agent_knowledge
 from mindroom.logging_config import get_logger
 from mindroom.routing import suggest_agent
 from mindroom.teams import TeamMode, format_team_response
-from mindroom.tool_events import format_tool_completed_event, format_tool_started_event
 
 AUTO_MODEL_NAME = "auto"
 TEAM_MODEL_PREFIX = "team/"
@@ -772,6 +771,43 @@ def _inject_tool_metadata(tool_message: str, *, tool_id: str, state: Literal["st
     return tool_message.replace("<tool>", f'<tool id="{tool_id}" state="{state}">', 1)
 
 
+def _to_compact_tool_text(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        return str(value)
+
+
+def _format_openai_tool_call(tool: ToolExecution) -> str:
+    tool_name = tool.tool_name or "tool"
+    tool_args = tool.tool_args if isinstance(tool.tool_args, dict) else {}
+    if not tool_args:
+        return f"{tool_name}()"
+
+    parts: list[str] = []
+    for key, value in tool_args.items():
+        value_text = _to_compact_tool_text(value).replace("\n", " ")
+        parts.append(f"{key}={value_text}")
+    return f"{tool_name}({', '.join(parts)})"
+
+
+def _format_openai_stream_tool_message(
+    tool: ToolExecution,
+    *,
+    completed: bool,
+) -> str:
+    call_display = _format_openai_tool_call(tool)
+    if not completed:
+        return f"<tool>{call_display}</tool>"
+
+    result = tool.result
+    if result is None or result == "":
+        return f"<tool>{call_display}\n</tool>"
+    return f"<tool>{call_display}\n{_to_compact_tool_text(result)}</tool>"
+
+
 def _format_stream_tool_event(
     event: RunOutputEvent | TeamRunOutputEvent,
     tool_state: _ToolStreamState,
@@ -781,18 +817,14 @@ def _format_stream_tool_event(
         tool = event.tool
         if tool is None:
             return None
-        tool_msg, _ = format_tool_started_event(tool)
-        if not tool_msg:
-            return None
+        tool_msg = _format_openai_stream_tool_message(tool, completed=False)
         tool_id = _resolve_started_tool_id(tool, tool_state)
         state: Literal["start", "done"] = "start"
     elif isinstance(event, (ToolCallCompletedEvent, TeamToolCallCompletedEvent)):
         tool = event.tool
         if tool is None:
             return None
-        tool_msg, _ = format_tool_completed_event(tool)
-        if not tool_msg:
-            return None
+        tool_msg = _format_openai_stream_tool_message(tool, completed=True)
         tool_id = _resolve_completed_tool_id(tool, tool_state)
         state = "done"
     else:

@@ -128,7 +128,7 @@ class TestMentionParsing:
         )
 
         assert TOOL_TRACE_KEY in content
-        assert content[TOOL_TRACE_KEY]["version"] == 1
+        assert content[TOOL_TRACE_KEY]["version"] == 2
         assert content[TOOL_TRACE_KEY]["events"][0]["tool_name"] == "save_file"
 
     def test_no_mentions_in_text(self) -> None:
