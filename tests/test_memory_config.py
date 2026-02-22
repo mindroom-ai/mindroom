@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path  # noqa: TC003
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from mindroom.bot import MultiAgentOrchestrator
 from mindroom.config import (
     Config,
     EmbedderConfig,
@@ -174,3 +175,39 @@ class TestMemoryConfig:
         # Verify directory was created
         assert chroma_path.exists()
         assert chroma_path.is_dir()
+
+    @patch("mindroom.memory.config.get_credentials_manager")
+    def test_relative_storage_path_remains_stable_after_cwd_change(
+        self,
+        mock_get_creds_manager: MagicMock,
+        tmp_path: Path,
+        monkeypatch: object,
+    ) -> None:
+        """Relative storage paths should be anchored once and survive later cwd changes."""
+        mock_creds_manager = MagicMock()
+        mock_creds_manager.load_credentials.return_value = None
+        mock_get_creds_manager.return_value = mock_creds_manager
+
+        project_root = tmp_path / "project"
+        project_root.mkdir(parents=True, exist_ok=True)
+        monkeypatch.chdir(project_root)
+
+        orchestrator = MultiAgentOrchestrator(storage_path=Path("mindroom_data"))
+
+        other_cwd = tmp_path / "other"
+        other_cwd.mkdir(parents=True, exist_ok=True)
+        monkeypatch.chdir(other_cwd)
+
+        embedder_config = MemoryEmbedderConfig(
+            provider="ollama",
+            config=EmbedderConfig(model="test", host=None),
+        )
+        memory = MemoryConfig(embedder=embedder_config, llm=None)
+        config = Config(memory=memory, router=RouterConfig(model="default"))
+
+        result = get_memory_config(orchestrator.storage_path, config)
+
+        expected_storage = (project_root / "mindroom_data").resolve()
+        expected_chroma = (expected_storage / "chroma").resolve()
+        assert orchestrator.storage_path == expected_storage
+        assert Path(result["vector_store"]["config"]["path"]) == expected_chroma
