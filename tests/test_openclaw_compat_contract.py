@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from itertools import count
 from types import SimpleNamespace
@@ -263,6 +264,43 @@ def test_openclaw_compat_coding_read_file_error() -> None:
     assert payload["tool"] == "read_file"
 
 
+def test_openclaw_compat_merge_paths_prepends_and_dedupes() -> None:
+    """Verify login-shell PATH entries are prepended without duplicates."""
+    merged = OpenClawCompatTools._merge_paths(
+        existing_path=f"/usr/bin{os.pathsep}/bin",
+        shell_path=f"/custom/bin{os.pathsep}/usr/bin",
+    )
+    assert merged == f"/custom/bin{os.pathsep}/usr/bin{os.pathsep}/bin"
+
+
+def test_openclaw_compat_ensure_login_shell_path_applies_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify PATH bootstrap probes login shell once and caches the result."""
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setattr(OpenClawCompatTools, "_login_shell_path_loaded", False)
+    monkeypatch.setattr(OpenClawCompatTools, "_login_shell_path_applied", False)
+    monkeypatch.setattr(OpenClawCompatTools, "_login_shell_path", None)
+
+    call_counter = {"count": 0}
+
+    def _fake_read_login_shell_path(_cls: type[OpenClawCompatTools]) -> str:
+        call_counter["count"] += 1
+        return f"/custom/bin{os.pathsep}/usr/bin"
+
+    monkeypatch.setattr(
+        OpenClawCompatTools,
+        "_read_login_shell_path",
+        classmethod(_fake_read_login_shell_path),
+    )
+
+    OpenClawCompatTools._ensure_login_shell_path()
+    first_path = os.environ["PATH"]
+    OpenClawCompatTools._ensure_login_shell_path()
+
+    assert call_counter["count"] == 1
+    assert first_path == f"/custom/bin{os.pathsep}/usr/bin"
+    assert os.environ["PATH"] == first_path
+
+
 @pytest.mark.asyncio
 async def test_openclaw_compat_exec_uses_shell_tool_entrypoint() -> None:
     """Verify exec dispatches via shell toolkit function entrypoint."""
@@ -277,6 +315,27 @@ async def test_openclaw_compat_exec_uses_shell_tool_entrypoint() -> None:
     assert payload["tool"] == "exec"
     entrypoint.assert_called_once_with(["echo", "hi"])
     tool._shell.run_shell_command.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_openclaw_compat_exec_bootstraps_login_shell_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify exec calls login-shell PATH bootstrap before running shell command."""
+    tool = OpenClawCompatTools()
+    call_counter = {"count": 0}
+
+    def _fake_ensure(_cls: type[OpenClawCompatTools]) -> None:
+        call_counter["count"] += 1
+
+    monkeypatch.setattr(OpenClawCompatTools, "_ensure_login_shell_path", classmethod(_fake_ensure))
+    entrypoint = MagicMock(return_value="ok")
+    tool._shell.functions["run_shell_command"].entrypoint = entrypoint
+
+    payload = json.loads(await tool.exec("echo hi"))
+
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "exec"
+    assert call_counter["count"] == 1
+    entrypoint.assert_called_once_with(["echo", "hi"])
 
 
 @pytest.mark.asyncio
