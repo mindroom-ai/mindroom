@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,7 +14,7 @@ from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.streaming import IN_PROGRESS_MARKER, StreamingResponse
+from mindroom.streaming import IN_PROGRESS_MARKER, StreamingResponse, is_in_progress_message
 
 from .conftest import TEST_PASSWORD
 
@@ -384,6 +385,30 @@ class TestStreamingBehavior:
         assert end == pytest.approx(5.0)
         assert after == pytest.approx(5.0)
 
+    def test_streaming_char_threshold_starts_small_then_grows(self) -> None:
+        """Character trigger should ramp from a low threshold to steady-state."""
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            update_char_threshold=180,
+            min_update_char_threshold=30,
+            interval_ramp_seconds=15.0,
+        )
+        streaming.stream_started_at = 100.0
+
+        start = streaming._current_char_threshold(100.0)
+        mid = streaming._current_char_threshold(107.5)
+        end = streaming._current_char_threshold(115.0)
+        after = streaming._current_char_threshold(130.0)
+
+        assert start == 30
+        assert mid == 105
+        assert end == 180
+        assert after == 180
+
     def test_stream_started_at_not_set_before_first_send(self) -> None:
         """Test that stream_started_at is None until first _throttled_send."""
         streaming = StreamingResponse(
@@ -396,6 +421,14 @@ class TestStreamingBehavior:
         assert streaming.stream_started_at is None
         # Before stream starts, ramp is inactive so steady-state interval is returned
         assert streaming._current_update_interval(999.0) == streaming.update_interval
+
+    def test_is_in_progress_message_detects_animated_suffix(self) -> None:
+        """In-progress detection should handle animated marker suffixes."""
+        assert is_in_progress_message("Thinking... ⋯")
+        assert is_in_progress_message("Thinking... ⋯.")
+        assert is_in_progress_message("Thinking... ⋯..")
+        assert not is_in_progress_message("Thinking...")
+        assert not is_in_progress_message(None)
 
     @pytest.mark.asyncio
     async def test_throttled_send_uses_ramp_interval(self) -> None:
@@ -421,6 +454,64 @@ class TestStreamingBehavior:
         # First call sets stream_started_at and sends immediately (last_update=0)
         await streaming._throttled_send(mock_client)
         assert streaming.stream_started_at is not None
+        assert mock_client.room_send.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_char_threshold_can_trigger_before_time_interval(self) -> None:
+        """Large enough text chunks should trigger an update even before time interval elapses."""
+        mock_client = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.__class__ = nio.RoomSendResponse
+        mock_response.event_id = "$stream_char_1"
+        mock_client.room_send.return_value = mock_response
+
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            update_interval=10.0,
+            update_char_threshold=5,
+            min_update_char_threshold=5,
+            min_char_update_interval=0.0,
+        )
+        streaming.last_update = time.time()
+
+        await streaming.update_content("hello", mock_client)
+
+        assert mock_client.room_send.call_count == 1
+        assert streaming.event_id == "$stream_char_1"
+
+    @pytest.mark.asyncio
+    async def test_progress_hint_uses_shorter_interval(self) -> None:
+        """Tool progress hints should allow faster keepalive edits than steady-state interval."""
+        mock_client = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.__class__ = nio.RoomSendResponse
+        mock_response.event_id = "$stream_progress_1"
+        mock_client.room_send.return_value = mock_response
+
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            update_interval=5.0,
+            progress_update_interval=0.2,
+        )
+        streaming.event_id = "$existing_event"
+        streaming.accumulated_text = "working"
+        streaming.stream_started_at = 100.0
+        streaming.last_update = 100.0
+
+        with patch("mindroom.streaming.time.time", return_value=100.25):
+            await streaming._throttled_send(mock_client, progress_hint=False)
+        assert mock_client.room_send.call_count == 0
+
+        with patch("mindroom.streaming.time.time", return_value=100.25):
+            await streaming._throttled_send(mock_client, progress_hint=True)
         assert mock_client.room_send.call_count == 1
 
     @pytest.mark.asyncio
