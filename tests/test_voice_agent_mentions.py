@@ -115,3 +115,80 @@ async def test_voice_prompt_includes_correct_agent_format() -> None:
         assert "@calc or @mindroom_calc (spoken as: Calculator)" in captured_prompt
         assert "use EXACT agent name after @" in captured_prompt
         assert 'use "@home" NOT "@homeassistant"' in captured_prompt
+
+
+@pytest.mark.asyncio
+async def test_voice_prompt_scopes_agents_to_room_entities() -> None:
+    """Test that room-scoped entities are the only entities listed in the prompt."""
+    config = MagicMock(spec=Config)
+    config.agents = {
+        "openclaw": MagicMock(spec=AgentConfig, display_name="OpenClaw"),
+        "code": MagicMock(spec=AgentConfig, display_name="CodeAgent"),
+    }
+    config.teams = {}
+    config.voice = MagicMock()
+    config.voice.intelligence = MagicMock()
+    config.voice.intelligence.model = "test-model"
+
+    captured_prompt = None
+
+    async def capture_run(prompt: str, **kwargs: str) -> MagicMock:  # noqa: ARG001
+        nonlocal captured_prompt
+        captured_prompt = prompt
+        mock_resp = MagicMock()
+        mock_resp.content = "@openclaw test"
+        return mock_resp
+
+    with (
+        patch("mindroom.voice_handler.Agent") as mock_agent_class,
+        patch("mindroom.voice_handler.get_model_instance") as mock_get_model,
+    ):
+        mock_agent = MagicMock()
+        mock_agent.arun = AsyncMock(side_effect=capture_run)
+        mock_agent_class.return_value = mock_agent
+        mock_get_model.return_value = MagicMock()
+
+        await _process_transcription(
+            "test",
+            config,
+            available_agent_names=["openclaw"],
+            available_team_names=[],
+        )
+
+    assert "@openclaw or @mindroom_openclaw (spoken as: OpenClaw)" in captured_prompt
+    assert "@code or @mindroom_code (spoken as: CodeAgent)" not in captured_prompt
+    assert "Available teams (use EXACT team name after @):\n  (none)" in captured_prompt
+
+
+@pytest.mark.asyncio
+async def test_voice_transcription_strips_unavailable_entity_mentions() -> None:
+    """Test that configured but unavailable entities are not left as mentions."""
+    config = MagicMock(spec=Config)
+    config.agents = {
+        "openclaw": MagicMock(spec=AgentConfig, display_name="OpenClaw"),
+        "code": MagicMock(spec=AgentConfig, display_name="CodeAgent"),
+    }
+    config.teams = {}
+    config.voice = MagicMock()
+    config.voice.intelligence = MagicMock()
+    config.voice.intelligence.model = "test-model"
+
+    with (
+        patch("mindroom.voice_handler.Agent") as mock_agent_class,
+        patch("mindroom.voice_handler.get_model_instance") as mock_get_model,
+    ):
+        mock_agent = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "@code review this"
+        mock_agent.arun = AsyncMock(return_value=mock_response)
+        mock_agent_class.return_value = mock_agent
+        mock_get_model.return_value = MagicMock()
+
+        result = await _process_transcription(
+            "review this",
+            config,
+            available_agent_names=["openclaw"],
+            available_team_names=[],
+        )
+
+    assert result == "code review this"

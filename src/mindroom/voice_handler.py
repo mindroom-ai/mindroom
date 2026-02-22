@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from typing import TYPE_CHECKING
 
@@ -15,16 +16,20 @@ from .ai import get_model_instance
 from .commands import get_command_list
 from .constants import VOICE_PREFIX
 from .logging_config import get_logger
+from .thread_utils import get_available_agents_for_sender
 
 if TYPE_CHECKING:
     from .config import Config
 
 logger = get_logger(__name__)
+VOICE_MENTION_PATTERN = re.compile(
+    r"(?<![\w])@(?:(?P<prefix>mindroom_))?(?P<name>[A-Za-z0-9_]+)(?::[A-Za-z0-9.\-]+)?",
+)
 
 
 async def handle_voice_message(
     client: nio.AsyncClient,
-    room: nio.MatrixRoom,  # noqa: ARG001
+    room: nio.MatrixRoom,
     event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
     config: Config,
 ) -> str | None:
@@ -58,8 +63,15 @@ async def handle_voice_message(
 
         logger.info(f"Raw transcription: {transcription}")
 
+        available_agent_names, available_team_names = _get_available_entities_for_sender(room, event.sender, config)
+
         # Process transcription with AI for command/agent recognition
-        formatted_message = await _process_transcription(transcription, config)
+        formatted_message = await _process_transcription(
+            transcription,
+            config,
+            available_agent_names=available_agent_names,
+            available_team_names=available_team_names,
+        )
 
         logger.info(f"Formatted message: {formatted_message}")
 
@@ -146,12 +158,20 @@ async def _transcribe_audio(audio_data: bytes, config: Config) -> str | None:
         return None
 
 
-async def _process_transcription(transcription: str, config: Config) -> str:
+async def _process_transcription(
+    transcription: str,
+    config: Config,
+    *,
+    available_agent_names: list[str] | None = None,
+    available_team_names: list[str] | None = None,
+) -> str:
     """Process transcription to recognize commands and agent names.
 
     Args:
         transcription: Raw transcription text
         config: Application configuration
+        available_agent_names: Optional room-scoped list of available agent names
+        available_team_names: Optional room-scoped list of available team names
 
     Returns:
         Formatted message with proper commands and mentions
@@ -159,21 +179,34 @@ async def _process_transcription(transcription: str, config: Config) -> str:
     """
     try:
         # Get list of available agents and teams
-        agent_names = list(config.agents.keys())
-        agent_display_names = {name: cfg.display_name for name, cfg in config.agents.items()}
+        agent_names = available_agent_names if available_agent_names is not None else list(config.agents.keys())
+        team_names = available_team_names if available_team_names is not None else list(config.teams.keys())
 
-        team_names = list(config.teams.keys()) if config.teams else []
-        team_display_names = {name: cfg.display_name for name, cfg in config.teams.items()} if config.teams else {}
+        agent_display_names = {name: config.agents[name].display_name for name in agent_names if name in config.agents}
+        team_display_names = {name: config.teams[name].display_name for name in team_names if name in config.teams}
+
+        agent_list = (
+            chr(10).join(
+                [f"  - @{name} or @mindroom_{name} (spoken as: {agent_display_names[name]})" for name in agent_names],
+            )
+            if agent_names
+            else "  (none)"
+        )
+        team_list = (
+            chr(10).join([f"  - @{name} (spoken as: {team_display_names[name]})" for name in team_names])
+            if team_names
+            else "  (none)"
+        )
 
         # Build the prompt for the AI
         prompt = f"""You are a voice command processor for a Matrix chat bot system.
 Your task is to convert spoken transcriptions into properly formatted chat commands.
 
 Available agents (use EXACT agent name after @):
-{chr(10).join([f"  - @{name} or @mindroom_{name} (spoken as: {agent_display_names[name]})" for name in agent_names])}
+{agent_list}
 
 Available teams (use EXACT team name after @):
-{chr(10).join([f"  - @{name} (spoken as: {team_display_names[name]})" for name in team_names]) if team_names else "  (none)"}
+{team_list}
 
 Examples of correct formatting:
 - User says "HomeAssistant turn on the fan" → "@home turn on the fan"  (NOT @homeassistant)
@@ -198,6 +231,8 @@ CRITICAL RULES:
 7. Be smart about intent - "ask the research agent" means "@research"
 8. Keep the natural language but add proper formatting
 9. If unclear, prefer natural language over forcing commands
+10. ONLY mention agents/teams listed above as available in this room
+11. If no relevant available agent/team is listed, do not add any @mention
 
 Transcription: "{transcription}"
 
@@ -219,7 +254,11 @@ Output the formatted message only, no explanation:"""
 
         # Extract the content from the response
         if response and response.content:
-            return response.content.strip()
+            return _sanitize_unavailable_mentions(
+                response.content.strip(),
+                allowed_entities=set(agent_names) | set(team_names),
+                configured_entities=set(config.agents) | set(config.teams),
+            )
 
     except Exception as e:
         logger.exception("Error processing transcription")
@@ -230,3 +269,49 @@ Output the formatted message only, no explanation:"""
     else:
         # Return original transcription if no valid response from model
         return transcription
+
+
+def _get_available_entities_for_sender(
+    room: nio.MatrixRoom,
+    sender_id: str,
+    config: Config,
+) -> tuple[list[str], list[str]]:
+    """Return available agent and team names in this room for a specific sender."""
+    available_agent_names: list[str] = []
+    available_team_names: list[str] = []
+
+    for matrix_id in get_available_agents_for_sender(room, sender_id, config):
+        name = matrix_id.agent_name(config)
+        if name is None:
+            continue
+        if name in config.agents:
+            available_agent_names.append(name)
+        elif name in config.teams:
+            available_team_names.append(name)
+
+    return available_agent_names, available_team_names
+
+
+def _sanitize_unavailable_mentions(
+    text: str,
+    *,
+    allowed_entities: set[str],
+    configured_entities: set[str],
+) -> str:
+    """Strip @ from mentions that target configured but unavailable entities."""
+    if not text:
+        return text
+
+    configured_by_lower = {name.lower(): name for name in configured_entities}
+    allowed_lower = {name.lower() for name in allowed_entities}
+
+    def _replace(match: re.Match[str]) -> str:
+        name = match.group("name")
+        configured_name = configured_by_lower.get(name.lower())
+        if configured_name is None:
+            return match.group(0)
+        if configured_name.lower() in allowed_lower:
+            return match.group(0)
+        return configured_name
+
+    return VOICE_MENTION_PATTERN.sub(_replace, text)
