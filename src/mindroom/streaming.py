@@ -167,7 +167,10 @@ class StreamingResponse:
 
     async def finalize(self, client: nio.AsyncClient) -> None:
         """Send final message update."""
-        await self._send_or_edit_message(client, is_final=True)
+        # When a placeholder message exists but no real text arrived,
+        # still edit the message to strip the in-progress marker.
+        has_placeholder = self.event_id is not None and not self.accumulated_text.strip()
+        await self._send_or_edit_message(client, is_final=True, allow_empty_progress=has_placeholder)
 
     async def _send_or_edit_message(
         self,

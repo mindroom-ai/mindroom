@@ -600,6 +600,50 @@ class TestStreamingBehavior:
         assert IN_PROGRESS_MARKER in sent_content["body"]
 
     @pytest.mark.asyncio
+    async def test_finalize_strips_marker_from_placeholder_only_stream(self) -> None:
+        """Finalize should edit out the in-progress marker even when no text was ever emitted."""
+        mock_client = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.__class__ = nio.RoomSendResponse
+        mock_response.event_id = "$placeholder_msg"
+        mock_client.room_send.return_value = mock_response
+
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            update_interval=5.0,
+            progress_update_interval=0.2,
+        )
+        # Simulate cold-start: progress hint created the initial placeholder
+        streaming.stream_started_at = 100.0
+        streaming.last_update = 100.0
+
+        with patch("mindroom.streaming.time.time", return_value=100.25):
+            await streaming._throttled_send(mock_client, progress_hint=True)
+
+        assert streaming.event_id == "$placeholder_msg"
+        assert mock_client.room_send.call_count == 1
+
+        # Verify the initial message has the in-progress marker
+        initial_content = mock_client.room_send.call_args[1]["content"]
+        assert IN_PROGRESS_MARKER in initial_content["body"]
+
+        # Now finalize with no text ever emitted
+        with patch(
+            "mindroom.streaming.edit_message",
+            new=AsyncMock(return_value="$placeholder_msg"),
+        ) as mock_edit:
+            await streaming.finalize(mock_client)
+
+        assert mock_edit.await_count == 1
+        final_body = mock_edit.await_args.args[3]["body"]
+        assert final_body == PROGRESS_PLACEHOLDER
+        assert IN_PROGRESS_MARKER not in final_body
+
+    @pytest.mark.asyncio
     async def test_streaming_in_progress_marker(
         self,
         mock_helper_agent: AgentMatrixUser,  # noqa: ARG002
