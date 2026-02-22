@@ -182,6 +182,87 @@ class TestConfigThreadModeResolution:
         assert config.get_entity_thread_mode("ops") == "thread"
 
 
+class TestRouterHandoffThreadMode:
+    """Test router handoff replies follow the suggested entity's thread mode."""
+
+    @pytest.fixture
+    def router_user(self) -> AgentMatrixUser:
+        """Create a mock router user."""
+        return AgentMatrixUser(
+            agent_name=ROUTER_AGENT_NAME,
+            password=TEST_PASSWORD,
+            display_name="Router",
+            user_id="@mindroom_router:localhost",
+        )
+
+    @staticmethod
+    def _routing_event() -> MagicMock:
+        event = MagicMock(spec=nio.RoomMessageText)
+        event.sender = "@user:localhost"
+        event.body = "Help me"
+        event.event_id = "$user_event"
+        event.source = {
+            "event_id": "$user_event",
+            "sender": "@user:localhost",
+            "type": "m.room.message",
+            "content": {"body": "Help me", "msgtype": "m.text"},
+        }
+        return event
+
+    @pytest.mark.asyncio
+    async def test_router_handoff_uses_suggested_room_mode(
+        self,
+        room_mode_config: Config,
+        router_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Router should send handoff in-room when the suggested agent is room-mode."""
+        bot = AgentBot(config=room_mode_config, agent_user=router_user, storage_path=tmp_path)
+        bot.response_tracker = MagicMock()
+        bot._send_response = AsyncMock(return_value="$reply")
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+
+        # Mixed agent modes keep the router itself in thread mode.
+        assert bot.thread_mode == "thread"
+
+        with patch("mindroom.bot.suggest_agent_for_message", AsyncMock(return_value="assistant")):
+            await bot._handle_ai_routing(
+                room,
+                self._routing_event(),
+                thread_history=[],
+                thread_id="$thread_root",
+            )
+
+        assert bot._send_response.await_args.kwargs["thread_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_router_handoff_uses_suggested_thread_mode(
+        self,
+        room_mode_config: Config,
+        router_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Router should keep thread replies when the suggested agent is thread-mode."""
+        bot = AgentBot(config=room_mode_config, agent_user=router_user, storage_path=tmp_path)
+        bot.response_tracker = MagicMock()
+        bot._send_response = AsyncMock(return_value="$reply")
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+
+        with patch("mindroom.bot.suggest_agent_for_message", AsyncMock(return_value="coder")):
+            await bot._handle_ai_routing(
+                room,
+                self._routing_event(),
+                thread_history=[],
+                thread_id="$thread_root",
+            )
+
+        assert bot._send_response.await_args.kwargs["thread_id"] == "$thread_root"
+
+
 class TestCreateSessionIdWithNoneThread:
     """Verify create_session_id returns room-level ID when thread_id=None."""
 
