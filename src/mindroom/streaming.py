@@ -100,6 +100,7 @@ class StreamingResponse:
     stream_started_at: float | None = None
     chars_since_last_update: int = 0
     in_progress_update_count: int = 0
+    placeholder_progress_sent: bool = False
 
     def _update(self, new_chunk: str) -> None:
         """Append new chunk to accumulated text."""
@@ -169,7 +170,9 @@ class StreamingResponse:
         """Send final message update."""
         # When a placeholder message exists but no real text arrived,
         # still edit the message to strip the in-progress marker.
-        has_placeholder = self.event_id is not None and not self.accumulated_text.strip()
+        has_placeholder = (
+            self.event_id is not None and self.placeholder_progress_sent and not self.accumulated_text.strip()
+        )
         await self._send_or_edit_message(client, is_final=True, allow_empty_progress=has_placeholder)
 
     async def _send_or_edit_message(
@@ -208,6 +211,7 @@ class StreamingResponse:
             tool_trace=self.tool_trace,
         )
 
+        send_succeeded = False
         if self.event_id is None:
             # First message - send new
             logger.debug("Sending initial streaming message")
@@ -215,17 +219,23 @@ class StreamingResponse:
             if response_event_id:
                 self.event_id = response_event_id
                 logger.debug("Initial streaming message sent", event_id=self.event_id)
+                send_succeeded = True
             else:
                 logger.error("Failed to send initial streaming message")
         else:
             # Subsequent updates - edit existing message
             logger.debug("Editing streaming message", event_id=self.event_id)
             response_event_id = await edit_message(client, self.room_id, self.event_id, content, display_text)
-            if not response_event_id:
+            if response_event_id:
+                send_succeeded = True
+            else:
                 logger.error("Failed to edit streaming message")
 
-        if not is_final:
+        if send_succeeded and not is_final:
             self.in_progress_update_count += 1
+            self.placeholder_progress_sent = not self.accumulated_text.strip()
+        elif send_succeeded and is_final:
+            self.placeholder_progress_sent = False
 
 
 class ReplacementStreamingResponse(StreamingResponse):
