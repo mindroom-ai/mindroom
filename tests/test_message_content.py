@@ -78,6 +78,33 @@ class TestGetFullMessageBody:
         client.download.assert_called_once_with("server", "file123")
 
     @pytest.mark.asyncio
+    async def test_large_message_with_html_attachment_converts_to_text(self) -> None:
+        """HTML attachments should resolve to plain text for prompt history."""
+        client = AsyncMock()
+        client.download = AsyncMock()
+
+        response = MagicMock(spec=nio.DownloadResponse)
+        response.body = b"<h1>Title</h1><p>Hello <strong>world</strong></p><p>Second line</p>"
+        client.download.return_value = response
+
+        message = {
+            "body": "Preview...",
+            "content": {
+                "msgtype": "m.file",
+                "body": "Preview...",
+                "info": {"mimetype": "text/html"},
+                "io.mindroom.long_text": {
+                    "version": 1,
+                    "original_size": 100000,
+                },
+                "url": "mxc://server/file-html",
+            },
+        }
+
+        result = await _get_full_message_body(message, client)
+        assert result == "Title\nHello world\nSecond line"
+
+    @pytest.mark.asyncio
     async def test_large_message_with_encryption(self) -> None:
         """Test handling of encrypted large message."""
         client = AsyncMock()
