@@ -34,6 +34,7 @@ logger = get_logger(__name__)
 
 # Global constant for the in-progress marker
 IN_PROGRESS_MARKER = " ⋯"
+PROGRESS_PLACEHOLDER = "Thinking..."
 StreamInputChunk = str | StructuredStreamChunk | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
 _IN_PROGRESS_MESSAGE_PATTERN = re.compile(rf"{re.escape(IN_PROGRESS_MARKER)}\.*$")
 
@@ -153,8 +154,9 @@ class StreamingResponse:
             and elapsed_since_last_update >= self.min_char_update_interval
         )
         should_send = time_triggered or char_triggered
-        if should_send and self.accumulated_text.strip():
-            await self._send_or_edit_message(client)
+        allow_empty_progress = progress_hint and self.event_id is not None and not self.accumulated_text.strip()
+        if should_send and (self.accumulated_text.strip() or allow_empty_progress):
+            await self._send_or_edit_message(client, allow_empty_progress=allow_empty_progress)
             self.last_update = current_time
             self.chars_since_last_update = 0
 
@@ -167,15 +169,21 @@ class StreamingResponse:
         """Send final message update."""
         await self._send_or_edit_message(client, is_final=True)
 
-    async def _send_or_edit_message(self, client: nio.AsyncClient, is_final: bool = False) -> None:
+    async def _send_or_edit_message(
+        self,
+        client: nio.AsyncClient,
+        is_final: bool = False,
+        *,
+        allow_empty_progress: bool = False,
+    ) -> None:
         """Send new message or edit existing one."""
-        if not self.accumulated_text.strip():
+        if not self.accumulated_text.strip() and not allow_empty_progress:
             return
 
         effective_thread_id = None if self.room_mode else self.thread_id if self.thread_id else self.reply_to_event_id
 
         # Add in-progress marker during streaming (not on final update)
-        text_to_send = self.accumulated_text
+        text_to_send = self.accumulated_text if self.accumulated_text.strip() else PROGRESS_PLACEHOLDER
         if not is_final:
             marker_suffix = "." * (self.in_progress_update_count % 3)
             text_to_send += f"{IN_PROGRESS_MARKER}{marker_suffix}"
@@ -228,6 +236,7 @@ class ReplacementStreamingResponse(StreamingResponse):
     def _update(self, new_chunk: str) -> None:
         """Replace accumulated text with new chunk."""
         self.accumulated_text = new_chunk
+        self.chars_since_last_update += len(new_chunk)
 
 
 async def send_streaming_response(  # noqa: C901, PLR0912

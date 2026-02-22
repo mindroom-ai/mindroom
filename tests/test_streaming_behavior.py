@@ -14,7 +14,13 @@ from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.streaming import IN_PROGRESS_MARKER, StreamingResponse, is_in_progress_message
+from mindroom.streaming import (
+    IN_PROGRESS_MARKER,
+    PROGRESS_PLACEHOLDER,
+    ReplacementStreamingResponse,
+    StreamingResponse,
+    is_in_progress_message,
+)
 
 from .conftest import TEST_PASSWORD
 
@@ -409,6 +415,22 @@ class TestStreamingBehavior:
         assert end == 180
         assert after == 180
 
+    def test_replacement_streaming_tracks_chars_since_last_update(self) -> None:
+        """Replacement streams should still advance char-trigger counters."""
+        streaming = ReplacementStreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+        )
+
+        streaming._update("abc")
+        streaming._update("abcdef")
+
+        assert streaming.accumulated_text == "abcdef"
+        assert streaming.chars_since_last_update == 9
+
     def test_stream_started_at_not_set_before_first_send(self) -> None:
         """Test that stream_started_at is None until first _throttled_send."""
         streaming = StreamingResponse(
@@ -513,6 +535,38 @@ class TestStreamingBehavior:
         with patch("mindroom.streaming.time.time", return_value=100.25):
             await streaming._throttled_send(mock_client, progress_hint=True)
         assert mock_client.room_send.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_progress_hint_can_update_existing_message_before_text(self) -> None:
+        """Hidden tool calls should keep an existing thinking message visibly alive."""
+        mock_client = AsyncMock()
+
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            update_interval=5.0,
+            progress_update_interval=0.2,
+        )
+        streaming.event_id = "$existing_event"
+        streaming.stream_started_at = 100.0
+        streaming.last_update = 100.0
+
+        with (
+            patch("mindroom.streaming.time.time", return_value=100.25),
+            patch(
+                "mindroom.streaming.edit_message",
+                new=AsyncMock(return_value="$existing_event"),
+            ) as mock_edit,
+        ):
+            await streaming._throttled_send(mock_client, progress_hint=True)
+
+        assert mock_edit.await_count == 1
+        edit_args = mock_edit.await_args.args
+        assert edit_args[3]["body"].startswith(PROGRESS_PLACEHOLDER)
+        assert IN_PROGRESS_MARKER in edit_args[3]["body"]
 
     @pytest.mark.asyncio
     async def test_streaming_in_progress_marker(
