@@ -51,7 +51,22 @@ def _attachment_mimetype(content: dict[str, Any]) -> str | None:
 
 def _html_to_text(html_text: str) -> str:
     """Convert HTML attachment content back to plain text for prompt history."""
-    text = re.sub(r"(?i)<br\s*/?>", "\n", html_text)
+
+    def _anchor_to_text(match: re.Match[str]) -> str:
+        href = match.group(1) or match.group(2) or match.group(3) or ""
+        label = match.group(4).strip()
+        if not label:
+            return href
+        if label == href:
+            return href
+        return f"{label} ({href})"
+
+    text = re.sub(
+        r"""(?is)<a\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`]+))[^>]*>(.*?)</a>""",
+        _anchor_to_text,
+        html_text,
+    )
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
     text = re.sub(r"(?i)</(p|div|li|tr|h1|h2|h3|h4|h5|h6|pre|blockquote)>", "\n", text)
     text = re.sub(r"<[^>]+>", "", text)
     text = unescape(text)
