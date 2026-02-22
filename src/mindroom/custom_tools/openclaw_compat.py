@@ -64,6 +64,7 @@ class OpenClawCompatTools(Toolkit):
                 self.cron,
                 self.web_search,
                 self.web_fetch,
+                self.browser,
                 self.exec,
                 self.process,
                 self.read_file,
@@ -78,6 +79,7 @@ class OpenClawCompatTools(Toolkit):
         self._duckduckgo = DuckDuckGoTools()
         self._website = WebsiteTools()
         self._shell = get_tool_by_name("shell")
+        self._browser_tool: Toolkit | None = None
         self._coding = CodingTools()
 
     @staticmethod
@@ -1162,6 +1164,93 @@ class OpenClawCompatTools(Toolkit):
             return self._payload("web_fetch", "error", message="url cannot be empty")
         result = self._website.read_url(url.strip())
         return self._payload("web_fetch", "ok", result=result)
+
+    def _get_browser_tool(self) -> Toolkit:
+        if self._browser_tool is None:
+            self._browser_tool = get_tool_by_name("browser")
+        return self._browser_tool
+
+    async def browser(
+        self,
+        action: str,
+        target: str | None = None,
+        node: str | None = None,
+        profile: str | None = None,
+        target_url: str | None = None,
+        target_id: str | None = None,
+        limit: int | None = None,
+        max_chars: int | None = None,
+        mode: str | None = None,
+        snapshot_format: str | None = None,
+        refs: str | None = None,
+        interactive: bool | None = None,
+        compact: bool | None = None,
+        depth: int | None = None,
+        selector: str | None = None,
+        frame: str | None = None,
+        labels: bool | None = None,
+        full_page: bool | None = None,
+        ref: str | None = None,
+        element: str | None = None,
+        type_: str | None = None,
+        level: str | None = None,
+        paths: list[str] | None = None,
+        input_ref: str | None = None,
+        timeout_ms: int | None = None,
+        accept: bool | None = None,
+        prompt_text: str | None = None,
+        request: dict[str, Any] | None = None,
+    ) -> str:
+        """Invoke the first-class browser tool via OpenClaw-compatible shape."""
+        try:
+            browser_tool = self._get_browser_tool()
+        except ImportError as exc:
+            return self._payload("browser", "error", message=f"browser tool unavailable: {exc}")
+
+        browser_function = browser_tool.functions.get("browser") or browser_tool.async_functions.get("browser")
+        if browser_function is None or browser_function.entrypoint is None:
+            return self._payload("browser", "error", message="browser tool does not expose browser entrypoint.")
+
+        call_kwargs: dict[str, Any] = {
+            "action": action,
+            "target": target,
+            "node": node,
+            "profile": profile,
+            "targetUrl": target_url,
+            "targetId": target_id,
+            "limit": limit,
+            "maxChars": max_chars,
+            "mode": mode,
+            "snapshotFormat": snapshot_format,
+            "refs": refs,
+            "interactive": interactive,
+            "compact": compact,
+            "depth": depth,
+            "selector": selector,
+            "frame": frame,
+            "labels": labels,
+            "fullPage": full_page,
+            "ref": ref,
+            "element": element,
+            "type": type_,
+            "level": level,
+            "paths": paths,
+            "inputRef": input_ref,
+            "timeoutMs": timeout_ms,
+            "accept": accept,
+            "promptText": prompt_text,
+            "request": request,
+        }
+        call_kwargs = {key: value for key, value in call_kwargs.items() if value is not None}
+
+        try:
+            result = browser_function.entrypoint(**call_kwargs)
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception as exc:
+            return self._payload("browser", "error", action=action, message=str(exc))
+
+        return self._payload("browser", "ok", action=action, result=result)
 
     async def _run_shell(self, command: str, tool_name: str) -> str:
         """Shared shell execution for exec and process."""

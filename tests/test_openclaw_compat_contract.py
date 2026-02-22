@@ -35,6 +35,7 @@ OPENCLAW_COMPAT_CORE_TOOLS = {
 }
 
 OPENCLAW_COMPAT_ALIAS_TOOLS = {
+    "browser",
     "cron",
     "web_search",
     "web_fetch",
@@ -121,6 +122,11 @@ async def test_openclaw_compat_aliases_return_structured_results() -> None:
     tool._website.read_url = MagicMock(return_value='{"docs": []}')
     tool._shell.functions["run_shell_command"].entrypoint = MagicMock(return_value="ok")
     tool._scheduler.schedule = AsyncMock(return_value="scheduled")
+    browser_entrypoint = AsyncMock(return_value='{"status":"ok","action":"status"}')
+    tool._browser_tool = SimpleNamespace(
+        async_functions={"browser": SimpleNamespace(entrypoint=browser_entrypoint)},
+        functions={},
+    )
 
     web_search_payload = json.loads(await tool.web_search("mindroom"))
     assert web_search_payload["status"] == "ok"
@@ -129,6 +135,11 @@ async def test_openclaw_compat_aliases_return_structured_results() -> None:
     web_fetch_payload = json.loads(await tool.web_fetch("https://example.com"))
     assert web_fetch_payload["status"] == "ok"
     assert web_fetch_payload["tool"] == "web_fetch"
+
+    browser_payload = json.loads(await tool.browser(action="status"))
+    assert browser_payload["status"] == "ok"
+    assert browser_payload["tool"] == "browser"
+    browser_entrypoint.assert_awaited_once()
 
     exec_payload = json.loads(await tool.exec("echo hi"))
     assert exec_payload["status"] == "ok"

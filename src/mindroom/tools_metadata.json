@@ -6845,6 +6845,23 @@
     {
       "auth_provider": null,
       "category": "research",
+      "config_fields": null,
+      "dependencies": [
+        "playwright"
+      ],
+      "description": "OpenClaw-style browser control (status/start/stop/profiles/tabs/open/focus/close/snapshot/screenshot/navigate/console/pdf/upload/dialog/act)",
+      "display_name": "Browser",
+      "docs_url": "https://github.com/openclaw/openclaw/blob/main/docs/tools/browser.md",
+      "helper_text": null,
+      "icon": "FaChrome",
+      "icon_color": "text-orange-500",
+      "name": "browser",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "auth_provider": null,
+      "category": "research",
       "config_fields": [
         {
           "default": null,
