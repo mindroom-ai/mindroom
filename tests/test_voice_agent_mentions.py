@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.config import AgentConfig, Config
-from mindroom.voice_handler import _process_transcription
+from mindroom.voice_handler import _process_transcription, _sanitize_unavailable_mentions
 
 
 @pytest.mark.asyncio
@@ -192,3 +192,32 @@ async def test_voice_transcription_strips_unavailable_entity_mentions() -> None:
         )
 
     assert result == "code review this"
+
+
+@pytest.mark.parametrize(
+    ("text", "allowed_entities", "configured_entities", "expected"),
+    [
+        ("@code review this", {"openclaw"}, {"openclaw", "code"}, "code review this"),
+        ("@mindroom_code review this", {"openclaw"}, {"openclaw", "code"}, "mindroom_code review this"),
+        ("@code:server.com review this", {"openclaw"}, {"openclaw", "code"}, "code:server.com review this"),
+        ("@openclaw review this", {"openclaw"}, {"openclaw", "code"}, "@openclaw review this"),
+        ("@unknown review this", {"openclaw"}, {"openclaw", "code"}, "@unknown review this"),
+        ("@Code review this", {"openclaw"}, {"openclaw", "code"}, "Code review this"),
+        ("@openclaw ask @code to help", {"openclaw"}, {"openclaw", "code"}, "@openclaw ask code to help"),
+        ("", {"openclaw"}, {"openclaw", "code"}, ""),
+        ("no mentions in this sentence", {"openclaw"}, {"openclaw", "code"}, "no mentions in this sentence"),
+    ],
+)
+def test_sanitize_unavailable_mentions_direct(
+    text: str,
+    allowed_entities: set[str],
+    configured_entities: set[str],
+    expected: str,
+) -> None:
+    """Test direct sanitizer behavior for mention edge cases."""
+    result = _sanitize_unavailable_mentions(
+        text,
+        allowed_entities=allowed_entities,
+        configured_entities=configured_entities,
+    )
+    assert result == expected

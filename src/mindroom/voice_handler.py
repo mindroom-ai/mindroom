@@ -186,14 +186,14 @@ async def _process_transcription(
         team_display_names = {name: config.teams[name].display_name for name in team_names if name in config.teams}
 
         agent_list = (
-            chr(10).join(
+            "\n".join(
                 [f"  - @{name} or @mindroom_{name} (spoken as: {agent_display_names[name]})" for name in agent_names],
             )
             if agent_names
             else "  (none)"
         )
         team_list = (
-            chr(10).join([f"  - @{name} (spoken as: {team_display_names[name]})" for name in team_names])
+            "\n".join([f"  - @{name} (spoken as: {team_display_names[name]})" for name in team_names])
             if team_names
             else "  (none)"
         )
@@ -312,6 +312,7 @@ def _sanitize_unavailable_mentions(
             return match.group(0)
         if configured_name.lower() in allowed_lower:
             return match.group(0)
-        return configured_name
+        # Strip only '@', preserving exact matched token shape (mindroom_ prefix/domain suffix/case).
+        return match.group(0)[1:]
 
     return VOICE_MENTION_PATTERN.sub(_replace, text)
