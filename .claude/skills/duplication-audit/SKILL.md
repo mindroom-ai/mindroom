@@ -1,3 +1,9 @@
+---
+name: duplication-audit
+description: Find duplicated functionality across the codebase and propose minimal, safe generalizations.
+argument-hint: "[path or module to audit]"
+---
+
 # Duplication audit and generalization prompt
 
 You are a coding agent working inside a repository. Your job is to find duplicated
