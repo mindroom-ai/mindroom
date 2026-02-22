@@ -147,13 +147,17 @@ def complete_pending_tool_block(
     accumulated_text: str,
     tool_name: str,
     result: object | None,
-    tool_index: int | None = None,
+    tool_index: int,
 ) -> tuple[str, ToolTraceEntry]:
-    """Find a pending tool marker and mark it completed by removing the hourglass.
+    """Find a pending tool marker by index and mark it completed by removing the hourglass.
 
     Returns (updated_text, trace_entry).
-    If no pending block is found, appends a new combined block instead.
+    If no pending block is found, leaves text unchanged.
     """
+    if tool_index < 1:
+        msg = "tool_index must be >= 1 for v2 tool markers"
+        raise ValueError(msg)
+
     result_display = ""
     truncated = False
     if result is not None and result != "":
@@ -165,16 +169,10 @@ def complete_pending_tool_block(
     completed_line = _tool_marker_line(tool_name, tool_index, pending=False)
     pending_pos = updated.rfind(pending_line)
     if pending_pos >= 0:
-        updated = (
-            updated[:pending_pos]
-            + completed_line
-            + updated[pending_pos + len(pending_line) :]
-        )
+        updated = updated[:pending_pos] + completed_line + updated[pending_pos + len(pending_line) :]
     elif completed_line in updated:
         # Duplicate completion event for the same marker; leave text unchanged.
         pass
-    elif tool_index is not None or result is not None:
-        updated += _format_tool_marker(tool_name, tool_index, pending=False)
 
     trace = ToolTraceEntry(
         type="tool_call_completed",

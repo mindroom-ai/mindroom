@@ -834,14 +834,23 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     info = extract_tool_completed_info(event.tool)
                     if info:
                         tool_name, result = info
-                        tool_index = next(
-                            (idx for name, idx in reversed(pending_tools) if name == tool_name),
-                            tool_count + 1,
+                        match_pos = next(
+                            (
+                                pos
+                                for pos in range(len(pending_tools) - 1, -1, -1)
+                                if pending_tools[pos][0] == tool_name
+                            ),
+                            None,
                         )
-                        for pos in range(len(pending_tools) - 1, -1, -1):
-                            if pending_tools[pos][0] == tool_name and pending_tools[pos][1] == tool_index:
-                                pending_tools.pop(pos)
-                                break
+                        if match_pos is None:
+                            logger.warning(
+                                "Missing pending tool start in AI stream; skipping completion marker",
+                                tool_name=tool_name,
+                                agent=agent_name,
+                            )
+                            yield event
+                            continue
+                        _, tool_index = pending_tools.pop(match_pos)
                         full_response, _ = complete_pending_tool_block(
                             full_response,
                             tool_name,

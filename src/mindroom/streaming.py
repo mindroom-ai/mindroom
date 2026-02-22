@@ -352,14 +352,18 @@ async def send_streaming_response(  # noqa: C901, PLR0912
             if info:
                 tool_name, result = info
                 if streaming.show_tool_calls:
-                    tool_index = next(
-                        (idx for name, idx in reversed(pending_tools) if name == tool_name),
-                        len(streaming.tool_trace) + 1,
+                    match_pos = next(
+                        (pos for pos in range(len(pending_tools) - 1, -1, -1) if pending_tools[pos][0] == tool_name),
+                        None,
                     )
-                    for pos in range(len(pending_tools) - 1, -1, -1):
-                        if pending_tools[pos][0] == tool_name and pending_tools[pos][1] == tool_index:
-                            pending_tools.pop(pos)
-                            break
+                    if match_pos is None:
+                        logger.warning(
+                            "Missing pending tool start in streaming response; skipping completion marker",
+                            tool_name=tool_name,
+                        )
+                        await streaming._throttled_send(client, progress_hint=True)
+                        continue
+                    _, tool_index = pending_tools.pop(match_pos)
                     streaming.accumulated_text, trace_entry = complete_pending_tool_block(
                         streaming.accumulated_text,
                         tool_name,
@@ -372,7 +376,12 @@ async def send_streaming_response(  # noqa: C901, PLR0912
                         existing_entry.result_preview = trace_entry.result_preview
                         existing_entry.truncated = existing_entry.truncated or trace_entry.truncated
                     else:
-                        streaming.tool_trace.append(trace_entry)
+                        logger.warning(
+                            "Missing tool trace slot in streaming response for completion",
+                            tool_name=tool_name,
+                            tool_index=tool_index,
+                            trace_len=len(streaming.tool_trace),
+                        )
                 else:
                     await streaming._throttled_send(client, progress_hint=True)
                     continue

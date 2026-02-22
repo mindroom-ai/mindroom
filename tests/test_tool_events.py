@@ -1,5 +1,6 @@
 """Tests for tool event formatting and metadata payloads."""
 
+import pytest
 from agno.models.response import ToolExecution
 
 from mindroom.matrix.client import markdown_to_html
@@ -115,20 +116,26 @@ def test_complete_pending_tool_block_skips_already_completed() -> None:
     assert trace.result_preview == "new_result"
 
 
-def test_complete_pending_tool_block_appends_when_no_pending() -> None:
-    """Should append a completed marker when no pending marker is found."""
+def test_complete_pending_tool_block_noops_when_no_pending() -> None:
+    """Should not synthesize a completed marker when no pending marker is found."""
     text = "some text"
     updated, trace = complete_pending_tool_block(text, "save_file", "result", tool_index=3)
 
-    assert "some text" in updated
-    assert "🔧 `save_file` [3]" in updated
+    assert updated == text
     assert trace.type == "tool_call_completed"
+
+
+def test_complete_pending_tool_block_requires_tool_index() -> None:
+    """V2 completion markers must be matched by index."""
+    text = "some text"
+    with pytest.raises(ValueError, match="tool_index"):
+        complete_pending_tool_block(text, "save_file", None, tool_index=0)
 
 
 def test_complete_pending_tool_block_no_result_no_change() -> None:
     """Should not modify anything when there's no result and no pending block."""
     text = "some text"
-    updated, trace = complete_pending_tool_block(text, "save_file", None)
+    updated, trace = complete_pending_tool_block(text, "save_file", None, tool_index=1)
 
     assert updated == text
     assert trace.result_preview is None
@@ -278,8 +285,7 @@ def test_markdown_to_html_escapes_tool_tags() -> None:
 def test_markdown_to_html_escapes_unknown_tags_including_tool() -> None:
     """Unknown raw tags are escaped while supported tags stay intact."""
     body = (
-        "<tool>save_file(file=a.py)\nok</tool>\n"
-        "<code>example</code>\n<search>\n<query>Mindroom docs</query>\n</search>"
+        "<tool>save_file(file=a.py)\nok</tool>\n<code>example</code>\n<search>\n<query>Mindroom docs</query>\n</search>"
     )
     html = markdown_to_html(body)
     assert "<tool>" not in html

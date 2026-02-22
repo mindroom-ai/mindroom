@@ -12,6 +12,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
+from html import escape
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import uuid4
 
@@ -41,6 +42,7 @@ from mindroom.knowledge_utils import resolve_agent_knowledge
 from mindroom.logging_config import get_logger
 from mindroom.routing import suggest_agent
 from mindroom.teams import TeamMode, format_team_response
+from mindroom.tool_events import format_tool_completed_event, format_tool_started_event
 
 AUTO_MODEL_NAME = "auto"
 TEAM_MODEL_PREFIX = "team/"
@@ -768,29 +770,18 @@ def _resolve_completed_tool_id(tool: ToolExecution, tool_state: _ToolStreamState
 
 
 def _inject_tool_metadata(tool_message: str, *, tool_id: str, state: Literal["start", "done"]) -> str:
-    return tool_message.replace("<tool>", f'<tool id="{tool_id}" state="{state}">', 1)
+    return f'<tool id="{tool_id}" state="{state}">{tool_message}</tool>'
 
 
-def _to_compact_tool_text(value: object) -> str:
-    if isinstance(value, str):
-        return value
-    try:
-        return json.dumps(value, ensure_ascii=False, sort_keys=True)
-    except TypeError:
-        return str(value)
+def _escape_tool_payload_text(text: str) -> str:
+    return escape(text, quote=True)
 
 
-def _format_openai_tool_call(tool: ToolExecution) -> str:
-    tool_name = tool.tool_name or "tool"
-    tool_args = tool.tool_args if isinstance(tool.tool_args, dict) else {}
-    if not tool_args:
-        return f"{tool_name}()"
-
-    parts: list[str] = []
-    for key, value in tool_args.items():
-        value_text = _to_compact_tool_text(value).replace("\n", " ")
-        parts.append(f"{key}={value_text}")
-    return f"{tool_name}({', '.join(parts)})"
+def _format_openai_tool_call_display(tool_name: str, args_preview: str | None) -> str:
+    safe_tool_name = _escape_tool_payload_text(tool_name)
+    if not args_preview:
+        return f"{safe_tool_name}()"
+    return f"{safe_tool_name}({_escape_tool_payload_text(args_preview)})"
 
 
 def _format_openai_stream_tool_message(
@@ -798,14 +789,20 @@ def _format_openai_stream_tool_message(
     *,
     completed: bool,
 ) -> str:
-    call_display = _format_openai_tool_call(tool)
-    if not completed:
-        return f"<tool>{call_display}</tool>"
+    if completed:
+        _, trace = format_tool_completed_event(tool)
+    else:
+        _, trace = format_tool_started_event(tool)
+    if trace is None:
+        return ""
 
-    result = tool.result
-    if result is None or result == "":
-        return f"<tool>{call_display}\n</tool>"
-    return f"<tool>{call_display}\n{_to_compact_tool_text(result)}</tool>"
+    call_display = _format_openai_tool_call_display(trace.tool_name, trace.args_preview)
+    if not completed:
+        return call_display
+
+    if trace.result_preview is None:
+        return f"{call_display}\n"
+    return f"{call_display}\n{_escape_tool_payload_text(trace.result_preview)}"
 
 
 def _format_stream_tool_event(
@@ -830,6 +827,8 @@ def _format_stream_tool_event(
     else:
         return None
 
+    if not tool_msg:
+        return None
     return _inject_tool_metadata(tool_msg, tool_id=tool_id, state=state)
 
 

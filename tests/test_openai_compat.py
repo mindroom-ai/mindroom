@@ -613,6 +613,59 @@ class TestStreamingCompletion:
         assert '<tool id="1" state="done">search(query=X)\n3 results</tool>' in full_content
         assert "Result:" not in full_content
 
+    def test_streaming_tool_events_escape_payload_and_truncate_result(self, app_client: TestClient) -> None:
+        """Tool SSE payloads escape XML and keep large results bounded."""
+        from agno.models.response import ToolExecution  # noqa: PLC0415
+        from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent  # noqa: PLC0415
+
+        tool_started = ToolExecution(
+            tool_name="search",
+            tool_args={"query": "</tool><b>pwn</b>"},
+            tool_call_id="tc-stream-escape-1",
+        )
+        tool_completed = ToolExecution(
+            tool_name="search",
+            tool_args={"query": "</tool><b>pwn</b>"},
+            tool_call_id="tc-stream-escape-1",
+            result="</tool><i>boom</i>" + ("x" * 600),
+        )
+
+        async def mock_stream(**_kw: object) -> AsyncIterator[object]:
+            yield ToolCallStartedEvent(tool=tool_started)
+            yield ToolCallCompletedEvent(tool=tool_completed)
+
+        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Search"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        lines = response.text.strip().split("\n\n")
+        contents: list[str] = []
+        for line in lines:
+            text = line.removeprefix("data: ")
+            if text == "[DONE]":
+                continue
+            chunk = json.loads(text)
+            delta = chunk["choices"][0]["delta"]
+            if "content" in delta:
+                contents.append(delta["content"])
+
+        full_content = "".join(contents)
+        assert full_content.count('<tool id="1" state="start">') == 1
+        assert full_content.count('<tool id="1" state="done">') == 1
+        assert "query=&lt;/tool&gt;&lt;b&gt;pwn&lt;/b&gt;" in full_content
+        assert "&lt;/tool&gt;&lt;i&gt;boom&lt;/i&gt;" in full_content
+        assert "</tool><b>pwn</b>" not in full_content
+        assert "</tool><i>boom</i>" not in full_content
+        assert "…" in full_content
+        assert ("x" * 550) not in full_content
+
     def test_streaming_tool_ids_increment_for_multiple_calls(self, app_client: TestClient) -> None:
         """Tool ids start at 1 and increment for each new started tool call in a stream."""
         from agno.models.response import ToolExecution  # noqa: PLC0415
