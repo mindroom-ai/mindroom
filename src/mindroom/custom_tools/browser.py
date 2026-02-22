@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -927,7 +929,15 @@ class BrowserTools(Toolkit):
                 return state
 
             playwright = await async_playwright().start()
-            browser = await playwright.chromium.launch(headless=True)
+            executable = (
+                os.environ.get("BROWSER_EXECUTABLE_PATH")
+                or shutil.which("chromium")
+                or shutil.which("google-chrome-stable")
+            )
+            launch_kwargs: dict[str, Any] = {"headless": True}
+            if executable:
+                launch_kwargs["executable_path"] = executable
+            browser = await playwright.chromium.launch(**launch_kwargs)
             context = await browser.new_context(viewport={"height": VIEWPORT_HEIGHT, "width": VIEWPORT_WIDTH})
             state = BrowserProfileState(playwright=playwright, browser=browser, context=context)
             self._profiles[profile_name] = state
