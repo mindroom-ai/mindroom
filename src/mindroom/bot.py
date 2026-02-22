@@ -624,6 +624,7 @@ class AgentBot:
         reply_to_event_id: str | None = None,
         *,
         event_source: dict[str, Any] | None = None,
+        thread_mode_override: Literal["thread", "room"] | None = None,
     ) -> str | None:
         """Resolve the effective thread root for outgoing replies.
 
@@ -631,7 +632,8 @@ class AgentBot:
         messages and store room-level state. In thread mode, this prefers an
         existing thread ID and falls back to a safe root/reply target.
         """
-        if self.thread_mode == "room":
+        effective_thread_mode = thread_mode_override or self.thread_mode
+        if effective_thread_mode == "room":
             return None
         event_info = EventInfo.from_event(event_source)
         return thread_id or event_info.safe_thread_root or reply_to_event_id
@@ -2374,7 +2376,15 @@ class AgentBot:
             # Router mentions the suggested agent and asks them to help
             response_text = f"@{suggested_agent} could you help with this?"
 
-        thread_event_id = self._resolve_reply_thread_id(thread_id, event.event_id)
+        target_thread_mode = (
+            self.config.get_entity_thread_mode(suggested_agent) if suggested_agent else None
+        )
+        thread_event_id = self._resolve_reply_thread_id(
+            thread_id,
+            event.event_id,
+            event_source=event.source,
+            thread_mode_override=target_thread_mode,
+        )
 
         event_id = await self._send_response(
             room_id=room.room_id,
