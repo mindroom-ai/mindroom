@@ -569,6 +569,37 @@ class TestStreamingBehavior:
         assert IN_PROGRESS_MARKER in edit_args[3]["body"]
 
     @pytest.mark.asyncio
+    async def test_progress_hint_creates_initial_message_on_cold_start(self) -> None:
+        """Tool-first streams with hidden tool calls should create an initial placeholder message."""
+        mock_client = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.__class__ = nio.RoomSendResponse
+        mock_response.event_id = "$cold_start_1"
+        mock_client.room_send.return_value = mock_response
+
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            update_interval=5.0,
+            progress_update_interval=0.2,
+        )
+        # No event_id set — simulates tool-first cold start
+        streaming.stream_started_at = 100.0
+        streaming.last_update = 100.0
+
+        with patch("mindroom.streaming.time.time", return_value=100.25):
+            await streaming._throttled_send(mock_client, progress_hint=True)
+
+        assert mock_client.room_send.call_count == 1
+        assert streaming.event_id == "$cold_start_1"
+        sent_content = mock_client.room_send.call_args[1]["content"]
+        assert sent_content["body"].startswith(PROGRESS_PLACEHOLDER)
+        assert IN_PROGRESS_MARKER in sent_content["body"]
+
+    @pytest.mark.asyncio
     async def test_streaming_in_progress_marker(
         self,
         mock_helper_agent: AgentMatrixUser,  # noqa: ARG002

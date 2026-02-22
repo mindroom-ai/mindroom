@@ -964,9 +964,7 @@ class AgentBot:
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:  # noqa: C901, PLR0911
         self.logger.info("Received message", event_id=event.event_id, room_id=room.room_id, sender=event.sender)
         assert self.client is not None
-        if not isinstance(event.body, str):
-            return
-        if is_in_progress_message(event.body):
+        if not isinstance(event.body, str) or is_in_progress_message(event.body):
             return
 
         event_info = EventInfo.from_event(event.source)

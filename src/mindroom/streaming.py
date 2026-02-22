@@ -154,7 +154,7 @@ class StreamingResponse:
             and elapsed_since_last_update >= self.min_char_update_interval
         )
         should_send = time_triggered or char_triggered
-        allow_empty_progress = progress_hint and self.event_id is not None and not self.accumulated_text.strip()
+        allow_empty_progress = progress_hint and not self.accumulated_text.strip()
         if should_send and (self.accumulated_text.strip() or allow_empty_progress):
             await self._send_or_edit_message(client, allow_empty_progress=allow_empty_progress)
             self.last_update = current_time
