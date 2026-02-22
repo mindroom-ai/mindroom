@@ -862,24 +862,18 @@ class Config(BaseModel):
             return self.agents[entity_name].thread_mode
 
         if entity_name in self.teams:
-            team_modes = {
+            team_modes: set[Literal["thread", "room"]] = {
                 self.agents[name].thread_mode for name in self.teams[entity_name].agents if name in self.agents
             }
             if len(team_modes) == 1:
-                team_mode = next(iter(team_modes))
-                if team_mode == "thread":
-                    return "thread"
-                if team_mode == "room":
-                    return "room"
+                return next(iter(team_modes))
 
         if entity_name == ROUTER_AGENT_NAME:
-            configured_modes = {agent_cfg.thread_mode for agent_cfg in self.agents.values()}
+            configured_modes: set[Literal["thread", "room"]] = {
+                agent_cfg.thread_mode for agent_cfg in self.agents.values()
+            }
             if len(configured_modes) == 1:
-                configured_mode = next(iter(configured_modes))
-                if configured_mode == "thread":
-                    return "thread"
-                if configured_mode == "room":
-                    return "room"
+                return next(iter(configured_modes))
 
         return "thread"
 
