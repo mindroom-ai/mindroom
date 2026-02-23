@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import mindroom.tools  # noqa: F401
-from mindroom.custom_tools.openclaw_compat import OpenClawCompatTools
+from mindroom.custom_tools.openclaw_compat import OpenClawCompatTools, SessionOrchestrationTools
 from mindroom.openclaw_context import OpenClawToolContext, get_openclaw_tool_context, openclaw_tool_context
 from mindroom.thread_utils import create_session_id
 from mindroom.tools_metadata import TOOL_METADATA, get_tool_by_name
@@ -50,6 +50,16 @@ OPENCLAW_COMPAT_ALIAS_TOOLS = {
     "ls",
 }
 
+SESSION_ORCHESTRATION_TOOLS = {
+    "agents_list",
+    "session_status",
+    "sessions_list",
+    "sessions_history",
+    "sessions_send",
+    "sessions_spawn",
+    "subagents",
+}
+
 
 def test_openclaw_compat_tool_registered() -> None:
     """Verify metadata registration for the OpenClaw compatibility toolkit."""
@@ -64,6 +74,19 @@ def test_openclaw_compat_tool_instantiates() -> None:
     assert isinstance(tool, OpenClawCompatTools)
 
 
+def test_session_orchestration_tool_registered() -> None:
+    """Verify metadata registration for the reusable session orchestration toolkit."""
+    assert "session_orchestration" in TOOL_METADATA
+    metadata = TOOL_METADATA["session_orchestration"]
+    assert metadata.display_name == "Session Orchestration"
+
+
+def test_session_orchestration_tool_instantiates() -> None:
+    """Verify the reusable session orchestration toolkit can be loaded from the registry."""
+    tool = get_tool_by_name("session_orchestration")
+    assert isinstance(tool, SessionOrchestrationTools)
+
+
 def test_openclaw_compat_core_tool_names_present() -> None:
     """Lock the core OpenClaw-compatible tool name contract."""
     tool = OpenClawCompatTools()
@@ -73,6 +96,15 @@ def test_openclaw_compat_core_tool_names_present() -> None:
     assert OPENCLAW_COMPAT_CORE_TOOLS.issubset(exposed_names)
 
 
+def test_session_orchestration_tool_names_present() -> None:
+    """Lock the reusable session orchestration tool name contract."""
+    tool = SessionOrchestrationTools()
+    exposed_names = {func.name for func in tool.functions.values()} | {
+        func.name for func in tool.async_functions.values()
+    }
+    assert exposed_names == SESSION_ORCHESTRATION_TOOLS
+
+
 def test_openclaw_compat_alias_tool_names_present() -> None:
     """Lock the alias OpenClaw-compatible tool name contract."""
     tool = OpenClawCompatTools()
@@ -80,6 +112,15 @@ def test_openclaw_compat_alias_tool_names_present() -> None:
         func.name for func in tool.async_functions.values()
     }
     assert OPENCLAW_COMPAT_ALIAS_TOOLS.issubset(exposed_names)
+
+
+def test_openclaw_compat_uses_session_orchestration_entrypoints() -> None:
+    """OpenClaw compatibility should reuse the general session orchestration toolkit."""
+    tool = OpenClawCompatTools()
+    for entrypoint_name in SESSION_ORCHESTRATION_TOOLS:
+        entrypoint = tool.async_functions[entrypoint_name].entrypoint
+        assert entrypoint is not None
+        assert getattr(entrypoint, "__self__", None) is tool._session_orchestration
 
 
 @pytest.mark.asyncio
@@ -509,6 +550,36 @@ async def test_openclaw_compat_sessions_send_returns_error_when_matrix_send_fail
 
 
 @pytest.mark.asyncio
+async def test_openclaw_compat_sessions_send_relays_original_sender(tmp_path: Path) -> None:
+    """Verify sessions_send relays requester identity for bot-authored dispatch events."""
+    tool = OpenClawCompatTools()
+    tool._send_matrix_text = AsyncMock(return_value="$evt")
+    config = MagicMock()
+    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
+    ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id="$ctx-thread:localhost",
+        requester_id="@alice:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+
+    with openclaw_tool_context(ctx):
+        payload = json.loads(await tool.sessions_send(message="hello"))
+
+    assert payload["status"] == "ok"
+    tool._send_matrix_text.assert_awaited_once_with(
+        ctx,
+        room_id=ctx.room_id,
+        text="hello",
+        thread_id="$ctx-thread:localhost",
+        original_sender=ctx.requester_id,
+    )
+
+
+@pytest.mark.asyncio
 async def test_openclaw_compat_sessions_list_scopes_registry_entries_by_context(tmp_path: Path) -> None:
     """Verify sessions_list only returns registry sessions from the active context scope."""
     tool = OpenClawCompatTools()
@@ -605,6 +676,7 @@ async def test_openclaw_compat_sessions_send_label_prefers_latest_in_scope(
         room_id=ctx.room_id,
         text="hello",
         thread_id="$newer:localhost",
+        original_sender=ctx.requester_id,
     )
 
 
@@ -631,6 +703,36 @@ async def test_openclaw_compat_sessions_spawn_returns_error_when_matrix_send_fai
     assert payload["status"] == "error"
     assert payload["tool"] == "sessions_spawn"
     assert "Failed to send spawn message" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_openclaw_compat_sessions_spawn_relays_original_sender(tmp_path: Path) -> None:
+    """Verify sessions_spawn relays requester identity for bot-authored dispatch events."""
+    tool = OpenClawCompatTools()
+    tool._send_matrix_text = AsyncMock(return_value="$event")
+    config = MagicMock()
+    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
+    ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id="$ctx-thread:localhost",
+        requester_id="@alice:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+
+    with openclaw_tool_context(ctx):
+        payload = json.loads(await tool.sessions_spawn(task="do thing"))
+
+    assert payload["status"] == "ok"
+    tool._send_matrix_text.assert_awaited_once_with(
+        ctx,
+        room_id=ctx.room_id,
+        text="@mindroom_openclaw do thing",
+        thread_id=None,
+        original_sender=ctx.requester_id,
+    )
 
 
 @pytest.mark.asyncio

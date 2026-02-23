@@ -4219,6 +4219,23 @@
     {
       "auth_provider": null,
       "category": "development",
+      "config_fields": null,
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Spawn, steer, and inspect Matrix session/subagent runs across agents",
+      "display_name": "Session Orchestration",
+      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "helper_text": null,
+      "icon": "Workflow",
+      "icon_color": "text-teal-500",
+      "name": "session_orchestration",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "auth_provider": null,
+      "category": "development",
       "config_fields": [
         {
           "default": null,

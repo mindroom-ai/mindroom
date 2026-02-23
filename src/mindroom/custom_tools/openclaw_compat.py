@@ -19,6 +19,7 @@ from agno.tools import Toolkit
 from agno.tools.duckduckgo import DuckDuckGoTools
 from agno.tools.website import WebsiteTools
 
+from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.custom_tools.coding import CodingTools
 from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.logging_config import get_logger
@@ -54,16 +55,17 @@ class OpenClawCompatTools(Toolkit):
 
     def __init__(self) -> None:
         """Initialize the OpenClaw compatibility toolkit."""
+        self._session_orchestration = SessionOrchestrationTools()
         super().__init__(
             name="openclaw_compat",
             tools=[
-                self.agents_list,
-                self.session_status,
-                self.sessions_list,
-                self.sessions_history,
-                self.sessions_send,
-                self.sessions_spawn,
-                self.subagents,
+                self._session_orchestration.agents_list,
+                self._session_orchestration.session_status,
+                self._session_orchestration.sessions_list,
+                self._session_orchestration.sessions_history,
+                self._session_orchestration.sessions_send,
+                self._session_orchestration.sessions_spawn,
+                self._session_orchestration.subagents,
                 self.message,
                 self.gateway,
                 self.nodes,
@@ -577,6 +579,7 @@ class OpenClawCompatTools(Toolkit):
         room_id: str,
         text: str,
         thread_id: str | None,
+        original_sender: str | None = None,
     ) -> str | None:
         content = format_message_with_mentions(
             context.config,
@@ -584,6 +587,8 @@ class OpenClawCompatTools(Toolkit):
             sender_domain=context.config.domain,
             thread_event_id=thread_id,
         )
+        if original_sender:
+            content[ORIGINAL_SENDER_KEY] = original_sender
         return await send_message(context.client, room_id, content)
 
     async def agents_list(self) -> str:
@@ -799,6 +804,7 @@ class OpenClawCompatTools(Toolkit):
             room_id=target_room_id,
             text=outgoing,
             thread_id=target_thread_id,
+            original_sender=active_context.requester_id,
         )
 
         if event_id is None:
@@ -854,6 +860,7 @@ class OpenClawCompatTools(Toolkit):
             room_id=context.room_id,
             text=spawn_message,
             thread_id=None,
+            original_sender=context.requester_id,
         )
 
         if event_id is None:
@@ -1451,3 +1458,22 @@ class OpenClawCompatTools(Toolkit):
         result = self._coding.ls(path, limit)
         status = self._coding_status(result)
         return self._payload("ls", status, result=result)
+
+
+class SessionOrchestrationTools(OpenClawCompatTools):
+    """Session and subagent orchestration tools for any MindRoom agent."""
+
+    def __init__(self) -> None:
+        Toolkit.__init__(
+            self,
+            name="session_orchestration",
+            tools=[
+                self.agents_list,
+                self.session_status,
+                self.sessions_list,
+                self.sessions_history,
+                self.sessions_send,
+                self.sessions_spawn,
+                self.subagents,
+            ],
+        )

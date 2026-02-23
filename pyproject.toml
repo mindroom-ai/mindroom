@@ -299,6 +299,7 @@ optional-dependencies.serpapi = [
 optional-dependencies.serper = [
   "requests",
 ]
+optional-dependencies.session_orchestration = [  ]
 optional-dependencies.shell = [  ]
 optional-dependencies.shopify = [
   "httpx>=0.27",
