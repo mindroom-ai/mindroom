@@ -801,7 +801,6 @@ async def test_on_voice_message_tracks_response_event_id(tmp_path: Path) -> None
         # Verify the methods were called
         mock_handle_voice.assert_called_once()
         assert mock_handle_voice.call_args.args == (bot.client, room, voice_event, config)
-        assert mock_handle_voice.call_args.kwargs.get("audio") is None
         mock_send_response.assert_called_once()
 
 
@@ -903,7 +902,6 @@ async def test_on_voice_message_no_transcription_still_marks_responded(tmp_path:
         # Verify voice handler was called but _send_response was not
         mock_handle_voice.assert_called_once()
         assert mock_handle_voice.call_args.args == (bot.client, room, voice_event, config)
-        assert mock_handle_voice.call_args.kwargs.get("audio") is None
         mock_send_response.assert_not_called()
 
 

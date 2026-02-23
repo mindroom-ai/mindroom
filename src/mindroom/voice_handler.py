@@ -100,9 +100,10 @@ async def download_audio(
     if isinstance(event, nio.RoomEncryptedAudio):
         mime_type = event.mimetype
     else:
-        content = event.source.get("content", {})
-        info = content.get("info", {})
-        mime_type = info.get("mimetype")
+        source = getattr(event, "source", {})
+        content = source.get("content", {}) if isinstance(source, dict) else {}
+        info = content.get("info", {}) if isinstance(content, dict) else {}
+        mime_type = info.get("mimetype") if isinstance(info, dict) else None
 
     return Audio(content=audio_data, mime_type=mime_type)
 
