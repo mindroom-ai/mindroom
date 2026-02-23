@@ -687,6 +687,114 @@ async def test_openclaw_compat_sessions_list_scopes_registry_entries_by_context(
     assert [session["session_key"] for session in payload_b["sessions"]] == [session_b]
 
 
+def test_subagents_touch_session_rejects_cross_scope_updates(tmp_path: Path) -> None:
+    """Session tracking should not allow metadata writes from out-of-scope requesters."""
+    config = MagicMock()
+    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
+    ctx_a = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id="$thread:localhost",
+        requester_id="@alice:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+    ctx_b = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id="$thread:localhost",
+        requester_id="@bob:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+    session_key = create_session_id(ctx_a.room_id, "$child:localhost")
+
+    subagents_module._touch_session(
+        ctx_a,
+        session_key=session_key,
+        kind="thread",
+        label="alpha",
+        target_agent="openclaw",
+        status="active",
+    )
+    subagents_module._touch_session(
+        ctx_b,
+        session_key=session_key,
+        kind="thread",
+        label="beta",
+        target_agent="other-agent",
+        status="active",
+    )
+
+    tracked = subagents_module._load_tracked_session(ctx_a, session_key)
+    assert isinstance(tracked, dict)
+    assert tracked["label"] == "alpha"
+    assert tracked["target_agent"] == "openclaw"
+    assert tracked["requester_id"] == "@alice:localhost"
+    assert tracked["scope"]["requester_id"] == "@alice:localhost"
+
+
+@pytest.mark.asyncio
+async def test_openclaw_compat_sessions_send_ignores_out_of_scope_tracked_target_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sessions_send should ignore tracked target_agent values outside the active scope."""
+    tool = OpenClawCompatTools()
+    send_mock = AsyncMock(return_value="$evt")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    config = MagicMock()
+    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
+    config.get_entity_thread_mode = MagicMock(side_effect=lambda agent: "room" if agent == "room-agent" else "thread")
+    owner_ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id="$thread:localhost",
+        requester_id="@alice:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+    caller_ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id="$thread:localhost",
+        requester_id="@bob:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+    session_key = create_session_id(owner_ctx.room_id, "$child:localhost")
+    subagents_module._touch_session(
+        owner_ctx,
+        session_key=session_key,
+        kind="thread",
+        target_agent="room-agent",
+        status="active",
+    )
+
+    with openclaw_tool_context(caller_ctx):
+        payload = json.loads(
+            await call_openclaw_subagent_tool(
+                tool,
+                "sessions_send",
+                message="hello",
+                session_key=session_key,
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    send_mock.assert_awaited_once_with(
+        caller_ctx,
+        room_id=caller_ctx.room_id,
+        text="hello",
+        thread_id="$child:localhost",
+        original_sender=caller_ctx.requester_id,
+    )
+
+
 @pytest.mark.asyncio
 async def test_openclaw_compat_sessions_send_label_prefers_latest_in_scope(
     tmp_path: Path,

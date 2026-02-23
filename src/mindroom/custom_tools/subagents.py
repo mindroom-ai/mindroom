@@ -136,47 +136,47 @@ def _touch_session(
     now_iso = _now_iso()
     now_epoch = _now_epoch()
     room_id, thread_id = _session_key_to_room_thread(session_key)
+    context_scope = {
+        "agent_name": context.agent_name,
+        "room_id": context.room_id,
+        "thread_id": context.thread_id,
+        "requester_id": context.requester_id,
+    }
     with _REGISTRY_LOCK:
         registry = _load_registry(context)
         existing = registry["sessions"].get(session_key)
-        run_scope = {
-            "agent_name": context.agent_name,
-            "room_id": context.room_id,
-            "thread_id": context.thread_id,
-            "requester_id": context.requester_id,
-        }
-        base_scope = (
-            dict(existing.get("scope", {}))
-            if isinstance(existing, dict) and isinstance(existing.get("scope"), dict)
-            else {}
-        )
-        if base_scope.get("thread_id") in {"", "null"}:
-            base_scope["thread_id"] = None
-        if base_scope.get("requester_id") in {"", "null"}:
-            base_scope["requester_id"] = None
-        for key, value in run_scope.items():
-            if value is None:
-                continue
-            if key not in base_scope or base_scope.get(key) in {None, ""}:
-                base_scope[key] = value
-        if "thread_id" not in base_scope:
-            base_scope["thread_id"] = None
-        if "requester_id" not in base_scope:
-            base_scope["requester_id"] = context.requester_id
+        existing_scope = existing.get("scope") if isinstance(existing, dict) else None
+        if isinstance(existing_scope, dict):
+            normalized_scope = {
+                "agent_name": existing_scope.get("agent_name"),
+                "room_id": existing_scope.get("room_id"),
+                "thread_id": existing_scope.get("thread_id"),
+                "requester_id": existing_scope.get("requester_id"),
+            }
+            # Keep ownership immutable: writers outside the original scope cannot mutate this record.
+            if normalized_scope != context_scope:
+                return
+            scope = normalized_scope
+        else:
+            scope = context_scope
+
+        existing_label = existing.get("label") if isinstance(existing, dict) else None
+        existing_parent_session_key = existing.get("parent_session_key") if isinstance(existing, dict) else None
+        existing_target_agent = existing.get("target_agent") if isinstance(existing, dict) else None
         entry = {
             "session_key": session_key,
             "kind": kind,
-            "label": label,
+            "label": existing_label if label is None else label,
             "status": status,
             "agent_name": context.agent_name,
             "room_id": room_id,
             "thread_id": thread_id,
             "requester_id": context.requester_id,
-            "parent_session_key": parent_session_key,
-            "target_agent": target_agent,
+            "parent_session_key": (existing_parent_session_key if parent_session_key is None else parent_session_key),
+            "target_agent": existing_target_agent if target_agent is None else target_agent,
             "updated_at": now_iso,
             "updated_at_epoch": now_epoch,
-            "scope": base_scope,
+            "scope": scope,
         }
         if isinstance(existing, dict):
             created_at = existing.get("created_at", now_iso)
@@ -465,6 +465,8 @@ def _resolve_tracked_target_agent(
             return None
         session = sessions.get(session_key)
         if not isinstance(session, dict):
+            return None
+        if not _session_in_scope(session, context):
             return None
         resolved = session.get("target_agent")
         if isinstance(resolved, str) and resolved:
