@@ -144,11 +144,9 @@ async def test_router_voice_transcription_includes_original_sender_metadata(tmp_
 
     with (
         patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_voice,
-        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.bot.is_authorized_sender", return_value=True),
     ):
         mock_voice.return_value = "🎤 turn on the lights"
-        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_voice_message(room, event)
 
     bot._send_response.assert_called_once()
@@ -244,68 +242,5 @@ async def test_router_voice_transcription_falls_back_to_raw_audio(tmp_path) -> N
     assert bot._send_response.call_args.kwargs["response_text"] == f"{VOICE_PREFIX}[Attached voice message]"
     assert bot._send_response.call_args.kwargs["extra_content"] == {
         ORIGINAL_SENDER_KEY: "@alice:example.com",
-        VOICE_RAW_AUDIO_FALLBACK_KEY: True,
-    }
-
-
-@pytest.mark.asyncio
-async def test_router_routing_preserves_voice_raw_audio_fallback_metadata(tmp_path) -> None:  # noqa: ANN001
-    """Router handoff should preserve voice raw-audio metadata for downstream agents."""
-    agent_user = MagicMock()
-    agent_user.user_id = "@mindroom_router:example.com"
-    agent_user.agent_name = ROUTER_AGENT_NAME
-
-    config = Config(
-        agents={
-            "home": {
-                "display_name": "Home",
-                "role": "Home helper",
-                "rooms": ["!test:example.com"],
-            },
-        },
-        authorization={"default_room_access": True},
-    )
-
-    bot = AgentBot(
-        agent_user=agent_user,
-        storage_path=tmp_path,
-        config=config,
-        rooms=["!test:example.com"],
-    )
-    bot.response_tracker = MagicMock()
-    bot.logger = MagicMock()
-    bot._send_response = AsyncMock(return_value="$routed")
-
-    room = MagicMock()
-    room.room_id = "!test:example.com"
-
-    event = MagicMock()
-    event.sender = "@mindroom_router:localhost"
-    event.event_id = "$router_fallback"
-    event.body = f"{VOICE_PREFIX}[Attached voice message]"
-    event.source = {
-        "content": {
-            "body": f"{VOICE_PREFIX}[Attached voice message]",
-            ORIGINAL_SENDER_KEY: "@alice:localhost",
-            VOICE_RAW_AUDIO_FALLBACK_KEY: True,
-        },
-    }
-
-    with (
-        patch("mindroom.bot.get_configured_agents_for_room", return_value=[MagicMock()]),
-        patch("mindroom.bot.filter_agents_by_sender_permissions", return_value=[MagicMock()]),
-        patch("mindroom.bot.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
-    ):
-        await bot._handle_ai_routing(
-            room=room,
-            event=event,
-            thread_history=[],
-            thread_id="$thread_root",
-            requester_user_id="@alice:localhost",
-        )
-
-    bot._send_response.assert_called_once()
-    assert bot._send_response.call_args.kwargs["extra_content"] == {
-        ORIGINAL_SENDER_KEY: "@alice:localhost",
         VOICE_RAW_AUDIO_FALLBACK_KEY: True,
     }

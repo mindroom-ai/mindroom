@@ -12,7 +12,7 @@ import nio
 import pytest
 from agno.knowledge.document import Document
 from agno.knowledge.knowledge import Knowledge
-from agno.media import File, Image, Video
+from agno.media import Image
 from agno.models.ollama import Ollama
 from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
@@ -175,14 +175,6 @@ class TestAgentBot:
             event = MagicMock(spec=nio.RoomMessageAudio)
             event.body = "voice"
             event.source = {"content": {"body": "voice"}}
-        elif handler_name == "video":
-            event = MagicMock(spec=nio.RoomMessageVideo)
-            event.body = "video.mp4"
-            event.source = {"content": {"body": "video.mp4"}}
-        elif handler_name == "file":
-            event = MagicMock(spec=nio.RoomMessageFile)
-            event.body = "document.pdf"
-            event.source = {"content": {"body": "document.pdf"}}
         elif handler_name == "reaction":
             event = MagicMock(spec=nio.ReactionEvent)
             event.key = "👍"
@@ -210,10 +202,6 @@ class TestAgentBot:
             await bot._on_image_message(room, event)
         elif handler_name == "voice":
             await bot._on_voice_message(room, event)
-        elif handler_name == "video":
-            await bot._on_video_message(room, event)
-        elif handler_name == "file":
-            await bot._on_file_message(room, event)
         elif handler_name == "reaction":
             await bot._on_reaction(room, event)
         else:  # pragma: no cover - defensive guard for test helper misuse
@@ -478,7 +466,7 @@ class TestAgentBot:
         # The bot calls ensure_setup which calls ensure_user_account
         # and then login with whatever user account was ensured
         assert mock_login.called
-        assert mock_client.add_event_callback.call_count == 9  # invite, message, reaction, image/video/file callbacks
+        assert mock_client.add_event_callback.call_count == 5  # invite, message, reaction, and 2 image callbacks
 
     @pytest.mark.asyncio
     async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
@@ -660,8 +648,6 @@ class TestAgentBot:
                 user_id="@user:localhost",
                 audio=None,
                 images=None,
-                videos=None,
-                files=None,
                 reply_to_event_id="event123",
                 show_tool_calls=True,
             )
@@ -682,8 +668,6 @@ class TestAgentBot:
                 user_id="@user:localhost",
                 audio=None,
                 images=None,
-                videos=None,
-                files=None,
                 reply_to_event_id="event123",
                 show_tool_calls=True,
                 tool_trace_collector=ANY,
@@ -923,8 +907,6 @@ class TestAgentBot:
             ("message", True),
             ("image", True),
             ("voice", True),
-            ("video", True),
-            ("file", True),
             ("reaction", False),
         ],
     )
@@ -967,8 +949,6 @@ class TestAgentBot:
             ("message", True),
             ("image", True),
             ("voice", True),
-            ("video", True),
-            ("file", True),
             ("reaction", False),
         ],
     )
@@ -996,7 +976,7 @@ class TestAgentBot:
 
         event = self._make_handler_event(handler_name, sender="@user:localhost", event_id=f"${handler_name}_denied")
 
-        if handler_name in {"image", "video", "file"}:
+        if handler_name == "image":
             bot._extract_message_context = AsyncMock(
                 return_value=MessageContext(
                     am_i_mentioned=False,
@@ -1141,138 +1121,6 @@ class TestAgentBot:
 
         bot._generate_response.assert_not_called()
         tracker.mark_responded.assert_called_once_with("$img_event_fail")
-
-    @pytest.mark.asyncio
-    async def test_agent_bot_on_video_message_forwards_video_to_generate_response(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Video messages should call _generate_response with videos payload."""
-        config = Config.from_yaml()
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
-        bot.client = AsyncMock()
-
-        tracker = MagicMock()
-        tracker.has_responded.return_value = False
-        bot.__dict__["response_tracker"] = tracker
-
-        bot._extract_message_context = AsyncMock(
-            return_value=MessageContext(
-                am_i_mentioned=False,
-                is_thread=False,
-                thread_id=None,
-                thread_history=[],
-                mentioned_agents=[],
-                has_non_agent_mentions=False,
-            ),
-        )
-        bot._generate_response = AsyncMock(return_value="$response")
-
-        room = MagicMock()
-        room.room_id = "!test:localhost"
-
-        event = MagicMock(spec=nio.RoomMessageVideo)
-        event.sender = "@user:localhost"
-        event.event_id = "$vid_event"
-        event.body = "clip.mp4"
-        event.source = {"content": {"body": "clip.mp4"}}
-
-        video = Video(content=b"video-bytes", mime_type="video/mp4")
-
-        with (
-            patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
-            patch(
-                "mindroom.bot.decide_team_formation",
-                new_callable=AsyncMock,
-                return_value=TeamFormationDecision(
-                    should_form_team=False,
-                    agents=[],
-                    mode=TeamMode.COLLABORATE,
-                ),
-            ),
-            patch("mindroom.bot.should_agent_respond", return_value=True),
-            patch.object(bot, "_download_video", new_callable=AsyncMock, return_value=video),
-        ):
-            await bot._on_video_message(room, event)
-
-        bot._generate_response.assert_awaited_once_with(
-            room_id="!test:localhost",
-            prompt="[Attached video]",
-            reply_to_event_id="$vid_event",
-            thread_id=None,
-            thread_history=[],
-            user_id="@user:localhost",
-            videos=[video],
-        )
-        tracker.mark_responded.assert_called_once_with("$vid_event", "$response")
-
-    @pytest.mark.asyncio
-    async def test_agent_bot_on_file_message_forwards_file_to_generate_response(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """File messages should call _generate_response with files payload."""
-        config = Config.from_yaml()
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
-        bot.client = AsyncMock()
-
-        tracker = MagicMock()
-        tracker.has_responded.return_value = False
-        bot.__dict__["response_tracker"] = tracker
-
-        bot._extract_message_context = AsyncMock(
-            return_value=MessageContext(
-                am_i_mentioned=False,
-                is_thread=False,
-                thread_id=None,
-                thread_history=[],
-                mentioned_agents=[],
-                has_non_agent_mentions=False,
-            ),
-        )
-        bot._generate_response = AsyncMock(return_value="$response")
-
-        room = MagicMock()
-        room.room_id = "!test:localhost"
-
-        event = MagicMock(spec=nio.RoomMessageFile)
-        event.sender = "@user:localhost"
-        event.event_id = "$file_event"
-        event.body = "report.pdf"
-        event.source = {"content": {"body": "report.pdf"}}
-
-        file_media = File(content=b"file-bytes", mime_type="application/pdf", filename="report.pdf")
-
-        with (
-            patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
-            patch(
-                "mindroom.bot.decide_team_formation",
-                new_callable=AsyncMock,
-                return_value=TeamFormationDecision(
-                    should_form_team=False,
-                    agents=[],
-                    mode=TeamMode.COLLABORATE,
-                ),
-            ),
-            patch("mindroom.bot.should_agent_respond", return_value=True),
-            patch.object(bot, "_download_file", new_callable=AsyncMock, return_value=file_media),
-        ):
-            await bot._on_file_message(room, event)
-
-        bot._generate_response.assert_awaited_once_with(
-            room_id="!test:localhost",
-            prompt="[Attached file]",
-            reply_to_event_id="$file_event",
-            thread_id=None,
-            thread_history=[],
-            user_id="@user:localhost",
-            files=[file_media],
-        )
-        tracker.mark_responded.assert_called_once_with("$file_event", "$response")
 
     @pytest.mark.asyncio
     async def test_router_routes_image_messages_in_multi_agent_rooms(
@@ -1501,13 +1349,9 @@ class TestAgentBot:
         bot.response_tracker = tracker
         bot._generate_response = AsyncMock(return_value="$response")
 
-        # The thread root is the original media event.
+        # The thread root is the original image event
         fake_image = Image(content=b"png-bytes", mime_type="image/png")
-        fake_video = Video(content=b"mp4-bytes", mime_type="video/mp4")
-        fake_file = File(content=b"pdf-bytes", mime_type="application/pdf", filename="manual.pdf")
         bot._fetch_thread_images = AsyncMock(return_value=[fake_image])
-        bot._fetch_thread_videos = AsyncMock(return_value=[fake_video])
-        bot._fetch_thread_files = AsyncMock(return_value=[fake_file])
 
         # Simulate the routing mention event in a thread rooted at the image
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_calculator:localhost")
@@ -1555,13 +1399,9 @@ class TestAgentBot:
             await bot._on_message(room, event)
 
         bot._fetch_thread_images.assert_awaited_once_with("!test:localhost", "$img_root")
-        bot._fetch_thread_videos.assert_awaited_once_with("!test:localhost", "$img_root")
-        bot._fetch_thread_files.assert_awaited_once_with("!test:localhost", "$img_root")
         bot._generate_response.assert_awaited_once()
         call_kwargs = bot._generate_response.call_args.kwargs
         assert call_kwargs["images"] == [fake_image]
-        assert call_kwargs["videos"] == [fake_video]
-        assert call_kwargs["files"] == [fake_file]
 
     @pytest.mark.asyncio
     async def test_decide_team_for_sender_passes_sender_filtered_dm_agents(

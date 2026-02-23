@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
 import pytest
-from agno.media import Audio
 
 from mindroom import config_confirmation, interactive
 from mindroom.bot import AgentBot
@@ -784,13 +783,11 @@ async def test_on_voice_message_tracks_response_event_id(tmp_path: Path) -> None
 
     # Mock voice_handler.handle_voice_message to return a transcription
     with (
-        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
         patch("mindroom.bot.is_authorized_sender", return_value=True),
         patch.object(bot, "_send_response", new_callable=AsyncMock) as mock_send_response,
     ):
         # Setup mocks
-        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_handle_voice.return_value = "This is the transcribed message from voice"
         mock_send_response.return_value = "$response:example.com"
 
@@ -804,13 +801,13 @@ async def test_on_voice_message_tracks_response_event_id(tmp_path: Path) -> None
         # Verify the methods were called
         mock_handle_voice.assert_called_once()
         assert mock_handle_voice.call_args.args == (bot.client, room, voice_event, config)
-        assert isinstance(mock_handle_voice.call_args.kwargs.get("audio"), Audio)
+        assert mock_handle_voice.call_args.kwargs.get("audio") is None
         mock_send_response.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_on_voice_message_no_audio_still_marks_responded(tmp_path: Path) -> None:
-    """Test that _on_voice_message marks as responded when audio cannot be downloaded."""
+async def test_on_voice_message_no_transcription_still_marks_responded(tmp_path: Path) -> None:
+    """Test that _on_voice_message marks as responded even when no transcription is produced."""
     # Create a mock agent user
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
@@ -886,14 +883,14 @@ async def test_on_voice_message_no_audio_still_marks_responded(tmp_path: Path) -
         "sender": "@user:example.com",
     }
 
-    # Mock download failure to verify we do not attempt transcription.
+    # Mock voice_handler.handle_voice_message to return None (no transcription)
     with (
-        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
         patch("mindroom.bot.is_authorized_sender", return_value=True),
         patch.object(bot, "_send_response", new_callable=AsyncMock) as mock_send_response,
     ):
-        mock_download_audio.return_value = None
+        # Setup mocks
+        mock_handle_voice.return_value = None  # No transcription
 
         # Process the voice event
         await bot._on_voice_message(room, voice_event)
@@ -903,8 +900,10 @@ async def test_on_voice_message_no_audio_still_marks_responded(tmp_path: Path) -
         # Should not have a response event ID since no response was sent
         assert bot.response_tracker.get_response_event_id("$voice:example.com") is None
 
-        # Verify no transcription attempt was made and no response was sent.
-        mock_handle_voice.assert_not_called()
+        # Verify voice handler was called but _send_response was not
+        mock_handle_voice.assert_called_once()
+        assert mock_handle_voice.call_args.args == (bot.client, room, voice_event, config)
+        assert mock_handle_voice.call_args.kwargs.get("audio") is None
         mock_send_response.assert_not_called()
 
 

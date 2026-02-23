@@ -137,8 +137,6 @@ async def test_agent_processes_direct_mention(
                     user_id=test_user_id,
                     audio=None,
                     images=None,
-                    videos=None,
-                    files=None,
                     reply_to_event_id="$test_event:localhost",
                     show_tool_calls=True,
                 )
@@ -427,8 +425,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 user_id=test_user_id,
                 audio=None,
                 images=None,
-                videos=None,
-                files=None,
                 reply_to_event_id=f"$test_event2:{domain}",
                 show_tool_calls=True,
                 tool_trace_collector=ANY,
