@@ -25,6 +25,63 @@ logger = get_logger(__name__)
 VOICE_MENTION_PATTERN = re.compile(
     r"(?<![\w])@(?:(?P<prefix>mindroom_))?(?P<name>[A-Za-z0-9_]+)(?::[A-Za-z0-9.\-]+)?",
 )
+VOICE_COMMAND_PATTERN = re.compile(r"^!(?P<command>[a-zA-Z][a-zA-Z0-9_-]*)\b")
+
+VOICE_COMMAND_INTENT_PATTERNS: dict[str, tuple[str, ...]] = {
+    "help": (
+        r"^\s*help\b",
+        r"\bshow(?: me)?\s+(?:the\s+)?help\b",
+        r"\bwhat\s+commands?\b",
+        r"\bhelp\s+command\b",
+    ),
+    "schedule": (
+        r"^\s*schedule\b",
+        r"\bschedule\s+to\b",
+        r"\bschedule\s+(?:this|that|it)\b",
+        r"\bremind me\b",
+        r"\bset\s+(?:a\s+)?reminder\b",
+        r"\bcreate\s+(?:a\s+)?reminder\b",
+    ),
+    "list_schedules": (
+        r"^\s*(?:list|inspect)\s+(?:my\s+)?schedules?\b",
+        r"\b(?:list|inspect)\s+(?:my\s+)?schedules?\b",
+        r"\bshow\s+(?:my\s+)?schedules?\b",
+    ),
+    "cancel_schedule": (
+        r"^\s*cancel\s+(?:the\s+)?schedule\b",
+        r"\bcancel\s+(?:the\s+)?schedule\b",
+        r"\bdelete\s+(?:the\s+)?schedule\b",
+        r"\bremove\s+(?:the\s+)?schedule\b",
+    ),
+    "edit_schedule": (
+        r"^\s*(?:edit|update|change)\s+(?:the\s+)?schedule\b",
+        r"\b(?:edit|update|change)\s+(?:the\s+)?schedule\b",
+    ),
+    "widget": (
+        r"^\s*widget\b",
+        r"\bwidget\b",
+    ),
+    "config": (
+        r"^\s*config\b",
+        r"\bconfiguration\b",
+        r"\bconfig\s+command\b",
+    ),
+    "hi": (
+        r"^\s*(?:hi|hello)\b",
+        r"\bhi\s+command\b",
+        r"\bhello\s+command\b",
+    ),
+    "skill": (
+        r"^\s*skill\b",
+        r"\b(?:run|use|execute|invoke|trigger)\s+(?:the\s+)?skill\b",
+        r"\b(?:bang|exclamation(?:\s+mark)?)\s+skill\b",
+    ),
+}
+
+VOICE_COMMAND_ALIASES = {
+    "list": "list_schedules",
+    "inspect": "list_schedules",
+}
 
 
 async def handle_voice_message(
@@ -200,7 +257,7 @@ async def _process_transcription(
 
         # Build the prompt for the AI
         prompt = f"""You are a voice command processor for a Matrix chat bot system.
-Your task is to convert spoken transcriptions into properly formatted chat commands.
+Your task is to lightly normalize spoken transcriptions while preserving user intent.
 
 Available agents (use EXACT agent name after @):
 {agent_list}
@@ -220,19 +277,26 @@ Examples of correct formatting:
 CRITICAL RULES:
 1. ALWAYS use the EXACT agent name (the part before the parentheses) after @, NOT the display name
    - If agent is listed as "@home (spoken as: HomeAssistant)", use "@home" NOT "@homeassistant"
-2. If the user speaks a command, format it as !command
-3. !schedule commands MUST include a time (in X minutes, at 3pm, tomorrow, etc.)
+2. DEFAULT: keep natural language exactly as-is (except minor ASR fixes and mention normalization)
+3. Only emit a !command when command intent is explicit and unambiguous
+   - Explicit command intent examples: "schedule ...", "run skill ...", "cancel schedule ...", "help command"
+   - Non-command examples that must stay natural language:
+     - "What is my schedule today?" (question, not !list_schedules)
+     - "How do agent sessions work?" (question, not !skill session list)
+     - "Can you explain skills?" (question, not !skill)
+4. If command intent is uncertain, DO NOT create any !command
+5. !schedule commands MUST include a time (in X minutes, at 3pm, tomorrow, etc.)
    - The time should come right after !schedule
-4. When both command AND agent are mentioned, command comes FIRST
-5. Agent mentions come FIRST when just addressing them (no command):
+6. When both command AND agent are mentioned, command comes FIRST
+7. Agent mentions come FIRST when just addressing them (no command):
    - "research agent, find papers" → "@research find papers"
    - "ask the email agent to check mail" → "@email check mail"
-6. Fix common speech recognition errors (e.g., "at research" → "@research")
-7. Be smart about intent - "ask the research agent" means "@research"
-8. Keep the natural language but add proper formatting
-9. If unclear, prefer natural language over forcing commands
-10. ONLY mention agents/teams listed above as available in this room
-11. If no relevant available agent/team is listed, do not add any @mention
+8. Fix common speech recognition errors (e.g., "at research" → "@research")
+9. Be smart about intent - "ask the research agent" means "@research"
+10. Keep the natural language but add proper formatting
+11. ONLY mention agents/teams listed above as available in this room
+12. If no relevant available agent/team is listed, do not add any @mention
+13. Never invent command arguments that were not spoken
 
 Transcription: "{transcription}"
 
@@ -244,7 +308,7 @@ Output the formatted message only, no explanation:"""
         # Create an agent for voice command processing
         agent = Agent(
             name="VoiceCommandProcessor",
-            role="Convert voice transcriptions to properly formatted chat commands",
+            role="Normalize voice transcriptions while preserving command and mention intent",
             model=model,
         )
 
@@ -254,11 +318,18 @@ Output the formatted message only, no explanation:"""
 
         # Extract the content from the response
         if response and response.content:
-            return _sanitize_unavailable_mentions(
+            processed_message = _sanitize_unavailable_mentions(
                 response.content.strip(),
                 allowed_entities=set(agent_names) | set(team_names),
                 configured_entities=set(config.agents) | set(config.teams),
             )
+            if _is_speculative_command_rewrite(transcription, processed_message):
+                return _sanitize_unavailable_mentions(
+                    transcription.strip(),
+                    allowed_entities=set(agent_names) | set(team_names),
+                    configured_entities=set(config.agents) | set(config.teams),
+                )
+            return processed_message
 
     except Exception as e:
         logger.exception("Error processing transcription")
@@ -316,3 +387,24 @@ def _sanitize_unavailable_mentions(
         return match.group(0)[1:]
 
     return VOICE_MENTION_PATTERN.sub(_replace, text)
+
+
+def _is_speculative_command_rewrite(transcription: str, formatted_message: str) -> bool:
+    """Return True when model output invents a command not clearly requested by the user."""
+    if not formatted_message:
+        return False
+    match = VOICE_COMMAND_PATTERN.match(formatted_message.strip())
+    if match is None:
+        return False
+    command_name = _canonical_voice_command_name(match.group("command"))
+    patterns = VOICE_COMMAND_INTENT_PATTERNS.get(command_name)
+    if not patterns:
+        return True
+    normalized_transcription = transcription.strip().lower()
+    return not any(re.search(pattern, normalized_transcription) for pattern in patterns)
+
+
+def _canonical_voice_command_name(command_name: str) -> str:
+    """Normalize command names and aliases used by the voice command parser."""
+    normalized_name = command_name.lower().replace("-", "_")
+    return VOICE_COMMAND_ALIASES.get(normalized_name, normalized_name)
