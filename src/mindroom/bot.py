@@ -2091,11 +2091,9 @@ class AgentBot:
             )
 
         except asyncio.CancelledError:
-            # Handle cancellation - send a message showing it was stopped
+            # send_streaming_response already preserves partial text and appends
+            # a cancellation marker for the final edit.
             self.logger.info("Streaming cancelled by user", message_id=existing_event_id)
-            if existing_event_id:
-                cancelled_text = "**[Response cancelled by user]**"
-                await self._edit_message(room_id, existing_event_id, cancelled_text, thread_id)
             raise
         except Exception as e:
             self.logger.exception("Error in streaming response", error=str(e))

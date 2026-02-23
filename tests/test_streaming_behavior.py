@@ -15,11 +15,13 @@ from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.streaming import (
+    CANCELLED_RESPONSE_NOTE,
     IN_PROGRESS_MARKER,
     PROGRESS_PLACEHOLDER,
     ReplacementStreamingResponse,
     StreamingResponse,
     is_in_progress_message,
+    send_streaming_response,
 )
 
 from .conftest import TEST_PASSWORD
@@ -708,3 +710,43 @@ class TestStreamingBehavior:
         final_content = final_call[1]["content"]
         assert IN_PROGRESS_MARKER not in final_content["body"]
         assert "Hello world" in final_content["body"]
+
+    @pytest.mark.asyncio
+    async def test_cancelled_stream_preserves_partial_text_with_suffix(self) -> None:
+        """Cancellation should keep streamed text and append a stop marker."""
+        mock_client = AsyncMock()
+        edited_texts: list[str] = []
+
+        async def record_edit(
+            _client: object,
+            _room_id: str,
+            _event_id: str,
+            _new_content: dict[str, object],
+            new_text: str,
+        ) -> str:
+            edited_texts.append(new_text)
+            return "$edit"
+
+        async def cancelling_stream() -> AsyncIterator[str]:
+            yield "Partial answer"
+            raise asyncio.CancelledError
+
+        with (
+            patch("mindroom.streaming.edit_message", new=AsyncMock(side_effect=record_edit)),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await send_streaming_response(
+                client=mock_client,
+                room_id="!test:localhost",
+                reply_to_event_id="$original_123",
+                thread_id=None,
+                sender_domain="localhost",
+                config=self.config,
+                response_stream=cancelling_stream(),
+                existing_event_id="$thinking_123",
+                room_mode=True,
+            )
+
+        assert len(edited_texts) == 2
+        assert IN_PROGRESS_MARKER in edited_texts[0]
+        assert edited_texts[-1] == f"Partial answer\n\n{CANCELLED_RESPONSE_NOTE}"
