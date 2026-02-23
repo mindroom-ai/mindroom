@@ -13,7 +13,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import mindroom.tools  # noqa: F401
-from mindroom.custom_tools.openclaw_compat import OpenClawCompatTools, SessionOrchestrationTools
+from mindroom.custom_tools.openclaw_compat import OpenClawCompatTools
+from mindroom.custom_tools.session_orchestration import SessionOrchestrationTools
 from mindroom.openclaw_context import OpenClawToolContext, get_openclaw_tool_context, openclaw_tool_context
 from mindroom.thread_utils import create_session_id
 from mindroom.tools_metadata import TOOL_METADATA, get_tool_by_name

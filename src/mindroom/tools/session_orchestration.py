@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from mindroom.tools_metadata import SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from mindroom.custom_tools.openclaw_compat import SessionOrchestrationTools
+    from mindroom.custom_tools.session_orchestration import SessionOrchestrationTools
 
 
 @register_tool_with_metadata(
@@ -24,6 +24,6 @@ if TYPE_CHECKING:
 )
 def session_orchestration_tools() -> type[SessionOrchestrationTools]:
     """Return session orchestration tools."""
-    from mindroom.custom_tools.openclaw_compat import SessionOrchestrationTools
+    from mindroom.custom_tools.session_orchestration import SessionOrchestrationTools
 
     return SessionOrchestrationTools

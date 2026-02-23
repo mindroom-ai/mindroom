@@ -33,6 +33,7 @@ from mindroom.tools_metadata import get_tool_by_name
 if TYPE_CHECKING:
     from pathlib import Path
 
+
 logger = get_logger(__name__)
 
 
@@ -55,6 +56,8 @@ class OpenClawCompatTools(Toolkit):
 
     def __init__(self) -> None:
         """Initialize the OpenClaw compatibility toolkit."""
+        from mindroom.custom_tools.session_orchestration import SessionOrchestrationTools  # noqa: PLC0415
+
         self._session_orchestration = SessionOrchestrationTools()
         super().__init__(
             name="openclaw_compat",
@@ -1546,22 +1549,3 @@ class OpenClawCompatTools(Toolkit):
         result = self._coding.ls(path, limit)
         status = self._coding_status(result)
         return self._payload("ls", status, result=result)
-
-
-class SessionOrchestrationTools(OpenClawCompatTools):
-    """Session and subagent orchestration tools for any MindRoom agent."""
-
-    def __init__(self) -> None:
-        Toolkit.__init__(
-            self,
-            name="session_orchestration",
-            tools=[
-                self.agents_list,
-                self.session_status,
-                self.sessions_list,
-                self.sessions_history,
-                self.sessions_send,
-                self.sessions_spawn,
-                self.subagents,
-            ],
-        )
