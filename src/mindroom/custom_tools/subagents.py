@@ -25,6 +25,14 @@ if TYPE_CHECKING:
 _REGISTRY_LOCK = Lock()
 
 
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _now_epoch() -> int:
+    return int(datetime.now(UTC).timestamp())
+
+
 def _payload(tool_name: str, status: str, **kwargs: object) -> str:
     payload: dict[str, object] = {
         "status": status,
@@ -43,6 +51,7 @@ def _context_error(tool_name: str) -> str:
 
 
 def _registry_path(context: SessionToolsContext) -> Path:
+    # Intentionally separate from `openclaw/` registry state.
     return context.storage_path / "subagents" / "session_registry.json"
 
 
@@ -89,6 +98,7 @@ def _session_key_to_room_thread(session_key: str) -> tuple[str, str | None]:
 
 
 def _session_in_scope(session: dict[str, Any], context: SessionToolsContext) -> bool:
+    # Scope by requester and thread to prevent cross-user/session leakage.
     scope = session.get("scope")
     if not isinstance(scope, dict):
         return False
@@ -96,10 +106,12 @@ def _session_in_scope(session: dict[str, Any], context: SessionToolsContext) -> 
         scope.get("agent_name") == context.agent_name
         and scope.get("room_id") == context.room_id
         and scope.get("thread_id") == context.thread_id
+        and scope.get("requester_id") == context.requester_id
     )
 
 
 def _run_in_scope(run: dict[str, Any], context: SessionToolsContext) -> bool:
+    # Scope by requester and thread to prevent cross-user/session leakage.
     scope = run.get("scope")
     if not isinstance(scope, dict):
         return False
@@ -107,6 +119,7 @@ def _run_in_scope(run: dict[str, Any], context: SessionToolsContext) -> bool:
         scope.get("agent_name") == context.agent_name
         and scope.get("room_id") == context.room_id
         and scope.get("thread_id") == context.thread_id
+        and scope.get("requester_id") == context.requester_id
     )
 
 
@@ -120,8 +133,8 @@ def _touch_session(
     target_agent: str | None = None,
     status: str = "active",
 ) -> None:
-    now_iso = datetime.now(UTC).isoformat()
-    now_epoch = int(datetime.now(UTC).timestamp())
+    now_iso = _now_iso()
+    now_epoch = _now_epoch()
     room_id, thread_id = _session_key_to_room_thread(session_key)
     with _REGISTRY_LOCK:
         registry = _load_registry(context)
@@ -130,6 +143,7 @@ def _touch_session(
             "agent_name": context.agent_name,
             "room_id": context.room_id,
             "thread_id": context.thread_id,
+            "requester_id": context.requester_id,
         }
         base_scope = (
             dict(existing.get("scope", {}))
@@ -138,6 +152,8 @@ def _touch_session(
         )
         if base_scope.get("thread_id") in {"", "null"}:
             base_scope["thread_id"] = None
+        if base_scope.get("requester_id") in {"", "null"}:
+            base_scope["requester_id"] = None
         for key, value in run_scope.items():
             if value is None:
                 continue
@@ -145,6 +161,8 @@ def _touch_session(
                 base_scope[key] = value
         if "thread_id" not in base_scope:
             base_scope["thread_id"] = None
+        if "requester_id" not in base_scope:
+            base_scope["requester_id"] = context.requester_id
         entry = {
             "session_key": session_key,
             "kind": kind,
@@ -153,6 +171,7 @@ def _touch_session(
             "agent_name": context.agent_name,
             "room_id": room_id,
             "thread_id": thread_id,
+            "requester_id": context.requester_id,
             "parent_session_key": parent_session_key,
             "target_agent": target_agent,
             "updated_at": now_iso,
@@ -181,8 +200,8 @@ def _track_run(
     status: str,
     event_id: str | None = None,
 ) -> dict[str, Any]:
-    now_iso = datetime.now(UTC).isoformat()
-    now_epoch = int(datetime.now(UTC).timestamp())
+    now_iso = _now_iso()
+    now_epoch = _now_epoch()
     room_id, thread_id = _session_key_to_room_thread(session_key)
     with _REGISTRY_LOCK:
         registry = _load_registry(context)
@@ -196,6 +215,7 @@ def _track_run(
             "agent_name": context.agent_name,
             "room_id": room_id,
             "thread_id": thread_id,
+            "requester_id": context.requester_id,
             "created_at": now_iso,
             "updated_at": now_iso,
             "created_at_epoch": now_epoch,
@@ -204,6 +224,7 @@ def _track_run(
                 "agent_name": context.agent_name,
                 "room_id": context.room_id,
                 "thread_id": context.thread_id,
+                "requester_id": context.requester_id,
             },
         }
         registry["runs"][run_id] = run_info
@@ -224,8 +245,8 @@ def _update_run_status(
         if not _run_in_scope(run, context):
             return None
         run["status"] = status
-        run["updated_at"] = datetime.now(UTC).isoformat()
-        run["updated_at_epoch"] = int(datetime.now(UTC).timestamp())
+        run["updated_at"] = _now_iso()
+        run["updated_at_epoch"] = _now_epoch()
         registry["runs"][run_id] = run
         _save_registry(context, registry)
         return run
@@ -235,8 +256,8 @@ def _update_all_runs_status(context: SessionToolsContext, status: str) -> list[s
     with _REGISTRY_LOCK:
         registry = _load_registry(context)
         updated: list[str] = []
-        now_iso = datetime.now(UTC).isoformat()
-        now_epoch = int(datetime.now(UTC).timestamp())
+        now_iso = _now_iso()
+        now_epoch = _now_epoch()
         for run_id, run in registry["runs"].items():
             if not isinstance(run, dict):
                 continue
@@ -265,23 +286,36 @@ def _decode_runs(raw_runs: str | None) -> list[dict[str, Any]]:
     if raw_runs is None:
         return []
     try:
-        decoded = json.loads(raw_runs)
+        decoded: Any = json.loads(raw_runs)
     except json.JSONDecodeError:
         return []
+    if isinstance(decoded, str):
+        try:
+            decoded = json.loads(decoded)
+        except json.JSONDecodeError:
+            return []
     if isinstance(decoded, list):
         return [run for run in decoded if isinstance(run, dict)]
     return []
 
 
 def _agent_sessions_query(agent_name: str) -> str:
-    return (
-        f"SELECT session_id, session_type, user_id, created_at, updated_at, runs FROM {agent_name}_sessions "  # noqa: S608
-        "ORDER BY updated_at DESC"
-    )
+    table_name = _table_name(agent_name)
+    # Table names are derived from internal agent ids and escaped in `_table_name`.
+    return f'SELECT session_id, session_type, user_id, created_at, updated_at, runs FROM "{table_name}" ORDER BY updated_at DESC'  # noqa: S608
 
 
 def _session_runs_query(agent_name: str) -> str:
-    return f"SELECT runs FROM {agent_name}_sessions WHERE session_id = ?"  # noqa: S608
+    table_name = _table_name(agent_name)
+    # Table names are derived from internal agent ids and escaped in `_table_name`.
+    return f'SELECT runs FROM "{table_name}" WHERE session_id = ? LIMIT 1'  # noqa: S608
+
+
+def _table_name(agent_name: str) -> str:
+    # Agent/team names are validated to be alphanumeric + underscore in
+    # config.py. Escaping remains defense-in-depth.
+    escaped_agent_name = agent_name.replace('"', '""')
+    return f"{escaped_agent_name}_sessions"
 
 
 def _requested_limit(limit: int | None, default: int, maximum: int) -> int:
@@ -297,26 +331,34 @@ def _minutes_cutoff(minutes: int | None) -> int | None:
 
 
 def _coerce_epoch(value: object) -> float:
-    result = 0.0
-    if value is None:
-        return result
-    if isinstance(value, (int, float)):
-        return float(value)
-    if not isinstance(value, str):
-        return result
+    """Normalize mixed timestamp formats into unix seconds."""
+    if value is None or isinstance(value, bool):
+        return 0.0
 
-    stripped = value.strip()
-    if not stripped:
-        return result
+    numeric: float | None = None
+    if isinstance(value, int | float):
+        numeric = float(value)
+    elif isinstance(value, str):
+        stripped = value.strip()
+        if stripped:
+            try:
+                numeric = float(stripped)
+            except ValueError:
+                iso_value = f"{stripped[:-1]}+00:00" if stripped.endswith("Z") else stripped
+                try:
+                    parsed = datetime.fromisoformat(iso_value)
+                except ValueError:
+                    numeric = None
+                else:
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=UTC)
+                    return parsed.timestamp()
 
-    try:
-        result = float(stripped)
-    except ValueError:
-        try:
-            result = datetime.fromisoformat(stripped).timestamp()
-        except ValueError:
-            result = 0.0
-    return result
+    if numeric is None:
+        return 0.0
+
+    # Matrix timestamps are often milliseconds; convert for ordering.
+    return numeric / 1000.0 if numeric > 1_000_000_000_000 else numeric
 
 
 def _registry_sessions(context: SessionToolsContext) -> list[dict[str, Any]]:
