@@ -680,15 +680,20 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         nonlocal consensus
         consensus = value
 
+    def _ensure_hidden_tool_gap(*, get_text: Callable[[], str], apply_text: Callable[[str], None]) -> None:
+        if not get_text().endswith("\n\n"):
+            apply_text("\n\n")
+
     def _start_tool(
         *,
         scope_key: str,
+        get_text: Callable[[], str],
         apply_text: Callable[[str], None],
         tool: Any,
     ) -> None:
         nonlocal next_tool_index
         if not show_tool_calls:
-            apply_text("\n\n")
+            _ensure_hidden_tool_gap(get_text=get_text, apply_text=apply_text)
             return
 
         tool_msg, trace_entry = format_tool_started_event(tool, tool_index=next_tool_index)
@@ -778,6 +783,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                     per_member[agent_name] = ""
                 _start_tool(
                     scope_key=_scope_key_for_agent(agent_name),
+                    get_text=lambda agent_name=agent_name: per_member[agent_name],
                     apply_text=lambda text, agent_name=agent_name: per_member.__setitem__(
                         agent_name,
                         per_member[agent_name] + text,
@@ -809,6 +815,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         elif isinstance(event, TeamToolCallStartedEvent):
             _start_tool(
                 scope_key="team",
+                get_text=lambda: consensus,
                 apply_text=lambda text: _append_to_consensus(text),
                 tool=event.tool,
             )

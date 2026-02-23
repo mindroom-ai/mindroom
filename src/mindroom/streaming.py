@@ -112,6 +112,11 @@ class StreamingResponse:
         self.accumulated_text += new_chunk
         self.chars_since_last_update += len(new_chunk)
 
+    def _ensure_hidden_tool_gap(self) -> None:
+        """Insert a single placeholder gap for hidden tool calls."""
+        if not self.accumulated_text.endswith("\n\n"):
+            self._update("\n\n")
+
     def _current_update_interval(self, current_time: float) -> float:
         """Return the current throttling interval.
 
@@ -338,7 +343,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912
         elif isinstance(chunk, ToolCallStartedEvent):
             if not streaming.show_tool_calls:
                 if chunk.tool is not None:
-                    streaming._update("\n\n")
+                    streaming._ensure_hidden_tool_gap()
                 await streaming._throttled_send(client, progress_hint=True)
                 continue
 

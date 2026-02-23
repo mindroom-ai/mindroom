@@ -559,3 +559,29 @@ async def test_replacement_streaming_preserves_text_on_tool_completion() -> None
     # The accumulated text must still contain the tool marker, not be empty
     assert "save_file" in accumulated
     assert accumulated.strip() != ""
+
+
+@pytest.mark.asyncio
+async def test_hidden_tool_calls_coalesce_placeholder_spacing() -> None:
+    """Hidden tool calls should not stack repeated blank-line placeholders."""
+    client = MockClient()
+    config = MockConfig()
+
+    async def stream() -> AsyncIterator[StreamInputChunk]:
+        yield ToolCallStartedEvent(tool=ToolExecution(tool_name="first_tool", tool_args={}))
+        yield ToolCallStartedEvent(tool=ToolExecution(tool_name="second_tool", tool_args={}))
+        yield "Done"
+
+    event_id, accumulated = await send_streaming_response(
+        client=client,
+        room_id="!test:room",
+        reply_to_event_id=None,
+        thread_id=None,
+        sender_domain="example.com",
+        config=config,
+        response_stream=stream(),
+        show_tool_calls=False,
+    )
+
+    assert event_id is not None
+    assert accumulated == "\n\nDone"
