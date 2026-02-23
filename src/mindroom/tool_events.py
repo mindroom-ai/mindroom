@@ -18,6 +18,8 @@ TOOL_TRACE_VERSION = 2
 MAX_TOOL_ARGS_PREVIEW_CHARS = 1200
 MAX_TOOL_ARG_VALUE_PREVIEW_CHARS = 250
 MAX_TOOL_RESULT_DISPLAY_CHARS = 500
+# Keep v2 trace indexing stable (`events[N-1]`) by not truncating event slots.
+# Large-message handling is responsible for payload size fallbacks.
 MAX_TOOL_TRACE_EVENTS = 120
 TOOL_REF_ICON = "🔧"
 TOOL_PENDING_MARKER = " ⏳"
@@ -228,9 +230,6 @@ def build_tool_trace_content(tool_trace: Sequence[ToolTraceEntry] | None) -> dic
         return None
 
     trace_list = list(tool_trace)
-    overflow = max(0, len(trace_list) - MAX_TOOL_TRACE_EVENTS)
-    if overflow:
-        trace_list = trace_list[-MAX_TOOL_TRACE_EVENTS:]
 
     events: list[dict[str, object]] = []
     has_truncated_content = False
@@ -252,8 +251,6 @@ def build_tool_trace_content(tool_trace: Sequence[ToolTraceEntry] | None) -> dic
         "version": TOOL_TRACE_VERSION,
         "events": events,
     }
-    if overflow:
-        payload["events_truncated"] = overflow
     if has_truncated_content:
         payload["content_truncated"] = True
 

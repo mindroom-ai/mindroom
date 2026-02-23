@@ -150,8 +150,8 @@ def test_complete_pending_tool_block_no_result_marks_completed() -> None:
     assert trace.result_preview is None
 
 
-def test_build_tool_trace_content_limits_event_count() -> None:
-    """Tool trace payload should cap stored events and mark overflow."""
+def test_build_tool_trace_content_preserves_all_events_for_v2_indexing() -> None:
+    """V2 tool trace keeps all events so `[N] -> events[N-1]` remains valid."""
     entries = [
         ToolTraceEntry(type="tool_call_started", tool_name=f"tool_{i}") for i in range(MAX_TOOL_TRACE_EVENTS + 5)
     ]
@@ -159,8 +159,8 @@ def test_build_tool_trace_content_limits_event_count() -> None:
     assert payload is not None
     trace = payload[TOOL_TRACE_KEY]
     assert trace["version"] == 2
-    assert len(trace["events"]) == MAX_TOOL_TRACE_EVENTS
-    assert trace["events_truncated"] == 5
+    assert len(trace["events"]) == MAX_TOOL_TRACE_EVENTS + 5
+    assert "events_truncated" not in trace
 
 
 def test_format_tool_started_with_empty_args() -> None:
