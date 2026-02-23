@@ -13,15 +13,24 @@ from agno.models.cerebras import Cerebras
 from agno.models.deepseek import DeepSeek
 from agno.models.google import Gemini
 from agno.models.groq import Groq
+from agno.models.metrics import Metrics
 from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat
 from agno.models.openrouter import OpenRouter
-from agno.run.agent import RunContentEvent, RunErrorEvent, RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
+from agno.run.agent import (
+    ModelRequestCompletedEvent,
+    RunCompletedEvent,
+    RunContentEvent,
+    RunErrorEvent,
+    RunOutput,
+    ToolCallCompletedEvent,
+    ToolCallStartedEvent,
+)
 from agno.run.base import RunStatus
 from agno.utils.message import filter_tool_calls
 
 from .agents import _get_agent_session, create_agent, create_session_storage, get_seen_event_ids
-from .constants import ENABLE_AI_CACHE, PROVIDER_ENV_KEYS
+from .constants import AI_RUN_METADATA_KEY, ENABLE_AI_CACHE, PROVIDER_ENV_KEYS, ROUTER_AGENT_NAME
 from .credentials import get_credentials_manager
 from .credentials_sync import get_api_key_for_provider, get_ollama_host
 from .error_handling import get_user_friendly_error_message
@@ -50,6 +59,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 AIStreamChunk = str | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+AI_RUN_METADATA_VERSION = 1
 
 
 def _estimate_message_media_chars(message: object) -> int:
@@ -312,6 +322,126 @@ def _extract_tool_trace(response: RunOutput) -> list[ToolTraceEntry]:
         _, trace_entry = format_tool_combined(tool_name, tool_args, tool.result)
         trace.append(trace_entry)
     return trace
+
+
+def _get_model_config(config: Config, agent_name: str) -> tuple[str | None, ModelConfig | None]:
+    """Return configured model name/config for an agent when available."""
+    if agent_name not in config.agents and agent_name not in config.teams and agent_name != ROUTER_AGENT_NAME:
+        return None, None
+    model_name = config.get_entity_model_name(agent_name)
+    return model_name, config.models.get(model_name)
+
+
+def _serialize_metrics(metrics: Metrics | dict[str, Any] | None) -> dict[str, Any] | None:
+    def _sanitize_metrics_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+        sanitized: dict[str, Any] = {}
+        for key, value in payload.items():
+            if isinstance(value, (str, int)) or value is None or isinstance(value, bool):
+                sanitized[key] = value
+            elif isinstance(value, float):
+                sanitized[key] = format(value, ".12g")
+        return sanitized or None
+
+    if metrics is None:
+        return None
+    if isinstance(metrics, Metrics):
+        metrics_dict = metrics.to_dict()
+        if not isinstance(metrics_dict, dict):
+            return None
+        return _sanitize_metrics_payload(metrics_dict)
+    if isinstance(metrics, dict):
+        return _sanitize_metrics_payload(metrics)
+    return None
+
+
+def _build_model_request_metrics_fallback(
+    totals: dict[str, int],
+    first_token_latency: float | None,
+) -> dict[str, Any] | None:
+    payload = {key: value for key, value in totals.items() if value > 0}
+    if payload.get("total_tokens") is None:
+        input_tokens = payload.get("input_tokens")
+        output_tokens = payload.get("output_tokens")
+        if isinstance(input_tokens, int) and isinstance(output_tokens, int):
+            payload["total_tokens"] = input_tokens + output_tokens
+    if first_token_latency is not None:
+        payload["time_to_first_token"] = format(first_token_latency, ".12g")
+    return payload or None
+
+
+def _build_context_payload(
+    *,
+    input_tokens: int | None,
+    model_config: ModelConfig | None,
+) -> dict[str, Any] | None:
+    if input_tokens is None or model_config is None or model_config.context_window is None:
+        return None
+    context_window = model_config.context_window
+    if context_window <= 0:
+        return None
+    return {
+        "input_tokens": input_tokens,
+        "window_tokens": context_window,
+    }
+
+
+def _build_ai_run_metadata_content(  # noqa: C901, PLR0912
+    *,
+    agent_name: str,
+    config: Config,
+    run_id: str | None,
+    session_id: str | None,
+    status: RunStatus | str | None,
+    model: str | None,
+    model_provider: str | None,
+    metrics: Metrics | dict[str, Any] | None = None,
+    metrics_fallback: dict[str, Any] | None = None,
+    tool_count: int | None = None,
+) -> dict[str, Any] | None:
+    model_name, model_config = _get_model_config(config, agent_name)
+    model_id = model or (model_config.id if model_config is not None else None)
+    provider = model_provider or (model_config.provider if model_config is not None else None)
+
+    usage_payload = _serialize_metrics(metrics)
+    if usage_payload is None and metrics_fallback:
+        usage_payload = dict(metrics_fallback)
+
+    input_tokens = usage_payload.get("input_tokens") if usage_payload else None
+    if not isinstance(input_tokens, int):
+        input_tokens = None
+
+    payload: dict[str, Any] = {"version": AI_RUN_METADATA_VERSION}
+    if run_id is not None:
+        payload["run_id"] = run_id
+    if session_id is not None:
+        payload["session_id"] = session_id
+    if status is not None:
+        raw_status = status.value if isinstance(status, RunStatus) else str(status)
+        payload["status"] = raw_status.lower()
+    if model_name is not None or model_id is not None or provider is not None:
+        model_payload: dict[str, Any] = {}
+        if model_name is not None:
+            model_payload["config"] = model_name
+        if model_id is not None:
+            model_payload["id"] = model_id
+        if provider is not None:
+            model_payload["provider"] = provider
+        if model_payload:
+            payload["model"] = model_payload
+    if usage_payload:
+        payload["usage"] = usage_payload
+    context_payload = _build_context_payload(
+        input_tokens=input_tokens,
+        model_config=model_config,
+    )
+    if context_payload:
+        payload["context"] = context_payload
+    if tool_count is not None:
+        payload["tools"] = {"count": tool_count}
+
+    if len(payload) == 1:
+        return None
+    return {AI_RUN_METADATA_KEY: payload}
 
 
 @functools.cache
@@ -643,6 +773,7 @@ async def ai_response(
     reply_to_event_id: str | None = None,
     show_tool_calls: bool = True,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
+    run_metadata_collector: dict[str, Any] | None = None,
 ) -> str:
     """Generates a response using the specified agno Agent with memory integration.
 
@@ -665,6 +796,8 @@ async def ai_response(
         show_tool_calls: Whether to include tool call details inline in the response text.
         tool_trace_collector: Optional list that receives structured tool-trace
             entries from this run.
+        run_metadata_collector: Optional mapping that receives versioned
+            run/model/token metadata for Matrix message content.
 
     Returns:
         Agent response string
@@ -710,6 +843,20 @@ async def ai_response(
 
     if tool_trace_collector is not None:
         tool_trace_collector.extend(_extract_tool_trace(response))
+    if run_metadata_collector is not None:
+        run_metadata = _build_ai_run_metadata_content(
+            agent_name=agent_name,
+            config=config,
+            run_id=response.run_id,
+            session_id=response.session_id or session_id,
+            status=response.status,
+            model=response.model,
+            model_provider=response.model_provider,
+            metrics=response.metrics,
+            tool_count=len(response.tools) if response.tools is not None else 0,
+        )
+        if run_metadata:
+            run_metadata_collector.update(run_metadata)
 
     # Extract response content - this shouldn't fail
     return _extract_response_content(response, show_tool_calls=show_tool_calls)
@@ -729,6 +876,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     images: Sequence[Image] | None = None,
     reply_to_event_id: str | None = None,
     show_tool_calls: bool = True,
+    run_metadata_collector: dict[str, Any] | None = None,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
 
@@ -752,6 +900,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         reply_to_event_id: Matrix event ID of the triggering message, stored
             in run metadata for unseen message tracking and edit cleanup.
         show_tool_calls: Whether to include tool call details inline in the streamed response.
+        run_metadata_collector: Optional mapping that receives versioned
+            run/model/token metadata for Matrix message content.
 
     Yields:
         Streaming chunks/events as they become available
@@ -790,12 +940,39 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         if cached_result is not None:
             logger.info("Cache hit", agent=agent_name)
             response_text = cached_result.content or ""
+            if run_metadata_collector is not None:
+                cached_metadata = _build_ai_run_metadata_content(
+                    agent_name=agent_name,
+                    config=config,
+                    run_id=getattr(cached_result, "run_id", None),
+                    session_id=getattr(cached_result, "session_id", None) or session_id,
+                    status="cached",
+                    model=getattr(cached_result, "model", None),
+                    model_provider=getattr(cached_result, "model_provider", None),
+                    metrics=getattr(cached_result, "metrics", None),
+                    tool_count=len(cached_result.tools) if getattr(cached_result, "tools", None) else 0,
+                )
+                if cached_metadata:
+                    run_metadata_collector.update(cached_metadata)
             yield response_text
             return
 
     full_response = ""
     tool_count = 0
+    observed_tool_calls = 0
     pending_tools: list[tuple[str, int]] = []
+    latest_model_id: str | None = None
+    latest_model_provider: str | None = None
+    completed_run_event: RunCompletedEvent | None = None
+    request_metric_totals: dict[str, int] = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "reasoning_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+    }
+    first_token_latency: float | None = None
 
     # Execute the streaming AI call - this can fail for network, rate limits, etc.
     try:
@@ -821,6 +998,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 full_response += chunk_text
                 yield event
             elif isinstance(event, ToolCallStartedEvent):
+                observed_tool_calls += 1
                 if show_tool_calls:
                     tool_count += 1
                     tool_msg, trace_entry = format_tool_started_event(event.tool, tool_index=tool_count)
@@ -858,6 +1036,27 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             tool_index=tool_index,
                         )
                 yield event
+            elif isinstance(event, ModelRequestCompletedEvent):
+                if event.model:
+                    latest_model_id = event.model
+                if event.model_provider:
+                    latest_model_provider = event.model_provider
+                if isinstance(event.input_tokens, int):
+                    request_metric_totals["input_tokens"] += event.input_tokens
+                if isinstance(event.output_tokens, int):
+                    request_metric_totals["output_tokens"] += event.output_tokens
+                if isinstance(event.total_tokens, int):
+                    request_metric_totals["total_tokens"] += event.total_tokens
+                if isinstance(event.reasoning_tokens, int):
+                    request_metric_totals["reasoning_tokens"] += event.reasoning_tokens
+                if isinstance(event.cache_read_tokens, int):
+                    request_metric_totals["cache_read_tokens"] += event.cache_read_tokens
+                if isinstance(event.cache_write_tokens, int):
+                    request_metric_totals["cache_write_tokens"] += event.cache_write_tokens
+                if first_token_latency is None and isinstance(event.time_to_first_token, (int, float)):
+                    first_token_latency = float(event.time_to_first_token)
+            elif isinstance(event, RunCompletedEvent):
+                completed_run_event = event
             elif isinstance(event, RunErrorEvent):
                 error_text = event.content or "Unknown agent error"
                 logger.error("Agent run error during streaming", agent=agent_name, error=error_text)
@@ -869,6 +1068,31 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         logger.exception("Error during streaming AI response")
         yield get_user_friendly_error_message(e, agent_name)
         return
+
+    if run_metadata_collector is not None:
+        fallback_metrics = _build_model_request_metrics_fallback(request_metric_totals, first_token_latency)
+        run_metadata = _build_ai_run_metadata_content(
+            agent_name=agent_name,
+            config=config,
+            run_id=completed_run_event.run_id if completed_run_event is not None else None,
+            session_id=(
+                completed_run_event.session_id
+                if completed_run_event is not None and completed_run_event.session_id is not None
+                else session_id
+            ),
+            status=RunStatus.completed,
+            model=latest_model_id,
+            model_provider=latest_model_provider,
+            metrics=completed_run_event.metrics if completed_run_event is not None else None,
+            metrics_fallback=fallback_metrics,
+            tool_count=(
+                len(completed_run_event.tools)
+                if completed_run_event is not None and completed_run_event.tools is not None
+                else observed_tool_calls
+            ),
+        )
+        if run_metadata:
+            run_metadata_collector.update(run_metadata)
 
     if cache is not None and full_response:
         cached_response = RunOutput(content=full_response)

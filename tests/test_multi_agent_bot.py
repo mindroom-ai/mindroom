@@ -649,6 +649,7 @@ class TestAgentBot:
                 images=None,
                 reply_to_event_id="event123",
                 show_tool_calls=True,
+                run_metadata_collector=ANY,
             )
             mock_ai_response.assert_not_called()
             # With streaming and stop button: initial message + reaction + edits
@@ -669,6 +670,7 @@ class TestAgentBot:
                 reply_to_event_id="event123",
                 show_tool_calls=True,
                 tool_trace_collector=ANY,
+                run_metadata_collector=ANY,
             )
             mock_stream_agent_response.assert_not_called()
             # With stop button support: initial + reaction + final

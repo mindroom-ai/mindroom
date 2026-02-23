@@ -1823,6 +1823,7 @@ class AgentBot:
         )
         openclaw_context = self._build_openclaw_context(room_id, thread_id, user_id)
         tool_trace: list[ToolTraceEntry] = []
+        run_metadata_content: dict[str, Any] = {}
 
         try:
             # Show typing indicator while generating response
@@ -1842,6 +1843,7 @@ class AgentBot:
                         reply_to_event_id=reply_to_event_id,
                         show_tool_calls=self.show_tool_calls,
                         tool_trace_collector=tool_trace,
+                        run_metadata_collector=run_metadata_content,
                     )
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
@@ -1862,6 +1864,7 @@ class AgentBot:
                 response_text,
                 thread_id,
                 tool_trace=tool_trace if self.show_tool_calls else None,
+                extra_content=run_metadata_content or None,
             )
             return existing_event_id
 
@@ -1872,6 +1875,7 @@ class AgentBot:
             response.formatted_text,
             thread_id,
             tool_trace=tool_trace if self.show_tool_calls else None,
+            extra_content=run_metadata_content or None,
         )
         if event_id and response.option_map and response.options_list:
             # For interactive questions, use the same thread root that _send_response uses:
@@ -1918,6 +1922,7 @@ class AgentBot:
         openclaw_context = self._build_openclaw_context(room_id, thread_id, user_id, agent_name=agent_name)
         show_tool_calls = self._show_tool_calls_for_agent(agent_name)
         tool_trace: list[ToolTraceEntry] = []
+        run_metadata_content: dict[str, Any] = {}
 
         async with typing_indicator(self.client, room_id):
             with scheduling_tool_context(scheduler_context), openclaw_tool_context(openclaw_context):
@@ -1933,6 +1938,7 @@ class AgentBot:
                     reply_to_event_id=reply_to_event_id,
                     show_tool_calls=show_tool_calls,
                     tool_trace_collector=tool_trace,
+                    run_metadata_collector=run_metadata_content,
                 )
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
@@ -1944,6 +1950,7 @@ class AgentBot:
             reply_to_event=reply_to_event,
             skip_mentions=True,
             tool_trace=tool_trace if show_tool_calls else None,
+            extra_content=run_metadata_content or None,
         )
 
         if event_id and response.option_map and response.options_list:
@@ -2047,6 +2054,7 @@ class AgentBot:
             user_id=user_id,
         )
         openclaw_context = self._build_openclaw_context(room_id, thread_id, user_id)
+        run_metadata_content: dict[str, Any] = {}
 
         try:
             # Show typing indicator while generating response
@@ -2065,6 +2073,7 @@ class AgentBot:
                         images=images,
                         reply_to_event_id=reply_to_event_id,
                         show_tool_calls=self.show_tool_calls,
+                        run_metadata_collector=run_metadata_content,
                     )
 
                     event_id, accumulated = await send_streaming_response(
@@ -2079,6 +2088,7 @@ class AgentBot:
                         existing_event_id=existing_event_id,
                         room_mode=self.thread_mode == "room",
                         show_tool_calls=self.show_tool_calls,
+                        extra_content=run_metadata_content,
                     )
 
             # Handle interactive questions if present
@@ -2251,6 +2261,7 @@ class AgentBot:
                 reply_to_event_id=None,
                 latest_thread_event_id=None,
                 tool_trace=tool_trace,
+                extra_content=extra_content,
             )
         else:
             # Get the latest message in thread for MSC3440 fallback compatibility
@@ -2269,13 +2280,12 @@ class AgentBot:
                 reply_to_event_id=reply_to_event_id,
                 latest_thread_event_id=latest_thread_event_id,
                 tool_trace=tool_trace,
+                extra_content=extra_content,
             )
 
         # Add metadata to indicate mentions should be ignored for responses
         if skip_mentions:
             content["com.mindroom.skip_mentions"] = True
-        if extra_content:
-            content.update(extra_content)
 
         assert self.client is not None
         event_id = await send_message(self.client, room_id, content)
@@ -2292,6 +2302,7 @@ class AgentBot:
         new_text: str,
         thread_id: str | None,
         tool_trace: list[ToolTraceEntry] | None = None,
+        extra_content: dict[str, Any] | None = None,
     ) -> bool:
         """Edit an existing message.
 
@@ -2309,6 +2320,7 @@ class AgentBot:
                 new_text,
                 sender_domain=sender_domain,
                 tool_trace=tool_trace,
+                extra_content=extra_content,
             )
         else:
             # For edits in threads, we need to get the latest thread event ID for MSC3440 compliance
@@ -2331,6 +2343,7 @@ class AgentBot:
                 thread_event_id=thread_id,
                 latest_thread_event_id=latest_thread_event_id,
                 tool_trace=tool_trace,
+                extra_content=extra_content,
             )
 
         assert self.client is not None
