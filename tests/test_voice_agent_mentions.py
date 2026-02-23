@@ -7,7 +7,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.config import AgentConfig, Config
-from mindroom.voice_handler import _process_transcription, _sanitize_unavailable_mentions
+from mindroom.voice_handler import (
+    _is_speculative_command_rewrite,
+    _process_transcription,
+    _sanitize_unavailable_mentions,
+)
 
 
 @pytest.mark.asyncio
@@ -221,3 +225,130 @@ def test_sanitize_unavailable_mentions_direct(
         configured_entities=configured_entities,
     )
     assert result == expected
+
+
+@pytest.mark.parametrize(
+    ("transcription", "formatted_message", "expected"),
+    [
+        ("How do agent sessions work?", "!skill session list", True),
+        ("Can you explain this concept?", "!help", True),
+        ("run skill session list", "!skill session list", False),
+        ("help command", "!help", False),
+        ("show me help", "!help", False),
+        ("What is my schedule today?", "!list_schedules", False),
+        ("@research can you help me?", "@research can you help me?", False),
+    ],
+)
+def test_is_speculative_command_rewrite(
+    transcription: str,
+    formatted_message: str,
+    expected: bool,
+) -> None:
+    """Only explicit command intent should survive command rewrites."""
+    assert _is_speculative_command_rewrite(transcription, formatted_message) is expected
+
+
+@pytest.mark.asyncio
+async def test_voice_transcription_rejects_invented_skill_command() -> None:
+    """A general sessions question must not be rewritten into !skill."""
+    config = MagicMock(spec=Config)
+    config.agents = {}
+    config.teams = {}
+    config.voice = MagicMock()
+    config.voice.intelligence = MagicMock()
+    config.voice.intelligence.model = "test-model"
+
+    with (
+        patch("mindroom.voice_handler.Agent") as mock_agent_class,
+        patch("mindroom.voice_handler.get_model_instance") as mock_get_model,
+    ):
+        mock_agent = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "!skill session list"
+        mock_agent.arun = AsyncMock(return_value=mock_response)
+        mock_agent_class.return_value = mock_agent
+        mock_get_model.return_value = MagicMock()
+
+        transcription = "How do agent sessions work?"
+        result = await _process_transcription(transcription, config)
+
+    assert result == transcription
+
+
+@pytest.mark.asyncio
+async def test_voice_transcription_keeps_explicit_skill_command() -> None:
+    """Explicit skill intent should continue to produce !skill commands."""
+    config = MagicMock(spec=Config)
+    config.agents = {}
+    config.teams = {}
+    config.voice = MagicMock()
+    config.voice.intelligence = MagicMock()
+    config.voice.intelligence.model = "test-model"
+
+    with (
+        patch("mindroom.voice_handler.Agent") as mock_agent_class,
+        patch("mindroom.voice_handler.get_model_instance") as mock_get_model,
+    ):
+        mock_agent = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "!skill session list"
+        mock_agent.arun = AsyncMock(return_value=mock_response)
+        mock_agent_class.return_value = mock_agent
+        mock_get_model.return_value = MagicMock()
+
+        result = await _process_transcription("run skill session list", config)
+
+    assert result == "!skill session list"
+
+
+@pytest.mark.asyncio
+async def test_voice_transcription_rejects_invented_help_command() -> None:
+    """A general question must not be rewritten into !help."""
+    config = MagicMock(spec=Config)
+    config.agents = {}
+    config.teams = {}
+    config.voice = MagicMock()
+    config.voice.intelligence = MagicMock()
+    config.voice.intelligence.model = "test-model"
+
+    with (
+        patch("mindroom.voice_handler.Agent") as mock_agent_class,
+        patch("mindroom.voice_handler.get_model_instance") as mock_get_model,
+    ):
+        mock_agent = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "!help"
+        mock_agent.arun = AsyncMock(return_value=mock_response)
+        mock_agent_class.return_value = mock_agent
+        mock_get_model.return_value = MagicMock()
+
+        transcription = "What is photosynthesis?"
+        result = await _process_transcription(transcription, config)
+
+    assert result == transcription
+
+
+@pytest.mark.asyncio
+async def test_voice_transcription_keeps_explicit_help_command() -> None:
+    """Explicit help intent should continue to produce !help commands."""
+    config = MagicMock(spec=Config)
+    config.agents = {}
+    config.teams = {}
+    config.voice = MagicMock()
+    config.voice.intelligence = MagicMock()
+    config.voice.intelligence.model = "test-model"
+
+    with (
+        patch("mindroom.voice_handler.Agent") as mock_agent_class,
+        patch("mindroom.voice_handler.get_model_instance") as mock_get_model,
+    ):
+        mock_agent = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "!help"
+        mock_agent.arun = AsyncMock(return_value=mock_response)
+        mock_agent_class.return_value = mock_agent
+        mock_get_model.return_value = MagicMock()
+
+        result = await _process_transcription("help command", config)
+
+    assert result == "!help"
