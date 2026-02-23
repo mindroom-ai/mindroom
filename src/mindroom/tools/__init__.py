@@ -94,6 +94,7 @@ from .scrapegraph import scrapegraph_tools
 from .searxng import searxng_tools
 from .serpapi import serpapi_tools
 from .serper import serper_tools
+from .session_orchestration import session_orchestration_tools
 from .shell import shell_tools
 from .shopify import shopify_tools
 from .slack import slack_tools
@@ -207,6 +208,7 @@ __all__ = [
     "searxng_tools",
     "serpapi_tools",
     "serper_tools",
+    "session_orchestration_tools",
     "shell_tools",
     "shopify_tools",
     "slack_tools",
