@@ -8,7 +8,7 @@ import nio
 import pytest
 
 from mindroom import voice_handler
-from mindroom.config import Config, VoiceConfig, VoiceLLMConfig, VoiceSTTConfig
+from mindroom.config import AgentConfig, Config, VoiceConfig, VoiceLLMConfig, VoiceSTTConfig
 
 
 class TestVoiceHandler:
@@ -75,6 +75,40 @@ class TestVoiceHandler:
 
             result = await voice_handler._process_transcription("research help me with this", config)
             assert "@research" in result
+
+    @pytest.mark.asyncio
+    async def test_voice_handler_uses_room_scoped_entities_for_transcription(self) -> None:
+        """Test voice transcription prompt is scoped to entities present in the room."""
+        config = Config(
+            voice=VoiceConfig(enabled=True),
+            agents={
+                "openclaw": AgentConfig(display_name="OpenClaw Agent", role="OpenClaw role"),
+                "code": AgentConfig(display_name="Code Agent", role="Coding role"),
+            },
+        )
+
+        client = AsyncMock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.users = {
+            f"@mindroom_openclaw:{config.domain}": MagicMock(),
+            f"@mindroom_router:{config.domain}": MagicMock(),
+            "@alice:example.com": MagicMock(),
+        }
+        event = MagicMock(spec=nio.RoomMessageAudio)
+        event.sender = "@alice:example.com"
+
+        with (
+            patch("mindroom.voice_handler._download_audio", return_value=b"audio"),
+            patch("mindroom.voice_handler._transcribe_audio", return_value="help me"),
+            patch("mindroom.voice_handler._process_transcription", new_callable=AsyncMock) as mock_process,
+        ):
+            mock_process.return_value = "@openclaw help me"
+            result = await voice_handler.handle_voice_message(client, room, event, config)
+
+        assert result == "🎤 @openclaw help me"
+        assert mock_process.await_count == 1
+        assert mock_process.await_args.kwargs["available_agent_names"] == ["openclaw"]
+        assert mock_process.await_args.kwargs["available_team_names"] == []
 
     @pytest.mark.asyncio
     async def test_download_audio_unencrypted(self) -> None:
