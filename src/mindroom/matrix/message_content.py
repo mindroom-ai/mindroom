@@ -152,9 +152,10 @@ async def _get_full_message_body(
                 if extracted_body is not None:
                     return extracted_body
                 logger.warning("Invalid large-message v2 payload JSON, returning preview")
-                return body
-            return full_text
-        logger.warning("Failed to download large message, returning preview")
+            else:
+                return full_text
+        else:
+            logger.warning("Failed to download large message, returning preview")
         return body
 
     # Regular message or no custom metadata
