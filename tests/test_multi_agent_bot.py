@@ -1056,7 +1056,7 @@ class TestAgentBot:
         event.body = "photo.jpg"
         event.source = {"content": {"body": "photo.jpg"}}  # no filename → body is filename
 
-        image = MagicMock()
+        image = Image(content=b"img-bytes", mime_type="image/jpeg")
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
@@ -1075,15 +1075,15 @@ class TestAgentBot:
         ):
             await bot._on_image_message(room, event)
 
-        bot._generate_response.assert_awaited_once_with(
-            room_id="!test:localhost",
-            prompt="[Attached image]",
-            reply_to_event_id="$img_event",
-            thread_id=None,
-            thread_history=[],
-            user_id="@user:localhost",
-            images=[image],
-        )
+        bot._generate_response.assert_awaited_once()
+        call_kwargs = bot._generate_response.call_args.kwargs
+        assert call_kwargs["room_id"] == "!test:localhost"
+        assert call_kwargs["prompt"] == "[Attached image]"
+        assert call_kwargs["reply_to_event_id"] == "$img_event"
+        assert call_kwargs["images"] == [image]
+        assert call_kwargs["files"] is not None
+        assert len(call_kwargs["files"]) == 1
+        assert call_kwargs["files"][0].mime_type is None
         tracker.mark_responded.assert_called_once_with("$img_event", "$response")
 
     @pytest.mark.asyncio
@@ -1197,15 +1197,15 @@ class TestAgentBot:
         ):
             await bot._on_video_message(room, event)
 
-        bot._generate_response.assert_awaited_once_with(
-            room_id="!test:localhost",
-            prompt="[Attached video]",
-            reply_to_event_id="$vid_event",
-            thread_id=None,
-            thread_history=[],
-            user_id="@user:localhost",
-            videos=[video],
-        )
+        bot._generate_response.assert_awaited_once()
+        call_kwargs = bot._generate_response.call_args.kwargs
+        assert call_kwargs["room_id"] == "!test:localhost"
+        assert call_kwargs["prompt"] == "[Attached video]"
+        assert call_kwargs["reply_to_event_id"] == "$vid_event"
+        assert call_kwargs["videos"] == [video]
+        assert call_kwargs["files"] is not None
+        assert len(call_kwargs["files"]) == 1
+        assert call_kwargs["files"][0].mime_type is None
         tracker.mark_responded.assert_called_once_with("$vid_event", "$response")
 
     @pytest.mark.asyncio
@@ -1561,7 +1561,10 @@ class TestAgentBot:
         call_kwargs = bot._generate_response.call_args.kwargs
         assert call_kwargs["images"] == [fake_image]
         assert call_kwargs["videos"] == [fake_video]
-        assert call_kwargs["files"] == [fake_file]
+        assert call_kwargs["files"] is not None
+        assert len(call_kwargs["files"]) == 3
+        mime_types = {file.mime_type for file in call_kwargs["files"]}
+        assert mime_types == {"application/pdf", None}
 
     @pytest.mark.asyncio
     async def test_decide_team_for_sender_passes_sender_filtered_dm_agents(

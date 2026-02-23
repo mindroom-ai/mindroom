@@ -564,6 +564,17 @@ def _extract_media_mimetype(
     return mimetype if isinstance(mimetype, str) else None
 
 
+def _file_from_media(
+    media: Audio | Image | Video,
+    filename: str | None = None,
+) -> File | None:
+    """Convert typed media to a generic file payload for model-side interpretation."""
+    if media.content is None:
+        return None
+    mime_type = media.mime_type if media.mime_type in File.valid_mime_types() else None
+    return File(content=media.content, mime_type=mime_type, filename=filename)
+
+
 def create_bot_for_entity(
     entity_name: str,
     agent_user: AgentMatrixUser,
@@ -1182,6 +1193,10 @@ class AgentBot:
         )
         thread_videos = await self._fetch_thread_videos(room.room_id, context.thread_id) if context.thread_id else []
         thread_files = await self._fetch_thread_files(room.room_id, context.thread_id) if context.thread_id else []
+        for media in [*thread_images, *thread_audio, *thread_videos]:
+            media_file = _file_from_media(media)
+            if media_file is not None:
+                thread_files.append(media_file)
 
         if action.kind == "team":
             assert action.form_team is not None
@@ -1426,6 +1441,7 @@ class AgentBot:
             self.logger.error("Failed to download image", event_id=event.event_id)
             self.response_tracker.mark_responded(event.event_id)
             return
+        image_file = _file_from_media(image, filename=event.body if isinstance(event.body, str) else None)
 
         self.logger.info("Processing image", event_id=event.event_id)
 
@@ -1442,6 +1458,7 @@ class AgentBot:
                 requester_user_id=requester_user_id,
                 existing_event_id=None,
                 images=[image],
+                files=[image_file] if image_file else None,
             )
         else:
             response_event_id = await self._generate_response(
@@ -1452,6 +1469,7 @@ class AgentBot:
                 thread_history=context.thread_history,
                 user_id=requester_user_id,
                 images=[image],
+                files=[image_file] if image_file else None,
             )
         self.response_tracker.mark_responded(event.event_id, response_event_id)
 
@@ -1494,6 +1512,7 @@ class AgentBot:
             self.logger.error("Failed to download video", event_id=event.event_id)
             self.response_tracker.mark_responded(event.event_id)
             return
+        video_file = _file_from_media(video, filename=event.body if isinstance(event.body, str) else None)
 
         self.logger.info("Processing video", event_id=event.event_id)
 
@@ -1510,6 +1529,7 @@ class AgentBot:
                 requester_user_id=requester_user_id,
                 existing_event_id=None,
                 videos=[video],
+                files=[video_file] if video_file else None,
             )
         else:
             response_event_id = await self._generate_response(
@@ -1520,6 +1540,7 @@ class AgentBot:
                 thread_history=context.thread_history,
                 user_id=requester_user_id,
                 videos=[video],
+                files=[video_file] if video_file else None,
             )
         self.response_tracker.mark_responded(event.event_id, response_event_id)
 
