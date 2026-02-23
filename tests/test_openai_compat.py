@@ -1433,17 +1433,21 @@ class TestTeamCompletion:
         assert "Team consensus result" in data["choices"][0]["message"]["content"]
 
     def test_team_streaming(self, team_app_client: TestClient) -> None:
-        """Streaming team completion returns SSE events."""
+        """Streaming team completion emits formatted TeamRunOutput."""
         from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
+        from agno.run.team import TeamRunOutput  # noqa: PLC0415
 
-        from mindroom.teams import TeamMode  # noqa: PLC0415
+        from mindroom.teams import TeamMode, format_team_response  # noqa: PLC0415
+
+        final_output = TeamRunOutput(content="Team response!")
+        expected_text = "\n\n".join(format_team_response(final_output)) or str(final_output.content)
 
         mock_team = MagicMock()
         mock_agents = [MagicMock(name="GeneralAgent")]
 
         async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
-            yield TeamContentEvent(content="Team ")
-            yield TeamContentEvent(content="response!")
+            yield TeamContentEvent(content="buffered but replaced")
+            yield final_output
 
         mock_team.arun = mock_stream_events
 
@@ -1464,15 +1468,13 @@ class TestTeamCompletion:
         assert "text/event-stream" in response.headers["content-type"]
 
         lines = response.text.strip().split("\n\n")
-        # Role announcement + content chunks + finish + [DONE]
-        assert len(lines) >= 4
 
         # First chunk is role announcement
         first = json.loads(lines[0].removeprefix("data: "))
         assert first["choices"][0]["delta"] == {"role": "assistant"}
         assert first["model"] == "team/super_team"
 
-        # Verify content chunks contain the expected text
+        # Verify content chunks contain the formatted output (not raw buffered content)
         content_parts = []
         for line in lines:
             if line.startswith("data: ") and line != "data: [DONE]":
@@ -1480,40 +1482,57 @@ class TestTeamCompletion:
                 delta = chunk["choices"][0]["delta"]
                 if "content" in delta:
                     content_parts.append(delta["content"])
-        assert "".join(content_parts) == "Team response!"
+        full_content = "".join(content_parts)
+        assert full_content == expected_text
+        assert "buffered but replaced" not in full_content
 
     def test_team_streaming_tool_events_emit_start_and_done_with_ids(
         self,
         team_app_client: TestClient,
     ) -> None:
-        """Team streaming emits start/done tool blocks sharing the same stable id."""
+        """Both agent-level and team-level tool events are emitted with stable IDs."""
         from agno.models.response import ToolExecution  # noqa: PLC0415
-        from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
+        from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent  # noqa: PLC0415
+        from agno.run.team import TeamRunOutput  # noqa: PLC0415
         from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent  # noqa: PLC0415
         from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent  # noqa: PLC0415
 
         from mindroom.teams import TeamMode  # noqa: PLC0415
 
-        tool_started = ToolExecution(
+        # Agent-level tool
+        agent_tool_started = ToolExecution(
             tool_name="search",
             tool_args={"query": "X"},
-            tool_call_id="tc-team-stream-1",
+            tool_call_id="tc-agent-1",
         )
-        tool_completed = ToolExecution(
+        agent_tool_completed = ToolExecution(
             tool_name="search",
             tool_args={"query": "X"},
-            tool_call_id="tc-team-stream-1",
+            tool_call_id="tc-agent-1",
             result="3 results",
+        )
+        # Team-level tool
+        team_tool_started = ToolExecution(
+            tool_name="transfer_task",
+            tool_args={"agent": "code"},
+            tool_call_id="tc-team-1",
+        )
+        team_tool_completed = ToolExecution(
+            tool_name="transfer_task",
+            tool_args={"agent": "code"},
+            tool_call_id="tc-team-1",
+            result="delegated",
         )
 
         mock_team = MagicMock()
         mock_agents = [MagicMock(name="GeneralAgent")]
 
         async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
-            yield TeamContentEvent(content="Team says: ")
-            yield TeamToolCallStartedEvent(tool=tool_started)
-            yield TeamToolCallCompletedEvent(tool=tool_completed)
-            yield TeamContentEvent(content="done.")
+            yield TeamToolCallStartedEvent(tool=team_tool_started)
+            yield ToolCallStartedEvent(tool=agent_tool_started)
+            yield ToolCallCompletedEvent(tool=agent_tool_completed)
+            yield TeamToolCallCompletedEvent(tool=team_tool_completed)
+            yield TeamRunOutput(content="Final answer")
 
         mock_team.arun = mock_stream_events
 
@@ -1543,10 +1562,12 @@ class TestTeamCompletion:
                 contents.append(delta["content"])
 
         full_content = "".join(contents)
-        assert "Team says: " in full_content
-        assert '<tool id="1" state="start">search(query=X)</tool>' in full_content
-        assert full_content.count('<tool id="1" state="done">search(query=X)\n3 results</tool>') == 1
-        assert "done." in full_content
+        # Agent-level tool
+        assert '<tool id="2" state="start">search(query=X)</tool>' in full_content
+        assert '<tool id="2" state="done">search(query=X)\n3 results</tool>' in full_content
+        # Team-level tool
+        assert '<tool id="1" state="start">transfer_task(agent=code)</tool>' in full_content
+        assert '<tool id="1" state="done">transfer_task(agent=code)\ndelegated</tool>' in full_content
 
     def test_team_streaming_first_event_error_returns_500(self, team_app_client: TestClient) -> None:
         """Team stream returns HTTP 500 when first event is an explicit run error."""
@@ -1580,7 +1601,7 @@ class TestTeamCompletion:
         assert response.json()["error"]["message"] == "Team execution failed"
 
     def test_team_streaming_midstream_error_emits_failure_chunk(self, team_app_client: TestClient) -> None:
-        """When stream error occurs after start, emit a failure chunk and finish stream."""
+        """When stream error occurs after start, buffered content and failure chunk are emitted."""
         from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
         from agno.run.team import RunErrorEvent as TeamRunErrorEvent  # noqa: PLC0415
 
@@ -1618,8 +1639,12 @@ class TestTeamCompletion:
                 if "content" in delta:
                     contents.append(delta["content"])
 
-        assert "Team started. " in contents
-        assert "Team execution failed." in contents
+        # Buffered content is flushed before the error
+        full = "".join(contents)
+        assert "Team started. " in full
+        assert "Team execution failed." in full
+        # Buffered content comes before the failure message
+        assert full.index("Team started. ") < full.index("Team execution failed.")
         assert lines[-1] == "data: [DONE]"
 
     def test_team_no_valid_agents_500(self, team_app_client: TestClient) -> None:
@@ -1688,6 +1713,154 @@ class TestTeamCompletion:
 
         assert response.status_code == 500
         assert response.json()["error"]["type"] == "server_error"
+
+    def test_team_streaming_fallback_when_no_team_run_output(self, team_app_client: TestClient) -> None:
+        """When no TeamRunOutput arrives, buffered content is emitted as fallback."""
+        from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        mock_team = MagicMock()
+        mock_agents = [MagicMock(name="GeneralAgent")]
+
+        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
+            yield TeamContentEvent(content="partial ")
+            yield TeamContentEvent(content="response")
+
+        mock_team.arun = mock_stream_events
+
+        with patch(
+            "mindroom.api.openai_compat._build_team",
+            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+        ):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Build it"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        lines = response.text.strip().split("\n\n")
+        contents: list[str] = []
+        for line in lines:
+            if line.startswith("data: ") and line != "data: [DONE]":
+                chunk = json.loads(line.removeprefix("data: "))
+                delta = chunk["choices"][0]["delta"]
+                if "content" in delta:
+                    contents.append(delta["content"])
+
+        # Buffered content emitted as a single chunk (not interleaved)
+        full = "".join(contents)
+        assert full == "partial response"
+        assert lines[-1] == "data: [DONE]"
+
+    def test_team_streaming_pending_tools_finalized_on_error(self, team_app_client: TestClient) -> None:
+        """Pending tool calls get (interrupted) done tags when stream errors."""
+        from agno.models.response import ToolExecution  # noqa: PLC0415
+        from agno.run.agent import ToolCallStartedEvent  # noqa: PLC0415
+        from agno.run.team import RunErrorEvent as TeamRunErrorEvent  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        tool_started = ToolExecution(
+            tool_name="run_shell",
+            tool_args={"cmd": "ls"},
+            tool_call_id="tc-pending-1",
+        )
+
+        mock_team = MagicMock()
+        mock_agents = [MagicMock(name="GeneralAgent")]
+
+        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
+            yield ToolCallStartedEvent(tool=tool_started)
+            yield TeamRunErrorEvent(content="Error: timeout")
+
+        mock_team.arun = mock_stream_events
+
+        with patch(
+            "mindroom.api.openai_compat._build_team",
+            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+        ):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Run it"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        lines = response.text.strip().split("\n\n")
+        contents: list[str] = []
+        for line in lines:
+            if line.startswith("data: ") and line != "data: [DONE]":
+                chunk = json.loads(line.removeprefix("data: "))
+                delta = chunk["choices"][0]["delta"]
+                if "content" in delta:
+                    contents.append(delta["content"])
+
+        full = "".join(contents)
+        # Start tag was emitted
+        assert '<tool id="1" state="start">' in full
+        # Pending tool got finalized with (interrupted)
+        assert '<tool id="1" state="done">(interrupted)</tool>' in full
+        assert "Team execution failed." in full
+
+    def test_team_streaming_buffers_parallel_member_content(self, team_app_client: TestClient) -> None:
+        """Interleaved content from parallel members is buffered; TeamRunOutput is emitted."""
+        from agno.run.agent import RunContentEvent  # noqa: PLC0415
+        from agno.run.team import TeamRunOutput  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode, format_team_response  # noqa: PLC0415
+
+        final_output = TeamRunOutput(content="Clean combined answer")
+        expected_text = "\n\n".join(format_team_response(final_output)) or str(final_output.content)
+
+        mock_team = MagicMock()
+        mock_agents = [MagicMock(name="AgentA"), MagicMock(name="AgentB")]
+
+        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
+            # Simulate interleaved chunks from two parallel members
+            yield RunContentEvent(content="From A chunk1 ")
+            yield RunContentEvent(content="From B chunk1 ")
+            yield RunContentEvent(content="From A chunk2 ")
+            yield RunContentEvent(content="From B chunk2 ")
+            yield final_output
+
+        mock_team.arun = mock_stream_events
+
+        with patch(
+            "mindroom.api.openai_compat._build_team",
+            return_value=(mock_agents, mock_team, TeamMode.COLLABORATE),
+        ):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Analyze this"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        lines = response.text.strip().split("\n\n")
+        contents: list[str] = []
+        for line in lines:
+            if line.startswith("data: ") and line != "data: [DONE]":
+                chunk = json.loads(line.removeprefix("data: "))
+                delta = chunk["choices"][0]["delta"]
+                if "content" in delta:
+                    contents.append(delta["content"])
+
+        full = "".join(contents)
+        # Final output is the formatted TeamRunOutput, not interleaved chunks
+        assert full == expected_text
+        assert "From A chunk1" not in full
+        assert "From B chunk1" not in full
 
     def test_team_non_streaming_includes_thread_history(self, team_app_client: TestClient) -> None:
         """Team prompt includes prior messages converted from request history."""

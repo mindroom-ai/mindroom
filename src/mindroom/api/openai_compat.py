@@ -16,7 +16,7 @@ from html import escape
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import uuid4
 
-from agno.run.agent import RunContentEvent, RunErrorEvent, ToolCallCompletedEvent, ToolCallStartedEvent
+from agno.run.agent import RunContentEvent, RunErrorEvent, RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
 from agno.run.team import RunContentEvent as TeamContentEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
     from agno.models.response import ToolExecution
-    from agno.run.agent import RunOutput, RunOutputEvent
+    from agno.run.agent import RunOutputEvent
     from agno.run.team import TeamRunOutputEvent
 
 logger = get_logger(__name__)
@@ -1051,22 +1051,6 @@ async def _stream_team_completion(
     )
 
 
-def _extract_team_stream_text(
-    event: RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str,
-    tool_state: _ToolStreamState,
-) -> str | None:
-    """Extract text content from a team stream event."""
-    if isinstance(event, TeamContentEvent) and event.content:
-        return str(event.content)
-    if isinstance(event, RunContentEvent) and event.content:
-        return str(event.content)
-    if isinstance(event, TeamRunOutput):
-        return _format_team_output(event)
-    if isinstance(event, str):
-        return event
-    return _format_stream_tool_event(event, tool_state)
-
-
 def _extract_team_stream_error(event: RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str) -> str | None:
     """Extract explicit error text from a team stream event."""
     if isinstance(event, (RunErrorEvent, TeamRunErrorEvent)):
@@ -1092,7 +1076,69 @@ def _team_stream_preflight_error(
     return _error_response(500, "Team execution failed", error_type="server_error")
 
 
-async def _team_stream_event_generator(
+@dataclass
+class _TeamStreamState:
+    """Mutable state for team stream event processing."""
+
+    tool_state: _ToolStreamState = field(default_factory=_ToolStreamState)
+    content_buffer: list[str] = field(default_factory=list)
+    got_final_output: bool = False
+
+
+def _classify_team_event(
+    event: RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str,
+    state: _TeamStreamState,
+) -> str | None:
+    """Classify a team stream event and return formatted content, or ``None`` to skip.
+
+    Final output events are formatted via ``_format_team_output``.
+    Tool events are emitted immediately for progress feedback.
+    Content events are buffered to avoid interleaving from parallel members.
+    """
+    if isinstance(event, (TeamRunOutput, RunOutput)):
+        state.got_final_output = True
+        return _format_team_output(event)
+
+    tool_text = _format_stream_tool_event(event, state.tool_state)  # type: ignore[arg-type]
+    if tool_text is not None:
+        return tool_text
+
+    if isinstance(event, (RunContentEvent, TeamContentEvent)) and event.content:
+        state.content_buffer.append(str(event.content))
+        return None
+
+    if isinstance(event, str):
+        state.content_buffer.append(event)
+        return None
+
+    return None
+
+
+def _finalize_pending_tools(state: _TeamStreamState) -> str | None:
+    """Build done tags for tool calls that started but never completed."""
+    if not state.tool_state.tool_ids_by_call_id:
+        return None
+    parts = [
+        f'<tool id="{tool_id}" state="done">(interrupted)</tool>'
+        for tool_id in state.tool_state.tool_ids_by_call_id.values()
+    ]
+    state.tool_state.tool_ids_by_call_id.clear()
+    return "".join(parts)
+
+
+def _flush_team_stream_on_error(state: _TeamStreamState) -> list[str]:
+    """Return content parts to emit before an error chunk (pending tools + buffered content)."""
+    parts: list[str] = []
+    pending = _finalize_pending_tools(state)
+    if pending:
+        parts.append(pending)
+    if state.content_buffer and not state.got_final_output:
+        parts.append("".join(state.content_buffer))
+        state.content_buffer.clear()
+    return parts
+
+
+async def _team_stream_event_generator(  # noqa: C901
     *,
     stream: AsyncIterator[RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str],
     first_event: RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str,
@@ -1101,34 +1147,59 @@ async def _team_stream_event_generator(
     model_id: str,
     team_name: str,
 ) -> AsyncIterator[str]:
-    """Yield SSE chunks for team streaming responses."""
-    tool_state = _ToolStreamState()
+    """Yield SSE chunks for team streaming responses.
+
+    Buffers content events to avoid interleaving from parallel team members.
+    Emits all tool events (agent-level and team-level) for progress feedback.
+    Formats the final ``TeamRunOutput`` with ``_format_team_output`` for clean output.
+    Falls back to emitting buffered content if no final output event arrives.
+    """
+    state = _TeamStreamState()
+
+    def _chunk(content: str) -> str:
+        return f"data: {_chunk_json(completion_id, created, model_id, delta={'content': content})}\n\n"
 
     # 1. Role announcement
     yield f"data: {_chunk_json(completion_id, created, model_id, delta={'role': 'assistant'})}\n\n"
 
     # 2. First event
-    first_text = _extract_team_stream_text(first_event, tool_state)
-    if first_text:
-        yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': first_text})}\n\n"
+    if _extract_team_stream_error(first_event) is not None:
+        logger.warning("Team stream first event is error", team=team_name)
+        yield _chunk("Team execution failed.")
+    else:
+        text = _classify_team_event(first_event, state)
+        if text:
+            yield _chunk(text)
 
     # 3. Remaining events
     try:
         async for event in stream:
-            error_text = _extract_team_stream_error(event)
-            if error_text is not None:
-                logger.warning("Team stream emitted error event", team=team_name, error=error_text)
-                yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': 'Team execution failed.'})}\n\n"
+            if _extract_team_stream_error(event) is not None:
+                logger.warning("Team stream emitted error event", team=team_name)
+                for part in _flush_team_stream_on_error(state):
+                    yield _chunk(part)
+                yield _chunk("Team execution failed.")
                 break
 
-            text = _extract_team_stream_text(event, tool_state)
+            text = _classify_team_event(event, state)
             if text:
-                yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': text})}\n\n"
+                yield _chunk(text)
     except Exception:
         logger.exception("Team stream failed during iteration", team=team_name)
-        yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': 'Team execution failed.'})}\n\n"
+        for part in _flush_team_stream_on_error(state):
+            yield _chunk(part)
+        yield _chunk("Team execution failed.")
 
-    # 4. Finish
+    # 4. Finalize any tool calls that started but never completed
+    pending = _finalize_pending_tools(state)
+    if pending:
+        yield _chunk(pending)
+
+    # 5. Fallback: if no TeamRunOutput arrived, emit buffered content
+    if not state.got_final_output and state.content_buffer:
+        yield _chunk("".join(state.content_buffer))
+
+    # 6. Finish
     logger.info("Team completion sent", team=team_name, stream=True)
     yield f"data: {_chunk_json(completion_id, created, model_id, delta={}, finish_reason='stop')}\n\n"
     yield "data: [DONE]\n\n"
