@@ -675,12 +675,12 @@ class TestAgentBot:
             assert bot.client.room_send.call_count >= 2
 
     @pytest.mark.asyncio
-    async def test_non_streaming_hidden_tool_calls_still_send_tool_trace(
+    async def test_non_streaming_hidden_tool_calls_do_not_send_tool_trace(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Hidden inline tool calls should still propagate structured tool metadata."""
+        """Hidden tool calls should not propagate structured tool metadata."""
 
         @asynccontextmanager
         async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
@@ -729,9 +729,7 @@ class TestAgentBot:
         assert event_id == "$response"
         assert mock_ai.call_args.kwargs["show_tool_calls"] is False
         tool_trace = bot._send_response.call_args.kwargs["tool_trace"]
-        assert tool_trace is not None
-        assert len(tool_trace) == 1
-        assert tool_trace[0].tool_name == "read_file"
+        assert tool_trace is None
 
     @pytest.mark.asyncio
     async def test_skill_command_uses_target_agent_show_tool_calls_setting(

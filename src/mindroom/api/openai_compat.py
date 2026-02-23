@@ -12,6 +12,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
+from html import escape
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import uuid4
 
@@ -769,7 +770,39 @@ def _resolve_completed_tool_id(tool: ToolExecution, tool_state: _ToolStreamState
 
 
 def _inject_tool_metadata(tool_message: str, *, tool_id: str, state: Literal["start", "done"]) -> str:
-    return tool_message.replace("<tool>", f'<tool id="{tool_id}" state="{state}">', 1)
+    return f'<tool id="{tool_id}" state="{state}">{tool_message}</tool>'
+
+
+def _escape_tool_payload_text(text: str) -> str:
+    return escape(text, quote=True)
+
+
+def _format_openai_tool_call_display(tool_name: str, args_preview: str | None) -> str:
+    safe_tool_name = _escape_tool_payload_text(tool_name)
+    if not args_preview:
+        return f"{safe_tool_name}()"
+    return f"{safe_tool_name}({_escape_tool_payload_text(args_preview)})"
+
+
+def _format_openai_stream_tool_message(
+    tool: ToolExecution,
+    *,
+    completed: bool,
+) -> str:
+    if completed:
+        _, trace = format_tool_completed_event(tool)
+    else:
+        _, trace = format_tool_started_event(tool)
+    if trace is None:
+        return ""
+
+    call_display = _format_openai_tool_call_display(trace.tool_name, trace.args_preview)
+    if not completed:
+        return call_display
+
+    if trace.result_preview is None:
+        return f"{call_display}\n"
+    return f"{call_display}\n{_escape_tool_payload_text(trace.result_preview)}"
 
 
 def _format_stream_tool_event(
@@ -781,23 +814,21 @@ def _format_stream_tool_event(
         tool = event.tool
         if tool is None:
             return None
-        tool_msg, _ = format_tool_started_event(tool)
-        if not tool_msg:
-            return None
+        tool_msg = _format_openai_stream_tool_message(tool, completed=False)
         tool_id = _resolve_started_tool_id(tool, tool_state)
         state: Literal["start", "done"] = "start"
     elif isinstance(event, (ToolCallCompletedEvent, TeamToolCallCompletedEvent)):
         tool = event.tool
         if tool is None:
             return None
-        tool_msg, _ = format_tool_completed_event(tool)
-        if not tool_msg:
-            return None
+        tool_msg = _format_openai_stream_tool_message(tool, completed=True)
         tool_id = _resolve_completed_tool_id(tool, tool_state)
         state = "done"
     else:
         return None
 
+    if not tool_msg:
+        return None
     return _inject_tool_metadata(tool_msg, tool_id=tool_id, state=state)
 
 

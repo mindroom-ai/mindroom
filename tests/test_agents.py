@@ -14,6 +14,7 @@ from agno.agent import Agent
 from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
 from pydantic import ValidationError
 
+from mindroom import agent_prompts
 from mindroom.agents import _CULTURE_MANAGER_CACHE, create_agent
 from mindroom.config import AgentConfig, Config, CultureConfig, KnowledgeBaseConfig, ModelConfig
 
@@ -39,6 +40,17 @@ def test_get_agent_general(mock_storage: MagicMock) -> None:  # noqa: ARG001
     assert agent.learning.user_profile.mode is LearningMode.ALWAYS
     assert isinstance(agent.learning.user_memory, UserMemoryConfig)
     assert agent.learning.user_memory.mode is LearningMode.ALWAYS
+
+
+@patch("mindroom.agents.SqliteDb")
+def test_hidden_tool_calls_prompt_is_injected(mock_storage: MagicMock) -> None:  # noqa: ARG001
+    """Agents with hidden tool calls get a prompt hint to avoid narrating tool usage."""
+    config = Config.from_yaml()
+    config.agents["general"].show_tool_calls = False
+
+    agent = create_agent("general", config=config)
+
+    assert agent_prompts.HIDDEN_TOOL_CALLS_PROMPT in agent.instructions
 
 
 @patch("mindroom.agents.SqliteDb")

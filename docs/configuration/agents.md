@@ -127,7 +127,7 @@ agents:
 | `compress_tool_results` | bool | `null` | Compress tool results in history to save context. Inherits from `defaults.compress_tool_results` (default: `true`) |
 | `enable_session_summaries` | bool | `null` | Generate AI summaries of older conversation segments for compaction (each summary costs an extra LLM call). Inherits from `defaults.enable_session_summaries` (default: `false`) |
 | `max_tool_calls_from_history` | int | `null` | Limit tool call messages replayed from history (`null` = no limit) |
-| `show_tool_calls` | bool | `null` | Show tool call details inline in responses. Inherits from `defaults.show_tool_calls` (default: `true`). Set to `false` to hide `<tool>…</tool>` blocks (metadata is still tracked) |
+| `show_tool_calls` | bool | `null` | Show tool-call markers and trace metadata in Matrix messages. Inherits from `defaults.show_tool_calls` (default: `true`). When `false`, inline markers and `io.mindroom.tool_trace` are omitted from sent Matrix message content. Note: this flag is not currently enforced by the OpenAI-compatible `/v1/chat/completions` path. |
 | `sandbox_tools` | list | `null` | Tool names to execute through the [sandbox proxy](../deployment/sandbox-proxy.md). Inherits from `defaults.sandbox_tools` (default: `null` — defers to env vars). Set to `[]` to explicitly disable sandboxing for this agent |
 | `allow_self_config` | bool | `null` | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool |
 | `delegate_to` | list | `[]` | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation)) |
@@ -221,7 +221,7 @@ defaults:
   compress_tool_results: true           # Compress tool results in history to save context
   enable_session_summaries: false       # AI summaries of older conversation segments (costs extra LLM call)
   max_tool_calls_from_history: null     # Limit tool call messages replayed from history (null = no limit)
-  show_tool_calls: true                 # Show tool call details inline in responses
+  show_tool_calls: true                 # Show tool-call markers and trace metadata in message content
   sandbox_tools: null                    # Tool names to sandbox (null = use env var config, [] = disable)
   allow_self_config: false               # Allow agents to read/modify their own config at runtime
 ```

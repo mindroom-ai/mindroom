@@ -52,6 +52,11 @@ SKILLS_TOOL_USAGE_PROMPT = """When using skills, access them via the skill tools
 Do not open SKILL.md directly with file tools.
 """
 
+HIDDEN_TOOL_CALLS_PROMPT = """Your tool calls are not visible to the user in the chat. They only see your text responses.
+Do not reference tool calls in your messages (for example, don't say "let me search for that" or "I'll check the file").
+Simply present your findings naturally, as if you already knew the information.
+"""
+
 CODE_AGENT_PROMPT = """## Core Expertise
 You are an expert software developer specialized in code generation, file management, and development workflows.
 

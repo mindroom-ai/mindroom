@@ -85,7 +85,15 @@ Events are processed in background tasks:
 
 Agents stream responses by progressively editing messages. Streaming is enabled only when the requesting user is online (checked via `should_use_streaming()`), saving API calls for offline users.
 
-Tool call telemetry is emitted as structured collapsible blocks (`<tool>...</tool>`, `<validation>...</validation>`) and mirrored in `io.mindroom.tool_trace` metadata on the same message content.
+Tool call telemetry is emitted as plain inline markers and mirrored in `io.mindroom.tool_trace` metadata on the same message content.
+
+Marker format:
+```text
+Pending:   🔧 `tool_name` [N] ⏳
+Completed: 🔧 `tool_name` [N]
+```
+
+Where `N` is 1-indexed per message and maps to `io.mindroom.tool_trace.events[N-1]`.
 
 ## Presence
 
@@ -113,12 +121,12 @@ Returns content with `m.mentions` and `formatted_body` containing clickable link
 
 Messages exceeding the 64KB Matrix event limit are automatically handled by `prepare_large_message()`:
 
-- Messages > 55,000 bytes: Uploaded as attachment (`message.txt` for plain text, `message.html` for formatted HTML)
-- Edits > 27,000 bytes: Lower threshold since edit structure roughly doubles size
+- Messages > 55,000 bytes and edits > 27,000 bytes use a fallback event
+- Full original Matrix message content is uploaded as a JSON sidecar (`message-content.json`)
 - Preview text included in message body (maximum that fits)
-- Custom metadata (`io.mindroom.long_text`) for reconstruction
-- Preserves essential metadata (for example mentions) while dropping bulky optional fields to stay within event limits
-- Encrypted rooms: Content encrypted before upload (`message.txt.enc` for plain text, `message.html.enc` for formatted HTML)
+- Custom metadata (`io.mindroom.long_text.version = 2`) points to sidecar encoding (`matrix_event_content_json`)
+- Preview event is compact (for example no inline `io.mindroom.tool_trace`), while the sidecar preserves full content fidelity
+- Encrypted rooms: sidecar JSON is encrypted before upload (`message-content.json.enc`)
 
 ## Identity Management
 

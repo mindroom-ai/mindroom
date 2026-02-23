@@ -70,8 +70,13 @@ def _merge_tool_trace(existing: list[ToolTraceEntry], incoming: list[ToolTraceEn
         # Incoming is an older prefix; keep current entries.
         return existing.copy()
 
-    # Diverged snapshots: preserve known history and append unseen tail.
-    return existing + incoming[shared_prefix:]
+    # Diverged snapshots with equal-or-greater length are typically newer
+    # "full snapshot" replacements (e.g. pending -> completed in place).
+    if len(incoming) >= len(existing):
+        return incoming.copy()
+
+    # Shorter divergent snapshot is treated as stale; keep current entries.
+    return existing.copy()
 
 
 @dataclass
@@ -95,7 +100,7 @@ class StreamingResponse:
     progress_update_interval: float = 1.0
     latest_thread_event_id: str | None = None  # For MSC3440 compliance
     room_mode: bool = False  # When True, skip all thread relations (for bridges/mobile)
-    show_tool_calls: bool = True  # When False, omit inline tool call text (metadata still tracked)
+    show_tool_calls: bool = True  # When False, omit inline tool call text and tool-trace metadata
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
     stream_started_at: float | None = None
     chars_since_last_update: int = 0
@@ -106,6 +111,11 @@ class StreamingResponse:
         """Append new chunk to accumulated text."""
         self.accumulated_text += new_chunk
         self.chars_since_last_update += len(new_chunk)
+
+    def _ensure_hidden_tool_gap(self) -> None:
+        """Insert a single placeholder gap for hidden tool calls."""
+        if not self.accumulated_text.endswith("\n\n"):
+            self._update("\n\n")
 
     def _current_update_interval(self, current_time: float) -> float:
         """Return the current throttling interval.
@@ -208,7 +218,7 @@ class StreamingResponse:
             thread_event_id=effective_thread_id,
             reply_to_event_id=None if self.room_mode else self.reply_to_event_id,
             latest_thread_event_id=latest_for_message,
-            tool_trace=self.tool_trace,
+            tool_trace=self.tool_trace if self.show_tool_calls else None,
         )
 
         send_succeeded = False
@@ -318,6 +328,8 @@ async def send_streaming_response(  # noqa: C901, PLR0912
     if header:
         await streaming.update_content(header, client)
 
+    pending_tools: list[tuple[str, int]] = []
+
     async for chunk in response_stream:
         # Handle different types of chunks from the stream
         if isinstance(chunk, str):
@@ -329,29 +341,56 @@ async def send_streaming_response(  # noqa: C901, PLR0912
         elif isinstance(chunk, RunContentEvent) and chunk.content:
             text_chunk = str(chunk.content)
         elif isinstance(chunk, ToolCallStartedEvent):
-            text_chunk, trace_entry = format_tool_started_event(chunk.tool)
+            if not streaming.show_tool_calls:
+                if chunk.tool is not None:
+                    streaming._ensure_hidden_tool_gap()
+                await streaming._throttled_send(client, progress_hint=True)
+                continue
+
+            tool_index = len(streaming.tool_trace) + 1
+            text_chunk, trace_entry = format_tool_started_event(chunk.tool, tool_index=tool_index)
             if trace_entry is not None:
                 streaming.tool_trace.append(trace_entry)
-            if not streaming.show_tool_calls:
-                text_chunk = ""
-                await streaming._throttled_send(client, progress_hint=True)
+                pending_tools.append((trace_entry.tool_name, tool_index))
         elif isinstance(chunk, ToolCallCompletedEvent):
             info = extract_tool_completed_info(chunk.tool)
             if info:
                 tool_name, result = info
                 if streaming.show_tool_calls:
+                    match_pos = next(
+                        (pos for pos in range(len(pending_tools) - 1, -1, -1) if pending_tools[pos][0] == tool_name),
+                        None,
+                    )
+                    if match_pos is None:
+                        logger.warning(
+                            "Missing pending tool start in streaming response; skipping completion marker",
+                            tool_name=tool_name,
+                        )
+                        await streaming._throttled_send(client, progress_hint=True)
+                        continue
+                    _, tool_index = pending_tools.pop(match_pos)
                     streaming.accumulated_text, trace_entry = complete_pending_tool_block(
                         streaming.accumulated_text,
                         tool_name,
                         result,
+                        tool_index=tool_index,
                     )
-                else:
-                    _, trace_entry = complete_pending_tool_block("", tool_name, result)
-                streaming.tool_trace.append(trace_entry)
-                if streaming.show_tool_calls:
-                    await streaming._throttled_send(client)
+                    if 0 < tool_index <= len(streaming.tool_trace):
+                        existing_entry = streaming.tool_trace[tool_index - 1]
+                        existing_entry.type = "tool_call_completed"
+                        existing_entry.result_preview = trace_entry.result_preview
+                        existing_entry.truncated = existing_entry.truncated or trace_entry.truncated
+                    else:
+                        logger.warning(
+                            "Missing tool trace slot in streaming response for completion",
+                            tool_name=tool_name,
+                            tool_index=tool_index,
+                            trace_len=len(streaming.tool_trace),
+                        )
                 else:
                     await streaming._throttled_send(client, progress_hint=True)
+                    continue
+                await streaming._throttled_send(client)
                 continue
             text_chunk = ""
         else:
