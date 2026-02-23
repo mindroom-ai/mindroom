@@ -1081,8 +1081,6 @@ class _TeamStreamState:
     """Mutable state for team stream event processing."""
 
     tool_state: _ToolStreamState = field(default_factory=_ToolStreamState)
-    content_buffer: list[str] = field(default_factory=list)
-    got_final_output: bool = False
 
 
 def _classify_team_event(
@@ -1091,26 +1089,36 @@ def _classify_team_event(
 ) -> str | None:
     """Classify a team stream event and return formatted content, or ``None`` to skip.
 
-    Final output events are formatted via ``_format_team_output``.
-    Tool events are emitted immediately for progress feedback.
-    Content events are buffered to avoid interleaving from parallel members.
+    Team leader content (``TeamContentEvent``) is streamed directly — it is the
+    synthesized answer and never interleaves.
+    Member agent content (``RunContentEvent``) is skipped to prevent interleaving
+    from parallel members.
+    Tool events (agent-level and team-level) are emitted for progress feedback.
+    ``TeamRunOutput`` / ``RunOutput`` are formatted as a safety net (unlikely to
+    fire since mindroom doesn't pass ``yield_run_output=True``).
+    ``TeamRunCompletedEvent`` is the actual terminal event but its content was
+    already streamed via ``TeamContentEvent``, so it is skipped.
     """
+    # Safety net: TeamRunOutput / RunOutput (unlikely to arrive)
     if isinstance(event, (TeamRunOutput, RunOutput)):
-        state.got_final_output = True
         return _format_team_output(event)
 
+    # Tool events — emit for progress feedback
     tool_text = _format_stream_tool_event(event, state.tool_state)  # type: ignore[arg-type]
     if tool_text is not None:
         return tool_text
 
-    if isinstance(event, (RunContentEvent, TeamContentEvent)) and event.content:
-        state.content_buffer.append(str(event.content))
-        return None
+    # Team leader content — stream directly (synthesized answer)
+    if isinstance(event, TeamContentEvent) and event.content:
+        return str(event.content)
 
+    # Raw string fallback — stream directly
     if isinstance(event, str):
-        state.content_buffer.append(event)
-        return None
+        return event
 
+    # Member agent content (RunContentEvent) — skip to prevent interleaving.
+    # TeamRunCompletedEvent — terminal event, content already streamed.
+    # Everything else (reasoning, memory, hooks, etc.) — skip.
     return None
 
 
@@ -1127,14 +1135,11 @@ def _finalize_pending_tools(state: _TeamStreamState) -> str | None:
 
 
 def _flush_team_stream_on_error(state: _TeamStreamState) -> list[str]:
-    """Return content parts to emit before an error chunk (pending tools + buffered content)."""
+    """Return content parts to emit before an error chunk (pending tool finalization)."""
     parts: list[str] = []
     pending = _finalize_pending_tools(state)
     if pending:
         parts.append(pending)
-    if state.content_buffer and not state.got_final_output:
-        parts.append("".join(state.content_buffer))
-        state.content_buffer.clear()
     return parts
 
 
@@ -1149,10 +1154,9 @@ async def _team_stream_event_generator(  # noqa: C901
 ) -> AsyncIterator[str]:
     """Yield SSE chunks for team streaming responses.
 
-    Buffers content events to avoid interleaving from parallel team members.
+    Streams team leader content (``TeamContentEvent``) directly for real-time output.
+    Skips member agent content (``RunContentEvent``) to prevent interleaving.
     Emits all tool events (agent-level and team-level) for progress feedback.
-    Formats the final ``TeamRunOutput`` with ``_format_team_output`` for clean output.
-    Falls back to emitting buffered content if no final output event arrives.
     """
     state = _TeamStreamState()
 
@@ -1195,11 +1199,7 @@ async def _team_stream_event_generator(  # noqa: C901
     if pending:
         yield _chunk(pending)
 
-    # 5. Fallback: if no TeamRunOutput arrived, emit buffered content
-    if not state.got_final_output and state.content_buffer:
-        yield _chunk("".join(state.content_buffer))
-
-    # 6. Finish
+    # 5. Finish
     logger.info("Team completion sent", team=team_name, stream=True)
     yield f"data: {_chunk_json(completion_id, created, model_id, delta={}, finish_reason='stop')}\n\n"
     yield "data: [DONE]\n\n"

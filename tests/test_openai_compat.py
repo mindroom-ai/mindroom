@@ -1433,21 +1433,17 @@ class TestTeamCompletion:
         assert "Team consensus result" in data["choices"][0]["message"]["content"]
 
     def test_team_streaming(self, team_app_client: TestClient) -> None:
-        """Streaming team completion emits formatted TeamRunOutput."""
+        """Streaming team completion streams TeamContentEvent (leader text) directly."""
         from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
-        from agno.run.team import TeamRunOutput  # noqa: PLC0415
 
-        from mindroom.teams import TeamMode, format_team_response  # noqa: PLC0415
-
-        final_output = TeamRunOutput(content="Team response!")
-        expected_text = "\n\n".join(format_team_response(final_output)) or str(final_output.content)
+        from mindroom.teams import TeamMode  # noqa: PLC0415
 
         mock_team = MagicMock()
         mock_agents = [MagicMock(name="GeneralAgent")]
 
         async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
-            yield TeamContentEvent(content="buffered but replaced")
-            yield final_output
+            yield TeamContentEvent(content="Hello ")
+            yield TeamContentEvent(content="world!")
 
         mock_team.arun = mock_stream_events
 
@@ -1474,7 +1470,7 @@ class TestTeamCompletion:
         assert first["choices"][0]["delta"] == {"role": "assistant"}
         assert first["model"] == "team/super_team"
 
-        # Verify content chunks contain the formatted output (not raw buffered content)
+        # Leader content is streamed directly (not buffered)
         content_parts = []
         for line in lines:
             if line.startswith("data: ") and line != "data: [DONE]":
@@ -1483,8 +1479,10 @@ class TestTeamCompletion:
                 if "content" in delta:
                     content_parts.append(delta["content"])
         full_content = "".join(content_parts)
-        assert full_content == expected_text
-        assert "buffered but replaced" not in full_content
+        assert full_content == "Hello world!"
+        # Each TeamContentEvent is a separate chunk (streamed directly)
+        assert "Hello " in content_parts
+        assert "world!" in content_parts
 
     def test_team_streaming_tool_events_emit_start_and_done_with_ids(
         self,
@@ -1493,7 +1491,7 @@ class TestTeamCompletion:
         """Both agent-level and team-level tool events are emitted with stable IDs."""
         from agno.models.response import ToolExecution  # noqa: PLC0415
         from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent  # noqa: PLC0415
-        from agno.run.team import TeamRunOutput  # noqa: PLC0415
+        from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
         from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent  # noqa: PLC0415
         from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent  # noqa: PLC0415
 
@@ -1532,7 +1530,7 @@ class TestTeamCompletion:
             yield ToolCallStartedEvent(tool=agent_tool_started)
             yield ToolCallCompletedEvent(tool=agent_tool_completed)
             yield TeamToolCallCompletedEvent(tool=team_tool_completed)
-            yield TeamRunOutput(content="Final answer")
+            yield TeamContentEvent(content="Final answer")
 
         mock_team.arun = mock_stream_events
 
@@ -1601,7 +1599,7 @@ class TestTeamCompletion:
         assert response.json()["error"]["message"] == "Team execution failed"
 
     def test_team_streaming_midstream_error_emits_failure_chunk(self, team_app_client: TestClient) -> None:
-        """When stream error occurs after start, buffered content and failure chunk are emitted."""
+        """When stream error occurs after start, already-streamed content and failure chunk are emitted."""
         from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
         from agno.run.team import RunErrorEvent as TeamRunErrorEvent  # noqa: PLC0415
 
@@ -1639,11 +1637,11 @@ class TestTeamCompletion:
                 if "content" in delta:
                     contents.append(delta["content"])
 
-        # Buffered content is flushed before the error
+        # Leader content was streamed directly before the error
         full = "".join(contents)
         assert "Team started. " in full
         assert "Team execution failed." in full
-        # Buffered content comes before the failure message
+        # Leader content comes before the failure message
         assert full.index("Team started. ") < full.index("Team execution failed.")
         assert lines[-1] == "data: [DONE]"
 
@@ -1714,8 +1712,9 @@ class TestTeamCompletion:
         assert response.status_code == 500
         assert response.json()["error"]["type"] == "server_error"
 
-    def test_team_streaming_fallback_when_no_team_run_output(self, team_app_client: TestClient) -> None:
-        """When no TeamRunOutput arrives, buffered content is emitted as fallback."""
+    def test_team_streaming_skips_member_content(self, team_app_client: TestClient) -> None:
+        """Member agent RunContentEvent is skipped; only leader TeamContentEvent is streamed."""
+        from agno.run.agent import RunContentEvent  # noqa: PLC0415
         from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
 
         from mindroom.teams import TeamMode  # noqa: PLC0415
@@ -1724,8 +1723,10 @@ class TestTeamCompletion:
         mock_agents = [MagicMock(name="GeneralAgent")]
 
         async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
-            yield TeamContentEvent(content="partial ")
-            yield TeamContentEvent(content="response")
+            yield RunContentEvent(content="member noise ")
+            yield TeamContentEvent(content="leader ")
+            yield RunContentEvent(content="more noise ")
+            yield TeamContentEvent(content="answer")
 
         mock_team.arun = mock_stream_events
 
@@ -1752,9 +1753,12 @@ class TestTeamCompletion:
                 if "content" in delta:
                     contents.append(delta["content"])
 
-        # Buffered content emitted as a single chunk (not interleaved)
         full = "".join(contents)
-        assert full == "partial response"
+        # Only leader content is present
+        assert full == "leader answer"
+        # Member content is skipped
+        assert "member noise" not in full
+        assert "more noise" not in full
         assert lines[-1] == "data: [DONE]"
 
     def test_team_streaming_pending_tools_finalized_on_error(self, team_app_client: TestClient) -> None:
@@ -1810,15 +1814,12 @@ class TestTeamCompletion:
         assert '<tool id="1" state="done">(interrupted)</tool>' in full
         assert "Team execution failed." in full
 
-    def test_team_streaming_buffers_parallel_member_content(self, team_app_client: TestClient) -> None:
-        """Interleaved content from parallel members is buffered; TeamRunOutput is emitted."""
+    def test_team_streaming_skips_interleaved_parallel_member_content(self, team_app_client: TestClient) -> None:
+        """Interleaved RunContentEvent from parallel members is skipped; leader content is streamed."""
         from agno.run.agent import RunContentEvent  # noqa: PLC0415
-        from agno.run.team import TeamRunOutput  # noqa: PLC0415
+        from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
 
-        from mindroom.teams import TeamMode, format_team_response  # noqa: PLC0415
-
-        final_output = TeamRunOutput(content="Clean combined answer")
-        expected_text = "\n\n".join(format_team_response(final_output)) or str(final_output.content)
+        from mindroom.teams import TeamMode  # noqa: PLC0415
 
         mock_team = MagicMock()
         mock_agents = [MagicMock(name="AgentA"), MagicMock(name="AgentB")]
@@ -1829,7 +1830,8 @@ class TestTeamCompletion:
             yield RunContentEvent(content="From B chunk1 ")
             yield RunContentEvent(content="From A chunk2 ")
             yield RunContentEvent(content="From B chunk2 ")
-            yield final_output
+            # Leader synthesizes the answer
+            yield TeamContentEvent(content="Combined answer from leader")
 
         mock_team.arun = mock_stream_events
 
@@ -1857,10 +1859,13 @@ class TestTeamCompletion:
                     contents.append(delta["content"])
 
         full = "".join(contents)
-        # Final output is the formatted TeamRunOutput, not interleaved chunks
-        assert full == expected_text
+        # Only leader content is streamed
+        assert full == "Combined answer from leader"
+        # Member content is skipped entirely
         assert "From A chunk1" not in full
         assert "From B chunk1" not in full
+        assert "From A chunk2" not in full
+        assert "From B chunk2" not in full
 
     def test_team_non_streaming_includes_thread_history(self, team_app_client: TestClient) -> None:
         """Team prompt includes prior messages converted from request history."""
