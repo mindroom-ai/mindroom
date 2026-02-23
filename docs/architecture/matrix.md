@@ -88,8 +88,10 @@ Agents stream responses by progressively editing messages. Streaming is enabled 
 Tool call telemetry is emitted as plain inline markers and mirrored in `io.mindroom.tool_trace` metadata on the same message content.
 
 Marker format:
-- Pending: `🔧 \`tool_name\` [N] ⏳`
-- Completed: `🔧 \`tool_name\` [N]`
+```text
+Pending:   🔧 `tool_name` [N] ⏳
+Completed: 🔧 `tool_name` [N]
+```
 
 Where `N` is 1-indexed per message and maps to `io.mindroom.tool_trace.events[N-1]`.
 
