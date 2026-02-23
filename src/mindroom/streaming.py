@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from dataclasses import dataclass, field
@@ -35,6 +36,7 @@ logger = get_logger(__name__)
 # Global constant for the in-progress marker
 IN_PROGRESS_MARKER = " ⋯"
 PROGRESS_PLACEHOLDER = "Thinking..."
+CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
 StreamInputChunk = str | StructuredStreamChunk | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
 _IN_PROGRESS_MESSAGE_PATTERN = re.compile(rf"{re.escape(IN_PROGRESS_MARKER)}\.*$")
 
@@ -176,8 +178,14 @@ class StreamingResponse:
         self._update(new_chunk)
         await self._throttled_send(client)
 
-    async def finalize(self, client: nio.AsyncClient) -> None:
+    async def finalize(self, client: nio.AsyncClient, *, cancelled: bool = False) -> None:
         """Send final message update."""
+        if cancelled:
+            stripped_text = self.accumulated_text.rstrip()
+            self.accumulated_text = (
+                f"{stripped_text}\n\n{CANCELLED_RESPONSE_NOTE}" if stripped_text else CANCELLED_RESPONSE_NOTE
+            )
+
         # When a placeholder message exists but no real text arrived,
         # still edit the message to strip the in-progress marker.
         has_placeholder = (
@@ -262,72 +270,12 @@ class ReplacementStreamingResponse(StreamingResponse):
         self.chars_since_last_update += len(new_chunk)
 
 
-async def send_streaming_response(  # noqa: C901, PLR0912
+async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
     client: nio.AsyncClient,
-    room_id: str,
-    reply_to_event_id: str | None,
-    thread_id: str | None,
-    sender_domain: str,
-    config: Config,
     response_stream: AsyncIterator[StreamInputChunk],
-    streaming_cls: type[StreamingResponse] = StreamingResponse,
-    header: str | None = None,
-    existing_event_id: str | None = None,
-    room_mode: bool = False,
-    show_tool_calls: bool = True,
-) -> tuple[str | None, str]:
-    """Stream chunks to a Matrix room, returning (event_id, accumulated_text).
-
-    Args:
-        client: Matrix client
-        room_id: Destination room
-        reply_to_event_id: Event to reply to (can be None when in a thread)
-        thread_id: Thread root if already in a thread
-        sender_domain: Sender's homeserver domain for mention formatting
-        config: App config for mention formatting
-        response_stream: Async iterator yielding text chunks or response events
-        streaming_cls: StreamingResponse class to use (default: StreamingResponse, alternative: ReplacementStreamingResponse)
-        header: Optional text prefix to send before chunks
-        existing_event_id: If editing an existing message, pass its ID
-        room_mode: If True, skip thread relations (for bridges/mobile)
-        show_tool_calls: Whether to include tool call text inline in the streamed message
-
-    Returns:
-        Tuple of (final event_id or None, full accumulated text)
-
-    """
-    if room_mode:
-        latest_thread_event_id = None
-    else:
-        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
-            client,
-            room_id,
-            thread_id,
-            reply_to_event_id,
-            existing_event_id,
-        )
-
-    streaming = streaming_cls(
-        room_id=room_id,
-        reply_to_event_id=reply_to_event_id,
-        thread_id=thread_id,
-        sender_domain=sender_domain,
-        config=config,
-        latest_thread_event_id=latest_thread_event_id,
-        room_mode=room_mode,
-        show_tool_calls=show_tool_calls,
-    )
-
-    # Ensure the first chunk triggers an initial send immediately
-    streaming.last_update = float("-inf")
-
-    if existing_event_id:
-        streaming.event_id = existing_event_id
-        streaming.accumulated_text = ""
-
-    if header:
-        await streaming.update_content(header, client)
-
+    streaming: StreamingResponse,
+) -> None:
+    """Consume stream chunks and apply incremental message updates."""
     pending_tools: list[tuple[str, int]] = []
 
     async for chunk in response_stream:
@@ -399,6 +347,79 @@ async def send_streaming_response(  # noqa: C901, PLR0912
 
         if text_chunk:
             await streaming.update_content(text_chunk, client)
+
+
+async def send_streaming_response(
+    client: nio.AsyncClient,
+    room_id: str,
+    reply_to_event_id: str | None,
+    thread_id: str | None,
+    sender_domain: str,
+    config: Config,
+    response_stream: AsyncIterator[StreamInputChunk],
+    streaming_cls: type[StreamingResponse] = StreamingResponse,
+    header: str | None = None,
+    existing_event_id: str | None = None,
+    room_mode: bool = False,
+    show_tool_calls: bool = True,
+) -> tuple[str | None, str]:
+    """Stream chunks to a Matrix room, returning (event_id, accumulated_text).
+
+    Args:
+        client: Matrix client
+        room_id: Destination room
+        reply_to_event_id: Event to reply to (can be None when in a thread)
+        thread_id: Thread root if already in a thread
+        sender_domain: Sender's homeserver domain for mention formatting
+        config: App config for mention formatting
+        response_stream: Async iterator yielding text chunks or response events
+        streaming_cls: StreamingResponse class to use (default: StreamingResponse, alternative: ReplacementStreamingResponse)
+        header: Optional text prefix to send before chunks
+        existing_event_id: If editing an existing message, pass its ID
+        room_mode: If True, skip thread relations (for bridges/mobile)
+        show_tool_calls: Whether to include tool call text inline in the streamed message
+
+    Returns:
+        Tuple of (final event_id or None, full accumulated text)
+
+    """
+    if room_mode:
+        latest_thread_event_id = None
+    else:
+        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
+            client,
+            room_id,
+            thread_id,
+            reply_to_event_id,
+            existing_event_id,
+        )
+
+    streaming = streaming_cls(
+        room_id=room_id,
+        reply_to_event_id=reply_to_event_id,
+        thread_id=thread_id,
+        sender_domain=sender_domain,
+        config=config,
+        latest_thread_event_id=latest_thread_event_id,
+        room_mode=room_mode,
+        show_tool_calls=show_tool_calls,
+    )
+
+    # Ensure the first chunk triggers an initial send immediately
+    streaming.last_update = float("-inf")
+
+    if existing_event_id:
+        streaming.event_id = existing_event_id
+        streaming.accumulated_text = ""
+
+    if header:
+        await streaming.update_content(header, client)
+
+    try:
+        await _consume_streaming_chunks(client, response_stream, streaming)
+    except asyncio.CancelledError:
+        await streaming.finalize(client, cancelled=True)
+        raise
 
     await streaming.finalize(client)
 
