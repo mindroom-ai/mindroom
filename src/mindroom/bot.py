@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import mimetypes
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import cached_property
@@ -12,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import nio
 import uvicorn
+from nio import crypto
 from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
 
 from . import config_confirmation, image_handler, interactive, voice_handler
@@ -30,6 +32,7 @@ from .config_commands import handle_config_command
 from .constants import (
     CONFIG_PATH,
     MATRIX_HOMESERVER,
+    MEDIA_LOCAL_PATH_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     VOICE_PREFIX,
@@ -534,6 +537,125 @@ def _is_voice_raw_audio_fallback(event_source: dict) -> bool:
     return bool(content.get(VOICE_RAW_AUDIO_FALLBACK_KEY, False))
 
 
+def _media_local_path(event_source: dict) -> str | None:
+    """Return local media path metadata for relay events, when present."""
+    content = event_source.get("content", {})
+    value = content.get(MEDIA_LOCAL_PATH_KEY)
+    return value if isinstance(value, str) and value else None
+
+
+def _extension_from_mime_type(mime_type: str | None) -> str:
+    """Map MIME type to a stable file extension."""
+    if not mime_type:
+        return ".bin"
+    normalized_mime_type = mime_type.split(";", 1)[0].strip().lower()
+    extension = mimetypes.guess_extension(normalized_mime_type)
+    if extension:
+        return extension
+    return ".bin"
+
+
+def _store_media_bytes_locally(
+    storage_path: Path,
+    event_id: str,
+    media_bytes: bytes | None,
+    mime_type: str | None,
+) -> Path | None:
+    """Persist media bytes to storage so tool-enabled agents can access them as files."""
+    if media_bytes is None:
+        return None
+    incoming_media_dir = storage_path / "incoming_media"
+    safe_event_id = "".join(ch if ch.isalnum() else "_" for ch in event_id).strip("_") or "voice_event"
+    extension = _extension_from_mime_type(mime_type)
+    media_path = incoming_media_dir / f"{safe_event_id}{extension}"
+    try:
+        incoming_media_dir.mkdir(parents=True, exist_ok=True)
+        media_path.write_bytes(media_bytes)
+    except OSError:
+        logger.exception("Failed to persist media payload")
+        return None
+    return media_path
+
+
+def _media_mime_type(
+    event: nio.RoomMessageMedia | nio.RoomEncryptedMedia,
+) -> str | None:
+    """Extract MIME type from Matrix media events."""
+    if isinstance(event, nio.RoomEncryptedMedia):
+        mimetype = getattr(event, "mimetype", None)
+        if isinstance(mimetype, str) and mimetype:
+            return mimetype
+    content = event.source.get("content", {})
+    info = content.get("info", {}) if isinstance(content, dict) else {}
+    mimetype = info.get("mimetype") if isinstance(info, dict) else None
+    return mimetype if isinstance(mimetype, str) and mimetype else None
+
+
+def _extract_file_or_video_caption(
+    event: nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
+) -> str:
+    """Extract user caption for file/video events using MSC2530 semantics."""
+    content = event.source.get("content", {})
+    filename = content.get("filename")
+    body = event.body
+    if filename and filename != body and body:
+        return body
+    if isinstance(event, nio.RoomMessageVideo | nio.RoomEncryptedVideo):
+        return "[Attached video]"
+    return "[Attached file]"
+
+
+def _decrypt_encrypted_media_bytes(event: nio.RoomEncryptedMedia, encrypted_bytes: bytes) -> bytes | None:
+    """Decrypt encrypted Matrix media payload bytes."""
+    try:
+        key = event.source["content"]["file"]["key"]["k"]
+        sha256 = event.source["content"]["file"]["hashes"]["sha256"]
+        iv = event.source["content"]["file"]["iv"]
+    except (KeyError, TypeError):
+        logger.exception("Encrypted media payload missing decryption fields", event_id=event.event_id)
+        return None
+
+    try:
+        return crypto.attachments.decrypt_attachment(encrypted_bytes, key, sha256, iv)
+    except Exception:
+        logger.exception("Media decryption failed", event_id=event.event_id)
+        return None
+
+
+async def _download_media_bytes(
+    client: nio.AsyncClient,
+    event: nio.RoomMessageMedia | nio.RoomEncryptedMedia,
+) -> bytes | None:
+    """Download and decrypt Matrix media payload bytes."""
+    try:
+        response = await client.download(event.url)
+    except Exception:
+        logger.exception("Error downloading media")
+        return None
+
+    if isinstance(response, nio.DownloadError):
+        logger.error("Media download failed", event_id=event.event_id, error=str(response))
+        return None
+    if not isinstance(response.body, bytes):
+        logger.error("Media download returned non-bytes payload", event_id=event.event_id)
+        return None
+
+    if isinstance(event, nio.RoomEncryptedMedia):
+        return _decrypt_encrypted_media_bytes(event, response.body)
+    return response.body
+
+
+async def _store_file_or_video_locally(
+    client: nio.AsyncClient,
+    storage_path: Path,
+    event: nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
+) -> Path | None:
+    """Download and persist file/video media to local storage."""
+    media_bytes = await _download_media_bytes(client, event)
+    mime_type = _media_mime_type(event)
+    return _store_media_bytes_locally(storage_path, event.event_id, media_bytes, mime_type)
+
+
 def create_bot_for_entity(
     entity_name: str,
     agent_user: AgentMatrixUser,
@@ -846,6 +968,10 @@ class AgentBot:
         # Register image message callbacks on all agents (each agent handles its own routing)
         self.client.add_event_callback(_create_task_wrapper(self._on_image_message), nio.RoomMessageImage)
         self.client.add_event_callback(_create_task_wrapper(self._on_image_message), nio.RoomEncryptedImage)
+        self.client.add_event_callback(_create_task_wrapper(self._on_file_or_video_message), nio.RoomMessageFile)
+        self.client.add_event_callback(_create_task_wrapper(self._on_file_or_video_message), nio.RoomEncryptedFile)
+        self.client.add_event_callback(_create_task_wrapper(self._on_file_or_video_message), nio.RoomMessageVideo)
+        self.client.add_event_callback(_create_task_wrapper(self._on_file_or_video_message), nio.RoomEncryptedVideo)
 
         self.running = True
 
@@ -1069,6 +1195,10 @@ class AgentBot:
             if context.thread_id and _is_voice_raw_audio_fallback(event.source)
             else []
         )
+        local_audio_path = _media_local_path(event.source)
+        prompt_text = event.body
+        if local_audio_path:
+            prompt_text = f"{prompt_text}\n\nLocal media file path: {local_audio_path}"
 
         if action.kind == "team":
             assert action.form_team is not None
@@ -1076,7 +1206,7 @@ class AgentBot:
                 room_id=room.room_id,
                 reply_to_event_id=event.event_id,
                 thread_id=context.thread_id,
-                message=event.body,
+                message=prompt_text,
                 team_agents=action.form_team.agents,
                 team_mode=action.form_team.mode,
                 thread_history=context.thread_history,
@@ -1096,7 +1226,7 @@ class AgentBot:
 
         response_event_id = await self._generate_response(
             room_id=room.room_id,
-            prompt=event.body,
+            prompt=prompt_text,
             reply_to_event_id=event.event_id,
             thread_id=context.thread_id,
             thread_history=context.thread_history,
@@ -1253,16 +1383,25 @@ class AgentBot:
             event_id=event.event_id,
             sender=event.sender,
         )
+        local_audio_path = _store_media_bytes_locally(
+            self.storage_path,
+            event.event_id,
+            voice_audio.content,
+            voice_audio.mime_type,
+        )
         fallback_message = f"{VOICE_PREFIX}{voice_handler.extract_caption(event)}"
+        fallback_extra_content: dict[str, str | bool] = {
+            ORIGINAL_SENDER_KEY: event.sender,
+            VOICE_RAW_AUDIO_FALLBACK_KEY: True,
+        }
+        if local_audio_path is not None:
+            fallback_extra_content[MEDIA_LOCAL_PATH_KEY] = str(local_audio_path)
         response_event_id = await self._send_response(
             room_id=room.room_id,
             reply_to_event_id=event.event_id,
             response_text=fallback_message,
             thread_id=thread_id,
-            extra_content={
-                ORIGINAL_SENDER_KEY: event.sender,
-                VOICE_RAW_AUDIO_FALLBACK_KEY: True,
-            },
+            extra_content=fallback_extra_content,
         )
         self.response_tracker.mark_responded(event.event_id, response_event_id)
 
@@ -1338,6 +1477,89 @@ class AgentBot:
             )
         self.response_tracker.mark_responded(event.event_id, response_event_id)
 
+    async def _on_file_or_video_message(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
+    ) -> None:
+        """Handle file/video events by exposing a local path to agent prompts."""
+        assert self.client is not None
+
+        requester_user_id = self._precheck_event(room, event)
+        if requester_user_id is None:
+            return
+
+        # Skip messages from other agents unless mentioned
+        sender_agent_name = extract_agent_name(requester_user_id, self.config)
+        context = await self._extract_message_context(room, event)
+
+        if sender_agent_name and not context.am_i_mentioned:
+            self.logger.debug("Ignoring media from other agent (not mentioned)")
+            return
+
+        local_media_path = await _store_file_or_video_locally(self.client, self.storage_path, event)
+        if local_media_path is None:
+            self.logger.error("Failed to download media", event_id=event.event_id)
+            self.response_tracker.mark_responded(event.event_id)
+            return
+
+        caption = _extract_file_or_video_caption(event)
+        local_media_path_str = str(local_media_path)
+
+        # Router dispatch (routing / skip) — shared with text and image handlers.
+        if await self._handle_router_dispatch(
+            room,
+            event,
+            context,
+            requester_user_id,
+            message=caption,
+            extra_content={
+                ORIGINAL_SENDER_KEY: event.sender,
+                MEDIA_LOCAL_PATH_KEY: local_media_path_str,
+            },
+        ):
+            return
+
+        # Decide: team response, individual response, or skip.
+        _is_dm_room = await is_dm_room(self.client, room.room_id)
+        action = await self._resolve_response_action(
+            context,
+            room,
+            requester_user_id,
+            event.body,
+            _is_dm_room,
+        )
+        if action.kind == "skip":
+            return
+
+        prompt_text = f"{caption}\n\nLocal media file path: {local_media_path_str}"
+
+        self.logger.info("Processing media message", event_id=event.event_id)
+
+        if action.kind == "team":
+            assert action.form_team is not None
+            response_event_id = await self._generate_team_response_helper(
+                room_id=room.room_id,
+                reply_to_event_id=event.event_id,
+                thread_id=context.thread_id,
+                message=prompt_text,
+                team_agents=action.form_team.agents,
+                team_mode=action.form_team.mode,
+                thread_history=context.thread_history,
+                requester_user_id=requester_user_id,
+                existing_event_id=None,
+            )
+        else:
+            response_event_id = await self._generate_response(
+                room_id=room.room_id,
+                prompt=prompt_text,
+                reply_to_event_id=event.event_id,
+                thread_id=context.thread_id,
+                thread_history=context.thread_history,
+                user_id=requester_user_id,
+            )
+        self.response_tracker.mark_responded(event.event_id, response_event_id)
+
     async def _derive_conversation_context(
         self,
         room_id: str,
@@ -1360,7 +1582,11 @@ class AgentBot:
         | nio.RoomMessageImage
         | nio.RoomEncryptedImage
         | nio.RoomMessageAudio
-        | nio.RoomEncryptedAudio,
+        | nio.RoomEncryptedAudio
+        | nio.RoomMessageFile
+        | nio.RoomEncryptedFile
+        | nio.RoomMessageVideo
+        | nio.RoomEncryptedVideo,
     ) -> str:
         """Return the effective requester for per-user reply checks."""
         return get_effective_sender_id_for_reply_permissions(event.sender, event.source, self.config)
@@ -1372,11 +1598,15 @@ class AgentBot:
         | nio.RoomMessageImage
         | nio.RoomEncryptedImage
         | nio.RoomMessageAudio
-        | nio.RoomEncryptedAudio,
+        | nio.RoomEncryptedAudio
+        | nio.RoomMessageFile
+        | nio.RoomEncryptedFile
+        | nio.RoomMessageVideo
+        | nio.RoomEncryptedVideo,
         *,
         is_edit: bool = False,
     ) -> str | None:
-        """Common early-exit checks shared by text, image, and voice handlers.
+        """Common early-exit checks shared by text/media/voice handlers.
 
         Returns the effective requester user ID when the event should be
         processed, or ``None`` when the event should be skipped.
@@ -1417,13 +1647,20 @@ class AgentBot:
     async def _handle_router_dispatch(
         self,
         room: nio.MatrixRoom,
-        event: nio.RoomMessageText | nio.RoomMessageImage | nio.RoomEncryptedImage,
+        event: nio.RoomMessageText
+        | nio.RoomMessageImage
+        | nio.RoomEncryptedImage
+        | nio.RoomMessageFile
+        | nio.RoomEncryptedFile
+        | nio.RoomMessageVideo
+        | nio.RoomEncryptedVideo,
         context: MessageContext,
         requester_user_id: str,
         *,
         message: str | None = None,
+        extra_content: dict[str, Any] | None = None,
     ) -> bool:
-        """Run the router dispatch logic shared by text and image handlers.
+        """Run the router dispatch logic shared by text and media handlers.
 
         Returns True when this agent is the router and has handled (or skipped)
         the message, meaning the caller should ``return`` immediately.
@@ -1442,13 +1679,18 @@ class AgentBot:
                 if len(available_agents) == 1:
                     self.logger.info("Skipping routing: only one agent present")
                 else:
+                    routing_kwargs: dict[str, Any] = {
+                        "message": message,
+                        "requester_user_id": requester_user_id,
+                    }
+                    if extra_content:
+                        routing_kwargs["extra_content"] = extra_content
                     await self._handle_ai_routing(
                         room,
                         event,
                         context.thread_history,
                         context.thread_id,
-                        message=message,
-                        requester_user_id=requester_user_id,
+                        **routing_kwargs,
                     )
         return True
 
@@ -2413,11 +2655,18 @@ class AgentBot:
     async def _handle_ai_routing(
         self,
         room: nio.MatrixRoom,
-        event: nio.RoomMessageText | nio.RoomMessageImage | nio.RoomEncryptedImage,
+        event: nio.RoomMessageText
+        | nio.RoomMessageImage
+        | nio.RoomEncryptedImage
+        | nio.RoomMessageFile
+        | nio.RoomEncryptedFile
+        | nio.RoomMessageVideo
+        | nio.RoomEncryptedVideo,
         thread_history: list[dict],
         thread_id: str | None = None,
         message: str | None = None,
         requester_user_id: str | None = None,
+        extra_content: dict[str, Any] | None = None,
     ) -> None:
         # Only router agent should handle routing
         assert self.agent_name == ROUTER_AGENT_NAME
@@ -2456,12 +2705,15 @@ class AgentBot:
             thread_mode_override=target_thread_mode,
         )
 
-        event_id = await self._send_response(
-            room_id=room.room_id,
-            reply_to_event_id=event.event_id,
-            response_text=response_text,
-            thread_id=thread_event_id,
-        )
+        send_kwargs: dict[str, Any] = {
+            "room_id": room.room_id,
+            "reply_to_event_id": event.event_id,
+            "response_text": response_text,
+            "thread_id": thread_event_id,
+        }
+        if extra_content:
+            send_kwargs["extra_content"] = extra_content
+        event_id = await self._send_response(**send_kwargs)
         if event_id:
             self.logger.info("Routed to agent", suggested_agent=suggested_agent)
             self.response_tracker.mark_responded(event.event_id)

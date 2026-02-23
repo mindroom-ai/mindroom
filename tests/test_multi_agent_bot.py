@@ -19,6 +19,7 @@ from agno.run.team import TeamRunOutput
 
 from mindroom.bot import AgentBot, MessageContext, MultiAgentOrchestrator, MultiKnowledgeVectorDb
 from mindroom.config import AgentConfig, AuthorizationConfig, Config, DefaultsConfig, KnowledgeBaseConfig, ModelConfig
+from mindroom.constants import MEDIA_LOCAL_PATH_KEY, ORIGINAL_SENDER_KEY
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.teams import TeamFormationDecision, TeamMode
@@ -175,6 +176,11 @@ class TestAgentBot:
             event = MagicMock(spec=nio.RoomMessageAudio)
             event.body = "voice"
             event.source = {"content": {"body": "voice"}}
+        elif handler_name == "file":
+            event = MagicMock(spec=nio.RoomMessageFile)
+            event.body = "report.pdf"
+            event.url = "mxc://localhost/report"
+            event.source = {"content": {"body": "report.pdf", "msgtype": "m.file"}}
         elif handler_name == "reaction":
             event = MagicMock(spec=nio.ReactionEvent)
             event.key = "👍"
@@ -202,6 +208,8 @@ class TestAgentBot:
             await bot._on_image_message(room, event)
         elif handler_name == "voice":
             await bot._on_voice_message(room, event)
+        elif handler_name == "file":
+            await bot._on_file_or_video_message(room, event)
         elif handler_name == "reaction":
             await bot._on_reaction(room, event)
         else:  # pragma: no cover - defensive guard for test helper misuse
@@ -466,7 +474,7 @@ class TestAgentBot:
         # The bot calls ensure_setup which calls ensure_user_account
         # and then login with whatever user account was ensured
         assert mock_login.called
-        assert mock_client.add_event_callback.call_count == 5  # invite, message, reaction, and 2 image callbacks
+        assert mock_client.add_event_callback.call_count == 9  # invite, message, reaction, image/file/video callbacks
 
     @pytest.mark.asyncio
     async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
@@ -907,6 +915,7 @@ class TestAgentBot:
             ("message", True),
             ("image", True),
             ("voice", True),
+            ("file", True),
             ("reaction", False),
         ],
     )
@@ -949,6 +958,7 @@ class TestAgentBot:
             ("message", True),
             ("image", True),
             ("voice", True),
+            ("file", True),
             ("reaction", False),
         ],
     )
@@ -1123,6 +1133,131 @@ class TestAgentBot:
         tracker.mark_responded.assert_called_once_with("$img_event_fail")
 
     @pytest.mark.asyncio
+    async def test_agent_bot_on_file_message_forwards_local_path_to_generate_response(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """File messages should call _generate_response with a local media path in prompt."""
+        config = Config.from_yaml()
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot.client = AsyncMock()
+
+        tracker = MagicMock()
+        tracker.has_responded.return_value = False
+        bot.__dict__["response_tracker"] = tracker
+
+        bot._extract_message_context = AsyncMock(
+            return_value=MessageContext(
+                am_i_mentioned=False,
+                is_thread=False,
+                thread_id=None,
+                thread_history=[],
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+            ),
+        )
+        bot._generate_response = AsyncMock(return_value="$response")
+
+        room = MagicMock()
+        room.room_id = "!test:localhost"
+
+        event = MagicMock(spec=nio.RoomMessageFile)
+        event.sender = "@user:localhost"
+        event.event_id = "$file_event"
+        event.body = "report.pdf"
+        event.url = "mxc://localhost/report"
+        event.source = {"content": {"body": "report.pdf", "msgtype": "m.file"}}
+
+        local_media_path = tmp_path / "incoming_media" / "file.pdf"
+        local_media_path.parent.mkdir(parents=True, exist_ok=True)
+        local_media_path.write_bytes(b"pdf")
+
+        with (
+            patch("mindroom.bot.is_authorized_sender", return_value=True),
+            patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
+            patch(
+                "mindroom.bot.decide_team_formation",
+                new_callable=AsyncMock,
+                return_value=TeamFormationDecision(
+                    should_form_team=False,
+                    agents=[],
+                    mode=TeamMode.COLLABORATE,
+                ),
+            ),
+            patch("mindroom.bot.should_agent_respond", return_value=True),
+            patch("mindroom.bot._store_file_or_video_locally", new_callable=AsyncMock, return_value=local_media_path),
+        ):
+            await bot._on_file_or_video_message(room, event)
+
+        bot._generate_response.assert_awaited_once_with(
+            room_id="!test:localhost",
+            prompt=f"[Attached file]\n\nLocal media file path: {local_media_path}",
+            reply_to_event_id="$file_event",
+            thread_id=None,
+            thread_history=[],
+            user_id="@user:localhost",
+        )
+        tracker.mark_responded.assert_called_once_with("$file_event", "$response")
+
+    @pytest.mark.asyncio
+    async def test_agent_bot_on_file_message_marks_responded_when_store_fails(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """File media persistence failure should still mark event as responded."""
+        config = Config.from_yaml()
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot.client = AsyncMock()
+
+        tracker = MagicMock()
+        tracker.has_responded.return_value = False
+        bot.__dict__["response_tracker"] = tracker
+
+        bot._extract_message_context = AsyncMock(
+            return_value=MessageContext(
+                am_i_mentioned=False,
+                is_thread=False,
+                thread_id=None,
+                thread_history=[],
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+            ),
+        )
+        bot._generate_response = AsyncMock()
+
+        room = MagicMock()
+        room.room_id = "!test:localhost"
+
+        event = MagicMock(spec=nio.RoomMessageFile)
+        event.sender = "@user:localhost"
+        event.event_id = "$file_event_fail"
+        event.body = "report.pdf"
+        event.url = "mxc://localhost/report"
+        event.source = {"content": {"body": "report.pdf", "msgtype": "m.file"}}
+
+        with (
+            patch("mindroom.bot.is_authorized_sender", return_value=True),
+            patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
+            patch(
+                "mindroom.bot.decide_team_formation",
+                new_callable=AsyncMock,
+                return_value=TeamFormationDecision(
+                    should_form_team=False,
+                    agents=[],
+                    mode=TeamMode.COLLABORATE,
+                ),
+            ),
+            patch("mindroom.bot.should_agent_respond", return_value=True),
+            patch("mindroom.bot._store_file_or_video_locally", new_callable=AsyncMock, return_value=None),
+        ):
+            await bot._on_file_or_video_message(room, event)
+
+        bot._generate_response.assert_not_called()
+        tracker.mark_responded.assert_called_once_with("$file_event_fail")
+
+    @pytest.mark.asyncio
     async def test_router_routes_image_messages_in_multi_agent_rooms(
         self,
         tmp_path: Path,
@@ -1200,6 +1335,92 @@ class TestAgentBot:
             message="[Attached image]",
             requester_user_id="@user:localhost",
         )
+
+    @pytest.mark.asyncio
+    async def test_router_routes_file_messages_with_local_path_metadata(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Router should pass local file path metadata when routing file messages."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+
+        config = Config.from_yaml()
+        config.ids = {
+            "general": MatrixID.from_username("mindroom_general", "localhost"),
+            "calculator": MatrixID.from_username("mindroom_calculator", "localhost"),
+            "router": MatrixID.from_username("mindroom_router", "localhost"),
+        }
+
+        bot = AgentBot(agent_user, tmp_path, config=config)
+        bot.client = AsyncMock()
+        bot.logger = MagicMock()
+        bot._handle_ai_routing = AsyncMock()
+        bot.response_tracker = MagicMock()
+        bot.response_tracker.has_responded.return_value = False
+
+        mock_context = MagicMock()
+        mock_context.am_i_mentioned = False
+        mock_context.mentioned_agents = []
+        mock_context.has_non_agent_mentions = False
+        mock_context.is_thread = False
+        mock_context.thread_id = None
+        mock_context.thread_history = []
+        bot._extract_message_context = AsyncMock(return_value=mock_context)
+
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
+        room.users = {
+            "@mindroom_router:localhost": None,
+            "@mindroom_general:localhost": None,
+            "@mindroom_calculator:localhost": None,
+            "@user:localhost": None,
+        }
+
+        event = nio.RoomMessageFile.from_dict(
+            {
+                "event_id": "$file_route",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.file",
+                    "body": "report.pdf",
+                    "url": "mxc://localhost/test_file",
+                    "info": {"mimetype": "application/pdf"},
+                },
+            },
+        )
+        local_media_path = tmp_path / "incoming_media" / "file_route.pdf"
+        local_media_path.parent.mkdir(parents=True, exist_ok=True)
+        local_media_path.write_bytes(b"%PDF")
+
+        with (
+            patch("mindroom.bot.extract_agent_name", return_value=None),
+            patch("mindroom.bot.get_agents_in_thread", return_value=[]),
+            patch("mindroom.bot.has_multiple_non_agent_users_in_thread", return_value=False),
+            patch("mindroom.bot.get_available_agents_for_sender") as mock_get_available,
+            patch("mindroom.bot.is_authorized_sender", return_value=True),
+            patch(
+                "mindroom.bot._store_file_or_video_locally",
+                new_callable=AsyncMock,
+                return_value=local_media_path,
+            ),
+        ):
+            mock_get_available.return_value = [config.ids["general"], config.ids["calculator"]]
+            await bot._on_file_or_video_message(room, event)
+
+        bot._handle_ai_routing.assert_called_once()
+        call_kwargs = bot._handle_ai_routing.call_args.kwargs
+        assert call_kwargs["message"] == "[Attached file]"
+        assert call_kwargs["requester_user_id"] == "@user:localhost"
+        assert call_kwargs["extra_content"] == {
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+            MEDIA_LOCAL_PATH_KEY: str(local_media_path),
+        }
 
     @pytest.mark.asyncio
     async def test_router_dispatch_parity_text_and_image_route_under_same_conditions(self, tmp_path: Path) -> None:

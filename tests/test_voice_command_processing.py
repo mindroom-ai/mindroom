@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -10,6 +11,7 @@ from agno.media import Audio
 from mindroom.bot import AgentBot
 from mindroom.config import Config
 from mindroom.constants import (
+    MEDIA_LOCAL_PATH_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     VOICE_PREFIX,
@@ -240,7 +242,10 @@ async def test_router_voice_transcription_falls_back_to_raw_audio(tmp_path) -> N
 
     bot._send_response.assert_called_once()
     assert bot._send_response.call_args.kwargs["response_text"] == f"{VOICE_PREFIX}[Attached voice message]"
-    assert bot._send_response.call_args.kwargs["extra_content"] == {
-        ORIGINAL_SENDER_KEY: "@alice:example.com",
-        VOICE_RAW_AUDIO_FALLBACK_KEY: True,
-    }
+    extra_content = bot._send_response.call_args.kwargs["extra_content"]
+    assert extra_content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
+    assert extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] is True
+    assert isinstance(extra_content.get(MEDIA_LOCAL_PATH_KEY), str)
+    local_audio_path = Path(extra_content[MEDIA_LOCAL_PATH_KEY])
+    assert local_audio_path.exists()
+    assert local_audio_path.is_file()

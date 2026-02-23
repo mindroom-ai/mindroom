@@ -12,7 +12,12 @@ from agno.media import Audio
 
 from mindroom.bot import ROUTER_AGENT_NAME, AgentBot
 from mindroom.config import Config
-from mindroom.constants import ORIGINAL_SENDER_KEY, VOICE_PREFIX, VOICE_RAW_AUDIO_FALLBACK_KEY
+from mindroom.constants import (
+    MEDIA_LOCAL_PATH_KEY,
+    ORIGINAL_SENDER_KEY,
+    VOICE_PREFIX,
+    VOICE_RAW_AUDIO_FALLBACK_KEY,
+)
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.teams import TeamFormationDecision, TeamMode
@@ -249,6 +254,7 @@ async def test_agent_receives_thread_audio_on_voice_raw_fallback(mock_home_bot: 
             "body": f"{VOICE_PREFIX}[Attached voice message]",
             ORIGINAL_SENDER_KEY: "@user:example.com",
             VOICE_RAW_AUDIO_FALLBACK_KEY: True,
+            MEDIA_LOCAL_PATH_KEY: "/opt/mindroom/incoming_media/voice_fallback.ogg",
             "m.relates_to": {
                 "rel_type": "m.thread",
                 "event_id": "$thread_root",
@@ -296,3 +302,4 @@ async def test_agent_receives_thread_audio_on_voice_raw_fallback(mock_home_bot: 
     bot._generate_response.assert_called_once()
     call_kwargs = bot._generate_response.call_args.kwargs
     assert call_kwargs["audio"]
+    assert "/opt/mindroom/incoming_media/voice_fallback.ogg" in call_kwargs["prompt"]
