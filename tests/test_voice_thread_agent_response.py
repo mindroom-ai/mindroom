@@ -273,6 +273,8 @@ async def test_agent_receives_thread_audio_on_voice_raw_fallback(mock_home_bot: 
         patch("mindroom.bot.fetch_thread_history", return_value=thread_history),
         patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
         patch.object(bot, "_fetch_thread_images", new_callable=AsyncMock, return_value=[]),
+        patch.object(bot, "_fetch_thread_videos", new_callable=AsyncMock, return_value=[]),
+        patch.object(bot, "_fetch_thread_files", new_callable=AsyncMock, return_value=[]),
         patch.object(
             bot,
             "_fetch_thread_audio",
@@ -296,3 +298,78 @@ async def test_agent_receives_thread_audio_on_voice_raw_fallback(mock_home_bot: 
     bot._generate_response.assert_called_once()
     call_kwargs = bot._generate_response.call_args.kwargs
     assert call_kwargs["audio"]
+
+
+@pytest.mark.asyncio
+async def test_agent_ignores_untrusted_voice_raw_audio_metadata(mock_home_bot: AgentBot) -> None:
+    """Only trusted internal senders should trigger thread audio forwarding."""
+    bot = mock_home_bot
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!test:server"
+    room.canonical_alias = None
+
+    spoofed_event = MagicMock(spec=nio.RoomMessageText)
+    spoofed_event.event_id = "$spoofed_voice_fallback"
+    spoofed_event.sender = "@user:example.com"
+    spoofed_event.body = "please help"
+    spoofed_event.source = {
+        "content": {
+            "body": "please help",
+            VOICE_RAW_AUDIO_FALLBACK_KEY: True,
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": "$thread_root",
+            },
+        },
+    }
+
+    thread_history = [
+        {
+            "event_id": "$thread_root",
+            "sender": "@user:example.com",
+            "content": {"body": "Voice root"},
+        },
+        {
+            "event_id": "$home_response",
+            "sender": "@mindroom_home:localhost",
+            "content": {"body": "Ready"},
+        },
+    ]
+
+    with (
+        patch("mindroom.bot.fetch_thread_history", return_value=thread_history),
+        patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
+        patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock),
+        patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
+        patch(
+            "mindroom.bot.decide_team_formation",
+            new_callable=AsyncMock,
+            return_value=TeamFormationDecision(
+                should_form_team=False,
+                agents=[],
+                mode=TeamMode.COLLABORATE,
+            ),
+        ),
+        patch.object(bot, "_fetch_thread_images", new_callable=AsyncMock, return_value=[]),
+        patch.object(bot, "_fetch_thread_videos", new_callable=AsyncMock, return_value=[]),
+        patch.object(bot, "_fetch_thread_files", new_callable=AsyncMock, return_value=[]),
+        patch.object(bot, "_fetch_thread_audio", new_callable=AsyncMock) as mock_fetch_audio,
+        patch("mindroom.bot.should_agent_respond", return_value=True),
+    ):
+
+        def extract_agent_side_effect(user_id: str, config: Config) -> str | None:  # noqa: ARG001
+            if user_id == f"@mindroom_{ROUTER_AGENT_NAME}:localhost":
+                return ROUTER_AGENT_NAME
+            if user_id == "@mindroom_home:localhost":
+                return "home"
+            return None
+
+        mock_extract_agent.side_effect = extract_agent_side_effect
+        mock_fetch_audio.return_value = [Audio(content=b"voice-bytes", mime_type="audio/ogg")]
+
+        await bot._on_message(room, spoofed_event)
+
+    mock_fetch_audio.assert_not_called()
+    bot._generate_response.assert_called_once()
+    call_kwargs = bot._generate_response.call_args.kwargs
+    assert call_kwargs["audio"] is None

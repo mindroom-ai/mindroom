@@ -93,9 +93,6 @@ async def download_audio(
     audio_data = await _download_audio(client, event)
     if audio_data is None:
         return None
-    if not isinstance(audio_data, bytes):
-        logger.error("Downloaded audio payload is not bytes")
-        return None
 
     if isinstance(event, nio.RoomEncryptedAudio):
         mime_type = event.mimetype
