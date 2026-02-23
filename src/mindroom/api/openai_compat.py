@@ -16,7 +16,7 @@ from html import escape
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import uuid4
 
-from agno.run.agent import RunContentEvent, RunErrorEvent, RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
+from agno.run.agent import RunContentEvent, RunErrorEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 from agno.run.team import RunContentEvent as TeamContentEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
     from agno.models.response import ToolExecution
-    from agno.run.agent import RunOutputEvent
+    from agno.run.agent import RunOutput, RunOutputEvent
     from agno.run.team import TeamRunOutputEvent
 
 logger = get_logger(__name__)
@@ -1051,7 +1051,7 @@ async def _stream_team_completion(
     )
 
 
-def _extract_team_stream_error(event: RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str) -> str | None:
+def _extract_team_stream_error(event: RunOutputEvent | TeamRunOutputEvent | str) -> str | None:
     """Extract explicit error text from a team stream event."""
     if isinstance(event, (RunErrorEvent, TeamRunErrorEvent)):
         return str(event.content or "Unknown team error")
@@ -1061,7 +1061,7 @@ def _extract_team_stream_error(event: RunOutputEvent | TeamRunOutputEvent | Team
 
 
 def _team_stream_preflight_error(
-    first_event: RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str | None,
+    first_event: RunOutputEvent | TeamRunOutputEvent | str | None,
     team_name: str,
 ) -> JSONResponse | None:
     """Validate first team stream event before SSE response begins."""
@@ -1077,7 +1077,7 @@ def _team_stream_preflight_error(
 
 
 def _classify_team_event(
-    event: RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str,
+    event: RunOutputEvent | TeamRunOutputEvent | str,
     tool_state: _ToolStreamState,
 ) -> str | None:
     """Classify a team stream event and return formatted content, or ``None`` to skip.
@@ -1087,13 +1087,7 @@ def _classify_team_event(
     Member agent content (``RunContentEvent``) is skipped to prevent interleaving
     from parallel members.
     Tool events (agent-level and team-level) are emitted for progress feedback.
-    ``TeamRunOutput`` / ``RunOutput`` are formatted as a safety net (unlikely to
-    fire since mindroom doesn't pass ``yield_run_output=True``).
     """
-    # Safety net: TeamRunOutput / RunOutput (unlikely to arrive)
-    if isinstance(event, (TeamRunOutput, RunOutput)):
-        return _format_team_output(event)
-
     # Tool events — emit for progress feedback
     tool_text = _format_stream_tool_event(event, tool_state)  # type: ignore[arg-type]
     if tool_text is not None:
@@ -1122,10 +1116,10 @@ def _finalize_pending_tools(tool_state: _ToolStreamState) -> str | None:
     return "".join(parts)
 
 
-async def _team_stream_event_generator(  # noqa: C901
+async def _team_stream_event_generator(
     *,
-    stream: AsyncIterator[RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str],
-    first_event: RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str,
+    stream: AsyncIterator[RunOutputEvent | TeamRunOutputEvent | str],
+    first_event: RunOutputEvent | TeamRunOutputEvent | str,
     completion_id: str,
     created: int,
     model_id: str,
@@ -1136,6 +1130,10 @@ async def _team_stream_event_generator(  # noqa: C901
     Streams team leader content (``TeamContentEvent``) directly for real-time output.
     Skips member agent content (``RunContentEvent``) to prevent interleaving.
     Emits all tool events (agent-level and team-level) for progress feedback.
+
+    The caller (``_stream_team_completion``) validates the first event via
+    ``_team_stream_preflight_error`` before entering this generator, so
+    ``first_event`` is guaranteed to be non-error.
     """
     tool_state = _ToolStreamState()
 
@@ -1145,14 +1143,10 @@ async def _team_stream_event_generator(  # noqa: C901
     # 1. Role announcement
     yield f"data: {_chunk_json(completion_id, created, model_id, delta={'role': 'assistant'})}\n\n"
 
-    # 2. First event
-    if _extract_team_stream_error(first_event) is not None:
-        logger.warning("Team stream first event is error", team=team_name)
-        yield _chunk("Team execution failed.")
-    else:
-        text = _classify_team_event(first_event, tool_state)
-        if text:
-            yield _chunk(text)
+    # 2. First event (guaranteed non-error by preflight)
+    text = _classify_team_event(first_event, tool_state)
+    if text:
+        yield _chunk(text)
 
     # 3. Remaining events
     try:
