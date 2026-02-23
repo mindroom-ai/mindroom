@@ -1,4 +1,4 @@
-"""Session orchestration toolkit implementation."""
+"""Sub-agents toolkit implementation."""
 
 from __future__ import annotations
 
@@ -7,13 +7,13 @@ from agno.tools import Toolkit
 from mindroom.custom_tools.openclaw_compat import OpenClawCompatTools
 
 
-class SessionOrchestrationTools(OpenClawCompatTools):
-    """Session and subagent orchestration tools for any MindRoom agent."""
+class SubAgentsTools(OpenClawCompatTools):
+    """Session and sub-agent orchestration tools for any MindRoom agent."""
 
     def __init__(self) -> None:
         Toolkit.__init__(
             self,
-            name="session_orchestration",
+            name="subagents",
             tools=[
                 self.agents_list,
                 self.session_status,

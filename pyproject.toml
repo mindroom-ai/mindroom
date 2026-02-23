@@ -299,7 +299,6 @@ optional-dependencies.serpapi = [
 optional-dependencies.serper = [
   "requests",
 ]
-optional-dependencies.session_orchestration = [  ]
 optional-dependencies.shell = [  ]
 optional-dependencies.shopify = [
   "httpx>=0.27",
@@ -318,6 +317,7 @@ optional-dependencies.spotify = [
 optional-dependencies.sql = [
   "sqlalchemy",
 ]
+optional-dependencies.subagents = [  ]
 # NOTE: not a tool extra — this is for SaaS platform JWT auth (api/main.py),
 # kept optional to avoid pulling in heavy transitive deps (pyiceberg, pyroaring).
 optional-dependencies.supabase = [

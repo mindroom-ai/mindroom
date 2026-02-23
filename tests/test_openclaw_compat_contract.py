@@ -14,7 +14,7 @@ import pytest
 
 import mindroom.tools  # noqa: F401
 from mindroom.custom_tools.openclaw_compat import OpenClawCompatTools
-from mindroom.custom_tools.session_orchestration import SessionOrchestrationTools
+from mindroom.custom_tools.subagents import SubAgentsTools
 from mindroom.openclaw_context import OpenClawToolContext, get_openclaw_tool_context, openclaw_tool_context
 from mindroom.thread_utils import create_session_id
 from mindroom.tools_metadata import TOOL_METADATA, get_tool_by_name
@@ -51,7 +51,7 @@ OPENCLAW_COMPAT_ALIAS_TOOLS = {
     "ls",
 }
 
-SESSION_ORCHESTRATION_TOOLS = {
+SUBAGENT_TOOLSET_TOOLS = {
     "agents_list",
     "session_status",
     "sessions_list",
@@ -75,17 +75,17 @@ def test_openclaw_compat_tool_instantiates() -> None:
     assert isinstance(tool, OpenClawCompatTools)
 
 
-def test_session_orchestration_tool_registered() -> None:
-    """Verify metadata registration for the reusable session orchestration toolkit."""
-    assert "session_orchestration" in TOOL_METADATA
-    metadata = TOOL_METADATA["session_orchestration"]
-    assert metadata.display_name == "Session Orchestration"
+def test_subagents_tool_registered() -> None:
+    """Verify metadata registration for the reusable sub-agents toolkit."""
+    assert "subagents" in TOOL_METADATA
+    metadata = TOOL_METADATA["subagents"]
+    assert metadata.display_name == "Sub-Agents"
 
 
-def test_session_orchestration_tool_instantiates() -> None:
-    """Verify the reusable session orchestration toolkit can be loaded from the registry."""
-    tool = get_tool_by_name("session_orchestration")
-    assert isinstance(tool, SessionOrchestrationTools)
+def test_subagents_tool_instantiates() -> None:
+    """Verify the reusable sub-agents toolkit can be loaded from the registry."""
+    tool = get_tool_by_name("subagents")
+    assert isinstance(tool, SubAgentsTools)
 
 
 def test_openclaw_compat_core_tool_names_present() -> None:
@@ -97,13 +97,13 @@ def test_openclaw_compat_core_tool_names_present() -> None:
     assert OPENCLAW_COMPAT_CORE_TOOLS.issubset(exposed_names)
 
 
-def test_session_orchestration_tool_names_present() -> None:
-    """Lock the reusable session orchestration tool name contract."""
-    tool = SessionOrchestrationTools()
+def test_subagents_tool_names_present() -> None:
+    """Lock the reusable sub-agents tool name contract."""
+    tool = SubAgentsTools()
     exposed_names = {func.name for func in tool.functions.values()} | {
         func.name for func in tool.async_functions.values()
     }
-    assert exposed_names == SESSION_ORCHESTRATION_TOOLS
+    assert exposed_names == SUBAGENT_TOOLSET_TOOLS
 
 
 def test_openclaw_compat_alias_tool_names_present() -> None:
@@ -115,13 +115,13 @@ def test_openclaw_compat_alias_tool_names_present() -> None:
     assert OPENCLAW_COMPAT_ALIAS_TOOLS.issubset(exposed_names)
 
 
-def test_openclaw_compat_uses_session_orchestration_entrypoints() -> None:
-    """OpenClaw compatibility should reuse the general session orchestration toolkit."""
+def test_openclaw_compat_uses_subagents_entrypoints() -> None:
+    """OpenClaw compatibility should reuse the general sub-agents toolkit."""
     tool = OpenClawCompatTools()
-    for entrypoint_name in SESSION_ORCHESTRATION_TOOLS:
+    for entrypoint_name in SUBAGENT_TOOLSET_TOOLS:
         entrypoint = tool.async_functions[entrypoint_name].entrypoint
         assert entrypoint is not None
-        assert getattr(entrypoint, "__self__", None) is tool._session_orchestration
+        assert getattr(entrypoint, "__self__", None) is tool._subagents_tools
 
 
 @pytest.mark.asyncio

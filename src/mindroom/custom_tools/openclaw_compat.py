@@ -56,19 +56,19 @@ class OpenClawCompatTools(Toolkit):
 
     def __init__(self) -> None:
         """Initialize the OpenClaw compatibility toolkit."""
-        from mindroom.custom_tools.session_orchestration import SessionOrchestrationTools  # noqa: PLC0415
+        from mindroom.custom_tools.subagents import SubAgentsTools  # noqa: PLC0415
 
-        self._session_orchestration = SessionOrchestrationTools()
+        self._subagents_tools = SubAgentsTools()
         super().__init__(
             name="openclaw_compat",
             tools=[
-                self._session_orchestration.agents_list,
-                self._session_orchestration.session_status,
-                self._session_orchestration.sessions_list,
-                self._session_orchestration.sessions_history,
-                self._session_orchestration.sessions_send,
-                self._session_orchestration.sessions_spawn,
-                self._session_orchestration.subagents,
+                self._subagents_tools.agents_list,
+                self._subagents_tools.session_status,
+                self._subagents_tools.sessions_list,
+                self._subagents_tools.sessions_history,
+                self._subagents_tools.sessions_send,
+                self._subagents_tools.sessions_spawn,
+                self._subagents_tools.subagents,
                 self.message,
                 self.gateway,
                 self.nodes,
