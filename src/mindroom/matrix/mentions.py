@@ -113,6 +113,7 @@ def format_message_with_mentions(
     reply_to_event_id: str | None = None,
     latest_thread_event_id: str | None = None,
     tool_trace: list["ToolTraceEntry"] | None = None,
+    extra_content: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Parse text for mentions and create properly formatted Matrix message.
 
@@ -126,6 +127,7 @@ def format_message_with_mentions(
         reply_to_event_id: Optional event ID to reply to (for genuine replies)
         latest_thread_event_id: Optional latest event ID in thread (for fallback compatibility)
         tool_trace: Optional structured tool trace metadata
+        extra_content: Optional custom metadata fields merged into content
 
     Returns:
         Properly formatted content dict for room_send
@@ -136,7 +138,12 @@ def format_message_with_mentions(
     # Convert markdown (with links) to HTML
     # The markdown converter will properly handle the [@DisplayName](url) format
     formatted_html = markdown_to_html(markdown_text)
-    extra_content = build_tool_trace_content(tool_trace)
+    tool_trace_content = build_tool_trace_content(tool_trace)
+    merged_extra_content: dict[str, Any] = {}
+    if tool_trace_content:
+        merged_extra_content.update(tool_trace_content)
+    if extra_content:
+        merged_extra_content.update(extra_content)
 
     return build_message_content(
         body=plain_text,
@@ -145,5 +152,5 @@ def format_message_with_mentions(
         thread_event_id=thread_event_id,
         reply_to_event_id=reply_to_event_id,
         latest_thread_event_id=latest_thread_event_id,
-        extra_content=extra_content,
+        extra_content=merged_extra_content or None,
     )

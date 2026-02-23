@@ -6,7 +6,7 @@ import asyncio
 import re
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
@@ -104,6 +104,7 @@ class StreamingResponse:
     room_mode: bool = False  # When True, skip all thread relations (for bridges/mobile)
     show_tool_calls: bool = True  # When False, omit inline tool call text and tool-trace metadata
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
+    extra_content: dict[str, Any] | None = None
     stream_started_at: float | None = None
     chars_since_last_update: int = 0
     in_progress_update_count: int = 0
@@ -227,6 +228,7 @@ class StreamingResponse:
             reply_to_event_id=None if self.room_mode else self.reply_to_event_id,
             latest_thread_event_id=latest_for_message,
             tool_trace=self.tool_trace if self.show_tool_calls else None,
+            extra_content=self.extra_content,
         )
 
         send_succeeded = False
@@ -362,6 +364,7 @@ async def send_streaming_response(
     existing_event_id: str | None = None,
     room_mode: bool = False,
     show_tool_calls: bool = True,
+    extra_content: dict[str, Any] | None = None,
 ) -> tuple[str | None, str]:
     """Stream chunks to a Matrix room, returning (event_id, accumulated_text).
 
@@ -378,6 +381,7 @@ async def send_streaming_response(
         existing_event_id: If editing an existing message, pass its ID
         room_mode: If True, skip thread relations (for bridges/mobile)
         show_tool_calls: Whether to include tool call text inline in the streamed message
+        extra_content: Optional custom metadata fields merged into each event
 
     Returns:
         Tuple of (final event_id or None, full accumulated text)
@@ -403,6 +407,7 @@ async def send_streaming_response(
         latest_thread_event_id=latest_thread_event_id,
         room_mode=room_mode,
         show_tool_calls=show_tool_calls,
+        extra_content=extra_content,
     )
 
     # Ensure the first chunk triggers an initial send immediately

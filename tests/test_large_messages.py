@@ -5,6 +5,7 @@ import json
 import nio
 import pytest
 
+from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.matrix.large_messages import (
     NORMAL_MESSAGE_LIMIT,
     _calculate_event_size,
@@ -233,6 +234,37 @@ async def test_prepare_large_message_moves_tool_trace_to_json_sidecar_regular() 
     assert client.uploaded_data is not None
     uploaded_payload = json.loads(client.uploaded_data.decode("utf-8"))
     assert TOOL_TRACE_KEY in uploaded_payload
+
+
+@pytest.mark.asyncio
+async def test_prepare_large_message_preserves_ai_run_metadata() -> None:
+    """AI run metadata should remain in the preview event for large messages."""
+
+    class MockClient:
+        rooms: dict = {}  # noqa: RUF012
+        uploaded_data: bytes | None = None
+
+        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
+            data_provider = kwargs.get("data_provider")
+            if data_provider:
+                data = data_provider(None, None)
+                self.uploaded_data = data.read()
+            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file999"})
+            return response, None
+
+    client = MockClient()
+    content = {
+        "body": "m" * 100000,
+        "msgtype": "m.text",
+        AI_RUN_METADATA_KEY: {"version": 1, "usage": {"total_tokens": 1234}},
+    }
+
+    result = await prepare_large_message(client, "!room:server", content)
+    assert AI_RUN_METADATA_KEY in result
+    assert result[AI_RUN_METADATA_KEY]["usage"]["total_tokens"] == 1234
+    assert client.uploaded_data is not None
+    uploaded_payload = json.loads(client.uploaded_data.decode("utf-8"))
+    assert uploaded_payload[AI_RUN_METADATA_KEY]["usage"]["total_tokens"] == 1234
 
 
 @pytest.mark.asyncio
