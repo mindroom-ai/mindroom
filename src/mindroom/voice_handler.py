@@ -26,62 +26,12 @@ VOICE_MENTION_PATTERN = re.compile(
     r"(?<![\w])@(?:(?P<prefix>mindroom_))?(?P<name>[A-Za-z0-9_]+)(?::[A-Za-z0-9.\-]+)?",
 )
 VOICE_COMMAND_PATTERN = re.compile(r"^!(?P<command>[a-zA-Z][a-zA-Z0-9_-]*)\b")
-
-VOICE_COMMAND_INTENT_PATTERNS: dict[str, tuple[str, ...]] = {
-    "help": (
-        r"^\s*help\b",
-        r"\bshow(?: me)?\s+(?:the\s+)?help\b",
-        r"\bwhat\s+commands?\b",
-        r"\bhelp\s+command\b",
-    ),
-    "schedule": (
-        r"^\s*schedule\b",
-        r"\bschedule\s+to\b",
-        r"\bschedule\s+(?:this|that|it)\b",
-        r"\bremind me\b",
-        r"\bset\s+(?:a\s+)?reminder\b",
-        r"\bcreate\s+(?:a\s+)?reminder\b",
-    ),
-    "list_schedules": (
-        r"^\s*(?:list|inspect)\s+(?:my\s+)?schedules?\b",
-        r"\b(?:list|inspect)\s+(?:my\s+)?schedules?\b",
-        r"\bshow\s+(?:my\s+)?schedules?\b",
-    ),
-    "cancel_schedule": (
-        r"^\s*cancel\s+(?:the\s+)?schedule\b",
-        r"\bcancel\s+(?:the\s+)?schedule\b",
-        r"\bdelete\s+(?:the\s+)?schedule\b",
-        r"\bremove\s+(?:the\s+)?schedule\b",
-    ),
-    "edit_schedule": (
-        r"^\s*(?:edit|update|change)\s+(?:the\s+)?schedule\b",
-        r"\b(?:edit|update|change)\s+(?:the\s+)?schedule\b",
-    ),
-    "widget": (
-        r"^\s*widget\b",
-        r"\bwidget\b",
-    ),
-    "config": (
-        r"^\s*config\b",
-        r"\bconfiguration\b",
-        r"\bconfig\s+command\b",
-    ),
-    "hi": (
-        r"^\s*(?:hi|hello)\b",
-        r"\bhi\s+command\b",
-        r"\bhello\s+command\b",
-    ),
-    "skill": (
-        r"^\s*skill\b",
-        r"\b(?:run|use|execute|invoke|trigger)\s+(?:the\s+)?skill\b",
-        r"\b(?:bang|exclamation(?:\s+mark)?)\s+skill\b",
-    ),
-}
-
-VOICE_COMMAND_ALIASES = {
-    "list": "list_schedules",
-    "inspect": "list_schedules",
-}
+VOICE_SKILL_INTENT_PATTERN = re.compile(
+    r"^\s*skill\b|\b(?:run|use|execute|invoke|trigger)\s+(?:the\s+)?skill\b|\b(?:bang|exclamation(?:\s+mark)?)\s+skill\b",
+)
+VOICE_HELP_INTENT_PATTERN = re.compile(
+    r"^\s*help\b|\bshow(?: me)?\s+(?:the\s+)?help\b|\bhelp\s+command\b|\bwhat\s+commands?\b",
+)
 
 
 async def handle_voice_message(
@@ -396,15 +346,10 @@ def _is_speculative_command_rewrite(transcription: str, formatted_message: str) 
     match = VOICE_COMMAND_PATTERN.match(formatted_message.strip())
     if match is None:
         return False
-    command_name = _canonical_voice_command_name(match.group("command"))
-    patterns = VOICE_COMMAND_INTENT_PATTERNS.get(command_name)
-    if not patterns:
-        return True
+    command_name = match.group("command").lower().replace("-", "_")
     normalized_transcription = transcription.strip().lower()
-    return not any(re.search(pattern, normalized_transcription) for pattern in patterns)
-
-
-def _canonical_voice_command_name(command_name: str) -> str:
-    """Normalize command names and aliases used by the voice command parser."""
-    normalized_name = command_name.lower().replace("-", "_")
-    return VOICE_COMMAND_ALIASES.get(normalized_name, normalized_name)
+    if command_name == "skill":
+        return VOICE_SKILL_INTENT_PATTERN.search(normalized_transcription) is None
+    if command_name == "help":
+        return VOICE_HELP_INTENT_PATTERN.search(normalized_transcription) is None
+    return False
