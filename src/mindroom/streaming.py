@@ -270,7 +270,86 @@ class ReplacementStreamingResponse(StreamingResponse):
         self.chars_since_last_update += len(new_chunk)
 
 
-async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
+async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
+    client: nio.AsyncClient,
+    response_stream: AsyncIterator[StreamInputChunk],
+    streaming: StreamingResponse,
+) -> None:
+    """Consume stream chunks and apply incremental message updates."""
+    pending_tools: list[tuple[str, int]] = []
+
+    async for chunk in response_stream:
+        # Handle different types of chunks from the stream
+        if isinstance(chunk, str):
+            text_chunk = chunk
+        elif isinstance(chunk, StructuredStreamChunk):
+            text_chunk = chunk.content
+            if chunk.tool_trace is not None:
+                streaming.tool_trace = _merge_tool_trace(streaming.tool_trace, chunk.tool_trace)
+        elif isinstance(chunk, RunContentEvent) and chunk.content:
+            text_chunk = str(chunk.content)
+        elif isinstance(chunk, ToolCallStartedEvent):
+            if not streaming.show_tool_calls:
+                if chunk.tool is not None:
+                    streaming._ensure_hidden_tool_gap()
+                await streaming._throttled_send(client, progress_hint=True)
+                continue
+
+            tool_index = len(streaming.tool_trace) + 1
+            text_chunk, trace_entry = format_tool_started_event(chunk.tool, tool_index=tool_index)
+            if trace_entry is not None:
+                streaming.tool_trace.append(trace_entry)
+                pending_tools.append((trace_entry.tool_name, tool_index))
+        elif isinstance(chunk, ToolCallCompletedEvent):
+            info = extract_tool_completed_info(chunk.tool)
+            if info:
+                tool_name, result = info
+                if streaming.show_tool_calls:
+                    match_pos = next(
+                        (pos for pos in range(len(pending_tools) - 1, -1, -1) if pending_tools[pos][0] == tool_name),
+                        None,
+                    )
+                    if match_pos is None:
+                        logger.warning(
+                            "Missing pending tool start in streaming response; skipping completion marker",
+                            tool_name=tool_name,
+                        )
+                        await streaming._throttled_send(client, progress_hint=True)
+                        continue
+                    _, tool_index = pending_tools.pop(match_pos)
+                    streaming.accumulated_text, trace_entry = complete_pending_tool_block(
+                        streaming.accumulated_text,
+                        tool_name,
+                        result,
+                        tool_index=tool_index,
+                    )
+                    if 0 < tool_index <= len(streaming.tool_trace):
+                        existing_entry = streaming.tool_trace[tool_index - 1]
+                        existing_entry.type = "tool_call_completed"
+                        existing_entry.result_preview = trace_entry.result_preview
+                        existing_entry.truncated = existing_entry.truncated or trace_entry.truncated
+                    else:
+                        logger.warning(
+                            "Missing tool trace slot in streaming response for completion",
+                            tool_name=tool_name,
+                            tool_index=tool_index,
+                            trace_len=len(streaming.tool_trace),
+                        )
+                else:
+                    await streaming._throttled_send(client, progress_hint=True)
+                    continue
+                await streaming._throttled_send(client)
+                continue
+            text_chunk = ""
+        else:
+            logger.debug(f"Unhandled streaming event type: {type(chunk).__name__}")
+            continue
+
+        if text_chunk:
+            await streaming.update_content(text_chunk, client)
+
+
+async def send_streaming_response(
     client: nio.AsyncClient,
     room_id: str,
     reply_to_event_id: str | None,
@@ -336,82 +415,8 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     if header:
         await streaming.update_content(header, client)
 
-    pending_tools: list[tuple[str, int]] = []
-
     try:
-        async for chunk in response_stream:
-            # Handle different types of chunks from the stream
-            if isinstance(chunk, str):
-                text_chunk = chunk
-            elif isinstance(chunk, StructuredStreamChunk):
-                text_chunk = chunk.content
-                if chunk.tool_trace is not None:
-                    streaming.tool_trace = _merge_tool_trace(streaming.tool_trace, chunk.tool_trace)
-            elif isinstance(chunk, RunContentEvent) and chunk.content:
-                text_chunk = str(chunk.content)
-            elif isinstance(chunk, ToolCallStartedEvent):
-                if not streaming.show_tool_calls:
-                    if chunk.tool is not None:
-                        streaming._ensure_hidden_tool_gap()
-                    await streaming._throttled_send(client, progress_hint=True)
-                    continue
-
-                tool_index = len(streaming.tool_trace) + 1
-                text_chunk, trace_entry = format_tool_started_event(chunk.tool, tool_index=tool_index)
-                if trace_entry is not None:
-                    streaming.tool_trace.append(trace_entry)
-                    pending_tools.append((trace_entry.tool_name, tool_index))
-            elif isinstance(chunk, ToolCallCompletedEvent):
-                info = extract_tool_completed_info(chunk.tool)
-                if info:
-                    tool_name, result = info
-                    if streaming.show_tool_calls:
-                        match_pos = next(
-                            (
-                                pos
-                                for pos in range(len(pending_tools) - 1, -1, -1)
-                                if pending_tools[pos][0] == tool_name
-                            ),
-                            None,
-                        )
-                        if match_pos is None:
-                            logger.warning(
-                                "Missing pending tool start in streaming response; skipping completion marker",
-                                tool_name=tool_name,
-                            )
-                            await streaming._throttled_send(client, progress_hint=True)
-                            continue
-                        _, tool_index = pending_tools.pop(match_pos)
-                        streaming.accumulated_text, trace_entry = complete_pending_tool_block(
-                            streaming.accumulated_text,
-                            tool_name,
-                            result,
-                            tool_index=tool_index,
-                        )
-                        if 0 < tool_index <= len(streaming.tool_trace):
-                            existing_entry = streaming.tool_trace[tool_index - 1]
-                            existing_entry.type = "tool_call_completed"
-                            existing_entry.result_preview = trace_entry.result_preview
-                            existing_entry.truncated = existing_entry.truncated or trace_entry.truncated
-                        else:
-                            logger.warning(
-                                "Missing tool trace slot in streaming response for completion",
-                                tool_name=tool_name,
-                                tool_index=tool_index,
-                                trace_len=len(streaming.tool_trace),
-                            )
-                    else:
-                        await streaming._throttled_send(client, progress_hint=True)
-                        continue
-                    await streaming._throttled_send(client)
-                    continue
-                text_chunk = ""
-            else:
-                logger.debug(f"Unhandled streaming event type: {type(chunk).__name__}")
-                continue
-
-            if text_chunk:
-                await streaming.update_content(text_chunk, client)
+        await _consume_streaming_chunks(client, response_stream, streaming)
     except asyncio.CancelledError:
         await streaming.finalize(client, cancelled=True)
         raise
