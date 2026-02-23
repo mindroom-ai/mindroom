@@ -22,6 +22,7 @@ from agno.tools.website import WebsiteTools
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.custom_tools.coding import CodingTools
 from mindroom.custom_tools.scheduler import SchedulerTools
+from mindroom.custom_tools.subagents import SubAgentsTools
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import fetch_thread_history, send_message
 from mindroom.matrix.mentions import format_message_with_mentions
@@ -56,8 +57,6 @@ class OpenClawCompatTools(Toolkit):
 
     def __init__(self) -> None:
         """Initialize the OpenClaw compatibility toolkit."""
-        from mindroom.custom_tools.subagents import SubAgentsTools  # noqa: PLC0415
-
         self._subagents_tools = SubAgentsTools()
         super().__init__(
             name="openclaw_compat",

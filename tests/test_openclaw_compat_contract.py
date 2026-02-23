@@ -88,6 +88,11 @@ def test_subagents_tool_instantiates() -> None:
     assert isinstance(tool, SubAgentsTools)
 
 
+def test_subagents_tool_is_standalone() -> None:
+    """Sub-agents toolkit should not inherit from OpenClaw compatibility toolkit."""
+    assert not issubclass(SubAgentsTools, OpenClawCompatTools)
+
+
 def test_openclaw_compat_core_tool_names_present() -> None:
     """Lock the core OpenClaw-compatible tool name contract."""
     tool = OpenClawCompatTools()
