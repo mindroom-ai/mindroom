@@ -1,7 +1,7 @@
 """Handle large Matrix messages that exceed the 64KB event limit.
 
-This module provides minimal intervention for messages that are too large,
-uploading the full text as an MXC attachment while maximizing the preview size.
+When a message is too large, we upload the full original content payload as
+JSON and send a compact preview event with a pointer to that sidecar.
 """
 
 from __future__ import annotations
@@ -61,21 +61,6 @@ def _prefix_by_bytes(text: str, max_bytes: int) -> str:
     return text[:best]
 
 
-def _suffix_by_bytes(text: str, max_bytes: int) -> str:
-    """Return the longest suffix of *text* that fits within *max_bytes* UTF-8."""
-    if len(text.encode("utf-8")) <= max_bytes:
-        return text
-    lo, hi, best = 0, len(text), len(text)
-    while lo <= hi:
-        mid = (lo + hi) // 2
-        if len(text[mid:].encode("utf-8")) <= max_bytes:
-            best = mid
-            hi = mid - 1
-        else:
-            lo = mid + 1
-    return text[best:]
-
-
 _CONTINUATION_INDICATOR = "\n\n[Message continues in attached file]"
 
 
@@ -126,8 +111,12 @@ async def _upload_text_as_mxc(
         "mimetype": mimetype,
     }
 
-    is_html = mimetype == "text/html"
-    filename = "message.html" if is_html else "message.txt"
+    if mimetype == "text/html":
+        filename = "message.html"
+    elif mimetype == "application/json":
+        filename = "message-content.json"
+    else:
+        filename = "message.txt"
 
     # Check if room is encrypted
     room_encrypted = False
@@ -193,34 +182,24 @@ async def _upload_text_as_mxc(
 async def _build_file_content(
     client: nio.AsyncClient,
     room_id: str,
-    source_content: dict[str, Any],
-    full_text: str,
-    has_formatted_html: bool,
+    full_content: dict[str, Any],
+    preview_text: str,
     size_limit: int,
 ) -> tuple[str | None, dict[str, Any] | None, dict[str, Any]]:
-    """Upload the full text and build the ``m.file`` content dict with previews.
-
-    When *has_formatted_html* is True, the uploaded attachment uses
-    ``formatted_body`` (HTML) so clients can render the full long message with
-    markdown formatting preserved.
-    """
-    if has_formatted_html:
-        upload_text = source_content["formatted_body"]
-        upload_mimetype = "text/html"
-    else:
-        upload_text = full_text
-        upload_mimetype = "text/plain"
+    """Upload full original content JSON and build preview ``m.file`` event."""
+    upload_text = json.dumps(full_content, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    upload_mimetype = "application/json"
 
     mxc_uri, file_info = await _upload_text_as_mxc(client, upload_text, room_id, mimetype=upload_mimetype)
 
     attachment_overhead = 5000  # Conservative estimate for attachment JSON structure
     available = size_limit - attachment_overhead
-    preview = _create_preview(full_text, available)
+    preview = _create_preview(preview_text, available)
 
     modified_content: dict[str, Any] = {
         "msgtype": "m.file",
         "body": preview,
-        "filename": "message.html" if has_formatted_html else "message.txt",
+        "filename": "message-content.json",
         "info": file_info,
     }
 
@@ -236,9 +215,9 @@ async def prepare_large_message(
 
     This function:
     1. Checks the message size
-    2. If too large, uploads the full text as MXC
+    2. If too large, uploads full original event content JSON as MXC
     3. Replaces body with maximum-size preview
-    4. Adds metadata for reconstruction
+    4. Adds metadata for reconstruction/hydration
 
     Args:
         client: The Matrix client
@@ -257,18 +236,14 @@ async def prepare_large_message(
         return content
 
     source_content = content["m.new_content"] if is_edit and "m.new_content" in content else content
-    full_text = source_content["body"]
-    formatted_body = source_content.get("formatted_body")
-    formatted_body_text = formatted_body if isinstance(formatted_body, str) else None
-    has_formatted_html = source_content.get("format") == "org.matrix.custom.html" and formatted_body_text is not None
-    logger.info(f"Message too large ({current_size} bytes), uploading to MXC")
+    preview_text = source_content["body"]
+    logger.info(f"Message too large ({current_size} bytes), uploading full content JSON to MXC")
 
     mxc_uri, file_info, modified_content = await _build_file_content(
         client,
         room_id,
-        source_content,
-        full_text,
-        has_formatted_html,
+        content,
+        preview_text,
         size_limit,
     )
 
@@ -282,10 +257,11 @@ async def prepare_large_message(
         modified_content["url"] = mxc_uri
 
     modified_content["io.mindroom.long_text"] = {
-        "version": 1,
-        "original_size": len(full_text),
+        "version": 2,
+        "encoding": "matrix_event_content_json",
+        "original_event_size": current_size,
         "preview_size": len(modified_content["body"]),
-        "is_complete_text": True,
+        "is_complete_content": True,
     }
 
     if "m.relates_to" in content:
@@ -305,7 +281,7 @@ async def prepare_large_message(
 
     inner: dict[str, Any] = modified_content.get("m.new_content", modified_content)  # type: ignore[assignment]
     logger.info(
-        f"Large message prepared: {len(full_text)} bytes -> {len(inner['body'])} preview + MXC attachment",
+        f"Large message prepared: {current_size} bytes -> {len(inner['body'])} preview + JSON sidecar",
     )
 
     return modified_content

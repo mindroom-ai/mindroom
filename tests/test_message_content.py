@@ -78,6 +78,60 @@ class TestGetFullMessageBody:
         client.download.assert_called_once_with("server", "file123")
 
     @pytest.mark.asyncio
+    async def test_large_message_v2_json_sidecar_extracts_body(self) -> None:
+        """V2 large-message sidecar JSON should resolve to the original body."""
+        client = AsyncMock()
+        client.download = AsyncMock()
+
+        response = MagicMock(spec=nio.DownloadResponse)
+        response.body = b'{"body":"Full v2 body","msgtype":"m.text","io.mindroom.tool_trace":{"version":2,"events":[]}}'
+        client.download.return_value = response
+
+        message = {
+            "body": "Preview...",
+            "content": {
+                "msgtype": "m.file",
+                "body": "Preview...",
+                "info": {"mimetype": "application/json"},
+                "io.mindroom.long_text": {
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
+                },
+                "url": "mxc://server/file-json",
+            },
+        }
+
+        result = await _get_full_message_body(message, client)
+        assert result == "Full v2 body"
+
+    @pytest.mark.asyncio
+    async def test_large_message_v2_invalid_json_returns_preview(self) -> None:
+        """Invalid v2 payload JSON should fall back to preview body."""
+        client = AsyncMock()
+        client.download = AsyncMock()
+
+        response = MagicMock(spec=nio.DownloadResponse)
+        response.body = b"not-json"
+        client.download.return_value = response
+
+        message = {
+            "body": "Preview fallback",
+            "content": {
+                "msgtype": "m.file",
+                "body": "Preview fallback",
+                "info": {"mimetype": "application/json"},
+                "io.mindroom.long_text": {
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
+                },
+                "url": "mxc://server/file-json-invalid",
+            },
+        }
+
+        result = await _get_full_message_body(message, client)
+        assert result == "Preview fallback"
+
+    @pytest.mark.asyncio
     async def test_large_message_with_html_attachment_converts_to_text(self) -> None:
         """HTML attachments should resolve to plain text for prompt history."""
         client = AsyncMock()

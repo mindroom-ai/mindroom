@@ -1,5 +1,7 @@
 """Tests for large message handling."""
 
+import json
+
 import nio
 import pytest
 
@@ -108,8 +110,13 @@ async def test_prepare_large_message_truncation() -> None:
     # Mock client with upload - nio returns tuple
     class MockClient:
         rooms: dict = {}  # noqa: RUF012
+        uploaded_data: bytes | None = None
 
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003, ARG002
+        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
+            data_provider = kwargs.get("data_provider")
+            if data_provider:
+                data = data_provider(None, None)
+                self.uploaded_data = data.read()
             # Create a mock UploadResponse
             response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file123"})
             return response, None  # nio returns (response, encryption_dict)
@@ -124,25 +131,30 @@ async def test_prepare_large_message_truncation() -> None:
     # Should be an m.file message
     assert result["msgtype"] == "m.file"
     assert "filename" in result
-    assert result["filename"] == "message.txt"
+    assert result["filename"] == "message-content.json"
 
     # Should have file info
     assert "info" in result or "file" in result
     if "info" in result:
-        assert result["info"]["mimetype"] == "text/plain"
-        assert result["info"]["size"] == 100000
+        expected_size = len(json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode())
+        assert result["info"]["mimetype"] == "application/json"
+        assert result["info"]["size"] == expected_size
 
     # Should have URL
     assert "url" in result or "file" in result
 
     # Should have custom metadata
     assert "io.mindroom.long_text" in result
-    assert result["io.mindroom.long_text"]["original_size"] == 100000
-    assert result["io.mindroom.long_text"]["is_complete_text"] is True
+    assert result["io.mindroom.long_text"]["version"] == 2
+    assert result["io.mindroom.long_text"]["encoding"] == "matrix_event_content_json"
+    assert result["io.mindroom.long_text"]["is_complete_content"] is True
 
     # Body should be truncated preview
     assert len(result["body"]) < len(large_text)
     assert "[Message continues in attached file]" in result["body"]
+
+    assert client.uploaded_data is not None
+    assert json.loads(client.uploaded_data.decode("utf-8")) == content
 
     # Preview should fit in limit
     assert _calculate_event_size(result) <= NORMAL_MESSAGE_LIMIT
@@ -155,8 +167,13 @@ async def test_prepare_edit_message() -> None:
     # Mock client with upload - nio returns tuple
     class MockClient:
         rooms: dict = {}  # noqa: RUF012
+        uploaded_data: bytes | None = None
 
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003, ARG002
+        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
+            data_provider = kwargs.get("data_provider")
+            if data_provider:
+                data = data_provider(None, None)
+                self.uploaded_data = data.read()
             # Create a mock UploadResponse
             response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file456"})
             return response, None  # nio returns (response, encryption_dict)
@@ -183,16 +200,24 @@ async def test_prepare_edit_message() -> None:
     # Body should have preview
     assert len(result["body"]) < len("* " + text)
     assert "[Message continues in attached file]" in result["m.new_content"]["body"]
+    assert result["m.new_content"]["io.mindroom.long_text"]["version"] == 2
+    assert client.uploaded_data is not None
+    assert json.loads(client.uploaded_data.decode("utf-8")) == edit_content
 
 
 @pytest.mark.asyncio
-async def test_prepare_large_message_drops_tool_trace_regular() -> None:
-    """Large-message conversion should drop tool trace metadata."""
+async def test_prepare_large_message_moves_tool_trace_to_json_sidecar_regular() -> None:
+    """Large-message conversion keeps tool trace in uploaded sidecar, not preview."""
 
     class MockClient:
         rooms: dict = {}  # noqa: RUF012
+        uploaded_data: bytes | None = None
 
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003, ARG002
+        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
+            data_provider = kwargs.get("data_provider")
+            if data_provider:
+                data = data_provider(None, None)
+                self.uploaded_data = data.read()
             response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file789"})
             return response, None
 
@@ -205,16 +230,24 @@ async def test_prepare_large_message_drops_tool_trace_regular() -> None:
 
     result = await prepare_large_message(client, "!room:server", content)
     assert TOOL_TRACE_KEY not in result
+    assert client.uploaded_data is not None
+    uploaded_payload = json.loads(client.uploaded_data.decode("utf-8"))
+    assert TOOL_TRACE_KEY in uploaded_payload
 
 
 @pytest.mark.asyncio
-async def test_prepare_large_message_drops_tool_trace_edit() -> None:
-    """Edit large-message conversion should drop tool trace metadata."""
+async def test_prepare_large_message_moves_tool_trace_to_json_sidecar_edit() -> None:
+    """Edit large-message conversion keeps tool trace in uploaded sidecar, not preview."""
 
     class MockClient:
         rooms: dict = {}  # noqa: RUF012
+        uploaded_data: bytes | None = None
 
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003, ARG002
+        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
+            data_provider = kwargs.get("data_provider")
+            if data_provider:
+                data = data_provider(None, None)
+                self.uploaded_data = data.read()
             response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file999"})
             return response, None
 
@@ -233,3 +266,6 @@ async def test_prepare_large_message_drops_tool_trace_edit() -> None:
     result = await prepare_large_message(client, "!room:server", edit_content)
     assert "m.new_content" in result
     assert TOOL_TRACE_KEY not in result["m.new_content"]
+    assert client.uploaded_data is not None
+    uploaded_payload = json.loads(client.uploaded_data.decode("utf-8"))
+    assert TOOL_TRACE_KEY in uploaded_payload["m.new_content"]
