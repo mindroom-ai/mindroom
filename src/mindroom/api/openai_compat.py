@@ -70,6 +70,10 @@ class _ToolStreamState:
     next_tool_id: int = 1
     tool_ids_by_call_id: dict[str, str] = field(default_factory=dict)
 
+    @property
+    def has_pending_tools(self) -> bool:
+        return bool(self.tool_ids_by_call_id)
+
 
 def _load_config() -> tuple[Config, Path]:
     """Load the current runtime config and return it with its path.
@@ -835,6 +839,10 @@ def _format_stream_tool_event(
 def _extract_stream_text(event: AIStreamChunk, tool_state: _ToolStreamState) -> str | None:
     """Extract text content from a stream event."""
     if isinstance(event, RunContentEvent) and event.content:
+        # Nested tool executions can emit their own streamed content events.
+        # Suppress those while tools are in-flight to avoid interleaved gibberish.
+        if tool_state.has_pending_tools:
+            return None
         return str(event.content)
     if isinstance(event, str):
         return event
@@ -1056,9 +1064,9 @@ def _extract_team_stream_text(
     tool_state: _ToolStreamState,
 ) -> str | None:
     """Extract text content from a team stream event."""
-    if isinstance(event, TeamContentEvent) and event.content:
-        return str(event.content)
-    if isinstance(event, RunContentEvent) and event.content:
+    if isinstance(event, (TeamContentEvent, RunContentEvent)) and event.content:
+        if tool_state.has_pending_tools:
+            return None
         return str(event.content)
     if isinstance(event, TeamRunOutput):
         return _format_team_output(event)

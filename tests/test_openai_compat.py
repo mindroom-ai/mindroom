@@ -666,6 +666,82 @@ class TestStreamingCompletion:
         assert "…" in full_content
         assert ("x" * 550) not in full_content
 
+    def test_streaming_suppresses_nested_content_while_tools_in_flight(self, app_client: TestClient) -> None:
+        """Nested content chunks are ignored until all started tool calls complete."""
+        from agno.models.response import ToolExecution  # noqa: PLC0415
+        from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent  # noqa: PLC0415
+
+        shell_started = ToolExecution(
+            tool_name="delegate_task_to_member",
+            tool_args={"member_id": "shell", "task": "show time"},
+            tool_call_id="tc-stream-shell",
+        )
+        shell_completed = ToolExecution(
+            tool_name="delegate_task_to_member",
+            tool_args={"member_id": "shell", "task": "show time"},
+            tool_call_id="tc-stream-shell",
+            result="shell-result",
+        )
+        security_started = ToolExecution(
+            tool_name="delegate_task_to_member",
+            tool_args={"member_id": "security", "task": "tip"},
+            tool_call_id="tc-stream-security",
+        )
+        security_completed = ToolExecution(
+            tool_name="delegate_task_to_member",
+            tool_args={"member_id": "security", "task": "tip"},
+            tool_call_id="tc-stream-security",
+            result="security-result",
+        )
+
+        async def mock_stream(**_kw: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="Intro. ")
+            yield ToolCallStartedEvent(tool=shell_started)
+            yield ToolCallStartedEvent(tool=security_started)
+            yield RunContentEvent(content="NOISY_NESTED_CHUNK_1")
+            yield ToolCallCompletedEvent(tool=shell_completed)
+            yield RunContentEvent(content="NOISY_NESTED_CHUNK_2")
+            yield ToolCallCompletedEvent(tool=security_completed)
+            yield RunContentEvent(content="Summary.")
+
+        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "demo"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        lines = response.text.strip().split("\n\n")
+        contents: list[str] = []
+        for line in lines:
+            text = line.removeprefix("data: ")
+            if text == "[DONE]":
+                continue
+            chunk = json.loads(text)
+            delta = chunk["choices"][0]["delta"]
+            if "content" in delta:
+                contents.append(delta["content"])
+
+        full_content = "".join(contents)
+        assert "Intro. " in full_content
+        assert "Summary." in full_content
+        assert "NOISY_NESTED_CHUNK_1" not in full_content
+        assert "NOISY_NESTED_CHUNK_2" not in full_content
+        assert (
+            '<tool id="1" state="start">delegate_task_to_member(member_id=shell, task=show time)</tool>' in full_content
+        )
+        assert (
+            '<tool id="1" state="done">delegate_task_to_member(member_id=shell, task=show time)\nshell-result</tool>'
+        ) in full_content
+        assert '<tool id="2" state="start">delegate_task_to_member(member_id=security, task=tip)</tool>' in full_content
+        assert (
+            '<tool id="2" state="done">delegate_task_to_member(member_id=security, task=tip)\nsecurity-result</tool>'
+        ) in full_content
+
     def test_streaming_tool_ids_increment_for_multiple_calls(self, app_client: TestClient) -> None:
         """Tool ids start at 1 and increment for each new started tool call in a stream."""
         from agno.models.response import ToolExecution  # noqa: PLC0415
