@@ -479,7 +479,7 @@ class TestUserIdPassthrough:
         assert payload["usage"]["input_tokens"] == 12
         assert payload["usage"]["output_tokens"] == 3
         assert payload["usage"]["total_tokens"] == 15
-        assert payload["usage"]["time_to_first_token"] == 0.12
+        assert payload["usage"]["time_to_first_token"] == format(0.12, ".12g")
         assert payload["context"]["input_tokens"] == 12
         assert payload["context"]["window_tokens"] == 100
         assert "utilization_pct" not in payload["context"]

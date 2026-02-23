@@ -333,13 +333,24 @@ def _get_model_config(config: Config, agent_name: str) -> tuple[str | None, Mode
 
 
 def _serialize_metrics(metrics: Metrics | dict[str, Any] | None) -> dict[str, Any] | None:
+    def _sanitize_metrics_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+        sanitized: dict[str, Any] = {}
+        for key, value in payload.items():
+            if isinstance(value, (str, int)) or value is None or isinstance(value, bool):
+                sanitized[key] = value
+            elif isinstance(value, float):
+                sanitized[key] = format(value, ".12g")
+        return sanitized or None
+
     if metrics is None:
         return None
     if isinstance(metrics, Metrics):
         metrics_dict = metrics.to_dict()
-        return metrics_dict or None
+        if not isinstance(metrics_dict, dict):
+            return None
+        return _sanitize_metrics_payload(metrics_dict)
     if isinstance(metrics, dict):
-        return metrics or None
+        return _sanitize_metrics_payload(metrics)
     return None
 
 
@@ -354,7 +365,7 @@ def _build_model_request_metrics_fallback(
         if isinstance(input_tokens, int) and isinstance(output_tokens, int):
             payload["total_tokens"] = input_tokens + output_tokens
     if first_token_latency is not None:
-        payload["time_to_first_token"] = first_token_latency
+        payload["time_to_first_token"] = format(first_token_latency, ".12g")
     return payload or None
 
 
