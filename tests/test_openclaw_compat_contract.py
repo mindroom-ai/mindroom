@@ -580,6 +580,40 @@ async def test_openclaw_compat_sessions_send_relays_original_sender(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_openclaw_compat_sessions_send_rejects_room_mode_threaded_dispatch(tmp_path: Path) -> None:
+    """Verify threaded dispatch is rejected when target agent uses thread_mode=room."""
+    tool = OpenClawCompatTools()
+    tool._send_matrix_text = AsyncMock(return_value="$evt")
+    config = MagicMock()
+    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
+    config.get_entity_thread_mode = MagicMock(return_value="room")
+    ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id="$ctx-thread:localhost",
+        requester_id="@alice:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+    target_session = create_session_id(ctx.room_id, "$worker-thread:localhost")
+
+    with openclaw_tool_context(ctx):
+        payload = json.loads(
+            await tool.sessions_send(
+                message="hello",
+                session_key=target_session,
+                agent_id="openclaw",
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert payload["tool"] == "sessions_send"
+    assert "thread_mode=room" in payload["message"]
+    tool._send_matrix_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_openclaw_compat_sessions_list_scopes_registry_entries_by_context(tmp_path: Path) -> None:
     """Verify sessions_list only returns registry sessions from the active context scope."""
     tool = OpenClawCompatTools()
@@ -733,6 +767,33 @@ async def test_openclaw_compat_sessions_spawn_relays_original_sender(tmp_path: P
         thread_id=None,
         original_sender=ctx.requester_id,
     )
+
+
+@pytest.mark.asyncio
+async def test_openclaw_compat_sessions_spawn_rejects_room_mode_target_agent(tmp_path: Path) -> None:
+    """Verify isolated spawn is rejected when target agent uses thread_mode=room."""
+    tool = OpenClawCompatTools()
+    tool._send_matrix_text = AsyncMock(return_value="$event")
+    config = MagicMock()
+    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
+    config.get_entity_thread_mode = MagicMock(return_value="room")
+    ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id="$ctx-thread:localhost",
+        requester_id="@alice:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+
+    with openclaw_tool_context(ctx):
+        payload = json.loads(await tool.sessions_spawn(task="do thing"))
+
+    assert payload["status"] == "error"
+    assert payload["tool"] == "sessions_spawn"
+    assert "thread_mode=room" in payload["message"]
+    tool._send_matrix_text.assert_not_awaited()
 
 
 @pytest.mark.asyncio

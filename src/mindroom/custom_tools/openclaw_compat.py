@@ -534,6 +534,88 @@ class OpenClawCompatTools(Toolkit):
         agent_tools = getattr(agent_config, "tools", None)
         return isinstance(agent_tools, list) and tool_name in agent_tools
 
+    @staticmethod
+    def _agent_thread_mode(context: OpenClawToolContext, agent_name: str) -> str:
+        resolver = getattr(context.config, "get_entity_thread_mode", None)
+        if not callable(resolver):
+            return "thread"
+
+        mode = resolver(agent_name)
+        return "room" if mode == "room" else "thread"
+
+    @classmethod
+    def _resolve_labeled_session_key(
+        cls,
+        context: OpenClawToolContext,
+        *,
+        label: str,
+        fallback_session_key: str,
+    ) -> str:
+        with cls._registry_lock:
+            registry = cls._load_registry(context)
+            sessions = registry.get("sessions")
+            if not isinstance(sessions, dict):
+                return fallback_session_key
+
+            candidates = [
+                tracked_session
+                for tracked_session in sessions.values()
+                if isinstance(tracked_session, dict)
+                and tracked_session.get("label") == label
+                and cls._session_in_scope(tracked_session, context)
+            ]
+            candidates.sort(
+                key=lambda tracked_session: cls._coerce_epoch(tracked_session.get("updated_at_epoch")),
+                reverse=True,
+            )
+            for tracked_session in candidates:
+                candidate = tracked_session.get("session_key")
+                if isinstance(candidate, str):
+                    return candidate
+        return fallback_session_key
+
+    @classmethod
+    def _resolve_tracked_target_agent(
+        cls,
+        context: OpenClawToolContext,
+        *,
+        session_key: str,
+    ) -> str | None:
+        with cls._registry_lock:
+            registry = cls._load_registry(context)
+            sessions = registry.get("sessions")
+            if not isinstance(sessions, dict):
+                return None
+            session = sessions.get(session_key)
+            if not isinstance(session, dict):
+                return None
+            resolved = session.get("target_agent")
+            if isinstance(resolved, str) and resolved:
+                return resolved
+            return None
+
+    def _threaded_dispatch_error(
+        self,
+        context: OpenClawToolContext,
+        *,
+        session_key: str,
+        thread_id: str | None,
+        target_agent: str,
+    ) -> str | None:
+        if thread_id is None:
+            return None
+        if self._agent_thread_mode(context, target_agent) != "room":
+            return None
+        return self._payload(
+            "sessions_send",
+            "error",
+            session_key=session_key,
+            message=(
+                f"Threaded session dispatch is not supported for agent '{target_agent}' "
+                "because it uses thread_mode=room."
+            ),
+        )
+
     def _read_agent_sessions(self, context: OpenClawToolContext) -> list[dict[str, Any]]:
         db_path = context.storage_path / "sessions" / f"{context.agent_name}.db"
         if not db_path.is_file():
@@ -767,34 +849,30 @@ class OpenClawCompatTools(Toolkit):
 
         target_session = session_key or create_session_id(active_context.room_id, active_context.thread_id)
         if label:
-
-            def _find_labeled() -> str:
-                with self._registry_lock:
-                    registry = self._load_registry(active_context)
-                    sessions = registry.get("sessions")
-                    if not isinstance(sessions, dict):
-                        return target_session
-
-                    candidates = [
-                        tracked_session
-                        for tracked_session in sessions.values()
-                        if isinstance(tracked_session, dict)
-                        and tracked_session.get("label") == label
-                        and self._session_in_scope(tracked_session, active_context)
-                    ]
-                    candidates.sort(
-                        key=lambda tracked_session: self._coerce_epoch(tracked_session.get("updated_at_epoch")),
-                        reverse=True,
-                    )
-                    for tracked_session in candidates:
-                        candidate = tracked_session.get("session_key")
-                        if isinstance(candidate, str):
-                            return candidate
-                return target_session
-
-            target_session = await asyncio.to_thread(_find_labeled)
+            target_session = await asyncio.to_thread(
+                self._resolve_labeled_session_key,
+                active_context,
+                label=label,
+                fallback_session_key=target_session,
+            )
 
         target_room_id, target_thread_id = self._session_key_to_room_thread(target_session)
+        target_agent = agent_id or await asyncio.to_thread(
+            self._resolve_tracked_target_agent,
+            active_context,
+            session_key=target_session,
+        )
+        target_agent = target_agent or active_context.agent_name
+
+        thread_dispatch_error = self._threaded_dispatch_error(
+            active_context,
+            session_key=target_session,
+            thread_id=target_thread_id,
+            target_agent=target_agent,
+        )
+        if thread_dispatch_error is not None:
+            return thread_dispatch_error
+
         outgoing = message.strip()
         if agent_id:
             outgoing = f"@mindroom_{agent_id} {outgoing}"
@@ -854,6 +932,16 @@ class OpenClawCompatTools(Toolkit):
             return self._payload("sessions_spawn", "error", message="Task cannot be empty.")
 
         target_agent = agent_id or context.agent_name
+        if self._agent_thread_mode(context, target_agent) == "room":
+            return self._payload(
+                "sessions_spawn",
+                "error",
+                message=(
+                    f"Isolated spawn sessions are not supported for agent '{target_agent}' "
+                    "because it uses thread_mode=room."
+                ),
+            )
+
         spawn_message = f"@mindroom_{target_agent} {task.strip()}"
         event_id = await self._send_matrix_text(
             context,
