@@ -1,7 +1,7 @@
 """Integration tests for large message handling with streaming and regular messages."""
 
-from collections.abc import AsyncIterator
 import json
+from collections.abc import AsyncIterator
 from unittest.mock import MagicMock
 
 import nio
@@ -9,6 +9,7 @@ import pytest
 from agno.models.response import ToolExecution
 from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 
+from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.matrix.client import edit_message, send_message
 from mindroom.matrix.large_messages import NORMAL_MESSAGE_LIMIT, prepare_large_message
 from mindroom.streaming import (
@@ -495,6 +496,34 @@ async def test_structured_stream_chunk_adds_tool_trace_metadata() -> None:
     target_content = last_content.get("m.new_content", last_content)
     assert TOOL_TRACE_KEY in target_content
     assert target_content[TOOL_TRACE_KEY]["events"][0]["tool_name"] == "save_file"
+
+
+@pytest.mark.asyncio
+async def test_streaming_with_extra_content_metadata() -> None:
+    """Streaming sender should merge custom metadata into final event content."""
+    client = MockClient()
+    config = MockConfig()
+    extra_content: dict[str, object] = {}
+
+    async def stream() -> AsyncIterator[StreamInputChunk]:
+        yield "hello"
+        extra_content[AI_RUN_METADATA_KEY] = {"version": 1, "usage": {"total_tokens": 10}}
+
+    event_id, _ = await send_streaming_response(
+        client=client,
+        room_id="!test:room",
+        reply_to_event_id=None,
+        thread_id=None,
+        sender_domain="example.com",
+        config=config,
+        response_stream=stream(),
+        streaming_cls=ReplacementStreamingResponse,
+        extra_content=extra_content,
+    )
+
+    assert event_id is not None
+    target_content = client.messages_sent[-1][2].get("m.new_content", client.messages_sent[-1][2])
+    assert target_content[AI_RUN_METADATA_KEY]["usage"]["total_tokens"] == 10
 
 
 @pytest.mark.asyncio

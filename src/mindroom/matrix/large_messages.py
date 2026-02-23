@@ -13,6 +13,7 @@ from typing import Any
 import nio
 from nio import crypto
 
+from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -20,7 +21,7 @@ logger = get_logger(__name__)
 # Conservative limits accounting for Matrix overhead
 NORMAL_MESSAGE_LIMIT = 55000  # ~55KB for regular messages
 EDIT_MESSAGE_LIMIT = 27000  # ~27KB for edits (they roughly double in size)
-PASSTHROUGH_CONTENT_KEYS = ("m.mentions", "com.mindroom.skip_mentions")
+PASSTHROUGH_CONTENT_KEYS = ("m.mentions", "com.mindroom.skip_mentions", AI_RUN_METADATA_KEY)
 
 
 def _calculate_event_size(content: dict[str, Any]) -> int:
@@ -86,7 +87,7 @@ def _create_preview(text: str, max_bytes: int) -> str:
     return _prefix_by_bytes(text, target_bytes) + _CONTINUATION_INDICATOR
 
 
-async def _upload_text_as_mxc(
+async def _upload_text_as_mxc(  # noqa: C901
     client: nio.AsyncClient,
     text: str,
     room_id: str | None = None,
