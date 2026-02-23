@@ -1051,17 +1051,15 @@ async def _stream_team_completion(
     )
 
 
-def _extract_team_stream_error(event: RunOutputEvent | TeamRunOutputEvent | str) -> str | None:
+def _extract_team_stream_error(event: RunOutputEvent | TeamRunOutputEvent) -> str | None:
     """Extract explicit error text from a team stream event."""
     if isinstance(event, (RunErrorEvent, TeamRunErrorEvent)):
         return str(event.content or "Unknown team error")
-    if isinstance(event, str) and _is_error_response(event):
-        return event
     return None
 
 
 def _team_stream_preflight_error(
-    first_event: RunOutputEvent | TeamRunOutputEvent | str | None,
+    first_event: RunOutputEvent | TeamRunOutputEvent | None,
     team_name: str,
 ) -> JSONResponse | None:
     """Validate first team stream event before SSE response begins."""
@@ -1077,7 +1075,7 @@ def _team_stream_preflight_error(
 
 
 def _classify_team_event(
-    event: RunOutputEvent | TeamRunOutputEvent | str,
+    event: RunOutputEvent | TeamRunOutputEvent,
     tool_state: _ToolStreamState,
 ) -> str | None:
     """Classify a team stream event and return formatted content, or ``None`` to skip.
@@ -1089,17 +1087,13 @@ def _classify_team_event(
     Tool events (agent-level and team-level) are emitted for progress feedback.
     """
     # Tool events — emit for progress feedback
-    tool_text = _format_stream_tool_event(event, tool_state)  # type: ignore[arg-type]
+    tool_text = _format_stream_tool_event(event, tool_state)
     if tool_text is not None:
         return tool_text
 
     # Team leader content — stream directly (synthesized answer)
     if isinstance(event, TeamContentEvent) and event.content:
         return str(event.content)
-
-    # Raw string fallback — stream directly
-    if isinstance(event, str):
-        return event
 
     # Everything else (member content, reasoning, memory, hooks, etc.) — skip.
     return None
@@ -1118,8 +1112,8 @@ def _finalize_pending_tools(tool_state: _ToolStreamState) -> str | None:
 
 async def _team_stream_event_generator(
     *,
-    stream: AsyncIterator[RunOutputEvent | TeamRunOutputEvent | str],
-    first_event: RunOutputEvent | TeamRunOutputEvent | str,
+    stream: AsyncIterator[RunOutputEvent | TeamRunOutputEvent],
+    first_event: RunOutputEvent | TeamRunOutputEvent,
     completion_id: str,
     created: int,
     model_id: str,
