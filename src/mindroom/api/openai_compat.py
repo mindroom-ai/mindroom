@@ -1076,16 +1076,9 @@ def _team_stream_preflight_error(
     return _error_response(500, "Team execution failed", error_type="server_error")
 
 
-@dataclass
-class _TeamStreamState:
-    """Mutable state for team stream event processing."""
-
-    tool_state: _ToolStreamState = field(default_factory=_ToolStreamState)
-
-
 def _classify_team_event(
     event: RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str,
-    state: _TeamStreamState,
+    tool_state: _ToolStreamState,
 ) -> str | None:
     """Classify a team stream event and return formatted content, or ``None`` to skip.
 
@@ -1096,15 +1089,13 @@ def _classify_team_event(
     Tool events (agent-level and team-level) are emitted for progress feedback.
     ``TeamRunOutput`` / ``RunOutput`` are formatted as a safety net (unlikely to
     fire since mindroom doesn't pass ``yield_run_output=True``).
-    ``TeamRunCompletedEvent`` is the actual terminal event but its content was
-    already streamed via ``TeamContentEvent``, so it is skipped.
     """
     # Safety net: TeamRunOutput / RunOutput (unlikely to arrive)
     if isinstance(event, (TeamRunOutput, RunOutput)):
         return _format_team_output(event)
 
     # Tool events — emit for progress feedback
-    tool_text = _format_stream_tool_event(event, state.tool_state)  # type: ignore[arg-type]
+    tool_text = _format_stream_tool_event(event, tool_state)  # type: ignore[arg-type]
     if tool_text is not None:
         return tool_text
 
@@ -1116,31 +1107,19 @@ def _classify_team_event(
     if isinstance(event, str):
         return event
 
-    # Member agent content (RunContentEvent) — skip to prevent interleaving.
-    # TeamRunCompletedEvent — terminal event, content already streamed.
-    # Everything else (reasoning, memory, hooks, etc.) — skip.
+    # Everything else (member content, reasoning, memory, hooks, etc.) — skip.
     return None
 
 
-def _finalize_pending_tools(state: _TeamStreamState) -> str | None:
+def _finalize_pending_tools(tool_state: _ToolStreamState) -> str | None:
     """Build done tags for tool calls that started but never completed."""
-    if not state.tool_state.tool_ids_by_call_id:
+    if not tool_state.tool_ids_by_call_id:
         return None
     parts = [
-        f'<tool id="{tool_id}" state="done">(interrupted)</tool>'
-        for tool_id in state.tool_state.tool_ids_by_call_id.values()
+        f'<tool id="{tool_id}" state="done">(interrupted)</tool>' for tool_id in tool_state.tool_ids_by_call_id.values()
     ]
-    state.tool_state.tool_ids_by_call_id.clear()
+    tool_state.tool_ids_by_call_id.clear()
     return "".join(parts)
-
-
-def _flush_team_stream_on_error(state: _TeamStreamState) -> list[str]:
-    """Return content parts to emit before an error chunk (pending tool finalization)."""
-    parts: list[str] = []
-    pending = _finalize_pending_tools(state)
-    if pending:
-        parts.append(pending)
-    return parts
 
 
 async def _team_stream_event_generator(  # noqa: C901
@@ -1158,7 +1137,7 @@ async def _team_stream_event_generator(  # noqa: C901
     Skips member agent content (``RunContentEvent``) to prevent interleaving.
     Emits all tool events (agent-level and team-level) for progress feedback.
     """
-    state = _TeamStreamState()
+    tool_state = _ToolStreamState()
 
     def _chunk(content: str) -> str:
         return f"data: {_chunk_json(completion_id, created, model_id, delta={'content': content})}\n\n"
@@ -1171,7 +1150,7 @@ async def _team_stream_event_generator(  # noqa: C901
         logger.warning("Team stream first event is error", team=team_name)
         yield _chunk("Team execution failed.")
     else:
-        text = _classify_team_event(first_event, state)
+        text = _classify_team_event(first_event, tool_state)
         if text:
             yield _chunk(text)
 
@@ -1180,22 +1159,24 @@ async def _team_stream_event_generator(  # noqa: C901
         async for event in stream:
             if _extract_team_stream_error(event) is not None:
                 logger.warning("Team stream emitted error event", team=team_name)
-                for part in _flush_team_stream_on_error(state):
-                    yield _chunk(part)
+                pending = _finalize_pending_tools(tool_state)
+                if pending:
+                    yield _chunk(pending)
                 yield _chunk("Team execution failed.")
                 break
 
-            text = _classify_team_event(event, state)
+            text = _classify_team_event(event, tool_state)
             if text:
                 yield _chunk(text)
     except Exception:
         logger.exception("Team stream failed during iteration", team=team_name)
-        for part in _flush_team_stream_on_error(state):
-            yield _chunk(part)
+        pending = _finalize_pending_tools(tool_state)
+        if pending:
+            yield _chunk(pending)
         yield _chunk("Team execution failed.")
 
     # 4. Finalize any tool calls that started but never completed
-    pending = _finalize_pending_tools(state)
+    pending = _finalize_pending_tools(tool_state)
     if pending:
         yield _chunk(pending)
 
