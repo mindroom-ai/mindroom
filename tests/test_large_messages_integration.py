@@ -382,9 +382,7 @@ async def test_large_message_with_plain_tool_markers_uploads_html() -> None:
 
     body = "Here is the result:\n\n🔧 `web_search` [1]\n"
     body = body * 500  # Make it large enough to trigger long text
-    formatted_body = (
-        "<p>Here is the result:</p>\n<p>🔧 <code>web_search</code> [1]</p>\n"
-    )
+    formatted_body = "<p>Here is the result:</p>\n<p>🔧 <code>web_search</code> [1]</p>\n"
     formatted_body = formatted_body * 500
 
     content = {

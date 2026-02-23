@@ -619,7 +619,9 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     if skills and skills.get_skill_names():
         instructions.append(agent_prompts.SKILLS_TOOL_USAGE_PROMPT)
 
-    show_tool_calls = agent_config.show_tool_calls if agent_config.show_tool_calls is not None else defaults.show_tool_calls
+    show_tool_calls = (
+        agent_config.show_tool_calls if agent_config.show_tool_calls is not None else defaults.show_tool_calls
+    )
     if not show_tool_calls:
         instructions.append(agent_prompts.HIDDEN_TOOL_CALLS_PROMPT)
 

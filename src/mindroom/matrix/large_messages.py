@@ -22,6 +22,7 @@ NORMAL_MESSAGE_LIMIT = 55000  # ~55KB for regular messages
 EDIT_MESSAGE_LIMIT = 27000  # ~27KB for edits (they roughly double in size)
 PASSTHROUGH_CONTENT_KEYS = ("m.mentions", "com.mindroom.skip_mentions")
 
+
 def _calculate_event_size(content: dict[str, Any]) -> int:
     """Calculate the approximate size of a Matrix event.
 

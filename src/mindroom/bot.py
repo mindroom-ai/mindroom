@@ -2382,9 +2382,7 @@ class AgentBot:
             # Router mentions the suggested agent and asks them to help
             response_text = f"@{suggested_agent} could you help with this?"
 
-        target_thread_mode = (
-            self.config.get_entity_thread_mode(suggested_agent) if suggested_agent else None
-        )
+        target_thread_mode = self.config.get_entity_thread_mode(suggested_agent) if suggested_agent else None
         thread_event_id = self._resolve_reply_thread_id(
             thread_id,
             event.event_id,
