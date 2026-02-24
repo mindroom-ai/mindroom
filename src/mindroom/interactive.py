@@ -40,8 +40,10 @@ class InteractiveResponse(NamedTuple):
 _active_questions: dict[str, InteractiveQuestion] = {}
 
 # Constants
-# Match interactive code blocks
-INTERACTIVE_PATTERN = r"```(?:interactive\s*)?\n(?:interactive\s*\n)?(.*?)\n```"
+# Match interactive code blocks only (supports two accepted formats):
+# 1) ```interactive\n{...}\n```
+# 2) ```\ninteractive\n{...}\n```
+INTERACTIVE_PATTERN = r"```(?:interactive\s*\n|\s*\ninteractive\s*\n)(.*?)\n```"
 MAX_OPTIONS = 5
 DEFAULT_QUESTION = "Please choose an option:"
 INSTRUCTION_TEXT = "React with an emoji or type the number to respond."

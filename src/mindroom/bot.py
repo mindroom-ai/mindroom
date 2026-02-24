@@ -1856,19 +1856,30 @@ class AgentBot:
             self.logger.exception("Error in non-streaming response", error=str(e))
             raise
 
+        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+
         if existing_event_id:
-            # Edit the existing message
-            await self._edit_message(
+            # Edit the existing message (typically the initial "Thinking..." placeholder)
+            edit_succeeded = await self._edit_message(
                 room_id,
                 existing_event_id,
-                response_text,
+                response.formatted_text,
                 thread_id,
                 tool_trace=tool_trace if self.show_tool_calls else None,
                 extra_content=run_metadata_content or None,
             )
+            if edit_succeeded and response.option_map and response.options_list:
+                thread_root_for_registration = self._resolve_reply_thread_id(thread_id, reply_to_event_id)
+                interactive.register_interactive_question(
+                    existing_event_id,
+                    room_id,
+                    thread_root_for_registration,
+                    response.option_map,
+                    self.agent_name,
+                )
+                await interactive.add_reaction_buttons(self.client, room_id, existing_event_id, response.options_list)
             return existing_event_id
 
-        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
         event_id = await self._send_response(
             room_id,
             reply_to_event_id,
