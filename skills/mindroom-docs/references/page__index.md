@@ -89,6 +89,13 @@ ANTHROPIC_API_KEY=your_api_key
 mindroom run
 ```
 
+For local development with a host-installed backend plus Dockerized Synapse + Cinny (Linux/macOS), you can bootstrap the local stack with:
+
+```
+mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+mindroom run
+```
+
 ## Features
 
 | Feature                   | Description                                                       |

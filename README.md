@@ -317,7 +317,8 @@ Complete control on your infrastructure:
 # Using your existing Matrix server
 MATRIX_HOMESERVER=https://your-matrix.server uv run mindroom run
 
-# Or let MindRoom handle everything locally
+# Or bootstrap local Synapse + Cinny (Linux/macOS; Docker required)
+mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
 uv run mindroom run
 ```
 
