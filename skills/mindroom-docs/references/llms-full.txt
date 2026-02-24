@@ -95,6 +95,13 @@ ANTHROPIC_API_KEY=your_api_key
 mindroom run
 ```
 
+For local development with a host-installed backend plus Dockerized Synapse + Cinny (Linux/macOS), you can bootstrap the local stack with:
+
+```
+mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+mindroom run
+```
+
 ## Features
 
 | Feature                   | Description                                                       |
@@ -289,6 +296,29 @@ ANTHROPIC_API_KEY=your_anthropic_key
 # MINDROOM_API_KEY=your-secret-key
 
 ```
+
+#### Optional: Bootstrap local Synapse + Cinny with Docker (Linux/macOS)
+
+If you want a local Matrix + client setup without running the full `mindroom-stack` app,
+use the helper command:
+
+```
+
+mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+
+```
+
+If you're running from source in this repo, use:
+
+```
+
+uv run mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+
+```
+
+This starts Synapse from the `mindroom-stack` compose files, starts a MindRoom Cinny
+container, waits for both services to be healthy, and by default writes local Matrix
+settings to `.env` next to your active `config.yaml`.
 
 > [!NOTE]
 > MindRoom automatically creates Matrix user accounts for each agent. Your Matrix homeserver must allow open registration, or you need to configure it to allow registration from localhost. If registration fails, check your homeserver's registration settings.
@@ -885,32 +915,32 @@ agents:
 
 ## Configuration Options
 
-| Option                        | Type   | Default     | Description                                                                                                                                                                                                                                                 |
-| ----------------------------- | ------ | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `display_name`                | string | *required*  | Human-readable name shown in Matrix as the bot's display name                                                                                                                                                                                               |
-| `role`                        | string | `""`        | System prompt describing the agent's purpose — guides its behavior and expertise                                                                                                                                                                            |
-| `model`                       | string | `"default"` | Model name (must match a key in the `models` section)                                                                                                                                                                                                       |
-| `tools`                       | list   | `[]`        | Agent-specific tool names (see [Tools](https://docs.mindroom.chat/tools/index.md)); effective tools are `tools + defaults.tools` with duplicates removed                                                                                                    |
-| `include_default_tools`       | bool   | `true`      | When `true`, append `defaults.tools` to this agent's `tools`; set to `false` to opt this agent out                                                                                                                                                          |
-| `skills`                      | list   | `[]`        | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/index.md))                                                                                                                                                                    |
-| `instructions`                | list   | `[]`        | Extra lines appended to the system prompt after the role                                                                                                                                                                                                    |
-| `rooms`                       | list   | `[]`        | Room aliases to auto-join; rooms are created if they don't exist                                                                                                                                                                                            |
-| `markdown`                    | bool   | `null`      | When enabled, the agent is instructed to format responses as Markdown. Inherits from `defaults.markdown` (default: `true`)                                                                                                                                  |
-| `learning`                    | bool   | `null`      | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`)                                                         |
-| `learning_mode`               | string | `null`      | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`)                                                                           |
-| `knowledge_bases`             | list   | `[]`        | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                                                                                                                                   |
-| `context_files`               | list   | `[]`        | File paths loaded at agent init/reload and prepended to role context (under `Personality Context`)                                                                                                                                                          |
-| `memory_dir`                  | string | `null`      | Directory loaded at agent init/reload for `MEMORY.md` and dated files (under `Memory Context`)                                                                                                                                                              |
-| `thread_mode`                 | string | `"thread"`  | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile                                           |
-| `num_history_runs`            | int    | `null`      | Number of prior Agno runs to include as history context (`null` = all). Mutually exclusive with `num_history_messages`                                                                                                                                      |
-| `num_history_messages`        | int    | `null`      | Max messages from history. Mutually exclusive with `num_history_runs`                                                                                                                                                                                       |
-| `compress_tool_results`       | bool   | `null`      | Compress tool results in history to save context. Inherits from `defaults.compress_tool_results` (default: `true`)                                                                                                                                          |
-| `enable_session_summaries`    | bool   | `null`      | Generate AI summaries of older conversation segments for compaction (each summary costs an extra LLM call). Inherits from `defaults.enable_session_summaries` (default: `false`)                                                                            |
-| `max_tool_calls_from_history` | int    | `null`      | Limit tool call messages replayed from history (`null` = no limit)                                                                                                                                                                                          |
-| `show_tool_calls`             | bool   | `null`      | Show tool call details inline in responses. Inherits from `defaults.show_tool_calls` (default: `true`). Set to `false` to hide `<tool>…</tool>` blocks (metadata is still tracked)                                                                          |
-| `sandbox_tools`               | list   | `null`      | Tool names to execute through the [sandbox proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md). Inherits from `defaults.sandbox_tools` (default: `null` — defers to env vars). Set to `[]` to explicitly disable sandboxing for this agent |
-| `allow_self_config`           | bool   | `null`      | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool                                                   |
-| `delegate_to`                 | list   | `[]`        | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation))                                                                                                                                                     |
+| Option                        | Type   | Default     | Description                                                                                                                                                                                                                                                                                                                       |
+| ----------------------------- | ------ | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `display_name`                | string | *required*  | Human-readable name shown in Matrix as the bot's display name                                                                                                                                                                                                                                                                     |
+| `role`                        | string | `""`        | System prompt describing the agent's purpose — guides its behavior and expertise                                                                                                                                                                                                                                                  |
+| `model`                       | string | `"default"` | Model name (must match a key in the `models` section)                                                                                                                                                                                                                                                                             |
+| `tools`                       | list   | `[]`        | Agent-specific tool names (see [Tools](https://docs.mindroom.chat/tools/index.md)); effective tools are `tools + defaults.tools` with duplicates removed                                                                                                                                                                          |
+| `include_default_tools`       | bool   | `true`      | When `true`, append `defaults.tools` to this agent's `tools`; set to `false` to opt this agent out                                                                                                                                                                                                                                |
+| `skills`                      | list   | `[]`        | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/index.md))                                                                                                                                                                                                                                          |
+| `instructions`                | list   | `[]`        | Extra lines appended to the system prompt after the role                                                                                                                                                                                                                                                                          |
+| `rooms`                       | list   | `[]`        | Room aliases to auto-join; rooms are created if they don't exist                                                                                                                                                                                                                                                                  |
+| `markdown`                    | bool   | `null`      | When enabled, the agent is instructed to format responses as Markdown. Inherits from `defaults.markdown` (default: `true`)                                                                                                                                                                                                        |
+| `learning`                    | bool   | `null`      | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`)                                                                                                                               |
+| `learning_mode`               | string | `null`      | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`)                                                                                                                                                 |
+| `knowledge_bases`             | list   | `[]`        | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                                                                                                                                                                                                         |
+| `context_files`               | list   | `[]`        | File paths loaded at agent init/reload and prepended to role context (under `Personality Context`)                                                                                                                                                                                                                                |
+| `memory_dir`                  | string | `null`      | Directory loaded at agent init/reload for `MEMORY.md` and dated files (under `Memory Context`)                                                                                                                                                                                                                                    |
+| `thread_mode`                 | string | `"thread"`  | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile                                                                                                                 |
+| `num_history_runs`            | int    | `null`      | Number of prior Agno runs to include as history context (`null` = all). Mutually exclusive with `num_history_messages`                                                                                                                                                                                                            |
+| `num_history_messages`        | int    | `null`      | Max messages from history. Mutually exclusive with `num_history_runs`                                                                                                                                                                                                                                                             |
+| `compress_tool_results`       | bool   | `null`      | Compress tool results in history to save context. Inherits from `defaults.compress_tool_results` (default: `true`)                                                                                                                                                                                                                |
+| `enable_session_summaries`    | bool   | `null`      | Generate AI summaries of older conversation segments for compaction (each summary costs an extra LLM call). Inherits from `defaults.enable_session_summaries` (default: `false`)                                                                                                                                                  |
+| `max_tool_calls_from_history` | int    | `null`      | Limit tool call messages replayed from history (`null` = no limit)                                                                                                                                                                                                                                                                |
+| `show_tool_calls`             | bool   | `null`      | Show tool-call markers and trace metadata in Matrix messages. Inherits from `defaults.show_tool_calls` (default: `true`). When `false`, inline markers and `io.mindroom.tool_trace` are omitted from sent Matrix message content. Note: this flag is not currently enforced by the OpenAI-compatible `/v1/chat/completions` path. |
+| `sandbox_tools`               | list   | `null`      | Tool names to execute through the [sandbox proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md). Inherits from `defaults.sandbox_tools` (default: `null` — defers to env vars). Set to `[]` to explicitly disable sandboxing for this agent                                                                       |
+| `allow_self_config`           | bool   | `null`      | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool                                                                                                                         |
+| `delegate_to`                 | list   | `[]`        | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation))                                                                                                                                                                                                                           |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
 
@@ -1001,7 +1031,7 @@ defaults:
   compress_tool_results: true           # Compress tool results in history to save context
   enable_session_summaries: false       # AI summaries of older conversation segments (costs extra LLM call)
   max_tool_calls_from_history: null     # Limit tool call messages replayed from history (null = no limit)
-  show_tool_calls: true                 # Show tool call details inline in responses
+  show_tool_calls: true                 # Show tool-call markers and trace metadata in message content
   sandbox_tools: null                    # Tool names to sandbox (null = use env var config, [] = disable)
   allow_self_config: false               # Allow agents to read/modify their own config at runtime
 ```
@@ -3265,7 +3295,7 @@ Teams are exposed as `team/<team_name>` models. Selecting `team/super_team` runs
 
 `stream: true` returns Server-Sent Events in the standard OpenAI format: role chunk, content chunks, finish chunk, `[DONE]`.
 
-Tool calls appear inline as text in the stream (not as native OpenAI `tool_calls` deltas).
+Tool calls appear inline as text in the stream (not as native OpenAI `tool_calls` deltas). MindRoom currently emits tool events in stream chunks as inline `<tool id="N" state="start|done">...</tool>` content.
 
 ### Session continuity
 
@@ -3316,6 +3346,7 @@ The OpenAI-compatible API uses its own auth (`OPENAI_COMPAT_API_KEYS`), separate
 
 - **Token usage is always zeros** — Agno doesn't expose token counts
 - **No native `tool_calls` format** — tool results appear inline in content text
+- **`show_tool_calls` config is Matrix-only today** — OpenAI-compatible `/v1/chat/completions` currently includes tool-call text/events regardless of `show_tool_calls: false`
 - **No room memory** — only agent-scoped memory (no `room_id` in API requests)
 - **Scheduler tool unavailable** — scheduling requires Matrix context and returns an error message when no Matrix scheduling context is available
 
@@ -3452,7 +3483,16 @@ Events are processed in background tasks:
 
 Agents stream responses by progressively editing messages. Streaming is enabled only when the requesting user is online (checked via `should_use_streaming()`), saving API calls for offline users.
 
-Tool call telemetry is emitted as structured collapsible blocks (`<tool>...</tool>`, `<validation>...</validation>`) and mirrored in `io.mindroom.tool_trace` metadata on the same message content.
+Tool call telemetry is emitted as plain inline markers and mirrored in `io.mindroom.tool_trace` metadata on the same message content.
+
+Marker format:
+
+```
+Pending:   🔧 `tool_name` [N] ⏳
+Completed: 🔧 `tool_name` [N]
+```
+
+Where `N` is 1-indexed per message and maps to `io.mindroom.tool_trace.events[N-1]`.
 
 ## Presence
 
@@ -3482,12 +3522,12 @@ Returns content with `m.mentions` and `formatted_body` containing clickable link
 
 Messages exceeding the 64KB Matrix event limit are automatically handled by `prepare_large_message()`:
 
-- Messages > 55,000 bytes: Uploaded as attachment (`message.txt` for plain text, `message.html` for formatted HTML)
-- Edits > 27,000 bytes: Lower threshold since edit structure roughly doubles size
+- Messages > 55,000 bytes and edits > 27,000 bytes use a fallback event
+- Full original Matrix message content is uploaded as a JSON sidecar (`message-content.json`)
 - Preview text included in message body (maximum that fits)
-- Custom metadata (`io.mindroom.long_text`) for reconstruction
-- Preserves essential metadata (for example mentions) while dropping bulky optional fields to stay within event limits
-- Encrypted rooms: Content encrypted before upload (`message.txt.enc` for plain text, `message.html.enc` for formatted HTML)
+- Custom metadata (`io.mindroom.long_text.version = 2`) points to sidecar encoding (`matrix_event_content_json`)
+- Preview event is compact (for example no inline `io.mindroom.tool_trace`), while the sidecar preserves full content fidelity
+- Encrypted rooms: sidecar JSON is encrypted before upload (`message-content.json.enc`)
 
 ## Identity Management
 
@@ -3680,6 +3720,13 @@ mindroom run --storage-path ./mindroom_data
 ```
 
 The config file path is set via `MINDROOM_CONFIG_PATH` (defaults to `./config.yaml`).
+
+If you want local Matrix + Cinny with a host-installed backend (Linux/macOS), use:
+
+```
+mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+mindroom run --storage-path ./mindroom_data
+```
 
 ### Docker (single container)
 
@@ -4389,6 +4436,13 @@ The local Matrix stack includes:
 - **PostgreSQL**: Database backend
 - **Redis**: Caching layer
 
+If you're running the backend on the host (not in Docker), you can use `mindroom local-stack-setup` to start Synapse + MindRoom Cinny and persist local Matrix env vars automatically:
+
+```
+mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+mindroom run
+```
+
 ## Health Checks
 
 The container exposes a health endpoint on port 8765:
@@ -4842,10 +4896,11 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │ --help                -h        Show this message and exit.                            │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ version   Show the current version of Mindroom.                                        │
-│ run       Run the mindroom multi-agent system.                                         │
-│ doctor    Check your environment for common issues.                                    │
-│ config    Manage MindRoom configuration files.                                         │
+│ version             Show the current version of Mindroom.                              │
+│ run                 Run the mindroom multi-agent system.                               │
+│ doctor              Check your environment for common issues.                          │
+│ local-stack-setup   Start local Synapse + MindRoom Cinny using Docker only.            │
+│ config              Manage MindRoom configuration files.                               │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -4898,6 +4953,65 @@ Start MindRoom with your configuration.
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
+## local-stack-setup
+
+Start local Synapse and the MindRoom Cinny client container for development.
+
+By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, and `MATRIX_SSL_VERIFY=false` into `.env` next to your active `config.yaml` so `mindroom run` works without inline env exports.
+
+```
+ Usage: root local-stack-setup [OPTIONS]
+
+ Start local Synapse + MindRoom Cinny using Docker only.
+
+
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --synapse-dir                                 PATH                 Directory           │
+│                                                                    containing Synapse  │
+│                                                                    docker-compose.yml  │
+│                                                                    (from               │
+│                                                                    mindroom-stack      │
+│                                                                    settings).          │
+│                                                                    [default:           │
+│                                                                    local/matrix]       │
+│ --homeserver-url                              TEXT                 Homeserver URL that │
+│                                                                    Cinny and MindRoom  │
+│                                                                    should use.         │
+│                                                                    [default:           │
+│                                                                    http://localhost:8… │
+│ --server-name                                 TEXT                 Matrix server name  │
+│                                                                    (default: inferred  │
+│                                                                    from                │
+│                                                                    --homeserver-url    │
+│                                                                    hostname).          │
+│                                                                    [default: None]     │
+│ --cinny-port                                  INTEGER RANGE        Local host port for │
+│                                               [1<=x<=65535]        the MindRoom Cinny  │
+│                                                                    container.          │
+│                                                                    [default: 8080]     │
+│ --cinny-image                                 TEXT                 Docker image for    │
+│                                                                    MindRoom Cinny.     │
+│                                                                    [default:           │
+│                                                                    ghcr.io/mindroom-a… │
+│ --cinny-container-n…                          TEXT                 Container name for  │
+│                                                                    MindRoom Cinny.     │
+│                                                                    [default:           │
+│                                                                    mindroom-cinny-loc… │
+│ --skip-synapse                                                     Skip starting       │
+│                                                                    Synapse (assume it  │
+│                                                                    is already          │
+│                                                                    running).           │
+│ --persist-env             --no-persist-env                         Persist Matrix      │
+│                                                                    local dev settings  │
+│                                                                    to .env next to     │
+│                                                                    config.yaml.        │
+│                                                                    [default:           │
+│                                                                    persist-env]        │
+│ --help                -h                                           Show this message   │
+│                                                                    and exit.           │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+```
+
 ## Examples
 
 ### Basic run
@@ -4916,6 +5030,18 @@ mindroom run --log-level DEBUG
 
 ```
 mindroom run --storage-path /data/mindroom
+```
+
+### Start local Synapse + Cinny (default local setup)
+
+```
+mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+```
+
+### Start local stack without writing `.env`
+
+```
+mindroom local-stack-setup --no-persist-env
 ```
 
 ### Show version

@@ -46,6 +46,13 @@ mindroom run --storage-path ./mindroom_data
 
 The config file path is set via `MINDROOM_CONFIG_PATH` (defaults to `./config.yaml`).
 
+If you want local Matrix + Cinny with a host-installed backend (Linux/macOS), use:
+
+```
+mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+mindroom run --storage-path ./mindroom_data
+```
+
 ### Docker (single container)
 
 ```

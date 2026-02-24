@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import re
+import subprocess
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -637,3 +639,137 @@ class TestDoctor:
         result = runner.invoke(app, ["doctor"])
         assert result.exit_code == 0
         assert "Memory LLM (openai): OPENAI_API_KEY not set" in result.output
+
+
+# ---------------------------------------------------------------------------
+# mindroom local-stack-setup
+# ---------------------------------------------------------------------------
+
+
+class TestLocalStackSetup:
+    """Tests for `mindroom local-stack-setup`."""
+
+    def test_starts_synapse_and_cinny_containers(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Command starts Synapse compose and the Cinny container."""
+        synapse_dir = tmp_path / "matrix"
+        synapse_dir.mkdir()
+        (synapse_dir / "docker-compose.yml").write_text("services: {}\n")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(tmp_path / "mindroom_data"))
+        monkeypatch.setattr("mindroom.cli.sys.platform", "linux")
+        monkeypatch.setattr("mindroom.cli.shutil.which", lambda _name: "/usr/bin/docker")
+        monkeypatch.setattr("mindroom.cli.httpx.get", lambda *_a, **_kw: httpx.Response(200, json={}))
+        monkeypatch.setattr("mindroom.cli.time.sleep", lambda *_a, **_kw: None)
+
+        commands: list[list[str]] = []
+
+        def _fake_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            commands.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr("mindroom.cli.subprocess.run", _fake_run)
+
+        result = runner.invoke(
+            app,
+            [
+                "local-stack-setup",
+                "--synapse-dir",
+                str(synapse_dir),
+                "--cinny-port",
+                "18080",
+                "--cinny-container-name",
+                "mindroom-cinny-test",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert ["docker", "compose", "up", "-d"] in commands
+        assert any(cmd[:3] == ["docker", "rm", "-f"] for cmd in commands)
+        assert any(cmd[:3] == ["docker", "run", "-d"] for cmd in commands)
+
+        cinny_config = tmp_path / "mindroom_data" / "local" / "cinny-config.json"
+        assert cinny_config.exists()
+        config = json.loads(cinny_config.read_text())
+        assert config["homeserverList"] == ["http://localhost:8008"]
+        assert config["featuredCommunities"]["rooms"] == ["#lobby:localhost"]
+
+        env_path = tmp_path / ".env"
+        assert env_path.exists()
+        env_content = env_path.read_text()
+        assert "MATRIX_HOMESERVER=http://localhost:8008" in env_content
+        assert "MATRIX_SSL_VERIFY=false" in env_content
+        assert "MATRIX_SERVER_NAME=localhost" in env_content
+        assert "Local stack is ready." in result.output
+
+    def test_skip_synapse_skips_compose_start(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """--skip-synapse should not run docker compose up."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(tmp_path / "mindroom_data"))
+        monkeypatch.setattr("mindroom.cli.sys.platform", "linux")
+        monkeypatch.setattr("mindroom.cli.shutil.which", lambda _name: "/usr/bin/docker")
+        monkeypatch.setattr("mindroom.cli.httpx.get", lambda *_a, **_kw: httpx.Response(200, json={}))
+        monkeypatch.setattr("mindroom.cli.time.sleep", lambda *_a, **_kw: None)
+
+        commands: list[list[str]] = []
+
+        def _fake_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            commands.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr("mindroom.cli.subprocess.run", _fake_run)
+
+        result = runner.invoke(app, ["local-stack-setup", "--skip-synapse"])
+
+        assert result.exit_code == 0
+        assert ["docker", "compose", "up", "-d"] not in commands
+        assert any(cmd[:3] == ["docker", "run", "-d"] for cmd in commands)
+
+    def test_no_persist_env_prints_inline_command(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """--no-persist-env should not write .env and should print inline env usage."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(tmp_path / "mindroom_data"))
+        monkeypatch.setattr("mindroom.cli.sys.platform", "linux")
+        monkeypatch.setattr("mindroom.cli.shutil.which", lambda _name: "/usr/bin/docker")
+        monkeypatch.setattr("mindroom.cli.httpx.get", lambda *_a, **_kw: httpx.Response(200, json={}))
+        monkeypatch.setattr("mindroom.cli.time.sleep", lambda *_a, **_kw: None)
+        monkeypatch.setattr(
+            "mindroom.cli.subprocess.run",
+            lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""),
+        )
+
+        result = runner.invoke(app, ["local-stack-setup", "--skip-synapse", "--no-persist-env"])
+
+        assert result.exit_code == 0
+        assert not (tmp_path / ".env").exists()
+        assert "MATRIX_HOMESERVER=http://localhost:8008 MATRIX_SSL_VERIFY=false" in result.output
+        assert "uv run" in result.output
+        assert "mindroom run" in result.output
+
+    def test_rejects_unsupported_platform(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Command fails on unsupported operating systems."""
+        monkeypatch.setattr("mindroom.cli.sys.platform", "win32")
+        monkeypatch.setattr("mindroom.cli.shutil.which", lambda _name: "/usr/bin/docker")
+
+        result = runner.invoke(app, ["local-stack-setup", "--skip-synapse"])
+
+        assert result.exit_code == 1
+        assert "supports Linux and macOS only" in result.output
+
+    def test_requires_docker_binary(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Command fails when Docker is missing from PATH."""
+        monkeypatch.setattr("mindroom.cli.sys.platform", "linux")
+        monkeypatch.setattr("mindroom.cli.shutil.which", lambda _name: None)
+
+        result = runner.invoke(app, ["local-stack-setup", "--skip-synapse"])
+
+        assert result.exit_code == 1
+        assert "Docker is required" in result.output
