@@ -2272,6 +2272,12 @@ async def _fetch_thread_event_sources_via_room_messages(
             ):
                 root_message_found = True
 
+        # Continue paginating until we either find the thread root (oldest
+        # possible thread event) or run out of room history pages.
+        #
+        # We intentionally do NOT stop on a page that has zero thread events:
+        # in busy rooms, unrelated events can fill a page and hide older thread
+        # messages in subsequent pages.
         if root_message_found or not response.end:
             break
         from_token = response.end

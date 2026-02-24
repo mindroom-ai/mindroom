@@ -867,6 +867,52 @@ class TestThreadHistory:
         assert history[0].body == "New thread"
 
     @pytest.mark.asyncio
+    async def test_fetch_thread_history_continues_pagination_after_empty_page(self) -> None:
+        """Thread history pagination must continue when a page has no thread events."""
+        client = AsyncMock()
+
+        unrelated_event = self._make_text_event(
+            event_id="$other",
+            sender="@user:localhost",
+            body="Unrelated room message",
+            server_timestamp=3000,
+            source_content={"body": "Unrelated room message"},
+        )
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Thread root",
+            server_timestamp=1000,
+            source_content={"body": "Thread root"},
+        )
+        thread_reply = self._make_text_event(
+            event_id="$reply",
+            sender="@agent:localhost",
+            body="Reply in thread",
+            server_timestamp=2000,
+            source_content={
+                "body": "Reply in thread",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$thread_root",
+                },
+            },
+        )
+
+        page_one = MagicMock(spec=nio.RoomMessagesResponse)
+        page_one.chunk = [unrelated_event]
+        page_one.end = "next_token"
+        page_two = MagicMock(spec=nio.RoomMessagesResponse)
+        page_two.chunk = [thread_reply, root_event]
+        page_two.end = None
+        client.room_messages.side_effect = [page_one, page_two]
+
+        history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+
+        assert [msg.event_id for msg in history] == ["$thread_root", "$reply"]
+        assert client.room_messages.await_count == 2
+
+    @pytest.mark.asyncio
     async def test_fetch_thread_history_applies_edits(self) -> None:
         """Thread history should show edited body/content for thread messages."""
         client = AsyncMock()
