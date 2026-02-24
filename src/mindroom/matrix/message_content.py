@@ -287,6 +287,33 @@ async def extract_and_resolve_message(
     return data
 
 
+async def extract_edit_body(
+    event_source: dict[str, Any],
+    client: nio.AsyncClient | None = None,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Extract body/content from an edit event's ``m.new_content`` payload."""
+    content = event_source.get("content", {})
+    if not isinstance(content, dict):
+        return None, None
+
+    new_content = content.get("m.new_content", {})
+    if not isinstance(new_content, dict):
+        return None, None
+
+    body = new_content.get("body")
+    if not isinstance(body, str):
+        return None, None
+
+    resolved_body = body
+    if client and "io.mindroom.long_text" in new_content:
+        resolved_body = await _get_full_message_body(
+            {"body": body, "content": new_content},
+            client,
+        )
+
+    return resolved_body, dict(new_content)
+
+
 def _clean_expired_cache() -> None:
     """Remove expired entries from the MXC cache."""
     current_time = time.time()
