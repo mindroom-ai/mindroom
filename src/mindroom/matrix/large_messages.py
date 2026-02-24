@@ -269,10 +269,14 @@ async def prepare_large_message(
         modified_content["m.relates_to"] = content["m.relates_to"]
 
     if is_edit and "m.new_content" in content:
+        # Keep edit new_content as m.text for Matrix client compatibility.
+        # Some clients treat edited m.text -> m.file as a malformed/broken edit.
+        edit_new_content = dict(modified_content)
+        edit_new_content["msgtype"] = "m.text"
         modified_content = {
             "msgtype": "m.text",
-            "body": f"* {modified_content['body']}",
-            "m.new_content": modified_content,
+            "body": f"* {edit_new_content['body']}",
+            "m.new_content": edit_new_content,
             "m.relates_to": content.get("m.relates_to", {}),
         }
 
