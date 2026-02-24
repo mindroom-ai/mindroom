@@ -293,12 +293,7 @@ async def extract_edit_body(
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Extract body/content from an edit event's ``m.new_content`` payload."""
     content = event_source.get("content", {})
-    if not isinstance(content, dict):
-        return None, None
-
     new_content = content.get("m.new_content", {})
-    if not isinstance(new_content, dict):
-        return None, None
 
     body = new_content.get("body")
     if not isinstance(body, str):

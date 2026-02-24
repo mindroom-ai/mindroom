@@ -611,26 +611,7 @@ async def send_message(client: nio.AsyncClient, room_id: str, content: dict[str,
 
 def _history_message_sort_key(message: dict[str, Any]) -> tuple[int, str]:
     """Sort thread history messages by timestamp and event ID."""
-    timestamp = message.get("timestamp")
-    event_id = message.get("event_id")
-    return (
-        timestamp if isinstance(timestamp, int) else 0,
-        event_id if isinstance(event_id, str) else "",
-    )
-
-
-def _is_newer_edit(
-    candidate_event: nio.RoomMessageText,
-    current_event: nio.RoomMessageText | None,
-) -> bool:
-    """Return ``True`` if candidate edit is newer than current edit."""
-    if current_event is None:
-        return True
-
-    return (candidate_event.server_timestamp, candidate_event.event_id) > (
-        current_event.server_timestamp,
-        current_event.event_id,
-    )
+    return (message["timestamp"], message["event_id"])
 
 
 def _record_latest_thread_edit(
@@ -646,7 +627,10 @@ def _record_latest_thread_edit(
 
     original_event_id = event_info.original_event_id
     current_latest_edit = latest_edits_by_original_event_id.get(original_event_id)
-    if _is_newer_edit(event, current_latest_edit):
+    if current_latest_edit is None or (event.server_timestamp, event.event_id) > (
+        current_latest_edit.server_timestamp,
+        current_latest_edit.event_id,
+    ):
         latest_edits_by_original_event_id[original_event_id] = event
     return True
 
@@ -775,7 +759,8 @@ async def fetch_thread_history(
                 messages_by_event_id=messages_by_event_id,
             )
 
-        if not response.end:
+        # Once the thread root is seen, all older pages are outside this thread.
+        if root_message_found or not response.end:
             break
         from_token = response.end
 

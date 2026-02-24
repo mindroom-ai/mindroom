@@ -36,37 +36,28 @@ class TestThreadHistory:
     @pytest.mark.asyncio
     async def test_fetch_thread_history_includes_root_message(self) -> None:
         """Test that fetch_thread_history includes the thread root message itself."""
-        # Create mock client
         client = AsyncMock()
 
-        # Create mock events
-        # 1. The thread root message (user's original message)
-        root_event = MagicMock(spec=nio.RoomMessageText)
-        root_event.event_id = "$thread_root"
-        root_event.sender = "@user:localhost"
-        root_event.body = "look up Feynman on Wikipedia"
-        root_event.server_timestamp = 1000
-        root_event.source = {
-            "type": "m.room.message",
-            "content": {"body": "look up Feynman on Wikipedia"},
-        }
-
-        # 2. Router's message in the thread
-        router_event = MagicMock(spec=nio.RoomMessageText)
-        router_event.event_id = "$router_msg"
-        router_event.sender = "@mindroom_news:localhost"
-        router_event.body = "@mindroom_research:localhost could you help with this?"
-        router_event.server_timestamp = 2000
-        router_event.source = {
-            "type": "m.room.message",
-            "content": {
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="look up Feynman on Wikipedia",
+            server_timestamp=1000,
+            source_content={"body": "look up Feynman on Wikipedia"},
+        )
+        router_event = self._make_text_event(
+            event_id="$router_msg",
+            sender="@mindroom_news:localhost",
+            body="@mindroom_research:localhost could you help with this?",
+            server_timestamp=2000,
+            source_content={
                 "body": "@mindroom_research:localhost could you help with this?",
                 "m.relates_to": {
                     "rel_type": "m.thread",
                     "event_id": "$thread_root",
                 },
             },
-        }
+        )
 
         # Mock response
         mock_response = MagicMock(spec=nio.RoomMessagesResponse)
@@ -93,65 +84,48 @@ class TestThreadHistory:
     @pytest.mark.asyncio
     async def test_fetch_thread_history_only_thread_messages(self) -> None:
         """Test that fetch_thread_history only includes messages from the specific thread."""
-        # Create mock client
         client = AsyncMock()
 
-        # Create mock events
-        # Thread root
-        root_event = MagicMock(spec=nio.RoomMessageText)
-        root_event.event_id = "$thread1"
-        root_event.sender = "@user:localhost"
-        root_event.body = "First thread"
-        root_event.server_timestamp = 1000
-        root_event.source = {
-            "type": "m.room.message",
-            "content": {"body": "First thread"},
-        }
-
-        # Message in thread 1
-        thread1_msg = MagicMock(spec=nio.RoomMessageText)
-        thread1_msg.event_id = "$msg1"
-        thread1_msg.sender = "@agent:localhost"
-        thread1_msg.body = "Reply in thread 1"
-        thread1_msg.server_timestamp = 2000
-        thread1_msg.source = {
-            "type": "m.room.message",
-            "content": {
+        root_event = self._make_text_event(
+            event_id="$thread1",
+            sender="@user:localhost",
+            body="First thread",
+            server_timestamp=1000,
+            source_content={"body": "First thread"},
+        )
+        thread1_msg = self._make_text_event(
+            event_id="$msg1",
+            sender="@agent:localhost",
+            body="Reply in thread 1",
+            server_timestamp=2000,
+            source_content={
                 "body": "Reply in thread 1",
                 "m.relates_to": {
                     "rel_type": "m.thread",
                     "event_id": "$thread1",
                 },
             },
-        }
-
-        # Message in different thread
-        other_thread_msg = MagicMock(spec=nio.RoomMessageText)
-        other_thread_msg.event_id = "$msg2"
-        other_thread_msg.sender = "@agent:localhost"
-        other_thread_msg.body = "Reply in different thread"
-        other_thread_msg.server_timestamp = 3000
-        other_thread_msg.source = {
-            "type": "m.room.message",
-            "content": {
+        )
+        other_thread_msg = self._make_text_event(
+            event_id="$msg2",
+            sender="@agent:localhost",
+            body="Reply in different thread",
+            server_timestamp=3000,
+            source_content={
                 "body": "Reply in different thread",
                 "m.relates_to": {
                     "rel_type": "m.thread",
-                    "event_id": "$thread2",  # Different thread
+                    "event_id": "$thread2",
                 },
             },
-        }
-
-        # Regular room message (not in any thread)
-        room_msg = MagicMock(spec=nio.RoomMessageText)
-        room_msg.event_id = "$room_msg"
-        room_msg.sender = "@user:localhost"
-        room_msg.body = "Regular room message"
-        room_msg.server_timestamp = 4000
-        room_msg.source = {
-            "type": "m.room.message",
-            "content": {"body": "Regular room message"},
-        }
+        )
+        room_msg = self._make_text_event(
+            event_id="$room_msg",
+            sender="@user:localhost",
+            body="Regular room message",
+            server_timestamp=4000,
+            source_content={"body": "Regular room message"},
+        )
 
         # Mock response with all messages
         mock_response = MagicMock(spec=nio.RoomMessagesResponse)
@@ -178,16 +152,13 @@ class TestThreadHistory:
         """Test fetch_thread_history with a thread that has no replies yet."""
         client = AsyncMock()
 
-        # Only the root message exists
-        root_event = MagicMock(spec=nio.RoomMessageText)
-        root_event.event_id = "$thread_root"
-        root_event.sender = "@user:localhost"
-        root_event.body = "New thread"
-        root_event.server_timestamp = 1000
-        root_event.source = {
-            "type": "m.room.message",
-            "content": {"body": "New thread"},
-        }
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="New thread",
+            server_timestamp=1000,
+            source_content={"body": "New thread"},
+        )
 
         # Mock response
         mock_response = MagicMock(spec=nio.RoomMessagesResponse)
@@ -487,3 +458,40 @@ class TestThreadHistory:
         assert client.room_messages.call_count == 2
         assert [msg["event_id"] for msg in history] == ["$thread_root", "$agent_msg"]
         assert history[1]["body"] == "Final answer"
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_history_stops_when_root_is_found(self) -> None:
+        """Stop pagination once the thread root has been seen."""
+        client = AsyncMock()
+
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="root",
+            server_timestamp=1000,
+            source_content={"body": "root"},
+        )
+        thread_message = self._make_text_event(
+            event_id="$agent_msg",
+            sender="@agent:localhost",
+            body="reply",
+            server_timestamp=2000,
+            source_content={
+                "body": "reply",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$thread_root",
+                },
+            },
+        )
+
+        first_page = MagicMock(spec=nio.RoomMessagesResponse)
+        first_page.chunk = [thread_message, root_event]
+        first_page.end = "older_page"
+
+        client.room_messages.return_value = first_page
+
+        history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+
+        assert client.room_messages.call_count == 1
+        assert [msg["event_id"] for msg in history] == ["$thread_root", "$agent_msg"]

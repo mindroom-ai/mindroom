@@ -126,7 +126,7 @@ Teams are exposed as `team/<team_name>` models. Selecting `team/super_team` runs
 
 `stream: true` returns Server-Sent Events in the standard OpenAI format: role chunk, content chunks, finish chunk, `[DONE]`.
 
-Tool calls appear inline as text in the stream (not as native OpenAI `tool_calls` deltas). MindRoom currently emits tool events in stream chunks as inline `<tool id="N" state="start|done">...</tool>` content.
+Tool calls appear inline as text in the stream (not as native OpenAI `tool_calls` deltas).
 
 ### Session continuity
 
@@ -177,6 +177,5 @@ The OpenAI-compatible API uses its own auth (`OPENAI_COMPAT_API_KEYS`), separate
 
 - **Token usage is always zeros** — Agno doesn't expose token counts
 - **No native `tool_calls` format** — tool results appear inline in content text
-- **`show_tool_calls` config is Matrix-only today** — OpenAI-compatible `/v1/chat/completions` currently includes tool-call text/events regardless of `show_tool_calls: false`
 - **No room memory** — only agent-scoped memory (no `room_id` in API requests)
 - **Scheduler tool unavailable** — scheduling requires Matrix context and returns an error message when no Matrix scheduling context is available
