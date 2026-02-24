@@ -42,10 +42,11 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │ --help                -h        Show this message and exit.                            │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ version   Show the current version of Mindroom.                                        │
-│ run       Run the mindroom multi-agent system.                                         │
-│ doctor    Check your environment for common issues.                                    │
-│ config    Manage MindRoom configuration files.                                         │
+│ version             Show the current version of Mindroom.                              │
+│ run                 Run the mindroom multi-agent system.                               │
+│ doctor              Check your environment for common issues.                          │
+│ local-stack-setup   Start local Synapse + MindRoom Cinny using Docker only.            │
+│ config              Manage MindRoom configuration files.                               │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
