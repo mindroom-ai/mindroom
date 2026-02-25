@@ -30,9 +30,6 @@ OPENCLAW_COMPAT_CORE_TOOLS = {
     "sessions_spawn",
     "subagents",
     "message",
-    "gateway",
-    "nodes",
-    "canvas",
 }
 
 OPENCLAW_COMPAT_ALIAS_TOOLS = {
@@ -96,22 +93,11 @@ async def test_openclaw_compat_placeholder_responses_are_json() -> None:
         ("subagents", await tool.subagents()),
         ("message", await tool.message(action="send", message="hi")),
     ]
-    not_configured = [
-        ("gateway", await tool.gateway(action="config.get")),
-        ("nodes", await tool.nodes(action="status")),
-        ("canvas", await tool.canvas(action="snapshot")),
-    ]
 
     for expected_tool_name, raw_response in context_required:
         payload = json.loads(raw_response)
         assert payload["tool"] == expected_tool_name
         assert payload["status"] == "error"
-        assert "message" in payload
-
-    for expected_tool_name, raw_response in not_configured:
-        payload = json.loads(raw_response)
-        assert payload["tool"] == expected_tool_name
-        assert payload["status"] == "not_configured"
         assert "message" in payload
 
 

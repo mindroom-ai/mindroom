@@ -23,7 +23,7 @@ Works well:
 
 Not included:
 
-- OpenClaw gateway control plane (`gateway` returns `not_configured`)
+- OpenClaw gateway control plane
 - Device nodes and canvas platform tools
 - `tts` and `image` tool aliases (use MindRoom's native TTS/image tools directly)
 - Heartbeat runtime — schedule heartbeats via `cron`/`scheduler` instead
@@ -40,7 +40,6 @@ The `openclaw_compat` tool provides OpenClaw-named aliases so prompts and skills
 | `message`, `sessions_*` | Matrix client calls |
 | `subagents`, `agents_list` | Agent registry lookup |
 | `browser` | `BrowserTools` (Playwright, host target only) |
-| `gateway`, `nodes`, `canvas` | Stubs (`not_configured`) |
 
 ## Drop-in config
 

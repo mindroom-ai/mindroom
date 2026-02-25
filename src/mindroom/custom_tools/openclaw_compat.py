@@ -65,9 +65,6 @@ class OpenClawCompatTools(Toolkit):
                 self.sessions_spawn,
                 self.subagents,
                 self.message,
-                self.gateway,
-                self.nodes,
-                self.canvas,
                 self.cron,
                 self.web_search,
                 self.web_fetch,
@@ -1172,58 +1169,6 @@ class OpenClawCompatTools(Toolkit):
             "error",
             action=action,
             message="Unsupported action. Use send, thread-reply, react, or read.",
-        )
-
-    async def gateway(
-        self,
-        action: str,
-        raw: str | None = None,
-        base_hash: str | None = None,
-        note: str | None = None,
-    ) -> str:
-        """Invoke gateway lifecycle/config operations."""
-        return self._payload(
-            "gateway",
-            "not_configured",
-            action=action,
-            raw=raw,
-            base_hash=base_hash,
-            note=note,
-            message="gateway requires an OpenClaw Gateway endpoint and is not configured in MindRoom.",
-        )
-
-    async def nodes(
-        self,
-        action: str,
-        node: str | None = None,
-    ) -> str:
-        """Invoke node discovery and control operations."""
-        return self._payload(
-            "nodes",
-            "not_configured",
-            action=action,
-            node=node,
-            message="nodes requires an OpenClaw Gateway endpoint and is not configured in MindRoom.",
-        )
-
-    async def canvas(
-        self,
-        action: str,
-        node: str | None = None,
-        target: str | None = None,
-        url: str | None = None,
-        java_script: str | None = None,
-    ) -> str:
-        """Control canvas operations on a node."""
-        return self._payload(
-            "canvas",
-            "not_configured",
-            action=action,
-            node=node,
-            target=target,
-            url=url,
-            java_script=java_script,
-            message="canvas requires an OpenClaw Gateway endpoint and is not configured in MindRoom.",
         )
 
     async def cron(self, request: str) -> str:
