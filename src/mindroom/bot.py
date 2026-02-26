@@ -549,8 +549,10 @@ def create_bot_for_entity(
     if entity_name in config.teams:
         team_config = config.teams[entity_name]
         rooms = resolve_room_aliases(team_config.rooms)
-        # Convert agent names to MatrixID objects
-        team_matrix_ids = [MatrixID.from_username(agent_name, config.domain) for agent_name in team_config.agents]
+        # Convert team member agent names into canonical agent Matrix IDs.
+        # Team streaming resolves config agents from these IDs, so they must keep
+        # the `mindroom_` prefix used by MatrixID.from_agent().
+        team_matrix_ids = [MatrixID.from_agent(agent_name, config.domain) for agent_name in team_config.agents]
         return TeamBot(
             agent_user=agent_user,
             storage_path=storage_path,
