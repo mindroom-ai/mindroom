@@ -290,7 +290,7 @@ class ModelConfig(BaseModel):
     """Configuration for an AI model."""
 
     provider: str = Field(
-        description="Model provider (openai, anthropic, vertexai_claude, anthropic_vertex, ollama, etc)",
+        description="Model provider (openai, anthropic, vertexai_claude, ollama, etc)",
     )
     id: str = Field(description="Model ID specific to the provider")
     host: str | None = Field(default=None, description="Optional host URL (e.g., for Ollama)")

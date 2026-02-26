@@ -420,7 +420,7 @@ Configure AI model providers:
 - **Test connection** to verify model accessibility
 - **Provider API keys** section for configuring credentials
 
-**Runtime-supported providers:** OpenAI, Anthropic, Google Gemini (`google`/`gemini`), Ollama, OpenRouter, Groq, DeepSeek, Cerebras
+**Runtime-supported providers:** OpenAI, Anthropic, Google Gemini (`google`/`gemini`), Vertex AI Claude (`vertexai_claude`), Ollama, OpenRouter, Groq, DeepSeek, Cerebras
 
 ### Memory
 
@@ -654,10 +654,10 @@ agents:
 # Model configurations (at least a "default" model is recommended)
 models:
   default:
-    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, groq, cerebras, openrouter, deepseek
+    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
     id: claude-sonnet-4-5-latest     # Required: Model ID for the provider
   sonnet:
-    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, groq, cerebras, openrouter, deepseek
+    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
     id: claude-sonnet-4-5-latest     # Required: Model ID for the provider
     host: null                     # Optional: Host URL (e.g., for Ollama)
     api_key: null                  # Optional: API key (usually from env vars)
@@ -1056,6 +1056,7 @@ Models define the AI providers and model IDs used by agents.
 - `anthropic` - Claude models (Anthropic)
 - `openai` - GPT models and OpenAI-compatible endpoints
 - `google` or `gemini` - Google Gemini models
+- `vertexai_claude` - Anthropic Claude models on Google Vertex AI
 - `ollama` - Local models via Ollama
 - `groq` - Groq-hosted models (fast inference)
 - `openrouter` - OpenRouter-hosted models (access to many providers)
@@ -1099,6 +1100,14 @@ models:
   gemini:
     provider: google
     id: gemini-2.0-flash
+
+  # Anthropic Claude on Vertex AI
+  vertex_claude:
+    provider: vertexai_claude
+    id: claude-sonnet-4@20250514
+    extra_kwargs:
+      project_id: your-gcp-project
+      region: us-central1
 
   # Local via Ollama
   local:

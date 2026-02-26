@@ -278,38 +278,5 @@ def test_vertexai_claude_provider() -> None:
     assert model.provider == "VertexAI"
 
 
-def test_anthropic_vertex_alias_provider() -> None:
-    """Test anthropic_vertex alias maps to native Vertex Claude model."""
-    config_data = {
-        "models": {
-            "vertex_alias_model": {
-                "provider": "anthropic_vertex",
-                "id": "claude-opus-4@20250514",
-            },
-        },
-        "defaults": {
-            "markdown": True,
-        },
-        "router": {
-            "model": "vertex_alias_model",
-        },
-        "memory": {
-            "embedder": {
-                "provider": "openai",
-                "config": {
-                    "model": "text-embedding-3-small",
-                },
-            },
-        },
-        "agents": {},
-    }
-
-    config = Config(**config_data)
-    model = get_model_instance(config, "vertex_alias_model")
-
-    assert isinstance(model, VertexAIClaude)
-    assert model.id == "claude-opus-4@20250514"
-
-
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

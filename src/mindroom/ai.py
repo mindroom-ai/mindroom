@@ -526,7 +526,6 @@ def _create_model_for_provider(provider: str, model_id: str, model_config: Model
         "gemini": Gemini,
         "google": Gemini,
         "vertexai_claude": VertexAIClaude,
-        "anthropic_vertex": VertexAIClaude,
         "cerebras": Cerebras,
         "groq": Groq,
         "deepseek": DeepSeek,
