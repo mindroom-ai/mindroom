@@ -289,7 +289,9 @@ class KnowledgeBaseConfig(BaseModel):
 class ModelConfig(BaseModel):
     """Configuration for an AI model."""
 
-    provider: str = Field(description="Model provider (openai, anthropic, ollama, etc)")
+    provider: str = Field(
+        description="Model provider (openai, anthropic, vertexai_claude, anthropic_vertex, ollama, etc)",
+    )
     id: str = Field(description="Model ID specific to the provider")
     host: str | None = Field(default=None, description="Optional host URL (e.g., for Ollama)")
     api_key: str | None = Field(default=None, description="Optional API key (usually from env vars)")

@@ -17,6 +17,7 @@ from agno.models.metrics import Metrics
 from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat
 from agno.models.openrouter import OpenRouter
+from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.run.agent import (
     ModelRequestCompletedEvent,
     RunCompletedEvent,
@@ -60,6 +61,11 @@ logger = get_logger(__name__)
 
 AIStreamChunk = str | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
 AI_RUN_METADATA_VERSION = 1
+
+
+def _canonical_provider(provider: str) -> str:
+    """Return normalized provider key for model dispatch."""
+    return provider.strip().lower().replace("-", "_")
 
 
 def _estimate_message_media_chars(message: object) -> int:
@@ -460,18 +466,22 @@ def _set_api_key_env_var(provider: str) -> None:
         provider: Provider name (e.g., 'openai', 'anthropic')
 
     """
-    env_vars = {**PROVIDER_ENV_KEYS, "gemini": PROVIDER_ENV_KEYS["google"]}
+    env_vars = {
+        **PROVIDER_ENV_KEYS,
+        "gemini": PROVIDER_ENV_KEYS["google"],
+    }
 
-    if provider not in env_vars:
+    canonical_provider = _canonical_provider(provider)
+    if canonical_provider not in env_vars:
         return
 
     # Get API key from CredentialsManager (which has been synced from .env)
-    api_key = get_api_key_for_provider(provider)
+    api_key = get_api_key_for_provider(canonical_provider)
 
     # Set environment variable if key exists
     if api_key:
-        os.environ[env_vars[provider]] = api_key
-        logger.debug(f"Set {env_vars[provider]} from CredentialsManager")
+        os.environ[env_vars[canonical_provider]] = api_key
+        logger.debug(f"Set {env_vars[canonical_provider]} from CredentialsManager")
 
 
 def _create_model_for_provider(provider: str, model_id: str, model_config: ModelConfig, extra_kwargs: dict) -> Model:
@@ -490,8 +500,10 @@ def _create_model_for_provider(provider: str, model_id: str, model_config: Model
         ValueError: If provider not supported
 
     """
+    canonical_provider = _canonical_provider(provider)
+
     # Handle Ollama separately due to special host configuration
-    if provider == "ollama":
+    if canonical_provider == "ollama":
         # Priority: model config > env/CredentialsManager > default
         # This allows per-model host configuration in config.yaml
         host = model_config.host or get_ollama_host() or "http://localhost:11434"
@@ -499,10 +511,10 @@ def _create_model_for_provider(provider: str, model_id: str, model_config: Model
         return Ollama(id=model_id, host=host, **extra_kwargs)
 
     # Handle OpenRouter separately due to API key capture timing issue
-    if provider == "openrouter":
+    if canonical_provider == "openrouter":
         # OpenRouter needs the API key passed explicitly because it captures
         # the environment variable at import time, not at instantiation time
-        api_key = extra_kwargs.pop("api_key", None) or get_api_key_for_provider(provider)
+        api_key = extra_kwargs.pop("api_key", None) or get_api_key_for_provider(canonical_provider)
         if not api_key:
             logger.warning("No OpenRouter API key found in environment or CredentialsManager")
         return OpenRouter(id=model_id, api_key=api_key, **extra_kwargs)
@@ -513,12 +525,14 @@ def _create_model_for_provider(provider: str, model_id: str, model_config: Model
         "anthropic": Claude,
         "gemini": Gemini,
         "google": Gemini,
+        "vertexai_claude": VertexAIClaude,
+        "anthropic_vertex": VertexAIClaude,
         "cerebras": Cerebras,
         "groq": Groq,
         "deepseek": DeepSeek,
     }
 
-    model_class = provider_map.get(provider)
+    model_class = provider_map.get(canonical_provider)
     if model_class is not None:
         return model_class(id=model_id, **extra_kwargs)
 

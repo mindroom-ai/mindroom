@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from agno.models.vertexai.claude import Claude as VertexAIClaude
 
 from mindroom.ai import get_model_instance
 from mindroom.config import Config, ModelConfig
@@ -237,6 +238,77 @@ def test_model_without_extra_kwargs() -> None:
     model = get_model_instance(config, "simple_model")
     assert model.id == "gpt-3.5-turbo"
     assert model.provider == "OpenAI"
+
+
+def test_vertexai_claude_provider() -> None:
+    """Test native Vertex Claude provider mapping."""
+    config_data = {
+        "models": {
+            "vertex_claude_model": {
+                "provider": "vertexai_claude",
+                "id": "claude-sonnet-4@20250514",
+                "extra_kwargs": {
+                    "project_id": "demo-project",
+                    "region": "us-central1",
+                },
+            },
+        },
+        "defaults": {
+            "markdown": True,
+        },
+        "router": {
+            "model": "vertex_claude_model",
+        },
+        "memory": {
+            "embedder": {
+                "provider": "openai",
+                "config": {
+                    "model": "text-embedding-3-small",
+                },
+            },
+        },
+        "agents": {},
+    }
+
+    config = Config(**config_data)
+    model = get_model_instance(config, "vertex_claude_model")
+
+    assert isinstance(model, VertexAIClaude)
+    assert model.id == "claude-sonnet-4@20250514"
+    assert model.provider == "VertexAI"
+
+
+def test_anthropic_vertex_alias_provider() -> None:
+    """Test anthropic_vertex alias maps to native Vertex Claude model."""
+    config_data = {
+        "models": {
+            "vertex_alias_model": {
+                "provider": "anthropic_vertex",
+                "id": "claude-opus-4@20250514",
+            },
+        },
+        "defaults": {
+            "markdown": True,
+        },
+        "router": {
+            "model": "vertex_alias_model",
+        },
+        "memory": {
+            "embedder": {
+                "provider": "openai",
+                "config": {
+                    "model": "text-embedding-3-small",
+                },
+            },
+        },
+        "agents": {},
+    }
+
+    config = Config(**config_data)
+    model = get_model_instance(config, "vertex_alias_model")
+
+    assert isinstance(model, VertexAIClaude)
+    assert model.id == "claude-opus-4@20250514"
 
 
 if __name__ == "__main__":

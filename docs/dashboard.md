@@ -76,7 +76,7 @@ Configure AI model providers:
 - **Test connection** to verify model accessibility
 - **Provider API keys** section for configuring credentials
 
-**Runtime-supported providers:** OpenAI, Anthropic, Google Gemini (`google`/`gemini`), Ollama, OpenRouter, Groq, DeepSeek, Cerebras
+**Runtime-supported providers:** OpenAI, Anthropic, Google Gemini (`google`/`gemini`), Vertex AI Claude (`vertexai_claude`/`anthropic_vertex`), Ollama, OpenRouter, Groq, DeepSeek, Cerebras
 
 ### Memory
 
