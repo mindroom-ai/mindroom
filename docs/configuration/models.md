@@ -12,7 +12,6 @@ Models define the AI providers and model IDs used by agents.
 - `openai` - GPT models and OpenAI-compatible endpoints
 - `google` or `gemini` - Google Gemini models
 - `vertexai_claude` - Anthropic Claude models on Google Vertex AI
-- `anthropic_vertex` - Alias for `vertexai_claude`
 - `ollama` - Local models via Ollama
 - `groq` - Groq-hosted models (fast inference)
 - `openrouter` - OpenRouter-hosted models (access to many providers)
