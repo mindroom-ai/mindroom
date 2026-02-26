@@ -153,6 +153,9 @@ mindroom run
 - [Google Services OAuth](deployment/google-services-oauth.md) - Admin OAuth setup for Gmail/Calendar/Drive/Sheets
 - [Google Services OAuth (Individual)](deployment/google-services-user-oauth.md) - Single-user OAuth setup
 - [CLI Reference](cli.md) - Command-line interface
+- [Support](support.md) - Contact and troubleshooting help
+- [Privacy Policy](privacy.md) - Privacy and data handling information
+- [Terms of Service](terms.md) - Terms for using MindRoom services and clients
 
 ## License
 
