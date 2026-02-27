@@ -275,7 +275,7 @@ class TestMatrixRegistration:
 
         with (
             patch(
-                "mindroom.matrix.client._register_user_via_provisioning_service",
+                "mindroom.matrix.client.provisioning.register_user_via_provisioning_service",
                 new_callable=AsyncMock,
             ) as mock_register,
             patch("mindroom.matrix.client.matrix_client") as mock_matrix_client,
@@ -324,7 +324,7 @@ class TestMatrixRegistration:
 
         with (
             patch(
-                "mindroom.matrix.client._register_user_via_provisioning_service",
+                "mindroom.matrix.client.provisioning.register_user_via_provisioning_service",
                 new_callable=AsyncMock,
             ) as mock_register,
             patch("mindroom.matrix.client.matrix_client") as mock_matrix_client,

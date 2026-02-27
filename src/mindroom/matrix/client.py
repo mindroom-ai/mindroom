@@ -7,10 +7,9 @@ import re
 import ssl as ssl_module
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from html import escape
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import httpx
 import markdown
@@ -20,6 +19,7 @@ from mindroom.config import RoomDirectoryVisibility, RoomJoinRule
 from mindroom.constants import ENCRYPTION_KEYS_DIR
 from mindroom.logging_config import get_logger
 
+from . import provisioning
 from .event_info import EventInfo
 from .identity import MatrixID, extract_server_name_from_homeserver
 from .large_messages import prepare_large_message
@@ -51,99 +51,6 @@ def _registration_token_from_env() -> str | None:
     """Get MATRIX_REGISTRATION_TOKEN from environment if configured."""
     token = os.getenv("MATRIX_REGISTRATION_TOKEN", "").strip()
     return token or None
-
-
-def _provisioning_url_from_env() -> str | None:
-    """Get hosted provisioning API base URL from environment if configured."""
-    url = os.getenv("MINDROOM_PROVISIONING_URL", "").strip()
-    return url.rstrip("/") or None
-
-
-def _local_provisioning_client_credentials_from_env() -> tuple[str, str] | None:
-    """Get local provisioning client credentials from environment if configured."""
-    client_id = os.getenv("MINDROOM_LOCAL_CLIENT_ID", "").strip()
-    client_secret = os.getenv("MINDROOM_LOCAL_CLIENT_SECRET", "").strip()
-    if not client_id and not client_secret:
-        return None
-    if not client_id or not client_secret:
-        msg = (
-            "Provisioning credentials are incomplete. "
-            "Set both MINDROOM_LOCAL_CLIENT_ID and MINDROOM_LOCAL_CLIENT_SECRET, "
-            "or run `mindroom connect --pair-code ...` again."
-        )
-        raise ValueError(msg)
-    return client_id, client_secret
-
-
-@dataclass(frozen=True)
-class _ProvisioningRegisterResult:
-    status: Literal["created", "user_in_use"]
-    user_id: str
-
-
-async def _register_user_via_provisioning_service(
-    *,
-    provisioning_url: str,
-    client_id: str,
-    client_secret: str,
-    homeserver: str,
-    username: str,
-    password: str,
-    display_name: str,
-) -> _ProvisioningRegisterResult:
-    """Register an agent account via provisioning service server-side flow."""
-    url = f"{provisioning_url}/v1/local-mindroom/register-agent"
-    headers = {
-        "X-Local-MindRoom-Client-Id": client_id,
-        "X-Local-MindRoom-Client-Secret": client_secret,
-    }
-    payload = {
-        "homeserver": homeserver.rstrip("/"),
-        "username": username,
-        "password": password,
-        "display_name": display_name,
-    }
-    try:
-        async with httpx.AsyncClient(timeout=10, verify=_matrix_ssl_verify_enabled()) as client:
-            response = await client.post(url, json=payload, headers=headers)
-    except httpx.HTTPError as exc:
-        msg = f"Could not reach provisioning service ({provisioning_url}): {exc}"
-        raise ValueError(msg) from exc
-
-    if not response.is_success:
-        detail = response.text.strip() or "unknown error"
-        if response.status_code in {401, 403}:
-            msg = "Provisioning credentials are invalid or revoked. Run `mindroom connect --pair-code ...` again."
-            raise ValueError(msg)
-        if response.status_code == 404:
-            msg = (
-                "Provisioning service does not support /register-agent yet. "
-                "Deploy the latest local provisioning service."
-            )
-            raise ValueError(msg)
-        msg = f"Provisioning service returned HTTP {response.status_code}: {detail}"
-        raise ValueError(msg)
-
-    try:
-        body = response.json()
-    except ValueError as exc:
-        msg = "Provisioning service returned invalid JSON while registering agent."
-        raise ValueError(msg) from exc
-
-    if not isinstance(body, dict):
-        msg = "Provisioning service returned invalid register-agent payload."
-        raise TypeError(msg)
-
-    status = body.get("status")
-    user_id = body.get("user_id")
-    if status not in {"created", "user_in_use"}:
-        msg = "Provisioning service response missing valid status for register-agent."
-        raise ValueError(msg)
-    if not isinstance(user_id, str) or not user_id.strip():
-        msg = "Provisioning service response missing user_id for register-agent."
-        raise ValueError(msg)
-
-    return _ProvisioningRegisterResult(status=status, user_id=user_id.strip())
 
 
 async def _homeserver_requires_registration_token(homeserver: str) -> bool:
@@ -361,9 +268,9 @@ async def register_user(
     user_id = MatrixID.from_username(username, server_name).full_id
 
     registration_token = _registration_token_from_env()
-    provisioning_url = _provisioning_url_from_env()
+    provisioning_url = provisioning.provisioning_url_from_env()
     if provisioning_url and not registration_token:
-        creds = _local_provisioning_client_credentials_from_env()
+        creds = provisioning.local_provisioning_client_credentials_from_env()
         if creds is None:
             msg = (
                 "MINDROOM_PROVISIONING_URL is set but local client credentials are missing. "
@@ -371,7 +278,7 @@ async def register_user(
             )
             raise ValueError(msg)
         client_id, client_secret = creds
-        provisioning_result = await _register_user_via_provisioning_service(
+        provisioning_result = await provisioning.register_user_via_provisioning_service(
             provisioning_url=provisioning_url,
             client_id=client_id,
             client_secret=client_secret,
