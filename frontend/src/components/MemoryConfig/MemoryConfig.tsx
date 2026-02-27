@@ -271,17 +271,6 @@ export function MemoryConfig() {
     });
   };
 
-  const updateAutoFlushCuration = (
-    updates: Partial<NonNullable<NonNullable<MemorySettings['auto_flush']>['curation']>>
-  ) => {
-    updateAutoFlush({
-      curation: {
-        ...localConfig.auto_flush?.curation,
-        ...updates,
-      },
-    });
-  };
-
   const handleSave = async () => {
     await saveConfig();
   };
@@ -708,25 +697,6 @@ export function MemoryConfig() {
               </FieldGroup>
 
               <FieldGroup
-                label="Extractor: Max Retries"
-                helperText="Consecutive failures before extended cooldown."
-                htmlFor="max-retries"
-              >
-                <Input
-                  id="max-retries"
-                  type="number"
-                  min={0}
-                  value={localConfig.auto_flush?.extractor?.max_retries ?? 3}
-                  onChange={e =>
-                    updateAutoFlushExtractor({
-                      max_retries: parseInteger(e.target.value, 3),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
-
-              <FieldGroup
                 label="Extractor: NO_REPLY Token"
                 helperText="Exact token used by the extractor when nothing should be stored."
                 htmlFor="no-reply-token"
@@ -785,118 +755,6 @@ export function MemoryConfig() {
                   }
                   className="transition-colors hover:border-ring focus:border-ring"
                 />
-              </FieldGroup>
-
-              <FieldGroup
-                label="Context: Daily Tail Lines"
-                helperText="Reserved for daily-note context depth."
-                htmlFor="daily-tail-lines"
-              >
-                <Input
-                  id="daily-tail-lines"
-                  type="number"
-                  min={0}
-                  value={
-                    localConfig.auto_flush?.extractor?.include_memory_context?.daily_tail_lines ??
-                    80
-                  }
-                  onChange={e =>
-                    updateAutoFlushExtractorContext({
-                      daily_tail_lines: parseInteger(e.target.value, 80),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
-
-              <FieldGroup
-                label="Auto Curation"
-                helperText="Optional append-only curation from daily memory into MEMORY.md."
-                htmlFor="curation-enabled"
-              >
-                <Select
-                  value={String(localConfig.auto_flush?.curation?.enabled ?? false)}
-                  onValueChange={value =>
-                    updateAutoFlushCuration({
-                      enabled: parseBoolean(value),
-                    })
-                  }
-                >
-                  <SelectTrigger
-                    id="curation-enabled"
-                    className="transition-colors hover:border-ring"
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="true">Enabled</SelectItem>
-                    <SelectItem value="false">Disabled</SelectItem>
-                  </SelectContent>
-                </Select>
-              </FieldGroup>
-
-              <FieldGroup
-                label="Curation: Max Lines Per Pass"
-                helperText="Maximum lines appended to MEMORY.md per curation pass."
-                htmlFor="curation-max-lines"
-              >
-                <Input
-                  id="curation-max-lines"
-                  type="number"
-                  min={1}
-                  value={localConfig.auto_flush?.curation?.max_lines_per_pass ?? 20}
-                  onChange={e =>
-                    updateAutoFlushCuration({
-                      max_lines_per_pass: parseInteger(e.target.value, 20),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
-
-              <FieldGroup
-                label="Curation: Max Passes Per Day"
-                helperText="Maximum curation runs per day."
-                htmlFor="curation-max-passes"
-              >
-                <Input
-                  id="curation-max-passes"
-                  type="number"
-                  min={1}
-                  value={localConfig.auto_flush?.curation?.max_passes_per_day ?? 1}
-                  onChange={e =>
-                    updateAutoFlushCuration({
-                      max_passes_per_day: parseInteger(e.target.value, 1),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
-
-              <FieldGroup
-                label="Curation: Append Only"
-                helperText="When enabled, curation never auto-deletes from MEMORY.md."
-                htmlFor="curation-append-only"
-              >
-                <Select
-                  value={String(localConfig.auto_flush?.curation?.append_only ?? true)}
-                  onValueChange={value =>
-                    updateAutoFlushCuration({
-                      append_only: parseBoolean(value),
-                    })
-                  }
-                >
-                  <SelectTrigger
-                    id="curation-append-only"
-                    className="transition-colors hover:border-ring"
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="true">Enabled</SelectItem>
-                    <SelectItem value="false">Disabled</SelectItem>
-                  </SelectContent>
-                </Select>
               </FieldGroup>
             </>
           )}

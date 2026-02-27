@@ -2710,7 +2710,6 @@ memory:
       max_messages_per_flush: 20
       max_chars_per_flush: 12000
       max_extraction_seconds: 30
-      max_retries: 3
 ```
 
 High-level behavior:
@@ -2730,8 +2729,7 @@ The Dashboard **Memory** page supports:
 - file backend settings (`path`, `entrypoint_file`, `max_entrypoint_lines`)
 - auto-flush settings (intervals, idle/age thresholds, retries)
 - batch sizing
-- extractor settings (`no_reply_token`, message/char/time/retry limits, memory-context bounds)
-- curation settings
+- extractor settings (`no_reply_token`, message/char/time limits, memory-context bounds)
 
 Save from the Memory page to persist changes to `config.yaml`.
 
