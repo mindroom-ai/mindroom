@@ -11,6 +11,8 @@ MindRoom supports two memory backends:
 
 You can switch backends with `memory.backend`.
 
+OpenClaw compatibility uses this same backend selection; there is no separate OpenClaw-only memory engine.
+
 Optional:
 - `memory.team_reads_member_memory: true` allows team-context memory reads to include member agent scopes.
 
