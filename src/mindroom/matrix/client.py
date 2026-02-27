@@ -45,7 +45,7 @@ async def _homeserver_requires_registration_token(homeserver: str) -> bool:
     """Check whether the homeserver advertises registration-token flow."""
     url = f"{homeserver.rstrip('/')}/_matrix/client/v3/register"
     try:
-        async with httpx.AsyncClient(timeout=5, verify=provisioning.matrix_ssl_verify_enabled()) as client:
+        async with httpx.AsyncClient(timeout=5, verify=MATRIX_SSL_VERIFY) as client:
             response = await client.post(url, json={})
             data = response.json()
     except (httpx.HTTPError, ValueError):
@@ -61,22 +61,6 @@ async def _homeserver_requires_registration_token(homeserver: str) -> bool:
         if isinstance(stages, list) and "m.login.registration_token" in stages:
             return True
     return False
-
-
-async def _register_with_token(
-    client: nio.AsyncClient,
-    *,
-    username: str,
-    password: str,
-    registration_token: str,
-) -> nio.RegisterResponse | nio.ErrorResponse:
-    """Register a user with m.login.registration_token auth."""
-    return await client.register_with_token(
-        username=username,
-        password=password,
-        registration_token=registration_token,
-        device_name="mindroom_agent",
-    )
 
 
 async def _registration_failure_message(
@@ -293,11 +277,11 @@ async def register_user(
     async with matrix_client(homeserver, user_id=user_id) as client:
         # Try to register the user
         if registration_token:
-            response = await _register_with_token(
-                client,
+            response = await client.register_with_token(
                 username=username,
                 password=password,
                 registration_token=registration_token,
+                device_name="mindroom_agent",
             )
         else:
             response = await client.register(

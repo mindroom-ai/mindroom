@@ -11,11 +11,6 @@ import httpx
 from mindroom.constants import MATRIX_SSL_VERIFY
 
 
-def matrix_ssl_verify_enabled() -> bool:
-    """Return whether HTTPS certificate validation is enabled for Matrix/provisioning requests."""
-    return MATRIX_SSL_VERIFY
-
-
 def provisioning_url_from_env() -> str | None:
     """Get hosted provisioning API base URL from environment if configured."""
     url = os.getenv("MINDROOM_PROVISIONING_URL", "").strip()
@@ -94,7 +89,7 @@ async def register_user_via_provisioning_service(
         "display_name": display_name,
     }
     try:
-        async with httpx.AsyncClient(timeout=10, verify=matrix_ssl_verify_enabled()) as client:
+        async with httpx.AsyncClient(timeout=10, verify=MATRIX_SSL_VERIFY) as client:
             response = await client.post(url, json=payload, headers=headers)
     except httpx.HTTPError as exc:
         msg = f"Could not reach provisioning service ({provisioning_url}): {exc}"
