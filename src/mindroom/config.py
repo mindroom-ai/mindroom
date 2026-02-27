@@ -21,6 +21,7 @@ logger = get_logger(__name__)
 
 AgentLearningMode = Literal["always", "agentic"]
 CultureMode = Literal["automatic", "agentic", "manual"]
+MemoryBackend = Literal["mem0", "file"]
 RoomAccessMode = Literal["single_user_private", "multi_user"]
 MultiUserJoinRule = Literal["public", "knock"]
 RoomJoinRule = Literal["invite", "public", "knock"]
@@ -237,14 +238,185 @@ class MemoryLLMConfig(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict, description="Provider-specific LLM config")
 
 
+class MemoryFileConfig(BaseModel):
+    """File-backed memory configuration."""
+
+    path: str | None = Field(
+        default=None,
+        description=(
+            "Directory for file-backed memory. Relative paths resolve from the config "
+            "directory. Defaults to <storage_path>/memory_files when omitted."
+        ),
+    )
+    entrypoint_file: str = Field(
+        default="MEMORY.md",
+        description="Primary memory file loaded as a high-priority memory index",
+    )
+    max_entrypoint_lines: int = Field(
+        default=200,
+        ge=1,
+        description="Maximum number of lines to preload from the entrypoint memory file",
+    )
+
+
+class MemoryAutoFlushBatchConfig(BaseModel):
+    """Batching controls for background memory auto-flush."""
+
+    max_sessions_per_cycle: int = Field(
+        default=10,
+        ge=1,
+        description="Maximum sessions processed in one auto-flush loop iteration",
+    )
+    max_sessions_per_agent_per_cycle: int = Field(
+        default=3,
+        ge=1,
+        description="Maximum sessions per agent processed in one auto-flush loop iteration",
+    )
+
+
+class MemoryAutoFlushContextConfig(BaseModel):
+    """Existing-memory context limits injected into extraction runs."""
+
+    daily_tail_lines: int = Field(
+        default=80,
+        ge=0,
+        description="Maximum recent daily-memory lines included for extraction dedupe context",
+    )
+    memory_snippets: int = Field(
+        default=5,
+        ge=0,
+        description="Maximum number of MEMORY.md snippets included for extraction dedupe context",
+    )
+    snippet_max_chars: int = Field(
+        default=400,
+        ge=1,
+        description="Maximum characters per included memory snippet",
+    )
+
+
+class MemoryAutoFlushExtractorConfig(BaseModel):
+    """Extraction limits for one background memory flush job."""
+
+    no_reply_token: str = Field(
+        default="NO_REPLY",
+        description="Token indicating no durable memory should be written",
+    )
+    max_messages_per_flush: int = Field(
+        default=20,
+        ge=1,
+        description="Maximum session chat messages considered by one extraction job",
+    )
+    max_chars_per_flush: int = Field(
+        default=12000,
+        ge=1,
+        description="Maximum message characters considered by one extraction job",
+    )
+    max_extraction_seconds: int = Field(
+        default=30,
+        ge=1,
+        description="Timeout for one extraction job before retrying in a later cycle",
+    )
+    max_retries: int = Field(
+        default=3,
+        ge=0,
+        description="Maximum consecutive extraction failures before extended cooldown",
+    )
+    include_memory_context: MemoryAutoFlushContextConfig = Field(
+        default_factory=MemoryAutoFlushContextConfig,
+        description="Bounds for existing memory context included during extraction",
+    )
+
+
+class MemoryAutoFlushCurationConfig(BaseModel):
+    """Optional long-term curation controls for MEMORY.md."""
+
+    enabled: bool = Field(default=False, description="Enable periodic auto-curation into MEMORY.md")
+    max_lines_per_pass: int = Field(
+        default=20,
+        ge=1,
+        description="Maximum lines appended to MEMORY.md in one curation pass",
+    )
+    max_passes_per_day: int = Field(
+        default=1,
+        ge=1,
+        description="Maximum curation passes per day per agent",
+    )
+    append_only: bool = Field(
+        default=True,
+        description="Only append during auto-curation; never auto-delete from MEMORY.md",
+    )
+
+
+class MemoryAutoFlushConfig(BaseModel):
+    """Background memory auto-flush configuration."""
+
+    enabled: bool = Field(default=False, description="Enable background file-memory auto-flush worker")
+    flush_interval_seconds: int = Field(
+        default=180,
+        ge=5,
+        description="Background auto-flush loop interval",
+    )
+    idle_seconds: int = Field(
+        default=120,
+        ge=0,
+        description="Session idle time before dirty session becomes flush-eligible",
+    )
+    max_dirty_age_seconds: int = Field(
+        default=600,
+        ge=1,
+        description="Force flush eligibility once a session remains dirty for this long",
+    )
+    stale_ttl_seconds: int = Field(
+        default=86400,
+        ge=60,
+        description="Drop stale flush-state entries older than this TTL",
+    )
+    max_cross_session_reprioritize: int = Field(
+        default=5,
+        ge=0,
+        description="Maximum same-agent dirty sessions reprioritized per incoming prompt",
+    )
+    retry_cooldown_seconds: int = Field(
+        default=30,
+        ge=1,
+        description="Cooldown before retrying a failed extraction attempt",
+    )
+    max_retry_cooldown_seconds: int = Field(
+        default=300,
+        ge=1,
+        description="Upper bound for retry cooldown backoff",
+    )
+    batch: MemoryAutoFlushBatchConfig = Field(
+        default_factory=MemoryAutoFlushBatchConfig,
+        description="Batch sizing controls for each auto-flush cycle",
+    )
+    extractor: MemoryAutoFlushExtractorConfig = Field(
+        default_factory=MemoryAutoFlushExtractorConfig,
+        description="Extraction-window and timeout controls for auto-flush",
+    )
+    curation: MemoryAutoFlushCurationConfig = Field(
+        default_factory=MemoryAutoFlushCurationConfig,
+        description="Optional long-term curation settings",
+    )
+
+
 class MemoryConfig(BaseModel):
     """Memory system configuration."""
 
+    backend: MemoryBackend = Field(
+        default="mem0",
+        description="Memory backend: 'mem0' (vector memory) or 'file' (markdown memory files)",
+    )
     embedder: MemoryEmbedderConfig = Field(
         default_factory=MemoryEmbedderConfig,
         description="Embedder configuration for memory",
     )
     llm: MemoryLLMConfig | None = Field(default=None, description="LLM configuration for memory")
+    file: MemoryFileConfig = Field(default_factory=MemoryFileConfig, description="File-backed memory configuration")
+    auto_flush: MemoryAutoFlushConfig = Field(
+        default_factory=MemoryAutoFlushConfig,
+        description="Background auto-flush behavior for file-backed memory",
+    )
 
 
 class KnowledgeGitConfig(BaseModel):

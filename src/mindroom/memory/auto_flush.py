@@ -1,0 +1,496 @@
+"""Background auto-flush for file-backed memory."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import threading
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, TypedDict, cast
+
+from agno.db.base import SessionType
+from agno.session.agent import AgentSession
+
+from mindroom.agents import create_session_storage
+from mindroom.logging_config import get_logger
+
+from .functions import add_agent_memory
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
+
+    from mindroom.config import Config, MemoryAutoFlushConfig
+
+logger = get_logger(__name__)
+
+_FLUSH_STATE_FILENAME = "memory_flush_state.json"
+_STATE_LOCK = threading.Lock()
+_WAKE_EVENTS: set[asyncio.Event] = set()
+
+
+class FlushSessionEntry(TypedDict, total=False):
+    """Persistent flush metadata per (agent, session)."""
+
+    agent_name: str
+    session_id: str
+    room_id: str | None
+    thread_id: str | None
+    dirty: bool
+    in_flight: bool
+    first_dirty_at: int
+    last_seen_at: int
+    last_session_updated_at: int | None
+    last_flushed_at: int | None
+    last_flushed_session_updated_at: int | None
+    next_attempt_at: int | None
+    consecutive_failures: int
+    priority_boost_at: int | None
+
+
+class FlushState(TypedDict):
+    """On-disk auto-flush state payload."""
+
+    version: int
+    sessions: dict[str, FlushSessionEntry]
+
+
+def _state_path(storage_path: Path) -> Path:
+    root = storage_path.expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    return root / _FLUSH_STATE_FILENAME
+
+
+def _now_ts() -> int:
+    return int(datetime.now(UTC).timestamp())
+
+
+def _empty_state() -> FlushState:
+    return {"version": 1, "sessions": {}}
+
+
+def _session_key(agent_name: str, session_id: str) -> str:
+    return f"{agent_name}:{session_id}"
+
+
+def _read_state_unlocked(storage_path: Path) -> FlushState:
+    path = _state_path(storage_path)
+    if not path.exists():
+        return _empty_state()
+
+    payload = path.read_text(encoding="utf-8").strip()
+    if not payload:
+        return _empty_state()
+
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        logger.warning("Invalid memory auto-flush state JSON; resetting state")
+        return _empty_state()
+    if not isinstance(data, dict):
+        return _empty_state()
+    sessions_raw = data.get("sessions")
+    sessions = sessions_raw if isinstance(sessions_raw, dict) else {}
+    return {"version": 1, "sessions": sessions}
+
+
+def _write_state_unlocked(storage_path: Path, state: FlushState) -> None:
+    path = _state_path(storage_path)
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    tmp_path.write_text(f"{json.dumps(state, ensure_ascii=True, indent=2)}\n", encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _notify_workers() -> None:
+    for wake_event in tuple(_WAKE_EVENTS):
+        wake_event.set()
+
+
+def auto_flush_enabled(config: Config) -> bool:
+    """Return whether file-memory auto-flush is enabled."""
+    return config.memory.backend == "file" and config.memory.auto_flush.enabled
+
+
+def mark_auto_flush_dirty_session(
+    storage_path: Path,
+    config: Config,
+    *,
+    agent_name: str,
+    session_id: str,
+    room_id: str | None,
+    thread_id: str | None,
+) -> None:
+    """Mark one agent session as dirty for background auto-flush."""
+    if not auto_flush_enabled(config):
+        return
+
+    now = _now_ts()
+    key = _session_key(agent_name, session_id)
+
+    with _STATE_LOCK:
+        state = _read_state_unlocked(storage_path)
+        sessions = state["sessions"]
+        existing = sessions.get(key, {})
+        first_dirty_at = existing.get("first_dirty_at", now)
+        if not existing.get("dirty", False):
+            first_dirty_at = now
+
+        sessions[key] = {
+            **existing,
+            "agent_name": agent_name,
+            "session_id": session_id,
+            "room_id": room_id,
+            "thread_id": thread_id,
+            "dirty": True,
+            "in_flight": False,
+            "first_dirty_at": first_dirty_at,
+            "last_seen_at": now,
+            "next_attempt_at": None,
+        }
+        _write_state_unlocked(storage_path, state)
+
+    _notify_workers()
+
+
+def reprioritize_auto_flush_sessions(
+    storage_path: Path,
+    config: Config,
+    *,
+    agent_name: str,
+    active_session_id: str,
+) -> None:
+    """Raise priority of other dirty sessions for the same agent."""
+    if not auto_flush_enabled(config):
+        return
+
+    max_reprioritize = config.memory.auto_flush.max_cross_session_reprioritize
+    if max_reprioritize <= 0:
+        return
+
+    now = _now_ts()
+    with _STATE_LOCK:
+        state = _read_state_unlocked(storage_path)
+        sessions = state["sessions"]
+        candidates = [
+            (key, entry)
+            for key, entry in sessions.items()
+            if entry.get("agent_name") == agent_name
+            and entry.get("session_id") != active_session_id
+            and entry.get("dirty", False)
+        ]
+        candidates.sort(key=lambda item: item[1].get("first_dirty_at", now))
+        for key, entry in candidates[:max_reprioritize]:
+            entry["priority_boost_at"] = now
+            sessions[key] = entry
+        _write_state_unlocked(storage_path, state)
+
+    _notify_workers()
+
+
+def _coerce_agent_session(raw_session: object) -> AgentSession | None:
+    if isinstance(raw_session, AgentSession):
+        return raw_session
+    if isinstance(raw_session, dict):
+        session_payload = cast("dict[str, Any]", raw_session)
+        return AgentSession.from_dict(session_payload)
+    return None
+
+
+def _load_agent_session(storage_path: Path, agent_name: str, session_id: str) -> AgentSession | None:
+    storage = create_session_storage(agent_name, storage_path)
+    raw_session = storage.get_session(session_id, SessionType.AGENT)
+    return _coerce_agent_session(raw_session)
+
+
+def _entry_priority_key(entry: FlushSessionEntry, now: int) -> tuple[int, int]:
+    boosted = entry.get("priority_boost_at")
+    priority_rank = 0 if isinstance(boosted, int) and boosted > 0 else 1
+    return (priority_rank, entry.get("first_dirty_at", now))
+
+
+def _select_recent_chat_lines(
+    session: AgentSession,
+    *,
+    max_messages: int,
+    max_chars: int,
+) -> list[str]:
+    messages = session.get_chat_history()
+    selected: list[str] = []
+    char_count = 0
+    for message in reversed(messages):
+        role = getattr(message, "role", None)
+        if role not in {"user", "assistant"}:
+            continue
+        content = getattr(message, "content", None)
+        if not isinstance(content, str):
+            continue
+        cleaned = " ".join(content.split())
+        if not cleaned:
+            continue
+        if len(cleaned) > 500:
+            cleaned = f"{cleaned[:497]}..."
+        line = f"{role}: {cleaned}"
+        next_count = char_count + len(line) + 1
+        if selected and next_count > max_chars:
+            break
+        selected.append(line)
+        char_count = next_count
+        if len(selected) >= max_messages:
+            break
+    selected.reverse()
+    return selected
+
+
+_DURABLE_HINTS = (
+    "decide",
+    "decision",
+    "agreed",
+    "remember",
+    "preference",
+    "prefer",
+    "todo",
+    "action item",
+    "next step",
+    "deadline",
+    "due",
+    "will ",
+)
+
+
+def _extract_durable_lines(lines: list[str]) -> list[str]:
+    durable: list[str] = []
+    for line in lines:
+        lower = line.lower()
+        if any(hint in lower for hint in _DURABLE_HINTS):
+            durable.append(line)
+    return durable
+
+
+def _retry_cooldown_seconds(settings: MemoryAutoFlushConfig, failures: int) -> int:
+    if failures <= 0:
+        return settings.retry_cooldown_seconds
+    multiplier = 2 ** max(0, failures - 1)
+    return min(
+        settings.max_retry_cooldown_seconds,
+        settings.retry_cooldown_seconds * multiplier,
+    )
+
+
+@dataclass
+class MemoryAutoFlushWorker:
+    """Background worker that flushes dirty sessions to file memory."""
+
+    storage_path: Path
+    config_provider: Callable[[], Config | None]
+    _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+    _wake_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+
+    def stop(self) -> None:
+        """Request graceful shutdown of the worker loop."""
+        self._stop_event.set()
+        self._wake_event.set()
+
+    async def run(self) -> None:
+        """Run periodic auto-flush cycles until stopped."""
+        _WAKE_EVENTS.add(self._wake_event)
+        try:
+            while not self._stop_event.is_set():
+                config = self.config_provider()
+                interval = 30
+                if config is not None and auto_flush_enabled(config):
+                    await self._run_cycle(config)
+                    interval = config.memory.auto_flush.flush_interval_seconds
+                self._wake_event.clear()
+                try:
+                    await asyncio.wait_for(self._wake_event.wait(), timeout=interval)
+                except TimeoutError:
+                    continue
+        finally:
+            _WAKE_EVENTS.discard(self._wake_event)
+
+    async def _run_cycle(self, config: Config) -> None:  # noqa: C901, PLR0915
+        now = _now_ts()
+        settings = config.memory.auto_flush
+
+        with _STATE_LOCK:
+            state = _read_state_unlocked(self.storage_path)
+            sessions = state["sessions"]
+            stale_keys = [
+                key
+                for key, entry in sessions.items()
+                if now - entry.get("last_seen_at", now) > settings.stale_ttl_seconds
+            ]
+            for key in stale_keys:
+                del sessions[key]
+            _write_state_unlocked(self.storage_path, state)
+
+        with _STATE_LOCK:
+            state = _read_state_unlocked(self.storage_path)
+            sessions = state["sessions"]
+            dirty_items = [(key, entry) for key, entry in sessions.items() if entry.get("dirty", False)]
+            dirty_items.sort(key=lambda item: _entry_priority_key(item[1], now))
+
+        selected_keys: list[str] = []
+        per_agent_count: dict[str, int] = {}
+        max_total = settings.batch.max_sessions_per_cycle
+        max_per_agent = settings.batch.max_sessions_per_agent_per_cycle
+
+        for key, entry in dirty_items:
+            if len(selected_keys) >= max_total:
+                break
+            if entry.get("in_flight", False):
+                continue
+            next_attempt_at = entry.get("next_attempt_at")
+            if isinstance(next_attempt_at, int) and next_attempt_at > now:
+                continue
+
+            agent_name = entry.get("agent_name")
+            session_id = entry.get("session_id")
+            if not isinstance(agent_name, str) or not isinstance(session_id, str):
+                continue
+
+            if per_agent_count.get(agent_name, 0) >= max_per_agent:
+                continue
+
+            session = _load_agent_session(self.storage_path, agent_name, session_id)
+            if session is None:
+                continue
+            session_updated_at = session.updated_at
+            entry["last_session_updated_at"] = session_updated_at
+            last_flushed = entry.get("last_flushed_session_updated_at")
+            if (
+                isinstance(last_flushed, int)
+                and isinstance(session_updated_at, int)
+                and session_updated_at <= last_flushed
+            ):
+                entry["dirty"] = False
+                with _STATE_LOCK:
+                    latest_state = _read_state_unlocked(self.storage_path)
+                    latest_state["sessions"][key] = entry
+                    _write_state_unlocked(self.storage_path, latest_state)
+                continue
+
+            idle_ready = now - entry.get("last_seen_at", now) >= settings.idle_seconds
+            age_ready = now - entry.get("first_dirty_at", now) >= settings.max_dirty_age_seconds
+            if not (idle_ready or age_ready):
+                continue
+
+            selected_keys.append(key)
+            per_agent_count[agent_name] = per_agent_count.get(agent_name, 0) + 1
+            with _STATE_LOCK:
+                latest_state = _read_state_unlocked(self.storage_path)
+                latest_entry = latest_state["sessions"].get(key, entry)
+                latest_entry["in_flight"] = True
+                latest_state["sessions"][key] = latest_entry
+                _write_state_unlocked(self.storage_path, latest_state)
+
+        for key in selected_keys:
+            await self._process_session_key(config, key)
+
+    async def _process_session_key(self, config: Config, key: str) -> None:  # noqa: PLR0915
+        now = _now_ts()
+        settings = config.memory.auto_flush
+        with _STATE_LOCK:
+            state = _read_state_unlocked(self.storage_path)
+            entry = state["sessions"].get(key)
+        if entry is None:
+            return
+
+        agent_name = entry.get("agent_name")
+        session_id = entry.get("session_id")
+        session_updated_at = entry.get("last_session_updated_at")
+        if not isinstance(agent_name, str) or not isinstance(session_id, str):
+            return
+
+        wrote_memory = False
+        try:
+            wrote_memory = await asyncio.wait_for(
+                self._flush_session(config, agent_name=agent_name, session_id=session_id),
+                timeout=settings.extractor.max_extraction_seconds,
+            )
+        except TimeoutError:
+            with _STATE_LOCK:
+                latest_state = _read_state_unlocked(self.storage_path)
+                latest_entry = latest_state["sessions"].get(key, entry)
+                failures = latest_entry.get("consecutive_failures", 0) + 1
+                cooldown = _retry_cooldown_seconds(settings, failures)
+                latest_entry["consecutive_failures"] = failures
+                latest_entry["next_attempt_at"] = now + cooldown
+                latest_entry["in_flight"] = False
+                latest_state["sessions"][key] = latest_entry
+                _write_state_unlocked(self.storage_path, latest_state)
+            logger.warning(
+                "Memory auto-flush timed out",
+                agent=agent_name,
+                session_id=session_id,
+                timeout_seconds=settings.extractor.max_extraction_seconds,
+            )
+            return
+        except Exception:
+            with _STATE_LOCK:
+                latest_state = _read_state_unlocked(self.storage_path)
+                latest_entry = latest_state["sessions"].get(key, entry)
+                failures = latest_entry.get("consecutive_failures", 0) + 1
+                cooldown = _retry_cooldown_seconds(settings, failures)
+                latest_entry["consecutive_failures"] = failures
+                latest_entry["next_attempt_at"] = now + cooldown
+                latest_entry["in_flight"] = False
+                latest_state["sessions"][key] = latest_entry
+                _write_state_unlocked(self.storage_path, latest_state)
+            logger.exception("Memory auto-flush failed", agent=agent_name, session_id=session_id)
+            return
+
+        with _STATE_LOCK:
+            latest_state = _read_state_unlocked(self.storage_path)
+            latest_entry = latest_state["sessions"].get(key, entry)
+            latest_entry["dirty"] = False
+            latest_entry["in_flight"] = False
+            latest_entry["last_flushed_at"] = now
+            if isinstance(session_updated_at, int):
+                latest_entry["last_flushed_session_updated_at"] = session_updated_at
+            latest_entry["next_attempt_at"] = None
+            latest_entry["consecutive_failures"] = 0
+            latest_entry["priority_boost_at"] = None
+            latest_state["sessions"][key] = latest_entry
+            _write_state_unlocked(self.storage_path, latest_state)
+
+        logger.debug(
+            "Memory auto-flush completed",
+            agent=agent_name,
+            session_id=session_id,
+            wrote_memory=wrote_memory,
+        )
+
+    async def _flush_session(self, config: Config, *, agent_name: str, session_id: str) -> bool:
+        session = _load_agent_session(self.storage_path, agent_name, session_id)
+        if session is None:
+            return False
+
+        extractor = config.memory.auto_flush.extractor
+        lines = _select_recent_chat_lines(
+            session,
+            max_messages=extractor.max_messages_per_flush,
+            max_chars=extractor.max_chars_per_flush,
+        )
+        durable_lines = _extract_durable_lines(lines)
+        if not durable_lines:
+            return False
+
+        session_updated = session.updated_at if isinstance(session.updated_at, int) else 0
+        flush_marker = f"auto_flush:{session_id}:{session_updated}"
+        condensed = " | ".join(durable_lines[:10])
+        memory_content = f"[{flush_marker}] {condensed}"
+
+        await add_agent_memory(
+            memory_content,
+            agent_name=agent_name,
+            storage_path=self.storage_path,
+            config=config,
+            metadata={
+                "source": "auto_flush",
+                "session_id": session_id,
+                "marker": flush_marker,
+            },
+        )
+        return True
