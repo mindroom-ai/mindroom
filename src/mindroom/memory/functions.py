@@ -340,7 +340,10 @@ def _build_team_user_id(agent_names: list[str]) -> str:
 def _get_allowed_memory_user_ids(caller_context: str | list[str], config: Config) -> set[str]:
     """Get all user_id scopes the caller is allowed to access."""
     if isinstance(caller_context, list):
-        return {_build_team_user_id(caller_context)}
+        allowed_user_ids = {_build_team_user_id(caller_context)}
+        if config.memory.team_reads_member_memory:
+            allowed_user_ids.update(f"agent_{agent_name}" for agent_name in caller_context)
+        return allowed_user_ids
 
     allowed_user_ids = {f"agent_{caller_context}"}
     allowed_user_ids.update(get_team_ids_for_agent(caller_context, config))

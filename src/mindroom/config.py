@@ -407,6 +407,12 @@ class MemoryConfig(BaseModel):
         default="mem0",
         description="Memory backend: 'mem0' (vector memory) or 'file' (markdown memory files)",
     )
+    team_reads_member_memory: bool = Field(
+        default=False,
+        description=(
+            "When true, team-context memory reads can access member agent memories in addition to the shared team scope"
+        ),
+    )
     embedder: MemoryEmbedderConfig = Field(
         default_factory=MemoryEmbedderConfig,
         description="Embedder configuration for memory",

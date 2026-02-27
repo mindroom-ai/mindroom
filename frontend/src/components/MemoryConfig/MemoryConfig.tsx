@@ -43,6 +43,7 @@ type MemorySettings = MindRoomConfig['memory'];
 
 const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
   backend: 'mem0',
+  team_reads_member_memory: false,
   embedder: {
     provider: 'openai',
     config: {
@@ -314,6 +315,33 @@ export function MemoryConfig() {
                     {backend.label}
                   </SelectItem>
                 ))}
+              </SelectContent>
+            </Select>
+          </FieldGroup>
+
+          <FieldGroup
+            label="Team Reads Member Memory"
+            helperText="Allow team-context memory reads to include member agent memories."
+            htmlFor="team-reads-member-memory"
+          >
+            <Select
+              value={String(localConfig.team_reads_member_memory ?? false)}
+              onValueChange={value =>
+                applyMemoryConfig({
+                  ...localConfig,
+                  team_reads_member_memory: parseBoolean(value),
+                })
+              }
+            >
+              <SelectTrigger
+                id="team-reads-member-memory"
+                className="transition-colors hover:border-ring"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="true">Enabled</SelectItem>
+                <SelectItem value="false">Disabled</SelectItem>
               </SelectContent>
             </Select>
           </FieldGroup>
@@ -781,6 +809,12 @@ export function MemoryConfig() {
             <div className="flex justify-between">
               <span className="text-muted-foreground">Provider:</span>
               <span className="font-mono text-foreground">{localConfig.embedder.provider}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Team Reads Members:</span>
+              <span className="font-mono text-foreground">
+                {localConfig.team_reads_member_memory ? 'enabled' : 'disabled'}
+              </span>
             </div>
             <div className="flex justify-between">
               <span className="text-muted-foreground">Model:</span>

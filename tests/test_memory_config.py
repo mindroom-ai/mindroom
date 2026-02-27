@@ -221,6 +221,7 @@ class TestMemoryConfig:
         memory = MemoryConfig.model_validate(
             {
                 "backend": "file",
+                "team_reads_member_memory": True,
                 "auto_flush": {
                     "enabled": True,
                     "batch": {
@@ -235,6 +236,7 @@ class TestMemoryConfig:
             },
         )
         assert memory.backend == "file"
+        assert memory.team_reads_member_memory is True
         assert memory.auto_flush.enabled is True
         assert memory.auto_flush.batch.max_sessions_per_cycle == 7
         assert memory.auto_flush.batch.max_sessions_per_agent_per_cycle == 2

@@ -7,6 +7,10 @@ MindRoom supports two memory backends:
 
 You can switch backends with `memory.backend`.
 
+Optional:
+
+- `memory.team_reads_member_memory: true` allows team-context memory reads to include member agent scopes.
+
 ## Memory Scopes
 
 | Scope | User ID Format               | Description                                |
@@ -99,6 +103,7 @@ High-level behavior:
 The Dashboard **Memory** page supports:
 
 - backend selection (`mem0` vs `file`)
+- team/member read toggle (`team_reads_member_memory`)
 - embedder provider/model/host
 - file backend settings (`path`, `entrypoint_file`, `max_entrypoint_lines`)
 - auto-flush settings (intervals, idle/age thresholds, retries)

@@ -11,6 +11,7 @@ export interface ModelConfig {
 
 export interface MemoryConfig {
   backend?: 'mem0' | 'file';
+  team_reads_member_memory?: boolean;
   embedder: {
     provider: string;
     config: {

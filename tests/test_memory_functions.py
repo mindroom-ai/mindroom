@@ -212,6 +212,40 @@ class TestMemoryFunctions:
             mock_memory.get.assert_called_once_with("mem-team")
 
     @pytest.mark.asyncio
+    async def test_get_agent_memory_team_context_rejects_member_scope_by_default(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Team caller context should not read member agent scope by default."""
+        mock_memory.get.return_value = {"id": "mem-member", "memory": "Member memory", "user_id": "agent_helper"}
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+            result = await get_agent_memory("mem-member", ["helper", "test_agent"], storage_path, config)
+
+            assert result is None
+            mock_memory.get.assert_called_once_with("mem-member")
+
+    @pytest.mark.asyncio
+    async def test_get_agent_memory_team_context_allows_member_scope_when_enabled(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Team caller context can read member scopes when explicitly enabled."""
+        config.memory.team_reads_member_memory = True
+        mock_memory.get.return_value = {"id": "mem-member", "memory": "Member memory", "user_id": "agent_helper"}
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+            result = await get_agent_memory("mem-member", ["helper", "test_agent"], storage_path, config)
+
+            assert result is not None
+            assert result["id"] == "mem-member"
+            mock_memory.get.assert_called_once_with("mem-member")
+
+    @pytest.mark.asyncio
     async def test_update_agent_memory_rejects_other_agent_scope(
         self,
         mock_memory: AsyncMock,
@@ -642,6 +676,24 @@ class TestMemoryFunctions:
         memory_root = storage_path / "memory-files"
         assert (memory_root / "team_a_b+c" / "MEMORY.md").exists()
         assert (memory_root / "team_a+b_c" / "MEMORY.md").exists()
+
+    @pytest.mark.asyncio
+    async def test_file_backend_team_context_member_scope_toggle(self, storage_path: Path, config: Config) -> None:
+        """Team-context reads should honor the member-scope toggle in file backend."""
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "memory-files")
+
+        await add_agent_memory("Helper private memory", "helper", storage_path, config)
+        helper_memories = await list_all_agent_memories("helper", storage_path, config)
+        helper_memory_id = helper_memories[0]["id"]
+
+        blocked = await get_agent_memory(helper_memory_id, ["helper", "test_agent"], storage_path, config)
+        assert blocked is None
+
+        config.memory.team_reads_member_memory = True
+        allowed = await get_agent_memory(helper_memory_id, ["helper", "test_agent"], storage_path, config)
+        assert allowed is not None
+        assert allowed["memory"] == "Helper private memory"
 
     @pytest.mark.asyncio
     async def test_file_backend_rejects_path_traversal_memory_id(self, storage_path: Path, config: Config) -> None:
