@@ -101,9 +101,11 @@ The Dashboard **Memory** page supports:
 
 - backend selection (`mem0` vs `file`)
 - embedder provider/model/host
-- file backend path
-- auto-flush toggle
-- batch sizing and extractor window limits
+- file backend settings (`path`, `entrypoint_file`, `max_entrypoint_lines`)
+- auto-flush settings (intervals, idle/age thresholds, retries)
+- batch sizing
+- extractor settings (`no_reply_token`, message/char/time/retry limits, memory-context bounds)
+- curation settings
 
 Save from the Memory page to persist changes to `config.yaml`.
 
