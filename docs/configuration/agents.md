@@ -74,9 +74,6 @@ agents:
       - ./openclaw_data/TOOLS.md
       - ./openclaw_data/HEARTBEAT.md
 
-    # Optional: directory-based memory context (MEMORY.md + dated files)
-    memory_dir: ./openclaw_data/memory
-
     # Whether to include defaults.tools for this agent (default: true)
     include_default_tools: true
 
@@ -120,7 +117,6 @@ agents:
 | `learning_mode` | string | `null` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`) |
 | `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents |
 | `context_files` | list | `[]` | File paths loaded at agent init/reload and prepended to role context (under `Personality Context`) |
-| `memory_dir` | string | `null` | Directory loaded at agent init/reload for `MEMORY.md` and dated files (under `Memory Context`) |
 | `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
 | `num_history_runs` | int | `null` | Number of prior Agno runs to include as history context (`null` = all). Mutually exclusive with `num_history_messages` |
 | `num_history_messages` | int | `null` | Max messages from history. Mutually exclusive with `num_history_runs` |
@@ -147,14 +143,6 @@ You can inject file content directly into an agent's role context without using 
 - Paths are resolved relative to the config file directory
 - Existing files are loaded in list order and added under `Personality Context`
 - Missing files are skipped with a warning in logs
-
-`memory_dir` behavior:
-
-- Paths are resolved relative to the config file directory
-- Loads `MEMORY.md` (uppercase) if present
-- Loads dated files named `YYYY-MM-DD.md` for yesterday and today
-- Content is added under `Memory Context`
-- Preloaded context is capped by `defaults.max_preload_chars`; if exceeded, truncation drops daily files first, then `MEMORY.md`, then personality files
 
 This loading happens when the agent is created (and on config reload), not continuously on every message.
 
@@ -213,7 +201,7 @@ defaults:
   markdown: true                        # Format responses as Markdown
   learning: true                        # Enable Agno Learning
   learning_mode: always                 # "always" or "agentic"
-  max_preload_chars: 50000              # Hard cap for preloaded context from context_files/memory_dir
+  max_preload_chars: 50000              # Hard cap for preloaded context from context_files
   show_stop_button: false               # Show a stop button while agent is responding (global-only, cannot be overridden per-agent)
   num_history_runs: null                # Number of prior runs to include (null = all)
   num_history_messages: null            # Max messages from history (null = use num_history_runs)

@@ -59,10 +59,6 @@ class AgentConfig(BaseModel):
         default_factory=list,
         description="File paths read at agent init and prepended to role context",
     )
-    memory_dir: str | None = Field(
-        default=None,
-        description="Directory containing MEMORY.md and dated memory files to auto-load into role context",
-    )
     thread_mode: Literal["thread", "room"] = Field(
         default="thread",
         description="Conversation threading mode: 'thread' creates Matrix threads per conversation, 'room' uses a single continuous conversation per room (ideal for bridges/mobile)",
@@ -114,11 +110,15 @@ class AgentConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def reject_legacy_knowledge_base_field(cls, data: object) -> object:
-        """Reject legacy single knowledge_base field to prevent silent misconfiguration."""
-        if isinstance(data, dict) and "knowledge_base" in data:
-            msg = "Agent field 'knowledge_base' was removed. Use 'knowledge_bases' (list) instead."
-            raise ValueError(msg)
+    def reject_legacy_agent_fields(cls, data: object) -> object:
+        """Reject removed legacy fields to prevent silent misconfiguration."""
+        if isinstance(data, dict):
+            if "knowledge_base" in data:
+                msg = "Agent field 'knowledge_base' was removed. Use 'knowledge_bases' (list) instead."
+                raise ValueError(msg)
+            if "memory_dir" in data:
+                msg = "Agent field 'memory_dir' was removed. Use 'context_files' and memory.backend=file instead."
+                raise ValueError(msg)
         return data
 
     @field_validator("knowledge_bases")
@@ -189,7 +189,7 @@ class DefaultsConfig(BaseModel):
     max_preload_chars: int = Field(
         default=50000,
         ge=1,
-        description="Hard cap for extra role preload context loaded from context_files and memory_dir",
+        description="Hard cap for extra role preload context loaded from context_files",
     )
 
     @model_validator(mode="after")

@@ -90,7 +90,6 @@ export interface Agent {
   rooms: string[];
   knowledge_bases?: string[];
   context_files?: string[]; // File paths read at agent init and prepended to role context
-  memory_dir?: string; // Directory containing MEMORY.md and dated memory files
   markdown?: boolean; // Per-agent markdown override
   learning?: boolean; // Defaults to true when omitted
   learning_mode?: LearningMode; // Defaults to always when omitted

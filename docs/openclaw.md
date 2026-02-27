@@ -130,11 +130,6 @@ OpenClaw-compatible agents use the same memory system as every other MindRoom ag
 
 Recommended for OpenClaw-style setups: `memory.backend: file` with `memory.auto_flush.enabled: true`.
 
-Legacy note:
-
-- `agents.<name>.memory_dir` still works as a preload compatibility field.
-- New setups should prefer the unified memory backend and avoid `memory_dir`.
-
 ## Context Management
 
 MindRoom includes built-in context controls for OpenClaw-style agents:
