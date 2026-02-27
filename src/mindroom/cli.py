@@ -257,7 +257,7 @@ def connect(
         help="Pair code shown in chat UI (format: ABCD-EFGH).",
     ),
     provisioning_url: str = typer.Option(
-        os.getenv("MINDROOM_PROVISIONING_URL", "https://platform.mindroom.chat"),
+        os.getenv("MINDROOM_PROVISIONING_URL", "https://mindroom.chat"),
         "--provisioning-url",
         help="Base URL for the MindRoom provisioning API.",
     ),

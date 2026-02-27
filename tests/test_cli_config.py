@@ -71,6 +71,7 @@ class TestConfigInit:
         env_content = (tmp_path / ".env").read_text()
         assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
         assert "MATRIX_SERVER_NAME=mindroom.chat" in env_content
+        assert "MINDROOM_PROVISIONING_URL=https://mindroom.chat" in env_content
         assert "MATRIX_REGISTRATION_TOKEN=" in env_content
 
     def test_init_creates_env_with_dashboard_key(self, tmp_path: Path) -> None:

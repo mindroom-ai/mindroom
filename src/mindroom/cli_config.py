@@ -347,6 +347,8 @@ def _env_template(profile: str = "full") -> str:
         extra_matrix = (
             "# Matrix server_name override (needed when federation hostname differs)\n"
             "MATRIX_SERVER_NAME=mindroom.chat\n\n"
+            "# Hosted pairing/provisioning API for `mindroom connect` and token issuance\n"
+            "MINDROOM_PROVISIONING_URL=https://mindroom.chat\n\n"
             "# Required for homeservers that gate bot registration (recommended in public mode)\n"
             "# Keep this secret; do not commit real values.\n"
             "MATRIX_REGISTRATION_TOKEN=\n"
