@@ -2,7 +2,6 @@
 
 import io
 import json
-import os
 import re
 import ssl as ssl_module
 from collections.abc import AsyncGenerator
@@ -11,13 +10,15 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
+import httpx
 import markdown
 import nio
 
 from mindroom.config import RoomDirectoryVisibility, RoomJoinRule
-from mindroom.constants import ENCRYPTION_KEYS_DIR
+from mindroom.constants import ENCRYPTION_KEYS_DIR, MATRIX_SSL_VERIFY
 from mindroom.logging_config import get_logger
 
+from . import provisioning
 from .event_info import EventInfo
 from .identity import MatrixID, extract_server_name_from_homeserver
 from .large_messages import prepare_large_message
@@ -28,7 +29,7 @@ logger = get_logger(__name__)
 
 def _maybe_ssl_context(homeserver: str) -> ssl_module.SSLContext | None:
     if homeserver.startswith("https://"):
-        if os.getenv("MATRIX_SSL_VERIFY", "true").lower() == "false":
+        if not MATRIX_SSL_VERIFY:
             # Create context that disables verification for dev/self-signed certs
             ssl_context = ssl_module.create_default_context()
             ssl_context.check_hostname = False
@@ -38,6 +39,75 @@ def _maybe_ssl_context(homeserver: str) -> ssl_module.SSLContext | None:
             ssl_context = ssl_module.create_default_context()
         return ssl_context
     return None
+
+
+async def _homeserver_requires_registration_token(homeserver: str) -> bool:
+    """Check whether the homeserver advertises registration-token flow."""
+    url = f"{homeserver.rstrip('/')}/_matrix/client/v3/register"
+    try:
+        async with httpx.AsyncClient(timeout=5, verify=MATRIX_SSL_VERIFY) as client:
+            response = await client.post(url, json={})
+            data = response.json()
+    except (httpx.HTTPError, ValueError):
+        return False
+
+    flows = data.get("flows")
+    if not isinstance(flows, list):
+        return False
+    for flow in flows:
+        if not isinstance(flow, dict):
+            continue
+        stages = flow.get("stages")
+        if isinstance(stages, list) and "m.login.registration_token" in stages:
+            return True
+    return False
+
+
+async def _registration_failure_message(
+    response: nio.ErrorResponse,
+    homeserver: str,
+    registration_token: str | None,
+) -> str | None:
+    if (
+        response.status_code == "M_FORBIDDEN"
+        and registration_token
+        and "Invalid registration token" in (response.message or "")
+    ):
+        return (
+            "Matrix registration failed: MATRIX_REGISTRATION_TOKEN is invalid. "
+            "Generate/issue a valid token for bot provisioning and try again."
+        )
+
+    if (
+        response.message == "unknown error"
+        and not registration_token
+        and await _homeserver_requires_registration_token(homeserver)
+    ):
+        return (
+            "Matrix homeserver requires registration tokens for account creation. "
+            "Set MATRIX_REGISTRATION_TOKEN and retry."
+        )
+
+    return None
+
+
+async def _login_and_sync_display_name(
+    *,
+    client: nio.AsyncClient,
+    user_id: str,
+    password: str,
+    display_name: str,
+) -> None:
+    """Login with known password and keep display name synchronized."""
+    login_response = await client.login(password)
+    if isinstance(login_response, nio.LoginResponse):
+        display_response = await client.set_displayname(display_name)
+        if isinstance(display_response, nio.ErrorResponse):
+            logger.warning(f"Failed to set display name for existing user: {display_response}")
+        return
+
+    msg = f"Login failed for existing user {user_id} with provided password: {login_response}"
+    raise ValueError(msg)
 
 
 def create_matrix_client(
@@ -165,13 +235,60 @@ async def register_user(
     server_name = extract_server_name_from_homeserver(homeserver)
     user_id = MatrixID.from_username(username, server_name).full_id
 
-    async with matrix_client(homeserver, user_id=user_id) as client:
-        # Try to register the user
-        response = await client.register(
+    registration_token = provisioning.registration_token_from_env()
+    provisioning_url = provisioning.provisioning_url_from_env()
+    creds = provisioning.required_local_provisioning_client_credentials_for_registration(
+        provisioning_url=provisioning_url,
+        registration_token=registration_token,
+    )
+    if creds and provisioning_url:
+        client_id, client_secret = creds
+        provisioning_result = await provisioning.register_user_via_provisioning_service(
+            provisioning_url=provisioning_url,
+            client_id=client_id,
+            client_secret=client_secret,
+            homeserver=homeserver,
             username=username,
             password=password,
-            device_name="mindroom_agent",
+            display_name=display_name,
         )
+        if provisioning_result.status == "created":
+            logger.info(f"✅ Successfully registered user via provisioning service: {provisioning_result.user_id}")
+            return provisioning_result.user_id
+
+        login_user_id = user_id
+        if provisioning_result.user_id != user_id:
+            logger.warning(
+                "Provisioning service returned mismatched user_id for user_in_use; using local server_name-derived ID",
+                provisioning_user_id=provisioning_result.user_id,
+                expected_user_id=user_id,
+            )
+
+        logger.info(f"User {login_user_id} already exists (provisioning service)")
+        async with matrix_client(homeserver, user_id=login_user_id) as client:
+            await _login_and_sync_display_name(
+                client=client,
+                user_id=login_user_id,
+                password=password,
+                display_name=display_name,
+            )
+        return login_user_id
+
+    async with matrix_client(homeserver, user_id=user_id) as client:
+        # Try to register the user
+        if registration_token:
+            response = await client.register_with_token(
+                username=username,
+                password=password,
+                registration_token=registration_token,
+                device_name="mindroom_agent",
+            )
+        else:
+            response = await client.register(
+                username=username,
+                password=password,
+                device_name="mindroom_agent",
+            )
 
         if isinstance(response, nio.RegisterResponse):
             logger.info(f"✅ Successfully registered user: {user_id}")
@@ -188,15 +305,18 @@ async def register_user(
             return user_id
         if isinstance(response, nio.ErrorResponse) and response.status_code == "M_USER_IN_USE":
             logger.info(f"User {user_id} already exists")
-            # Keep display name in sync when account already exists.
-            login_response = await client.login(password)
-            if isinstance(login_response, nio.LoginResponse):
-                display_response = await client.set_displayname(display_name)
-                if isinstance(display_response, nio.ErrorResponse):
-                    logger.warning(f"Failed to set display name for existing user: {display_response}")
-                return user_id
-            msg = f"Login failed for existing user {user_id} with provided password: {login_response}"
-            raise ValueError(msg)
+            await _login_and_sync_display_name(
+                client=client,
+                user_id=user_id,
+                password=password,
+                display_name=display_name,
+            )
+            return user_id
+
+        if isinstance(response, nio.ErrorResponse):
+            failure_message = await _registration_failure_message(response, homeserver, registration_token)
+            if failure_message:
+                raise ValueError(failure_message)
         msg = f"Failed to register user {username}: {response}"
         raise ValueError(msg)
 

@@ -29,6 +29,8 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │ version             Show the current version of Mindroom.                              │
 │ run                 Run the mindroom multi-agent system.                               │
 │ doctor              Check your environment for common issues.                          │
+│ connect             Pair this local MindRoom install with the hosted provisioning      │
+│                     service.                                                           │
 │ local-stack-setup   Start local Synapse + MindRoom Cinny using Docker only.            │
 │ config              Manage MindRoom configuration files.                               │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
