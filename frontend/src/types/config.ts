@@ -21,7 +21,6 @@ export interface MemoryConfig {
   };
   file?: {
     path?: string | null;
-    entrypoint_file?: string;
     max_entrypoint_lines?: number;
   };
   auto_flush?: {
@@ -42,18 +41,10 @@ export interface MemoryConfig {
       max_messages_per_flush?: number;
       max_chars_per_flush?: number;
       max_extraction_seconds?: number;
-      max_retries?: number;
       include_memory_context?: {
-        daily_tail_lines?: number;
         memory_snippets?: number;
         snippet_max_chars?: number;
       };
-    };
-    curation?: {
-      enabled?: boolean;
-      max_lines_per_pass?: number;
-      max_passes_per_day?: number;
-      append_only?: boolean;
     };
   };
 }

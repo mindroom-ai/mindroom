@@ -94,7 +94,6 @@ memory:
   backend: file
   file:
     path: ./openclaw_data/memory
-    entrypoint_file: MEMORY.md
     max_entrypoint_lines: 200
   auto_flush:
     enabled: true

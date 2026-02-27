@@ -248,14 +248,10 @@ class MemoryFileConfig(BaseModel):
             "directory. Defaults to <storage_path>/memory_files when omitted."
         ),
     )
-    entrypoint_file: str = Field(
-        default="MEMORY.md",
-        description="Primary memory file loaded as a high-priority memory index",
-    )
     max_entrypoint_lines: int = Field(
         default=200,
         ge=1,
-        description="Maximum number of lines to preload from the entrypoint memory file",
+        description="Maximum number of lines to preload from MEMORY.md",
     )
 
 
@@ -277,11 +273,6 @@ class MemoryAutoFlushBatchConfig(BaseModel):
 class MemoryAutoFlushContextConfig(BaseModel):
     """Existing-memory context limits injected into extraction runs."""
 
-    daily_tail_lines: int = Field(
-        default=80,
-        ge=0,
-        description="Maximum recent daily-memory lines included for extraction dedupe context",
-    )
     memory_snippets: int = Field(
         default=5,
         ge=0,
@@ -316,34 +307,9 @@ class MemoryAutoFlushExtractorConfig(BaseModel):
         ge=1,
         description="Timeout for one extraction job before retrying in a later cycle",
     )
-    max_retries: int = Field(
-        default=3,
-        ge=0,
-        description="Maximum consecutive extraction failures before extended cooldown",
-    )
     include_memory_context: MemoryAutoFlushContextConfig = Field(
         default_factory=MemoryAutoFlushContextConfig,
         description="Bounds for existing memory context included during extraction",
-    )
-
-
-class MemoryAutoFlushCurationConfig(BaseModel):
-    """Optional long-term curation controls for MEMORY.md."""
-
-    enabled: bool = Field(default=False, description="Enable periodic auto-curation into MEMORY.md")
-    max_lines_per_pass: int = Field(
-        default=20,
-        ge=1,
-        description="Maximum lines appended to MEMORY.md in one curation pass",
-    )
-    max_passes_per_day: int = Field(
-        default=1,
-        ge=1,
-        description="Maximum curation passes per day per agent",
-    )
-    append_only: bool = Field(
-        default=True,
-        description="Only append during auto-curation; never auto-delete from MEMORY.md",
     )
 
 
@@ -393,10 +359,6 @@ class MemoryAutoFlushConfig(BaseModel):
     extractor: MemoryAutoFlushExtractorConfig = Field(
         default_factory=MemoryAutoFlushExtractorConfig,
         description="Extraction-window and timeout controls for auto-flush",
-    )
-    curation: MemoryAutoFlushCurationConfig = Field(
-        default_factory=MemoryAutoFlushCurationConfig,
-        description="Optional long-term curation settings",
     )
 
 

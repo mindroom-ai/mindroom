@@ -18,7 +18,7 @@ from mindroom.agents import create_session_storage
 from mindroom.ai import get_model_instance
 from mindroom.logging_config import get_logger
 
-from .functions import add_agent_memory, list_all_agent_memories
+from .functions import append_agent_daily_memory, list_all_agent_memories
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -581,15 +581,10 @@ class MemoryAutoFlushWorker:
         flush_marker = f"auto_flush:{session_id}:{session_updated}"
         memory_content = f"[{flush_marker}] {memory_summary}"
 
-        await add_agent_memory(
+        append_agent_daily_memory(
             memory_content,
             agent_name=agent_name,
             storage_path=self.storage_path,
             config=config,
-            metadata={
-                "source": "auto_flush",
-                "session_id": session_id,
-                "marker": flush_marker,
-            },
         )
         return True

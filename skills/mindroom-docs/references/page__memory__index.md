@@ -56,7 +56,6 @@ memory:
   backend: file
   file:
     path: ./mindroom_data/memory_files
-    entrypoint_file: MEMORY.md
     max_entrypoint_lines: 200
 ```
 
@@ -65,8 +64,11 @@ memory:
 Under `memory.file.path` (or `<storage_path>/memory_files` by default), MindRoom stores per-scope folders such as:
 
 - `agent_<name>/MEMORY.md`
+- `agent_<name>/memory/YYYY-MM-DD.md`
 - `room_<safe_room_id>/MEMORY.md`
+- `room_<safe_room_id>/memory/YYYY-MM-DD.md`
 - `team_<sorted_members>/MEMORY.md`
+- `team_<sorted_members>/memory/YYYY-MM-DD.md`
 
 ## File Auto-Flush Worker
 
@@ -107,7 +109,7 @@ The Dashboard **Memory** page supports:
 - backend selection (`mem0` vs `file`)
 - team/member read toggle (`team_reads_member_memory`)
 - embedder provider/model/host
-- file backend settings (`path`, `entrypoint_file`, `max_entrypoint_lines`)
+- file backend settings (`path`, `max_entrypoint_lines`)
 - auto-flush settings (intervals, idle/age thresholds, retries)
 - batch sizing
 - extractor settings (`no_reply_token`, message/char/time limits, memory-context bounds)

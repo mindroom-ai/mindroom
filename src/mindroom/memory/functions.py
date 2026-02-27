@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict, cast
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from mindroom.constants import resolve_config_relative_path
 from mindroom.logging_config import get_logger
@@ -14,6 +14,8 @@ from mindroom.logging_config import get_logger
 from .config import create_memory_instance
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mindroom.config import Config
 
 
@@ -48,17 +50,14 @@ class MemoryNotFoundError(ValueError):
 
 
 _FILE_MEMORY_DEFAULT_DIRNAME = "memory_files"
+_FILE_MEMORY_ENTRYPOINT = "MEMORY.md"
+_FILE_MEMORY_DAILY_DIR = "memory"
 _FILE_MEMORY_ENTRY_PATTERN = re.compile(r"^- \[id=(?P<id>[^\]]+)\]\s*(?P<memory>.+?)\s*$")
 _FILE_MEMORY_PATH_ID_PATTERN = re.compile(r"^file:(?P<path>[^:]+):(?P<line>\d+)$")
 
 
 def _use_file_memory_backend(config: Config) -> bool:
     return config.memory.backend == "file"
-
-
-def _entrypoint_filename(config: Config) -> str:
-    entrypoint = Path(config.memory.file.entrypoint_file).name.strip()
-    return entrypoint if entrypoint else "MEMORY.md"
 
 
 def _file_memory_root(storage_path: Path, config: Config) -> Path:
@@ -93,10 +92,17 @@ def _scope_dir(scope_user_id: str, storage_path: Path, config: Config, *, create
 
 def _scope_entrypoint_path(scope_user_id: str, storage_path: Path, config: Config, *, create: bool) -> Path:
     scope_path = _scope_dir(scope_user_id, storage_path, config, create=create)
-    entrypoint_path = scope_path / _entrypoint_filename(config)
+    entrypoint_path = scope_path / _FILE_MEMORY_ENTRYPOINT
     if create and not entrypoint_path.exists():
         entrypoint_path.write_text("# Memory\n\n", encoding="utf-8")
     return entrypoint_path
+
+
+def _scope_markdown_files(scope_path: Path) -> list[Path]:
+    return sorted(
+        (path for path in scope_path.rglob("*.md") if path.is_file()),
+        key=lambda path: path.relative_to(scope_path).as_posix(),
+    )
 
 
 def _load_scope_id_entries(
@@ -108,9 +114,8 @@ def _load_scope_id_entries(
     if not scope_path.exists():
         return [], {}
 
-    entrypoint_name = _entrypoint_filename(config)
-    markdown_files = sorted(p for p in scope_path.glob("*.md") if p.is_file())
-    entrypoint_path = scope_path / entrypoint_name
+    markdown_files = _scope_markdown_files(scope_path)
+    entrypoint_path = scope_path / _FILE_MEMORY_ENTRYPOINT
     ordered_files = ([entrypoint_path] if entrypoint_path in markdown_files else []) + [
         p for p in markdown_files if p != entrypoint_path
     ]
@@ -118,6 +123,7 @@ def _load_scope_id_entries(
     results: list[MemoryResult] = []
     id_to_file: dict[str, Path] = {}
     for file_path in ordered_files:
+        relative_path = file_path.relative_to(scope_path).as_posix()
         for line_no, raw_line in enumerate(file_path.read_text(encoding="utf-8").splitlines(), 1):
             match = _FILE_MEMORY_ENTRY_PATTERN.match(raw_line.strip())
             if not match:
@@ -130,7 +136,7 @@ def _load_scope_id_entries(
                 "id": memory_id,
                 "memory": memory_text,
                 "user_id": scope_user_id,
-                "metadata": {"source_file": file_path.name, "line": line_no},
+                "metadata": {"source_file": relative_path, "line": line_no},
             }
             results.append(result)
             id_to_file.setdefault(memory_id, file_path)
@@ -167,21 +173,37 @@ def _append_scope_memory_entry(
     content: str,
     storage_path: Path,
     config: Config,
+    *,
+    target_relative_path: str | None = None,
 ) -> MemoryResult:
-    entrypoint_path = _scope_entrypoint_path(scope_user_id, storage_path, config, create=True)
+    scope_path = _scope_dir(scope_user_id, storage_path, config, create=True)
+    if target_relative_path is None:
+        target_path = scope_path / _FILE_MEMORY_ENTRYPOINT
+        if not target_path.exists():
+            target_path.write_text("# Memory\n\n", encoding="utf-8")
+    else:
+        target_path = _resolve_scope_markdown_path(scope_path, target_relative_path)
+        if target_path is None:
+            msg = f"Invalid markdown memory path: {target_relative_path}"
+            raise ValueError(msg)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        if not target_path.exists():
+            target_path.touch()
+
+    relative_path = target_path.relative_to(scope_path).as_posix()
     memory_id = _new_file_memory_id()
     line = _format_entry_line(memory_id, content)
 
-    text = entrypoint_path.read_text(encoding="utf-8")
+    text = target_path.read_text(encoding="utf-8")
     needs_separator = bool(text) and not text.endswith("\n")
     separator = "\n" if needs_separator else ""
-    entrypoint_path.write_text(f"{text}{separator}{line}\n", encoding="utf-8")
+    target_path.write_text(f"{text}{separator}{line}\n", encoding="utf-8")
 
     return {
         "id": memory_id,
         "memory": " ".join(content.strip().split()),
         "user_id": scope_user_id,
-        "metadata": {"source_file": entrypoint_path.name},
+        "metadata": {"source_file": relative_path},
     }
 
 
@@ -214,10 +236,13 @@ def _search_scope_memory_entries(
         return scored_entries
 
     remaining_limit = limit - len(scored_entries)
-    entrypoint_name = _entrypoint_filename(config)
+    entrypoint_path = scope_path / _FILE_MEMORY_ENTRYPOINT
     query_tokens = _extract_query_tokens(query)
     snippet_results: list[MemoryResult] = []
-    for markdown_path in sorted(p for p in scope_path.glob("*.md") if p.is_file() and p.name != entrypoint_name):
+    for markdown_path in _scope_markdown_files(scope_path):
+        if markdown_path == entrypoint_path:
+            continue
+        relative_path = markdown_path.relative_to(scope_path).as_posix()
         for line_no, line in enumerate(markdown_path.read_text(encoding="utf-8").splitlines(), 1):
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
@@ -227,11 +252,11 @@ def _search_scope_memory_entries(
                 continue
             snippet_results.append(
                 {
-                    "id": f"file:{markdown_path.name}:{line_no}",
+                    "id": f"file:{relative_path}:{line_no}",
                     "memory": stripped,
                     "user_id": scope_user_id,
                     "score": score,
-                    "metadata": {"source_file": markdown_path.name, "line": line_no},
+                    "metadata": {"source_file": relative_path, "line": line_no},
                 },
             )
 
@@ -412,6 +437,26 @@ async def add_agent_memory(
     except Exception:
         logger.exception("Failed to add memory", agent=agent_name)
         raise
+
+
+def append_agent_daily_memory(
+    content: str,
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+) -> MemoryResult:
+    """Append one memory entry to today's per-agent daily memory file."""
+    current_date = datetime.now(ZoneInfo(config.timezone)).date().isoformat()
+    daily_relative_path = f"{_FILE_MEMORY_DAILY_DIR}/{current_date}.md"
+    result = _append_scope_memory_entry(
+        f"agent_{agent_name}",
+        content,
+        storage_path,
+        config,
+        target_relative_path=daily_relative_path,
+    )
+    logger.info("File daily memory added", agent=agent_name, date=current_date)
+    return result
 
 
 def get_team_ids_for_agent(agent_name: str, config: Config) -> list[str]:

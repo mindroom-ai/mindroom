@@ -53,7 +53,6 @@ const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
   },
   file: {
     path: '',
-    entrypoint_file: 'MEMORY.md',
     max_entrypoint_lines: 200,
   },
   auto_flush: {
@@ -74,18 +73,10 @@ const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
       max_messages_per_flush: 20,
       max_chars_per_flush: 12000,
       max_extraction_seconds: 30,
-      max_retries: 3,
       include_memory_context: {
-        daily_tail_lines: 80,
         memory_snippets: 5,
         snippet_max_chars: 400,
       },
-    },
-    curation: {
-      enabled: false,
-      max_lines_per_pass: 20,
-      max_passes_per_day: 1,
-      append_only: true,
     },
   },
 };
@@ -120,10 +111,6 @@ function normalizeMemorySettings(memory: MindRoomConfig['memory'] | undefined): 
           ...DEFAULT_MEMORY_SETTINGS.auto_flush?.extractor?.include_memory_context,
           ...(memory?.auto_flush?.extractor?.include_memory_context || {}),
         },
-      },
-      curation: {
-        ...DEFAULT_MEMORY_SETTINGS.auto_flush?.curation,
-        ...(memory?.auto_flush?.curation || {}),
       },
     },
   };
@@ -416,7 +403,7 @@ export function MemoryConfig() {
             <>
               <FieldGroup
                 label="File Memory Path"
-                helperText="Directory containing MEMORY.md and auto-flush memory files."
+                helperText="Directory containing MEMORY.md and daily files under memory/YYYY-MM-DD.md."
                 htmlFor="file-memory-path"
               >
                 <Input
@@ -425,28 +412,6 @@ export function MemoryConfig() {
                   value={localConfig.file?.path || ''}
                   onChange={e => handleFilePathChange(e.target.value)}
                   placeholder="./mindroom_data/memory_files"
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
-
-              <FieldGroup
-                label="Entrypoint File"
-                helperText="Primary memory markdown file loaded into context."
-                htmlFor="entrypoint-file"
-              >
-                <Input
-                  id="entrypoint-file"
-                  type="text"
-                  value={localConfig.file?.entrypoint_file || 'MEMORY.md'}
-                  onChange={e =>
-                    applyMemoryConfig({
-                      ...localConfig,
-                      file: {
-                        ...localConfig.file,
-                        entrypoint_file: e.target.value,
-                      },
-                    })
-                  }
                   className="transition-colors hover:border-ring focus:border-ring"
                 />
               </FieldGroup>

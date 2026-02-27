@@ -122,14 +122,15 @@ async def test_worker_respects_batch_limits(
 
     writes: list[str] = []
 
-    async def _fake_add_memory(
+    def _fake_append_daily_memory(
         content: str,
         agent_name: str,
         **_: object,
-    ) -> None:
+    ) -> dict[str, str]:
         writes.append(f"{agent_name}:{content}")
+        return {"id": "m_test", "memory": content, "user_id": f"agent_{agent_name}"}
 
-    monkeypatch.setattr("mindroom.memory.auto_flush.add_agent_memory", _fake_add_memory)
+    monkeypatch.setattr("mindroom.memory.auto_flush.append_agent_daily_memory", _fake_append_daily_memory)
 
     worker = MemoryAutoFlushWorker(storage_path=storage_path, config_provider=lambda: config)
     await worker._run_cycle(config)
