@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
+from urllib.parse import quote
 
 import httpx
 import uvicorn
@@ -42,7 +43,6 @@ if TYPE_CHECKING:
 
 PAIR_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 DEFAULT_PAIR_CODE_TTL_SECONDS = 10 * 60
-DEFAULT_REGISTRATION_TOKEN_TTL_SECONDS = 5 * 60
 DEFAULT_PAIR_POLL_INTERVAL_SECONDS = 3
 DEFAULT_STATE_PATH = "/var/lib/mindroom-local-provisioning/state.json"
 DEFAULT_CORS_ORIGINS = "https://chat.mindroom.chat"
@@ -59,7 +59,6 @@ class ServiceConfig:
     matrix_registration_token: str
     state_path: Path
     pair_code_ttl_seconds: int
-    registration_token_ttl_seconds: int
     pair_poll_interval_seconds: int
     cors_origins: list[str]
     listen_host: str
@@ -91,21 +90,6 @@ class LocalConnection:
     client_secret_hash: str
     created_at: datetime
     last_seen_at: datetime
-    revoked_at: datetime | None = None
-
-
-@dataclass(slots=True)
-class IssuedCredential:
-    """A registration token issuance event."""
-
-    id: str
-    connection_id: str
-    purpose: Literal["register_agent"]
-    token_hash: str
-    agent_hint: str | None
-    uses_remaining: int
-    created_at: datetime
-    expires_at: datetime
     revoked_at: datetime | None = None
 
 
@@ -165,27 +149,26 @@ class RevokeConnectionResponse(BaseModel):
     connection_id: str
 
 
-class IssueTokenRequest(BaseModel):
-    """Request payload for registration token issuance."""
+class RegisterAgentRequest(BaseModel):
+    """Request payload for registering an agent account via provisioning service."""
 
-    purpose: Literal["register_agent"] = "register_agent"
-    agent_hint: str | None = Field(default=None, max_length=120)
+    homeserver: str = Field(min_length=1, max_length=512)
+    username: str = Field(min_length=1, max_length=255)
+    password: str = Field(min_length=1, max_length=1024)
+    display_name: str = Field(min_length=1, max_length=255)
 
 
-class IssueTokenResponse(BaseModel):
-    """Issued registration token payload."""
+class RegisterAgentResponse(BaseModel):
+    """Result of a server-side agent registration attempt."""
 
-    credential_id: str
-    registration_token: str
-    expires_at: datetime
-    uses_remaining: int
+    status: Literal["created", "user_in_use"]
+    user_id: str
 
 
 _state_lock = asyncio.Lock()
 _pair_sessions: dict[str, PairSession] = {}
 _pair_session_by_hash: dict[str, str] = {}
 _connections: dict[str, LocalConnection] = {}
-_issued_credentials: dict[str, IssuedCredential] = {}
 _rate_limit_buckets: dict[str, list[float]] = {}
 
 
@@ -263,11 +246,6 @@ def _load_service_config_from_env() -> ServiceConfig:
         default=DEFAULT_PAIR_CODE_TTL_SECONDS,
         minimum=30,
     )
-    token_ttl = _env_int(
-        "MINDROOM_PROVISIONING_TOKEN_TTL_SECONDS",
-        default=DEFAULT_REGISTRATION_TOKEN_TTL_SECONDS,
-        minimum=30,
-    )
     poll_interval = _env_int(
         "MINDROOM_PROVISIONING_POLL_INTERVAL_SECONDS",
         default=DEFAULT_PAIR_POLL_INTERVAL_SECONDS,
@@ -285,7 +263,6 @@ def _load_service_config_from_env() -> ServiceConfig:
         matrix_registration_token=registration_token,
         state_path=state_path,
         pair_code_ttl_seconds=pair_ttl,
-        registration_token_ttl_seconds=token_ttl,
         pair_poll_interval_seconds=poll_interval,
         cors_origins=cors_origins,
         listen_host=os.getenv("MINDROOM_PROVISIONING_HOST", DEFAULT_LISTEN_HOST).strip(),
@@ -336,29 +313,11 @@ def _connections_payload() -> list[dict[str, str | None]]:
     ]
 
 
-def _issued_credentials_payload() -> list[dict[str, str | int | None]]:
-    return [
-        {
-            "id": credential.id,
-            "connection_id": credential.connection_id,
-            "purpose": credential.purpose,
-            "token_hash": credential.token_hash,
-            "agent_hint": credential.agent_hint,
-            "uses_remaining": credential.uses_remaining,
-            "created_at": _as_utc_iso(credential.created_at),
-            "expires_at": _as_utc_iso(credential.expires_at),
-            "revoked_at": _as_utc_iso(credential.revoked_at),
-        }
-        for credential in _issued_credentials.values()
-    ]
-
-
 def _persist_state_unlocked(state_path: Path) -> None:
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state = {
         "pair_sessions": _pair_sessions_payload(),
         "connections": _connections_payload(),
-        "issued_credentials": _issued_credentials_payload(),
     }
     tmp_path = state_path.with_suffix(f"{state_path.suffix}.tmp")
     tmp_path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
@@ -369,7 +328,6 @@ def _clear_state_unlocked() -> None:
     _pair_sessions.clear()
     _pair_session_by_hash.clear()
     _connections.clear()
-    _issued_credentials.clear()
 
 
 def _load_state_from_disk_unlocked(state_path: Path) -> None:
@@ -406,23 +364,25 @@ def _load_state_from_disk_unlocked(state_path: Path) -> None:
         )
         _connections[connection.id] = connection
 
-    for item in payload.get("issued_credentials", []):
-        credential = IssuedCredential(
-            id=item["id"],
-            connection_id=item["connection_id"],
-            purpose=item["purpose"],
-            token_hash=item["token_hash"],
-            agent_hint=item.get("agent_hint"),
-            uses_remaining=int(item["uses_remaining"]),
-            created_at=_from_utc_iso(item["created_at"]) or _now_utc(),
-            expires_at=_from_utc_iso(item["expires_at"]) or _now_utc(),
-            revoked_at=_from_utc_iso(item.get("revoked_at")),
-        )
-        _issued_credentials[credential.id] = credential
-
 
 def _normalize_pair_code(pair_code: str) -> str:
     return pair_code.strip().upper()
+
+
+def _normalize_homeserver_url(homeserver: str) -> str:
+    return homeserver.strip().rstrip("/")
+
+
+def _server_name_from_homeserver(homeserver: str) -> str:
+    url = httpx.URL(homeserver)
+    if not url.host:
+        msg = f"Invalid homeserver URL: {homeserver}"
+        raise HTTPException(status_code=400, detail=msg)
+    return url.host
+
+
+def _expected_user_id(homeserver: str, username: str) -> str:
+    return f"@{username}:{_server_name_from_homeserver(homeserver)}"
 
 
 def _generate_pair_code() -> str:
@@ -492,6 +452,63 @@ async def _matrix_whoami(config: ServiceConfig, access_token: str) -> str:
     if not isinstance(user_id, str) or not user_id.startswith("@"):
         raise HTTPException(status_code=502, detail="Matrix whoami response missing user_id")
     return user_id
+
+
+async def _register_agent_with_matrix(config: ServiceConfig, payload: RegisterAgentRequest) -> RegisterAgentResponse:
+    register_url = f"{config.matrix_homeserver}/_matrix/client/v3/register"
+    request_payload = {
+        "username": payload.username,
+        "password": payload.password,
+        "device_name": "mindroom_agent",
+        "auth": {
+            "type": "m.login.registration_token",
+            "token": config.matrix_registration_token,
+        },
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10, verify=config.matrix_ssl_verify) as client:
+            response = await client.post(register_url, json=request_payload)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Could not reach Matrix homeserver: {exc}") from exc
+
+    expected_user_id = _expected_user_id(config.matrix_homeserver, payload.username)
+    if response.is_success:
+        try:
+            body = response.json()
+        except ValueError:
+            body = {}
+        user_id = body.get("user_id", expected_user_id) if isinstance(body, dict) else expected_user_id
+        if not isinstance(user_id, str) or not user_id.startswith("@"):
+            user_id = expected_user_id
+
+        access_token = body.get("access_token") if isinstance(body, dict) else None
+        if isinstance(access_token, str) and access_token:
+            profile_url = f"{config.matrix_homeserver}/_matrix/client/v3/profile/{quote(user_id, safe='')}/displayname"
+            headers = {"Authorization": f"Bearer {access_token}"}
+            profile_payload = {"displayname": payload.display_name}
+            try:
+                async with httpx.AsyncClient(timeout=10, verify=config.matrix_ssl_verify) as client:
+                    await client.put(profile_url, json=profile_payload, headers=headers)
+            except httpx.HTTPError:
+                pass
+
+        return RegisterAgentResponse(status="created", user_id=user_id)
+
+    detail = response.text.strip() or "unknown error"
+    errcode = None
+    try:
+        body = response.json()
+        if isinstance(body, dict):
+            errcode = body.get("errcode")
+            detail = str(body.get("error", detail))
+    except ValueError:
+        pass
+
+    if errcode == "M_USER_IN_USE":
+        return RegisterAgentResponse(status="user_in_use", user_id=expected_user_id)
+
+    raise HTTPException(status_code=502, detail=f"Matrix registration failed: {detail}")
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:
@@ -666,52 +683,33 @@ def create_app(config: ServiceConfig | None = None) -> FastAPI:  # noqa: C901, P
             connection.revoked_at = now
             connection.last_seen_at = now
 
-            for credential in _issued_credentials.values():
-                if credential.connection_id == connection_id:
-                    credential.revoked_at = now
-                    credential.uses_remaining = 0
-
             _persist_state_unlocked(service_config.state_path)
 
         return RevokeConnectionResponse(revoked=True, connection_id=connection_id)
 
-    @app.post("/v1/local-mindroom/tokens/issue", response_model=IssueTokenResponse)
-    async def issue_registration_token(
-        payload: IssueTokenRequest,
+    @app.post("/v1/local-mindroom/register-agent", response_model=RegisterAgentResponse)
+    async def register_agent(
+        payload: RegisterAgentRequest,
         x_local_mindroom_client_id: Annotated[str | None, Header(alias="X-Local-MindRoom-Client-Id")] = None,
         x_local_mindroom_client_secret: Annotated[str | None, Header(alias="X-Local-MindRoom-Client-Secret")] = None,
-    ) -> IssueTokenResponse:
+    ) -> RegisterAgentResponse:
         now = _now_utc()
-        expires_at = now + timedelta(seconds=service_config.registration_token_ttl_seconds)
+        configured_homeserver = _normalize_homeserver_url(service_config.matrix_homeserver)
+        requested_homeserver = _normalize_homeserver_url(payload.homeserver)
+        if requested_homeserver != configured_homeserver:
+            msg = (
+                "Invalid homeserver for this provisioning service. "
+                f"Expected {configured_homeserver}, got {requested_homeserver}."
+            )
+            raise HTTPException(status_code=400, detail=msg)
 
         async with _state_lock:
             connection = _require_local_client(x_local_mindroom_client_id, x_local_mindroom_client_secret)
-            _enforce_rate_limit_unlocked(key=f"tokens:issue:{connection.id}", limit=60, window_seconds=60)
+            _enforce_rate_limit_unlocked(key=f"register:agent:{connection.id}", limit=60, window_seconds=60)
             connection.last_seen_at = now
-
-            # Tuwunel currently expects the configured registration token.
-            # We gate access here (paired client + revocation + rate limits).
-            registration_token = service_config.matrix_registration_token
-            credential_id = secrets.token_urlsafe(18)
-            credential = IssuedCredential(
-                id=credential_id,
-                connection_id=connection.id,
-                purpose=payload.purpose,
-                token_hash=_hash_token(registration_token),
-                agent_hint=payload.agent_hint,
-                uses_remaining=1,
-                created_at=now,
-                expires_at=expires_at,
-            )
-            _issued_credentials[credential_id] = credential
             _persist_state_unlocked(service_config.state_path)
 
-        return IssueTokenResponse(
-            credential_id=credential_id,
-            registration_token=registration_token,
-            expires_at=expires_at,
-            uses_remaining=1,
-        )
+        return await _register_agent_with_matrix(service_config, payload)
 
     return app
 

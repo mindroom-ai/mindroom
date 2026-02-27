@@ -22,7 +22,6 @@ def _service_config(state_path: Path) -> provisioning.ServiceConfig:
         matrix_registration_token="server-secret-token",  # noqa: S106
         state_path=state_path,
         pair_code_ttl_seconds=600,
-        registration_token_ttl_seconds=300,
         pair_poll_interval_seconds=3,
         cors_origins=["https://chat.mindroom.chat"],
         listen_host="127.0.0.1",
@@ -55,10 +54,22 @@ def _patch_matrix_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(provisioning, "_matrix_whoami", _fake_matrix_whoami)
 
 
-def test_pairing_and_token_issue_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """End-to-end happy path: pair -> complete -> issue token -> revoke."""
+def test_pairing_and_register_agent_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """End-to-end happy path: pair -> complete -> register agent -> revoke."""
     _patch_matrix_auth(monkeypatch)
     app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    async def _fake_register(
+        config: provisioning.ServiceConfig,
+        payload: provisioning.RegisterAgentRequest,
+    ) -> provisioning.RegisterAgentResponse:
+        del config
+        return provisioning.RegisterAgentResponse(
+            status="created",
+            user_id=f"@{payload.username}:mindroom.chat",
+        )
+
+    monkeypatch.setattr(provisioning, "_register_agent_with_matrix", _fake_register)
 
     with TestClient(app) as client:
         start = client.post(
@@ -97,16 +108,22 @@ def test_pairing_and_token_issue_flow(tmp_path: Path, monkeypatch: pytest.Monkey
         assert connected.status_code == 200
         assert connected.json()["status"] == "connected"
 
-        issue = client.post(
-            "/v1/local-mindroom/tokens/issue",
-            json={"purpose": "register_agent", "agent_hint": "code"},
+        register = client.post(
+            "/v1/local-mindroom/register-agent",
+            json={
+                "homeserver": "https://mindroom.chat",
+                "username": "mindroom_code",
+                "password": "agent-pass-123",
+                "display_name": "CodeAgent",
+            },
             headers={
                 "X-Local-MindRoom-Client-Id": client_id,
                 "X-Local-MindRoom-Client-Secret": client_secret,
             },
         )
-        assert issue.status_code == 200
-        assert issue.json()["registration_token"] == "server-secret-token"  # noqa: S105
+        assert register.status_code == 200
+        assert register.json()["status"] == "created"
+        assert register.json()["user_id"] == "@mindroom_code:mindroom.chat"
 
         revoke = client.delete(
             f"/v1/local-mindroom/connections/{client_id}",
@@ -115,15 +132,64 @@ def test_pairing_and_token_issue_flow(tmp_path: Path, monkeypatch: pytest.Monkey
         assert revoke.status_code == 200
         assert revoke.json()["revoked"] is True
 
-        issue_after_revoke = client.post(
-            "/v1/local-mindroom/tokens/issue",
-            json={"purpose": "register_agent"},
+        register_after_revoke = client.post(
+            "/v1/local-mindroom/register-agent",
+            json={
+                "homeserver": "https://mindroom.chat",
+                "username": "mindroom_other",
+                "password": "agent-pass-123",
+                "display_name": "OtherAgent",
+            },
             headers={
                 "X-Local-MindRoom-Client-Id": client_id,
                 "X-Local-MindRoom-Client-Secret": client_secret,
             },
         )
-        assert issue_after_revoke.status_code == 403
+        assert register_after_revoke.status_code == 403
+
+
+def test_register_agent_validates_homeserver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Register-agent should reject homeserver mismatches."""
+    _patch_matrix_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    async def _fake_register(
+        config: provisioning.ServiceConfig,
+        payload: provisioning.RegisterAgentRequest,
+    ) -> provisioning.RegisterAgentResponse:
+        del config, payload
+        return provisioning.RegisterAgentResponse(status="created", user_id="@mindroom_code:mindroom.chat")
+
+    monkeypatch.setattr(provisioning, "_register_agent_with_matrix", _fake_register)
+
+    with TestClient(app) as client:
+        pair_code = client.post(
+            "/v1/local-mindroom/pair/start",
+            headers={"Authorization": "Bearer token-alice"},
+        ).json()["pair_code"]
+        complete = client.post(
+            "/v1/local-mindroom/pair/complete",
+            json={
+                "pair_code": pair_code,
+                "client_name": "alice-macbook",
+                "client_pubkey_or_fingerprint": "sha256:abc123",
+            },
+        ).json()
+
+        register = client.post(
+            "/v1/local-mindroom/register-agent",
+            json={
+                "homeserver": "https://other.example",
+                "username": "mindroom_code",
+                "password": "agent-pass-123",
+                "display_name": "CodeAgent",
+            },
+            headers={
+                "X-Local-MindRoom-Client-Id": complete["client_id"],
+                "X-Local-MindRoom-Client-Secret": complete["client_secret"],
+            },
+        )
+        assert register.status_code == 400
 
 
 def test_browser_auth_required_for_pair_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

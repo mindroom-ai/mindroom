@@ -262,18 +262,60 @@ class TestMatrixRegistration:
             mock_client.set_displayname.assert_called_once_with("Test User")
 
     @pytest.mark.asyncio
-    async def test_register_user_uses_provisioning_service_token_when_configured(
+    async def test_register_user_uses_provisioning_service_register_agent_when_configured(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """When provisioning client creds are set, fetch token and register via token auth."""
+        """When provisioning client creds are set, use register-agent provisioning flow."""
+        test_pass = "test_pass"  # noqa: S105
         monkeypatch.setenv("MINDROOM_PROVISIONING_URL", "https://provisioning.example")
         monkeypatch.setenv("MINDROOM_LOCAL_CLIENT_ID", "client-123")
         client_secret = "secret-123"  # noqa: S105
         monkeypatch.setenv("MINDROOM_LOCAL_CLIENT_SECRET", client_secret)
 
+        with (
+            patch(
+                "mindroom.matrix.client._register_user_via_provisioning_service",
+                new_callable=AsyncMock,
+            ) as mock_register,
+            patch("mindroom.matrix.client.matrix_client") as mock_matrix_client,
+            patch(
+                "mindroom.matrix.client._registration_token_from_env",
+                return_value=None,
+            ),
+        ):
+            mock_register.return_value = MagicMock(
+                status="created",
+                user_id="@test_user:localhost",
+            )
+
+            user_id = await register_user("http://localhost:8008", "test_user", test_pass, "Test User")
+
+            assert user_id == "@test_user:localhost"
+            mock_register.assert_called_once_with(
+                provisioning_url="https://provisioning.example",
+                client_id="client-123",
+                client_secret=client_secret,
+                homeserver="http://localhost:8008",
+                username="test_user",
+                password=test_pass,
+                display_name="Test User",
+            )
+            mock_matrix_client.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_register_user_provisioning_user_in_use_logs_in_and_syncs_display(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When provisioning reports user exists, login locally and sync display name."""
+        test_pass = "test_pass"  # noqa: S105
+        monkeypatch.setenv("MINDROOM_PROVISIONING_URL", "https://provisioning.example")
+        monkeypatch.setenv("MINDROOM_LOCAL_CLIENT_ID", "client-123")
+        monkeypatch.setenv("MINDROOM_LOCAL_CLIENT_SECRET", "secret-123")
+
         mock_client = AsyncMock()
-        mock_client._send.return_value = nio.RegisterResponse(
+        mock_client.login.return_value = nio.LoginResponse(
             user_id="@test_user:localhost",
             device_id="TEST_DEVICE",
             access_token=TEST_ACCESS_TOKEN,
@@ -281,25 +323,26 @@ class TestMatrixRegistration:
         mock_client.set_displayname.return_value = AsyncMock()
 
         with (
+            patch(
+                "mindroom.matrix.client._register_user_via_provisioning_service",
+                new_callable=AsyncMock,
+            ) as mock_register,
             patch("mindroom.matrix.client.matrix_client") as mock_matrix_client,
             patch(
-                "mindroom.matrix.client._fetch_registration_token_from_provisioning",
-                new_callable=AsyncMock,
-            ) as mock_fetch,
+                "mindroom.matrix.client._registration_token_from_env",
+                return_value=None,
+            ),
         ):
+            mock_register.return_value = MagicMock(
+                status="user_in_use",
+                user_id="@test_user:localhost",
+            )
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
-            mock_fetch.return_value = "issued-token"
 
-            user_id = await register_user("http://localhost:8008", "test_user", "test_pass", "Test User")
+            user_id = await register_user("http://localhost:8008", "test_user", test_pass, "Test User")
 
             assert user_id == "@test_user:localhost"
-            mock_fetch.assert_called_once_with(
-                provisioning_url="https://provisioning.example",
-                client_id="client-123",
-                client_secret=client_secret,
-            )
-            mock_client._send.assert_called_once()
-            mock_client.register.assert_not_called()
+            mock_client.login.assert_called_once_with(test_pass)
             mock_client.set_displayname.assert_called_once_with("Test User")
 
     @pytest.mark.asyncio

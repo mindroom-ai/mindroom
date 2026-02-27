@@ -7,9 +7,10 @@ import re
 import ssl as ssl_module
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from html import escape
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import markdown
@@ -74,21 +75,37 @@ def _local_provisioning_client_credentials_from_env() -> tuple[str, str] | None:
     return client_id, client_secret
 
 
-async def _fetch_registration_token_from_provisioning(
+@dataclass(frozen=True)
+class _ProvisioningRegisterResult:
+    status: Literal["created", "user_in_use"]
+    user_id: str
+
+
+async def _register_user_via_provisioning_service(
     *,
     provisioning_url: str,
     client_id: str,
     client_secret: str,
-) -> str:
-    """Issue a short-lived registration token from hosted provisioning service."""
-    url = f"{provisioning_url}/v1/local-mindroom/tokens/issue"
+    homeserver: str,
+    username: str,
+    password: str,
+    display_name: str,
+) -> _ProvisioningRegisterResult:
+    """Register an agent account via provisioning service server-side flow."""
+    url = f"{provisioning_url}/v1/local-mindroom/register-agent"
     headers = {
         "X-Local-MindRoom-Client-Id": client_id,
         "X-Local-MindRoom-Client-Secret": client_secret,
     }
+    payload = {
+        "homeserver": homeserver.rstrip("/"),
+        "username": username,
+        "password": password,
+        "display_name": display_name,
+    }
     try:
         async with httpx.AsyncClient(timeout=10, verify=_matrix_ssl_verify_enabled()) as client:
-            response = await client.post(url, json={"purpose": "register_agent"}, headers=headers)
+            response = await client.post(url, json=payload, headers=headers)
     except httpx.HTTPError as exc:
         msg = f"Could not reach provisioning service ({provisioning_url}): {exc}"
         raise ValueError(msg) from exc
@@ -98,46 +115,35 @@ async def _fetch_registration_token_from_provisioning(
         if response.status_code in {401, 403}:
             msg = "Provisioning credentials are invalid or revoked. Run `mindroom connect --pair-code ...` again."
             raise ValueError(msg)
+        if response.status_code == 404:
+            msg = (
+                "Provisioning service does not support /register-agent yet. "
+                "Deploy the latest local provisioning service."
+            )
+            raise ValueError(msg)
         msg = f"Provisioning service returned HTTP {response.status_code}: {detail}"
         raise ValueError(msg)
 
     try:
-        payload = response.json()
+        body = response.json()
     except ValueError as exc:
-        msg = "Provisioning service returned invalid JSON while issuing registration token."
+        msg = "Provisioning service returned invalid JSON while registering agent."
         raise ValueError(msg) from exc
 
-    token = payload.get("registration_token") if isinstance(payload, dict) else None
-    if not isinstance(token, str) or not token.strip():
-        msg = "Provisioning service response missing registration_token."
+    if not isinstance(body, dict):
+        msg = "Provisioning service returned invalid register-agent payload."
+        raise TypeError(msg)
+
+    status = body.get("status")
+    user_id = body.get("user_id")
+    if status not in {"created", "user_in_use"}:
+        msg = "Provisioning service response missing valid status for register-agent."
         raise ValueError(msg)
-    return token.strip()
-
-
-async def _resolve_registration_token() -> str | None:
-    """Resolve registration token from env or hosted provisioning service."""
-    env_token = _registration_token_from_env()
-    if env_token:
-        return env_token
-
-    provisioning_url = _provisioning_url_from_env()
-    if not provisioning_url:
-        return None
-
-    creds = _local_provisioning_client_credentials_from_env()
-    if creds is None:
-        msg = (
-            "MINDROOM_PROVISIONING_URL is set but local client credentials are missing. "
-            "Run `mindroom connect --pair-code ...` first."
-        )
+    if not isinstance(user_id, str) or not user_id.strip():
+        msg = "Provisioning service response missing user_id for register-agent."
         raise ValueError(msg)
 
-    client_id, client_secret = creds
-    return await _fetch_registration_token_from_provisioning(
-        provisioning_url=provisioning_url,
-        client_id=client_id,
-        client_secret=client_secret,
-    )
+    return _ProvisioningRegisterResult(status=status, user_id=user_id.strip())
 
 
 async def _homeserver_requires_registration_token(homeserver: str) -> bool:
@@ -208,6 +214,25 @@ async def _registration_failure_message(
         )
 
     return None
+
+
+async def _login_and_sync_display_name(
+    *,
+    client: nio.AsyncClient,
+    user_id: str,
+    password: str,
+    display_name: str,
+) -> None:
+    """Login with known password and keep display name synchronized."""
+    login_response = await client.login(password)
+    if isinstance(login_response, nio.LoginResponse):
+        display_response = await client.set_displayname(display_name)
+        if isinstance(display_response, nio.ErrorResponse):
+            logger.warning(f"Failed to set display name for existing user: {display_response}")
+        return
+
+    msg = f"Login failed for existing user {user_id} with provided password: {login_response}"
+    raise ValueError(msg)
 
 
 def create_matrix_client(
@@ -335,7 +360,39 @@ async def register_user(
     server_name = extract_server_name_from_homeserver(homeserver)
     user_id = MatrixID.from_username(username, server_name).full_id
 
-    registration_token = await _resolve_registration_token()
+    registration_token = _registration_token_from_env()
+    provisioning_url = _provisioning_url_from_env()
+    if provisioning_url and not registration_token:
+        creds = _local_provisioning_client_credentials_from_env()
+        if creds is None:
+            msg = (
+                "MINDROOM_PROVISIONING_URL is set but local client credentials are missing. "
+                "Run `mindroom connect --pair-code ...` first."
+            )
+            raise ValueError(msg)
+        client_id, client_secret = creds
+        provisioning_result = await _register_user_via_provisioning_service(
+            provisioning_url=provisioning_url,
+            client_id=client_id,
+            client_secret=client_secret,
+            homeserver=homeserver,
+            username=username,
+            password=password,
+            display_name=display_name,
+        )
+        if provisioning_result.status == "created":
+            logger.info(f"✅ Successfully registered user via provisioning service: {provisioning_result.user_id}")
+            return provisioning_result.user_id
+
+        logger.info(f"User {provisioning_result.user_id} already exists (provisioning service)")
+        async with matrix_client(homeserver, user_id=provisioning_result.user_id) as client:
+            await _login_and_sync_display_name(
+                client=client,
+                user_id=provisioning_result.user_id,
+                password=password,
+                display_name=display_name,
+            )
+        return provisioning_result.user_id
 
     async with matrix_client(homeserver, user_id=user_id) as client:
         # Try to register the user
@@ -368,15 +425,13 @@ async def register_user(
             return user_id
         if isinstance(response, nio.ErrorResponse) and response.status_code == "M_USER_IN_USE":
             logger.info(f"User {user_id} already exists")
-            # Keep display name in sync when account already exists.
-            login_response = await client.login(password)
-            if isinstance(login_response, nio.LoginResponse):
-                display_response = await client.set_displayname(display_name)
-                if isinstance(display_response, nio.ErrorResponse):
-                    logger.warning(f"Failed to set display name for existing user: {display_response}")
-                return user_id
-            msg = f"Login failed for existing user {user_id} with provided password: {login_response}"
-            raise ValueError(msg)
+            await _login_and_sync_display_name(
+                client=client,
+                user_id=user_id,
+                password=password,
+                display_name=display_name,
+            )
+            return user_id
 
         if isinstance(response, nio.ErrorResponse):
             failure_message = await _registration_failure_message(response, homeserver, registration_token)
