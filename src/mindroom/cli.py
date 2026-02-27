@@ -256,8 +256,8 @@ def connect(
         "--pair-code",
         help="Pair code shown in chat UI (format: ABCD-EFGH).",
     ),
-    provisioning_url: str = typer.Option(
-        os.getenv("MINDROOM_PROVISIONING_URL", "https://mindroom.chat"),
+    provisioning_url: str | None = typer.Option(
+        None,
         "--provisioning-url",
         help="Base URL for the MindRoom provisioning API.",
     ),
@@ -278,15 +278,22 @@ def connect(
         console.print("[red]Error:[/red] Invalid pair code format. Expected ABCD-EFGH.")
         raise typer.Exit(1)
 
+    resolved_provisioning_url = (
+        provisioning_url or os.getenv("MINDROOM_PROVISIONING_URL", "https://mindroom.chat")
+    ).strip()
+    if not resolved_provisioning_url:
+        console.print("[red]Error:[/red] Invalid provisioning URL.")
+        raise typer.Exit(1)
+
     payload = {
         "pair_code": normalized_pair_code,
         "client_name": client_name.strip() or socket.gethostname(),
         "client_pubkey_or_fingerprint": _local_client_fingerprint(),
     }
-    endpoint = f"{provisioning_url.rstrip('/')}/v1/local-mindroom/pair/complete"
+    endpoint = f"{resolved_provisioning_url.rstrip('/')}/v1/local-mindroom/pair/complete"
 
     try:
-        response = httpx.post(endpoint, json=payload, timeout=10)
+        response = httpx.post(endpoint, json=payload, timeout=10, verify=MATRIX_SSL_VERIFY)
     except httpx.HTTPError as exc:
         console.print(f"[red]Error:[/red] Could not reach provisioning service: {exc}")
         raise typer.Exit(1) from None
@@ -313,7 +320,7 @@ def connect(
 
     if persist_env:
         env_path = _persist_local_provisioning_env(
-            provisioning_url=provisioning_url,
+            provisioning_url=resolved_provisioning_url,
             client_id=client_id,
             client_secret=client_secret,
         )
@@ -325,7 +332,7 @@ def connect(
 
     console.print("[green]Paired successfully.[/green]")
     console.print("\nExport these variables before running MindRoom:")
-    console.print(f"  export MINDROOM_PROVISIONING_URL={provisioning_url}")
+    console.print(f"  export MINDROOM_PROVISIONING_URL={resolved_provisioning_url}")
     console.print(f"  export MINDROOM_LOCAL_CLIENT_ID={client_id}")
     console.print(f"  export MINDROOM_LOCAL_CLIENT_SECRET={client_secret}")
     console.print("\nThen run:")

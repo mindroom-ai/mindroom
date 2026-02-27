@@ -73,6 +73,7 @@ class TestConfigInit:
         assert "MATRIX_SERVER_NAME=mindroom.chat" in env_content
         assert "MINDROOM_PROVISIONING_URL=https://mindroom.chat" in env_content
         assert "MATRIX_REGISTRATION_TOKEN=" in env_content
+        assert "\n\n\n# AI provider API keys" not in env_content
 
     def test_init_creates_env_with_dashboard_key(self, tmp_path: Path) -> None:
         """Config init writes a random MINDROOM_API_KEY to .env."""
@@ -751,6 +752,83 @@ class TestConnect:
         assert "export MINDROOM_LOCAL_CLIENT_ID=client-123" in result.output
         assert "export MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in result.output
         assert not (tmp_path / ".env").exists()
+
+    def test_connect_uses_runtime_env_default_provisioning_url(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Provisioning URL default should be read at command runtime."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
+        monkeypatch.setenv("MINDROOM_PROVISIONING_URL", "https://env-provisioning.example")
+
+        called: dict[str, object] = {}
+
+        def _fake_post(url: str, **kwargs: object) -> httpx.Response:
+            called["url"] = url
+            called["kwargs"] = kwargs
+            return httpx.Response(
+                200,
+                json={"client_id": "client-123", "client_secret": "secret-123"},
+            )
+
+        monkeypatch.setattr("mindroom.cli.httpx.post", _fake_post)
+
+        result = runner.invoke(
+            app,
+            [
+                "connect",
+                "--pair-code",
+                "ABCD-EFGH",
+                "--no-persist-env",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert called["url"] == "https://env-provisioning.example/v1/local-mindroom/pair/complete"
+        assert "export MINDROOM_PROVISIONING_URL=https://env-provisioning.example" in result.output
+
+    def test_connect_passes_matrix_ssl_verify_to_httpx(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Connect should pass MATRIX_SSL_VERIFY through to httpx.post."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mindroom.cli.MATRIX_SSL_VERIFY", False)
+
+        called: dict[str, object] = {}
+
+        def _fake_post(url: str, **kwargs: object) -> httpx.Response:
+            called["url"] = url
+            called["kwargs"] = kwargs
+            return httpx.Response(
+                200,
+                json={"client_id": "client-123", "client_secret": "secret-123"},
+            )
+
+        monkeypatch.setattr("mindroom.cli.httpx.post", _fake_post)
+
+        result = runner.invoke(
+            app,
+            [
+                "connect",
+                "--pair-code",
+                "ABCD-EFGH",
+                "--provisioning-url",
+                "https://provisioning.example",
+                "--no-persist-env",
+            ],
+        )
+
+        assert result.exit_code == 0
+        kwargs = called["kwargs"]
+        assert isinstance(kwargs, dict)
+        assert kwargs["verify"] is False
 
 
 # ---------------------------------------------------------------------------

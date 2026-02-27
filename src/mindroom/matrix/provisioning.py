@@ -8,10 +8,12 @@ from typing import Literal
 
 import httpx
 
+from mindroom.constants import MATRIX_SSL_VERIFY
+
 
 def matrix_ssl_verify_enabled() -> bool:
     """Return whether HTTPS certificate validation is enabled for Matrix/provisioning requests."""
-    return os.getenv("MATRIX_SSL_VERIFY", "true").lower() != "false"
+    return MATRIX_SSL_VERIFY
 
 
 def provisioning_url_from_env() -> str | None:

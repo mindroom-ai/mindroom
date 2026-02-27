@@ -25,6 +25,12 @@ in
       description = "Matrix homeserver used for /account/whoami token verification.";
     };
 
+    matrixServerName = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Optional Matrix server_name override when it differs from matrixHomeserver host.";
+    };
+
     matrixRegistrationTokenFile = lib.mkOption {
       type = lib.types.str;
       description = "File containing the Matrix registration token.";
@@ -86,6 +92,8 @@ in
         MINDROOM_PROVISIONING_PORT = toString cfg.listenPort;
         MINDROOM_PROVISIONING_STATE_PATH = cfg.statePath;
         MINDROOM_PROVISIONING_CORS_ORIGINS = lib.concatStringsSep "," cfg.corsOrigins;
+      } // lib.optionalAttrs (cfg.matrixServerName != null) {
+        MATRIX_SERVER_NAME = cfg.matrixServerName;
       };
 
       serviceConfig = {

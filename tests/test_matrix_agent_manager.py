@@ -241,10 +241,12 @@ class TestMatrixRegistration:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """When MATRIX_REGISTRATION_TOKEN is set, register via token auth flow."""
-        monkeypatch.setenv("MATRIX_REGISTRATION_TOKEN", "token-123")
+        test_pass = "test_pass"  # noqa: S105
+        registration_token = "token-123"  # noqa: S105
+        monkeypatch.setenv("MATRIX_REGISTRATION_TOKEN", registration_token)
 
         mock_client = AsyncMock()
-        mock_client._send.return_value = nio.RegisterResponse(
+        mock_client.register_with_token.return_value = nio.RegisterResponse(
             user_id="@test_user:localhost",
             device_id="TEST_DEVICE",
             access_token=TEST_ACCESS_TOKEN,
@@ -254,10 +256,15 @@ class TestMatrixRegistration:
         with patch("mindroom.matrix.client.matrix_client") as mock_matrix_client:
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
-            user_id = await register_user("http://localhost:8008", "test_user", "test_pass", "Test User")
+            user_id = await register_user("http://localhost:8008", "test_user", test_pass, "Test User")
 
             assert user_id == "@test_user:localhost"
-            mock_client._send.assert_called_once()
+            mock_client.register_with_token.assert_called_once_with(
+                username="test_user",
+                password=test_pass,
+                registration_token=registration_token,
+                device_name="mindroom_agent",
+            )
             mock_client.register.assert_not_called()
             mock_client.set_displayname.assert_called_once_with("Test User")
 
@@ -344,6 +351,54 @@ class TestMatrixRegistration:
             assert user_id == "@test_user:localhost"
             mock_client.login.assert_called_once_with(test_pass)
             mock_client.set_displayname.assert_called_once_with("Test User")
+
+    @pytest.mark.asyncio
+    async def test_register_user_provisioning_user_in_use_uses_local_server_name(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When provisioning returns mismatched user_id, local server-name-derived ID should be used."""
+        test_pass = "test_pass"  # noqa: S105
+        monkeypatch.setenv("MINDROOM_PROVISIONING_URL", "https://provisioning.example")
+        monkeypatch.setenv("MINDROOM_LOCAL_CLIENT_ID", "client-123")
+        monkeypatch.setenv("MINDROOM_LOCAL_CLIENT_SECRET", "secret-123")
+
+        mock_client = AsyncMock()
+        mock_client.login.return_value = nio.LoginResponse(
+            user_id="@test_user:mindroom.chat",
+            device_id="TEST_DEVICE",
+            access_token=TEST_ACCESS_TOKEN,
+        )
+        mock_client.set_displayname.return_value = AsyncMock()
+
+        with (
+            patch(
+                "mindroom.matrix.client.provisioning.register_user_via_provisioning_service",
+                new_callable=AsyncMock,
+            ) as mock_register,
+            patch("mindroom.matrix.client.matrix_client") as mock_matrix_client,
+            patch(
+                "mindroom.matrix.client.provisioning.registration_token_from_env",
+                return_value=None,
+            ),
+            patch(
+                "mindroom.matrix.client.extract_server_name_from_homeserver",
+                return_value="mindroom.chat",
+            ),
+        ):
+            mock_register.return_value = MagicMock(
+                status="user_in_use",
+                user_id="@test_user:internal-matrix",
+            )
+            mock_matrix_client.return_value.__aenter__.return_value = mock_client
+
+            user_id = await register_user("https://internal-matrix:8448", "test_user", test_pass, "Test User")
+
+            assert user_id == "@test_user:mindroom.chat"
+            mock_matrix_client.assert_called_once_with(
+                "https://internal-matrix:8448",
+                user_id="@test_user:mindroom.chat",
+            )
 
     @pytest.mark.asyncio
     async def test_register_user_missing_provisioning_client_credentials_is_explicit(

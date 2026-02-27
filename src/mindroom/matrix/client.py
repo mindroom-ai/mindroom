@@ -2,7 +2,6 @@
 
 import io
 import json
-import os
 import re
 import ssl as ssl_module
 from collections.abc import AsyncGenerator
@@ -16,7 +15,7 @@ import markdown
 import nio
 
 from mindroom.config import RoomDirectoryVisibility, RoomJoinRule
-from mindroom.constants import ENCRYPTION_KEYS_DIR
+from mindroom.constants import ENCRYPTION_KEYS_DIR, MATRIX_SSL_VERIFY
 from mindroom.logging_config import get_logger
 
 from . import provisioning
@@ -30,7 +29,7 @@ logger = get_logger(__name__)
 
 def _maybe_ssl_context(homeserver: str) -> ssl_module.SSLContext | None:
     if homeserver.startswith("https://"):
-        if os.getenv("MATRIX_SSL_VERIFY", "true").lower() == "false":
+        if not MATRIX_SSL_VERIFY:
             # Create context that disables verification for dev/self-signed certs
             ssl_context = ssl_module.create_default_context()
             ssl_context.check_hostname = False
@@ -72,16 +71,12 @@ async def _register_with_token(
     registration_token: str,
 ) -> nio.RegisterResponse | nio.ErrorResponse:
     """Register a user with m.login.registration_token auth."""
-    method, path, data = nio.Api.register(
-        user=username,
+    return await client.register_with_token(
+        username=username,
         password=password,
+        registration_token=registration_token,
         device_name="mindroom_agent",
-        auth_dict={
-            "type": "m.login.registration_token",
-            "token": registration_token,
-        },
     )
-    return await client._send(nio.RegisterResponse, method, path, data)
 
 
 async def _registration_failure_message(
@@ -277,15 +272,23 @@ async def register_user(
             logger.info(f"✅ Successfully registered user via provisioning service: {provisioning_result.user_id}")
             return provisioning_result.user_id
 
-        logger.info(f"User {provisioning_result.user_id} already exists (provisioning service)")
-        async with matrix_client(homeserver, user_id=provisioning_result.user_id) as client:
+        login_user_id = user_id
+        if provisioning_result.user_id != user_id:
+            logger.warning(
+                "Provisioning service returned mismatched user_id for user_in_use; using local server_name-derived ID",
+                provisioning_user_id=provisioning_result.user_id,
+                expected_user_id=user_id,
+            )
+
+        logger.info(f"User {login_user_id} already exists (provisioning service)")
+        async with matrix_client(homeserver, user_id=login_user_id) as client:
             await _login_and_sync_display_name(
                 client=client,
-                user_id=provisioning_result.user_id,
+                user_id=login_user_id,
                 password=password,
                 display_name=display_name,
             )
-        return provisioning_result.user_id
+        return login_user_id
 
     async with matrix_client(homeserver, user_id=user_id) as client:
         # Try to register the user

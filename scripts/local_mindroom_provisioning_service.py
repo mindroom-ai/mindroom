@@ -33,7 +33,7 @@ from urllib.parse import quote
 
 import httpx
 import uvicorn
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -48,6 +48,8 @@ DEFAULT_STATE_PATH = "/var/lib/mindroom-local-provisioning/state.json"
 DEFAULT_CORS_ORIGINS = "https://chat.mindroom.chat"
 DEFAULT_LISTEN_HOST = "127.0.0.1"
 DEFAULT_LISTEN_PORT = 8776
+RATE_LIMIT_CLEANUP_INTERVAL_SECONDS = 300
+RATE_LIMIT_STALE_SECONDS = 3600
 
 
 @dataclass(slots=True)
@@ -55,6 +57,7 @@ class ServiceConfig:
     """Runtime configuration for the provisioning service."""
 
     matrix_homeserver: str
+    matrix_server_name: str
     matrix_ssl_verify: bool
     matrix_registration_token: str
     state_path: Path
@@ -91,6 +94,18 @@ class LocalConnection:
     created_at: datetime
     last_seen_at: datetime
     revoked_at: datetime | None = None
+
+
+@dataclass(slots=True)
+class ProvisioningState:
+    """In-memory mutable runtime state for one app instance."""
+
+    lock: asyncio.Lock
+    pair_sessions: dict[str, PairSession]
+    pair_session_by_hash: dict[str, str]
+    connections: dict[str, LocalConnection]
+    rate_limit_buckets: dict[str, list[float]]
+    last_rate_limit_cleanup: float
 
 
 class PairStartResponse(BaseModel):
@@ -165,11 +180,15 @@ class RegisterAgentResponse(BaseModel):
     user_id: str
 
 
-_state_lock = asyncio.Lock()
-_pair_sessions: dict[str, PairSession] = {}
-_pair_session_by_hash: dict[str, str] = {}
-_connections: dict[str, LocalConnection] = {}
-_rate_limit_buckets: dict[str, list[float]] = {}
+def _new_runtime_state() -> ProvisioningState:
+    return ProvisioningState(
+        lock=asyncio.Lock(),
+        pair_sessions={},
+        pair_session_by_hash={},
+        connections={},
+        rate_limit_buckets={},
+        last_rate_limit_cleanup=0.0,
+    )
 
 
 def _now_utc() -> datetime:
@@ -231,6 +250,13 @@ def _load_service_config_from_env() -> ServiceConfig:
     if not matrix_homeserver:
         msg = "MATRIX_HOMESERVER must be set."
         raise ValueError(msg)
+    matrix_server_name = os.getenv("MATRIX_SERVER_NAME", "").strip()
+    if not matrix_server_name:
+        parsed = httpx.URL(matrix_homeserver)
+        if not parsed.host:
+            msg = f"Could not infer MATRIX_SERVER_NAME from MATRIX_HOMESERVER: {matrix_homeserver}"
+            raise ValueError(msg)
+        matrix_server_name = parsed.host
 
     registration_token = _read_secret(
         env_name="MATRIX_REGISTRATION_TOKEN",
@@ -259,6 +285,7 @@ def _load_service_config_from_env() -> ServiceConfig:
 
     return ServiceConfig(
         matrix_homeserver=matrix_homeserver,
+        matrix_server_name=matrix_server_name,
         matrix_ssl_verify=_env_bool("MATRIX_SSL_VERIFY", default=True),
         matrix_registration_token=registration_token,
         state_path=state_path,
@@ -281,7 +308,7 @@ def _serialize_connection(connection: LocalConnection) -> LocalConnectionOut:
     )
 
 
-def _pair_sessions_payload() -> list[dict[str, str | None]]:
+def _pair_sessions_payload(state: ProvisioningState) -> list[dict[str, str | None]]:
     return [
         {
             "id": session.id,
@@ -293,11 +320,11 @@ def _pair_sessions_payload() -> list[dict[str, str | None]]:
             "completed_at": _as_utc_iso(session.completed_at),
             "connection_id": session.connection_id,
         }
-        for session in _pair_sessions.values()
+        for session in state.pair_sessions.values()
     ]
 
 
-def _connections_payload() -> list[dict[str, str | None]]:
+def _connections_payload(state: ProvisioningState) -> list[dict[str, str | None]]:
     return [
         {
             "id": connection.id,
@@ -309,29 +336,30 @@ def _connections_payload() -> list[dict[str, str | None]]:
             "last_seen_at": _as_utc_iso(connection.last_seen_at),
             "revoked_at": _as_utc_iso(connection.revoked_at),
         }
-        for connection in _connections.values()
+        for connection in state.connections.values()
     ]
 
 
-def _persist_state_unlocked(state_path: Path) -> None:
+def _persist_state_unlocked(state: ProvisioningState, state_path: Path) -> None:
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    state = {
-        "pair_sessions": _pair_sessions_payload(),
-        "connections": _connections_payload(),
+    payload = {
+        "pair_sessions": _pair_sessions_payload(state),
+        "connections": _connections_payload(state),
     }
     tmp_path = state_path.with_suffix(f"{state_path.suffix}.tmp")
-    tmp_path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     tmp_path.replace(state_path)
 
 
-def _clear_state_unlocked() -> None:
-    _pair_sessions.clear()
-    _pair_session_by_hash.clear()
-    _connections.clear()
+def _clear_state_unlocked(state: ProvisioningState) -> None:
+    state.pair_sessions.clear()
+    state.pair_session_by_hash.clear()
+    state.connections.clear()
+    state.rate_limit_buckets.clear()
 
 
-def _load_state_from_disk_unlocked(state_path: Path) -> None:
-    _clear_state_unlocked()
+def _load_state_from_disk_unlocked(state: ProvisioningState, state_path: Path) -> None:
+    _clear_state_unlocked(state)
     if not state_path.exists():
         return
 
@@ -348,8 +376,8 @@ def _load_state_from_disk_unlocked(state_path: Path) -> None:
             completed_at=_from_utc_iso(item.get("completed_at")),
             connection_id=item.get("connection_id"),
         )
-        _pair_sessions[session.id] = session
-        _pair_session_by_hash[session.pair_code_hash] = session.id
+        state.pair_sessions[session.id] = session
+        state.pair_session_by_hash[session.pair_code_hash] = session.id
 
     for item in payload.get("connections", []):
         connection = LocalConnection(
@@ -362,7 +390,7 @@ def _load_state_from_disk_unlocked(state_path: Path) -> None:
             last_seen_at=_from_utc_iso(item["last_seen_at"]) or _now_utc(),
             revoked_at=_from_utc_iso(item.get("revoked_at")),
         )
-        _connections[connection.id] = connection
+        state.connections[connection.id] = connection
 
 
 def _normalize_pair_code(pair_code: str) -> str:
@@ -373,16 +401,8 @@ def _normalize_homeserver_url(homeserver: str) -> str:
     return homeserver.strip().rstrip("/")
 
 
-def _server_name_from_homeserver(homeserver: str) -> str:
-    url = httpx.URL(homeserver)
-    if not url.host:
-        msg = f"Invalid homeserver URL: {homeserver}"
-        raise HTTPException(status_code=400, detail=msg)
-    return url.host
-
-
-def _expected_user_id(homeserver: str, username: str) -> str:
-    return f"@{username}:{_server_name_from_homeserver(homeserver)}"
+def _expected_user_id(server_name: str, username: str) -> str:
+    return f"@{username}:{server_name}"
 
 
 def _generate_pair_code() -> str:
@@ -391,12 +411,12 @@ def _generate_pair_code() -> str:
     return f"{left}-{right}"
 
 
-def _find_pair_session_unlocked(pair_code: str) -> PairSession | None:
+def _find_pair_session_unlocked(state: ProvisioningState, pair_code: str) -> PairSession | None:
     pair_hash = _hash_token(_normalize_pair_code(pair_code))
-    session_id = _pair_session_by_hash.get(pair_hash)
+    session_id = state.pair_session_by_hash.get(pair_hash)
     if not session_id:
         return None
-    return _pair_sessions.get(session_id)
+    return state.pair_sessions.get(session_id)
 
 
 def _expire_if_needed(session: PairSession, now: datetime) -> None:
@@ -404,20 +424,46 @@ def _expire_if_needed(session: PairSession, now: datetime) -> None:
         session.status = "expired"
 
 
-def _enforce_rate_limit_unlocked(*, key: str, limit: int, window_seconds: int) -> None:
+def _cleanup_rate_limit_buckets_unlocked(
+    state: ProvisioningState,
+    *,
+    now: float,
+    stale_seconds: int,
+) -> None:
+    stale_cutoff = now - stale_seconds
+    stale_keys = [key for key, entries in state.rate_limit_buckets.items() if not entries or entries[-1] < stale_cutoff]
+    for key in stale_keys:
+        state.rate_limit_buckets.pop(key, None)
+
+
+def _enforce_rate_limit_unlocked(
+    state: ProvisioningState,
+    *,
+    key: str,
+    limit: int,
+    window_seconds: int,
+) -> None:
     now = time.monotonic()
+    if now - state.last_rate_limit_cleanup >= RATE_LIMIT_CLEANUP_INTERVAL_SECONDS:
+        _cleanup_rate_limit_buckets_unlocked(state, now=now, stale_seconds=RATE_LIMIT_STALE_SECONDS)
+        state.last_rate_limit_cleanup = now
+
     window_start = now - window_seconds
-    entries = [value for value in _rate_limit_buckets.get(key, []) if value >= window_start]
+    entries = [value for value in state.rate_limit_buckets.get(key, []) if value >= window_start]
     if len(entries) >= limit:
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
     entries.append(now)
-    _rate_limit_buckets[key] = entries
+    state.rate_limit_buckets[key] = entries
 
 
-def _require_local_client(client_id: str | None, client_secret: str | None) -> LocalConnection:
+def _require_local_client(
+    state: ProvisioningState,
+    client_id: str | None,
+    client_secret: str | None,
+) -> LocalConnection:
     if not client_id or not client_secret:
         raise HTTPException(status_code=401, detail="Missing local client credentials")
-    connection = _connections.get(client_id)
+    connection = state.connections.get(client_id)
     if not connection:
         raise HTTPException(status_code=401, detail="Invalid local client credentials")
     expected_hash = connection.client_secret_hash
@@ -472,7 +518,7 @@ async def _register_agent_with_matrix(config: ServiceConfig, payload: RegisterAg
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Could not reach Matrix homeserver: {exc}") from exc
 
-    expected_user_id = _expected_user_id(config.matrix_homeserver, payload.username)
+    expected_user_id = _expected_user_id(config.matrix_server_name, payload.username)
     if response.is_success:
         try:
             body = response.json()
@@ -532,23 +578,212 @@ async def _verify_browser_user(
     if not token:
         raise HTTPException(status_code=401, detail="Missing Matrix access token")
 
-    config: ServiceConfig = request.app.state.service_config
+    config = _service_config_from_request(request)
     return await _matrix_whoami(config, token)
 
 
-def create_app(config: ServiceConfig | None = None) -> FastAPI:  # noqa: C901, PLR0915
+def _service_config_from_request(request: Request) -> ServiceConfig:
+    return request.app.state.service_config
+
+
+def _runtime_state_from_request(request: Request) -> ProvisioningState:
+    return request.app.state.runtime_state
+
+
+router = APIRouter()
+
+
+@router.get("/healthz")
+async def healthz() -> dict[str, str]:
+    """Liveness probe endpoint."""
+    return {"status": "ok"}
+
+
+@router.post("/v1/local-mindroom/pair/start", response_model=PairStartResponse)
+async def start_pair(
+    user_id: Annotated[str, Depends(_verify_browser_user)],
+    config: Annotated[ServiceConfig, Depends(_service_config_from_request)],
+    state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
+) -> PairStartResponse:
+    """Start a browser-authenticated pairing flow for a local client."""
+    now = _now_utc()
+    expires_at = now + timedelta(seconds=config.pair_code_ttl_seconds)
+    pair_code = _generate_pair_code()
+    pair_hash = _hash_token(pair_code)
+    session_id = secrets.token_urlsafe(18)
+
+    async with state.lock:
+        _enforce_rate_limit_unlocked(state, key=f"pair:start:{user_id}", limit=10, window_seconds=60)
+        for session in state.pair_sessions.values():
+            _expire_if_needed(session, now)
+            if session.user_id == user_id and session.status == "pending":
+                session.status = "expired"
+
+        session = PairSession(
+            id=session_id,
+            user_id=user_id,
+            pair_code_hash=pair_hash,
+            status="pending",
+            created_at=now,
+            expires_at=expires_at,
+        )
+        state.pair_sessions[session_id] = session
+        state.pair_session_by_hash[pair_hash] = session_id
+        _persist_state_unlocked(state, config.state_path)
+
+    return PairStartResponse(
+        pair_code=pair_code,
+        expires_at=expires_at,
+        poll_interval_seconds=config.pair_poll_interval_seconds,
+    )
+
+
+@router.get("/v1/local-mindroom/pair/status", response_model=PairStatusResponse)
+async def pair_status(
+    pair_code: str,
+    user_id: Annotated[str, Depends(_verify_browser_user)],
+    state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
+) -> PairStatusResponse:
+    """Poll the status of a previously issued pair code."""
+    now = _now_utc()
+    async with state.lock:
+        _enforce_rate_limit_unlocked(state, key=f"pair:status:{user_id}", limit=60, window_seconds=60)
+        session = _find_pair_session_unlocked(state, pair_code)
+        if not session or session.user_id != user_id:
+            raise HTTPException(status_code=404, detail="Pair code not found")
+
+        _expire_if_needed(session, now)
+        if session.status == "connected" and session.connection_id:
+            connection = state.connections.get(session.connection_id)
+            if connection:
+                return PairStatusResponse(status="connected", connection=_serialize_connection(connection))
+        if session.status == "expired":
+            return PairStatusResponse(status="expired")
+        return PairStatusResponse(status="pending", expires_at=session.expires_at)
+
+
+@router.post("/v1/local-mindroom/pair/complete", response_model=PairCompleteResponse)
+async def pair_complete(
+    request: Request,
+    payload: PairCompleteRequest,
+    config: Annotated[ServiceConfig, Depends(_service_config_from_request)],
+    state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
+) -> PairCompleteResponse:
+    """Complete pairing from the local client using the short pair code."""
+    now = _now_utc()
+    remote = request.client.host if request.client else "unknown"
+    async with state.lock:
+        _enforce_rate_limit_unlocked(state, key=f"pair:complete:{remote}", limit=20, window_seconds=60)
+        session = _find_pair_session_unlocked(state, payload.pair_code)
+        if not session:
+            raise HTTPException(status_code=404, detail="Pair code not found")
+
+        _expire_if_needed(session, now)
+        if session.status == "expired":
+            raise HTTPException(status_code=410, detail="Pair code expired")
+        if session.status == "connected":
+            raise HTTPException(status_code=409, detail="Pair code already used")
+
+        client_secret = secrets.token_urlsafe(32)
+        connection_id = secrets.token_urlsafe(18)
+        connection = LocalConnection(
+            id=connection_id,
+            user_id=session.user_id,
+            client_name=payload.client_name.strip(),
+            fingerprint=payload.client_pubkey_or_fingerprint.strip(),
+            client_secret_hash=_hash_token(client_secret),
+            created_at=now,
+            last_seen_at=now,
+        )
+        state.connections[connection_id] = connection
+
+        session.status = "connected"
+        session.completed_at = now
+        session.connection_id = connection_id
+        _persist_state_unlocked(state, config.state_path)
+
+    return PairCompleteResponse(
+        connection=_serialize_connection(connection),
+        client_id=connection.id,
+        client_secret=client_secret,
+    )
+
+
+@router.get("/v1/local-mindroom/connections", response_model=ConnectionsResponse)
+async def list_connections(
+    user_id: Annotated[str, Depends(_verify_browser_user)],
+    state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
+) -> ConnectionsResponse:
+    """List local client connections owned by the authenticated Matrix user."""
+    async with state.lock:
+        _enforce_rate_limit_unlocked(state, key=f"connections:list:{user_id}", limit=60, window_seconds=60)
+        connections = [_serialize_connection(c) for c in state.connections.values() if c.user_id == user_id]
+    return ConnectionsResponse(connections=connections)
+
+
+@router.delete("/v1/local-mindroom/connections/{connection_id}", response_model=RevokeConnectionResponse)
+async def revoke_connection(
+    connection_id: str,
+    user_id: Annotated[str, Depends(_verify_browser_user)],
+    config: Annotated[ServiceConfig, Depends(_service_config_from_request)],
+    state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
+) -> RevokeConnectionResponse:
+    """Revoke a previously paired local client connection."""
+    now = _now_utc()
+    async with state.lock:
+        _enforce_rate_limit_unlocked(state, key=f"connections:revoke:{user_id}", limit=20, window_seconds=60)
+        connection = state.connections.get(connection_id)
+        if not connection or connection.user_id != user_id:
+            raise HTTPException(status_code=404, detail="Connection not found")
+        connection.revoked_at = now
+        connection.last_seen_at = now
+        _persist_state_unlocked(state, config.state_path)
+
+    return RevokeConnectionResponse(revoked=True, connection_id=connection_id)
+
+
+@router.post("/v1/local-mindroom/register-agent", response_model=RegisterAgentResponse)
+async def register_agent(
+    payload: RegisterAgentRequest,
+    config: Annotated[ServiceConfig, Depends(_service_config_from_request)],
+    state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
+    x_local_mindroom_client_id: Annotated[str | None, Header(alias="X-Local-MindRoom-Client-Id")] = None,
+    x_local_mindroom_client_secret: Annotated[str | None, Header(alias="X-Local-MindRoom-Client-Secret")] = None,
+) -> RegisterAgentResponse:
+    """Register an agent account server-side for an authenticated local client."""
+    now = _now_utc()
+    configured_homeserver = _normalize_homeserver_url(config.matrix_homeserver)
+    requested_homeserver = _normalize_homeserver_url(payload.homeserver)
+    if requested_homeserver != configured_homeserver:
+        msg = (
+            "Invalid homeserver for this provisioning service. "
+            f"Expected {configured_homeserver}, got {requested_homeserver}."
+        )
+        raise HTTPException(status_code=400, detail=msg)
+
+    async with state.lock:
+        connection = _require_local_client(state, x_local_mindroom_client_id, x_local_mindroom_client_secret)
+        _enforce_rate_limit_unlocked(state, key=f"register:agent:{connection.id}", limit=60, window_seconds=60)
+        connection.last_seen_at = now
+        _persist_state_unlocked(state, config.state_path)
+
+    return await _register_agent_with_matrix(config, payload)
+
+
+def create_app(config: ServiceConfig | None = None) -> FastAPI:
     """Create the standalone provisioning FastAPI app."""
     service_config = config or _load_service_config_from_env()
+    runtime_state = _new_runtime_state()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.service_config = service_config
-        async with _state_lock:
-            _load_state_from_disk_unlocked(service_config.state_path)
+        app.state.runtime_state = runtime_state
+        async with runtime_state.lock:
+            _load_state_from_disk_unlocked(runtime_state, service_config.state_path)
         yield
 
     app = FastAPI(title="MindRoom Local Provisioning Service", version="0.1.0", lifespan=lifespan)
-
     app.add_middleware(
         CORSMiddleware,
         allow_origins=service_config.cors_origins,
@@ -556,161 +791,7 @@ def create_app(config: ServiceConfig | None = None) -> FastAPI:  # noqa: C901, P
         allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["Authorization", "Content-Type", "X-Matrix-Access-Token"],
     )
-
-    @app.get("/healthz")
-    async def healthz() -> dict[str, str]:
-        return {"status": "ok"}
-
-    @app.post("/v1/local-mindroom/pair/start", response_model=PairStartResponse)
-    async def start_pair(
-        user_id: Annotated[str, Depends(_verify_browser_user)],
-    ) -> PairStartResponse:
-        now = _now_utc()
-        expires_at = now + timedelta(seconds=service_config.pair_code_ttl_seconds)
-        pair_code = _generate_pair_code()
-        pair_hash = _hash_token(pair_code)
-        session_id = secrets.token_urlsafe(18)
-
-        async with _state_lock:
-            _enforce_rate_limit_unlocked(key=f"pair:start:{user_id}", limit=10, window_seconds=60)
-            for session in _pair_sessions.values():
-                _expire_if_needed(session, now)
-                if session.user_id == user_id and session.status == "pending":
-                    session.status = "expired"
-
-            session = PairSession(
-                id=session_id,
-                user_id=user_id,
-                pair_code_hash=pair_hash,
-                status="pending",
-                created_at=now,
-                expires_at=expires_at,
-            )
-            _pair_sessions[session_id] = session
-            _pair_session_by_hash[pair_hash] = session_id
-            _persist_state_unlocked(service_config.state_path)
-
-        return PairStartResponse(
-            pair_code=pair_code,
-            expires_at=expires_at,
-            poll_interval_seconds=service_config.pair_poll_interval_seconds,
-        )
-
-    @app.get("/v1/local-mindroom/pair/status", response_model=PairStatusResponse)
-    async def pair_status(
-        pair_code: str,
-        user_id: Annotated[str, Depends(_verify_browser_user)],
-    ) -> PairStatusResponse:
-        now = _now_utc()
-        async with _state_lock:
-            _enforce_rate_limit_unlocked(key=f"pair:status:{user_id}", limit=60, window_seconds=60)
-            session = _find_pair_session_unlocked(pair_code)
-            if not session or session.user_id != user_id:
-                raise HTTPException(status_code=404, detail="Pair code not found")
-
-            _expire_if_needed(session, now)
-            if session.status == "connected" and session.connection_id:
-                connection = _connections.get(session.connection_id)
-                if connection:
-                    return PairStatusResponse(status="connected", connection=_serialize_connection(connection))
-            if session.status == "expired":
-                return PairStatusResponse(status="expired")
-            return PairStatusResponse(status="pending", expires_at=session.expires_at)
-
-    @app.post("/v1/local-mindroom/pair/complete", response_model=PairCompleteResponse)
-    async def pair_complete(
-        request: Request,
-        payload: PairCompleteRequest,
-    ) -> PairCompleteResponse:
-        now = _now_utc()
-        remote = request.client.host if request.client else "unknown"
-        async with _state_lock:
-            _enforce_rate_limit_unlocked(key=f"pair:complete:{remote}", limit=20, window_seconds=60)
-            session = _find_pair_session_unlocked(payload.pair_code)
-            if not session:
-                raise HTTPException(status_code=404, detail="Pair code not found")
-
-            _expire_if_needed(session, now)
-            if session.status == "expired":
-                raise HTTPException(status_code=410, detail="Pair code expired")
-            if session.status == "connected":
-                raise HTTPException(status_code=409, detail="Pair code already used")
-
-            client_secret = secrets.token_urlsafe(32)
-            connection_id = secrets.token_urlsafe(18)
-            connection = LocalConnection(
-                id=connection_id,
-                user_id=session.user_id,
-                client_name=payload.client_name.strip(),
-                fingerprint=payload.client_pubkey_or_fingerprint.strip(),
-                client_secret_hash=_hash_token(client_secret),
-                created_at=now,
-                last_seen_at=now,
-            )
-            _connections[connection_id] = connection
-
-            session.status = "connected"
-            session.completed_at = now
-            session.connection_id = connection_id
-            _persist_state_unlocked(service_config.state_path)
-
-        return PairCompleteResponse(
-            connection=_serialize_connection(connection),
-            client_id=connection.id,
-            client_secret=client_secret,
-        )
-
-    @app.get("/v1/local-mindroom/connections", response_model=ConnectionsResponse)
-    async def list_connections(
-        user_id: Annotated[str, Depends(_verify_browser_user)],
-    ) -> ConnectionsResponse:
-        async with _state_lock:
-            _enforce_rate_limit_unlocked(key=f"connections:list:{user_id}", limit=60, window_seconds=60)
-            connections = [_serialize_connection(c) for c in _connections.values() if c.user_id == user_id]
-        return ConnectionsResponse(connections=connections)
-
-    @app.delete("/v1/local-mindroom/connections/{connection_id}", response_model=RevokeConnectionResponse)
-    async def revoke_connection(
-        connection_id: str,
-        user_id: Annotated[str, Depends(_verify_browser_user)],
-    ) -> RevokeConnectionResponse:
-        now = _now_utc()
-        async with _state_lock:
-            _enforce_rate_limit_unlocked(key=f"connections:revoke:{user_id}", limit=20, window_seconds=60)
-            connection = _connections.get(connection_id)
-            if not connection or connection.user_id != user_id:
-                raise HTTPException(status_code=404, detail="Connection not found")
-            connection.revoked_at = now
-            connection.last_seen_at = now
-
-            _persist_state_unlocked(service_config.state_path)
-
-        return RevokeConnectionResponse(revoked=True, connection_id=connection_id)
-
-    @app.post("/v1/local-mindroom/register-agent", response_model=RegisterAgentResponse)
-    async def register_agent(
-        payload: RegisterAgentRequest,
-        x_local_mindroom_client_id: Annotated[str | None, Header(alias="X-Local-MindRoom-Client-Id")] = None,
-        x_local_mindroom_client_secret: Annotated[str | None, Header(alias="X-Local-MindRoom-Client-Secret")] = None,
-    ) -> RegisterAgentResponse:
-        now = _now_utc()
-        configured_homeserver = _normalize_homeserver_url(service_config.matrix_homeserver)
-        requested_homeserver = _normalize_homeserver_url(payload.homeserver)
-        if requested_homeserver != configured_homeserver:
-            msg = (
-                "Invalid homeserver for this provisioning service. "
-                f"Expected {configured_homeserver}, got {requested_homeserver}."
-            )
-            raise HTTPException(status_code=400, detail=msg)
-
-        async with _state_lock:
-            connection = _require_local_client(x_local_mindroom_client_id, x_local_mindroom_client_secret)
-            _enforce_rate_limit_unlocked(key=f"register:agent:{connection.id}", limit=60, window_seconds=60)
-            connection.last_seen_at = now
-            _persist_state_unlocked(service_config.state_path)
-
-        return await _register_agent_with_matrix(service_config, payload)
-
+    app.include_router(router)
     return app
 
 

@@ -102,7 +102,7 @@ def config_init(
     profile: str = typer.Option(
         "full",
         "--profile",
-        help="Template profile: full, minimal, or public.",
+        help="Template profile: full, minimal, or public (public keeps full YAML and adjusts .env defaults).",
     ),
 ) -> None:
     """Create a starter config.yaml with example agents and models.
@@ -333,6 +333,7 @@ def _template_for_profile(profile: str) -> str:
     """Return the YAML config template content for a profile."""
     if profile == "minimal":
         return _minimal_template()
+    # Public profile uses the same YAML template as full; only .env defaults differ.
     return _full_template()
 
 
@@ -351,19 +352,19 @@ def _env_template(profile: str = "full") -> str:
             "MINDROOM_PROVISIONING_URL=https://mindroom.chat\n\n"
             "# Required for homeservers that gate bot registration (recommended in public mode)\n"
             "# Keep this secret; do not commit real values.\n"
-            "MATRIX_REGISTRATION_TOKEN=\n"
+            "MATRIX_REGISTRATION_TOKEN="
         )
     else:
         matrix_homeserver = "https://matrix.example.com"
         extra_matrix = (
-            "# Matrix registration token (only needed if your homeserver requires it)\n# MATRIX_REGISTRATION_TOKEN=\n"
+            "# Matrix registration token (only needed if your homeserver requires it)\n# MATRIX_REGISTRATION_TOKEN="
         )
 
     return f"""\
 # Matrix homeserver (must allow open registration for agent accounts)
 MATRIX_HOMESERVER={matrix_homeserver}
 # MATRIX_SSL_VERIFY=false
-{extra_matrix}
+{extra_matrix.rstrip()}
 
 # AI provider API keys (at least one required)
 # ANTHROPIC_API_KEY=your-key-here

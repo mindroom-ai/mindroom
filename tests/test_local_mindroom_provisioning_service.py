@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 import pytest
 from fastapi import HTTPException
@@ -11,13 +11,13 @@ from fastapi.testclient import TestClient
 import scripts.local_mindroom_provisioning_service as provisioning
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
     from pathlib import Path
 
 
 def _service_config(state_path: Path) -> provisioning.ServiceConfig:
     return provisioning.ServiceConfig(
         matrix_homeserver="https://mindroom.chat",
+        matrix_server_name="mindroom.chat",
         matrix_ssl_verify=True,
         matrix_registration_token="server-secret-token",  # noqa: S106
         state_path=state_path,
@@ -27,15 +27,6 @@ def _service_config(state_path: Path) -> provisioning.ServiceConfig:
         listen_host="127.0.0.1",
         listen_port=8776,
     )
-
-
-@pytest.fixture(autouse=True)
-def _reset_state() -> Generator[None, None, None]:
-    provisioning._clear_state_unlocked()
-    provisioning._rate_limit_buckets.clear()
-    yield
-    provisioning._clear_state_unlocked()
-    provisioning._rate_limit_buckets.clear()
 
 
 def _patch_matrix_auth(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -230,3 +221,67 @@ def test_state_persists_between_restarts(tmp_path: Path, monkeypatch: pytest.Mon
         )
         assert listed.status_code == 200
         assert len(listed.json()["connections"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_register_agent_user_in_use_respects_matrix_server_name_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """User-in-use should return user_id on configured MATRIX_SERVER_NAME domain."""
+    config = provisioning.ServiceConfig(
+        matrix_homeserver="https://internal-matrix:8448",
+        matrix_server_name="mindroom.chat",
+        matrix_ssl_verify=True,
+        matrix_registration_token="server-secret-token",  # noqa: S106
+        state_path=tmp_path / "state.json",
+        pair_code_ttl_seconds=600,
+        pair_poll_interval_seconds=3,
+        cors_origins=["https://chat.mindroom.chat"],
+        listen_host="127.0.0.1",
+        listen_port=8776,
+    )
+
+    class _FakeResponse:
+        status_code = 400
+        is_success = False
+        text = "M_USER_IN_USE"
+
+        @staticmethod
+        def json() -> dict[str, str]:
+            return {
+                "errcode": "M_USER_IN_USE",
+                "error": "User ID already taken",
+            }
+
+    class _FakeAsyncClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+            del exc_type, exc, tb
+
+        async def post(
+            self,
+            url: str,
+            *,
+            json: dict[str, object],
+            headers: dict[str, str] | None = None,
+        ) -> _FakeResponse:
+            del url, json, headers
+            return _FakeResponse()
+
+    monkeypatch.setattr(provisioning.httpx, "AsyncClient", _FakeAsyncClient)
+    payload = provisioning.RegisterAgentRequest(
+        homeserver="https://internal-matrix:8448",
+        username="mindroom_code",
+        password="agent-pass",  # noqa: S106
+        display_name="CodeAgent",
+    )
+
+    result = await provisioning._register_agent_with_matrix(config, payload)
+    assert result.status == "user_in_use"
+    assert result.user_id == "@mindroom_code:mindroom.chat"
