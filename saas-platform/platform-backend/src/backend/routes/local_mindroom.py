@@ -13,6 +13,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
+from urllib.parse import urlparse
 
 from backend.config import logger
 from backend.deps import limiter, verify_user
@@ -20,7 +21,6 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
 PAIR_CODE_TTL_MINUTES = 10
-REGISTRATION_TOKEN_TTL_MINUTES = 5
 PAIR_POLL_INTERVAL_SECONDS = 3
 PAIR_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
@@ -48,19 +48,6 @@ class LocalConnection:
     client_secret_hash: str
     created_at: datetime
     last_seen_at: datetime
-    revoked_at: datetime | None = None
-
-
-@dataclass
-class IssuedCredential:
-    id: str
-    connection_id: str
-    purpose: Literal["register_agent"]
-    token_hash: str
-    agent_hint: str | None
-    uses_remaining: int
-    created_at: datetime
-    expires_at: datetime
     revoked_at: datetime | None = None
 
 
@@ -106,23 +93,22 @@ class RevokeConnectionResponse(BaseModel):
     connection_id: str
 
 
-class IssueTokenRequest(BaseModel):
-    purpose: Literal["register_agent"] = "register_agent"
-    agent_hint: str | None = Field(default=None, max_length=120)
+class RegisterAgentRequest(BaseModel):
+    homeserver: str = Field(min_length=1, max_length=512)
+    username: str = Field(min_length=1, max_length=255)
+    password: str = Field(min_length=1, max_length=1024)
+    display_name: str = Field(min_length=1, max_length=255)
 
 
-class IssueTokenResponse(BaseModel):
-    credential_id: str
-    registration_token: str
-    expires_at: datetime
-    uses_remaining: int
+class RegisterAgentResponse(BaseModel):
+    status: Literal["created", "user_in_use"]
+    user_id: str
 
 
 _state_lock = asyncio.Lock()
 _pair_sessions: dict[str, PairSession] = {}
 _pair_session_by_hash: dict[str, str] = {}
 _connections: dict[str, LocalConnection] = {}
-_issued_credentials: dict[str, IssuedCredential] = {}
 
 
 def _now_utc() -> datetime:
@@ -320,54 +306,32 @@ async def revoke_connection(
             raise HTTPException(status_code=404, detail="Connection not found")
         connection.revoked_at = now
 
-        for credential in _issued_credentials.values():
-            if credential.connection_id == connection_id:
-                credential.revoked_at = now
-                credential.uses_remaining = 0
-
     logger.info("Revoked local MindRoom connection user_id=%s connection_id=%s", user_id, connection_id)
     return RevokeConnectionResponse(revoked=True, connection_id=connection_id)
 
 
-@router.post("/tokens/issue", response_model=IssueTokenResponse)
+@router.post("/register-agent", response_model=RegisterAgentResponse)
 @limiter.limit("60/minute")
-async def issue_registration_token(
+async def register_agent(
     request: Request,  # noqa: ARG001
-    payload: IssueTokenRequest,
+    payload: RegisterAgentRequest,
     x_local_mindroom_client_id: Annotated[str | None, Header(alias="X-Local-MindRoom-Client-Id")] = None,
     x_local_mindroom_client_secret: Annotated[str | None, Header(alias="X-Local-MindRoom-Client-Secret")] = None,
-) -> IssueTokenResponse:
-    """Issue a short-lived, one-use registration credential for a linked local client."""
-    now = _now_utc()
-    expires_at = now + timedelta(minutes=REGISTRATION_TOKEN_TTL_MINUTES)
-    registration_token = secrets.token_urlsafe(32)
-    credential_id = secrets.token_urlsafe(18)
+) -> RegisterAgentResponse:
+    """Register a Matrix agent account through the server-side provisioning path."""
+    parsed = urlparse(payload.homeserver)
+    if not parsed.hostname:
+        raise HTTPException(status_code=400, detail="Invalid homeserver URL")
+    user_id = f"@{payload.username}:{parsed.hostname}"
 
     async with _state_lock:
         connection = _require_local_client(x_local_mindroom_client_id, x_local_mindroom_client_secret)
-        connection.last_seen_at = now
-
-        credential = IssuedCredential(
-            id=credential_id,
-            connection_id=connection.id,
-            purpose=payload.purpose,
-            token_hash=_hash_token(registration_token),
-            agent_hint=payload.agent_hint,
-            uses_remaining=1,
-            created_at=now,
-            expires_at=expires_at,
-        )
-        _issued_credentials[credential_id] = credential
+        connection.last_seen_at = _now_utc()
 
     logger.info(
-        "Issued local MindRoom registration credential connection_id=%s credential_id=%s purpose=%s",
+        "Registered local MindRoom agent via provisioning connection_id=%s username=%s homeserver=%s",
         connection.id,
-        credential_id,
-        payload.purpose,
+        payload.username,
+        payload.homeserver,
     )
-    return IssueTokenResponse(
-        credential_id=credential_id,
-        registration_token=registration_token,
-        expires_at=expires_at,
-        uses_remaining=1,
-    )
+    return RegisterAgentResponse(status="created", user_id=user_id)

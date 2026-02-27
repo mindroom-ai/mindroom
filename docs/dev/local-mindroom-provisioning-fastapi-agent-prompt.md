@@ -49,31 +49,31 @@ Implement API (v1):
    - Auth: required (browser user)
    - Revokes the local installation and all active provisioning credentials.
 
-6) POST `/v1/local-mindroom/tokens/issue`
+6) POST `/v1/local-mindroom/register-agent`
    - Auth: linked local client auth
-   - Input: `{ purpose: "register_agent", agent_hint }`
-   - Returns short-lived, limited-use registration credential for homeserver registration flow.
-   - This endpoint is what local MindRoom calls before creating new Matrix agent users.
+   - Input: `{ homeserver, username, password, display_name }`
+   - Registers the agent account server-side using trusted provisioning credentials.
+   - Returns: `{ status: "created" | "user_in_use", user_id }`
+   - This endpoint is what local MindRoom calls when creating new Matrix agent users.
 
 Homeserver integration (`mindroon-tuwunel`):
 - Implement an adapter layer, e.g.:
-  - `HomeserverProvisioner.issue_registration_token(...)`
-  - `HomeserverProvisioner.create_bot_account_direct(...)` (fallback if token flow unavailable)
-- Prefer token-based flow if tuwunel supports `m.login.registration_token`.
+  - `HomeserverProvisioner.register_bot_account(...)`
+- Prefer token-based server-side flow if tuwunel supports `m.login.registration_token`.
 - Never expose homeserver admin credentials to browser clients.
 
 Security requirements:
 - Pair codes: high entropy, short TTL (e.g. 10 min), one-time use.
-- Registration credentials: very short TTL, limited uses (ideally 1), scope-limited.
-- Rate limits on pair creation, completion, and token issuance.
-- Full audit log: who created pair, when linked, when tokens were issued, from which connection.
+- Never return global registration tokens to clients.
+- Rate limits on pair creation, completion, and register-agent calls.
+- Full audit log: who created pair, when linked, and which connection requested account registration.
 - Server-side revocation checks on every privileged call.
 - Secret redaction in logs.
 
 Data model (minimum):
 - `pair_sessions`: id, user_id, pair_code_hash, expires_at, status, created_at, completed_at.
 - `local_connections`: id, user_id, client_name, fingerprint, created_at, last_seen_at, revoked_at.
-- `issued_credentials`: id, connection_id, type, token_hash, scope, uses_remaining, expires_at, revoked_at, created_at.
+- `agent_registrations`: id, connection_id, username, user_id, status, created_at.
 - `audit_events`: id, actor_type, actor_id, action, metadata_json, created_at.
 
 Operational requirements:
@@ -86,11 +86,11 @@ Operational requirements:
 Testing requirements:
 - Unit tests for pair code lifecycle.
 - Unit tests for connection creation/revocation.
-- Unit tests for token issuance policy (TTL, usage caps, revocation).
+- Unit tests for register-agent policy (revocation and homeserver checks).
 - Integration tests for full flow:
   - pair start -> complete -> connected
-  - issue registration token -> consume once -> reject reuse
-  - revoked connection cannot issue new tokens
+  - register-agent -> created/user_in_use response
+  - revoked connection cannot register new agents
 - Tests for tuwunel adapter error handling and fallback behavior.
 
 Deliverables:
