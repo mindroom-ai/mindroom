@@ -99,6 +99,11 @@ def config_init(
         "--minimal",
         help="Generate a bare-minimum config instead of a richer example.",
     ),
+    profile: str = typer.Option(
+        "full",
+        "--profile",
+        help="Template profile: full, minimal, or public.",
+    ),
 ) -> None:
     """Create a starter config.yaml with example agents and models.
 
@@ -112,7 +117,12 @@ def config_init(
             console.print("[dim]Aborted.[/dim]")
             raise typer.Exit(0)
 
-    content = _minimal_template() if minimal else _full_template()
+    selected_profile = "minimal" if minimal else profile.strip().lower()
+    valid_profiles = {"full", "minimal", "public"}
+    if selected_profile not in valid_profiles:
+        msg = f"Invalid profile '{profile}'. Expected one of: {', '.join(sorted(valid_profiles))}"
+        raise typer.BadParameter(msg)
+    content = _template_for_profile(selected_profile)
 
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
@@ -121,7 +131,7 @@ def config_init(
     env_path = target.parent / ".env"
     env_created = False
     if not env_path.exists():
-        env_path.write_text(_env_template(), encoding="utf-8")
+        env_path.write_text(_env_template(selected_profile), encoding="utf-8")
         console.print(f"[green]Env file created:[/green] {env_path}")
         env_created = True
 
@@ -319,16 +329,39 @@ def _full_template() -> str:
     return (Path(__file__).parent / "config_template.yaml").read_text(encoding="utf-8")
 
 
-def _env_template() -> str:
+def _template_for_profile(profile: str) -> str:
+    """Return the YAML config template content for a profile."""
+    if profile == "minimal":
+        return _minimal_template()
+    return _full_template()
+
+
+def _env_template(profile: str = "full") -> str:
     """Return a starter .env file for standalone deployments.
 
     Generates a random dashboard API key.
     """
     api_key = secrets.token_urlsafe(32)
+    if profile == "public":
+        matrix_homeserver = "https://mindroom.chat"
+        extra_matrix = (
+            "# Matrix server_name override (needed when federation hostname differs)\n"
+            "MATRIX_SERVER_NAME=mindroom.chat\n\n"
+            "# Required for homeservers that gate bot registration (recommended in public mode)\n"
+            "# Keep this secret; do not commit real values.\n"
+            "MATRIX_REGISTRATION_TOKEN=\n"
+        )
+    else:
+        matrix_homeserver = "https://matrix.example.com"
+        extra_matrix = (
+            "# Matrix registration token (only needed if your homeserver requires it)\n# MATRIX_REGISTRATION_TOKEN=\n"
+        )
+
     return f"""\
 # Matrix homeserver (must allow open registration for agent accounts)
-MATRIX_HOMESERVER=https://matrix.example.com
+MATRIX_HOMESERVER={matrix_homeserver}
 # MATRIX_SSL_VERIFY=false
+{extra_matrix}
 
 # AI provider API keys (at least one required)
 # ANTHROPIC_API_KEY=your-key-here

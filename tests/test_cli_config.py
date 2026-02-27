@@ -54,6 +54,25 @@ class TestConfigInit:
         assert "agents:" in content
         assert "# MindRoom Configuration (minimal)" in content
 
+    def test_init_profile_minimal(self, tmp_path: Path) -> None:
+        """Config init --profile minimal creates the minimal template."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--profile", "minimal"])
+        assert result.exit_code == 0
+        content = target.read_text()
+        assert "# MindRoom Configuration (minimal)" in content
+
+    def test_init_profile_public_writes_public_matrix_defaults(self, tmp_path: Path) -> None:
+        """Public profile should prefill hosted Matrix defaults and token placeholder."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--profile", "public"])
+        assert result.exit_code == 0
+
+        env_content = (tmp_path / ".env").read_text()
+        assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
+        assert "MATRIX_SERVER_NAME=mindroom.chat" in env_content
+        assert "MATRIX_REGISTRATION_TOKEN=" in env_content
+
     def test_init_creates_env_with_dashboard_key(self, tmp_path: Path) -> None:
         """Config init writes a random MINDROOM_API_KEY to .env."""
         target = tmp_path / "config.yaml"
@@ -639,6 +658,98 @@ class TestDoctor:
         result = runner.invoke(app, ["doctor"])
         assert result.exit_code == 0
         assert "Memory LLM (openai): OPENAI_API_KEY not set" in result.output
+
+
+# ---------------------------------------------------------------------------
+# mindroom connect
+# ---------------------------------------------------------------------------
+
+
+class TestConnect:
+    """Tests for `mindroom connect` pairing command."""
+
+    def test_connect_persists_local_provisioning_credentials(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Successful pairing should write provisioning credentials to .env."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mindroom.cli.socket.gethostname", lambda: "devbox")
+
+        monkeypatch.setattr(
+            "mindroom.cli.httpx.post",
+            lambda *_a, **_kw: httpx.Response(
+                200,
+                json={
+                    "client_id": "client-123",
+                    "client_secret": "secret-123",
+                    "connection": {
+                        "id": "conn-1",
+                        "client_name": "devbox",
+                        "fingerprint": "sha256:abc",
+                        "created_at": "2026-02-27T12:00:00Z",
+                        "last_seen_at": "2026-02-27T12:00:00Z",
+                        "revoked_at": None,
+                    },
+                },
+            ),
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "connect",
+                "--pair-code",
+                "ABCD-EFGH",
+                "--provisioning-url",
+                "https://provisioning.example",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert "Paired successfully" in result.output
+        env_content = (tmp_path / ".env").read_text()
+        assert "MINDROOM_PROVISIONING_URL=https://provisioning.example" in env_content
+        assert "MINDROOM_LOCAL_CLIENT_ID=client-123" in env_content
+        assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in env_content
+
+    def test_connect_no_persist_prints_exports(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--no-persist-env should print export commands and avoid writing .env."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
+        monkeypatch.setattr(
+            "mindroom.cli.httpx.post",
+            lambda *_a, **_kw: httpx.Response(
+                200,
+                json={"client_id": "client-123", "client_secret": "secret-123"},
+            ),
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "connect",
+                "--pair-code",
+                "ABCD-EFGH",
+                "--provisioning-url",
+                "https://provisioning.example",
+                "--no-persist-env",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert "export MINDROOM_PROVISIONING_URL=https://provisioning.example" in result.output
+        assert "export MINDROOM_LOCAL_CLIENT_ID=client-123" in result.output
+        assert "export MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in result.output
+        assert not (tmp_path / ".env").exists()
 
 
 # ---------------------------------------------------------------------------

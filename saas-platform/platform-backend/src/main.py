@@ -25,6 +25,7 @@ from backend.routes import (
     gdpr,
     health,
     instances,
+    local_mindroom,
     pricing,
     provisioner,
     sso,
@@ -215,6 +216,7 @@ app.include_router(subscriptions.router)
 app.include_router(usage.router)
 app.include_router(instances.router)
 app.include_router(provisioner.router)
+app.include_router(local_mindroom.router)
 app.include_router(admin.router)
 app.include_router(pricing.router)
 app.include_router(stripe_routes.router)

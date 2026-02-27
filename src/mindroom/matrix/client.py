@@ -11,6 +11,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
+import httpx
 import markdown
 import nio
 
@@ -37,6 +38,175 @@ def _maybe_ssl_context(homeserver: str) -> ssl_module.SSLContext | None:
             # Use default context with proper verification
             ssl_context = ssl_module.create_default_context()
         return ssl_context
+    return None
+
+
+def _matrix_ssl_verify_enabled() -> bool:
+    """Return whether HTTPS certificate validation is enabled for Matrix requests."""
+    return os.getenv("MATRIX_SSL_VERIFY", "true").lower() != "false"
+
+
+def _registration_token_from_env() -> str | None:
+    """Get MATRIX_REGISTRATION_TOKEN from environment if configured."""
+    token = os.getenv("MATRIX_REGISTRATION_TOKEN", "").strip()
+    return token or None
+
+
+def _provisioning_url_from_env() -> str | None:
+    """Get hosted provisioning API base URL from environment if configured."""
+    url = os.getenv("MINDROOM_PROVISIONING_URL", "").strip()
+    return url.rstrip("/") or None
+
+
+def _local_provisioning_client_credentials_from_env() -> tuple[str, str] | None:
+    """Get local provisioning client credentials from environment if configured."""
+    client_id = os.getenv("MINDROOM_LOCAL_CLIENT_ID", "").strip()
+    client_secret = os.getenv("MINDROOM_LOCAL_CLIENT_SECRET", "").strip()
+    if not client_id and not client_secret:
+        return None
+    if not client_id or not client_secret:
+        msg = (
+            "Provisioning credentials are incomplete. "
+            "Set both MINDROOM_LOCAL_CLIENT_ID and MINDROOM_LOCAL_CLIENT_SECRET, "
+            "or run `mindroom connect --pair-code ...` again."
+        )
+        raise ValueError(msg)
+    return client_id, client_secret
+
+
+async def _fetch_registration_token_from_provisioning(
+    *,
+    provisioning_url: str,
+    client_id: str,
+    client_secret: str,
+) -> str:
+    """Issue a short-lived registration token from hosted provisioning service."""
+    url = f"{provisioning_url}/v1/local-mindroom/tokens/issue"
+    headers = {
+        "X-Local-MindRoom-Client-Id": client_id,
+        "X-Local-MindRoom-Client-Secret": client_secret,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10, verify=_matrix_ssl_verify_enabled()) as client:
+            response = await client.post(url, json={"purpose": "register_agent"}, headers=headers)
+    except httpx.HTTPError as exc:
+        msg = f"Could not reach provisioning service ({provisioning_url}): {exc}"
+        raise ValueError(msg) from exc
+
+    if not response.is_success:
+        detail = response.text.strip() or "unknown error"
+        if response.status_code in {401, 403}:
+            msg = "Provisioning credentials are invalid or revoked. Run `mindroom connect --pair-code ...` again."
+            raise ValueError(msg)
+        msg = f"Provisioning service returned HTTP {response.status_code}: {detail}"
+        raise ValueError(msg)
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        msg = "Provisioning service returned invalid JSON while issuing registration token."
+        raise ValueError(msg) from exc
+
+    token = payload.get("registration_token") if isinstance(payload, dict) else None
+    if not isinstance(token, str) or not token.strip():
+        msg = "Provisioning service response missing registration_token."
+        raise ValueError(msg)
+    return token.strip()
+
+
+async def _resolve_registration_token() -> str | None:
+    """Resolve registration token from env or hosted provisioning service."""
+    env_token = _registration_token_from_env()
+    if env_token:
+        return env_token
+
+    provisioning_url = _provisioning_url_from_env()
+    if not provisioning_url:
+        return None
+
+    creds = _local_provisioning_client_credentials_from_env()
+    if creds is None:
+        msg = (
+            "MINDROOM_PROVISIONING_URL is set but local client credentials are missing. "
+            "Run `mindroom connect --pair-code ...` first."
+        )
+        raise ValueError(msg)
+
+    client_id, client_secret = creds
+    return await _fetch_registration_token_from_provisioning(
+        provisioning_url=provisioning_url,
+        client_id=client_id,
+        client_secret=client_secret,
+    )
+
+
+async def _homeserver_requires_registration_token(homeserver: str) -> bool:
+    """Check whether the homeserver advertises registration-token flow."""
+    url = f"{homeserver.rstrip('/')}/_matrix/client/v3/register"
+    try:
+        async with httpx.AsyncClient(timeout=5, verify=_matrix_ssl_verify_enabled()) as client:
+            response = await client.post(url, json={})
+            data = response.json()
+    except (httpx.HTTPError, ValueError):
+        return False
+
+    flows = data.get("flows")
+    if not isinstance(flows, list):
+        return False
+    for flow in flows:
+        if not isinstance(flow, dict):
+            continue
+        stages = flow.get("stages")
+        if isinstance(stages, list) and "m.login.registration_token" in stages:
+            return True
+    return False
+
+
+async def _register_with_token(
+    client: nio.AsyncClient,
+    *,
+    username: str,
+    password: str,
+    registration_token: str,
+) -> nio.RegisterResponse | nio.ErrorResponse:
+    """Register a user with m.login.registration_token auth."""
+    method, path, data = nio.Api.register(
+        user=username,
+        password=password,
+        device_name="mindroom_agent",
+        auth_dict={
+            "type": "m.login.registration_token",
+            "token": registration_token,
+        },
+    )
+    return await client._send(nio.RegisterResponse, method, path, data)
+
+
+async def _registration_failure_message(
+    response: nio.ErrorResponse,
+    homeserver: str,
+    registration_token: str | None,
+) -> str | None:
+    if (
+        response.status_code == "M_FORBIDDEN"
+        and registration_token
+        and "Invalid registration token" in (response.message or "")
+    ):
+        return (
+            "Matrix registration failed: MATRIX_REGISTRATION_TOKEN is invalid. "
+            "Generate/issue a valid token for bot provisioning and try again."
+        )
+
+    if (
+        response.message == "unknown error"
+        and not registration_token
+        and await _homeserver_requires_registration_token(homeserver)
+    ):
+        return (
+            "Matrix homeserver requires registration tokens for account creation. "
+            "Set MATRIX_REGISTRATION_TOKEN and retry."
+        )
+
     return None
 
 
@@ -165,13 +335,23 @@ async def register_user(
     server_name = extract_server_name_from_homeserver(homeserver)
     user_id = MatrixID.from_username(username, server_name).full_id
 
+    registration_token = await _resolve_registration_token()
+
     async with matrix_client(homeserver, user_id=user_id) as client:
         # Try to register the user
-        response = await client.register(
-            username=username,
-            password=password,
-            device_name="mindroom_agent",
-        )
+        if registration_token:
+            response = await _register_with_token(
+                client,
+                username=username,
+                password=password,
+                registration_token=registration_token,
+            )
+        else:
+            response = await client.register(
+                username=username,
+                password=password,
+                device_name="mindroom_agent",
+            )
 
         if isinstance(response, nio.RegisterResponse):
             logger.info(f"✅ Successfully registered user: {user_id}")
@@ -197,6 +377,11 @@ async def register_user(
                 return user_id
             msg = f"Login failed for existing user {user_id} with provided password: {login_response}"
             raise ValueError(msg)
+
+        if isinstance(response, nio.ErrorResponse):
+            failure_message = await _registration_failure_message(response, homeserver, registration_token)
+            if failure_message:
+                raise ValueError(failure_message)
         msg = f"Failed to register user {username}: {response}"
         raise ValueError(msg)
 
