@@ -42,22 +42,11 @@ def _maybe_ssl_context(homeserver: str) -> ssl_module.SSLContext | None:
     return None
 
 
-def _matrix_ssl_verify_enabled() -> bool:
-    """Return whether HTTPS certificate validation is enabled for Matrix requests."""
-    return os.getenv("MATRIX_SSL_VERIFY", "true").lower() != "false"
-
-
-def _registration_token_from_env() -> str | None:
-    """Get MATRIX_REGISTRATION_TOKEN from environment if configured."""
-    token = os.getenv("MATRIX_REGISTRATION_TOKEN", "").strip()
-    return token or None
-
-
 async def _homeserver_requires_registration_token(homeserver: str) -> bool:
     """Check whether the homeserver advertises registration-token flow."""
     url = f"{homeserver.rstrip('/')}/_matrix/client/v3/register"
     try:
-        async with httpx.AsyncClient(timeout=5, verify=_matrix_ssl_verify_enabled()) as client:
+        async with httpx.AsyncClient(timeout=5, verify=provisioning.matrix_ssl_verify_enabled()) as client:
             response = await client.post(url, json={})
             data = response.json()
     except (httpx.HTTPError, ValueError):
@@ -267,16 +256,13 @@ async def register_user(
     server_name = extract_server_name_from_homeserver(homeserver)
     user_id = MatrixID.from_username(username, server_name).full_id
 
-    registration_token = _registration_token_from_env()
+    registration_token = provisioning.registration_token_from_env()
     provisioning_url = provisioning.provisioning_url_from_env()
-    if provisioning_url and not registration_token:
-        creds = provisioning.local_provisioning_client_credentials_from_env()
-        if creds is None:
-            msg = (
-                "MINDROOM_PROVISIONING_URL is set but local client credentials are missing. "
-                "Run `mindroom connect --pair-code ...` first."
-            )
-            raise ValueError(msg)
+    creds = provisioning.required_local_provisioning_client_credentials_for_registration(
+        provisioning_url=provisioning_url,
+        registration_token=registration_token,
+    )
+    if creds and provisioning_url:
         client_id, client_secret = creds
         provisioning_result = await provisioning.register_user_via_provisioning_service(
             provisioning_url=provisioning_url,

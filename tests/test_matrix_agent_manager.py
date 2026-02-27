@@ -280,7 +280,7 @@ class TestMatrixRegistration:
             ) as mock_register,
             patch("mindroom.matrix.client.matrix_client") as mock_matrix_client,
             patch(
-                "mindroom.matrix.client._registration_token_from_env",
+                "mindroom.matrix.client.provisioning.registration_token_from_env",
                 return_value=None,
             ),
         ):
@@ -329,7 +329,7 @@ class TestMatrixRegistration:
             ) as mock_register,
             patch("mindroom.matrix.client.matrix_client") as mock_matrix_client,
             patch(
-                "mindroom.matrix.client._registration_token_from_env",
+                "mindroom.matrix.client.provisioning.registration_token_from_env",
                 return_value=None,
             ),
         ):

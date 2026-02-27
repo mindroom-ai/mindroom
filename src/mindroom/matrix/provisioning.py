@@ -9,7 +9,8 @@ from typing import Literal
 import httpx
 
 
-def _matrix_ssl_verify_enabled() -> bool:
+def matrix_ssl_verify_enabled() -> bool:
+    """Return whether HTTPS certificate validation is enabled for Matrix/provisioning requests."""
     return os.getenv("MATRIX_SSL_VERIFY", "true").lower() != "false"
 
 
@@ -17,6 +18,12 @@ def provisioning_url_from_env() -> str | None:
     """Get hosted provisioning API base URL from environment if configured."""
     url = os.getenv("MINDROOM_PROVISIONING_URL", "").strip()
     return url.rstrip("/") or None
+
+
+def registration_token_from_env() -> str | None:
+    """Get MATRIX_REGISTRATION_TOKEN from environment if configured."""
+    token = os.getenv("MATRIX_REGISTRATION_TOKEN", "").strip()
+    return token or None
 
 
 def local_provisioning_client_credentials_from_env() -> tuple[str, str] | None:
@@ -33,6 +40,25 @@ def local_provisioning_client_credentials_from_env() -> tuple[str, str] | None:
         )
         raise ValueError(msg)
     return client_id, client_secret
+
+
+def required_local_provisioning_client_credentials_for_registration(
+    *,
+    provisioning_url: str | None,
+    registration_token: str | None,
+) -> tuple[str, str] | None:
+    """Resolve required local provisioning credentials when using hosted registration."""
+    if registration_token or not provisioning_url:
+        return None
+
+    creds = local_provisioning_client_credentials_from_env()
+    if creds is None:
+        msg = (
+            "MINDROOM_PROVISIONING_URL is set but local client credentials are missing. "
+            "Run `mindroom connect --pair-code ...` first."
+        )
+        raise ValueError(msg)
+    return creds
 
 
 @dataclass(frozen=True)
@@ -66,7 +92,7 @@ async def register_user_via_provisioning_service(
         "display_name": display_name,
     }
     try:
-        async with httpx.AsyncClient(timeout=10, verify=_matrix_ssl_verify_enabled()) as client:
+        async with httpx.AsyncClient(timeout=10, verify=matrix_ssl_verify_enabled()) as client:
             response = await client.post(url, json=payload, headers=headers)
     except httpx.HTTPError as exc:
         msg = f"Could not reach provisioning service ({provisioning_url}): {exc}"
