@@ -115,6 +115,10 @@ async def test_worker_respects_batch_limits(
         "mindroom.memory.auto_flush._load_agent_session",
         lambda _storage, _agent, _sid: fake_session,
     )
+    monkeypatch.setattr(
+        "mindroom.memory.auto_flush._extract_memory_summary",
+        _fake_extract_memory_summary,
+    )
 
     writes: list[str] = []
 
@@ -131,3 +135,7 @@ async def test_worker_respects_batch_limits(
     await worker._run_cycle(config)
 
     assert len(writes) == 1
+
+
+async def _fake_extract_memory_summary(**_: object) -> str:
+    return "important decision"

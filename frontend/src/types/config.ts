@@ -6,15 +6,53 @@ export interface ModelConfig {
   provider: ProviderType;
   id: string;
   host?: string; // For ollama
-  extra_kwargs?: Record<string, any>; // Additional provider-specific parameters
+  extra_kwargs?: Record<string, unknown>; // Additional provider-specific parameters
 }
 
 export interface MemoryConfig {
+  backend?: 'mem0' | 'file';
   embedder: {
     provider: string;
     config: {
       model: string;
       host?: string;
+    };
+  };
+  file?: {
+    path?: string | null;
+    entrypoint_file?: string;
+    max_entrypoint_lines?: number;
+  };
+  auto_flush?: {
+    enabled?: boolean;
+    flush_interval_seconds?: number;
+    idle_seconds?: number;
+    max_dirty_age_seconds?: number;
+    stale_ttl_seconds?: number;
+    max_cross_session_reprioritize?: number;
+    retry_cooldown_seconds?: number;
+    max_retry_cooldown_seconds?: number;
+    batch?: {
+      max_sessions_per_cycle?: number;
+      max_sessions_per_agent_per_cycle?: number;
+    };
+    extractor?: {
+      no_reply_token?: string;
+      max_messages_per_flush?: number;
+      max_chars_per_flush?: number;
+      max_extraction_seconds?: number;
+      max_retries?: number;
+      include_memory_context?: {
+        daily_tail_lines?: number;
+        memory_snippets?: number;
+        snippet_max_chars?: number;
+      };
+    };
+    curation?: {
+      enabled?: boolean;
+      max_lines_per_pass?: number;
+      max_passes_per_day?: number;
+      append_only?: boolean;
     };
   };
 }
@@ -137,6 +175,6 @@ export interface Config {
   };
   room_models?: Record<string, string>; // Room-specific model overrides for teams
   teams?: Record<string, Omit<Team, 'id'>>; // Teams configuration
-  tools?: Record<string, any>; // Tool configurations
+  tools?: Record<string, unknown>; // Tool configurations
   voice?: VoiceConfig; // Voice configuration
 }

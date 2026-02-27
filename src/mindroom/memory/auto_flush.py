@@ -4,18 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
+from agno.agent import Agent
 from agno.db.base import SessionType
 from agno.session.agent import AgentSession
 
 from mindroom.agents import create_session_storage
+from mindroom.ai import get_model_instance
 from mindroom.logging_config import get_logger
 
-from .functions import add_agent_memory
+from .functions import add_agent_memory, list_all_agent_memories
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -242,29 +245,120 @@ def _select_recent_chat_lines(
     return selected
 
 
-_DURABLE_HINTS = (
-    "decide",
-    "decision",
-    "agreed",
-    "remember",
-    "preference",
-    "prefer",
-    "todo",
-    "action item",
-    "next step",
-    "deadline",
-    "due",
-    "will ",
-)
+def _normalize_extractor_line(line: str, no_reply_token: str) -> str | None:
+    stripped = line.strip()
+    if not stripped:
+        return None
+    if stripped.upper() == no_reply_token.upper():
+        return None
+    if stripped.startswith(("- ", "* ")):
+        stripped = stripped[2:].strip()
+    stripped = re.sub(r"^\d+\.\s+", "", stripped)
+    return stripped if stripped else None
 
 
-def _extract_durable_lines(lines: list[str]) -> list[str]:
-    durable: list[str] = []
-    for line in lines:
-        lower = line.lower()
-        if any(hint in lower for hint in _DURABLE_HINTS):
-            durable.append(line)
-    return durable
+def _sanitize_extractor_output(raw_output: str, no_reply_token: str) -> str | None:
+    cleaned = raw_output.strip()
+    if not cleaned:
+        return None
+    if cleaned.upper() == no_reply_token.upper():
+        return None
+
+    normalized_lines = [
+        normalized
+        for line in cleaned.splitlines()
+        if (normalized := _normalize_extractor_line(line, no_reply_token)) is not None
+    ]
+
+    if not normalized_lines:
+        return None
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for line in normalized_lines:
+        key = line.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(line)
+    return " | ".join(deduped[:10])
+
+
+async def _build_existing_memory_context(
+    *,
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+) -> str:
+    context_config = config.memory.auto_flush.extractor.include_memory_context
+    if context_config.memory_snippets <= 0:
+        return ""
+
+    max_memories = max(context_config.memory_snippets * 8, context_config.memory_snippets)
+    memories = await list_all_agent_memories(agent_name, storage_path, config, limit=max_memories)
+    if not memories:
+        return ""
+
+    snippets: list[str] = []
+    for memory in reversed(memories):
+        text = memory.get("memory", "").strip()
+        if not text:
+            continue
+        if len(text) > context_config.snippet_max_chars:
+            text = f"{text[: context_config.snippet_max_chars - 3]}..."
+        snippets.append(f"- {text}")
+        if len(snippets) >= context_config.memory_snippets:
+            break
+
+    snippets.reverse()
+    return "\n".join(snippets)
+
+
+async def _extract_memory_summary(
+    *,
+    config: Config,
+    storage_path: Path,
+    agent_name: str,
+    session_id: str,
+    lines: list[str],
+) -> str | None:
+    extractor = config.memory.auto_flush.extractor
+    if not lines:
+        return None
+
+    existing_context = await _build_existing_memory_context(
+        agent_name=agent_name,
+        storage_path=storage_path,
+        config=config,
+    )
+    existing_block = (
+        f"\nExisting memory snippets (avoid duplicates):\n{existing_context}\n"
+        if existing_context
+        else "\nExisting memory snippets: (none)\n"
+    )
+    excerpt = "\n".join(lines)
+    prompt = (
+        "Extract only durable memories from this conversation excerpt.\n"
+        "Keep only stable facts, explicit preferences, decisions, commitments, and action items.\n"
+        "Skip chit-chat, temporary statements, and one-off tool output.\n"
+        f"If nothing should be stored, output exactly: {extractor.no_reply_token}\n"
+        "Output plain lines only, one memory per line, no commentary.\n"
+        f"{existing_block}\n"
+        "Conversation excerpt:\n"
+        f"{excerpt}\n"
+    )
+
+    model_name = config.get_entity_model_name(agent_name)
+    model = get_model_instance(config, model_name)
+    extractor_agent = Agent(
+        name="MemoryAutoFlushExtractor",
+        role="Extract durable memory statements for long-term memory storage.",
+        model=model,
+    )
+    response = await extractor_agent.arun(prompt, session_id=f"memory_auto_flush_extract:{agent_name}:{session_id}")
+    content = response.content
+    raw_output = content if isinstance(content, str) else str(content or "")
+    return _sanitize_extractor_output(raw_output, extractor.no_reply_token)
 
 
 def _retry_cooldown_seconds(settings: MemoryAutoFlushConfig, failures: int) -> int:
@@ -473,14 +567,19 @@ class MemoryAutoFlushWorker:
             max_messages=extractor.max_messages_per_flush,
             max_chars=extractor.max_chars_per_flush,
         )
-        durable_lines = _extract_durable_lines(lines)
-        if not durable_lines:
+        memory_summary = await _extract_memory_summary(
+            config=config,
+            storage_path=self.storage_path,
+            agent_name=agent_name,
+            session_id=session_id,
+            lines=lines,
+        )
+        if memory_summary is None:
             return False
 
         session_updated = session.updated_at if isinstance(session.updated_at, int) else 0
         flush_marker = f"auto_flush:{session_id}:{session_updated}"
-        condensed = " | ".join(durable_lines[:10])
-        memory_content = f"[{flush_marker}] {condensed}"
+        memory_content = f"[{flush_marker}] {memory_summary}"
 
         await add_agent_memory(
             memory_content,
