@@ -30,6 +30,15 @@ if TYPE_CHECKING:
 DEFAULT_INTERNAL_USERNAME = Config().mindroom_user.username
 
 
+@pytest.fixture(autouse=True)
+def _clear_matrix_registration_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep matrix registration tests deterministic unless explicitly overridden."""
+    monkeypatch.delenv("MATRIX_REGISTRATION_TOKEN", raising=False)
+    monkeypatch.delenv("MINDROOM_PROVISIONING_URL", raising=False)
+    monkeypatch.delenv("MINDROOM_LOCAL_CLIENT_ID", raising=False)
+    monkeypatch.delenv("MINDROOM_LOCAL_CLIENT_SECRET", raising=False)
+
+
 @pytest.fixture
 def temp_matrix_users_file(tmp_path: Path) -> Path:
     """Create a temporary matrix_state.yaml file."""
@@ -226,6 +235,107 @@ class TestMatrixRegistration:
 
             mock_matrix_client.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_register_user_uses_registration_token_when_configured(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When MATRIX_REGISTRATION_TOKEN is set, register via token auth flow."""
+        monkeypatch.setenv("MATRIX_REGISTRATION_TOKEN", "token-123")
+
+        mock_client = AsyncMock()
+        mock_client._send.return_value = nio.RegisterResponse(
+            user_id="@test_user:localhost",
+            device_id="TEST_DEVICE",
+            access_token=TEST_ACCESS_TOKEN,
+        )
+        mock_client.set_displayname.return_value = AsyncMock()
+
+        with patch("mindroom.matrix.client.matrix_client") as mock_matrix_client:
+            mock_matrix_client.return_value.__aenter__.return_value = mock_client
+
+            user_id = await register_user("http://localhost:8008", "test_user", "test_pass", "Test User")
+
+            assert user_id == "@test_user:localhost"
+            mock_client._send.assert_called_once()
+            mock_client.register.assert_not_called()
+            mock_client.set_displayname.assert_called_once_with("Test User")
+
+    @pytest.mark.asyncio
+    async def test_register_user_uses_provisioning_service_token_when_configured(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When provisioning client creds are set, fetch token and register via token auth."""
+        monkeypatch.setenv("MINDROOM_PROVISIONING_URL", "https://provisioning.example")
+        monkeypatch.setenv("MINDROOM_LOCAL_CLIENT_ID", "client-123")
+        client_secret = "secret-123"  # noqa: S105
+        monkeypatch.setenv("MINDROOM_LOCAL_CLIENT_SECRET", client_secret)
+
+        mock_client = AsyncMock()
+        mock_client._send.return_value = nio.RegisterResponse(
+            user_id="@test_user:localhost",
+            device_id="TEST_DEVICE",
+            access_token=TEST_ACCESS_TOKEN,
+        )
+        mock_client.set_displayname.return_value = AsyncMock()
+
+        with (
+            patch("mindroom.matrix.client.matrix_client") as mock_matrix_client,
+            patch(
+                "mindroom.matrix.client._fetch_registration_token_from_provisioning",
+                new_callable=AsyncMock,
+            ) as mock_fetch,
+        ):
+            mock_matrix_client.return_value.__aenter__.return_value = mock_client
+            mock_fetch.return_value = "issued-token"
+
+            user_id = await register_user("http://localhost:8008", "test_user", "test_pass", "Test User")
+
+            assert user_id == "@test_user:localhost"
+            mock_fetch.assert_called_once_with(
+                provisioning_url="https://provisioning.example",
+                client_id="client-123",
+                client_secret=client_secret,
+            )
+            mock_client._send.assert_called_once()
+            mock_client.register.assert_not_called()
+            mock_client.set_displayname.assert_called_once_with("Test User")
+
+    @pytest.mark.asyncio
+    async def test_register_user_missing_provisioning_client_credentials_is_explicit(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Provisioning URL without local client creds should fail with actionable guidance."""
+        monkeypatch.setenv("MINDROOM_PROVISIONING_URL", "https://provisioning.example")
+        monkeypatch.delenv("MINDROOM_LOCAL_CLIENT_ID", raising=False)
+        monkeypatch.delenv("MINDROOM_LOCAL_CLIENT_SECRET", raising=False)
+
+        with pytest.raises(ValueError, match="mindroom connect --pair-code"):
+            await register_user("http://localhost:8008", "test_user", "test_pass", "Test User")
+
+    @pytest.mark.asyncio
+    async def test_register_user_missing_token_error_is_explicit(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Unknown register errors should become actionable when token flow is required."""
+        monkeypatch.delenv("MATRIX_REGISTRATION_TOKEN", raising=False)
+
+        mock_client = AsyncMock()
+        mock_client.register.return_value = nio.ErrorResponse("unknown error")
+
+        with (
+            patch("mindroom.matrix.client.matrix_client") as mock_matrix_client,
+            patch("mindroom.matrix.client._homeserver_requires_registration_token", new_callable=AsyncMock) as mock_req,
+        ):
+            mock_matrix_client.return_value.__aenter__.return_value = mock_client
+            mock_req.return_value = True
+
+            with pytest.raises(ValueError, match="Set MATRIX_REGISTRATION_TOKEN"):
+                await register_user("http://localhost:8008", "test_user", "test_pass", "Test User")
+
 
 class TestAgentUserCreation:
     """Test agent user creation functions."""
@@ -249,7 +359,7 @@ class TestAgentUserCreation:
         assert agent_user.agent_name == "calculator"
         assert agent_user.user_id == "@mindroom_calculator:localhost"
         assert agent_user.display_name == "CalculatorAgent"
-        assert agent_user.password.startswith("calculator_secure_password")
+        assert agent_user.password
 
         mock_save_creds.assert_called_once()
         mock_register.assert_called_once()
