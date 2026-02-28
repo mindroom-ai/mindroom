@@ -55,7 +55,7 @@ def _pin_matrix_homeserver(monkeypatch: pytest.MonkeyPatch) -> None:
     MATRIX_HOMESERVER (e.g. pointing at a staging server) would cause
     agent_name() domain checks to fail.
     """
-    monkeypatch.setattr("mindroom.config.MATRIX_HOMESERVER", "http://localhost:8008")
+    monkeypatch.setattr("mindroom.config.main.MATRIX_HOMESERVER", "http://localhost:8008")
 
 
 @pytest.fixture(autouse=True)

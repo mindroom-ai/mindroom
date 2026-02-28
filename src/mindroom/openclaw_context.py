@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
     import nio
 
-    from .config import Config
+    from .config.main import Config
 
 
 @dataclass(frozen=True)

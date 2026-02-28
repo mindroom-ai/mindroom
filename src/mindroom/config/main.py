@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Literal
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
-from mindroom.constants import CONFIG_PATH, ROUTER_AGENT_NAME, safe_replace
+from mindroom.constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, safe_replace
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import agent_username_localpart
 
@@ -180,10 +180,9 @@ class Config(BaseModel):
     @cached_property
     def domain(self) -> str:
         """Extract the domain from the MATRIX_HOMESERVER."""
-        from mindroom import config as config_module  # noqa: PLC0415
         from mindroom.matrix.identity import extract_server_name_from_homeserver  # noqa: PLC0415
 
-        return extract_server_name_from_homeserver(config_module.MATRIX_HOMESERVER)
+        return extract_server_name_from_homeserver(MATRIX_HOMESERVER)
 
     @cached_property
     def ids(self) -> dict[str, MatrixID]:

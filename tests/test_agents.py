@@ -14,7 +14,10 @@ from pydantic import ValidationError
 
 from mindroom import agent_prompts
 from mindroom.agents import _CULTURE_MANAGER_CACHE, create_agent
-from mindroom.config import AgentConfig, Config, CultureConfig, KnowledgeBaseConfig, ModelConfig
+from mindroom.config.agent import AgentConfig, CultureConfig
+from mindroom.config.knowledge import KnowledgeBaseConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 
 
 @patch("mindroom.agents.SqliteDb")

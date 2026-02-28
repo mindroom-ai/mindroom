@@ -8,7 +8,8 @@ import yaml
 from agno.tools import Toolkit
 from pydantic import ValidationError
 
-from mindroom.config import AgentConfig, AgentLearningMode, Config
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
 from mindroom.constants import CONFIG_PATH
 from mindroom.custom_tools.config_manager import validate_knowledge_bases
 from mindroom.logging_config import get_logger
@@ -16,6 +17,8 @@ from mindroom.tools_metadata import TOOL_METADATA
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.config.models import AgentLearningMode
 
 logger = get_logger(__name__)
 

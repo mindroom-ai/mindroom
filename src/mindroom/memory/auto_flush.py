@@ -24,7 +24,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from mindroom.config import Config, MemoryAutoFlushConfig
+    from mindroom.config.main import Config
+    from mindroom.config.memory import MemoryAutoFlushConfig
 
 logger = get_logger(__name__)
 

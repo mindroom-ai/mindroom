@@ -9,7 +9,7 @@ import nio
 import pytest
 import yaml
 
-from mindroom.config import Config
+from mindroom.config.main import Config
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import (
     INTERNAL_USER_AGENT_NAME,

@@ -28,7 +28,7 @@ from mindroom.cli_banner import make_banner
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from mindroom.config import Config
+    from mindroom.config.main import Config
 from mindroom import cli_connect
 from mindroom.cli_config import (
     _check_env_keys,

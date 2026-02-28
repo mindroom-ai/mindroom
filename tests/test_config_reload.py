@@ -9,7 +9,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator, _get_changed_agents
-from mindroom.config import AgentConfig, Config, CultureConfig, ModelConfig, RouterConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 
@@ -476,7 +478,7 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
         load_count[0] += 1
         return result
 
-    monkeypatch.setattr("mindroom.config.Config.from_yaml", mock_load_config)
+    monkeypatch.setattr("mindroom.config.main.Config.from_yaml", mock_load_config)
 
     async def mock_ensure_all_agent_users(_homeserver: str) -> dict[str, AgentMatrixUser]:
         return mock_agent_users

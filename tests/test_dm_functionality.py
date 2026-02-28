@@ -9,7 +9,8 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
-from mindroom.config import AgentConfig, Config
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
 from mindroom.matrix.client import create_dm_room
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID

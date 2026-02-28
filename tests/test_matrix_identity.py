@@ -5,7 +5,9 @@ from __future__ import annotations
 import pytest
 
 import mindroom.matrix.identity as matrix_identity
-from mindroom.config import AgentConfig, Config, ModelConfig
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.matrix.identity import MatrixID, ThreadStateKey, agent_username_localpart, extract_agent_name, is_agent_id
 
 

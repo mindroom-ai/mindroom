@@ -6,7 +6,7 @@ from typing import Any
 
 from mem0 import AsyncMemory
 
-from mindroom.config import Config
+from mindroom.config.main import Config
 from mindroom.credentials import get_credentials_manager
 from mindroom.logging_config import get_logger
 

@@ -25,7 +25,7 @@ from .state import MatrixRoom, MatrixState
 from .users import INTERNAL_USER_ACCOUNT_KEY
 
 if TYPE_CHECKING:
-    from mindroom.config import Config
+    from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 

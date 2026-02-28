@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from agno.models.response import ToolExecution
 
     from .bot import MultiAgentOrchestrator
-    from .config import Config
+    from .config.main import Config
     from .matrix.identity import MatrixID
 
 

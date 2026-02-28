@@ -16,7 +16,7 @@ from .config import create_memory_instance
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.config import Config
+    from mindroom.config.main import Config
 
 
 class MemoryResult(TypedDict, total=False):
