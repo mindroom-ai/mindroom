@@ -72,4 +72,4 @@ We may update these Terms from time to time. Continued use after changes are pub
 
 For questions about these Terms, contact:
 
-- `support@mindroom.chat` (update if different before App Store submission)
+- `support@mindroom.chat`
