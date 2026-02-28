@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import mindroom.matrix.identity as matrix_identity
-from mindroom.config import Config
+from mindroom.config.main import Config
 from mindroom.matrix.mentions import format_message_with_mentions, parse_mentions_in_text
 from mindroom.tool_events import TOOL_TRACE_KEY, ToolTraceEntry
 

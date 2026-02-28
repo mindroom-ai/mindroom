@@ -12,7 +12,7 @@ from typing import Any
 import nio
 from nio import crypto
 
-from mindroom.config import RoomDirectoryVisibility, RoomJoinRule
+from mindroom.config.matrix import RoomDirectoryVisibility, RoomJoinRule
 from mindroom.constants import ENCRYPTION_KEYS_DIR, MATRIX_SSL_VERIFY
 from mindroom.logging_config import get_logger
 

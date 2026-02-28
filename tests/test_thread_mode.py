@@ -11,7 +11,9 @@ from pydantic import ValidationError
 
 from mindroom.bot import AgentBot
 from mindroom.commands import Command, CommandType
-from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.streaming import StreamingResponse, send_streaming_response

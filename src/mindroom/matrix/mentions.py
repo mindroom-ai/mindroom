@@ -3,7 +3,7 @@
 import re
 from typing import TYPE_CHECKING, Any
 
-from mindroom.config import Config
+from mindroom.config.main import Config
 from mindroom.tool_events import build_tool_trace_content
 
 from .identity import MatrixID, mindroom_namespace

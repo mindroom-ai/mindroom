@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.config import Config
+from mindroom.config.main import Config
 from mindroom.voice_handler import handle_voice_message
 
 

@@ -9,7 +9,8 @@ import yaml
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 
 from mindroom.ai import get_model_instance
-from mindroom.config import Config, ModelConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 
 
 def test_model_config_with_extra_kwargs() -> None:

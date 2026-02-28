@@ -30,7 +30,7 @@ from .attachments import (
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .command_handler import CommandHandlerContext, _generate_welcome_message, handle_command
 from .commands import Command, command_parser
-from .config import Config
+from .config.main import Config
 from .constants import (
     ATTACHMENT_IDS_KEY,
     CONFIG_PATH,

@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import pytest
 
 from mindroom.agents import create_agent, get_datetime_context
-from mindroom.config import Config
+from mindroom.config.main import Config
 
 
 def test_get_datetime_context_format() -> None:

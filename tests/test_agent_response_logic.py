@@ -15,7 +15,9 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock
 
-from mindroom.config import AgentConfig, Config, ModelConfig
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.thread_utils import should_agent_respond
 
 

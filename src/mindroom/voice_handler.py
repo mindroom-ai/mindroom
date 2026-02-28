@@ -23,7 +23,7 @@ from .thread_utils import get_available_agents_for_sender
 if TYPE_CHECKING:
     import nio
 
-    from .config import Config
+    from .config.main import Config
 
 logger = get_logger(__name__)
 crypto = matrix_media.crypto

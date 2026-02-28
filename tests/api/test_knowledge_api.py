@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import mindroom.api.knowledge as knowledge_api
-from mindroom.config import Config, KnowledgeBaseConfig, KnowledgeGitConfig
+from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
+from mindroom.config.main import Config
 
 if TYPE_CHECKING:
     import pytest

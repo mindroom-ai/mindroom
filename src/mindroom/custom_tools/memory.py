@@ -24,7 +24,7 @@ from mindroom.memory.functions import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.config import Config
+    from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 

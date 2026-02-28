@@ -29,7 +29,9 @@ if TYPE_CHECKING:
     from agno.knowledge.protocol import KnowledgeProtocol
     from agno.models.base import Model
 
-    from .config import AgentConfig, Config, CultureConfig, CultureMode, DefaultsConfig
+    from .config.agent import AgentConfig, CultureConfig, CultureMode
+    from .config.main import Config
+    from .config.models import DefaultsConfig
 
 logger = get_logger(__name__)
 

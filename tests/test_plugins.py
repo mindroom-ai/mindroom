@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import mindroom.plugins as plugin_module
-from mindroom.config import Config
+from mindroom.config.main import Config
 from mindroom.plugins import load_plugins
 from mindroom.skills import get_plugin_skill_roots, set_plugin_skill_roots
 from mindroom.tools_metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name

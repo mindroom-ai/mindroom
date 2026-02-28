@@ -27,7 +27,7 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 |--------|---------|
 | `bot.py` | MultiAgentOrchestrator - boots agents, manages sync loops, hot-reload |
 | `agents.py` | Agent creation and configuration |
-| `config.py` | Pydantic models for YAML config parsing |
+| `config/` | Pydantic models for YAML config parsing (root model in `config/main.py`) |
 | `routing.py` | Intelligent agent selection when no agent is mentioned |
 | `teams.py` | Multi-agent collaboration (coordinate vs collaborate modes) |
 | `memory/` | Mem0 memory: agent, room, and team-scoped |
@@ -119,7 +119,7 @@ In this dev environment, many of these repositories are cloned in the parent dir
 
 ### Configuration Model
 
-The authoritative config is `config.yaml`, loaded via Pydantic models in `src/mindroom/config.py`:
+The authoritative config is `config.yaml`, loaded via Pydantic models in `src/mindroom/config/` (root model in `src/mindroom/config/main.py`):
 
 ```yaml
 agents:

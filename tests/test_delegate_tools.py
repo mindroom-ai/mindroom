@@ -9,7 +9,9 @@ import pytest
 
 import mindroom.tools  # noqa: F401
 from mindroom.agents import create_agent, describe_agent
-from mindroom.config import AgentConfig, Config, DefaultsConfig, ModelConfig
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH, DelegateTools
 from mindroom.tools_metadata import TOOL_METADATA
 

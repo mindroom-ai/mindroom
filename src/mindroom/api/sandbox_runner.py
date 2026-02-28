@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
     from agno.tools.toolkit import Toolkit
 
-    from mindroom.config import Config
+    from mindroom.config.main import Config
 
 MAX_LEASE_TTL_SECONDS = 3600
 DEFAULT_LEASE_TTL_SECONDS = 60
@@ -44,7 +44,7 @@ _RESPONSE_MARKER = "__SANDBOX_RESPONSE__"
 
 def _load_config_from_env() -> tuple[Config | None, Path]:
     """Read runner config path from environment variables."""
-    from mindroom.config import Config as _Config  # noqa: PLC0415
+    from mindroom.config.main import Config as _Config  # noqa: PLC0415
     from mindroom.constants import find_config  # noqa: PLC0415
 
     config_path = find_config()

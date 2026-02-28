@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
     import nio
 
-    from .config import Config
+    from .config.main import Config
 
 # Matches <a href="https://matrix.to/#/@user:domain">...</a> pills used by bridges.
 # Accepts both single and double quotes (mautrix bridges use single quotes).

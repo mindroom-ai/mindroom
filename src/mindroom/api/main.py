@@ -26,7 +26,7 @@ from mindroom.api.openai_compat import router as openai_compat_router
 from mindroom.api.schedules import router as schedules_router
 from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
-from mindroom.config import Config
+from mindroom.config.main import Config
 from mindroom.constants import CONFIG_PATH, CONFIG_TEMPLATE_PATH, safe_replace
 from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.tool_dependencies import auto_install_enabled, auto_install_tool_extra

@@ -8,7 +8,9 @@ import nio
 import pytest
 
 from mindroom import interactive
-from mindroom.config import AgentConfig, Config, ModelConfig
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 
 
 @pytest.fixture

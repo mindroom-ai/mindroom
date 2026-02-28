@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from mindroom.config import Config
+from mindroom.config.main import Config
 from mindroom.memory.functions import (
     MemoryResult,
     add_agent_memory,

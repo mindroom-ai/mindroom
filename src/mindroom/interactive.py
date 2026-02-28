@@ -14,7 +14,7 @@ from .matrix.event_info import EventInfo
 from .matrix.identity import is_agent_id
 
 if TYPE_CHECKING:
-    from .config import Config
+    from .config.main import Config
 
 logger = get_logger(__name__)
 

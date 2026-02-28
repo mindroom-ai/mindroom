@@ -10,7 +10,7 @@ import pytest
 
 from mindroom import config_confirmation, interactive
 from mindroom.bot import AgentBot
-from mindroom.config import Config
+from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker

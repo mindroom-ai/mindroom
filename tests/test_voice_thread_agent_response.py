@@ -11,7 +11,7 @@ import pytest
 from agno.media import Audio
 
 from mindroom.bot import ROUTER_AGENT_NAME, AgentBot
-from mindroom.config import Config
+from mindroom.config.main import Config
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,

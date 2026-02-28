@@ -11,14 +11,9 @@ from mindroom.bot import MultiAgentOrchestrator
 
 if TYPE_CHECKING:
     import pytest
-from mindroom.config import (
-    Config,
-    EmbedderConfig,
-    MemoryConfig,
-    MemoryEmbedderConfig,
-    MemoryLLMConfig,
-    RouterConfig,
-)
+from mindroom.config.main import Config
+from mindroom.config.memory import MemoryConfig, MemoryEmbedderConfig, MemoryLLMConfig
+from mindroom.config.models import EmbedderConfig, RouterConfig
 from mindroom.memory.config import get_memory_config
 
 

@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from agno.tools.function import Function
     from agno.tools.toolkit import Toolkit
 
-    from .config import Config
+    from .config.main import Config
     from .matrix.identity import MatrixID
     from .response_tracker import ResponseTracker
 
