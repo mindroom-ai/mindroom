@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import mimetypes
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import cached_property
@@ -13,19 +12,21 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import nio
 import uvicorn
-from nio import crypto
 from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
 
 from . import config_confirmation, image_handler, interactive, voice_handler
 from .agents import create_agent, create_session_storage, get_rooms_for_entity, remove_run_by_event_id
 from .ai import ai_response, stream_agent_response
 from .attachments import (
-    attachment_id_for_event,
-    attachment_records_to_media,
+    append_attachment_ids_prompt,
+    extract_file_or_video_caption,
+    is_voice_raw_audio_fallback,
     merge_attachment_ids,
     parse_attachment_ids_from_event_source,
-    register_local_attachment,
-    resolve_attachments,
+    register_audio_attachment,
+    register_file_or_video_attachment,
+    resolve_attachment_media,
+    resolve_thread_attachment_ids,
 )
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .commands import (
@@ -568,129 +569,6 @@ def _should_skip_mentions(event_source: dict) -> bool:
     return bool(content.get("com.mindroom.skip_mentions", False))
 
 
-def _is_voice_raw_audio_fallback(event_source: dict) -> bool:
-    """Return whether this message carries raw-audio fallback metadata."""
-    content = event_source.get("content", {})
-    return bool(content.get(VOICE_RAW_AUDIO_FALLBACK_KEY, False))
-
-
-def _attachment_ids(event_source: dict) -> list[str]:
-    """Return attachment IDs included in Matrix event metadata."""
-    return parse_attachment_ids_from_event_source(event_source)
-
-
-def _extension_from_mime_type(mime_type: str | None) -> str:
-    """Map MIME type to a stable file extension."""
-    if not mime_type:
-        return ".bin"
-    normalized_mime_type = mime_type.split(";", 1)[0].strip().lower()
-    extension = mimetypes.guess_extension(normalized_mime_type)
-    if extension:
-        return extension
-    return ".bin"
-
-
-def _store_media_bytes_locally(
-    storage_path: Path,
-    event_id: str,
-    media_bytes: bytes | None,
-    mime_type: str | None,
-) -> Path | None:
-    """Persist media bytes to storage so tool-enabled agents can access them as files."""
-    if media_bytes is None:
-        return None
-    incoming_media_dir = storage_path / "incoming_media"
-    safe_event_id = "".join(ch if ch.isalnum() else "_" for ch in event_id).strip("_") or "voice_event"
-    extension = _extension_from_mime_type(mime_type)
-    media_path = incoming_media_dir / f"{safe_event_id}{extension}"
-    try:
-        incoming_media_dir.mkdir(parents=True, exist_ok=True)
-        media_path.write_bytes(media_bytes)
-    except OSError:
-        logger.exception("Failed to persist media payload")
-        return None
-    return media_path
-
-
-def _media_mime_type(
-    event: nio.RoomMessageMedia | nio.RoomEncryptedMedia,
-) -> str | None:
-    """Extract MIME type from Matrix media events."""
-    if isinstance(event, nio.RoomEncryptedMedia):
-        mimetype = getattr(event, "mimetype", None)
-        if isinstance(mimetype, str) and mimetype:
-            return mimetype
-    content = event.source.get("content", {})
-    info = content.get("info", {}) if isinstance(content, dict) else {}
-    mimetype = info.get("mimetype") if isinstance(info, dict) else None
-    return mimetype if isinstance(mimetype, str) and mimetype else None
-
-
-def _extract_file_or_video_caption(
-    event: nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
-) -> str:
-    """Extract user caption for file/video events using MSC2530 semantics."""
-    content = event.source.get("content", {})
-    filename = content.get("filename")
-    body = event.body
-    if filename and filename != body and body:
-        return body
-    if isinstance(event, nio.RoomMessageVideo | nio.RoomEncryptedVideo):
-        return "[Attached video]"
-    return "[Attached file]"
-
-
-def _decrypt_encrypted_media_bytes(event: nio.RoomEncryptedMedia, encrypted_bytes: bytes) -> bytes | None:
-    """Decrypt encrypted Matrix media payload bytes."""
-    try:
-        key = event.source["content"]["file"]["key"]["k"]
-        sha256 = event.source["content"]["file"]["hashes"]["sha256"]
-        iv = event.source["content"]["file"]["iv"]
-    except (KeyError, TypeError):
-        logger.exception("Encrypted media payload missing decryption fields", event_id=event.event_id)
-        return None
-
-    try:
-        return crypto.attachments.decrypt_attachment(encrypted_bytes, key, sha256, iv)
-    except Exception:
-        logger.exception("Media decryption failed", event_id=event.event_id)
-        return None
-
-
-async def _download_media_bytes(
-    client: nio.AsyncClient,
-    event: nio.RoomMessageMedia | nio.RoomEncryptedMedia,
-) -> bytes | None:
-    """Download and decrypt Matrix media payload bytes."""
-    try:
-        response = await client.download(event.url)
-    except Exception:
-        logger.exception("Error downloading media")
-        return None
-
-    if isinstance(response, nio.DownloadError):
-        logger.error("Media download failed", event_id=event.event_id, error=str(response))
-        return None
-    if not isinstance(response.body, bytes):
-        logger.error("Media download returned non-bytes payload", event_id=event.event_id)
-        return None
-
-    if isinstance(event, nio.RoomEncryptedMedia):
-        return _decrypt_encrypted_media_bytes(event, response.body)
-    return response.body
-
-
-async def _store_file_or_video_locally(
-    client: nio.AsyncClient,
-    storage_path: Path,
-    event: nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
-) -> Path | None:
-    """Download and persist file/video media to local storage."""
-    media_bytes = await _download_media_bytes(client, event)
-    mime_type = _media_mime_type(event)
-    return _store_media_bytes_locally(storage_path, event.event_id, media_bytes, mime_type)
-
-
 def create_bot_for_entity(
     entity_name: str,
     agent_user: AgentMatrixUser,
@@ -891,59 +769,6 @@ class AgentBot:
             return []
         audio = await voice_handler.download_audio(self.client, event)
         return [audio] if audio else []
-
-    async def _fetch_thread_attachment_ids(self, room_id: str, thread_id: str) -> list[str]:
-        """Resolve attachment IDs from a thread root, creating one for raw file/video roots when needed."""
-        assert self.client is not None
-        response = await self.client.room_get_event(room_id, thread_id)
-        if not isinstance(response, nio.RoomGetEventResponse):
-            return []
-        event = response.event
-
-        event_attachment_ids = _attachment_ids(event.source)
-        if event_attachment_ids:
-            return event_attachment_ids
-
-        if not isinstance(
-            event,
-            nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
-        ):
-            return []
-
-        local_media_path = await _store_file_or_video_locally(self.client, self.storage_path, event)
-        if local_media_path is None:
-            return []
-
-        content = event.source.get("content", {})
-        filename = content.get("filename")
-        if not isinstance(filename, str) or not filename:
-            filename = event.body
-        kind = "video" if isinstance(event, nio.RoomMessageVideo | nio.RoomEncryptedVideo) else "file"
-        record = register_local_attachment(
-            self.storage_path,
-            local_media_path,
-            kind=kind,
-            attachment_id=attachment_id_for_event(event.event_id),
-            filename=filename if isinstance(filename, str) else None,
-            mime_type=_media_mime_type(event),
-            room_id=room_id,
-            thread_id=thread_id,
-            source_event_id=event.event_id,
-            sender=event.sender,
-        )
-        if record is None:
-            return []
-        return [record.attachment_id]
-
-    def _resolve_attachment_media(
-        self,
-        attachment_ids: list[str],
-    ) -> tuple[list[str], list[Audio], list[File], list[Video]]:
-        """Resolve attachment IDs into media objects for models and tools."""
-        attachment_records = resolve_attachments(self.storage_path, attachment_ids)
-        resolved_attachment_ids = [record.attachment_id for record in attachment_records]
-        attachment_audio, attachment_files, attachment_videos = attachment_records_to_media(attachment_records)
-        return resolved_attachment_ids, attachment_audio, attachment_files, attachment_videos
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
@@ -1262,7 +1087,7 @@ class AgentBot:
             self.logger.debug("Ignoring message from other agent (not mentioned)")
             return
 
-        message_attachment_ids = _attachment_ids(event.source)
+        message_attachment_ids = parse_attachment_ids_from_event_source(event.source)
 
         # Router dispatch (routing / skip) — shared with image handler
         if await self._handle_router_dispatch(
@@ -1290,23 +1115,26 @@ class AgentBot:
         thread_images = await self._fetch_thread_images(room.room_id, context.thread_id) if context.thread_id else []
         thread_audio = (
             await self._fetch_thread_audio(room.room_id, context.thread_id)
-            if context.thread_id and _is_voice_raw_audio_fallback(event.source)
+            if context.thread_id and is_voice_raw_audio_fallback(event.source)
             else []
         )
         thread_attachment_ids = (
-            await self._fetch_thread_attachment_ids(room.room_id, context.thread_id) if context.thread_id else []
+            await resolve_thread_attachment_ids(
+                self.client,
+                self.storage_path,
+                room_id=room.room_id,
+                thread_id=context.thread_id,
+            )
+            if context.thread_id
+            else []
         )
         attachment_ids = merge_attachment_ids(message_attachment_ids, thread_attachment_ids)
-        resolved_attachment_ids, attachment_audio, attachment_files, attachment_videos = self._resolve_attachment_media(
+        resolved_attachment_ids, attachment_audio, attachment_files, attachment_videos = resolve_attachment_media(
+            self.storage_path,
             attachment_ids,
         )
         merged_audio = [*thread_audio, *attachment_audio]
-        prompt_text = event.body
-        if resolved_attachment_ids:
-            prompt_text = (
-                f"{prompt_text}\n\nAvailable attachment IDs: {', '.join(resolved_attachment_ids)}. "
-                "Use tool calls to inspect or process them."
-            )
+        prompt_text = append_attachment_ids_prompt(event.body, resolved_attachment_ids)
 
         if action.kind == "team":
             assert action.form_team is not None
@@ -1497,32 +1325,23 @@ class AgentBot:
             event_id=event.event_id,
             sender=event.sender,
         )
-        local_audio_path = _store_media_bytes_locally(
+        attachment_record = register_audio_attachment(
             self.storage_path,
-            event.event_id,
-            voice_audio.content,
-            voice_audio.mime_type,
+            event_id=event.event_id,
+            audio_bytes=voice_audio.content,
+            mime_type=voice_audio.mime_type,
+            room_id=room.room_id,
+            thread_id=thread_id,
+            sender=event.sender,
+            filename=event.body if isinstance(event.body, str) else None,
         )
         fallback_message = f"{VOICE_PREFIX}{voice_handler.extract_caption(event)}"
         fallback_extra_content: dict[str, str | bool | list[str]] = {
             ORIGINAL_SENDER_KEY: event.sender,
             VOICE_RAW_AUDIO_FALLBACK_KEY: True,
         }
-        if local_audio_path is not None:
-            attachment_record = register_local_attachment(
-                self.storage_path,
-                local_audio_path,
-                kind="audio",
-                attachment_id=attachment_id_for_event(event.event_id),
-                filename=event.body if isinstance(event.body, str) else None,
-                mime_type=voice_audio.mime_type,
-                room_id=room.room_id,
-                thread_id=thread_id,
-                source_event_id=event.event_id,
-                sender=event.sender,
-            )
-            if attachment_record is not None:
-                fallback_extra_content[ATTACHMENT_IDS_KEY] = [attachment_record.attachment_id]
+        if attachment_record is not None:
+            fallback_extra_content[ATTACHMENT_IDS_KEY] = [attachment_record.attachment_id]
         response_event_id = await self._send_response(
             room_id=room.room_id,
             reply_to_event_id=event.event_id,
@@ -1624,36 +1443,21 @@ class AgentBot:
             self.logger.debug("Ignoring media from other agent (not mentioned)")
             return
 
-        local_media_path = await _store_file_or_video_locally(self.client, self.storage_path, event)
-        if local_media_path is None:
-            self.logger.error("Failed to download media", event_id=event.event_id)
-            self.response_tracker.mark_responded(event.event_id)
-            return
-
-        caption = _extract_file_or_video_caption(event)
-        content = event.source.get("content", {})
-        filename = content.get("filename")
-        if not isinstance(filename, str) or not filename:
-            filename = event.body
-        media_kind = "video" if isinstance(event, nio.RoomMessageVideo | nio.RoomEncryptedVideo) else "file"
-        attachment_record = register_local_attachment(
+        attachment_record = await register_file_or_video_attachment(
+            self.client,
             self.storage_path,
-            local_media_path,
-            kind=media_kind,
-            attachment_id=attachment_id_for_event(event.event_id),
-            filename=filename if isinstance(filename, str) else None,
-            mime_type=_media_mime_type(event),
             room_id=room.room_id,
             thread_id=context.thread_id,
-            source_event_id=event.event_id,
-            sender=event.sender,
+            event=event,
         )
         if attachment_record is None:
             self.logger.error("Failed to register media attachment", event_id=event.event_id)
             self.response_tracker.mark_responded(event.event_id)
             return
 
-        resolved_attachment_ids, attachment_audio, attachment_files, attachment_videos = self._resolve_attachment_media(
+        caption = extract_file_or_video_caption(event)
+        resolved_attachment_ids, attachment_audio, attachment_files, attachment_videos = resolve_attachment_media(
+            self.storage_path,
             [attachment_record.attachment_id],
         )
 
@@ -1683,12 +1487,7 @@ class AgentBot:
         if action.kind == "skip":
             return
 
-        prompt_text = caption
-        if resolved_attachment_ids:
-            prompt_text = (
-                f"{caption}\n\nAvailable attachment IDs: {', '.join(resolved_attachment_ids)}. "
-                "Use tool calls to inspect or process them."
-            )
+        prompt_text = append_attachment_ids_prompt(caption, resolved_attachment_ids)
 
         self.logger.info("Processing media message", event_id=event.event_id)
 

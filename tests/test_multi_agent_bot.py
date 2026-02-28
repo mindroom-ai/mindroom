@@ -17,7 +17,7 @@ from agno.models.ollama import Ollama
 from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
 
-from mindroom.attachments import attachment_id_for_event
+from mindroom.attachments import attachment_id_for_event, register_local_attachment
 from mindroom.bot import AgentBot, MessageContext, MultiAgentOrchestrator, MultiKnowledgeVectorDb
 from mindroom.config import AgentConfig, AuthorizationConfig, Config, DefaultsConfig, KnowledgeBaseConfig, ModelConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY
@@ -1179,6 +1179,19 @@ class TestAgentBot:
         local_media_path = tmp_path / "incoming_media" / "file.pdf"
         local_media_path.parent.mkdir(parents=True, exist_ok=True)
         local_media_path.write_bytes(b"pdf")
+        attachment_record = register_local_attachment(
+            tmp_path,
+            local_media_path,
+            kind="file",
+            attachment_id=attachment_id_for_event("$file_event"),
+            filename="report.pdf",
+            mime_type="application/pdf",
+            room_id=room.room_id,
+            thread_id=None,
+            source_event_id="$file_event",
+            sender="@user:localhost",
+        )
+        assert attachment_record is not None
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
@@ -1193,7 +1206,11 @@ class TestAgentBot:
                 ),
             ),
             patch("mindroom.bot.should_agent_respond", return_value=True),
-            patch("mindroom.bot._store_file_or_video_locally", new_callable=AsyncMock, return_value=local_media_path),
+            patch(
+                "mindroom.bot.register_file_or_video_attachment",
+                new_callable=AsyncMock,
+                return_value=attachment_record,
+            ),
         ):
             await bot._on_file_or_video_message(room, event)
 
@@ -1264,7 +1281,7 @@ class TestAgentBot:
                 ),
             ),
             patch("mindroom.bot.should_agent_respond", return_value=True),
-            patch("mindroom.bot._store_file_or_video_locally", new_callable=AsyncMock, return_value=None),
+            patch("mindroom.bot.register_file_or_video_attachment", new_callable=AsyncMock, return_value=None),
         ):
             await bot._on_file_or_video_message(room, event)
 
@@ -1411,6 +1428,19 @@ class TestAgentBot:
         local_media_path = tmp_path / "incoming_media" / "file_route.pdf"
         local_media_path.parent.mkdir(parents=True, exist_ok=True)
         local_media_path.write_bytes(b"%PDF")
+        attachment_record = register_local_attachment(
+            tmp_path,
+            local_media_path,
+            kind="file",
+            attachment_id=attachment_id_for_event("$file_route"),
+            filename="report.pdf",
+            mime_type="application/pdf",
+            room_id=room.room_id,
+            thread_id=None,
+            source_event_id="$file_route",
+            sender="@user:localhost",
+        )
+        assert attachment_record is not None
 
         with (
             patch("mindroom.bot.extract_agent_name", return_value=None),
@@ -1419,9 +1449,9 @@ class TestAgentBot:
             patch("mindroom.bot.get_available_agents_for_sender") as mock_get_available,
             patch("mindroom.bot.is_authorized_sender", return_value=True),
             patch(
-                "mindroom.bot._store_file_or_video_locally",
+                "mindroom.bot.register_file_or_video_attachment",
                 new_callable=AsyncMock,
-                return_value=local_media_path,
+                return_value=attachment_record,
             ),
         ):
             mock_get_available.return_value = [config.ids["general"], config.ids["calculator"]]
