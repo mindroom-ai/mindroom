@@ -220,9 +220,7 @@ uvx mindroom connect --pair-code ABCD-EFGH
 Notes:
 
 - Pair code is short-lived (10 minutes).
-- `mindroom connect` writes local provisioning credentials into `.env`.
-- Those credentials are not Matrix access tokens.
-- They only authorize provisioning endpoints for local onboarding.
+- `mindroom connect` writes local provisioning values (including `MINDROOM_NAMESPACE`) into `.env`.
 
 ### 4. Run MindRoom
 
@@ -3927,7 +3925,7 @@ Direct and single-container deployments:
 
 See the [Docker guide](https://docs.mindroom.chat/deployment/docker/#environment-variables) for the complete environment variable reference.
 
-Hosted `mindroom.chat` deployments additionally use local provisioning credentials from `mindroom connect` (`MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET`) to bootstrap agent registrations.
+Hosted `mindroom.chat` deployments additionally use values from `mindroom connect` (`MINDROOM_LOCAL_CLIENT_ID`, `MINDROOM_LOCAL_CLIENT_SECRET`, and `MINDROOM_NAMESPACE`) to bootstrap agent registrations and avoid collisions on shared homeservers.
 
 # Hosted Matrix + Local Backend
 
@@ -4008,8 +4006,9 @@ MindRoom then:
 
 - `MINDROOM_LOCAL_CLIENT_ID`
 - `MINDROOM_LOCAL_CLIENT_SECRET`
+- `MINDROOM_NAMESPACE`
 
-These are **not Matrix user access tokens**.
+`MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` are **not Matrix user access tokens**. `MINDROOM_NAMESPACE` is appended to managed agent usernames and room aliases to avoid collisions on shared homeservers.
 
 They can only call provisioning-service endpoints that accept local client credentials (for example agent registration flows). Revoke them from `Settings -> Local MindRoom` in the chat UI.
 
