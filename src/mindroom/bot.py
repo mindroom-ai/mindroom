@@ -33,9 +33,9 @@ from .file_watcher import watch_file
 from .knowledge import initialize_knowledge_managers, shutdown_knowledge_managers
 from .knowledge_utils import MultiKnowledgeVectorDb, resolve_agent_knowledge
 from .logging_config import emoji, get_logger, setup_logging
+from .matrix.avatar import check_and_set_avatar
 from .matrix.client import (
     _latest_thread_event_id,
-    check_and_set_avatar,
     edit_message,
     fetch_thread_history,
     get_joined_rooms,
