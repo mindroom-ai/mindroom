@@ -110,4 +110,4 @@ Direct and single-container deployments:
 
 See the [Docker guide](docker.md#environment-variables) for the complete environment variable reference.
 
-Hosted `mindroom.chat` deployments additionally use local provisioning credentials from `mindroom connect` (`MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET`) to bootstrap agent registrations.
+Hosted `mindroom.chat` deployments additionally use values from `mindroom connect` (`MINDROOM_LOCAL_CLIENT_ID`, `MINDROOM_LOCAL_CLIENT_SECRET`, and `MINDROOM_NAMESPACE`) to bootstrap agent registrations and avoid collisions on shared homeservers.
