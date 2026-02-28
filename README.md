@@ -160,6 +160,30 @@ Gmail, GitHub, Spotify, Home Assistant, Google Drive, Reddit, weather services, 
 - [uv](https://github.com/astral-sh/uv) for Python package management
 - Node.js 20+ and [bun](https://bun.sh/) (optional, for web UI)
 
+### Fastest Path: Hosted Matrix + Local Backend (`uvx` only)
+
+Use this path if you want to run only the backend locally while using hosted chat + Matrix on `mindroom.chat`.
+
+```bash
+mkdir -p ~/mindroom-local
+cd ~/mindroom-local
+
+# Create starter config + .env tuned for hosted matrix
+uvx mindroom config init --profile public
+
+# Add at least one model API key
+$EDITOR .env
+
+# Generate pair code in https://chat.mindroom.chat:
+# Settings -> Local MindRoom -> Generate Pair Code
+uvx mindroom connect --pair-code ABCD-EFGH
+
+# Start backend
+uvx mindroom run
+```
+
+See [Hosted Matrix deployment guide](docs/deployment/hosted-matrix.md) for full details.
+
 ### Installation and starting
 
 ```bash

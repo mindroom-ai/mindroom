@@ -20,8 +20,10 @@ from agno.run.team import TeamRunOutput
 from mindroom.bot import AgentBot, MessageContext, MultiAgentOrchestrator, MultiKnowledgeVectorDb
 from mindroom.config import AgentConfig, AuthorizationConfig, Config, DefaultsConfig, KnowledgeBaseConfig, ModelConfig
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.teams import TeamFormationDecision, TeamMode
+from mindroom.thread_utils import is_authorized_sender as is_authorized_sender_for_test
 from mindroom.tool_events import ToolTraceEntry
 
 from .conftest import TEST_PASSWORD
@@ -1733,6 +1735,96 @@ class TestMultiAgentOrchestrator:
         orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
         assert orchestrator.agent_bots == {}
         assert not orchestrator.running
+
+    @pytest.mark.asyncio
+    async def test_ensure_room_invitations_invites_authorized_users(self, tmp_path: Path) -> None:
+        """Global users and room-permitted users should be invited to managed rooms."""
+        config = Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="GeneralAgent",
+                    rooms=["!room1:localhost", "!room2:localhost"],
+                ),
+            },
+            authorization={
+                "global_users": ["@alice:localhost"],
+                "room_permissions": {"!room1:localhost": ["@bob:localhost"]},
+                "default_room_access": False,
+            },
+        )
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator.config = config
+
+        router_bot = MagicMock()
+        router_bot.client = AsyncMock()
+        orchestrator.agent_bots = {"router": router_bot}
+
+        room_members = {
+            "!room1:localhost": {"@mindroom_general:localhost", "@mindroom_router:localhost"},
+            "!room2:localhost": {"@mindroom_general:localhost", "@mindroom_router:localhost"},
+        }
+
+        async def mock_get_room_members(_client: AsyncMock, room_id: str) -> set[str]:
+            return room_members[room_id]
+
+        mock_invite = AsyncMock(return_value=True)
+
+        with (
+            patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
+            patch("mindroom.bot.is_authorized_sender", side_effect=is_authorized_sender_for_test),
+            patch("mindroom.bot.get_joined_rooms", new=AsyncMock(return_value=list(room_members))),
+            patch("mindroom.bot.get_room_members", side_effect=mock_get_room_members),
+            patch("mindroom.bot.invite_to_room", mock_invite),
+            patch("mindroom.bot.MatrixState.load", return_value=MatrixState()),
+        ):
+            await orchestrator._ensure_room_invitations()
+
+        invited_users_by_room = {(call.args[1], call.args[2]) for call in mock_invite.await_args_list}
+        assert invited_users_by_room == {
+            ("!room1:localhost", "@alice:localhost"),
+            ("!room2:localhost", "@alice:localhost"),
+            ("!room1:localhost", "@bob:localhost"),
+        }
+
+    @pytest.mark.asyncio
+    async def test_ensure_room_invitations_skips_non_matrix_authorization_entries(self, tmp_path: Path) -> None:
+        """Only concrete Matrix user IDs should be invited from authorization lists."""
+        config = Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="GeneralAgent",
+                    rooms=["!room1:localhost"],
+                ),
+            },
+            authorization={
+                "global_users": ["@alice:localhost", "@admin:*", "alice"],
+                "default_room_access": False,
+            },
+        )
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator.config = config
+
+        router_bot = MagicMock()
+        router_bot.client = AsyncMock()
+        orchestrator.agent_bots = {"router": router_bot}
+
+        async def mock_get_room_members(_client: AsyncMock, _room_id: str) -> set[str]:
+            return {"@mindroom_general:localhost", "@mindroom_router:localhost"}
+
+        mock_invite = AsyncMock(return_value=True)
+
+        with (
+            patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
+            patch("mindroom.bot.is_authorized_sender", side_effect=is_authorized_sender_for_test),
+            patch("mindroom.bot.get_joined_rooms", new=AsyncMock(return_value=["!room1:localhost"])),
+            patch("mindroom.bot.get_room_members", side_effect=mock_get_room_members),
+            patch("mindroom.bot.invite_to_room", mock_invite),
+            patch("mindroom.bot.MatrixState.load", return_value=MatrixState()),
+        ):
+            await orchestrator._ensure_room_invitations()
+
+        invited_users = [call.args[2] for call in mock_invite.await_args_list]
+        assert invited_users == ["@alice:localhost"]
 
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator initialization

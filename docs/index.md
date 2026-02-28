@@ -139,6 +139,7 @@ mindroom run
 ## Documentation
 
 - [Getting Started](getting-started.md) - Installation and first steps
+- [Hosted Matrix Deployment](deployment/hosted-matrix.md) - Run only `uvx mindroom` locally against hosted Matrix
 - [Configuration](configuration/index.md) - All configuration options
 - [Cultures](configuration/cultures.md) - Configure shared agent cultures
 - [Dashboard](dashboard.md) - Web UI for configuration

@@ -271,6 +271,12 @@ def connect(
         "--persist-env/--no-persist-env",
         help="Persist local provisioning credentials to .env next to config.yaml.",
     ),
+    path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--path",
+        "-p",
+        help="Override auto-detection and use this config file path for .env persistence.",
+    ),
 ) -> None:
     """Pair this local MindRoom install with the hosted provisioning service."""
     normalized_pair_code = pair_code.strip().upper()
@@ -285,13 +291,14 @@ def connect(
         console.print("[red]Error:[/red] Invalid provisioning URL.")
         raise typer.Exit(1)
 
+    resolved_config_path = (path or Path(CONFIG_PATH)).expanduser().resolve()
     normalized_client_name = client_name.strip() or socket.gethostname()
     try:
         credentials = cli_connect.complete_local_pairing(
             provisioning_url=resolved_provisioning_url,
             pair_code=normalized_pair_code,
             client_name=normalized_client_name,
-            client_fingerprint=_local_client_fingerprint(),
+            client_fingerprint=_local_client_fingerprint(config_path=resolved_config_path),
             matrix_ssl_verify=MATRIX_SSL_VERIFY,
             post_request=httpx.post,
         )
@@ -309,17 +316,15 @@ def connect(
             provisioning_url=resolved_provisioning_url,
             client_id=credentials.client_id,
             client_secret=credentials.client_secret,
-            config_path=CONFIG_PATH,
+            config_path=resolved_config_path,
         )
         console.print("[green]Paired successfully.[/green]")
         console.print(f"  Saved credentials to: {env_path}")
-        if credentials.owner_user_id:
-            config_path = Path(CONFIG_PATH).expanduser().resolve()
-            if cli_connect.replace_owner_placeholders_in_config(
-                config_path=config_path,
-                owner_user_id=credentials.owner_user_id,
-            ):
-                console.print(f"  Updated owner placeholder(s) in: {config_path}")
+        if credentials.owner_user_id and cli_connect.replace_owner_placeholders_in_config(
+            config_path=resolved_config_path,
+            owner_user_id=credentials.owner_user_id,
+        ):
+            console.print(f"  Updated owner placeholder(s) in: {resolved_config_path}")
         console.print("\nNext step:")
         console.print("  uv run mindroom run")
         return
@@ -621,6 +626,10 @@ def _check_single_provider(
 
 def _check_memory_config(config: Config) -> tuple[int, int, int]:
     """Check memory LLM and embedder configuration. Returns (passed, failed, warnings)."""
+    if config.memory.backend == "file":
+        console.print("[green]✓[/green] Memory backend: file (markdown)")
+        return 1, 0, 0
+
     p1, f1, w1 = _check_memory_llm(config)
     p2, f2, w2 = _check_memory_embedder(config)
     return p1 + p2, f1 + f2, w1 + w2
@@ -810,9 +819,10 @@ def _print_pairing_success_with_exports(
     console.print("  uv run mindroom run")
 
 
-def _local_client_fingerprint() -> str:
+def _local_client_fingerprint(*, config_path: Path | None = None) -> str:
     """Return a stable, non-secret local fingerprint."""
-    raw = f"{socket.gethostname()}:{Path(CONFIG_PATH).expanduser().resolve()}"
+    resolved_config_path = (config_path or Path(CONFIG_PATH)).expanduser().resolve()
+    raw = f"{socket.gethostname()}:{resolved_config_path}"
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
 

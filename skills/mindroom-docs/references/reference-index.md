@@ -37,6 +37,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Matrix Integration | `architecture/matrix.md` | `architecture/matrix/index.md` | `page__architecture__matrix__index.md` |
 | Agent Orchestration | `architecture/orchestration.md` | `architecture/orchestration/index.md` | `page__architecture__orchestration__index.md` |
 | Overview | `deployment/index.md` | `deployment/index.md` | `page__deployment__index.md` |
+| Hosted Matrix + Local Backend | `deployment/hosted-matrix.md` | `deployment/hosted-matrix/index.md` | `page__deployment__hosted-matrix__index.md` |
 | Overview | `deployment/bridges/index.md` | `deployment/bridges/index.md` | `page__deployment__bridges__index.md` |
 | Telegram | `deployment/bridges/telegram.md` | `deployment/bridges/telegram/index.md` | `page__deployment__bridges__telegram__index.md` |
 | Google Services OAuth (Admin) | `deployment/google-services-oauth.md` | `deployment/google-services-oauth/index.md` | `page__deployment__google-services-oauth__index.md` |

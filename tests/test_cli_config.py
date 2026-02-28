@@ -48,6 +48,21 @@ class TestConfigInit:
         assert "authorization:" in content
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER in content
 
+    def test_init_without_path_uses_detected_default_location(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Config init without --path should write to the detected config location."""
+        default_cfg = tmp_path / ".mindroom" / "config.yaml"
+        monkeypatch.setattr("mindroom.cli_config.CONFIG_PATH", default_cfg)
+
+        result = runner.invoke(app, ["config", "init"])
+
+        assert result.exit_code == 0
+        assert default_cfg.exists()
+        assert (default_cfg.parent / ".env").exists()
+
     def test_init_minimal(self, tmp_path: Path) -> None:
         """Config init --minimal creates a bare-minimum config."""
         target = tmp_path / "config.yaml"
@@ -736,6 +751,65 @@ class TestConnect:
         updated_config = cfg.read_text()
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER not in updated_config
         assert "@alice:mindroom.chat" in updated_config
+
+    def test_connect_path_overrides_env_and_config_target(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--path should control where .env is written and which config gets placeholder updates."""
+        default_cfg = tmp_path / "default" / "config.yaml"
+        default_cfg.parent.mkdir(parents=True, exist_ok=True)
+        default_cfg.write_text(
+            "models: {}\nagents: {}\nrouter:\n  model: default\n"
+            "authorization:\n"
+            "  default_room_access: false\n"
+            "  global_users:\n"
+            f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+        )
+        target_cfg = tmp_path / "custom" / "config.yaml"
+        target_cfg.parent.mkdir(parents=True, exist_ok=True)
+        target_cfg.write_text(
+            "models: {}\nagents: {}\nrouter:\n  model: default\n"
+            "authorization:\n"
+            "  default_room_access: false\n"
+            "  global_users:\n"
+            f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+        )
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", default_cfg)
+        monkeypatch.setattr(
+            "mindroom.cli.httpx.post",
+            lambda *_a, **_kw: httpx.Response(
+                200,
+                json={
+                    "client_id": "client-123",
+                    "client_secret": "secret-123",
+                    "owner_user_id": "@alice:mindroom.chat",
+                },
+            ),
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "connect",
+                "--pair-code",
+                "ABCD-EFGH",
+                "--provisioning-url",
+                "https://provisioning.example",
+                "--path",
+                str(target_cfg),
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert (target_cfg.parent / ".env").exists()
+        assert not (default_cfg.parent / ".env").exists()
+        updated_target_config = target_cfg.read_text()
+        unchanged_default_config = default_cfg.read_text()
+        assert OWNER_MATRIX_USER_ID_PLACEHOLDER not in updated_target_config
+        assert "@alice:mindroom.chat" in updated_target_config
+        assert OWNER_MATRIX_USER_ID_PLACEHOLDER in unchanged_default_config
 
     def test_connect_no_persist_prints_exports(
         self,
