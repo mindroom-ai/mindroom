@@ -11,8 +11,10 @@ import pytest
 
 from mindroom.bot import ROUTER_AGENT_NAME, AgentBot
 from mindroom.config import Config
-from mindroom.constants import VOICE_PREFIX
+from mindroom.constants import ORIGINAL_SENDER_KEY, VOICE_PREFIX
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.teams import TeamFormationDecision, TeamMode
 
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
@@ -52,6 +54,7 @@ async def test_agent_responds_to_voice_transcription_in_thread(mock_home_bot: Ag
     bot = mock_home_bot
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
+    room.canonical_alias = None
 
     # Create a voice transcription message from the router
     voice_transcription_event = MagicMock(spec=nio.RoomMessageText)
@@ -61,6 +64,7 @@ async def test_agent_responds_to_voice_transcription_in_thread(mock_home_bot: Ag
     voice_transcription_event.source = {
         "content": {
             "body": f"{VOICE_PREFIX}turn on the guest room lights",
+            ORIGINAL_SENDER_KEY: "@user:example.com",
             "m.relates_to": {
                 "rel_type": "m.thread",
                 "event_id": "$thread_root",
@@ -86,7 +90,7 @@ async def test_agent_responds_to_voice_transcription_in_thread(mock_home_bot: Ag
     with (
         patch("mindroom.bot.fetch_thread_history", return_value=thread_history),
         patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
-        patch("mindroom.bot.get_agents_in_thread", return_value=["home"]),  # HomeAssistant is in thread
+        patch("mindroom.bot.get_agents_in_thread", return_value=[MatrixID.parse("@mindroom_home:localhost")]),
         patch("mindroom.bot.should_agent_respond", return_value=True),  # HomeAssistant should respond
     ):
         # Set up extract_agent_name to return correct values
@@ -113,11 +117,82 @@ async def test_agent_responds_to_voice_transcription_in_thread(mock_home_bot: Ag
 
 
 @pytest.mark.asyncio
+async def test_voice_transcription_permissions_use_original_sender(mock_home_bot: AgentBot) -> None:
+    """Per-user reply permissions should apply to the original voice sender, not router."""
+    bot = mock_home_bot
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!test:server"
+    room.canonical_alias = None
+    room.users = {
+        "@mindroom_home:localhost": MagicMock(),
+        f"@mindroom_{ROUTER_AGENT_NAME}:localhost": MagicMock(),
+    }
+
+    # Allow only Alice for this agent.
+    bot.config.authorization.agent_reply_permissions = {"home": ["@alice:localhost"]}
+
+    # Router-posted transcription carrying original sender metadata (Bob).
+    voice_transcription_event = MagicMock(spec=nio.RoomMessageText)
+    voice_transcription_event.event_id = "$transcription_permissions"
+    voice_transcription_event.sender = f"@mindroom_{ROUTER_AGENT_NAME}:localhost"
+    voice_transcription_event.body = f"{VOICE_PREFIX}turn on the guest room lights"
+    voice_transcription_event.source = {
+        "content": {
+            "body": f"{VOICE_PREFIX}turn on the guest room lights",
+            ORIGINAL_SENDER_KEY: "@bob:localhost",
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": "$thread_root",
+            },
+        },
+    }
+
+    thread_history = [
+        {
+            "event_id": "$thread_root",
+            "sender": "@user:localhost",
+            "content": {"body": "@home status?"},
+        },
+        {
+            "event_id": "$home_response",
+            "sender": "@mindroom_home:localhost",
+            "content": {"body": "All good"},
+        },
+    ]
+
+    with (
+        patch("mindroom.bot.fetch_thread_history", return_value=thread_history),
+        patch("mindroom.bot.decide_team_formation", new_callable=AsyncMock) as mock_decide_team,
+        patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
+    ):
+        mock_decide_team.return_value = TeamFormationDecision(
+            should_form_team=False,
+            agents=[],
+            mode=TeamMode.COLLABORATE,
+        )
+
+        def extract_agent_side_effect(user_id: str, config: Config) -> str | None:  # noqa: ARG001
+            if user_id == f"@mindroom_{ROUTER_AGENT_NAME}:localhost":
+                return ROUTER_AGENT_NAME
+            if user_id == "@mindroom_home:localhost":
+                return "home"
+            return None
+
+        mock_extract_agent.side_effect = extract_agent_side_effect
+
+        await bot._on_message(room, voice_transcription_event)
+
+    # Bob is disallowed, so no reply should be generated.
+    bot._generate_response.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_agent_ignores_non_voice_router_messages(mock_home_bot: AgentBot) -> None:
     """Test that agents still ignore regular router messages (not voice)."""
     bot = mock_home_bot
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
+    room.canonical_alias = None
 
     # Create a regular message from the router (not voice)
     router_message = MagicMock(spec=nio.RoomMessageText)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import typing
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -18,6 +19,7 @@ from croniter import croniter
 from pydantic import BaseModel, Field
 
 from .ai import get_model_instance
+from .constants import ORIGINAL_SENDER_KEY
 from .logging_config import get_logger
 from .matrix.client import (
     fetch_thread_history,
@@ -386,7 +388,7 @@ async def save_edited_scheduled_task(
 async def parse_workflow_schedule(
     request: str,
     config: Config,
-    available_agents: list[MatrixID],
+    available_agents: typing.Sequence[MatrixID],
     current_time: datetime | None = None,
 ) -> ScheduledWorkflow | WorkflowParseError:
     """Parse natural language into structured workflow using AI."""
@@ -394,7 +396,7 @@ async def parse_workflow_schedule(
         current_time = datetime.now(UTC)
 
     assert available_agents, "No agents available for scheduling"
-    agent_list = ", ".join(f"@{name}" for name in available_agents)
+    agent_list = ", ".join(f"@{a.username}" for a in available_agents)
 
     prompt = f"""Parse this scheduling request into a structured workflow.
 
@@ -492,6 +494,8 @@ async def execute_scheduled_workflow(
             thread_event_id=workflow.thread_id,
             latest_thread_event_id=latest_thread_event_id,
         )
+        if workflow.created_by:
+            content[ORIGINAL_SENDER_KEY] = workflow.created_by
         await send_message(client, workflow.room_id, content)
         logger.info("Executed scheduled workflow", description=workflow.description, thread_id=workflow.thread_id)
     except Exception as e:

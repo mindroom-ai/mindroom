@@ -23,12 +23,14 @@ from .baidusearch import baidusearch_tools
 from .bitbucket import bitbucket_tools
 from .brandfetch import brandfetch_tools
 from .brightdata import brightdata_tools
+from .browser import browser_tools
 from .browserbase import browserbase_tools
 from .cal_com import cal_com_tools
 from .calculator import calculator_tools
 from .cartesia import cartesia_tools
 from .claude_agent import claude_agent_tools
 from .clickup import clickup_tools
+from .coding import coding_tools
 from .composio import composio_tools
 from .config_manager import config_manager_tools
 from .confluence import confluence_tools
@@ -134,12 +136,14 @@ __all__ = [
     "bitbucket_tools",
     "brandfetch_tools",
     "brightdata_tools",
+    "browser_tools",
     "browserbase_tools",
     "cal_com_tools",
     "calculator_tools",
     "cartesia_tools",
     "claude_agent_tools",
     "clickup_tools",
+    "coding_tools",
     "composio_tools",
     "config_manager_tools",
     "confluence_tools",

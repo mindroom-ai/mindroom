@@ -5,7 +5,7 @@
 # Define your AI models
 models:
   default:
-    provider: anthropic  # Options: anthropic, openai, google, openrouter, ollama
+    provider: anthropic  # Options: anthropic, openai, google, vertexai_claude, openrouter, ollama
     id: claude-sonnet-4-5-latest
 
 # Define your agents
@@ -30,6 +30,28 @@ router:
 mindroom_user:
   username: mindroom_user
   display_name: MindRoomUser
+
+# Matrix room access/discoverability (optional)
+# Default keeps current private behavior. Enable multi_user for OIDC/multi-human onboarding.
+matrix_room_access:
+  mode: single_user_private         # Options: single_user_private, multi_user
+  multi_user_join_rule: public      # In multi_user mode: public or knock
+  publish_to_room_directory: false  # In multi_user mode: publish managed rooms to directory
+  invite_only_rooms: []             # Room keys/aliases/IDs that stay invite-only/private
+  reconcile_existing_rooms: false   # When true, migrate current managed rooms to target policy
+
+# Authorization defaults (recommended for public deployments)
+# Replace __MINDROOM_OWNER_USER_ID_FROM_PAIRING__ with your Matrix user ID,
+# e.g. @alice:mindroom.chat.
+authorization:
+  default_room_access: false
+  global_users:
+    # Replace with your Matrix user ID (example: @alice:mindroom.chat).
+    - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
+  agent_reply_permissions:
+    "*":
+      # Replace with your Matrix user ID (example: @alice:mindroom.chat).
+      - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
 
 # Default settings for all agents
 defaults:

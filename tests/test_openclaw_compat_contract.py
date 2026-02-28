@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from itertools import count
 from types import SimpleNamespace
@@ -29,17 +30,21 @@ OPENCLAW_COMPAT_CORE_TOOLS = {
     "sessions_spawn",
     "subagents",
     "message",
-    "gateway",
-    "nodes",
-    "canvas",
 }
 
 OPENCLAW_COMPAT_ALIAS_TOOLS = {
+    "browser",
     "cron",
     "web_search",
     "web_fetch",
     "exec",
     "process",
+    "read_file",
+    "edit_file",
+    "write_file",
+    "grep",
+    "find_files",
+    "ls",
 }
 
 
@@ -88,22 +93,11 @@ async def test_openclaw_compat_placeholder_responses_are_json() -> None:
         ("subagents", await tool.subagents()),
         ("message", await tool.message(action="send", message="hi")),
     ]
-    not_configured = [
-        ("gateway", await tool.gateway(action="config.get")),
-        ("nodes", await tool.nodes(action="status")),
-        ("canvas", await tool.canvas(action="snapshot")),
-    ]
 
     for expected_tool_name, raw_response in context_required:
         payload = json.loads(raw_response)
         assert payload["tool"] == expected_tool_name
         assert payload["status"] == "error"
-        assert "message" in payload
-
-    for expected_tool_name, raw_response in not_configured:
-        payload = json.loads(raw_response)
-        assert payload["tool"] == expected_tool_name
-        assert payload["status"] == "not_configured"
         assert "message" in payload
 
 
@@ -115,6 +109,11 @@ async def test_openclaw_compat_aliases_return_structured_results() -> None:
     tool._website.read_url = MagicMock(return_value='{"docs": []}')
     tool._shell.functions["run_shell_command"].entrypoint = MagicMock(return_value="ok")
     tool._scheduler.schedule = AsyncMock(return_value="scheduled")
+    browser_entrypoint = AsyncMock(return_value='{"status":"ok","action":"status"}')
+    tool._browser_tool = SimpleNamespace(
+        async_functions={"browser": SimpleNamespace(entrypoint=browser_entrypoint)},
+        functions={},
+    )
 
     web_search_payload = json.loads(await tool.web_search("mindroom"))
     assert web_search_payload["status"] == "ok"
@@ -123,6 +122,23 @@ async def test_openclaw_compat_aliases_return_structured_results() -> None:
     web_fetch_payload = json.loads(await tool.web_fetch("https://example.com"))
     assert web_fetch_payload["status"] == "ok"
     assert web_fetch_payload["tool"] == "web_fetch"
+
+    browser_payload = json.loads(
+        await tool.browser(
+            action="status",
+            target="node",
+            node="node-1",
+            profile="openclaw",
+        ),
+    )
+    assert browser_payload["status"] == "ok"
+    assert browser_payload["tool"] == "browser"
+    browser_entrypoint.assert_awaited_once_with(
+        action="status",
+        node="node-1",
+        profile="openclaw",
+        target="node",
+    )
 
     exec_payload = json.loads(await tool.exec("echo hi"))
     assert exec_payload["status"] == "ok"
@@ -135,6 +151,199 @@ async def test_openclaw_compat_aliases_return_structured_results() -> None:
     cron_payload = json.loads(await tool.cron("in 1 minute remind me to test"))
     assert cron_payload["status"] == "ok"
     assert cron_payload["tool"] == "cron"
+
+
+def test_openclaw_compat_coding_read_file(tmp_path: Path) -> None:
+    """Verify read_file delegates to CodingTools and returns structured payload."""
+    tool = OpenClawCompatTools()
+    test_file = tmp_path / "hello.txt"
+    test_file.write_text("line1\nline2\n")
+    tool._coding.base_dir = tmp_path
+
+    payload = json.loads(tool.read_file(str(test_file)))
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "read_file"
+    assert "line1" in payload["result"]
+
+
+def test_openclaw_compat_coding_write_file(tmp_path: Path) -> None:
+    """Verify write_file delegates to CodingTools and returns structured payload."""
+    tool = OpenClawCompatTools()
+    tool._coding.base_dir = tmp_path
+    target = tmp_path / "out.txt"
+
+    payload = json.loads(tool.write_file(str(target), "hello"))
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "write_file"
+    assert target.read_text() == "hello"
+
+
+def test_openclaw_compat_coding_edit_file(tmp_path: Path) -> None:
+    """Verify edit_file delegates to CodingTools and returns structured payload."""
+    tool = OpenClawCompatTools()
+    tool._coding.base_dir = tmp_path
+    target = tmp_path / "edit.txt"
+    target.write_text("old content here")
+
+    payload = json.loads(tool.edit_file(str(target), "old content", "new content"))
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "edit_file"
+    assert "new content here" in target.read_text()
+
+
+def test_openclaw_compat_coding_grep(tmp_path: Path) -> None:
+    """Verify grep delegates to CodingTools and returns structured payload."""
+    tool = OpenClawCompatTools()
+    tool._coding.base_dir = tmp_path
+    (tmp_path / "sample.py").write_text("def hello():\n    pass\n")
+
+    payload = json.loads(tool.grep("hello", literal=True))
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "grep"
+    assert "hello" in payload["result"]
+
+
+def test_openclaw_compat_coding_grep_error_prefixed_filename_is_ok(tmp_path: Path) -> None:
+    """Verify grep does not misclassify successful results from Error* filenames."""
+    tool = OpenClawCompatTools()
+    tool._coding.base_dir = tmp_path
+    (tmp_path / "Error.py").write_text("needle\n")
+
+    payload = json.loads(tool.grep("needle", literal=True))
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "grep"
+    assert "Error.py" in payload["result"]
+
+
+def test_openclaw_compat_coding_find_files(tmp_path: Path) -> None:
+    """Verify find_files delegates to CodingTools and returns structured payload."""
+    tool = OpenClawCompatTools()
+    tool._coding.base_dir = tmp_path
+    (tmp_path / "foo.py").write_text("")
+
+    payload = json.loads(tool.find_files("*.py"))
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "find_files"
+    assert "foo.py" in payload["result"]
+
+
+def test_openclaw_compat_coding_find_files_error_prefixed_filename_is_ok(tmp_path: Path) -> None:
+    """Verify find_files does not misclassify successful Error* filename matches."""
+    tool = OpenClawCompatTools()
+    tool._coding.base_dir = tmp_path
+    (tmp_path / "Error.py").write_text("")
+
+    payload = json.loads(tool.find_files("*.py"))
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "find_files"
+    assert "Error.py" in payload["result"]
+
+
+def test_openclaw_compat_coding_ls(tmp_path: Path) -> None:
+    """Verify ls delegates to CodingTools and returns structured payload."""
+    tool = OpenClawCompatTools()
+    tool._coding.base_dir = tmp_path
+    (tmp_path / "a.txt").write_text("")
+    (tmp_path / "subdir").mkdir()
+
+    payload = json.loads(tool.ls())
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "ls"
+    assert "a.txt" in payload["result"]
+    assert "subdir/" in payload["result"]
+
+
+def test_openclaw_compat_coding_ls_error_prefixed_filename_is_ok(tmp_path: Path) -> None:
+    """Verify ls does not misclassify successful results from Error* filenames."""
+    tool = OpenClawCompatTools()
+    tool._coding.base_dir = tmp_path
+    (tmp_path / "Error notes.txt").write_text("")
+
+    payload = json.loads(tool.ls())
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "ls"
+    assert "Error notes.txt" in payload["result"]
+
+
+def test_openclaw_compat_coding_read_file_error() -> None:
+    """Verify read_file returns error payload for missing files."""
+    tool = OpenClawCompatTools()
+    payload = json.loads(tool.read_file("/nonexistent/path/file.txt"))
+    assert payload["status"] == "error"
+    assert payload["tool"] == "read_file"
+
+
+def test_openclaw_compat_merge_paths_prepends_and_dedupes() -> None:
+    """Verify login-shell PATH entries are prepended without duplicates."""
+    merged = OpenClawCompatTools._merge_paths(
+        existing_path=f"/usr/bin{os.pathsep}/bin",
+        shell_path=f"/custom/bin{os.pathsep}/usr/bin",
+    )
+    assert merged == f"/custom/bin{os.pathsep}/usr/bin{os.pathsep}/bin"
+
+
+def test_openclaw_compat_ensure_login_shell_path_applies_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify PATH bootstrap probes login shell once and caches the result."""
+    monkeypatch.setenv("PATH", f"/existing/bin{os.pathsep}/usr/bin")
+    monkeypatch.setattr(OpenClawCompatTools, "_login_shell_path_loaded", False)
+    monkeypatch.setattr(OpenClawCompatTools, "_login_shell_path_applied", False)
+    monkeypatch.setattr(OpenClawCompatTools, "_login_shell_path", None)
+
+    call_counter = {"count": 0}
+
+    def _fake_read_login_shell_path(_cls: type[OpenClawCompatTools]) -> str:
+        call_counter["count"] += 1
+        return f"/custom/bin{os.pathsep}/other/bin"
+
+    monkeypatch.setattr(
+        OpenClawCompatTools,
+        "_read_login_shell_path",
+        classmethod(_fake_read_login_shell_path),
+    )
+
+    OpenClawCompatTools._ensure_login_shell_path()
+    first_path = os.environ["PATH"]
+    OpenClawCompatTools._ensure_login_shell_path()
+
+    assert call_counter["count"] == 1
+    assert first_path == f"/custom/bin{os.pathsep}/other/bin{os.pathsep}/existing/bin{os.pathsep}/usr/bin"
+    assert os.environ["PATH"] == first_path
+
+
+def test_openclaw_compat_ensure_login_shell_path_retries_after_probe_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify transient probe failures do not permanently disable future PATH bootstrap."""
+    original_path = f"/existing/bin{os.pathsep}/usr/bin"
+    monkeypatch.setenv("PATH", original_path)
+    monkeypatch.setattr(OpenClawCompatTools, "_login_shell_path_loaded", False)
+    monkeypatch.setattr(OpenClawCompatTools, "_login_shell_path_applied", False)
+    monkeypatch.setattr(OpenClawCompatTools, "_login_shell_path", None)
+
+    call_counter = {"count": 0}
+    responses = [None, f"/custom/bin{os.pathsep}/other/bin"]
+
+    def _fake_read_login_shell_path(_cls: type[OpenClawCompatTools]) -> str | None:
+        call_counter["count"] += 1
+        return responses.pop(0)
+
+    monkeypatch.setattr(
+        OpenClawCompatTools,
+        "_read_login_shell_path",
+        classmethod(_fake_read_login_shell_path),
+    )
+
+    OpenClawCompatTools._ensure_login_shell_path()
+    assert call_counter["count"] == 1
+    assert os.environ["PATH"] == original_path
+    assert OpenClawCompatTools._login_shell_path_loaded is False
+    assert OpenClawCompatTools._login_shell_path_applied is False
+
+    OpenClawCompatTools._ensure_login_shell_path()
+    assert call_counter["count"] == 2
+    assert os.environ["PATH"] == f"/custom/bin{os.pathsep}/other/bin{os.pathsep}/existing/bin{os.pathsep}/usr/bin"
+    assert OpenClawCompatTools._login_shell_path_loaded is True
+    assert OpenClawCompatTools._login_shell_path_applied is True
 
 
 @pytest.mark.asyncio
@@ -151,6 +360,27 @@ async def test_openclaw_compat_exec_uses_shell_tool_entrypoint() -> None:
     assert payload["tool"] == "exec"
     entrypoint.assert_called_once_with(["echo", "hi"])
     tool._shell.run_shell_command.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_openclaw_compat_exec_bootstraps_login_shell_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify exec calls login-shell PATH bootstrap before running shell command."""
+    tool = OpenClawCompatTools()
+    call_counter = {"count": 0}
+
+    def _fake_ensure(_cls: type[OpenClawCompatTools]) -> None:
+        call_counter["count"] += 1
+
+    monkeypatch.setattr(OpenClawCompatTools, "_ensure_login_shell_path", classmethod(_fake_ensure))
+    entrypoint = MagicMock(return_value="ok")
+    tool._shell.functions["run_shell_command"].entrypoint = entrypoint
+
+    payload = json.loads(await tool.exec("echo hi"))
+
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "exec"
+    assert call_counter["count"] == 1
+    entrypoint.assert_called_once_with(["echo", "hi"])
 
 
 @pytest.mark.asyncio
@@ -639,7 +869,7 @@ def test_openclaw_compat_read_agent_sessions_handles_missing_table(tmp_path: Pat
     assert tool._read_agent_sessions(ctx) == []
 
 
-def test_openclaw_context_readable_inside_context_manager() -> None:
+def test_openclaw_context_readable_inside_context_manager(tmp_path: Path) -> None:
     """Verify the runtime context is accessible inside the context manager."""
     ctx = OpenClawToolContext(
         agent_name="test",
@@ -648,7 +878,7 @@ def test_openclaw_context_readable_inside_context_manager() -> None:
         requester_id="@user:localhost",
         client=MagicMock(),
         config=MagicMock(),
-        storage_path=MagicMock(),
+        storage_path=tmp_path,
     )
     assert get_openclaw_tool_context() is None
     with openclaw_tool_context(ctx):

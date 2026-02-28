@@ -1202,6 +1202,33 @@
       "config_fields": [
         {
           "default": null,
+          "description": "Working directory for file operations. Defaults to current directory.",
+          "label": "Base Directory",
+          "name": "base_dir",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [],
+      "description": "Advanced code-oriented file operations (precise edits, grep, and discovery). Prefer this over file for coding agents; keep file for backward compatibility.",
+      "display_name": "Coding Tools",
+      "docs_url": null,
+      "helper_text": null,
+      "icon": "Code",
+      "icon_color": "text-purple-500",
+      "name": "coding",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "auth_provider": null,
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
           "description": "Path to the configuration file (uses default if not specified)",
           "label": "Configuration Path",
           "name": "config_path",
@@ -6814,6 +6841,23 @@
       "name": "brightdata",
       "setup_type": "api_key",
       "status": "requires_config"
+    },
+    {
+      "auth_provider": null,
+      "category": "research",
+      "config_fields": null,
+      "dependencies": [
+        "playwright"
+      ],
+      "description": "OpenClaw-style browser control (status/start/stop/profiles/tabs/open/focus/close/snapshot/screenshot/navigate/console/pdf/upload/dialog/act)",
+      "display_name": "Browser",
+      "docs_url": "https://github.com/openclaw/openclaw/blob/main/docs/tools/browser.md",
+      "helper_text": null,
+      "icon": "FaChrome",
+      "icon_color": "text-orange-500",
+      "name": "browser",
+      "setup_type": "none",
+      "status": "available"
     },
     {
       "auth_provider": null,

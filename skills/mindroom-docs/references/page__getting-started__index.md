@@ -128,6 +128,29 @@ ANTHROPIC_API_KEY=your_anthropic_key
 
 ```
 
+#### Optional: Bootstrap local Synapse + Cinny with Docker (Linux/macOS)
+
+If you want a local Matrix + client setup without running the full `mindroom-stack` app,
+use the helper command:
+
+```
+
+mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+
+```
+
+If you're running from source in this repo, use:
+
+```
+
+uv run mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+
+```
+
+This starts Synapse from the `mindroom-stack` compose files, starts a MindRoom Cinny
+container, waits for both services to be healthy, and by default writes local Matrix
+settings to `.env` next to your active `config.yaml`.
+
 > [!NOTE]
 > MindRoom automatically creates Matrix user accounts for each agent. Your Matrix homeserver must allow open registration, or you need to configure it to allow registration from localhost. If registration fails, check your homeserver's registration settings.
 

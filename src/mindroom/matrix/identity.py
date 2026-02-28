@@ -42,7 +42,14 @@ class MatrixID:
         return f"@{self.username}:{self.domain}"
 
     def agent_name(self, config: Config) -> str | None:
-        """Extract agent name if this is a configured agent ID."""
+        """Extract agent name if this is a configured agent ID.
+
+        Only IDs whose domain matches ``config.domain`` are recognised.
+        A cross-domain ID like ``@mindroom_assistant:evil.com`` is never
+        treated as a local agent, even if the localpart matches.
+        """
+        if self.domain != config.domain:
+            return None
         if not self.username.startswith(self.AGENT_PREFIX):
             return None
 
@@ -131,6 +138,13 @@ def extract_agent_name(sender_id: str, config: Config) -> str | None:
 def agent_username_localpart(agent_name: str) -> str:
     """Build the Matrix username localpart for an agent-like entity."""
     return f"{MatrixID.AGENT_PREFIX}{agent_name}"
+
+
+def room_alias_localpart(room_alias: str) -> str | None:
+    """Extract the localpart from a room alias like '#lobby:example.com' → 'lobby'."""
+    if not room_alias.startswith("#") or ":" not in room_alias:
+        return None
+    return room_alias[1:].split(":", 1)[0]
 
 
 def extract_server_name_from_homeserver(homeserver: str) -> str:

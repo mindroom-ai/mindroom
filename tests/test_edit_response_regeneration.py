@@ -8,8 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import nio
 import pytest
 
+from mindroom import config_confirmation, interactive
 from mindroom.bot import AgentBot
 from mindroom.config import Config
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 
@@ -29,6 +31,9 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
     config = Mock()
     config.agents = {"test_agent": Mock(knowledge_bases=[])}
     config.domain = "example.com"
+    config.ids = {}
+    config.get_mindroom_user_id.return_value = "@mindroom:example.com"
+    config.authorization.agent_reply_permissions = {}
 
     # Create the bot
     bot = AgentBot(
@@ -153,6 +158,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
             "The answer is 6",
             None,  # thread_id
             tool_trace=[],
+            extra_content=None,
         )
 
         # Verify that the response tracker still maps to the same response
@@ -174,6 +180,9 @@ async def test_bot_ignores_edit_without_previous_response(tmp_path: Path) -> Non
     config = Mock()
     config.agents = {"test_agent": Mock(knowledge_bases=[])}
     config.domain = "example.com"
+    config.ids = {}
+    config.get_mindroom_user_id.return_value = "@mindroom:example.com"
+    config.authorization.agent_reply_permissions = {}
 
     # Create the bot
     bot = AgentBot(
@@ -267,6 +276,9 @@ async def test_bot_ignores_agent_edits(tmp_path: Path) -> None:
         "helper_agent": Mock(knowledge_bases=[]),
     }
     config.domain = "example.com"
+    config.ids = {}
+    config.get_mindroom_user_id.return_value = "@mindroom:example.com"
+    config.authorization.agent_reply_permissions = {}
 
     # Create the bot
     bot = AgentBot(
@@ -432,6 +444,7 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
     config.domain = "example.com"
     config.authorization = Mock()
     config.authorization.is_authorized = Mock(return_value=True)
+    config.authorization.agent_reply_permissions = {}
 
     # Create the bot
     bot = AgentBot(
@@ -510,6 +523,188 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> None:
+    """Disallowed reactions must not consume interactive questions."""
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@mindroom_test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+
+    config = Config(
+        agents={
+            "test_agent": {
+                "display_name": "Test Agent",
+                "rooms": ["!test:example.com"],
+            },
+        },
+        authorization={
+            "default_room_access": True,
+            "agent_reply_permissions": {"test_agent": ["@alice:example.com"]},
+        },
+    )
+
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        rooms=["!test:example.com"],
+    )
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
+    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.response_tracker = ResponseTracker(agent_name="test_agent", base_path=tmp_path)
+    bot.logger = MagicMock()
+
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
+    interactive._active_questions.clear()
+    interactive.register_interactive_question(
+        event_id="$question:example.com",
+        room_id=room.room_id,
+        thread_id=None,
+        option_map={"1️⃣": "Option 1", "1": "Option 1"},
+        agent_name="test_agent",
+    )
+
+    disallowed_reaction = nio.ReactionEvent.from_dict(
+        {
+            "content": {
+                "m.relates_to": {
+                    "event_id": "$question:example.com",
+                    "key": "1️⃣",
+                    "rel_type": "m.annotation",
+                },
+            },
+            "event_id": "$reaction_bob:example.com",
+            "sender": "@bob:example.com",
+            "origin_server_ts": 1000000,
+            "type": "m.reaction",
+            "room_id": "!test:example.com",
+        },
+    )
+    disallowed_reaction.reacts_to = "$question:example.com"
+    disallowed_reaction.key = "1️⃣"
+
+    allowed_reaction = nio.ReactionEvent.from_dict(
+        {
+            "content": {
+                "m.relates_to": {
+                    "event_id": "$question:example.com",
+                    "key": "1️⃣",
+                    "rel_type": "m.annotation",
+                },
+            },
+            "event_id": "$reaction_alice:example.com",
+            "sender": "@alice:example.com",
+            "origin_server_ts": 1000000,
+            "type": "m.reaction",
+            "room_id": "!test:example.com",
+        },
+    )
+    allowed_reaction.reacts_to = "$question:example.com"
+    allowed_reaction.key = "1️⃣"
+
+    with (
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch("mindroom.bot.config_confirmation.get_pending_change", return_value=None),
+        patch.object(bot, "_send_response", new_callable=AsyncMock) as mock_send_response,
+        patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate_response,
+    ):
+        mock_send_response.return_value = "$ack_event:example.com"
+        mock_generate_response.return_value = "$response_event:example.com"
+
+        await bot._on_reaction(room, disallowed_reaction)
+        mock_send_response.assert_not_called()
+        mock_generate_response.assert_not_called()
+
+        await bot._on_reaction(room, allowed_reaction)
+
+    interactive._active_questions.clear()
+
+    mock_send_response.assert_called_once()
+    mock_generate_response.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_config_confirmation_blocked_by_reply_permissions(tmp_path: Path) -> None:
+    """Disallowed senders must not trigger config confirmation reactions."""
+    agent_user = AgentMatrixUser(
+        agent_name=ROUTER_AGENT_NAME,
+        user_id=f"@mindroom_{ROUTER_AGENT_NAME}:example.com",
+        display_name="Router",
+        password="test_password",  # noqa: S106
+    )
+
+    config = Config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "rooms": ["!test:example.com"],
+            },
+        },
+        authorization={
+            "default_room_access": True,
+            "agent_reply_permissions": {ROUTER_AGENT_NAME: ["@alice:example.com"]},
+        },
+    )
+
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        rooms=["!test:example.com"],
+    )
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.user_id = f"@mindroom_{ROUTER_AGENT_NAME}:example.com"
+    bot.response_tracker = MagicMock()
+    bot.logger = MagicMock()
+
+    room = nio.MatrixRoom(
+        room_id="!test:example.com",
+        own_user_id=f"@mindroom_{ROUTER_AGENT_NAME}:example.com",
+    )
+
+    # Register a pending config change
+    config_confirmation._pending_changes["$config_msg:example.com"] = config_confirmation.PendingConfigChange(
+        requester="@bob:example.com",
+        room_id=room.room_id,
+        thread_id=None,
+        config_path="agents.assistant.role",
+        old_value="old",
+        new_value="new",
+    )
+
+    reaction_event = nio.ReactionEvent.from_dict(
+        {
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$config_msg:example.com",
+                    "key": "✅",
+                },
+            },
+            "event_id": "$reaction_bob:example.com",
+            "sender": "@bob:example.com",
+            "origin_server_ts": 1000000,
+            "type": "m.reaction",
+            "room_id": "!test:example.com",
+        },
+    )
+
+    with (
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch("mindroom.bot.config_confirmation.handle_confirmation_reaction", new_callable=AsyncMock) as mock_confirm,
+    ):
+        await bot._on_reaction(room, reaction_event)
+
+    config_confirmation._pending_changes.clear()
+
+    # Bob is disallowed for the router — the confirmation handler must not run.
+    mock_confirm.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_on_voice_message_tracks_response_event_id(tmp_path: Path) -> None:
     """Test that _on_voice_message properly tracks the response event ID."""
     # Create a mock agent user
@@ -524,10 +719,11 @@ async def test_on_voice_message_tracks_response_event_id(tmp_path: Path) -> None
     config = Mock()
     config.agents = {"test_agent": Mock(knowledge_bases=[])}
     config.domain = "example.com"
+    config.ids = {}
+    config.get_mindroom_user_id.return_value = "@mindroom:example.com"
     config.voice = Mock()
     config.voice.enabled = True
-    config.authorization = Mock()
-    config.authorization.is_authorized = Mock(return_value=True)
+    config.authorization.agent_reply_permissions = {}
 
     # Create the bot
     bot = AgentBot(
@@ -623,10 +819,11 @@ async def test_on_voice_message_no_transcription_still_marks_responded(tmp_path:
     config = Mock()
     config.agents = {"test_agent": Mock(knowledge_bases=[])}
     config.domain = "example.com"
+    config.ids = {}
+    config.get_mindroom_user_id.return_value = "@mindroom:example.com"
     config.voice = Mock()
     config.voice.enabled = True
-    config.authorization = Mock()
-    config.authorization.is_authorized = Mock(return_value=True)
+    config.authorization.agent_reply_permissions = {}
 
     # Create the bot
     bot = AgentBot(
@@ -750,6 +947,7 @@ async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
 
     room = Mock(spec=nio.MatrixRoom)
     room.room_id = "!test:example.com"
+    room.canonical_alias = None
     room.is_direct = False
 
     # Original message from authorized user
@@ -784,7 +982,7 @@ async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
     ):
         await bot._on_message(room, edit_event)
         # Verify authorization was checked
-        mock_is_auth.assert_called_once_with(edit_event.sender, config, room.room_id)
+        mock_is_auth.assert_called_once_with(edit_event.sender, config, room.room_id, room_alias=None)
         # Should not handle edit for unauthorized user
         mock_handle_edit.assert_not_called()
 
@@ -804,8 +1002,11 @@ async def test_on_voice_message_unauthorized_sender_marks_responded(tmp_path: Pa
     config = Mock()
     config.agents = {"test_agent": Mock(knowledge_bases=[])}
     config.domain = "example.com"
+    config.ids = {}
+    config.get_mindroom_user_id.return_value = "@mindroom:example.com"
     config.voice = Mock()
     config.voice.enabled = True
+    config.authorization.agent_reply_permissions = {}
 
     # Create the bot
     bot = AgentBot(

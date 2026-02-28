@@ -26,10 +26,13 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │ --help                -h        Show this message and exit.                            │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ version   Show the current version of Mindroom.                                        │
-│ run       Run the mindroom multi-agent system.                                         │
-│ doctor    Check your environment for common issues.                                    │
-│ config    Manage MindRoom configuration files.                                         │
+│ version             Show the current version of Mindroom.                              │
+│ run                 Run the mindroom multi-agent system.                               │
+│ doctor              Check your environment for common issues.                          │
+│ connect             Pair this local MindRoom install with the hosted provisioning      │
+│                     service.                                                           │
+│ local-stack-setup   Start local Synapse + MindRoom Cinny using Docker only.            │
+│ config              Manage MindRoom configuration files.                               │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -82,6 +85,65 @@ Start MindRoom with your configuration.
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
+## local-stack-setup
+
+Start local Synapse and the MindRoom Cinny client container for development.
+
+By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, and `MATRIX_SSL_VERIFY=false` into `.env` next to your active `config.yaml` so `mindroom run` works without inline env exports.
+
+```
+ Usage: root local-stack-setup [OPTIONS]
+
+ Start local Synapse + MindRoom Cinny using Docker only.
+
+
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --synapse-dir                                 PATH                 Directory           │
+│                                                                    containing Synapse  │
+│                                                                    docker-compose.yml  │
+│                                                                    (from               │
+│                                                                    mindroom-stack      │
+│                                                                    settings).          │
+│                                                                    [default:           │
+│                                                                    local/matrix]       │
+│ --homeserver-url                              TEXT                 Homeserver URL that │
+│                                                                    Cinny and MindRoom  │
+│                                                                    should use.         │
+│                                                                    [default:           │
+│                                                                    http://localhost:8… │
+│ --server-name                                 TEXT                 Matrix server name  │
+│                                                                    (default: inferred  │
+│                                                                    from                │
+│                                                                    --homeserver-url    │
+│                                                                    hostname).          │
+│                                                                    [default: None]     │
+│ --cinny-port                                  INTEGER RANGE        Local host port for │
+│                                               [1<=x<=65535]        the MindRoom Cinny  │
+│                                                                    container.          │
+│                                                                    [default: 8080]     │
+│ --cinny-image                                 TEXT                 Docker image for    │
+│                                                                    MindRoom Cinny.     │
+│                                                                    [default:           │
+│                                                                    ghcr.io/mindroom-a… │
+│ --cinny-container-n…                          TEXT                 Container name for  │
+│                                                                    MindRoom Cinny.     │
+│                                                                    [default:           │
+│                                                                    mindroom-cinny-loc… │
+│ --skip-synapse                                                     Skip starting       │
+│                                                                    Synapse (assume it  │
+│                                                                    is already          │
+│                                                                    running).           │
+│ --persist-env             --no-persist-env                         Persist Matrix      │
+│                                                                    local dev settings  │
+│                                                                    to .env next to     │
+│                                                                    config.yaml.        │
+│                                                                    [default:           │
+│                                                                    persist-env]        │
+│ --help                -h                                           Show this message   │
+│                                                                    and exit.           │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+```
+
 ## Examples
 
 ### Basic run
@@ -100,6 +162,18 @@ mindroom run --log-level DEBUG
 
 ```
 mindroom run --storage-path /data/mindroom
+```
+
+### Start local Synapse + Cinny (default local setup)
+
+```
+mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+```
+
+### Start local stack without writing `.env`
+
+```
+mindroom local-stack-setup --no-persist-env
 ```
 
 ### Show version

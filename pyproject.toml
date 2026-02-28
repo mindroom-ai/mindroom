@@ -80,6 +80,9 @@ optional-dependencies.brandfetch = [
 optional-dependencies.brightdata = [
   "requests",
 ]
+optional-dependencies.browser = [
+  "playwright",
+]
 optional-dependencies.browserbase = [
   "browserbase",
   "playwright",
@@ -98,6 +101,7 @@ optional-dependencies.claude_agent = [
 optional-dependencies.clickup = [
   "requests",
 ]
+optional-dependencies.coding = [  ]
 optional-dependencies.composio = [
   "composio-agno",
 ]

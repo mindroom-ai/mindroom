@@ -27,7 +27,7 @@ from .commands import (
 )
 from .config import Config
 from .config_commands import handle_config_command
-from .constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, VOICE_PREFIX
+from .constants import CONFIG_PATH, MATRIX_HOMESERVER, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
 from .knowledge import initialize_knowledge_managers, shutdown_knowledge_managers
@@ -92,9 +92,11 @@ from .streaming import (
     IN_PROGRESS_MARKER,
     ReplacementStreamingResponse,
     StreamingResponse,
+    is_in_progress_message,
     send_streaming_response,
 )
 from .teams import (
+    TeamFormationDecision,
     TeamMode,
     decide_team_formation,
     select_model_for_team,
@@ -104,13 +106,16 @@ from .teams import (
 from .thread_utils import (
     check_agent_mentioned,
     create_session_id,
+    filter_agents_by_sender_permissions,
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
-    get_available_agents_in_room,
+    get_available_agents_for_sender,
     get_configured_agents_for_room,
+    get_effective_sender_id_for_reply_permissions,
     has_multiple_non_agent_users_in_thread,
     has_user_responded_after_message,
     is_authorized_sender,
+    is_sender_allowed_for_agent_reply,
     should_agent_respond,
 )
 from .tools_metadata import get_tool_by_name
@@ -263,6 +268,7 @@ def _resolve_skill_command_agent(  # noqa: C901
     config: Config,
     room: nio.MatrixRoom,
     mentioned_agents: list[MatrixID],
+    requester_user_id: str,
 ) -> tuple[str | None, str | None]:
     requested = skill_name.strip().lower()
     mentioned_names: list[str] = []
@@ -275,7 +281,7 @@ def _resolve_skill_command_agent(  # noqa: C901
     if len(unique_mentions) > 1:
         return None, f"❌ Multiple agents mentioned: {', '.join(unique_mentions)}. Mention only one."
 
-    agents_in_room = get_available_agents_in_room(room, config)
+    agents_in_room = get_available_agents_for_sender(room, requester_user_id, config)
     candidate_names: list[str] = []
     for mid in agents_in_room:
         name = mid.agent_name(config)
@@ -364,6 +370,14 @@ def _resolve_tool_dispatch_target(  # noqa: C901, PLR0911, PLR0912
         return None, None, f"Tool '{command_tool}' exposes multiple functions; specify one."
 
     return None, None, f"Tool '{command_tool}' not found for this agent."
+
+
+@dataclass(frozen=True)
+class _ResponseAction:
+    """Result of the shared team-formation / should-respond decision."""
+
+    kind: Literal["skip", "team", "individual"]
+    form_team: TeamFormationDecision | None = None
 
 
 @dataclass(frozen=True)
@@ -535,8 +549,10 @@ def create_bot_for_entity(
     if entity_name in config.teams:
         team_config = config.teams[entity_name]
         rooms = resolve_room_aliases(team_config.rooms)
-        # Convert agent names to MatrixID objects
-        team_matrix_ids = [MatrixID.from_username(agent_name, config.domain) for agent_name in team_config.agents]
+        # Convert team member agent names into canonical agent Matrix IDs.
+        # Team streaming resolves config agents from these IDs, so they must keep
+        # the `mindroom_` prefix used by MatrixID.from_agent().
+        team_matrix_ids = [MatrixID.from_agent(agent_name, config.domain) for agent_name in team_config.agents]
         return TeamBot(
             agent_user=agent_user,
             storage_path=storage_path,
@@ -602,8 +618,27 @@ class AgentBot:
     @property
     def thread_mode(self) -> Literal["thread", "room"]:
         """Get the thread mode for this agent."""
-        agent_config = self.config.agents.get(self.agent_name)
-        return agent_config.thread_mode if agent_config else "thread"
+        return self.config.get_entity_thread_mode(self.agent_name)
+
+    def _resolve_reply_thread_id(
+        self,
+        thread_id: str | None,
+        reply_to_event_id: str | None = None,
+        *,
+        event_source: dict[str, Any] | None = None,
+        thread_mode_override: Literal["thread", "room"] | None = None,
+    ) -> str | None:
+        """Resolve the effective thread root for outgoing replies.
+
+        In room mode this always returns ``None`` so callers send plain room
+        messages and store room-level state. In thread mode, this prefers an
+        existing thread ID and falls back to a safe root/reply target.
+        """
+        effective_thread_mode = thread_mode_override or self.thread_mode
+        if effective_thread_mode == "room":
+            return None
+        event_info = EventInfo.from_event(event_source)
+        return thread_id or event_info.safe_thread_root or reply_to_event_id
 
     @property
     def show_tool_calls(self) -> bool:
@@ -947,39 +982,20 @@ class AgentBot:
         else:
             self.logger.error("Failed to join room", room_id=room.room_id)
 
-    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:  # noqa: C901, PLR0911, PLR0912, PLR0915
+    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:  # noqa: C901, PLR0911
         self.logger.info("Received message", event_id=event.event_id, room_id=room.room_id, sender=event.sender)
         assert self.client is not None
-        if event.body.endswith(IN_PROGRESS_MARKER):
-            return
-
-        # Skip our own messages (unless voice transcription from router)
-        if event.sender == self.matrix_id.full_id and not event.body.startswith(VOICE_PREFIX):
+        if not isinstance(event.body, str) or is_in_progress_message(event.body):
             return
 
         event_info = EventInfo.from_event(event.source)
-
-        # Check if sender is authorized to interact with agents
-        is_authorized = is_authorized_sender(event.sender, self.config, room.room_id)
-        self.logger.debug(
-            f"Authorization check for {event.sender}: authorized={is_authorized}, room={room.room_id}",
-        )
-        if not is_authorized:
-            # Mark as seen even though we're not responding (prevents reprocessing after permission changes)
-            # Only mark non-edit events as responded
-            if not event_info.is_edit:
-                self.response_tracker.mark_responded(event.event_id)
-            self.logger.debug(f"Ignoring message from unauthorized sender: {event.sender}")
+        requester_user_id = self._precheck_event(room, event, is_edit=event_info.is_edit)
+        if requester_user_id is None:
             return
 
         # Handle edit events
         if event_info.is_edit:
             await self._handle_message_edit(room, event, event_info)
-            return
-
-        # Check if we've already seen this message (prevents reprocessing after restart)
-        if self.response_tracker.has_responded(event.event_id):
-            self.logger.debug("Already seen message", event_id=event.event_id)
             return
 
         # We only receive events from rooms we're in - no need to check access
@@ -999,93 +1015,49 @@ class AgentBot:
         context = await self._extract_message_context(room, event)
 
         # Check if the sender is an agent
-        sender_agent_name = extract_agent_name(event.sender, self.config)
+        sender_agent_name = extract_agent_name(requester_user_id, self.config)
 
-        # Skip messages from agents unless:
-        # 1. We're mentioned
-        # 2. It's a voice transcription from router (treated as user message)
-        is_router_voice = sender_agent_name == ROUTER_AGENT_NAME and event.body.startswith(VOICE_PREFIX)
-        if sender_agent_name and not context.am_i_mentioned and not is_router_voice:
+        # Skip unmentioned messages authored by agents. Relayed messages carrying
+        # original-sender metadata resolve to that user before this check.
+        if sender_agent_name and not context.am_i_mentioned:
             self.logger.debug("Ignoring message from other agent (not mentioned)")
             return
 
-        # Get agents in thread (excludes router)
-        agents_in_thread = get_agents_in_thread(context.thread_history, self.config)
-
-        # Router: Route when no one is explicitly mentioned and no agents in thread
-        if self.agent_name == ROUTER_AGENT_NAME:
-            if not context.mentioned_agents and not context.has_non_agent_mentions and not agents_in_thread:
-                if context.is_thread and has_multiple_non_agent_users_in_thread(context.thread_history, self.config):
-                    self.logger.info("Skipping routing: multiple non-agent users in thread (mention required)")
-                else:
-                    available_agents = get_available_agents_in_room(room, self.config)
-                    if len(available_agents) == 1:
-                        # Skip routing in single-agent rooms - the agent will handle it directly
-                        self.logger.info("Skipping routing: only one agent present")
-                    else:
-                        # Multiple agents available - perform AI routing
-                        await self._handle_ai_routing(room, event, context.thread_history, context.thread_id)
-            # Router's job is done after routing/command handling/voice transcription
+        # Router dispatch (routing / skip) — shared with image handler
+        if await self._handle_router_dispatch(room, event, context, requester_user_id):
             return
 
-        # Check for team formation
-        all_mentioned_in_thread = get_all_mentioned_agents_in_thread(context.thread_history, self.config)
-        form_team = await decide_team_formation(
-            self.matrix_id,
-            context.mentioned_agents,
-            agents_in_thread,
-            all_mentioned_in_thread,
-            room=room,
-            message=event.body,
-            config=self.config,
-            is_dm_room=_is_dm_room,
-            is_thread=context.is_thread,
+        # Decide: team response, individual response, or skip
+        action = await self._resolve_response_action(
+            context,
+            room,
+            requester_user_id,
+            event.body,
+            _is_dm_room,
         )
+        if action.kind == "skip":
+            return
 
-        # Handle team formation (only first agent alphabetically)
-        if form_team.should_form_team and self.matrix_id in form_team.agents:
-            # Determine if this agent should lead the team response
-            # Use the same ordering as decide_team_formation (by full_id)
-            first_agent = min(form_team.agents, key=lambda x: x.full_id)
-            if self.matrix_id != first_agent:
-                return
-
-            # Use the shared team response helper
+        if action.kind == "team":
+            assert action.form_team is not None
             response_event_id = await self._generate_team_response_helper(
                 room_id=room.room_id,
                 reply_to_event_id=event.event_id,
                 thread_id=context.thread_id,
                 message=event.body,
-                team_agents=form_team.agents,
-                team_mode=form_team.mode,
+                team_agents=action.form_team.agents,
+                team_mode=action.form_team.mode,
                 thread_history=context.thread_history,
-                requester_user_id=event.sender,
+                requester_user_id=requester_user_id,
                 existing_event_id=None,
             )
-
             self.response_tracker.mark_responded(event.event_id, response_event_id)
             return
 
-        # Check if we should respond individually
-        should_respond = should_agent_respond(
-            agent_name=self.agent_name,
-            am_i_mentioned=context.am_i_mentioned,
-            is_thread=context.is_thread,
-            room=room,
-            thread_history=context.thread_history,
-            config=self.config,
-            mentioned_agents=context.mentioned_agents,
-            has_non_agent_mentions=context.has_non_agent_mentions,
-        )
-
-        if not should_respond:
-            return
-
-        # Log if responding without mention
+        # Individual response
         if not context.am_i_mentioned:
             self.logger.info("Will respond: only agent in thread")
 
-        # Generate and send response
         self.logger.info("Processing", event_id=event.event_id)
 
         # If responding in a thread, check whether the thread root is an image
@@ -1098,7 +1070,7 @@ class AgentBot:
             reply_to_event_id=event.event_id,
             thread_id=context.thread_id,
             thread_history=context.thread_history,
-            user_id=event.sender,
+            user_id=requester_user_id,
             images=thread_images or None,
         )
         self.response_tracker.mark_responded(event.event_id, response_event_id)
@@ -1108,8 +1080,20 @@ class AgentBot:
         assert self.client is not None
 
         # Check if sender is authorized to interact with agents
-        if not is_authorized_sender(event.sender, self.config, room.room_id):
+        if not is_authorized_sender(
+            event.sender,
+            self.config,
+            room.room_id,
+            room_alias=room.canonical_alias,
+        ):
             self.logger.debug(f"Ignoring reaction from unauthorized sender: {event.sender}")
+            return
+
+        # Check per-agent reply permissions before handling any reaction type
+        # so disallowed senders cannot trigger stop confirmations, config
+        # confirmations, or consume interactive questions.
+        if not self._can_reply_to_sender(event.sender):
+            self.logger.debug("Ignoring reaction due to reply permissions", sender=event.sender)
             return
 
         # Check if this is a stop button reaction for a message currently being generated
@@ -1144,7 +1128,6 @@ class AgentBot:
             await config_confirmation.handle_confirmation_reaction(self, room, event, pending_change)
             return
 
-        # Otherwise handle as interactive question
         result = await interactive.handle_reaction(self.client, event, self.agent_name, self.config)
 
         if result:
@@ -1199,24 +1182,10 @@ class AgentBot:
     ) -> None:
         """Handle voice message events for transcription and processing."""
         assert self.client is not None
-        # Only process if voice handler is enabled
         if not self.config.voice.enabled:
             return
 
-        # Don't process our own voice messages
-        if event.sender == self.matrix_id.full_id:
-            return
-
-        # Check if we've already seen this voice message (prevents reprocessing after restart)
-        if self.response_tracker.has_responded(event.event_id):
-            self.logger.debug("Already processed voice message", event_id=event.event_id)
-            return
-
-        # Check if sender is authorized to interact with agents
-        if not is_authorized_sender(event.sender, self.config, room.room_id):
-            # Mark as seen even though we're not responding
-            self.response_tracker.mark_responded(event.event_id)
-            self.logger.debug(f"Ignoring voice message from unauthorized sender: {event.sender}")
+        if self._precheck_event(room, event) is None:
             return
 
         self.logger.info("Processing voice message", event_id=event.event_id, sender=event.sender)
@@ -1231,13 +1200,14 @@ class AgentBot:
                 reply_to_event_id=event.event_id,
                 response_text=transcribed_message,
                 thread_id=thread_id,
+                extra_content={ORIGINAL_SENDER_KEY: event.sender},
             )
             self.response_tracker.mark_responded(event.event_id, response_event_id)
         else:
             # Mark as responded to avoid reprocessing
             self.response_tracker.mark_responded(event.event_id)
 
-    async def _on_image_message(  # noqa: C901, PLR0911, PLR0912
+    async def _on_image_message(
         self,
         room: nio.MatrixRoom,
         event: nio.RoomMessageImage | nio.RoomEncryptedImage,
@@ -1245,81 +1215,33 @@ class AgentBot:
         """Handle image message events by passing the image to the AI model."""
         assert self.client is not None
 
-        # Skip our own messages
-        if event.sender == self.matrix_id.full_id:
-            return
-
-        # Check if we've already seen this message
-        if self.response_tracker.has_responded(event.event_id):
-            self.logger.debug("Already processed image message", event_id=event.event_id)
-            return
-
-        # Check if sender is authorized
-        if not is_authorized_sender(event.sender, self.config, room.room_id):
-            self.response_tracker.mark_responded(event.event_id)
-            self.logger.debug(f"Ignoring image from unauthorized sender: {event.sender}")
+        requester_user_id = self._precheck_event(room, event)
+        if requester_user_id is None:
             return
 
         # Skip messages from other agents unless mentioned
-        sender_agent_name = extract_agent_name(event.sender, self.config)
+        sender_agent_name = extract_agent_name(requester_user_id, self.config)
         context = await self._extract_message_context(room, event)
 
         if sender_agent_name and not context.am_i_mentioned:
             self.logger.debug("Ignoring image from other agent (not mentioned)")
             return
 
-        # Get agents in thread (excludes router)
-        agents_in_thread = get_agents_in_thread(context.thread_history, self.config)
-
-        # Router: Route when no one is explicitly mentioned and no agents in thread
-        if self.agent_name == ROUTER_AGENT_NAME:
-            if not context.mentioned_agents and not context.has_non_agent_mentions and not agents_in_thread:
-                if context.is_thread and has_multiple_non_agent_users_in_thread(context.thread_history, self.config):
-                    self.logger.info("Skipping routing: multiple non-agent users in thread (mention required)")
-                else:
-                    available_agents = get_available_agents_in_room(room, self.config)
-                    if len(available_agents) == 1:
-                        self.logger.info("Skipping routing: only one agent present")
-                    else:
-                        caption = image_handler.extract_caption(event)
-                        await self._handle_ai_routing(
-                            room,
-                            event,
-                            context.thread_history,
-                            context.thread_id,
-                            message=caption,
-                        )
+        # Router dispatch (routing / skip) — shared with text handler
+        caption = image_handler.extract_caption(event)
+        if await self._handle_router_dispatch(room, event, context, requester_user_id, message=caption):
             return
-        _is_dm_room = await is_dm_room(self.client, room.room_id)
-        all_mentioned_in_thread = get_all_mentioned_agents_in_thread(context.thread_history, self.config)
-        form_team = await decide_team_formation(
-            self.matrix_id,
-            context.mentioned_agents,
-            agents_in_thread,
-            all_mentioned_in_thread,
-            room=room,
-            message=event.body,
-            config=self.config,
-            is_dm_room=_is_dm_room,
-            is_thread=context.is_thread,
-        )
 
-        # Check if we should respond (individually or as team) before downloading
-        will_respond_as_team = form_team.should_form_team and self.matrix_id in form_team.agents
-        if will_respond_as_team:
-            first_agent = min(form_team.agents, key=lambda x: x.full_id)
-            if self.matrix_id != first_agent:
-                return
-        elif not should_agent_respond(
-            agent_name=self.agent_name,
-            am_i_mentioned=context.am_i_mentioned,
-            is_thread=context.is_thread,
-            room=room,
-            thread_history=context.thread_history,
-            config=self.config,
-            mentioned_agents=context.mentioned_agents,
-            has_non_agent_mentions=context.has_non_agent_mentions,
-        ):
+        # Decide: team response, individual response, or skip (before downloading)
+        _is_dm_room = await is_dm_room(self.client, room.room_id)
+        action = await self._resolve_response_action(
+            context,
+            room,
+            requester_user_id,
+            event.body,
+            _is_dm_room,
+        )
+        if action.kind == "skip":
             return
 
         # Download image only after confirming we should respond
@@ -1329,32 +1251,30 @@ class AgentBot:
             self.response_tracker.mark_responded(event.event_id)
             return
 
-        # Extract caption using MSC2530 semantics (filename field vs body)
-        prompt = image_handler.extract_caption(event)
-
         self.logger.info("Processing image", event_id=event.event_id)
 
-        if will_respond_as_team:
+        if action.kind == "team":
+            assert action.form_team is not None
             response_event_id = await self._generate_team_response_helper(
                 room_id=room.room_id,
                 reply_to_event_id=event.event_id,
                 thread_id=context.thread_id,
-                message=prompt,
-                team_agents=form_team.agents,
-                team_mode=form_team.mode,
+                message=caption,
+                team_agents=action.form_team.agents,
+                team_mode=action.form_team.mode,
                 thread_history=context.thread_history,
-                requester_user_id=event.sender,
+                requester_user_id=requester_user_id,
                 existing_event_id=None,
                 images=[image],
             )
         else:
             response_event_id = await self._generate_response(
                 room_id=room.room_id,
-                prompt=prompt,
+                prompt=caption,
                 reply_to_event_id=event.event_id,
                 thread_id=context.thread_id,
                 thread_history=context.thread_history,
-                user_id=event.sender,
+                user_id=requester_user_id,
                 images=[image],
             )
         self.response_tracker.mark_responded(event.event_id, response_event_id)
@@ -1373,6 +1293,175 @@ class AgentBot:
             self._reply_chain,
             self.logger,
             fetch_thread_history,
+        )
+
+    def _requester_user_id_for_event(
+        self,
+        event: nio.RoomMessageText
+        | nio.RoomMessageImage
+        | nio.RoomEncryptedImage
+        | nio.RoomMessageAudio
+        | nio.RoomEncryptedAudio,
+    ) -> str:
+        """Return the effective requester for per-user reply checks."""
+        return get_effective_sender_id_for_reply_permissions(event.sender, event.source, self.config)
+
+    def _precheck_event(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageText
+        | nio.RoomMessageImage
+        | nio.RoomEncryptedImage
+        | nio.RoomMessageAudio
+        | nio.RoomEncryptedAudio,
+        *,
+        is_edit: bool = False,
+    ) -> str | None:
+        """Common early-exit checks shared by text, image, and voice handlers.
+
+        Returns the effective requester user ID when the event should be
+        processed, or ``None`` when the event should be skipped.
+
+        Checks (in order): self-authored, already processed (skipped for
+        edits so restart recovery works), sender authorization, and
+        per-agent reply permissions.
+        """
+        requester_user_id = self._requester_user_id_for_event(event)
+
+        if requester_user_id == self.matrix_id.full_id:
+            return None
+
+        # Edits bypass the dedup check: if an edit is redelivered after a
+        # restart the bot should still regenerate the response.
+        if not is_edit and self.response_tracker.has_responded(event.event_id):
+            return None
+
+        if not is_authorized_sender(
+            event.sender,
+            self.config,
+            room.room_id,
+            room_alias=room.canonical_alias,
+        ):
+            self.response_tracker.mark_responded(event.event_id)
+            return None
+
+        if not self._can_reply_to_sender(requester_user_id):
+            self.response_tracker.mark_responded(event.event_id)
+            return None
+
+        return requester_user_id
+
+    def _can_reply_to_sender(self, sender_id: str) -> bool:
+        """Return whether this entity may reply to *sender_id*."""
+        return is_sender_allowed_for_agent_reply(sender_id, self.agent_name, self.config)
+
+    async def _handle_router_dispatch(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageText | nio.RoomMessageImage | nio.RoomEncryptedImage,
+        context: MessageContext,
+        requester_user_id: str,
+        *,
+        message: str | None = None,
+    ) -> bool:
+        """Run the router dispatch logic shared by text and image handlers.
+
+        Returns True when this agent is the router and has handled (or skipped)
+        the message, meaning the caller should ``return`` immediately.
+        """
+        if self.agent_name != ROUTER_AGENT_NAME:
+            return False
+
+        agents_in_thread = get_agents_in_thread(context.thread_history, self.config)
+        sender_visible = filter_agents_by_sender_permissions(agents_in_thread, requester_user_id, self.config)
+
+        if not context.mentioned_agents and not context.has_non_agent_mentions and not sender_visible:
+            if context.is_thread and has_multiple_non_agent_users_in_thread(context.thread_history, self.config):
+                self.logger.info("Skipping routing: multiple non-agent users in thread (mention required)")
+            else:
+                available_agents = get_available_agents_for_sender(room, requester_user_id, self.config)
+                if len(available_agents) == 1:
+                    self.logger.info("Skipping routing: only one agent present")
+                else:
+                    await self._handle_ai_routing(
+                        room,
+                        event,
+                        context.thread_history,
+                        context.thread_id,
+                        message=message,
+                        requester_user_id=requester_user_id,
+                    )
+        return True
+
+    async def _resolve_response_action(
+        self,
+        context: MessageContext,
+        room: nio.MatrixRoom,
+        requester_user_id: str,
+        message: str,
+        is_dm: bool,
+    ) -> _ResponseAction:
+        """Decide whether to respond as a team, individually, or skip.
+
+        Shared by text and image handlers to avoid duplicating the team
+        formation + should-respond decision.
+        """
+        agents_in_thread = get_agents_in_thread(context.thread_history, self.config)
+        form_team = await self._decide_team_for_sender(
+            agents_in_thread,
+            context,
+            room,
+            requester_user_id,
+            message,
+            is_dm,
+        )
+
+        if form_team.should_form_team and self.matrix_id in form_team.agents:
+            first_agent = min(form_team.agents, key=lambda x: x.full_id)
+            if self.matrix_id != first_agent:
+                return _ResponseAction(kind="skip")
+            return _ResponseAction(kind="team", form_team=form_team)
+
+        if not should_agent_respond(
+            agent_name=self.agent_name,
+            am_i_mentioned=context.am_i_mentioned,
+            is_thread=context.is_thread,
+            room=room,
+            thread_history=context.thread_history,
+            config=self.config,
+            mentioned_agents=context.mentioned_agents,
+            has_non_agent_mentions=context.has_non_agent_mentions,
+            sender_id=requester_user_id,
+        ):
+            return _ResponseAction(kind="skip")
+
+        return _ResponseAction(kind="individual")
+
+    async def _decide_team_for_sender(
+        self,
+        agents_in_thread: list[MatrixID],
+        context: MessageContext,
+        room: nio.MatrixRoom,
+        requester_user_id: str,
+        message: str,
+        is_dm: bool,
+    ) -> TeamFormationDecision:
+        """Decide team formation using only agents the sender is allowed to interact with."""
+        all_mentioned_in_thread = get_all_mentioned_agents_in_thread(context.thread_history, self.config)
+        available_agents_in_room: list[MatrixID] | None = None
+        if is_dm:
+            available_agents_in_room = get_available_agents_for_sender(room, requester_user_id, self.config)
+        return await decide_team_formation(
+            self.matrix_id,
+            filter_agents_by_sender_permissions(context.mentioned_agents, requester_user_id, self.config),
+            filter_agents_by_sender_permissions(agents_in_thread, requester_user_id, self.config),
+            filter_agents_by_sender_permissions(all_mentioned_in_thread, requester_user_id, self.config),
+            room=room,
+            message=message,
+            config=self.config,
+            is_dm_room=is_dm,
+            is_thread=context.is_thread,
+            available_agents_in_room=available_agents_in_room,
         )
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessage) -> MessageContext:
@@ -1424,8 +1513,12 @@ class AgentBot:
         user_id: str | None,
     ) -> SchedulingToolContext | None:
         """Build runtime context for scheduler tool calls during response generation."""
-        assert self.client is not None
-        room = self.client.rooms.get(room_id)
+        client = self.client
+        if client is None:
+            self.logger.warning("No Matrix client available for scheduling tool context")
+            return None
+
+        room = client.rooms.get(room_id)
         if room is None:
             self.logger.warning(
                 "Skipping scheduler tool context because room is not cached",
@@ -1434,10 +1527,10 @@ class AgentBot:
             return None
 
         return SchedulingToolContext(
-            client=self.client,
+            client=client,
             room=room,
             room_id=room_id,
-            thread_id=None if self.thread_mode == "room" else thread_id or reply_to_event_id,
+            thread_id=self._resolve_reply_thread_id(thread_id, reply_to_event_id),
             requester_id=user_id or self.matrix_id.full_id,
             config=self.config,
         )
@@ -1732,6 +1825,7 @@ class AgentBot:
         )
         openclaw_context = self._build_openclaw_context(room_id, thread_id, user_id)
         tool_trace: list[ToolTraceEntry] = []
+        run_metadata_content: dict[str, Any] = {}
 
         try:
             # Show typing indicator while generating response
@@ -1751,6 +1845,7 @@ class AgentBot:
                         reply_to_event_id=reply_to_event_id,
                         show_tool_calls=self.show_tool_calls,
                         tool_trace_collector=tool_trace,
+                        run_metadata_collector=run_metadata_content,
                     )
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
@@ -1765,7 +1860,14 @@ class AgentBot:
 
         if existing_event_id:
             # Edit the existing message
-            await self._edit_message(room_id, existing_event_id, response_text, thread_id, tool_trace=tool_trace)
+            await self._edit_message(
+                room_id,
+                existing_event_id,
+                response_text,
+                thread_id,
+                tool_trace=tool_trace if self.show_tool_calls else None,
+                extra_content=run_metadata_content or None,
+            )
             return existing_event_id
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
@@ -1774,14 +1876,15 @@ class AgentBot:
             reply_to_event_id,
             response.formatted_text,
             thread_id,
-            tool_trace=tool_trace,
+            tool_trace=tool_trace if self.show_tool_calls else None,
+            extra_content=run_metadata_content or None,
         )
         if event_id and response.option_map and response.options_list:
             # For interactive questions, use the same thread root that _send_response uses:
             # - If already in a thread, use that thread_id
             # - If not in a thread, use reply_to_event_id (the user's message) as thread root
             # This ensures consistency with how the bot creates threads
-            thread_root_for_registration = None if self.thread_mode == "room" else thread_id or reply_to_event_id
+            thread_root_for_registration = self._resolve_reply_thread_id(thread_id, reply_to_event_id)
             interactive.register_interactive_question(
                 event_id,
                 room_id,
@@ -1821,6 +1924,7 @@ class AgentBot:
         openclaw_context = self._build_openclaw_context(room_id, thread_id, user_id, agent_name=agent_name)
         show_tool_calls = self._show_tool_calls_for_agent(agent_name)
         tool_trace: list[ToolTraceEntry] = []
+        run_metadata_content: dict[str, Any] = {}
 
         async with typing_indicator(self.client, room_id):
             with scheduling_tool_context(scheduler_context), openclaw_tool_context(openclaw_context):
@@ -1836,6 +1940,7 @@ class AgentBot:
                     reply_to_event_id=reply_to_event_id,
                     show_tool_calls=show_tool_calls,
                     tool_trace_collector=tool_trace,
+                    run_metadata_collector=run_metadata_content,
                 )
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
@@ -1846,11 +1951,12 @@ class AgentBot:
             thread_id,
             reply_to_event=reply_to_event,
             skip_mentions=True,
-            tool_trace=tool_trace,
+            tool_trace=tool_trace if show_tool_calls else None,
+            extra_content=run_metadata_content or None,
         )
 
         if event_id and response.option_map and response.options_list:
-            thread_root_for_registration = None if self.thread_mode == "room" else thread_id or reply_to_event_id
+            thread_root_for_registration = self._resolve_reply_thread_id(thread_id, reply_to_event_id)
             interactive.register_interactive_question(
                 event_id,
                 room_id,
@@ -1910,7 +2016,7 @@ class AgentBot:
         if interactive.should_create_interactive_question(content):
             response = interactive.parse_and_format_interactive(content, extract_mapping=True)
             if response.option_map and response.options_list:
-                thread_root_for_registration = None if self.thread_mode == "room" else thread_id or reply_to_event_id
+                thread_root_for_registration = self._resolve_reply_thread_id(thread_id, reply_to_event_id)
                 interactive.register_interactive_question(
                     event_id,
                     room_id,
@@ -1950,6 +2056,7 @@ class AgentBot:
             user_id=user_id,
         )
         openclaw_context = self._build_openclaw_context(room_id, thread_id, user_id)
+        run_metadata_content: dict[str, Any] = {}
 
         try:
             # Show typing indicator while generating response
@@ -1968,6 +2075,7 @@ class AgentBot:
                         images=images,
                         reply_to_event_id=reply_to_event_id,
                         show_tool_calls=self.show_tool_calls,
+                        run_metadata_collector=run_metadata_content,
                     )
 
                     event_id, accumulated = await send_streaming_response(
@@ -1982,6 +2090,7 @@ class AgentBot:
                         existing_event_id=existing_event_id,
                         room_mode=self.thread_mode == "room",
                         show_tool_calls=self.show_tool_calls,
+                        extra_content=run_metadata_content,
                     )
 
             # Handle interactive questions if present
@@ -1994,11 +2103,9 @@ class AgentBot:
             )
 
         except asyncio.CancelledError:
-            # Handle cancellation - send a message showing it was stopped
+            # send_streaming_response already preserves partial text and appends
+            # a cancellation marker for the final edit.
             self.logger.info("Streaming cancelled by user", message_id=existing_event_id)
-            if existing_event_id:
-                cancelled_text = "**[Response cancelled by user]**"
-                await self._edit_message(room_id, existing_event_id, cancelled_text, thread_id)
             raise
         except Exception as e:
             self.logger.exception("Error in streaming response", error=str(e))
@@ -2119,6 +2226,7 @@ class AgentBot:
         reply_to_event: nio.RoomMessageText | None = None,
         skip_mentions: bool = False,
         tool_trace: list[ToolTraceEntry] | None = None,
+        extra_content: dict[str, Any] | None = None,
     ) -> str | None:
         """Send a response message to a room.
 
@@ -2130,6 +2238,7 @@ class AgentBot:
             reply_to_event: Optional event object for the message we're replying to (used to check for safe thread root)
             skip_mentions: If True, add metadata to indicate mentions should not trigger responses
             tool_trace: Optional structured tool trace metadata for message content
+            extra_content: Optional content fields merged into the outgoing Matrix event
 
         Returns:
             Event ID if message was sent successfully, None otherwise.
@@ -2138,7 +2247,13 @@ class AgentBot:
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
 
-        if self.thread_mode == "room":
+        effective_thread_id = self._resolve_reply_thread_id(
+            thread_id,
+            reply_to_event_id,
+            event_source=reply_to_event.source if reply_to_event else None,
+        )
+
+        if effective_thread_id is None:
             # Room mode: plain message, no thread metadata
             content = format_message_with_mentions(
                 self.config,
@@ -2148,13 +2263,9 @@ class AgentBot:
                 reply_to_event_id=None,
                 latest_thread_event_id=None,
                 tool_trace=tool_trace,
+                extra_content=extra_content,
             )
         else:
-            # Always ensure we have a thread_id - use the original message as thread root if needed
-            # This ensures agents always respond in threads, even when mentioned in main room
-            event_info = EventInfo.from_event(reply_to_event.source if reply_to_event else None)
-            effective_thread_id = thread_id or event_info.safe_thread_root or reply_to_event_id
-
             # Get the latest message in thread for MSC3440 fallback compatibility
             latest_thread_event_id = await get_latest_thread_event_id_if_needed(
                 self.client,
@@ -2171,6 +2282,7 @@ class AgentBot:
                 reply_to_event_id=reply_to_event_id,
                 latest_thread_event_id=latest_thread_event_id,
                 tool_trace=tool_trace,
+                extra_content=extra_content,
             )
 
         # Add metadata to indicate mentions should be ignored for responses
@@ -2192,6 +2304,7 @@ class AgentBot:
         new_text: str,
         thread_id: str | None,
         tool_trace: list[ToolTraceEntry] | None = None,
+        extra_content: dict[str, Any] | None = None,
     ) -> bool:
         """Edit an existing message.
 
@@ -2209,6 +2322,7 @@ class AgentBot:
                 new_text,
                 sender_domain=sender_domain,
                 tool_trace=tool_trace,
+                extra_content=extra_content,
             )
         else:
             # For edits in threads, we need to get the latest thread event ID for MSC3440 compliance
@@ -2231,6 +2345,7 @@ class AgentBot:
                 thread_event_id=thread_id,
                 latest_thread_event_id=latest_thread_event_id,
                 tool_trace=tool_trace,
+                extra_content=extra_content,
             )
 
         assert self.client is not None
@@ -2249,14 +2364,17 @@ class AgentBot:
         thread_history: list[dict],
         thread_id: str | None = None,
         message: str | None = None,
+        requester_user_id: str | None = None,
     ) -> None:
         # Only router agent should handle routing
         assert self.agent_name == ROUTER_AGENT_NAME
 
         # Use configured agents only - router should not suggest random agents
+        permission_sender_id = requester_user_id or event.sender
         available_agents = get_configured_agents_for_room(room.room_id, self.config)
+        available_agents = filter_agents_by_sender_permissions(available_agents, permission_sender_id, self.config)
         if not available_agents:
-            self.logger.debug("No configured agents to route to in this room")
+            self.logger.debug("No configured agents to route to in this room for sender", sender=permission_sender_id)
             return
 
         self.logger.info("Handling AI routing", event_id=event.event_id)
@@ -2277,7 +2395,13 @@ class AgentBot:
             # Router mentions the suggested agent and asks them to help
             response_text = f"@{suggested_agent} could you help with this?"
 
-        thread_event_id = thread_id or event.event_id
+        target_thread_mode = self.config.get_entity_thread_mode(suggested_agent) if suggested_agent else None
+        thread_event_id = self._resolve_reply_thread_id(
+            thread_id,
+            event.event_id,
+            event_source=event.source,
+            thread_mode_override=target_thread_mode,
+        )
 
         event_id = await self._send_response(
             room_id=room.room_id,
@@ -2327,6 +2451,7 @@ class AgentBot:
         )
 
         context = await self._extract_message_context(room, event)
+        requester_user_id = self._requester_user_id_for_event(event)
 
         # Check if we should respond to the edited message
         # KNOWN LIMITATION: This doesn't work correctly for the router suggestion case.
@@ -2342,6 +2467,7 @@ class AgentBot:
             config=self.config,
             mentioned_agents=context.mentioned_agents,
             has_non_agent_mentions=context.has_non_agent_mentions,
+            sender_id=requester_user_id,
         )
 
         if not should_respond:
@@ -2369,7 +2495,7 @@ class AgentBot:
             thread_id=context.thread_id,
             thread_history=context.thread_history,
             existing_event_id=response_event_id,
-            user_id=event.sender,
+            user_id=requester_user_id,
         )
 
         # Update the response tracker
@@ -2382,6 +2508,7 @@ class AgentBot:
 
         event_info = EventInfo.from_event(event.source)
         _, thread_id, thread_history = await self._derive_conversation_context(room.room_id, event_info)
+        requester_user_id = self._requester_user_id_for_event(event)
 
         # Widget command modifies room state, so it doesn't need a thread
         if command.type == CommandType.WIDGET:
@@ -2391,9 +2518,9 @@ class AgentBot:
             await self._send_response(room.room_id, event.event_id, response_text, thread_id)
             return
 
-        # For commands that need thread context, use the existing thread or the event will start a new one
-        # The _send_response method will automatically create a thread if needed
-        effective_thread_id = thread_id or event.event_id
+        # Commands/tools that persist conversation context should use the same
+        # thread-root policy as outgoing replies.
+        effective_thread_id = self._resolve_reply_thread_id(thread_id, event.event_id)
 
         response_text = ""
 
@@ -2416,7 +2543,7 @@ class AgentBot:
                 client=self.client,
                 room_id=room.room_id,
                 thread_id=effective_thread_id,
-                scheduled_by=event.sender,
+                scheduled_by=requester_user_id,
                 full_text=full_text,
                 config=self.config,
                 room=room,
@@ -2460,7 +2587,7 @@ class AgentBot:
                 room_id=room.room_id,
                 task_id=task_id,
                 full_text=full_text,
-                scheduled_by=event.sender,
+                scheduled_by=requester_user_id,
                 config=self.config,
                 room=room,
                 thread_id=effective_thread_id,
@@ -2492,7 +2619,7 @@ class AgentBot:
                         config_path=change_info["config_path"],
                         old_value=change_info["old_value"],
                         new_value=change_info["new_value"],
-                        requester=event.sender,
+                        requester=requester_user_id,
                     )
 
                     # Get the pending change we just registered
@@ -2524,6 +2651,7 @@ class AgentBot:
                     config=self.config,
                     room=room,
                     mentioned_agents=mentioned_agents,
+                    requester_user_id=requester_user_id,
                 )
                 if error:
                     response_text = error
@@ -2555,7 +2683,7 @@ class AgentBot:
                             thread_history=thread_history,
                             prompt=prompt,
                             agent_name=target_agent,
-                            user_id=event.sender,
+                            user_id=requester_user_id,
                             reply_to_event=event,
                         )
                         if event_id:
@@ -2652,6 +2780,10 @@ class MultiAgentOrchestrator:
     config: Config | None = field(default=None, init=False)
     _sync_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     knowledge_managers: dict[str, KnowledgeManager] = field(default_factory=dict, init=False)
+
+    def __post_init__(self) -> None:
+        """Store a canonical absolute storage path to survive runtime cwd changes."""
+        self.storage_path = self.storage_path.expanduser().resolve()
 
     async def _ensure_user_account(self, config: Config) -> None:
         """Ensure a user account exists, creating one if necessary.
@@ -2798,6 +2930,7 @@ class MultiAgentOrchestrator:
         # Identify what changed - we can keep using the existing helper functions
         entities_to_restart = await _identify_entities_to_restart(current_config, new_config, self.agent_bots)
         mindroom_user_changed = current_config.mindroom_user != new_config.mindroom_user
+        matrix_room_access_changed = current_config.matrix_room_access != new_config.matrix_room_access
 
         # Also check for new entities that didn't exist before
         all_new_entities = set(new_config.agents.keys()) | set(new_config.teams.keys()) | {ROUTER_AGENT_NAME}
@@ -2822,7 +2955,12 @@ class MultiAgentOrchestrator:
                 await bot._set_presence_with_model_info()
                 logger.debug(f"Updated config for {entity_name}")
 
-        if not entities_to_restart and not new_entities and not mindroom_user_changed:
+        if (
+            not entities_to_restart
+            and not new_entities
+            and not mindroom_user_changed
+            and not matrix_room_access_changed
+        ):
             # No entities to restart or create, we're done
             return False
 
@@ -2883,7 +3021,7 @@ class MultiAgentOrchestrator:
             if entity_name in self.agent_bots
         ]
 
-        if bots_to_setup or mindroom_user_changed:
+        if bots_to_setup or mindroom_user_changed or matrix_room_access_changed:
             await self._setup_rooms_and_memberships(bots_to_setup)
 
         logger.info(f"Configuration update complete: {len(entities_to_restart) + len(new_entities)} bots affected")
@@ -3294,6 +3432,9 @@ async def main(
     """
     # Set up logging with the specified level
     setup_logging(level=log_level)
+
+    # Canonicalize once at startup so all downstream storage paths are cwd-stable.
+    storage_path = storage_path.expanduser().resolve()
 
     # Sync API keys from environment to CredentialsManager
     logger.info("Syncing API keys from environment to CredentialsManager...")

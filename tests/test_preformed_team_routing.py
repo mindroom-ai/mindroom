@@ -111,8 +111,8 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
     )
     # Convert agent names to MatrixID objects
     team_matrix_ids = [
-        MatrixID.from_username("a1", config_with_team.domain),
-        MatrixID.from_username("a2", config_with_team.domain),
+        MatrixID.from_agent("a1", config_with_team.domain),
+        MatrixID.from_agent("a2", config_with_team.domain),
     ]
     bot = TeamBot(
         agent_user=team_user,
@@ -164,8 +164,8 @@ async def test_preformed_team_reply_chain_uses_existing_thread_root(config_with_
         password="p",  # noqa: S106
     )
     team_matrix_ids = [
-        MatrixID.from_username("a1", config_with_team.domain),
-        MatrixID.from_username("a2", config_with_team.domain),
+        MatrixID.from_agent("a1", config_with_team.domain),
+        MatrixID.from_agent("a2", config_with_team.domain),
     ]
     bot = TeamBot(
         agent_user=team_user,
@@ -242,8 +242,8 @@ async def test_team_does_not_respond_to_different_domain_mention(config_with_tea
     )
     # Convert agent names to MatrixID objects
     team_matrix_ids = [
-        MatrixID.from_username("a1", config_with_team.domain),
-        MatrixID.from_username("a2", config_with_team.domain),
+        MatrixID.from_agent("a1", config_with_team.domain),
+        MatrixID.from_agent("a2", config_with_team.domain),
     ]
     bot = TeamBot(
         agent_user=team_user,

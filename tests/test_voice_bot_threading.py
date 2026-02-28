@@ -43,6 +43,7 @@ async def test_voice_message_in_main_room_creates_thread(mock_router_bot: AgentB
     bot = mock_router_bot
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
+    room.canonical_alias = None
 
     # Voice message in main room (not in a thread)
     voice_event = MagicMock(spec=nio.RoomMessageAudio)
@@ -72,6 +73,7 @@ async def test_voice_message_in_thread_continues_thread(mock_router_bot: AgentBo
     bot = mock_router_bot
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
+    room.canonical_alias = None
 
     # Voice message in an existing thread
     voice_event = MagicMock(spec=nio.RoomMessageAudio)
@@ -108,6 +110,7 @@ async def test_voice_plain_reply_to_thread_message_uses_thread_root(mock_router_
     bot = mock_router_bot
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
+    room.canonical_alias = None
 
     voice_event = MagicMock(spec=nio.RoomMessageAudio)
     voice_event.event_id = "$voice789"

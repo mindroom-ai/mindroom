@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, safe_replace
 from .logging_config import get_logger
+from .matrix.identity import room_alias_localpart
 
 if TYPE_CHECKING:
     from .matrix.identity import MatrixID
@@ -20,6 +21,10 @@ logger = get_logger(__name__)
 
 AgentLearningMode = Literal["always", "agentic"]
 CultureMode = Literal["automatic", "agentic", "manual"]
+RoomAccessMode = Literal["single_user_private", "multi_user"]
+MultiUserJoinRule = Literal["public", "knock"]
+RoomJoinRule = Literal["invite", "public", "knock"]
+RoomDirectoryVisibility = Literal["public", "private"]
 MATRIX_LOCALPART_PATTERN = re.compile(r"^[a-z0-9._=/-]+$")
 AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
 DEFAULT_DEFAULT_TOOLS = ("scheduler",)
@@ -284,7 +289,9 @@ class KnowledgeBaseConfig(BaseModel):
 class ModelConfig(BaseModel):
     """Configuration for an AI model."""
 
-    provider: str = Field(description="Model provider (openai, anthropic, ollama, etc)")
+    provider: str = Field(
+        description="Model provider (openai, anthropic, vertexai_claude, ollama, etc)",
+    )
     id: str = Field(description="Model ID specific to the provider")
     host: str | None = Field(default=None, description="Optional host URL (e.g., for Ollama)")
     api_key: str | None = Field(default=None, description="Optional API key (usually from env vars)")
@@ -378,7 +385,10 @@ class AuthorizationConfig(BaseModel):
     )
     room_permissions: dict[str, list[str]] = Field(
         default_factory=dict,
-        description="Room-specific user permissions. Keys are room IDs, values are lists of authorized user IDs",
+        description=(
+            "Room-specific user permissions. Keys may be room IDs ('!room:example.com'), "
+            "full aliases ('#room:example.com'), or managed room keys ('room')"
+        ),
     )
     default_room_access: bool = Field(
         default=False,
@@ -390,6 +400,16 @@ class AuthorizationConfig(BaseModel):
             "Map canonical Matrix user IDs to bridge aliases. "
             "A message from any alias is treated as if sent by the canonical user. "
             "E.g., {'@alice:example.com': ['@telegram_123:example.com']}"
+        ),
+    )
+    agent_reply_permissions: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Per-agent reply allowlists keyed by agent/team name. "
+            "A '*' key applies to all entities without an explicit override. "
+            "A '*' user entry allows all senders for that entity. "
+            "When set for an entity, it only replies to these user IDs "
+            "(after alias resolution)."
         ),
     )
 
@@ -458,6 +478,95 @@ class MindRoomUserConfig(BaseModel):
         return normalized
 
 
+class MatrixRoomAccessConfig(BaseModel):
+    """Configuration for managed Matrix room access and discoverability."""
+
+    mode: RoomAccessMode = Field(
+        default="single_user_private",
+        description=(
+            "Room access mode. 'single_user_private' preserves invite-only/private behavior. "
+            "'multi_user' applies configured join rules and directory visibility."
+        ),
+    )
+    multi_user_join_rule: MultiUserJoinRule = Field(
+        default="public",
+        description="Default join rule for managed rooms in multi_user mode",
+    )
+    publish_to_room_directory: bool = Field(
+        default=False,
+        description="Whether managed rooms should be published to the room directory in multi_user mode",
+    )
+    invite_only_rooms: list[str] = Field(
+        default_factory=list,
+        description=("Managed room keys/aliases/IDs that must remain invite-only and private, even in multi_user mode"),
+    )
+    reconcile_existing_rooms: bool = Field(
+        default=False,
+        description=(
+            "Whether to reconcile existing managed rooms to match current mode/join rule/directory settings "
+            "on startup and config reload"
+        ),
+    )
+
+    @field_validator("invite_only_rooms")
+    @classmethod
+    def validate_unique_invite_only_rooms(cls, invite_only_rooms: list[str]) -> list[str]:
+        """Ensure each invite-only room identifier appears at most once."""
+        if len(invite_only_rooms) != len(set(invite_only_rooms)):
+            seen: set[str] = set()
+            duplicates = {r for r in invite_only_rooms if r in seen or seen.add(r)}
+            msg = f"Duplicate invite_only_rooms are not allowed: {', '.join(sorted(duplicates))}"
+            raise ValueError(msg)
+        return invite_only_rooms
+
+    def is_multi_user_mode(self) -> bool:
+        """Return whether multi-user room access mode is enabled."""
+        return self.mode == "multi_user"
+
+    def is_invite_only_room(
+        self,
+        room_key: str,
+        room_id: str | None = None,
+        room_alias: str | None = None,
+    ) -> bool:
+        """Check whether a managed room should remain invite-only."""
+        identifiers = {room_key}
+        if room_id:
+            identifiers.add(room_id)
+        if room_alias:
+            identifiers.add(room_alias)
+            localpart = room_alias_localpart(room_alias)
+            if localpart:
+                identifiers.add(localpart)
+        return any(identifier in self.invite_only_rooms for identifier in identifiers)
+
+    def get_target_join_rule(
+        self,
+        room_key: str,
+        room_id: str | None = None,
+        room_alias: str | None = None,
+    ) -> RoomJoinRule | None:
+        """Get the configured target join rule for a managed room."""
+        if not self.is_multi_user_mode():
+            return None
+        if self.is_invite_only_room(room_key, room_id=room_id, room_alias=room_alias):
+            return "invite"
+        return self.multi_user_join_rule
+
+    def get_target_directory_visibility(
+        self,
+        room_key: str,
+        room_id: str | None = None,
+        room_alias: str | None = None,
+    ) -> RoomDirectoryVisibility | None:
+        """Get the configured target room directory visibility for a managed room."""
+        if not self.is_multi_user_mode():
+            return None
+        if self.is_invite_only_room(room_key, room_id=room_id, room_alias=room_alias):
+            return "private"
+        return "public" if self.publish_to_room_directory else "private"
+
+
 class Config(BaseModel):
     """Complete configuration from YAML."""
 
@@ -483,6 +592,10 @@ class Config(BaseModel):
         default_factory=MindRoomUserConfig,
         description="Configuration for the internal MindRoom user account",
     )
+    matrix_room_access: MatrixRoomAccessConfig = Field(
+        default_factory=MatrixRoomAccessConfig,
+        description="Managed Matrix room access/discoverability behavior",
+    )
     authorization: AuthorizationConfig = Field(
         default_factory=AuthorizationConfig,
         description="Authorization configuration with fine-grained permissions",
@@ -500,6 +613,17 @@ class Config(BaseModel):
         invalid = sorted(invalid_agents + invalid_teams)
         if invalid:
             msg = f"Agent/team names must be alphanumeric/underscore only, got: {', '.join(invalid)}"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_agent_reply_permissions(self) -> Config:
+        """Ensure per-agent reply permissions reference known entities."""
+        known_entities = set(self.agents) | set(self.teams) | {ROUTER_AGENT_NAME}
+        known_entities.add("*")
+        unknown_entities = sorted(set(self.authorization.agent_reply_permissions) - known_entities)
+        if unknown_entities:
+            msg = f"authorization.agent_reply_permissions contains unknown entities: {', '.join(unknown_entities)}"
             raise ValueError(msg)
         return self
 
@@ -647,6 +771,8 @@ class Config(BaseModel):
             data["plugins"] = []
         if data.get("knowledge_bases") is None:
             data["knowledge_bases"] = {}
+        if data.get("matrix_room_access") is None:
+            data["matrix_room_access"] = {}
 
         config = cls(**data)
         logger.info(f"Loaded agent configuration from {path}")
@@ -725,6 +851,33 @@ class Config(BaseModel):
         for team_config in self.teams.values():
             all_room_aliases.update(team_config.rooms)
         return all_room_aliases
+
+    def get_entity_thread_mode(self, entity_name: str) -> Literal["thread", "room"]:
+        """Get effective thread mode for an agent, team, or router.
+
+        Agents use their explicit per-agent setting.
+        Teams inherit a mode only when all member agents share it.
+        Router inherits a mode only when all configured agents share it.
+        In ambiguous cases, default to "thread".
+        """
+        if entity_name in self.agents:
+            return self.agents[entity_name].thread_mode
+
+        if entity_name in self.teams:
+            team_modes: set[Literal["thread", "room"]] = {
+                self.agents[name].thread_mode for name in self.teams[entity_name].agents if name in self.agents
+            }
+            if len(team_modes) == 1:
+                return next(iter(team_modes))
+
+        if entity_name == ROUTER_AGENT_NAME:
+            configured_modes: set[Literal["thread", "room"]] = {
+                agent_cfg.thread_mode for agent_cfg in self.agents.values()
+            }
+            if len(configured_modes) == 1:
+                return next(iter(configured_modes))
+
+        return "thread"
 
     def get_entity_model_name(self, entity_name: str) -> str:
         """Get the model name for an agent, team, or router.

@@ -103,10 +103,10 @@ agents:
 # Model configurations (at least a "default" model is recommended)
 models:
   default:
-    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, groq, cerebras, openrouter, deepseek
+    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
     id: claude-sonnet-4-5-latest     # Required: Model ID for the provider
   sonnet:
-    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, groq, cerebras, openrouter, deepseek
+    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
     id: claude-sonnet-4-5-latest     # Required: Model ID for the provider
     host: null                     # Optional: Host URL (e.g., for Ollama)
     api_key: null                  # Optional: API key (usually from env vars)
@@ -195,11 +195,20 @@ mindroom_user:
   username: mindroom_user          # Set before first startup (localpart only)
   display_name: MindRoomUser       # Can be changed later
 
+# Matrix room onboarding/discoverability (optional)
+matrix_room_access:
+  mode: single_user_private        # Default keeps invite-only/private behavior
+  multi_user_join_rule: public     # In multi_user mode: public or knock
+  publish_to_room_directory: false # Publish managed rooms in server room directory
+  invite_only_rooms: []            # Room keys/aliases/IDs that stay invite-only/private
+  reconcile_existing_rooms: false  # Explicit migration of existing managed rooms
+
 # Authorization (optional)
 authorization:
   global_users: []                 # Users with access to all rooms
-  room_permissions: {}             # Room-specific user permissions
+  room_permissions: {}             # Keys: room ID (!id), full alias (#alias:domain), or managed room key (alias)
   default_room_access: false       # Default: false
+  agent_reply_permissions: {}      # Per-agent/team/router (or '*') reply allowlists; supports globs like '*:example.com'
 
 # Room-specific model overrides (optional)
 # Keys are room aliases, values are model names from the models section
@@ -246,4 +255,9 @@ timezone: America/Los_Angeles      # Default: UTC
 - `agents.<name>.context_files` and `agents.<name>.memory_dir` inject file-based context at agent creation/reload (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md))
 - `defaults.max_preload_chars` caps preloaded file context (`context_files` + `memory_dir`)
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
+- `authorization.agent_reply_permissions` can further restrict which users specific agents/teams/router will reply to
+- `authorization.room_permissions` accepts room IDs, full room aliases, and managed room keys
+- `matrix_room_access.mode` defaults to `single_user_private`; this preserves current private/invite-only behavior
+- In `multi_user` mode, MindRoom sets managed room join rules and directory visibility from config
+- Publishing to the room directory requires the managing service account (typically router) to have moderator/admin power in each room
 - The `memory` system works out of the box with OpenAI; use `memory.llm` for memory summarization with a different provider

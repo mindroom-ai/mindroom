@@ -73,6 +73,14 @@ export const PROVIDERS: Record<string, ProviderInfo> = {
     icon: (className = 'h-5 w-5') => <Google className={className} />,
     requiresApiKey: true,
   },
+  vertexai_claude: {
+    id: 'vertexai_claude',
+    name: 'Vertex AI Claude',
+    description: 'Run Anthropic Claude models through Google Vertex AI',
+    color: 'bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20',
+    icon: (className = 'h-5 w-5') => <Google className={className} />,
+    requiresApiKey: false,
+  },
   groq: {
     id: 'groq',
     name: 'Groq',

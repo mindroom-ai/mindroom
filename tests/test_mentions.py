@@ -128,8 +128,25 @@ class TestMentionParsing:
         )
 
         assert TOOL_TRACE_KEY in content
-        assert content[TOOL_TRACE_KEY]["version"] == 1
+        assert content[TOOL_TRACE_KEY]["version"] == 2
         assert content[TOOL_TRACE_KEY]["events"][0]["tool_name"] == "save_file"
+
+    def test_format_message_with_mentions_merges_extra_content(self) -> None:
+        """Custom metadata should be merged with structured tool trace content."""
+        config = Config.from_yaml()
+        trace = [ToolTraceEntry(type="tool_call_started", tool_name="save_file")]
+
+        content = format_message_with_mentions(
+            config,
+            "Done.",
+            sender_domain="matrix.org",
+            tool_trace=trace,
+            extra_content={"io.mindroom.ai_run": {"version": 1, "usage": {"total_tokens": 42}}},
+        )
+
+        assert TOOL_TRACE_KEY in content
+        assert content["io.mindroom.ai_run"]["version"] == 1
+        assert content["io.mindroom.ai_run"]["usage"]["total_tokens"] == 42
 
     def test_no_mentions_in_text(self) -> None:
         """Test text with no mentions."""

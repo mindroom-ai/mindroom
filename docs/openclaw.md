@@ -19,12 +19,12 @@ Works well:
 
 - File-based identity and memory documents
 - OpenClaw-inspired behavior and instructions
-- `sessions_*`, `message`, `subagents`, `web_*`, `exec/process`, `cron` compatibility surface
+- `sessions_*`, `message`, `subagents`, `web_*`, `exec/process`, `cron`, `browser` compatibility surface
 
 Not included:
 
-- OpenClaw gateway control plane (`gateway` returns `not_configured`)
-- Device nodes, canvas, and browser platform tools
+- OpenClaw gateway control plane
+- Device nodes and canvas platform tools
 - `tts` and `image` tool aliases (use MindRoom's native TTS/image tools directly)
 - Heartbeat runtime — schedule heartbeats via `cron`/`scheduler` instead
 
@@ -39,7 +39,7 @@ The `openclaw_compat` tool provides OpenClaw-named aliases so prompts and skills
 | `cron` | `SchedulerTools` |
 | `message`, `sessions_*` | Matrix client calls |
 | `subagents`, `agents_list` | Agent registry lookup |
-| `gateway`, `nodes`, `canvas` | Stubs (`not_configured`) |
+| `browser` | `BrowserTools` (Playwright, host target only) |
 
 ## Drop-in config
 
@@ -82,6 +82,7 @@ agents:
       - duckduckgo
       - website
       - openclaw_compat
+      - browser
       - python
       - calculator
 

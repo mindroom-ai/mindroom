@@ -60,6 +60,9 @@ class EventInfo:
     relates_to_event_id: str | None
     """The primary event ID this event relates to (if any)."""
 
+    thread_id_from_edit: str | None = None
+    """For edit events: the thread root event ID found in ``m.new_content``."""
+
     @staticmethod
     def from_event(event_source: dict | None) -> EventInfo:
         """Create EventInfo from a raw event source dictionary."""
@@ -102,6 +105,7 @@ def _analyze_event_relations(event_source: dict | None) -> EventInfo:
             has_relations=False,
             relation_type=None,
             relates_to_event_id=None,
+            thread_id_from_edit=None,
         )
 
     content = event_source.get("content", {})
@@ -119,6 +123,7 @@ def _analyze_event_relations(event_source: dict | None) -> EventInfo:
     # Edit analysis
     is_edit = relation_type == "m.replace"
     original_event_id = relates_to_event_id if is_edit else None
+    thread_id_from_edit = _extract_thread_id_from_new_content(content) if is_edit else None
 
     # Reaction analysis
     is_reaction = relation_type == "m.annotation"
@@ -170,4 +175,22 @@ def _analyze_event_relations(event_source: dict | None) -> EventInfo:
         has_relations=has_relations,
         relation_type=relation_type,
         relates_to_event_id=relates_to_event_id,
+        thread_id_from_edit=thread_id_from_edit,
     )
+
+
+def _extract_thread_id_from_new_content(content: dict) -> str | None:
+    """Extract thread root event ID from edit ``m.new_content`` relation data."""
+    new_content = content.get("m.new_content", {})
+    if not isinstance(new_content, dict):
+        return None
+
+    new_relates_to = new_content.get("m.relates_to", {})
+    if not isinstance(new_relates_to, dict):
+        return None
+
+    if new_relates_to.get("rel_type") != "m.thread":
+        return None
+
+    event_id = new_relates_to.get("event_id")
+    return event_id if isinstance(event_id, str) else None

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from html import escape
 from typing import TYPE_CHECKING, Literal
 
 from agno.models.response import ToolExecution  # noqa: TC002 - used in isinstance checks
@@ -14,12 +13,17 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 TOOL_TRACE_KEY = "io.mindroom.tool_trace"
-TOOL_TRACE_VERSION = 1
+TOOL_TRACE_VERSION = 2
 
 MAX_TOOL_ARGS_PREVIEW_CHARS = 1200
 MAX_TOOL_ARG_VALUE_PREVIEW_CHARS = 250
 MAX_TOOL_RESULT_DISPLAY_CHARS = 500
+# Keep v2 trace indexing stable (`events[N-1]`) by not truncating event slots.
+# Large-message handling is responsible for payload size fallbacks.
 MAX_TOOL_TRACE_EVENTS = 120
+TOOL_REF_ICON = "🔧"
+TOOL_PENDING_MARKER = " ⏳"
+TOOL_MARKER_PATTERN = re.compile(r"🔧 `([^`]+)` \[(\d+)\]( ⏳)?")
 
 
 @dataclass(slots=True)
@@ -63,15 +67,24 @@ def _neutralize_mentions(text: str) -> str:
     return text.replace("@", "@\u200b")
 
 
+def _tool_marker_line(tool_name: str, tool_index: int | None, *, pending: bool) -> str:
+    safe_tool_name = _neutralize_mentions(tool_name).replace("`", r"\`")
+    suffix = f" [{tool_index}]" if tool_index is not None else ""
+    pending_suffix = TOOL_PENDING_MARKER if pending else ""
+    return f"{TOOL_REF_ICON} `{safe_tool_name}`{suffix}{pending_suffix}"
+
+
+def _format_tool_marker(tool_name: str, tool_index: int | None, *, pending: bool) -> str:
+    return f"\n\n{_tool_marker_line(tool_name, tool_index, pending=pending)}\n"
+
+
 def _format_tool_args(tool_args: dict[str, object]) -> tuple[str, bool]:
     parts: list[str] = []
     truncated = False
     # Preserve insertion order for easier debugging of tool-call construction.
     for key, value in tool_args.items():
         value_text = _to_compact_text(value)
-        # Collapse newlines so the call line stays single-line.  This is
-        # critical: complete_pending_tool_block uses "\n" inside a <tool>
-        # block to distinguish pending (call-only) from completed (call+result).
+        # Collapse newlines so previews stay single-line.
         value_text = value_text.replace("\n", " ")
         value_preview, value_truncated = _truncate(value_text, MAX_TOOL_ARG_VALUE_PREVIEW_CHARS)
         if value_truncated:
@@ -82,11 +95,14 @@ def _format_tool_args(tool_args: dict[str, object]) -> tuple[str, bool]:
     return args_preview, truncated or args_truncated
 
 
-def format_tool_started(tool_name: str, tool_args: dict[str, object]) -> tuple[str, ToolTraceEntry]:
+def format_tool_started(
+    tool_name: str,
+    tool_args: dict[str, object],
+    tool_index: int | None = None,
+) -> tuple[str, ToolTraceEntry]:
     """Format a tool-call start marker and return associated trace metadata."""
     if tool_args:
         args_preview, truncated = _format_tool_args(tool_args)
-        call_display = f"{tool_name}({args_preview})"
         trace = ToolTraceEntry(
             type="tool_call_started",
             tool_name=tool_name,
@@ -94,26 +110,22 @@ def format_tool_started(tool_name: str, tool_args: dict[str, object]) -> tuple[s
             truncated=truncated,
         )
     else:
-        call_display = f"{tool_name}()"
         trace = ToolTraceEntry(type="tool_call_started", tool_name=tool_name)
-
-    safe_display = escape(_neutralize_mentions(call_display))
-    return f"\n\n<tool>{safe_display}</tool>\n", trace
+    return _format_tool_marker(tool_name, tool_index, pending=True), trace
 
 
 def format_tool_combined(
     tool_name: str,
     tool_args: dict[str, object],
     result: object | None,
+    tool_index: int | None = None,
 ) -> tuple[str, ToolTraceEntry]:
-    """Format a complete tool call (call + result) as a single <tool> block."""
+    """Format a complete tool call marker and associated trace metadata."""
     if tool_args:
         args_preview, truncated = _format_tool_args(tool_args)
-        call_display = f"{tool_name}({args_preview})"
     else:
         args_preview = ""
         truncated = False
-        call_display = f"{tool_name}()"
 
     result_display = ""
     if result is not None and result != "":
@@ -121,14 +133,7 @@ def format_tool_combined(
         result_display, result_truncated = _truncate(result_text, MAX_TOOL_RESULT_DISPLAY_CHARS)
         truncated = truncated or result_truncated
 
-    safe_call = escape(_neutralize_mentions(call_display))
-    if result_display:
-        safe_result = escape(_neutralize_mentions(result_display))
-        block = f"\n\n<tool>{safe_call}\n{safe_result}</tool>\n"
-    else:
-        # Trailing \n signals "completed" to the frontend (no-result tool).
-        # Without it the block looks identical to a pending/in-progress block.
-        block = f"\n\n<tool>{safe_call}\n</tool>\n"
+    block = _format_tool_marker(tool_name, tool_index, pending=False)
 
     trace = ToolTraceEntry(
         type="tool_call_completed",
@@ -144,40 +149,32 @@ def complete_pending_tool_block(
     accumulated_text: str,
     tool_name: str,
     result: object | None,
+    tool_index: int,
 ) -> tuple[str, ToolTraceEntry]:
-    """Find the last pending <tool> block for tool_name and inject the result.
+    """Find a pending tool marker by index and mark it completed by removing the hourglass.
 
     Returns (updated_text, trace_entry).
-    If no pending block is found, appends a new combined block instead.
+    If no pending block is found, leaves text unchanged.
     """
+    if tool_index < 1:
+        msg = "tool_index must be >= 1 for v2 tool markers"
+        raise ValueError(msg)
+
     result_display = ""
     truncated = False
     if result is not None and result != "":
         result_text = _to_compact_text(result)
         result_display, truncated = _truncate(result_text, MAX_TOOL_RESULT_DISPLAY_CHARS)
 
-    safe_result = escape(_neutralize_mentions(result_display)) if result_display else ""
-
-    # Search backwards for the last <tool>...tool_name(...</tool> without a newline
-    # (a newline inside means it already has a result).
-    safe_tool_name = re.escape(escape(_neutralize_mentions(tool_name)))
-    pattern = re.compile(rf"<tool>({safe_tool_name}\([^<]*)</tool>")
-    matches = list(pattern.finditer(accumulated_text))
-
     updated = accumulated_text
-    for match in reversed(matches):
-        inner = match.group(1)
-        # Pending blocks have no newline (just the call). Completed blocks have \n.
-        if "\n" not in inner:
-            # Always inject \n to mark as completed, even when result is empty.
-            replacement = f"<tool>{inner}\n{safe_result}</tool>"
-            updated = updated[: match.start()] + replacement + updated[match.end() :]
-            break
-    else:
-        # No pending block found — append a standalone completed block
-        if safe_result:
-            escaped_name = escape(_neutralize_mentions(tool_name))
-            updated += f"<tool>{escaped_name}\n{safe_result}</tool>\n"
+    pending_line = _tool_marker_line(tool_name, tool_index, pending=True)
+    completed_line = _tool_marker_line(tool_name, tool_index, pending=False)
+    pending_pos = updated.rfind(pending_line)
+    if pending_pos >= 0:
+        updated = updated[:pending_pos] + completed_line + updated[pending_pos + len(pending_line) :]
+    elif completed_line in updated:
+        # Duplicate completion event for the same marker; leave text unchanged.
+        pass
 
     trace = ToolTraceEntry(
         type="tool_call_completed",
@@ -188,27 +185,33 @@ def complete_pending_tool_block(
     return updated, trace
 
 
-def format_tool_started_event(tool: ToolExecution | None) -> tuple[str, ToolTraceEntry | None]:
+def format_tool_started_event(
+    tool: ToolExecution | None,
+    tool_index: int | None = None,
+) -> tuple[str, ToolTraceEntry | None]:
     """Format an Agno tool-call start into display text and trace metadata."""
     if tool is None:
         return "", None
     tool_name = tool.tool_name or "tool"
     tool_args = {str(k): v for k, v in tool.tool_args.items()} if isinstance(tool.tool_args, dict) else {}
-    text, trace = format_tool_started(tool_name, tool_args)
+    text, trace = format_tool_started(tool_name, tool_args, tool_index=tool_index)
     return text, trace
 
 
-def format_tool_completed_event(tool: ToolExecution | None) -> tuple[str, ToolTraceEntry | None]:
+def format_tool_completed_event(
+    tool: ToolExecution | None,
+    tool_index: int | None = None,
+) -> tuple[str, ToolTraceEntry | None]:
     """Format an Agno tool-call completion into display text and trace metadata."""
     if tool is None:
         return "", None
     tool_name = tool.tool_name or "tool"
     tool_args = {str(k): v for k, v in tool.tool_args.items()} if isinstance(tool.tool_args, dict) else {}
-    text, trace = format_tool_combined(tool_name, tool_args, tool.result)
+    text, trace = format_tool_combined(tool_name, tool_args, tool.result, tool_index=tool_index)
     return text, trace
 
 
-def extract_tool_completed_info(tool: ToolExecution | None) -> tuple[str, str | None] | None:
+def extract_tool_completed_info(tool: ToolExecution | None) -> tuple[str, object | None] | None:
     """Extract tool name and result from a ToolExecution.
 
     Returns (tool_name, result) or None if tool is absent.
@@ -227,9 +230,6 @@ def build_tool_trace_content(tool_trace: Sequence[ToolTraceEntry] | None) -> dic
         return None
 
     trace_list = list(tool_trace)
-    overflow = max(0, len(trace_list) - MAX_TOOL_TRACE_EVENTS)
-    if overflow:
-        trace_list = trace_list[-MAX_TOOL_TRACE_EVENTS:]
 
     events: list[dict[str, object]] = []
     has_truncated_content = False
@@ -251,8 +251,6 @@ def build_tool_trace_content(tool_trace: Sequence[ToolTraceEntry] | None) -> dic
         "version": TOOL_TRACE_VERSION,
         "events": events,
     }
-    if overflow:
-        payload["events_truncated"] = overflow
     if has_truncated_content:
         payload["content_truncated"] = True
 

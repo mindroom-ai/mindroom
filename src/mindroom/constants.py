@@ -90,7 +90,7 @@ CONFIG_TEMPLATE_PATH = Path(_CONFIG_TEMPLATE_ENV).expanduser() if _CONFIG_TEMPLA
 
 _STORAGE_PATH_ENV = os.getenv("MINDROOM_STORAGE_PATH")
 STORAGE_PATH = _STORAGE_PATH_ENV or str(CONFIG_PATH.parent / "mindroom_data")
-STORAGE_PATH_OBJ = Path(STORAGE_PATH)
+STORAGE_PATH_OBJ = Path(STORAGE_PATH).expanduser().resolve()
 
 # Specific files and directories
 MATRIX_STATE_FILE = STORAGE_PATH_OBJ / "matrix_state.yaml"
@@ -110,12 +110,19 @@ def env_flag(name: str, *, default: bool = False) -> bool:
 
 # Other constants
 VOICE_PREFIX = "🎤 "
+ORIGINAL_SENDER_KEY = "com.mindroom.original_sender"
+AI_RUN_METADATA_KEY = "io.mindroom.ai_run"
 ENABLE_AI_CACHE = env_flag("MINDROOM_ENABLE_AI_CACHE", default=True)
 
 # Matrix
 MATRIX_HOMESERVER = os.getenv("MATRIX_HOMESERVER", "http://localhost:8008")
 # (for federation setups where hostname != server_name)
 MATRIX_SERVER_NAME = os.getenv("MATRIX_SERVER_NAME", None)
+
+# Placeholder used in starter config templates. `mindroom connect` can
+# automatically replace this token with the owner Matrix user ID returned
+# by the provisioning service.
+OWNER_MATRIX_USER_ID_PLACEHOLDER = "__MINDROOM_OWNER_USER_ID_FROM_PAIRING__"
 MATRIX_SSL_VERIFY = env_flag("MATRIX_SSL_VERIFY", default=True)
 
 

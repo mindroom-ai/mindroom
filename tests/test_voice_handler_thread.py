@@ -25,8 +25,9 @@ async def test_voice_handler_returns_transcription() -> None:
     client.download = AsyncMock()
 
     # Mock room
-    room = MagicMock(spec=nio.MatrixRoom)
+    room = MagicMock()
     room.room_id = "!test:server"
+    room.users = {}
 
     # Mock voice message event
     voice_event = MagicMock(spec=nio.RoomMessageAudio)
