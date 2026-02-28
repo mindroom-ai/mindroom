@@ -965,7 +965,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     metadata = _build_run_metadata(reply_to_event_id, unseen_event_ids)
 
     # Check cache (skip when media is present or history is enabled)
-    cache = None if (audio or images or agent.add_history_to_context) else get_cache(storage_path)
+    cache = None if (audio or images or files or videos or agent.add_history_to_context) else get_cache(storage_path)
     if cache is not None:
         model = agent.model
         assert model is not None

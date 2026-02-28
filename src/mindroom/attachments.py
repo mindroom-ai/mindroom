@@ -369,20 +369,27 @@ def load_attachment(storage_path: Path, attachment_id: str) -> AttachmentRecord 
     if kind not in {"audio", "file", "video", "image"} or not isinstance(local_path, str) or not local_path:
         return None
 
+    filename = raw_payload.get("filename")
+    mime_type = raw_payload.get("mime_type")
+    room_id = raw_payload.get("room_id")
+    thread_id = raw_payload.get("thread_id")
+    source_event_id = raw_payload.get("source_event_id")
+    sender = raw_payload.get("sender")
+    size_bytes = raw_payload.get("size_bytes")
+    created_at = raw_payload.get("created_at")
+
     return AttachmentRecord(
         attachment_id=normalized_attachment_id,
         local_path=Path(local_path),
         kind=kind,
-        filename=raw_payload.get("filename") if isinstance(raw_payload.get("filename"), str) else None,
-        mime_type=raw_payload.get("mime_type") if isinstance(raw_payload.get("mime_type"), str) else None,
-        room_id=raw_payload.get("room_id") if isinstance(raw_payload.get("room_id"), str) else None,
-        thread_id=raw_payload.get("thread_id") if isinstance(raw_payload.get("thread_id"), str) else None,
-        source_event_id=(
-            raw_payload.get("source_event_id") if isinstance(raw_payload.get("source_event_id"), str) else None
-        ),
-        sender=raw_payload.get("sender") if isinstance(raw_payload.get("sender"), str) else None,
-        size_bytes=raw_payload.get("size_bytes") if isinstance(raw_payload.get("size_bytes"), int) else None,
-        created_at=raw_payload.get("created_at") if isinstance(raw_payload.get("created_at"), str) else None,
+        filename=filename if isinstance(filename, str) else None,
+        mime_type=mime_type if isinstance(mime_type, str) else None,
+        room_id=room_id if isinstance(room_id, str) else None,
+        thread_id=thread_id if isinstance(thread_id, str) else None,
+        source_event_id=source_event_id if isinstance(source_event_id, str) else None,
+        sender=sender if isinstance(sender, str) else None,
+        size_bytes=size_bytes if isinstance(size_bytes, int) else None,
+        created_at=created_at if isinstance(created_at, str) else None,
     )
 
 
