@@ -6,9 +6,70 @@ icon: lucide/rocket
 
 This guide will help you set up MindRoom and create your first AI agent.
 
-## Recommended: Full Stack Docker Compose (backend + frontend + Matrix + Element)
+## Recommended: Hosted Matrix + Local Backend (`uvx` only)
 
-MindRoom depends on a Matrix homeserver plus supporting services. The easiest onboarding is the full stack Docker Compose repo, which brings everything up together.
+If you do not want to self-host Matrix yet, this is the simplest setup.
+You only run the MindRoom backend locally.
+
+### 1. Create a local project
+
+```bash
+mkdir -p ~/mindroom-local
+cd ~/mindroom-local
+uvx mindroom config init --profile public
+```
+
+This creates:
+
+- `config.yaml`
+- `.env` prefilled with `MATRIX_HOMESERVER=https://mindroom.chat`
+
+### 2. Add model API key(s)
+
+```bash
+$EDITOR .env
+```
+
+Set at least one key:
+
+- `ANTHROPIC_API_KEY=...`, or
+- `OPENAI_API_KEY=...`, or
+- another supported provider key.
+
+### 3. Pair your local install from chat UI
+
+1. Open `https://chat.mindroom.chat` and sign in.
+2. Go to `Settings -> Local MindRoom`.
+3. Click `Generate Pair Code`.
+4. Run locally:
+
+```bash
+uvx mindroom connect --pair-code ABCD-EFGH
+```
+
+Notes:
+
+- Pair code is short-lived (10 minutes).
+- `mindroom connect` writes local provisioning credentials into `.env`.
+- Those credentials are not Matrix access tokens.
+- They only authorize provisioning endpoints for local onboarding.
+
+### 4. Run MindRoom
+
+```bash
+uvx mindroom run
+```
+
+### 5. Verify in chat
+
+Send a message mentioning your agent in a room where it is configured.
+
+For a detailed architecture and credential model, see:
+[Hosted Matrix deployment guide](deployment/hosted-matrix.md).
+
+## Alternative: Full Stack Docker Compose (backend + frontend + Matrix + Element)
+
+Use this when you want everything local: backend, frontend, Matrix homeserver, and a Matrix client in one stack.
 
 **Prereqs:** Docker + Docker Compose.
 

@@ -200,6 +200,7 @@ Teams (`src/mindroom/teams.py`) let multiple agents work together:
 - **Keep it DRY**: Don't Repeat Yourself. Reuse code wherever possible.
 - **Be Ruthless with Code Removal**: Aggressively remove any unused code, including functions, imports, and variables.
 - **Prefer dataclasses**: Use `dataclasses` that can be typed over dictionaries for better type safety and clarity.
+- **Documentation Line Style**: In Markdown docs, write one sentence per line, and never split a single sentence across multiple lines.
 - Do not wrap things in try-excepts unless it's necessary. Avoid wrapping things that should not fail.
 - NEVER put imports in the function, unless it is to avoid circular imports. Imports should be at the top of the file.
 
