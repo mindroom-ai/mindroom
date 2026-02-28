@@ -18,7 +18,12 @@ from rich.console import Console
 from rich.syntax import Syntax
 
 from mindroom.config import Config
-from mindroom.constants import CONFIG_PATH, config_search_locations, env_key_for_provider
+from mindroom.constants import (
+    CONFIG_PATH,
+    OWNER_MATRIX_USER_ID_PLACEHOLDER,
+    config_search_locations,
+    env_key_for_provider,
+)
 
 console = Console()
 
@@ -389,7 +394,7 @@ MINDROOM_API_KEY={api_key}
 
 def _minimal_template() -> str:
     """Return a bare-minimum inline config."""
-    return """\
+    return f"""\
 # MindRoom Configuration (minimal)
 models:
   default:
@@ -409,6 +414,15 @@ router:
 mindroom_user:
   username: mindroom_user
   display_name: MindRoomUser
+authorization:
+  default_room_access: false
+  global_users:
+    # Replace with your Matrix user ID (example: @alice:mindroom.chat).
+    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}
+  agent_reply_permissions:
+    "*":
+      # Replace with your Matrix user ID (example: @alice:mindroom.chat).
+      - {OWNER_MATRIX_USER_ID_PLACEHOLDER}
 defaults:
   tools:
     - scheduler
