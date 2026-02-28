@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 import yaml
 from agno.tools import Toolkit
@@ -13,12 +13,10 @@ from agno.tools import Toolkit
 from mindroom.commands import get_command_help
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
+from mindroom.config.models import AgentLearningMode  # noqa: TC001
 from mindroom.constants import CONFIG_PATH
 from mindroom.logging_config import get_logger
 from mindroom.tools_metadata import TOOL_METADATA, ToolCategory, ToolStatus
-
-if TYPE_CHECKING:
-    from mindroom.config.models import AgentLearningMode
 
 logger = get_logger(__name__)
 

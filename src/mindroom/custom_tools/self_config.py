@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from pathlib import Path  # noqa: TC003
+from typing import Literal
 
 import yaml
 from agno.tools import Toolkit
@@ -10,15 +11,11 @@ from pydantic import ValidationError
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.models import AgentLearningMode  # noqa: TC001
 from mindroom.constants import CONFIG_PATH
 from mindroom.custom_tools.config_manager import validate_knowledge_bases
 from mindroom.logging_config import get_logger
 from mindroom.tools_metadata import TOOL_METADATA
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
-    from mindroom.config.models import AgentLearningMode
 
 logger = get_logger(__name__)
 
