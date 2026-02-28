@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from agno.tools import Toolkit
 
@@ -14,6 +14,14 @@ from mindroom.matrix.client import send_file_message
 
 if TYPE_CHECKING:
     from mindroom.attachments_context import AttachmentToolContext
+
+
+class ResolvedAttachmentReference(NamedTuple):
+    """Result of resolving an attachment reference string."""
+
+    path: Path | None
+    attachment_id: str | None
+    error: str | None
 
 
 def attachment_tool_payload(status: str, **kwargs: object) -> str:
@@ -46,25 +54,29 @@ def _resolve_attachment_reference(
     raw_reference: object,
     *,
     allow_local_paths: bool,
-) -> tuple[Path | None, str | None, str | None]:
+) -> ResolvedAttachmentReference:
     if not isinstance(raw_reference, str):
-        return None, None, "attachments entries must be strings."
+        return ResolvedAttachmentReference(None, None, "attachments entries must be strings.")
 
     reference = raw_reference.strip()
     if not reference:
-        return None, None, None
+        return ResolvedAttachmentReference(None, None, None)
 
     if reference.startswith("att_"):
         attachment_path, error = _resolve_context_attachment_path(context, reference)
-        return (None, None, error) if error is not None else (attachment_path, reference, None)
+        if error is not None:
+            return ResolvedAttachmentReference(None, None, error)
+        return ResolvedAttachmentReference(attachment_path, reference, None)
 
-    if not allow_local_paths:
-        return None, None, "Local file paths are disabled. Use attachment IDs or set allow_local_paths=true."
+    if allow_local_paths:
+        path = Path(reference).expanduser().resolve()
+        if path.is_file():
+            return ResolvedAttachmentReference(path, None, None)
+        error = f"Attachment path is not a file: {reference}"
+    else:
+        error = "Local file paths are disabled. Use attachment IDs or set allow_local_paths=true."
 
-    path = Path(reference).expanduser().resolve()
-    if not path.is_file():
-        return None, None, f"Attachment path is not a file: {reference}"
-    return path, None, None
+    return ResolvedAttachmentReference(None, None, error)
 
 
 def resolve_attachment_references(
@@ -80,19 +92,19 @@ def resolve_attachment_references(
     resolved_paths: list[Path] = []
     resolved_attachment_ids: list[str] = []
     for raw_reference in attachments:
-        path, attachment_id, error = _resolve_attachment_reference(
+        resolved = _resolve_attachment_reference(
             context,
             raw_reference,
             allow_local_paths=allow_local_paths,
         )
-        if error is not None:
-            return [], [], error
-        if path is None:
+        if resolved.error is not None:
+            return [], [], resolved.error
+        if resolved.path is None:
             continue
 
-        resolved_paths.append(path)
-        if attachment_id is not None:
-            resolved_attachment_ids.append(attachment_id)
+        resolved_paths.append(resolved.path)
+        if resolved.attachment_id is not None:
+            resolved_attachment_ids.append(resolved.attachment_id)
     return resolved_paths, resolved_attachment_ids, None
 
 

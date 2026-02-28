@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.attachments import register_local_attachment
-from mindroom.attachments_context import AttachmentToolContext, attachment_tool_context
+from mindroom.attachments_context import AttachmentToolContext, attachment_tool_context, get_attachment_tool_context
 from mindroom.custom_tools.attachments import AttachmentTools
 
 if TYPE_CHECKING:
@@ -107,3 +107,13 @@ async def test_attachments_tool_requires_context() -> None:
     assert payload["status"] == "error"
     assert payload["tool"] == "attachments"
     assert "context" in payload["message"]
+
+
+def test_attachment_context_none_temporarily_clears_nested_scope(tmp_path: Path) -> None:
+    """attachment_tool_context(None) should clear and then restore an outer context."""
+    ctx = _tool_context(tmp_path, attachment_ids=("att_upload",))
+    with attachment_tool_context(ctx):
+        assert get_attachment_tool_context() is ctx
+        with attachment_tool_context(None):
+            assert get_attachment_tool_context() is None
+        assert get_attachment_tool_context() is ctx

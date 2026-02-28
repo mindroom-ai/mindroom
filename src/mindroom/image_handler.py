@@ -7,14 +7,12 @@ from typing import TYPE_CHECKING
 from agno.media import Image
 
 from .logging_config import get_logger
-from .matrix import media as matrix_media
 from .matrix.media import download_media_bytes, media_mime_type
 
 if TYPE_CHECKING:
     import nio
 
 logger = get_logger(__name__)
-crypto = matrix_media.crypto
 
 
 def extract_caption(event: nio.RoomMessageImage | nio.RoomEncryptedImage) -> str:

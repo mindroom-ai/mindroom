@@ -15,7 +15,6 @@ from .ai import get_model_instance
 from .commands import get_command_list
 from .constants import VOICE_PREFIX
 from .logging_config import get_logger
-from .matrix import media as matrix_media
 from .matrix.identity import agent_username_localpart
 from .matrix.media import download_media_bytes, media_mime_type
 from .thread_utils import get_available_agents_for_sender
@@ -26,7 +25,6 @@ if TYPE_CHECKING:
     from .config.main import Config
 
 logger = get_logger(__name__)
-crypto = matrix_media.crypto
 VOICE_MENTION_PATTERN = re.compile(
     r"(?<![\w])@(?:(?P<prefix>mindroom_))?(?P<name>[A-Za-z0-9_]+)(?::[A-Za-z0-9.\-]+)?",
 )
@@ -113,22 +111,11 @@ async def download_audio(
     event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
 ) -> Audio | None:
     """Download Matrix audio and convert it to an agno Audio media object."""
-    audio_data = await _download_audio(client, event)
+    audio_data = await download_media_bytes(client, event)
     if audio_data is None:
-        return None
-    if not isinstance(audio_data, bytes):
-        logger.error("Downloaded audio payload is not bytes")
         return None
 
     return Audio(content=audio_data, mime_type=media_mime_type(event))
-
-
-async def _download_audio(
-    client: nio.AsyncClient,
-    event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
-) -> bytes | None:
-    """Download and decrypt audio file bytes from Matrix."""
-    return await download_media_bytes(client, event)
 
 
 async def _transcribe_audio(audio_data: bytes, config: Config) -> str | None:

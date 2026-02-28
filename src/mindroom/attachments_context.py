@@ -40,9 +40,6 @@ def get_attachment_tool_context() -> AttachmentToolContext | None:
 @contextmanager
 def attachment_tool_context(context: AttachmentToolContext | None) -> Iterator[None]:
     """Set attachments tool context for the current async scope."""
-    if context is None:
-        yield
-        return
     token = _ATTACHMENT_TOOL_CONTEXT.set(context)
     try:
         yield

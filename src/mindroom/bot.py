@@ -322,7 +322,6 @@ class _DispatchPayload:
     files: Sequence[File] | None = None
     videos: Sequence[Video] | None = None
     attachment_ids: list[str] | None = None
-    include_none_keys: tuple[str, ...] = ()
 
 
 @dataclass
@@ -829,7 +828,6 @@ class AgentBot:
                 files=attachment_files or None,
                 videos=attachment_videos or None,
                 attachment_ids=resolved_attachment_ids or None,
-                include_none_keys=("audio", "images", "files", "videos", "attachment_ids"),
             ),
             processing_log="Processing",
         )
@@ -1116,7 +1114,6 @@ class AgentBot:
                 files=attachment_files or None,
                 videos=attachment_videos or None,
                 attachment_ids=resolved_attachment_ids or None,
-                include_none_keys=("audio", "files", "videos", "attachment_ids"),
             ),
             processing_log="Processing media message",
         )
@@ -1310,15 +1307,15 @@ class AgentBot:
     def _payload_media_kwargs(payload: _DispatchPayload) -> dict[str, Any]:
         """Build optional media kwargs for response helper calls."""
         kwargs: dict[str, Any] = {}
-        if payload.audio is not None or "audio" in payload.include_none_keys:
+        if payload.audio is not None:
             kwargs["audio"] = payload.audio
-        if payload.images is not None or "images" in payload.include_none_keys:
+        if payload.images is not None:
             kwargs["images"] = payload.images
-        if payload.files is not None or "files" in payload.include_none_keys:
+        if payload.files is not None:
             kwargs["files"] = payload.files
-        if payload.videos is not None or "videos" in payload.include_none_keys:
+        if payload.videos is not None:
             kwargs["videos"] = payload.videos
-        if payload.attachment_ids is not None or "attachment_ids" in payload.include_none_keys:
+        if payload.attachment_ids is not None:
             kwargs["attachment_ids"] = payload.attachment_ids
         return kwargs
 
@@ -1360,19 +1357,24 @@ class AgentBot:
                 available_agents = get_available_agents_for_sender(room, requester_user_id, self.config)
                 if len(available_agents) == 1:
                     self.logger.info("Skipping routing: only one agent present")
-                else:
-                    routing_kwargs: dict[str, Any] = {
-                        "message": message,
-                        "requester_user_id": requester_user_id,
-                    }
-                    if extra_content:
-                        routing_kwargs["extra_content"] = extra_content
+                elif extra_content is None:
                     await self._handle_ai_routing(
                         room,
                         event,
                         context.thread_history,
                         context.thread_id,
-                        **routing_kwargs,
+                        message=message,
+                        requester_user_id=requester_user_id,
+                    )
+                else:
+                    await self._handle_ai_routing(
+                        room,
+                        event,
+                        context.thread_history,
+                        context.thread_id,
+                        message=message,
+                        requester_user_id=requester_user_id,
+                        extra_content=extra_content,
                     )
         return True
 
@@ -1525,7 +1527,6 @@ class AgentBot:
         user_id: str | None,
         *,
         agent_name: str | None = None,
-        attachment_ids: list[str] | None = None,
     ) -> OpenClawToolContext | None:
         """Build runtime context for OpenClaw-compatible tool calls."""
         if self.client is None:
@@ -1538,7 +1539,6 @@ class AgentBot:
             client=self.client,
             config=self.config,
             storage_path=self.storage_path,
-            attachment_ids=tuple(attachment_ids or []),
         )
 
     def _build_attachment_tool_context(
@@ -1560,6 +1560,30 @@ class AgentBot:
             storage_path=self.storage_path,
             attachment_ids=tuple(attachment_ids or []),
         )
+
+    def _build_runtime_tool_contexts(
+        self,
+        room_id: str,
+        thread_id: str | None,
+        user_id: str | None,
+        *,
+        agent_name: str | None = None,
+        attachment_ids: list[str] | None = None,
+    ) -> tuple[OpenClawToolContext | None, AttachmentToolContext | None]:
+        """Build OpenClaw and attachment tool contexts from the same message inputs."""
+        openclaw_context = self._build_openclaw_context(
+            room_id,
+            thread_id,
+            user_id,
+            agent_name=agent_name,
+        )
+        attachment_context = self._build_attachment_tool_context(
+            room_id,
+            thread_id,
+            user_id,
+            attachment_ids=attachment_ids,
+        )
+        return openclaw_context, attachment_context
 
     async def _generate_team_response_helper(
         self,
@@ -1606,18 +1630,15 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             user_id=requester_user_id,
         )
-        openclaw_context = self._build_openclaw_context(
+        tool_contexts = self._build_runtime_tool_contexts(
             room_id,
             thread_id,
             requester_user_id,
+            agent_name=self.agent_name,
             attachment_ids=attachment_ids,
         )
-        attachment_context = self._build_attachment_tool_context(
-            room_id,
-            thread_id,
-            requester_user_id,
-            attachment_ids=attachment_ids,
-        )
+        openclaw_context = tool_contexts[0]
+        attachment_context = tool_contexts[1]
         orchestrator = self.orchestrator
         if orchestrator is None:
             msg = "Orchestrator is not set"
@@ -1861,18 +1882,15 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
         )
-        openclaw_context = self._build_openclaw_context(
+        tool_contexts = self._build_runtime_tool_contexts(
             room_id,
             thread_id,
             user_id,
+            agent_name=self.agent_name,
             attachment_ids=attachment_ids,
         )
-        attachment_context = self._build_attachment_tool_context(
-            room_id,
-            thread_id,
-            user_id,
-            attachment_ids=attachment_ids,
-        )
+        openclaw_context = tool_contexts[0]
+        attachment_context = tool_contexts[1]
         tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
 
@@ -1983,12 +2001,14 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
         )
-        openclaw_context = self._build_openclaw_context(room_id, thread_id, user_id, agent_name=agent_name)
-        attachment_context = self._build_attachment_tool_context(
+        tool_contexts = self._build_runtime_tool_contexts(
             room_id,
             thread_id,
             user_id,
+            agent_name=agent_name,
         )
+        openclaw_context = tool_contexts[0]
+        attachment_context = tool_contexts[1]
         show_tool_calls = self._show_tool_calls_for_agent(agent_name)
         tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
@@ -2139,18 +2159,15 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
         )
-        openclaw_context = self._build_openclaw_context(
+        tool_contexts = self._build_runtime_tool_contexts(
             room_id,
             thread_id,
             user_id,
+            agent_name=self.agent_name,
             attachment_ids=attachment_ids,
         )
-        attachment_context = self._build_attachment_tool_context(
-            room_id,
-            thread_id,
-            user_id,
-            attachment_ids=attachment_ids,
-        )
+        openclaw_context = tool_contexts[0]
+        attachment_context = tool_contexts[1]
         run_metadata_content: dict[str, Any] = {}
 
         try:
@@ -2548,15 +2565,21 @@ class AgentBot:
             thread_mode_override=target_thread_mode,
         )
 
-        send_kwargs: dict[str, Any] = {
-            "room_id": room.room_id,
-            "reply_to_event_id": event.event_id,
-            "response_text": response_text,
-            "thread_id": thread_event_id,
-        }
-        if extra_content:
-            send_kwargs["extra_content"] = extra_content
-        event_id = await self._send_response(**send_kwargs)
+        if extra_content is None:
+            event_id = await self._send_response(
+                room_id=room.room_id,
+                reply_to_event_id=event.event_id,
+                response_text=response_text,
+                thread_id=thread_event_id,
+            )
+        else:
+            event_id = await self._send_response(
+                room_id=room.room_id,
+                reply_to_event_id=event.event_id,
+                response_text=response_text,
+                thread_id=thread_event_id,
+                extra_content=extra_content,
+            )
         if event_id:
             self.logger.info("Routed to agent", suggested_agent=suggested_agent)
             self.response_tracker.mark_responded(event.event_id)

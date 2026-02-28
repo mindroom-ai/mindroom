@@ -40,7 +40,7 @@ def attachment_records_to_media(
                     mime_type=record.mime_type,
                     filename=record.filename,
                 )
-            except Exception:
+            except ValueError:
                 # Agno validates file MIME types against a strict allow-list.
                 # Fall back to filepath+filename so arbitrary attachments still work.
                 file_media = File(

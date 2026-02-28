@@ -19,7 +19,7 @@ from agno.tools import Toolkit
 from agno.tools.duckduckgo import DuckDuckGoTools
 from agno.tools.website import WebsiteTools
 
-from mindroom.attachments_context import AttachmentToolContext
+from mindroom.attachments_context import AttachmentToolContext, get_attachment_tool_context
 from mindroom.custom_tools.attachments import (
     get_attachment_listing,
     resolve_attachment_references,
@@ -1103,13 +1103,16 @@ class OpenClawCompatTools(Toolkit):
     @staticmethod
     def _attachment_context(context: OpenClawToolContext) -> AttachmentToolContext:
         """Convert OpenClaw runtime context into attachments toolkit context."""
+        attachment_context = get_attachment_tool_context()
+        if attachment_context is not None:
+            return attachment_context
         return AttachmentToolContext(
             client=context.client,
             room_id=context.room_id,
             thread_id=context.thread_id,
             requester_id=context.requester_id,
             storage_path=context.storage_path,
-            attachment_ids=context.attachment_ids,
+            attachment_ids=(),
         )
 
     async def _message_react(

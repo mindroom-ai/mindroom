@@ -1232,7 +1232,7 @@ class TestAgentBot:
         assert generate_kwargs["files"] is not None
         assert len(generate_kwargs["files"]) == 1
         assert str(generate_kwargs["files"][0].filepath) == str(local_media_path)
-        assert generate_kwargs["videos"] is None
+        assert generate_kwargs.get("videos") is None
         tracker.mark_responded.assert_called_once_with("$file_event", "$response")
 
     @pytest.mark.asyncio

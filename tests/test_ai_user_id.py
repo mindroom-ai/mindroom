@@ -39,16 +39,17 @@ class TestUserIdPassthrough:
         bot.config = config
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response_id")
-        bot._build_openclaw_context = MagicMock(
-            return_value=OpenClawToolContext(
-                agent_name="general",
-                room_id="!test:localhost",
-                thread_id=None,
-                requester_id="@alice:localhost",
-                client=bot.client,
-                config=config,
-                storage_path=tmp_path,
-            ),
+        openclaw_context = OpenClawToolContext(
+            agent_name="general",
+            room_id="!test:localhost",
+            thread_id=None,
+            requester_id="@alice:localhost",
+            client=bot.client,
+            config=config,
+            storage_path=tmp_path,
+        )
+        bot._build_runtime_tool_contexts = MagicMock(
+            return_value=(openclaw_context, None),
         )
 
         process_method = AgentBot._process_and_respond
@@ -94,16 +95,17 @@ class TestUserIdPassthrough:
         bot.storage_path = tmp_path
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._handle_interactive_question = AsyncMock()
-        bot._build_openclaw_context = MagicMock(
-            return_value=OpenClawToolContext(
-                agent_name="general",
-                room_id="!test:localhost",
-                thread_id=None,
-                requester_id="@bob:localhost",
-                client=bot.client,
-                config=config,
-                storage_path=tmp_path,
-            ),
+        openclaw_context = OpenClawToolContext(
+            agent_name="general",
+            room_id="!test:localhost",
+            thread_id=None,
+            requester_id="@bob:localhost",
+            client=bot.client,
+            config=config,
+            storage_path=tmp_path,
+        )
+        bot._build_runtime_tool_contexts = MagicMock(
+            return_value=(openclaw_context, None),
         )
 
         streaming_method = AgentBot._process_and_respond_streaming

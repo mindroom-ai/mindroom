@@ -14,6 +14,7 @@ import pytest
 
 import mindroom.tools  # noqa: F401
 from mindroom.attachments import register_local_attachment
+from mindroom.attachments_context import AttachmentToolContext, attachment_tool_context
 from mindroom.custom_tools.openclaw_compat import OpenClawCompatTools
 from mindroom.openclaw_context import OpenClawToolContext, get_openclaw_tool_context, openclaw_tool_context
 from mindroom.thread_utils import create_session_id
@@ -497,10 +498,17 @@ async def test_openclaw_compat_message_attachments_lists_context_ids(tmp_path: P
         client=MagicMock(),
         config=config,
         storage_path=tmp_path,
+    )
+    attachment_ctx = AttachmentToolContext(
+        room_id="!room:localhost",
+        thread_id="$ctx-thread:localhost",
+        requester_id="@user:localhost",
+        client=ctx.client,
+        storage_path=tmp_path,
         attachment_ids=(attachment.attachment_id,),
     )
 
-    with openclaw_tool_context(ctx):
+    with openclaw_tool_context(ctx), attachment_tool_context(attachment_ctx):
         payload = json.loads(await tool.message(action="attachments"))
 
     assert payload["status"] == "ok"
@@ -993,3 +1001,21 @@ def test_openclaw_context_readable_inside_context_manager(tmp_path: Path) -> Non
         assert got.agent_name == "test"
         assert got.thread_id is None
     assert get_openclaw_tool_context() is None
+
+
+def test_openclaw_context_none_temporarily_clears_nested_scope(tmp_path: Path) -> None:
+    """OpenClaw context(None) should temporarily clear an outer active context."""
+    ctx = OpenClawToolContext(
+        agent_name="test",
+        room_id="!room:localhost",
+        thread_id=None,
+        requester_id="@user:localhost",
+        client=MagicMock(),
+        config=MagicMock(),
+        storage_path=tmp_path,
+    )
+    with openclaw_tool_context(ctx):
+        assert get_openclaw_tool_context() is ctx
+        with openclaw_tool_context(None):
+            assert get_openclaw_tool_context() is None
+        assert get_openclaw_tool_context() is ctx

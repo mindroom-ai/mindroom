@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -27,7 +27,6 @@ class OpenClawToolContext:
     client: nio.AsyncClient
     config: Config
     storage_path: Path
-    attachment_ids: tuple[str, ...] = field(default_factory=tuple)
 
 
 _OPENCLAW_TOOL_CONTEXT: ContextVar[OpenClawToolContext | None] = ContextVar(
@@ -44,9 +43,6 @@ def get_openclaw_tool_context() -> OpenClawToolContext | None:
 @contextmanager
 def openclaw_tool_context(context: OpenClawToolContext | None) -> Iterator[None]:
     """Set OpenClaw-compatible tool context for the current async scope."""
-    if context is None:
-        yield
-        return
     token = _OPENCLAW_TOOL_CONTEXT.set(context)
     try:
         yield
