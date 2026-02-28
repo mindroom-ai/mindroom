@@ -17,6 +17,7 @@ from agno.models.ollama import Ollama
 from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
 
+from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
 from mindroom.bot import AgentBot, MessageContext, MultiAgentOrchestrator, MultiKnowledgeVectorDb
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -27,7 +28,6 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.teams import TeamFormationDecision, TeamMode
-from mindroom.thread_utils import is_authorized_sender as is_authorized_sender_for_test
 from mindroom.tool_events import ToolTraceEntry
 
 from .conftest import TEST_PASSWORD

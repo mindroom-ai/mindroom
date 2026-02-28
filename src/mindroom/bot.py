@@ -16,6 +16,13 @@ from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
 from . import config_confirmation, image_handler, interactive, voice_handler
 from .agents import create_agent, create_session_storage, get_rooms_for_entity, remove_run_by_event_id
 from .ai import ai_response, stream_agent_response
+from .authorization import (
+    filter_agents_by_sender_permissions,
+    get_available_agents_for_sender,
+    get_effective_sender_id_for_reply_permissions,
+    is_authorized_sender,
+    is_sender_allowed_for_agent_reply,
+)
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .command_handler import CommandHandlerContext, _generate_welcome_message, handle_command
 from .commands import Command, command_parser
@@ -100,16 +107,11 @@ from .teams import (
 from .thread_utils import (
     check_agent_mentioned,
     create_session_id,
-    filter_agents_by_sender_permissions,
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
-    get_available_agents_for_sender,
     get_configured_agents_for_room,
-    get_effective_sender_id_for_reply_permissions,
     has_multiple_non_agent_users_in_thread,
     has_user_responded_after_message,
-    is_authorized_sender,
-    is_sender_allowed_for_agent_reply,
     should_agent_respond,
 )
 
