@@ -3,30 +3,25 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from mindroom.attachments import register_local_attachment
+from mindroom.attachments_context import AttachmentToolContext, attachment_tool_context
 from mindroom.custom_tools.attachments import AttachmentTools
-from mindroom.openclaw_context import OpenClawToolContext, openclaw_tool_context
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _tool_context(tmp_path: Path, *, attachment_ids: tuple[str, ...] = ()) -> OpenClawToolContext:
-    config = MagicMock()
-    config.agents = {"general": SimpleNamespace(tools=["attachments"])}
-    return OpenClawToolContext(
-        agent_name="general",
+def _tool_context(tmp_path: Path, *, attachment_ids: tuple[str, ...] = ()) -> AttachmentToolContext:
+    return AttachmentToolContext(
         room_id="!room:localhost",
         thread_id="$thread:localhost",
         requester_id="@user:localhost",
         client=MagicMock(),
-        config=config,
         storage_path=tmp_path,
         attachment_ids=attachment_ids,
     )
@@ -46,7 +41,7 @@ async def test_attachments_tool_lists_context_attachments(tmp_path: Path) -> Non
     )
     assert attachment is not None
 
-    with openclaw_tool_context(_tool_context(tmp_path, attachment_ids=(attachment.attachment_id,))):
+    with attachment_tool_context(_tool_context(tmp_path, attachment_ids=(attachment.attachment_id,))):
         payload = json.loads(await tool.list_attachments())
 
     assert payload["status"] == "ok"
@@ -71,7 +66,7 @@ async def test_attachments_tool_sends_attachment_ids(tmp_path: Path) -> None:
     assert attachment is not None
 
     with (
-        openclaw_tool_context(_tool_context(tmp_path, attachment_ids=("att_upload",))),
+        attachment_tool_context(_tool_context(tmp_path, attachment_ids=("att_upload",))),
         patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
     ):
         payload = json.loads(await tool.send_attachments(attachments=["att_upload"]))
@@ -91,7 +86,7 @@ async def test_attachments_tool_rejects_local_paths_by_default(tmp_path: Path) -
     sample_file.write_text("payload", encoding="utf-8")
 
     with (
-        openclaw_tool_context(_tool_context(tmp_path)),
+        attachment_tool_context(_tool_context(tmp_path)),
         patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
     ):
         payload = json.loads(await tool.send_attachments(attachments=[str(sample_file)]))
@@ -106,7 +101,7 @@ async def test_attachments_tool_rejects_local_paths_by_default(tmp_path: Path) -
 async def test_attachments_tool_requires_context() -> None:
     """Tool should return an explicit error when runtime context is unavailable."""
     tool = AttachmentTools()
-    with openclaw_tool_context(None):
+    with attachment_tool_context(None):
         payload = json.loads(await tool.list_attachments())
 
     assert payload["status"] == "error"

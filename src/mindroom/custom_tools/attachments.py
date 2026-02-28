@@ -9,11 +9,11 @@ from typing import TYPE_CHECKING
 from agno.tools import Toolkit
 
 from mindroom.attachments import attachments_for_tool_payload, load_attachment, resolve_attachments
+from mindroom.attachments_context import get_attachment_tool_context
 from mindroom.matrix.client import send_file_message
-from mindroom.openclaw_context import get_openclaw_tool_context
 
 if TYPE_CHECKING:
-    from mindroom.openclaw_context import OpenClawToolContext
+    from mindroom.attachments_context import AttachmentToolContext
 
 
 def attachment_tool_payload(status: str, **kwargs: object) -> str:
@@ -27,7 +27,7 @@ def attachment_tool_payload(status: str, **kwargs: object) -> str:
 
 
 def _resolve_context_attachment_path(
-    context: OpenClawToolContext,
+    context: AttachmentToolContext,
     attachment_id: str,
 ) -> tuple[Path | None, str | None]:
     if attachment_id not in context.attachment_ids:
@@ -42,7 +42,7 @@ def _resolve_context_attachment_path(
 
 
 def _resolve_attachment_reference(
-    context: OpenClawToolContext,
+    context: AttachmentToolContext,
     raw_reference: object,
     *,
     allow_local_paths: bool,
@@ -68,7 +68,7 @@ def _resolve_attachment_reference(
 
 
 def resolve_attachment_references(
-    context: OpenClawToolContext,
+    context: AttachmentToolContext,
     attachments: list[str] | None,
     *,
     allow_local_paths: bool = False,
@@ -97,7 +97,7 @@ def resolve_attachment_references(
 
 
 def get_attachment_listing(
-    context: OpenClawToolContext,
+    context: AttachmentToolContext,
     target: str | None,
 ) -> tuple[list[str], list[dict[str, object]], list[str], str | None]:
     """List requested context attachments and report missing metadata records."""
@@ -122,7 +122,7 @@ def get_attachment_listing(
 
 
 async def send_attachment_paths(
-    context: OpenClawToolContext,
+    context: AttachmentToolContext,
     *,
     room_id: str,
     thread_id: str | None,
@@ -157,7 +157,7 @@ class AttachmentTools(Toolkit):
 
     async def list_attachments(self, target: str | None = None) -> str:
         """List attachment metadata for current tool context."""
-        context = get_openclaw_tool_context()
+        context = get_attachment_tool_context()
         if context is None:
             return attachment_tool_payload(
                 "error",
@@ -183,7 +183,7 @@ class AttachmentTools(Toolkit):
         allow_local_paths: bool = False,
     ) -> str:
         """Send attachment IDs or local file paths to a Matrix room/thread."""
-        context = get_openclaw_tool_context()
+        context = get_attachment_tool_context()
         if context is None:
             return attachment_tool_payload(
                 "error",

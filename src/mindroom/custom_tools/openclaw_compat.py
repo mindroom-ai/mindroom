@@ -19,6 +19,7 @@ from agno.tools import Toolkit
 from agno.tools.duckduckgo import DuckDuckGoTools
 from agno.tools.website import WebsiteTools
 
+from mindroom.attachments_context import AttachmentToolContext
 from mindroom.custom_tools.attachments import (
     get_attachment_listing,
     resolve_attachment_references,
@@ -1011,8 +1012,9 @@ class OpenClawCompatTools(Toolkit):
         room_id: str,
         effective_thread_id: str | None,
     ) -> str:
+        attachment_context = self._attachment_context(context)
         attachment_paths, resolved_attachment_ids, attachment_error = resolve_attachment_references(
-            context,
+            attachment_context,
             attachments,
             allow_local_paths=allow_local_paths,
         )
@@ -1048,7 +1050,7 @@ class OpenClawCompatTools(Toolkit):
                 )
 
         attachment_event_ids, send_error = await send_attachment_paths(
-            context,
+            attachment_context,
             room_id=room_id,
             thread_id=effective_thread_id,
             attachment_paths=attachment_paths,
@@ -1078,7 +1080,10 @@ class OpenClawCompatTools(Toolkit):
 
     @staticmethod
     async def _message_attachments(context: OpenClawToolContext, target: str | None) -> str:
-        requested_attachment_ids, attachments, missing_attachment_ids, error = get_attachment_listing(context, target)
+        requested_attachment_ids, attachments, missing_attachment_ids, error = get_attachment_listing(
+            OpenClawCompatTools._attachment_context(context),
+            target,
+        )
         if error is not None:
             return OpenClawCompatTools._payload(
                 "message",
@@ -1093,6 +1098,18 @@ class OpenClawCompatTools(Toolkit):
             attachment_ids=requested_attachment_ids,
             attachments=attachments,
             missing_attachment_ids=missing_attachment_ids,
+        )
+
+    @staticmethod
+    def _attachment_context(context: OpenClawToolContext) -> AttachmentToolContext:
+        """Convert OpenClaw runtime context into attachments toolkit context."""
+        return AttachmentToolContext(
+            client=context.client,
+            room_id=context.room_id,
+            thread_id=context.thread_id,
+            requester_id=context.requester_id,
+            storage_path=context.storage_path,
+            attachment_ids=context.attachment_ids,
         )
 
     async def _message_react(

@@ -27,6 +27,7 @@ from .attachments import (
     register_file_or_video_attachment,
     resolve_thread_attachment_ids,
 )
+from .attachments_context import AttachmentToolContext, attachment_tool_context
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .command_handler import CommandHandlerContext, _generate_welcome_message, handle_command
 from .commands import Command, command_parser
@@ -1540,6 +1541,26 @@ class AgentBot:
             attachment_ids=tuple(attachment_ids or []),
         )
 
+    def _build_attachment_tool_context(
+        self,
+        room_id: str,
+        thread_id: str | None,
+        user_id: str | None,
+        *,
+        attachment_ids: list[str] | None = None,
+    ) -> AttachmentToolContext | None:
+        """Build runtime context for attachments toolkit calls."""
+        if self.client is None:
+            return None
+        return AttachmentToolContext(
+            client=self.client,
+            room_id=room_id,
+            thread_id=thread_id,
+            requester_id=user_id or self.matrix_id.full_id,
+            storage_path=self.storage_path,
+            attachment_ids=tuple(attachment_ids or []),
+        )
+
     async def _generate_team_response_helper(
         self,
         room_id: str,
@@ -1591,6 +1612,12 @@ class AgentBot:
             requester_user_id,
             attachment_ids=attachment_ids,
         )
+        attachment_context = self._build_attachment_tool_context(
+            room_id,
+            thread_id,
+            requester_user_id,
+            attachment_ids=attachment_ids,
+        )
         orchestrator = self.orchestrator
         if orchestrator is None:
             msg = "Orchestrator is not set"
@@ -1603,7 +1630,11 @@ class AgentBot:
             if use_streaming and not existing_event_id:
                 # Show typing indicator while team generates streaming response
                 async with typing_indicator(client, room_id):
-                    with scheduling_tool_context(scheduler_context), openclaw_tool_context(openclaw_context):
+                    with (
+                        scheduling_tool_context(scheduler_context),
+                        openclaw_tool_context(openclaw_context),
+                        attachment_tool_context(attachment_context),
+                    ):
                         response_stream = team_response_stream(
                             agent_ids=team_agents,
                             message=message,
@@ -1645,7 +1676,11 @@ class AgentBot:
             else:
                 # Show typing indicator while team generates non-streaming response
                 async with typing_indicator(client, room_id):
-                    with scheduling_tool_context(scheduler_context), openclaw_tool_context(openclaw_context):
+                    with (
+                        scheduling_tool_context(scheduler_context),
+                        openclaw_tool_context(openclaw_context),
+                        attachment_tool_context(attachment_context),
+                    ):
                         response_text = await team_response(
                             agent_names=agent_names,
                             mode=mode,
@@ -1832,13 +1867,23 @@ class AgentBot:
             user_id,
             attachment_ids=attachment_ids,
         )
+        attachment_context = self._build_attachment_tool_context(
+            room_id,
+            thread_id,
+            user_id,
+            attachment_ids=attachment_ids,
+        )
         tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
 
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
-                with scheduling_tool_context(scheduler_context), openclaw_tool_context(openclaw_context):
+                with (
+                    scheduling_tool_context(scheduler_context),
+                    openclaw_tool_context(openclaw_context),
+                    attachment_tool_context(attachment_context),
+                ):
                     response_text = await ai_response(
                         agent_name=self.agent_name,
                         prompt=prompt,
@@ -1939,12 +1984,21 @@ class AgentBot:
             user_id=user_id,
         )
         openclaw_context = self._build_openclaw_context(room_id, thread_id, user_id, agent_name=agent_name)
+        attachment_context = self._build_attachment_tool_context(
+            room_id,
+            thread_id,
+            user_id,
+        )
         show_tool_calls = self._show_tool_calls_for_agent(agent_name)
         tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
 
         async with typing_indicator(self.client, room_id):
-            with scheduling_tool_context(scheduler_context), openclaw_tool_context(openclaw_context):
+            with (
+                scheduling_tool_context(scheduler_context),
+                openclaw_tool_context(openclaw_context),
+                attachment_tool_context(attachment_context),
+            ):
                 response_text = await ai_response(
                     agent_name=agent_name,
                     prompt=prompt,
@@ -2091,12 +2145,22 @@ class AgentBot:
             user_id,
             attachment_ids=attachment_ids,
         )
+        attachment_context = self._build_attachment_tool_context(
+            room_id,
+            thread_id,
+            user_id,
+            attachment_ids=attachment_ids,
+        )
         run_metadata_content: dict[str, Any] = {}
 
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
-                with scheduling_tool_context(scheduler_context), openclaw_tool_context(openclaw_context):
+                with (
+                    scheduling_tool_context(scheduler_context),
+                    openclaw_tool_context(openclaw_context),
+                    attachment_tool_context(attachment_context),
+                ):
                     response_stream = stream_agent_response(
                         agent_name=self.agent_name,
                         prompt=prompt,
