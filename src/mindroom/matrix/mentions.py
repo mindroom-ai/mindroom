@@ -6,9 +6,8 @@ from typing import TYPE_CHECKING, Any
 from mindroom.config import Config
 from mindroom.tool_events import build_tool_trace_content
 
-from .client import markdown_to_html
 from .identity import MatrixID, mindroom_namespace
-from .message_builder import build_message_content
+from .message_builder import build_message_content, markdown_to_html
 
 if TYPE_CHECKING:
     from mindroom.tool_events import ToolTraceEntry

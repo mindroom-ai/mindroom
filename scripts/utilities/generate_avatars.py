@@ -39,7 +39,7 @@ from rich.text import Text
 
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix import MATRIX_HOMESERVER
-from mindroom.matrix.client import check_and_set_avatar
+from mindroom.matrix.avatar import check_and_set_avatar
 from mindroom.matrix.identity import MatrixID, extract_server_name_from_homeserver
 from mindroom.matrix.rooms import get_room_id
 from mindroom.matrix.state import MatrixState
