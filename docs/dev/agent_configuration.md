@@ -150,7 +150,6 @@ agents:
     context_files:
       - ./workspace/SOUL.md
       - ./workspace/USER.md
-    memory_dir: ./workspace/memory
     model: "anthropic"  # Optional: specific model for this agent (overrides default)
 ```
 
@@ -168,17 +167,15 @@ agents:
 - **learning_mode**: Learning mode (`always` or `agentic`, default: `always`)
 - **knowledge_bases**: List of configured knowledge base IDs assigned to this agent
 - **context_files**: File paths loaded into role context when the agent is created/reloaded
-- **memory_dir**: Directory loaded into role context for `MEMORY.md` plus yesterday/today `YYYY-MM-DD.md` files
 - **model**: (Optional) Specific model to use for this agent, overrides the default model
 - **allow_self_config**: (Optional) When `true`, gives the agent a scoped tool to read and modify its own configuration at runtime (default: inherits from `defaults.allow_self_config`, which defaults to `false`)
 
 ### File-Based Context Loading
 
-`context_files` and `memory_dir` are useful for OpenClaw-style file memory patterns:
+`context_files` is useful for OpenClaw-style workspace context:
 
 - Paths are resolved relative to `config.yaml`
 - `context_files` are injected in listed order
-- `memory_dir` loads `MEMORY.md` (uppercase) and dated memory files for yesterday/today
 - Content is refreshed when agents are created or reloaded
 
 ## Room Configuration

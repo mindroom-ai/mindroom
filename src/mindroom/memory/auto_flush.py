@@ -146,7 +146,8 @@ def mark_auto_flush_dirty_session(
             "room_id": room_id,
             "thread_id": thread_id,
             "dirty": True,
-            "in_flight": False,
+            # Keep in-flight status if a flush is already running for this key.
+            "in_flight": bool(existing.get("in_flight", False)),
             "first_dirty_at": first_dirty_at,
             "last_seen_at": now,
             "next_attempt_at": None,
@@ -476,6 +477,7 @@ class MemoryAutoFlushWorker:
                 latest_state = _read_state_unlocked(self.storage_path)
                 latest_entry = latest_state["sessions"].get(key, entry)
                 latest_entry["in_flight"] = True
+                latest_entry["last_session_updated_at"] = session_updated_at
                 latest_state["sessions"][key] = latest_entry
                 _write_state_unlocked(self.storage_path, latest_state)
 
@@ -535,17 +537,30 @@ class MemoryAutoFlushWorker:
             logger.exception("Memory auto-flush failed", agent=agent_name, session_id=session_id)
             return
 
+        latest_session_updated_at: int | None = None
+        latest_session = _load_agent_session(self.storage_path, agent_name, session_id)
+        if latest_session is not None and isinstance(latest_session.updated_at, int):
+            latest_session_updated_at = latest_session.updated_at
+
         with _STATE_LOCK:
             latest_state = _read_state_unlocked(self.storage_path)
             latest_entry = latest_state["sessions"].get(key, entry)
-            latest_entry["dirty"] = False
+            has_newer_updates = (
+                isinstance(latest_session_updated_at, int)
+                and isinstance(session_updated_at, int)
+                and latest_session_updated_at > session_updated_at
+            )
+            latest_entry["dirty"] = has_newer_updates
             latest_entry["in_flight"] = False
             latest_entry["last_flushed_at"] = now
+            if isinstance(latest_session_updated_at, int):
+                latest_entry["last_session_updated_at"] = latest_session_updated_at
             if isinstance(session_updated_at, int):
                 latest_entry["last_flushed_session_updated_at"] = session_updated_at
             latest_entry["next_attempt_at"] = None
             latest_entry["consecutive_failures"] = 0
-            latest_entry["priority_boost_at"] = None
+            if not latest_entry["dirty"]:
+                latest_entry["priority_boost_at"] = None
             latest_state["sessions"][key] = latest_entry
             _write_state_unlocked(self.storage_path, latest_state)
 

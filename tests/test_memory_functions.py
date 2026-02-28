@@ -601,6 +601,31 @@ class TestMemoryFunctions:
         assert "How do we build the API?" in enhanced
 
     @pytest.mark.asyncio
+    async def test_file_backend_search_skips_structured_line_duplicates(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Search should not return duplicate hits from structured ID lines in daily files."""
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "memory-files")
+
+        await add_agent_memory("Project owner is Bas", "general", storage_path, config)
+        memories = await list_all_agent_memories("general", storage_path, config)
+        memory_id = memories[0]["id"]
+
+        daily_file = storage_path / "memory-files" / "agent_general" / "memory" / "2026-02-28.md"
+        daily_file.parent.mkdir(parents=True, exist_ok=True)
+        daily_file.write_text(
+            f"- [id={memory_id}] Project owner is Bas\nProject owner is Bas\n",
+            encoding="utf-8",
+        )
+
+        results = await search_agent_memories("owner bas", "general", storage_path, config, limit=10)
+        matching_results = [r for r in results if r.get("memory") == "Project owner is Bas"]
+        assert len(matching_results) == 1
+
+    @pytest.mark.asyncio
     async def test_file_backend_memory_crud_and_scope(self, storage_path: Path, config: Config) -> None:
         """File backend should support CRUD and enforce caller scope rules."""
         config.memory.backend = "file"

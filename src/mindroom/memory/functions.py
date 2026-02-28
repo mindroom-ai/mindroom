@@ -207,7 +207,7 @@ def _append_scope_memory_entry(
     }
 
 
-def _search_scope_memory_entries(
+def _search_scope_memory_entries(  # noqa: C901
     scope_user_id: str,
     query: str,
     storage_path: Path,
@@ -219,14 +219,20 @@ def _search_scope_memory_entries(
     query_tokens = _extract_query_tokens(query)
 
     scored_entries: list[MemoryResult] = []
+    seen_scored_text: set[str] = set()
     for entry in id_entries:
         text = entry.get("memory", "")
+        normalized_text = text.strip().lower()
+        if normalized_text in seen_scored_text:
+            continue
         score = _match_score(query_tokens, text)
         if score <= 0:
             continue
         enriched = dict(entry)
         enriched["score"] = score
         scored_entries.append(cast("MemoryResult", enriched))
+        if normalized_text:
+            seen_scored_text.add(normalized_text)
 
     scored_entries.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
     scored_entries = scored_entries[:limit]
@@ -239,6 +245,9 @@ def _search_scope_memory_entries(
     entrypoint_path = scope_path / _FILE_MEMORY_ENTRYPOINT
     query_tokens = _extract_query_tokens(query)
     snippet_results: list[MemoryResult] = []
+    existing_memory_text = {
+        memory_text for entry in scored_entries if (memory_text := entry.get("memory", "").strip().lower())
+    }
     for markdown_path in _scope_markdown_files(scope_path):
         if markdown_path == entrypoint_path:
             continue
@@ -247,9 +256,16 @@ def _search_scope_memory_entries(
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
+            # Structured ID entries are already indexed above; skip here to avoid duplicates.
+            if _FILE_MEMORY_ENTRY_PATTERN.match(stripped):
+                continue
+            normalized_stripped = stripped.lower()
+            if normalized_stripped in existing_memory_text:
+                continue
             score = _match_score(query_tokens, stripped)
             if score <= 0:
                 continue
+            existing_memory_text.add(normalized_stripped)
             snippet_results.append(
                 {
                     "id": f"file:{relative_path}:{line_no}",
@@ -292,7 +308,7 @@ def _get_scope_memory_by_path_id(
         "id": memory_id,
         "memory": content,
         "user_id": scope_user_id,
-        "metadata": {"source_file": path.name, "line": line_no},
+        "metadata": {"source_file": path.relative_to(scope_path).as_posix(), "line": line_no},
     }
 
 

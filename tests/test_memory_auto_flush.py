@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -140,3 +141,67 @@ async def test_worker_respects_batch_limits(
 
 async def _fake_extract_memory_summary(**_: object) -> str:
     return "important decision"
+
+
+@pytest.mark.asyncio
+async def test_worker_keeps_session_dirty_when_new_activity_arrives_mid_flush(
+    tmp_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """New activity during a flush should keep the session dirty for a later pass."""
+    storage_path = tmp_path
+    session_updated_at = 100
+
+    mark_auto_flush_dirty_session(
+        storage_path,
+        config,
+        agent_name="general",
+        session_id="s1",
+        room_id="!room:example",
+        thread_id="t1",
+    )
+
+    def _load_session(_storage: Path, _agent: str, _sid: str) -> _FakeSession:
+        return _FakeSession(
+            updated_at=session_updated_at,
+            messages=[_FakeMessage(role="user", content="important detail")],
+        )
+
+    monkeypatch.setattr("mindroom.memory.auto_flush._load_agent_session", _load_session)
+    monkeypatch.setattr(
+        "mindroom.memory.auto_flush._extract_memory_summary",
+        _fake_extract_memory_summary,
+    )
+    monkeypatch.setattr(
+        "mindroom.memory.auto_flush.append_agent_daily_memory",
+        lambda *_args, **_kwargs: {
+            "id": "m_test",
+            "memory": "important detail",
+            "user_id": "agent_general",
+        },
+    )
+
+    worker = MemoryAutoFlushWorker(storage_path=storage_path, config_provider=lambda: config)
+
+    async def _fake_flush(config: Config, *, agent_name: str, session_id: str) -> bool:
+        nonlocal session_updated_at
+        session_updated_at = 200
+        mark_auto_flush_dirty_session(
+            storage_path,
+            config,
+            agent_name=agent_name,
+            session_id=session_id,
+            room_id="!room:example",
+            thread_id="t1",
+        )
+        return True
+
+    monkeypatch.setattr(worker, "_flush_session", _fake_flush)
+    await worker._run_cycle(config)
+
+    payload = json.loads((storage_path / "memory_flush_state.json").read_text(encoding="utf-8"))
+    session_state = payload["sessions"]["general:s1"]
+    assert session_state["dirty"] is True
+    assert session_state["in_flight"] is False
+    assert session_state["last_flushed_session_updated_at"] == 100

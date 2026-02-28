@@ -1991,19 +1991,20 @@ class AgentBot:
                 room_id=room_id,
                 thread_id=thread_id,
             )
-            create_background_task(
-                store_conversation_memory(
-                    prompt,
-                    agent_name,
-                    self.storage_path,
-                    session_id,
-                    self.config,
-                    room_id,
-                    thread_history,
-                    user_id,
-                ),
-                name=f"memory_save_{agent_name}_{session_id}",
-            )
+            if self.config.memory.backend != "file":
+                create_background_task(
+                    store_conversation_memory(
+                        prompt,
+                        agent_name,
+                        self.storage_path,
+                        session_id,
+                        self.config,
+                        room_id,
+                        thread_history,
+                        user_id,
+                    ),
+                    name=f"memory_save_{agent_name}_{session_id}",
+                )
         except Exception:  # pragma: no cover
             self.logger.debug("Skipping memory storage due to configuration error")
 
@@ -2232,19 +2233,20 @@ class AgentBot:
                 room_id=room_id,
                 thread_id=thread_id,
             )
-            create_background_task(
-                store_conversation_memory(
-                    prompt,
-                    self.agent_name,
-                    self.storage_path,
-                    session_id,
-                    self.config,
-                    room_id,
-                    thread_history,
-                    user_id,
-                ),
-                name=f"memory_save_{self.agent_name}_{session_id}",
-            )
+            if self.config.memory.backend != "file":
+                create_background_task(
+                    store_conversation_memory(
+                        prompt,
+                        self.agent_name,
+                        self.storage_path,
+                        session_id,
+                        self.config,
+                        room_id,
+                        thread_history,
+                        user_id,
+                    ),
+                    name=f"memory_save_{self.agent_name}_{session_id}",
+                )
         except Exception:  # pragma: no cover
             self.logger.debug("Skipping memory storage due to configuration error")
 
@@ -2773,20 +2775,21 @@ class TeamBot(AgentBot):
         session_id = create_session_id(room_id, thread_id)
         # Convert MatrixID list to agent names for memory storage
         agent_names = [mid.agent_name(self.config) or mid.username for mid in self.team_agents]
-        create_background_task(
-            store_conversation_memory(
-                prompt,
-                agent_names,  # Pass list of agent names for team storage
-                self.storage_path,
-                session_id,
-                self.config,
-                room_id,
-                thread_history,
-                user_id,
-            ),
-            name=f"memory_save_team_{session_id}",
-        )
-        self.logger.info(f"Storing memory for team: {agent_names}")
+        if self.config.memory.backend != "file":
+            create_background_task(
+                store_conversation_memory(
+                    prompt,
+                    agent_names,  # Pass list of agent names for team storage
+                    self.storage_path,
+                    session_id,
+                    self.config,
+                    room_id,
+                    thread_history,
+                    user_id,
+                ),
+                name=f"memory_save_team_{session_id}",
+            )
+            self.logger.info(f"Storing memory for team: {agent_names}")
 
         # Use the shared team response helper
         await self._generate_team_response_helper(
