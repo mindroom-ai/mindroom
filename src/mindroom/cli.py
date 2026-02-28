@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mindroom.config import Config
+from mindroom import cli_connect
 from mindroom.cli_config import (
     _check_env_keys,
     _format_validation_errors,
@@ -44,7 +45,6 @@ from mindroom.constants import (
     config_search_locations,
     env_key_for_provider,
 )
-from mindroom.matrix import provisioning
 
 _HELP = """\
 AI agents that live in Matrix and work everywhere via bridges.
@@ -274,7 +274,7 @@ def connect(
 ) -> None:
     """Pair this local MindRoom install with the hosted provisioning service."""
     normalized_pair_code = pair_code.strip().upper()
-    if not provisioning.is_valid_pair_code(normalized_pair_code):
+    if not cli_connect.is_valid_pair_code(normalized_pair_code):
         console.print("[red]Error:[/red] Invalid pair code format. Expected ABCD-EFGH.")
         raise typer.Exit(1)
 
@@ -287,7 +287,7 @@ def connect(
 
     normalized_client_name = client_name.strip() or socket.gethostname()
     try:
-        credentials = provisioning.complete_local_pairing(
+        credentials = cli_connect.complete_local_pairing(
             provisioning_url=resolved_provisioning_url,
             pair_code=normalized_pair_code,
             client_name=normalized_client_name,
@@ -305,7 +305,7 @@ def connect(
         )
 
     if persist_env:
-        env_path = provisioning.persist_local_provisioning_env(
+        env_path = cli_connect.persist_local_provisioning_env(
             provisioning_url=resolved_provisioning_url,
             client_id=credentials.client_id,
             client_secret=credentials.client_secret,
@@ -315,7 +315,7 @@ def connect(
         console.print(f"  Saved credentials to: {env_path}")
         if credentials.owner_user_id:
             config_path = Path(CONFIG_PATH).expanduser().resolve()
-            if provisioning.replace_owner_placeholders_in_config(
+            if cli_connect.replace_owner_placeholders_in_config(
                 config_path=config_path,
                 owner_user_id=credentials.owner_user_id,
             ):

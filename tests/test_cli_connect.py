@@ -1,4 +1,4 @@
-"""Tests for Matrix provisioning helper functions."""
+"""Tests for CLI connect helper functions."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING
 import httpx
 import pytest
 
+from mindroom import cli_connect
 from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
-from mindroom.matrix import provisioning
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -28,7 +28,7 @@ def test_complete_local_pairing_accepts_owner_user_id_with_server_port() -> None
             },
         )
 
-    result = provisioning.complete_local_pairing(
+    result = cli_connect.complete_local_pairing(
         provisioning_url="https://provisioning.example",
         pair_code="ABCD-EFGH",
         client_name="devbox",
@@ -48,7 +48,7 @@ def test_persist_local_provisioning_env_writes_credentials_only(tmp_path: Path) 
     config_path = tmp_path / "config.yaml"
     config_path.write_text("models: {}\nagents: {}\nrouter:\n  model: default\n")
 
-    env_path = provisioning.persist_local_provisioning_env(
+    env_path = cli_connect.persist_local_provisioning_env(
         provisioning_url="https://provisioning.example",
         client_id="client-123",
         client_secret="secret-123",  # noqa: S106
@@ -75,7 +75,7 @@ def test_replace_owner_placeholders_in_config_accepts_server_port(tmp_path: Path
         "      - __PLACEHOLDER__\n",
     )
 
-    replaced = provisioning.replace_owner_placeholders_in_config(
+    replaced = cli_connect.replace_owner_placeholders_in_config(
         config_path=config_path,
         owner_user_id="@alice:mindroom.chat:8448",
     )
@@ -94,7 +94,7 @@ def test_complete_local_pairing_rejects_non_json_response() -> None:
         return httpx.Response(200, text="not-json")
 
     with pytest.raises(ValueError, match="invalid JSON"):
-        provisioning.complete_local_pairing(
+        cli_connect.complete_local_pairing(
             provisioning_url="https://provisioning.example",
             pair_code="ABCD-EFGH",
             client_name="devbox",
@@ -111,7 +111,7 @@ def test_complete_local_pairing_rejects_non_object_json_response() -> None:
         return httpx.Response(200, json=["not", "an", "object"])
 
     with pytest.raises(TypeError, match="unexpected response"):
-        provisioning.complete_local_pairing(
+        cli_connect.complete_local_pairing(
             provisioning_url="https://provisioning.example",
             pair_code="ABCD-EFGH",
             client_name="devbox",
@@ -134,7 +134,7 @@ def test_complete_local_pairing_flags_malformed_owner_user_id() -> None:
             },
         )
 
-    result = provisioning.complete_local_pairing(
+    result = cli_connect.complete_local_pairing(
         provisioning_url="https://provisioning.example",
         pair_code="ABCD-EFGH",
         client_name="devbox",
