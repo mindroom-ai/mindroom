@@ -139,6 +139,7 @@ mindroom run
 ## Documentation
 
 - [Getting Started](https://docs.mindroom.chat/getting-started/index.md) - Installation and first steps
+- [Hosted Matrix Deployment](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) - Run only `uvx mindroom` locally against hosted Matrix
 - [Configuration](https://docs.mindroom.chat/configuration/index.md) - All configuration options
 - [Cultures](https://docs.mindroom.chat/configuration/cultures/index.md) - Configure shared agent cultures
 - [Dashboard](https://docs.mindroom.chat/dashboard/index.md) - Web UI for configuration
@@ -171,9 +172,68 @@ mindroom run
 
 This guide will help you set up MindRoom and create your first AI agent.
 
-## Recommended: Full Stack Docker Compose (backend + frontend + Matrix + Element)
+## Recommended: Hosted Matrix + Local Backend (`uvx` only)
 
-MindRoom depends on a Matrix homeserver plus supporting services. The easiest onboarding is the full stack Docker Compose repo, which brings everything up together.
+If you do not want to self-host Matrix yet, this is the simplest setup. You only run the MindRoom backend locally.
+
+### 1. Create a local project
+
+```
+mkdir -p ~/mindroom-local
+cd ~/mindroom-local
+uvx mindroom config init --profile public
+```
+
+This creates:
+
+- `config.yaml`
+- `.env` prefilled with `MATRIX_HOMESERVER=https://mindroom.chat`
+
+### 2. Add model API key(s)
+
+```
+$EDITOR .env
+```
+
+Set at least one key:
+
+- `ANTHROPIC_API_KEY=...`, or
+- `OPENAI_API_KEY=...`, or
+- another supported provider key.
+
+### 3. Pair your local install from chat UI
+
+1. Open `https://chat.mindroom.chat` and sign in.
+1. Go to `Settings -> Local MindRoom`.
+1. Click `Generate Pair Code`.
+1. Run locally:
+
+```
+uvx mindroom connect --pair-code ABCD-EFGH
+```
+
+Notes:
+
+- Pair code is short-lived (10 minutes).
+- `mindroom connect` writes local provisioning credentials into `.env`.
+- Those credentials are not Matrix access tokens.
+- They only authorize provisioning endpoints for local onboarding.
+
+### 4. Run MindRoom
+
+```
+uvx mindroom run
+```
+
+### 5. Verify in chat
+
+Send a message mentioning your agent in a room where it is configured.
+
+For a detailed architecture and credential model, see: [Hosted Matrix deployment guide](https://docs.mindroom.chat/deployment/hosted-matrix/index.md).
+
+## Alternative: Full Stack Docker Compose (backend + frontend + Matrix + Element)
+
+Use this when you want everything local: backend, frontend, Matrix homeserver, and a Matrix client in one stack.
 
 **Prereqs:** Docker + Docker Compose.
 
@@ -3735,12 +3795,13 @@ MindRoom can be deployed in various ways depending on your needs.
 
 ## Deployment Options
 
-| Method                                                                             | Best For                                                    |
-| ---------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Full Stack (Docker Compose)                                                        | All-in-one: backend + frontend + Matrix (Synapse) + Element |
-| [Docker (single container)](https://docs.mindroom.chat/deployment/docker/index.md) | Backend-only or when you already have Matrix                |
-| [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/index.md)            | Multi-tenant SaaS, production                               |
-| Direct                                                                             | Development, simple setups                                  |
+| Method                                                                                        | Best For                                                    |
+| --------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| [Hosted Matrix + local backend](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) | Simplest setup: run only `uvx mindroom run` locally         |
+| Full Stack (Docker Compose)                                                                   | All-in-one: backend + frontend + Matrix (Synapse) + Element |
+| [Docker (single container)](https://docs.mindroom.chat/deployment/docker/index.md)            | Backend-only or when you already have Matrix                |
+| [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/index.md)                       | Multi-tenant SaaS, production                               |
+| Direct                                                                                        | Development, simple setups                                  |
 
 ## Bridges
 
@@ -3757,6 +3818,21 @@ Use these guides if you want users to connect Google accounts in the MindRoom fr
 - [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) - single-user bring-your-own OAuth app setup
 
 ## Quick Start
+
+### Hosted Matrix + local backend (simplest)
+
+```
+mkdir -p ~/mindroom-local
+cd ~/mindroom-local
+uvx mindroom config init --profile public
+$EDITOR .env
+uvx mindroom connect --pair-code ABCD-EFGH
+uvx mindroom run
+```
+
+Generate the pair code in `https://chat.mindroom.chat` under: `Settings -> Local MindRoom`.
+
+See [Hosted Matrix deployment](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) for the full walkthrough.
 
 ### Full Stack (recommended)
 
@@ -3819,6 +3895,116 @@ Direct and single-container deployments:
 1. **Persistent storage** - Mount `mindroom_data/` to persist agent state (including `sessions/`, `learning/`, and memory data)
 
 See the [Docker guide](https://docs.mindroom.chat/deployment/docker/#environment-variables) for the complete environment variable reference.
+
+Hosted `mindroom.chat` deployments additionally use local provisioning credentials from `mindroom connect` (`MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET`) to bootstrap agent registrations.
+
+# Hosted Matrix + Local Backend
+
+This guide covers the simplest production-like setup:
+
+- Matrix homeserver is hosted at `https://mindroom.chat`
+- Web chat runs at `https://chat.mindroom.chat`
+- You run only `mindroom run` locally via `uvx`
+
+## What Runs Where
+
+| Component            | Runs on                          | Purpose                                 |
+| -------------------- | -------------------------------- | --------------------------------------- |
+| `chat.mindroom.chat` | Hosted web app                   | Login UI and pairing UI                 |
+| `mindroom.chat`      | Hosted Matrix + provisioning API | Matrix transport + local onboarding API |
+| `uvx mindroom run`   | Your machine/server              | Agent orchestration, tools, model calls |
+
+## Prerequisites
+
+- Python 3.12+
+- `uv` installed
+- A Matrix account that can sign in to `chat.mindroom.chat`
+- At least one AI provider API key
+
+## 1. Initialize Local Config
+
+```
+mkdir -p ~/mindroom-local
+cd ~/mindroom-local
+uvx mindroom config init --profile public
+```
+
+This creates `config.yaml` and `.env` with hosted defaults.
+
+## 2. Add AI Provider Key
+
+Edit `.env` and set at least one provider key:
+
+```
+ANTHROPIC_API_KEY=...
+# or OPENAI_API_KEY=...
+```
+
+## 3. Pair This Install
+
+1. Open `https://chat.mindroom.chat`.
+1. Go to `Settings -> Local MindRoom`.
+1. Click `Generate Pair Code`.
+1. Run locally:
+
+```
+uvx mindroom connect --pair-code ABCD-EFGH
+```
+
+Pair code behavior:
+
+- Valid for 600 seconds (10 minutes).
+- Only used to bootstrap local pairing.
+
+After successful pairing, local provisioning credentials are written to `.env` unless you use `--no-persist-env`.
+
+## 4. Start MindRoom
+
+```
+uvx mindroom run
+```
+
+MindRoom then:
+
+1. Connects to `MATRIX_HOMESERVER`
+1. Creates/updates configured agent Matrix users
+1. Joins/creates configured rooms
+1. Starts processing messages
+
+## Credential Model (Important)
+
+`mindroom connect` returns local provisioning credentials:
+
+- `MINDROOM_LOCAL_CLIENT_ID`
+- `MINDROOM_LOCAL_CLIENT_SECRET`
+
+These are **not Matrix user access tokens**.
+
+They can only call provisioning-service endpoints that accept local client credentials (for example agent registration flows). Revoke them from `Settings -> Local MindRoom` in the chat UI.
+
+## Trust Model (Hosted Server vs Message Privacy)
+
+For message *content*, this setup can be effectively zero-trust toward the homeserver operator when rooms are end-to-end encrypted.
+
+- In E2EE rooms, the homeserver stores ciphertext and cannot read message bodies.
+- The local `mindroom run` process holds your agent account keys and performs decryption locally.
+
+Important limits:
+
+- This does **not** hide metadata (room membership, timestamps, event IDs, sender IDs, traffic patterns).
+- If a room is not encrypted, the homeserver can read plaintext.
+- Any model/tool providers you send content to can still see the prompts/data you send to them.
+
+So the precise claim is: encrypted Matrix message content is protected from the hosted homeserver, not that every part of the system is universally invisible.
+
+## If You Self-Host Later
+
+You can keep the same local flow and switch endpoints:
+
+- `MATRIX_HOMESERVER=https://your-matrix.example.com`
+- `MINDROOM_PROVISIONING_URL=https://your-matrix.example.com` (or your dedicated provisioning host)
+
+Then run `mindroom connect` again with a fresh pair code from your own UI.
 
 # Bridges
 
@@ -5011,6 +5197,38 @@ Start MindRoom with your configuration.
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
+## connect
+
+Pair this local MindRoom install with a provisioning service.
+
+Default provisioning URL is `https://mindroom.chat` unless you override it with `--provisioning-url` or `MINDROOM_PROVISIONING_URL`.
+
+```
+mindroom connect --pair-code ABCD-EFGH
+```
+
+On success (default `--persist-env`), this writes to `.env` next to `config.yaml`:
+
+- `MINDROOM_PROVISIONING_URL`
+- `MINDROOM_LOCAL_CLIENT_ID`
+- `MINDROOM_LOCAL_CLIENT_SECRET`
+
+If your config still contains the owner placeholder token `__MINDROOM_OWNER_USER_ID_FROM_PAIRING__`, `connect` will auto-replace it when pairing returns a valid `owner_user_id`.
+
+Use `--no-persist-env` if you want to export variables only for the current shell session.
+
+```
+mindroom connect --pair-code ABCD-EFGH --no-persist-env
+```
+
+Use `--provisioning-url` for non-default deployments:
+
+```
+mindroom connect \
+  --pair-code ABCD-EFGH \
+  --provisioning-url https://matrix.example.com
+```
+
 ## local-stack-setup
 
 Start local Synapse and the MindRoom Cinny client container for development.
@@ -5088,6 +5306,12 @@ mindroom run --log-level DEBUG
 
 ```
 mindroom run --storage-path /data/mindroom
+```
+
+### Pair local install with hosted provisioning
+
+```
+mindroom connect --pair-code ABCD-EFGH
 ```
 
 ### Start local Synapse + Cinny (default local setup)
