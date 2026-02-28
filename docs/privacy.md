@@ -15,12 +15,12 @@ This policy applies to:
 - MindRoom services and documentation operated by MindRoom
 - MindRoom client applications (including the iOS app)
 
-## Information We Process
+## Information Needed to Operate the App
 
-Depending on the feature you use, MindRoom may process:
+To provide messaging features, MindRoom and your selected homeserver process data that is required for delivery, sync, and account functionality:
 
 - account identifiers (for example, Matrix user IDs)
-- messages and files you send through your configured homeserver
+- messages and files you choose to send through your configured homeserver
 - room metadata (room names, avatars, membership)
 - app configuration and local preferences stored on your device
 - diagnostic information you choose to share with support
@@ -29,8 +29,9 @@ Depending on the feature you use, MindRoom may process:
 
 MindRoom is built on Matrix.
 
-- Message content, media, and account data are primarily stored and processed by the Matrix homeserver you use.
+- Message content, media, and account data are primarily stored and processed by the Matrix homeserver you choose so chats can work.
 - If you use a third-party or self-hosted homeserver, that server's privacy policy also applies.
+- This is protocol-level message delivery/storage behavior, not hidden background monitoring.
 
 ## Open Source Transparency
 
