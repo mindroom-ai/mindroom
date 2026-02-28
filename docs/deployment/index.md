@@ -10,6 +10,7 @@ MindRoom can be deployed in various ways depending on your needs.
 
 | Method | Best For |
 |--------|----------|
+| [Hosted Matrix + local backend](hosted-matrix.md) | Simplest setup: run only `uvx mindroom run` locally |
 | Full Stack (Docker Compose) | All-in-one: backend + frontend + Matrix (Synapse) + Element |
 | [Docker (single container)](docker.md) | Backend-only or when you already have Matrix |
 | [Kubernetes](kubernetes.md) | Multi-tenant SaaS, production |
@@ -30,6 +31,22 @@ Use these guides if you want users to connect Google accounts in the MindRoom fr
 - [Google Services OAuth (Individual Setup)](google-services-user-oauth.md) - single-user bring-your-own OAuth app setup
 
 ## Quick Start
+
+### Hosted Matrix + local backend (simplest)
+
+```bash
+mkdir -p ~/mindroom-local
+cd ~/mindroom-local
+uvx mindroom config init --profile public
+$EDITOR .env
+uvx mindroom connect --pair-code ABCD-EFGH
+uvx mindroom run
+```
+
+Generate the pair code in `https://chat.mindroom.chat` under:
+`Settings -> Local MindRoom`.
+
+See [Hosted Matrix deployment](hosted-matrix.md) for the full walkthrough.
 
 ### Full Stack (recommended)
 
@@ -92,3 +109,5 @@ Direct and single-container deployments:
 3. **Persistent storage** - Mount `mindroom_data/` to persist agent state (including `sessions/`, `learning/`, and memory data)
 
 See the [Docker guide](docker.md#environment-variables) for the complete environment variable reference.
+
+Hosted `mindroom.chat` deployments additionally use local provisioning credentials from `mindroom connect` (`MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET`) to bootstrap agent registrations.
