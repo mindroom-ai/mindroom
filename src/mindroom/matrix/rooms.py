@@ -329,12 +329,19 @@ async def ensure_all_rooms_exist(
         power_users = get_agent_ids_for_room(room_key, config)
 
         # Ensure room exists
-        room_id = await ensure_room_exists(
-            client=client,
-            room_key=room_key,
-            config=config,
-            power_users=power_users,
-        )
+        try:
+            room_id = await ensure_room_exists(
+                client=client,
+                room_key=room_key,
+                config=config,
+                power_users=power_users,
+            )
+        except RuntimeError:
+            logger.exception(
+                "Failed to ensure managed room; continuing with remaining rooms",
+                room_key=room_key,
+            )
+            continue
 
         if room_id:
             room_ids[room_key] = room_id
