@@ -10,9 +10,8 @@ import shlex
 import sqlite3
 import subprocess
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import nio
@@ -20,16 +19,23 @@ from agno.tools import Toolkit
 from agno.tools.duckduckgo import DuckDuckGoTools
 from agno.tools.website import WebsiteTools
 
-from mindroom.attachments import attachments_for_tool_payload, load_attachment, resolve_attachments
+from mindroom.custom_tools.attachments import (
+    get_attachment_listing,
+    resolve_attachment_references,
+    send_attachment_paths,
+)
 from mindroom.custom_tools.coding import CodingTools
 from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import fetch_thread_history, send_file_message, send_message
+from mindroom.matrix.client import fetch_thread_history, send_message
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_content import extract_and_resolve_message
 from mindroom.openclaw_context import OpenClawToolContext, get_openclaw_tool_context
 from mindroom.thread_utils import create_session_id
 from mindroom.tools_metadata import get_tool_by_name
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 logger = get_logger(__name__)
 
@@ -1004,7 +1010,7 @@ class OpenClawCompatTools(Toolkit):
         room_id: str,
         effective_thread_id: str | None,
     ) -> str:
-        attachment_paths, resolved_attachment_ids, attachment_error = self._resolve_message_attachments(
+        attachment_paths, resolved_attachment_ids, attachment_error = resolve_attachment_references(
             context,
             attachments,
         )
@@ -1039,25 +1045,22 @@ class OpenClawCompatTools(Toolkit):
                     message="Failed to send message to Matrix.",
                 )
 
-        attachment_event_ids: list[str] = []
-        for attachment_path in attachment_paths:
-            attachment_event_id = await send_file_message(
-                context.client,
-                room_id,
-                attachment_path,
-                thread_id=effective_thread_id,
+        attachment_event_ids, send_error = await send_attachment_paths(
+            context,
+            room_id=room_id,
+            thread_id=effective_thread_id,
+            attachment_paths=attachment_paths,
+        )
+        if send_error is not None:
+            return self._payload(
+                "message",
+                "error",
+                action=action,
+                room_id=room_id,
+                event_id=text_event_id,
+                attachment_event_ids=attachment_event_ids,
+                message=send_error,
             )
-            if attachment_event_id is None:
-                return self._payload(
-                    "message",
-                    "error",
-                    action=action,
-                    room_id=room_id,
-                    event_id=text_event_id,
-                    attachment_event_ids=attachment_event_ids,
-                    message=f"Failed to send attachment: {attachment_path}",
-                )
-            attachment_event_ids.append(attachment_event_id)
 
         event_id = text_event_id or (attachment_event_ids[-1] if attachment_event_ids else None)
         return self._payload(
@@ -1072,90 +1075,21 @@ class OpenClawCompatTools(Toolkit):
         )
 
     @staticmethod
-    def _resolve_context_attachment_path(
-        context: OpenClawToolContext,
-        attachment_id: str,
-    ) -> tuple[Path | None, str | None]:
-        if attachment_id not in context.attachment_ids:
-            return None, f"Attachment ID is not available in this context: {attachment_id}"
-
-        attachment = load_attachment(context.storage_path, attachment_id)
-        if attachment is None:
-            return None, f"Attachment metadata not found: {attachment_id}"
-        if not attachment.local_path.is_file():
-            return None, f"Attachment file is missing on disk: {attachment_id}"
-        return attachment.local_path, None
-
-    @staticmethod
-    def _resolve_attachment_reference(
-        context: OpenClawToolContext,
-        raw_reference: object,
-    ) -> tuple[Path | None, str | None, str | None]:
-        if not isinstance(raw_reference, str):
-            return None, None, "attachments entries must be strings."
-
-        reference = raw_reference.strip()
-        if not reference:
-            return None, None, None
-
-        if reference.startswith("att_"):
-            attachment_path, error = OpenClawCompatTools._resolve_context_attachment_path(context, reference)
-            if error is not None:
-                return None, None, error
-            return attachment_path, reference, None
-
-        path = Path(reference).expanduser().resolve()
-        if not path.is_file():
-            return None, None, f"Attachment path is not a file: {reference}"
-        return path, None, None
-
-    @staticmethod
-    def _resolve_message_attachments(
-        context: OpenClawToolContext,
-        attachments: list[str] | None,
-    ) -> tuple[list[Path], list[str], str | None]:
-        if not attachments:
-            return [], [], None
-
-        resolved_paths: list[Path] = []
-        resolved_attachment_ids: list[str] = []
-        for raw_reference in attachments:
-            path, attachment_id, error = OpenClawCompatTools._resolve_attachment_reference(context, raw_reference)
-            if error is not None:
-                return [], [], error
-            if path is None:
-                continue
-
-            resolved_paths.append(path)
-            if attachment_id is not None:
-                resolved_attachment_ids.append(attachment_id)
-        return resolved_paths, resolved_attachment_ids, None
-
-    @staticmethod
     async def _message_attachments(context: OpenClawToolContext, target: str | None) -> str:
-        requested_attachment_ids = list(context.attachment_ids)
-        if target and target.strip():
-            target_attachment_id = target.strip()
-            if target_attachment_id not in context.attachment_ids:
-                return OpenClawCompatTools._payload(
-                    "message",
-                    "error",
-                    action="attachments",
-                    message=f"Attachment ID is not available in this context: {target_attachment_id}",
-                )
-            requested_attachment_ids = [target_attachment_id]
-
-        attachment_records = resolve_attachments(context.storage_path, requested_attachment_ids)
-        resolved_attachment_ids = [record.attachment_id for record in attachment_records]
-        missing_attachment_ids = [
-            attachment_id for attachment_id in requested_attachment_ids if attachment_id not in resolved_attachment_ids
-        ]
+        requested_attachment_ids, attachments, missing_attachment_ids, error = get_attachment_listing(context, target)
+        if error is not None:
+            return OpenClawCompatTools._payload(
+                "message",
+                "error",
+                action="attachments",
+                message=error,
+            )
         return OpenClawCompatTools._payload(
             "message",
             "ok",
             action="attachments",
             attachment_ids=requested_attachment_ids,
-            attachments=attachments_for_tool_payload(attachment_records),
+            attachments=attachments,
             missing_attachment_ids=missing_attachment_ids,
         )
 

@@ -532,7 +532,7 @@ async def test_openclaw_compat_message_send_supports_attachment_only(tmp_path: P
 
     with (
         openclaw_tool_context(ctx),
-        patch("mindroom.custom_tools.openclaw_compat.send_file_message", new=AsyncMock(return_value="$file_evt")),
+        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")),
     ):
         payload = json.loads(await tool.message(action="send", attachments=[str(sample_file)]))
 
