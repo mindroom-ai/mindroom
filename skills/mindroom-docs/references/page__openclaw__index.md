@@ -117,6 +117,7 @@ OpenClaw-compatible agents use the same memory system as every other MindRoom ag
 - `memory.backend: file` for file-first memory (global default)
 - `memory_backend: file` on an individual agent to override the global default
 - `memory_file_path: ./openclaw_data` to point the file-memory scope at an existing workspace directory instead of the default `<root>/agent_<name>/`
+- Agents that use file memory without `memory_file_path` continue to use the global `memory.file.path` (or the default `<storage_path>/memory_files/`)
 - optional `knowledge_bases` for semantic recall over arbitrary workspace folders
 
 Recommended for OpenClaw-style setups: `memory_backend: file` with `memory_file_path` pointing at the workspace root and `memory.auto_flush.enabled: true`.
