@@ -4,7 +4,7 @@ icon: lucide/shield-check
 
 # Privacy Policy
 
-Last updated: 2026-02-26
+Last updated: 2026-02-28
 
 This Privacy Policy explains how MindRoom and related MindRoom clients/services handle information.
 
@@ -31,6 +31,13 @@ MindRoom is built on Matrix.
 
 - Message content, media, and account data are primarily stored and processed by the Matrix homeserver you use.
 - If you use a third-party or self-hosted homeserver, that server's privacy policy also applies.
+
+## Open Source Transparency
+
+MindRoom is open source.
+
+- Source code is publicly available at `https://github.com/mindroom-ai`.
+- The app and supporting services can be independently audited by anyone.
 
 ## iOS Permissions
 

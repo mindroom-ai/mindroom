@@ -4,7 +4,7 @@ icon: lucide/file-text
 
 # Terms of Service
 
-Last updated: 2026-02-26
+Last updated: 2026-02-28
 
 These Terms of Service govern your use of MindRoom services and related MindRoom client applications (including the iOS app).
 
@@ -45,6 +45,10 @@ MindRoom clients connect to Matrix homeservers.
 
 - Availability, retention, moderation, and account policies may be controlled by the homeserver operator.
 - If you use a third-party or self-hosted homeserver, separate terms may apply.
+
+## Open Source
+
+MindRoom is open source, and source code for the app and related services is publicly available at `https://github.com/mindroom-ai`.
 
 ## Content and Moderation
 
