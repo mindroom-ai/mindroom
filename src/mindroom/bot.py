@@ -170,8 +170,8 @@ def _create_task_wrapper(
                 # Log the exception with full traceback
                 logger.exception("Error in event callback")
 
-        # Create task with error handling
-        _task = asyncio.create_task(error_handler())  # noqa: RUF006
+        # Keep a strong reference via background task registry.
+        create_background_task(error_handler())
 
     return wrapper
 
@@ -2246,8 +2246,7 @@ class AgentBot:
             user_id=user_id,
         )
 
-        # Store memory after response generation; ignore errors in tests/mocks
-        # TODO: Remove try-except and fix tests
+        # Store memory after response generation.
         try:
             mark_auto_flush_dirty_session(
                 self.storage_path,
@@ -2271,8 +2270,14 @@ class AgentBot:
                     ),
                     name=f"memory_save_{self.agent_name}_{session_id}",
                 )
-        except Exception:  # pragma: no cover
-            self.logger.debug("Skipping memory storage due to configuration error")
+        except Exception:
+            self.logger.exception(
+                "Failed to queue memory persistence after response",
+                agent_name=self.agent_name,
+                session_id=session_id,
+                room_id=room_id,
+                thread_id=thread_id,
+            )
 
         return event_id
 
