@@ -32,6 +32,7 @@ Configure AI agents:
 
 - **Display name** and **Role description**
 - **Model** - Select from configured models
+- **Memory backend** - Inherit global memory backend or override per agent (`mem0` or `file`)
 - **Tools** - Organized into configured tools (green badge) and default tools (no config needed)
 - **Instructions** - Custom behavior instructions
 - **Rooms** - Where the agent operates
@@ -76,11 +77,16 @@ Configure AI model providers:
 
 ### Memory
 
-Configure the embedder for agent memory:
+Configure global memory defaults:
 
+- **Backend** - Global default backend (`mem0` or `file`)
 - **Provider** - Ollama (local), OpenAI, HuggingFace, or Sentence Transformers
 - **Model** - Provider-specific embedding models
 - **Host URL** - For Ollama provider
+- **File backend settings** - Path and file memory tuning options
+- **Auto-flush settings** - Background extraction and flush controls for file-backed memory
+
+Per-agent overrides are configured from the **Agents** tab using the **Memory backend** selector.
 
 ### Knowledge
 

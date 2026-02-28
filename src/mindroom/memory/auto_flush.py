@@ -112,7 +112,13 @@ def _notify_workers() -> None:
 
 def auto_flush_enabled(config: Config) -> bool:
     """Return whether file-memory auto-flush is enabled."""
-    return config.memory.backend == "file" and config.memory.auto_flush.enabled
+    return config.memory.auto_flush.enabled and config.uses_file_memory()
+
+
+def _agent_uses_file_memory(config: Config, agent_name: str) -> bool:
+    if agent_name not in config.agents:
+        return False
+    return config.get_agent_memory_backend(agent_name) == "file"
 
 
 def mark_auto_flush_dirty_session(
@@ -125,7 +131,7 @@ def mark_auto_flush_dirty_session(
     thread_id: str | None,
 ) -> None:
     """Mark one agent session as dirty for background auto-flush."""
-    if not auto_flush_enabled(config):
+    if not auto_flush_enabled(config) or not _agent_uses_file_memory(config, agent_name):
         return
 
     now = _now_ts()
@@ -165,7 +171,7 @@ def reprioritize_auto_flush_sessions(
     active_session_id: str,
 ) -> None:
     """Raise priority of other dirty sessions for the same agent."""
-    if not auto_flush_enabled(config):
+    if not auto_flush_enabled(config) or not _agent_uses_file_memory(config, agent_name):
         return
 
     max_reprioritize = config.memory.auto_flush.max_cross_session_reprioritize
@@ -417,6 +423,13 @@ class MemoryAutoFlushWorker:
                 if now - entry.get("last_seen_at", now) > settings.stale_ttl_seconds
             ]
             for key in stale_keys:
+                del sessions[key]
+            non_file_agent_keys = [
+                key
+                for key, entry in sessions.items()
+                if isinstance(entry.get("agent_name"), str) and not _agent_uses_file_memory(config, entry["agent_name"])
+            ]
+            for key in non_file_agent_keys:
                 del sessions[key]
             _write_state_unlocked(self.storage_path, state)
 

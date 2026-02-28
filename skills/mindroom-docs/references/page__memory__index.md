@@ -5,7 +5,7 @@ MindRoom supports two memory backends:
 - `mem0`: vector memory (semantic retrieval + extraction via Mem0)
 - `file`: markdown memory files (`MEMORY.md` plus optional dated notes)
 
-You can switch backends with `memory.backend`.
+Set the global default backend with `memory.backend`. Override the backend per agent with `agents.<name>.memory_backend`.
 
 OpenClaw compatibility uses this same backend selection; there is no separate OpenClaw-only memory engine.
 
@@ -59,6 +59,19 @@ memory:
     max_entrypoint_lines: 200
 ```
 
+Per-agent override example:
+
+```
+memory:
+  backend: mem0
+
+agents:
+  coder:
+    display_name: Coder
+    role: Write and review code
+    memory_backend: file
+```
+
 ### File layout
 
 Under `memory.file.path` (or `<storage_path>/memory_files` by default), MindRoom stores per-scope folders such as:
@@ -72,7 +85,7 @@ Under `memory.file.path` (or `<storage_path>/memory_files` by default), MindRoom
 
 ## File Auto-Flush Worker
 
-When `memory.backend: file`, you can enable background auto-flush:
+When the effective backend is `file` for at least one agent, you can enable background auto-flush:
 
 ```
 memory:
@@ -114,7 +127,7 @@ The Dashboard **Memory** page supports:
 - batch sizing
 - extractor settings (`no_reply_token`, message/char/time limits, memory-context bounds)
 
-Save from the Memory page to persist changes to `config.yaml`.
+Save from the Memory page to persist changes to `config.yaml`. Use the Dashboard **Agents** page to set an agent-specific **Memory Backend** override.
 
 ## Optional Memory Tool
 

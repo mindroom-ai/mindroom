@@ -513,6 +513,29 @@ class TestMemoryFunctions:
             assert metadata["team_members"] == team_agents  # Original order preserved
 
     @pytest.mark.asyncio
+    async def test_store_conversation_memory_respects_agent_backend_override(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Conversation storage should resolve backend from per-agent override."""
+        config.memory.backend = "file"
+        config.agents["calculator"].memory_backend = "mem0"
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory) as mock_create:
+            await store_conversation_memory(
+                "What is 2+2?",
+                "calculator",
+                storage_path,
+                "session123",
+                config,
+            )
+
+        mock_create.assert_called_once_with(storage_path, config)
+        mock_memory.add.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_search_agent_memories_with_teams(
         self,
         mock_memory: AsyncMock,
@@ -581,6 +604,43 @@ class TestMemoryFunctions:
         assert memory_file.exists()
         content = memory_file.read_text(encoding="utf-8")
         assert "User prefers concise responses" in content
+
+    @pytest.mark.asyncio
+    async def test_agent_memory_backend_override_to_file_uses_file_storage(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Per-agent file override should use file storage even when global backend is mem0."""
+        config.memory.backend = "mem0"
+        config.memory.file.path = str(storage_path / "memory-files")
+        config.agents["general"].memory_backend = "file"
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory) as mock_create:
+            await add_agent_memory("Remember this", "general", storage_path, config)
+
+        mock_create.assert_not_called()
+        memory_file = storage_path / "memory-files" / "agent_general" / "MEMORY.md"
+        assert memory_file.exists()
+        assert "Remember this" in memory_file.read_text(encoding="utf-8")
+
+    @pytest.mark.asyncio
+    async def test_agent_memory_backend_override_to_mem0_uses_mem0_storage(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Per-agent mem0 override should use Mem0 even when global backend is file."""
+        config.memory.backend = "file"
+        config.agents["general"].memory_backend = "mem0"
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory) as mock_create:
+            await add_agent_memory("Remember this", "general", storage_path, config)
+
+        mock_create.assert_called_once_with(storage_path, config)
+        mock_memory.add.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_file_backend_prompt_includes_entrypoint(self, storage_path: Path, config: Config) -> None:

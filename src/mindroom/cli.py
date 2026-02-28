@@ -626,9 +626,12 @@ def _check_single_provider(
 
 def _check_memory_config(config: Config) -> tuple[int, int, int]:
     """Check memory LLM and embedder configuration. Returns (passed, failed, warnings)."""
-    if config.memory.backend == "file":
+    if not config.uses_mem0_memory():
         console.print("[green]✓[/green] Memory backend: file (markdown)")
         return 1, 0, 0
+
+    if config.uses_file_memory():
+        console.print("[green]✓[/green] Memory backend: mixed (per-agent mem0/file)")
 
     p1, f1, w1 = _check_memory_llm(config)
     p2, f2, w2 = _check_memory_embedder(config)

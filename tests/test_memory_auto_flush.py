@@ -83,6 +83,43 @@ def test_mark_dirty_and_reprioritize(tmp_path: Path, config: Config) -> None:
     assert '"priority_boost_at"' in payload
 
 
+def test_mark_dirty_uses_per_agent_file_override(tmp_path: Path, config: Config) -> None:
+    """Auto-flush should track agents explicitly configured for file memory."""
+    storage_path = tmp_path
+    config.memory.backend = "mem0"
+    config.agents["general"].memory_backend = "file"
+
+    mark_auto_flush_dirty_session(
+        storage_path,
+        config,
+        agent_name="general",
+        session_id="s1",
+        room_id="!room:example",
+        thread_id="t1",
+    )
+
+    payload = json.loads((storage_path / "memory_flush_state.json").read_text(encoding="utf-8"))
+    assert "general:s1" in payload["sessions"]
+
+
+def test_mark_dirty_skips_per_agent_mem0_override(tmp_path: Path, config: Config) -> None:
+    """Auto-flush should not track agents explicitly configured for Mem0."""
+    storage_path = tmp_path
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "mem0"
+
+    mark_auto_flush_dirty_session(
+        storage_path,
+        config,
+        agent_name="general",
+        session_id="s1",
+        room_id="!room:example",
+        thread_id="t1",
+    )
+
+    assert not (storage_path / "memory_flush_state.json").exists()
+
+
 @pytest.mark.asyncio
 async def test_worker_respects_batch_limits(
     tmp_path: Path,

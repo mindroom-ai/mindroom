@@ -54,12 +54,15 @@ The memory system uses embeddings to help agents remember and retrieve relevant 
 
 ```yaml
 memory:
+  backend: "mem0"  # Global default backend: "mem0" or "file"
   embedder:
     provider: "ollama"  # Options: openai, ollama, huggingface, sentence-transformers
     config:
       model: "nomic-embed-text"  # Embedding model to use
       host: "http://localhost:11434"  # Ollama host URL
 ```
+
+You can override the memory backend per agent with `memory_backend`.
 
 ## Router Configuration
 
@@ -145,6 +148,7 @@ agents:
       - dev
     learning: true  # Optional: enable Agno Learning (defaults to true)
     learning_mode: "always"  # Optional: "always" or "agentic"
+    memory_backend: "file"  # Optional: per-agent override ("mem0" or "file")
     knowledge_bases:
       - docs
     context_files:
@@ -165,6 +169,7 @@ agents:
 - **rooms**: List of room aliases where this agent should be active
 - **learning**: Enable Agno Learning for this agent (default: true)
 - **learning_mode**: Learning mode (`always` or `agentic`, default: `always`)
+- **memory_backend**: Optional per-agent memory backend override (`mem0` or `file`), inherits from `memory.backend` when omitted
 - **knowledge_bases**: List of configured knowledge base IDs assigned to this agent
 - **context_files**: File paths loaded into role context when the agent is created/reloaded
 - **model**: (Optional) Specific model to use for this agent, overrides the default model
