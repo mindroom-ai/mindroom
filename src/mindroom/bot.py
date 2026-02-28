@@ -72,6 +72,11 @@ from .matrix.users import (
     login_agent_user,
 )
 from .memory import store_conversation_memory
+from .memory.auto_flush import (
+    MemoryAutoFlushWorker,
+    mark_auto_flush_dirty_session,
+    reprioritize_auto_flush_sessions,
+)
 from .openclaw_context import OpenClawToolContext, openclaw_tool_context
 from .plugins import load_plugins
 from .response_tracker import ResponseTracker
@@ -1914,6 +1919,12 @@ class AgentBot:
             return None
 
         session_id = create_session_id(room_id, thread_id)
+        reprioritize_auto_flush_sessions(
+            self.storage_path,
+            self.config,
+            agent_name=agent_name,
+            active_session_id=session_id,
+        )
         knowledge = self._knowledge_for_agent(agent_name)
         scheduler_context = self._build_scheduling_tool_context(
             room_id=room_id,
@@ -1972,19 +1983,28 @@ class AgentBot:
             )
 
         try:
-            create_background_task(
-                store_conversation_memory(
-                    prompt,
-                    agent_name,
-                    self.storage_path,
-                    session_id,
-                    self.config,
-                    room_id,
-                    thread_history,
-                    user_id,
-                ),
-                name=f"memory_save_{agent_name}_{session_id}",
+            mark_auto_flush_dirty_session(
+                self.storage_path,
+                self.config,
+                agent_name=agent_name,
+                session_id=session_id,
+                room_id=room_id,
+                thread_id=thread_id,
             )
+            if self.config.memory.backend != "file":
+                create_background_task(
+                    store_conversation_memory(
+                        prompt,
+                        agent_name,
+                        self.storage_path,
+                        session_id,
+                        self.config,
+                        room_id,
+                        thread_history,
+                        user_id,
+                    ),
+                    name=f"memory_save_{agent_name}_{session_id}",
+                )
         except Exception:  # pragma: no cover
             self.logger.debug("Skipping memory storage due to configuration error")
 
@@ -2146,6 +2166,12 @@ class AgentBot:
 
         # Prepare session id for memory storage (store after sending response)
         session_id = create_session_id(room_id, thread_id)
+        reprioritize_auto_flush_sessions(
+            self.storage_path,
+            self.config,
+            agent_name=self.agent_name,
+            active_session_id=session_id,
+        )
 
         # Dynamically determine whether to use streaming based on user presence
         use_streaming = await should_use_streaming(
@@ -2199,19 +2225,28 @@ class AgentBot:
         # Store memory after response generation; ignore errors in tests/mocks
         # TODO: Remove try-except and fix tests
         try:
-            create_background_task(
-                store_conversation_memory(
-                    prompt,
-                    self.agent_name,
-                    self.storage_path,
-                    session_id,
-                    self.config,
-                    room_id,
-                    thread_history,
-                    user_id,
-                ),
-                name=f"memory_save_{self.agent_name}_{session_id}",
+            mark_auto_flush_dirty_session(
+                self.storage_path,
+                self.config,
+                agent_name=self.agent_name,
+                session_id=session_id,
+                room_id=room_id,
+                thread_id=thread_id,
             )
+            if self.config.memory.backend != "file":
+                create_background_task(
+                    store_conversation_memory(
+                        prompt,
+                        self.agent_name,
+                        self.storage_path,
+                        session_id,
+                        self.config,
+                        room_id,
+                        thread_history,
+                        user_id,
+                    ),
+                    name=f"memory_save_{self.agent_name}_{session_id}",
+                )
         except Exception:  # pragma: no cover
             self.logger.debug("Skipping memory storage due to configuration error")
 
@@ -2740,20 +2775,21 @@ class TeamBot(AgentBot):
         session_id = create_session_id(room_id, thread_id)
         # Convert MatrixID list to agent names for memory storage
         agent_names = [mid.agent_name(self.config) or mid.username for mid in self.team_agents]
-        create_background_task(
-            store_conversation_memory(
-                prompt,
-                agent_names,  # Pass list of agent names for team storage
-                self.storage_path,
-                session_id,
-                self.config,
-                room_id,
-                thread_history,
-                user_id,
-            ),
-            name=f"memory_save_team_{session_id}",
-        )
-        self.logger.info(f"Storing memory for team: {agent_names}")
+        if self.config.memory.backend != "file":
+            create_background_task(
+                store_conversation_memory(
+                    prompt,
+                    agent_names,  # Pass list of agent names for team storage
+                    self.storage_path,
+                    session_id,
+                    self.config,
+                    room_id,
+                    thread_history,
+                    user_id,
+                ),
+                name=f"memory_save_team_{session_id}",
+            )
+            self.logger.info(f"Storing memory for team: {agent_names}")
 
         # Use the shared team response helper
         await self._generate_team_response_helper(
@@ -2780,10 +2816,47 @@ class MultiAgentOrchestrator:
     config: Config | None = field(default=None, init=False)
     _sync_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     knowledge_managers: dict[str, KnowledgeManager] = field(default_factory=dict, init=False)
+    _memory_auto_flush_worker: MemoryAutoFlushWorker | None = field(default=None, init=False)
+    _memory_auto_flush_task: asyncio.Task | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         """Store a canonical absolute storage path to survive runtime cwd changes."""
         self.storage_path = self.storage_path.expanduser().resolve()
+
+    async def _stop_memory_auto_flush_worker(self) -> None:
+        """Stop the background memory auto-flush worker if running."""
+        worker = self._memory_auto_flush_worker
+        task = self._memory_auto_flush_task
+        self._memory_auto_flush_worker = None
+        self._memory_auto_flush_task = None
+
+        if worker is not None:
+            worker.stop()
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _sync_memory_auto_flush_worker(self) -> None:
+        """Start or stop background memory auto-flush worker based on current config."""
+        config = self.config
+        if config is None:
+            await self._stop_memory_auto_flush_worker()
+            return
+
+        enabled = config.memory.backend == "file" and config.memory.auto_flush.enabled
+        if not enabled:
+            await self._stop_memory_auto_flush_worker()
+            return
+
+        task = self._memory_auto_flush_task
+        if task is not None and not task.done():
+            return
+
+        worker = MemoryAutoFlushWorker(
+            storage_path=self.storage_path,
+            config_provider=lambda: self.config,
+        )
+        self._memory_auto_flush_worker = worker
+        self._memory_auto_flush_task = asyncio.create_task(worker.run(), name="memory_auto_flush_worker")
 
     async def _ensure_user_account(self, config: Config) -> None:
         """Ensure a user account exists, creating one if necessary.
@@ -2893,6 +2966,7 @@ class MultiAgentOrchestrator:
             msg = "Configuration not loaded"
             raise RuntimeError(msg)
         await self._configure_knowledge(config, start_watcher=True)
+        await self._sync_memory_auto_flush_worker()
 
         # Setup rooms and have all bots join them
         await self._setup_rooms_and_memberships(list(self.agent_bots.values()))
@@ -2943,6 +3017,7 @@ class MultiAgentOrchestrator:
         # Only apply the new config after all validation/account checks succeed.
         self.config = new_config
         await self._configure_knowledge(new_config, start_watcher=self.running)
+        await self._sync_memory_auto_flush_worker()
 
         # Always update config for ALL existing bots (even those being restarted will get new config when recreated)
         logger.info(
@@ -3030,6 +3105,7 @@ class MultiAgentOrchestrator:
     async def stop(self) -> None:
         """Stop all agent bots."""
         self.running = False
+        await self._stop_memory_auto_flush_worker()
         await shutdown_knowledge_managers()
         self.knowledge_managers = {}
 

@@ -27,6 +27,16 @@ function unassignAgentsFromOtherCultures(
   });
 }
 
+type MemoryEmbedderUpdate = {
+  provider: string;
+  model: string;
+  host?: string;
+};
+
+function isMemoryEmbedderUpdate(update: object): update is MemoryEmbedderUpdate {
+  return 'provider' in update && 'model' in update;
+}
+
 interface ConfigState {
   // State
   config: Config | null;
@@ -65,12 +75,12 @@ interface ConfigState {
   addAgentToRoom: (roomId: string, agentId: string) => void;
   removeAgentFromRoom: (roomId: string, agentId: string) => void;
   updateRoomModels: (roomModels: Record<string, string>) => void;
-  updateMemoryConfig: (memoryConfig: { provider: string; model: string; host?: string }) => void;
+  updateMemoryConfig: (memoryConfig: MemoryEmbedderUpdate | Config['memory']) => void;
   updateKnowledgeBase: (baseName: string, baseConfig: KnowledgeBaseConfig) => void;
   deleteKnowledgeBase: (baseName: string) => void;
   updateModel: (modelId: string, updates: Partial<ModelConfig>) => void;
   deleteModel: (modelId: string) => void;
-  updateToolConfig: (toolId: string, config: any) => void;
+  updateToolConfig: (toolId: string, config: unknown) => void;
   markDirty: () => void;
   clearError: () => void;
 }
@@ -598,19 +608,29 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   updateMemoryConfig: memoryConfig => {
     set(state => {
       if (!state.config) return state;
-      return {
-        config: {
-          ...state.config,
-          memory: {
-            ...state.config.memory,
-            embedder: {
-              provider: memoryConfig.provider,
-              config: {
-                model: memoryConfig.model,
-                ...(memoryConfig.host ? { host: memoryConfig.host } : {}),
+      if (isMemoryEmbedderUpdate(memoryConfig)) {
+        return {
+          config: {
+            ...state.config,
+            memory: {
+              ...state.config.memory,
+              embedder: {
+                provider: memoryConfig.provider,
+                config: {
+                  model: memoryConfig.model,
+                  ...(memoryConfig.host ? { host: memoryConfig.host } : {}),
+                },
               },
             },
           },
+          isDirty: true,
+        };
+      }
+
+      return {
+        config: {
+          ...state.config,
+          memory: memoryConfig,
         },
         isDirty: true,
       };

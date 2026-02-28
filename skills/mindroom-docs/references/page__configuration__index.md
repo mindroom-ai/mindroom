@@ -82,7 +82,6 @@ agents:
       - ./openclaw_data/MEMORY.md
       - ./openclaw_data/TOOLS.md
       - ./openclaw_data/HEARTBEAT.md
-    memory_dir: ./openclaw_data/memory  # Optional: Load MEMORY.md + dated files from this dir
   researcher:
     display_name: Researcher
     role: Research and gather information
@@ -140,7 +139,7 @@ defaults:
   enable_streaming: true           # Default: true (stream responses via message edits)
   learning: true                   # Default: true
   learning_mode: always            # Default: always (or agentic)
-  max_preload_chars: 50000         # Hard cap for preloaded context from context_files/memory_dir
+  max_preload_chars: 50000         # Hard cap for preloaded context from context_files
   show_stop_button: false          # Default: false (global only, cannot be overridden per-agent)
   num_history_runs: null           # Number of prior runs to include (null = all)
   num_history_messages: null       # Max messages from history (null = use num_history_runs)
@@ -252,8 +251,8 @@ timezone: America/Los_Angeles      # Default: UTC
 - All top-level sections are optional with sensible defaults, but at least one agent is recommended for Matrix interactions
 - A model named `default` is required unless agents, teams, and the router all specify explicit non-`default` models
 - Agents can set `knowledge_bases`, but each entry must exist in the top-level `knowledge_bases` section
-- `agents.<name>.context_files` and `agents.<name>.memory_dir` inject file-based context at agent creation/reload (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md))
-- `defaults.max_preload_chars` caps preloaded file context (`context_files` + `memory_dir`)
+- `agents.<name>.context_files` inject file-based context at agent creation/reload (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md))
+- `defaults.max_preload_chars` caps preloaded file context (`context_files`)
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
 - `authorization.agent_reply_permissions` can further restrict which users specific agents/teams/router will reply to
 - `authorization.room_permissions` accepts room IDs, full room aliases, and managed room keys

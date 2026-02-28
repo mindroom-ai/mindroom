@@ -16,7 +16,9 @@ from mindroom.memory.functions import (
     delete_agent_memory,
     format_memories_as_context,
     get_agent_memory,
+    list_all_agent_memories,
     search_agent_memories,
+    search_room_memories,
     store_conversation_memory,
     update_agent_memory,
 )
@@ -208,6 +210,40 @@ class TestMemoryFunctions:
             assert result is not None
             assert result["id"] == "mem-team"
             mock_memory.get.assert_called_once_with("mem-team")
+
+    @pytest.mark.asyncio
+    async def test_get_agent_memory_team_context_rejects_member_scope_by_default(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Team caller context should not read member agent scope by default."""
+        mock_memory.get.return_value = {"id": "mem-member", "memory": "Member memory", "user_id": "agent_helper"}
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+            result = await get_agent_memory("mem-member", ["helper", "test_agent"], storage_path, config)
+
+            assert result is None
+            mock_memory.get.assert_called_once_with("mem-member")
+
+    @pytest.mark.asyncio
+    async def test_get_agent_memory_team_context_allows_member_scope_when_enabled(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Team caller context can read member scopes when explicitly enabled."""
+        config.memory.team_reads_member_memory = True
+        mock_memory.get.return_value = {"id": "mem-member", "memory": "Member memory", "user_id": "agent_helper"}
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+            result = await get_agent_memory("mem-member", ["helper", "test_agent"], storage_path, config)
+
+            assert result is not None
+            assert result["id"] == "mem-member"
+            mock_memory.get.assert_called_once_with("mem-member")
 
     @pytest.mark.asyncio
     async def test_update_agent_memory_rejects_other_agent_scope(
@@ -527,6 +563,175 @@ class TestMemoryFunctions:
 
             # Should have called search twice (once for agent, once for team)
             assert mock_memory.search.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_file_backend_add_and_list_memories(self, storage_path: Path, config: Config) -> None:
+        """File backend should persist entries in MEMORY.md and list them."""
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "memory-files")
+
+        await add_agent_memory("User prefers concise responses", "general", storage_path, config)
+
+        results = await list_all_agent_memories("general", storage_path, config)
+        assert len(results) == 1
+        assert results[0]["memory"] == "User prefers concise responses"
+        assert results[0]["id"].startswith("m_")
+
+        memory_file = storage_path / "memory-files" / "agent_general" / "MEMORY.md"
+        assert memory_file.exists()
+        content = memory_file.read_text(encoding="utf-8")
+        assert "User prefers concise responses" in content
+
+    @pytest.mark.asyncio
+    async def test_file_backend_prompt_includes_entrypoint(self, storage_path: Path, config: Config) -> None:
+        """File backend should include MEMORY.md entrypoint context in the prompt."""
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "memory-files")
+
+        memory_dir = storage_path / "memory-files" / "agent_general"
+        memory_dir.mkdir(parents=True, exist_ok=True)
+        (memory_dir / "MEMORY.md").write_text(
+            "# Memory\n\nKey facts:\n- Project uses FastAPI.\n",
+            encoding="utf-8",
+        )
+
+        enhanced = await build_memory_enhanced_prompt("How do we build the API?", "general", storage_path, config)
+        assert "[File memory entrypoint (agent)]" in enhanced
+        assert "Project uses FastAPI." in enhanced
+        assert "How do we build the API?" in enhanced
+
+    @pytest.mark.asyncio
+    async def test_file_backend_search_skips_structured_line_duplicates(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Search should not return duplicate hits from structured ID lines in daily files."""
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "memory-files")
+
+        await add_agent_memory("Project owner is Bas", "general", storage_path, config)
+        memories = await list_all_agent_memories("general", storage_path, config)
+        memory_id = memories[0]["id"]
+
+        daily_file = storage_path / "memory-files" / "agent_general" / "memory" / "2026-02-28.md"
+        daily_file.parent.mkdir(parents=True, exist_ok=True)
+        daily_file.write_text(
+            f"- [id={memory_id}] Project owner is Bas\nProject owner is Bas\n",
+            encoding="utf-8",
+        )
+
+        results = await search_agent_memories("owner bas", "general", storage_path, config, limit=10)
+        matching_results = [r for r in results if r.get("memory") == "Project owner is Bas"]
+        assert len(matching_results) == 1
+
+    @pytest.mark.asyncio
+    async def test_file_backend_memory_crud_and_scope(self, storage_path: Path, config: Config) -> None:
+        """File backend should support CRUD and enforce caller scope rules."""
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "memory-files")
+
+        await add_agent_memory("Original memory", "general", storage_path, config)
+        listed = await list_all_agent_memories("general", storage_path, config)
+        memory_id = listed[0]["id"]
+
+        # Owner can read/update/delete
+        result = await get_agent_memory(memory_id, "general", storage_path, config)
+        assert result is not None
+        assert result["memory"] == "Original memory"
+
+        await update_agent_memory(memory_id, "Updated memory", "general", storage_path, config)
+        updated = await get_agent_memory(memory_id, "general", storage_path, config)
+        assert updated is not None
+        assert updated["memory"] == "Updated memory"
+
+        await delete_agent_memory(memory_id, "general", storage_path, config)
+        deleted = await get_agent_memory(memory_id, "general", storage_path, config)
+        assert deleted is None
+
+        # Different agent cannot read or mutate another scope
+        await add_agent_memory("Private memory", "general", storage_path, config)
+        listed_again = await list_all_agent_memories("general", storage_path, config)
+        private_id = listed_again[0]["id"]
+        assert await get_agent_memory(private_id, "other_agent", storage_path, config) is None
+        with pytest.raises(ValueError, match=f"No memory found with id={private_id}"):
+            await update_agent_memory(private_id, "Tampered", "other_agent", storage_path, config)
+
+    @pytest.mark.asyncio
+    async def test_file_backend_store_conversation_memory_with_room(self, storage_path: Path, config: Config) -> None:
+        """File backend should store both agent and room memory from conversation saves."""
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "memory-files")
+
+        await store_conversation_memory(
+            "Remember this requirement",
+            "general",
+            storage_path,
+            "session123",
+            config,
+            room_id="!room:server",
+        )
+
+        agent_results = await search_agent_memories("requirement", "general", storage_path, config, limit=5)
+        room_results = await search_room_memories("requirement", "!room:server", storage_path, config, limit=5)
+        assert any("Remember this requirement" in r.get("memory", "") for r in agent_results)
+        assert any("Remember this requirement" in r.get("memory", "") for r in room_results)
+
+    @pytest.mark.asyncio
+    async def test_file_backend_team_scopes_do_not_collide(self, storage_path: Path, config: Config) -> None:
+        """Distinct team IDs should map to distinct file-memory directories."""
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "memory-files")
+
+        await store_conversation_memory(
+            "Team one memory",
+            ["a_b", "c"],
+            storage_path,
+            "session-one",
+            config,
+        )
+        await store_conversation_memory(
+            "Team two memory",
+            ["a", "b_c"],
+            storage_path,
+            "session-two",
+            config,
+        )
+
+        memory_root = storage_path / "memory-files"
+        assert (memory_root / "team_a_b+c" / "MEMORY.md").exists()
+        assert (memory_root / "team_a+b_c" / "MEMORY.md").exists()
+
+    @pytest.mark.asyncio
+    async def test_file_backend_team_context_member_scope_toggle(self, storage_path: Path, config: Config) -> None:
+        """Team-context reads should honor the member-scope toggle in file backend."""
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "memory-files")
+
+        await add_agent_memory("Helper private memory", "helper", storage_path, config)
+        helper_memories = await list_all_agent_memories("helper", storage_path, config)
+        helper_memory_id = helper_memories[0]["id"]
+
+        blocked = await get_agent_memory(helper_memory_id, ["helper", "test_agent"], storage_path, config)
+        assert blocked is None
+
+        config.memory.team_reads_member_memory = True
+        allowed = await get_agent_memory(helper_memory_id, ["helper", "test_agent"], storage_path, config)
+        assert allowed is not None
+        assert allowed["memory"] == "Helper private memory"
+
+    @pytest.mark.asyncio
+    async def test_file_backend_rejects_path_traversal_memory_id(self, storage_path: Path, config: Config) -> None:
+        """Path-based IDs should not be able to escape the scope directory."""
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "memory-files")
+
+        await add_agent_memory("Safe memory", "general", storage_path, config)
+        secret_file = storage_path / "secret.md"
+        secret_file.write_text("Do not read", encoding="utf-8")
+
+        result = await get_agent_memory("file:../../secret.md:1", "general", storage_path, config)
+        assert result is None
 
     def test_get_team_ids_for_agent(self, config: Config) -> None:
         """Test getting team IDs for an agent."""

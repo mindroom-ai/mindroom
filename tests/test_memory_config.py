@@ -215,3 +215,30 @@ class TestMemoryConfig:
         expected_chroma = (expected_storage / "chroma").resolve()
         assert orchestrator.storage_path == expected_storage
         assert Path(result["vector_store"]["config"]["path"]) == expected_chroma
+
+    def test_memory_auto_flush_batch_config_is_parameterized(self) -> None:
+        """Auto-flush batch/extractor limits should be configurable."""
+        memory = MemoryConfig.model_validate(
+            {
+                "backend": "file",
+                "team_reads_member_memory": True,
+                "auto_flush": {
+                    "enabled": True,
+                    "batch": {
+                        "max_sessions_per_cycle": 7,
+                        "max_sessions_per_agent_per_cycle": 2,
+                    },
+                    "extractor": {
+                        "max_messages_per_flush": 12,
+                        "max_chars_per_flush": 9000,
+                    },
+                },
+            },
+        )
+        assert memory.backend == "file"
+        assert memory.team_reads_member_memory is True
+        assert memory.auto_flush.enabled is True
+        assert memory.auto_flush.batch.max_sessions_per_cycle == 7
+        assert memory.auto_flush.batch.max_sessions_per_agent_per_cycle == 2
+        assert memory.auto_flush.extractor.max_messages_per_flush == 12
+        assert memory.auto_flush.extractor.max_chars_per_flush == 9000

@@ -440,31 +440,6 @@ export function AgentEditor() {
         />
       </FieldGroup>
 
-      {/* Memory Directory */}
-      <FieldGroup
-        label="Memory Directory"
-        helperText="Directory containing MEMORY.md and dated memory files to auto-load into role context"
-        htmlFor="memory_dir"
-      >
-        <Controller
-          name="memory_dir"
-          control={control}
-          render={({ field }) => (
-            <Input
-              {...field}
-              value={field.value ?? ''}
-              id="memory_dir"
-              placeholder="./memories/agent_name"
-              onChange={e => {
-                const value = e.target.value || undefined;
-                field.onChange(value);
-                handleFieldChange('memory_dir', value);
-              }}
-            />
-          )}
-        />
-      </FieldGroup>
-
       {/* Include Default Tools */}
       <FieldGroup
         label="Include Default Tools"

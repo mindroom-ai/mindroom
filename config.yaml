@@ -244,8 +244,9 @@ agents:
       into your system prompt. Do not re-read them unless you need to verify
       specific details.
     - >-
-      Today's and yesterday's daily memory files from your memory_dir are also
-      pre-loaded. For older history, use the search_knowledge_base tool.
+      Important long-term context is persisted by the configured MindRoom
+      memory backend. If something must be preserved exactly, write/update the
+      relevant file directly.
     - >-
       IMPORTANT: You have no persistent memory between sessions. If you want to
       remember something, you MUST write it to a file. Mental notes do not
@@ -275,7 +276,6 @@ agents:
     - ./openclaw_data/MEMORY.md
     - ./openclaw_data/TOOLS.md
     - ./openclaw_data/HEARTBEAT.md
-    memory_dir: ./openclaw_data/memory
     knowledge_bases:
     - openclaw_memory
     model: opus
@@ -426,7 +426,7 @@ defaults:
   show_stop_button: true
 knowledge_bases:
   openclaw_memory:
-    # Semantic search over historical memory files (beyond today's/yesterday's preload).
+    # Semantic search over historical OpenClaw workspace memory files.
     path: ./openclaw_data/memory
     watch: true
 memory:

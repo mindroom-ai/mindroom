@@ -74,7 +74,6 @@ class SelfConfigTools(Toolkit):
         enable_session_summaries: bool | None = None,
         max_tool_calls_from_history: int | None = None,
         context_files: list[str] | None = None,
-        memory_dir: str | None = None,
     ) -> str:
         """Update this agent's own configuration. Only provided fields are changed.
 
@@ -99,7 +98,6 @@ class SelfConfigTools(Toolkit):
             enable_session_summaries: Enable session summaries
             max_tool_calls_from_history: Max tool call messages replayed from history
             context_files: File paths read at agent init
-            memory_dir: Directory containing memory files
 
         Returns:
             Success message with changes or an error message.
@@ -159,7 +157,6 @@ class SelfConfigTools(Toolkit):
             ("enable_session_summaries", enable_session_summaries),
             ("max_tool_calls_from_history", max_tool_calls_from_history),
             ("context_files", context_files),
-            ("memory_dir", memory_dir),
         ]
         non_null_updates = {field_name: value for field_name, value in requested_updates if value is not None}
 

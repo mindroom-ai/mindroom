@@ -235,8 +235,8 @@ agents:
     instructions:
     - You wake up fresh each session with no memory of previous conversations. Your context files (SOUL.md, USER.md, MEMORY.md,
       etc.) are already loaded into your system prompt. Do not re-read them unless you need to verify specific details.
-    - Today's and yesterday's daily memory files from your memory_dir are also pre-loaded. For older history, use the search_knowledge_base
-      tool.
+    - Important long-term context is persisted by the configured MindRoom memory backend. If something must be preserved exactly,
+      write/update the relevant file directly.
     - 'IMPORTANT: You have no persistent memory between sessions. If you want to remember something, you MUST write it to
       a file. Mental notes do not survive. When someone says "remember this", when you learn something important, or when
       you make a decision worth tracking, write it to ./openclaw_data/memory/YYYY-MM-DD.md using today''s date. Append, never
@@ -257,7 +257,6 @@ agents:
     - ./openclaw_data/MEMORY.md
     - ./openclaw_data/TOOLS.md
     - ./openclaw_data/HEARTBEAT.md
-    memory_dir: ./openclaw_data/memory
     knowledge_bases:
     - openclaw_memory
     model: opus

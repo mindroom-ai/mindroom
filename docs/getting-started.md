@@ -148,7 +148,6 @@ agents:
     rooms: [lobby]
     # Optional: file-based context (OpenClaw-style)
     # context_files: [./workspace/SOUL.md, ./workspace/USER.md]
-    # memory_dir: ./workspace/memory
 
 models:
   default:
