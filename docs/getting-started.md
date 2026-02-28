@@ -6,10 +6,12 @@ icon: lucide/rocket
 
 This guide will help you set up MindRoom and create your first AI agent.
 
-## Recommended: Hosted Matrix + Local Backend (`uvx` only)
+## Recommended: Hosted Matrix + Local Backend (`uv` only)
 
 If you do not want to self-host Matrix yet, this is the simplest setup.
 You only run the MindRoom backend locally.
+
+**Prerequisite:** Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
 ### 1. Create a local project
 
@@ -32,8 +34,8 @@ $EDITOR .env
 
 Set at least one key:
 
-- `ANTHROPIC_API_KEY=...`, or
 - `OPENAI_API_KEY=...`, or
+- `OPENROUTER_API_KEY=...`, or
 - another supported provider key.
 
 ### 3. Pair your local install from chat UI
@@ -151,8 +153,8 @@ agents:
 
 models:
   default:
-    provider: anthropic
-    id: claude-sonnet-4-5-latest
+    provider: openai
+    id: gpt-5.2
 
 defaults:
   tools: [scheduler]
@@ -176,9 +178,9 @@ MATRIX_HOMESERVER=https://matrix.example.com
 # MATRIX_SERVER_NAME=example.com
 
 # AI provider API keys
-ANTHROPIC_API_KEY=your_anthropic_key
-# OPENAI_API_KEY=your_openai_key
-# GOOGLE_API_KEY=your_google_key
+OPENAI_API_KEY=your_openai_key
+# OPENROUTER_API_KEY=your_openrouter_key
+# ANTHROPIC_API_KEY=your_anthropic_key
 
 # Optional: protect the dashboard API (recommended for non-localhost)
 # MINDROOM_API_KEY=your-secret-key

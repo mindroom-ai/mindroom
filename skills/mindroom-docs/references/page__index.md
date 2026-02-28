@@ -65,8 +65,8 @@ agents:
 
 models:
   default:
-    provider: anthropic
-    id: claude-sonnet-4-5-latest
+    provider: openai
+    id: gpt-5.2
 
 defaults:
   tools: [scheduler]
@@ -80,7 +80,7 @@ defaults:
 MATRIX_HOMESERVER=https://matrix.example.com
 
 # AI provider API keys
-ANTHROPIC_API_KEY=your_api_key
+OPENAI_API_KEY=your_api_key
 ```
 
 1. Run MindRoom:
@@ -156,6 +156,9 @@ mindroom run
 - [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) - Admin OAuth setup for Gmail/Calendar/Drive/Sheets
 - [Google Services OAuth (Individual)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) - Single-user OAuth setup
 - [CLI Reference](https://docs.mindroom.chat/cli/index.md) - Command-line interface
+- [Support](https://docs.mindroom.chat/support/index.md) - Contact and troubleshooting help
+- [Privacy Policy](https://docs.mindroom.chat/privacy/index.md) - Privacy and data handling information
+- [Terms of Service](https://docs.mindroom.chat/terms/index.md) - Terms for using MindRoom services and clients
 
 ## License
 
