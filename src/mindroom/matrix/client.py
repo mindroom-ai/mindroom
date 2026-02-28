@@ -134,23 +134,6 @@ async def login(homeserver: str, user_id: str, password: str) -> nio.AsyncClient
     raise ValueError(msg)
 
 
-async def register_user(
-    homeserver: str,
-    username: str,
-    password: str,
-    display_name: str,
-) -> str:
-    """Compatibility wrapper for user registration logic in matrix.users."""
-    from .users import register_user as register_matrix_user  # noqa: PLC0415
-
-    return await register_matrix_user(
-        homeserver=homeserver,
-        username=username,
-        password=password,
-        display_name=display_name,
-    )
-
-
 async def invite_to_room(
     client: nio.AsyncClient,
     room_id: str,
