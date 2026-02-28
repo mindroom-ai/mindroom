@@ -24,6 +24,7 @@ def test_complete_local_pairing_accepts_owner_user_id_with_server_port() -> None
             json={
                 "client_id": "client-123",
                 "client_secret": "secret-123",
+                "namespace": "a1b2c3d4",
                 "owner_user_id": "@alice:mindroom.chat:8448",
             },
         )
@@ -39,6 +40,7 @@ def test_complete_local_pairing_accepts_owner_user_id_with_server_port() -> None
 
     assert result.client_id == "client-123"
     assert result.client_secret == "secret-123"  # noqa: S105
+    assert result.namespace == "a1b2c3d4"
     assert result.owner_user_id == "@alice:mindroom.chat:8448"
     assert result.owner_user_id_invalid is False
 
@@ -52,6 +54,7 @@ def test_persist_local_provisioning_env_writes_credentials_only(tmp_path: Path) 
         provisioning_url="https://provisioning.example",
         client_id="client-123",
         client_secret="secret-123",  # noqa: S106
+        namespace="a1b2c3d4",
         config_path=config_path,
     )
 
@@ -60,6 +63,7 @@ def test_persist_local_provisioning_env_writes_credentials_only(tmp_path: Path) 
     assert "MINDROOM_PROVISIONING_URL=https://provisioning.example" in content
     assert "MINDROOM_LOCAL_CLIENT_ID=client-123" in content
     assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in content
+    assert "MINDROOM_NAMESPACE=a1b2c3d4" in content
     assert "MINDROOM_OWNER_USER_ID=" not in content
 
 
@@ -130,6 +134,7 @@ def test_complete_local_pairing_flags_malformed_owner_user_id() -> None:
             json={
                 "client_id": "client-123",
                 "client_secret": "secret-123",
+                "namespace": "a1b2c3d4",
                 "owner_user_id": "not-a-mxid",
             },
         )
@@ -145,3 +150,30 @@ def test_complete_local_pairing_flags_malformed_owner_user_id() -> None:
 
     assert result.owner_user_id is None
     assert result.owner_user_id_invalid is True
+    assert result.namespace == "a1b2c3d4"
+
+
+def test_complete_local_pairing_derives_namespace_when_missing() -> None:
+    """Missing namespace should derive a stable fallback from client_id."""
+
+    def _fake_post(_url: str, **_kwargs: object) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "client_id": "client-123",
+                "client_secret": "secret-123",
+                "owner_user_id": "@alice:mindroom.chat",
+            },
+        )
+
+    result = cli_connect.complete_local_pairing(
+        provisioning_url="https://provisioning.example",
+        pair_code="ABCD-EFGH",
+        client_name="devbox",
+        client_fingerprint="sha256:test",
+        matrix_ssl_verify=True,
+        post_request=_fake_post,
+    )
+
+    assert result.namespace == cli_connect._derive_namespace("client-123")
+    assert result.namespace_invalid is False

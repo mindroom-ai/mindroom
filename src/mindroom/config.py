@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, safe_replace
 from .logging_config import get_logger
-from .matrix.identity import room_alias_localpart
+from .matrix.identity import agent_username_localpart, managed_room_key_from_alias_localpart, room_alias_localpart
 
 if TYPE_CHECKING:
     from .matrix.identity import MatrixID
@@ -678,6 +678,9 @@ class MatrixRoomAccessConfig(BaseModel):
             localpart = room_alias_localpart(room_alias)
             if localpart:
                 identifiers.add(localpart)
+                managed_room_key = managed_room_key_from_alias_localpart(localpart)
+                if managed_room_key:
+                    identifiers.add(managed_room_key)
         return any(identifier in self.invite_only_rooms for identifier in identifiers)
 
     def get_target_join_rule(
@@ -753,6 +756,10 @@ class Config(BaseModel):
         invalid = sorted(invalid_agents + invalid_teams)
         if invalid:
             msg = f"Agent/team names must be alphanumeric/underscore only, got: {', '.join(invalid)}"
+            raise ValueError(msg)
+        overlapping_names = sorted(set(self.agents) & set(self.teams))
+        if overlapping_names:
+            msg = f"Agent and team names must be distinct, overlapping keys: {', '.join(overlapping_names)}"
             raise ValueError(msg)
         return self
 
@@ -841,9 +848,9 @@ class Config(BaseModel):
     def validate_internal_user_username_not_reserved(self) -> Config:
         """Ensure the internal user localpart does not collide with bot accounts."""
         reserved_localparts = {
-            f"mindroom_{ROUTER_AGENT_NAME}": f"router '{ROUTER_AGENT_NAME}'",
-            **{f"mindroom_{agent_name}": f"agent '{agent_name}'" for agent_name in self.agents},
-            **{f"mindroom_{team_name}": f"team '{team_name}'" for team_name in self.teams},
+            agent_username_localpart(ROUTER_AGENT_NAME): f"router '{ROUTER_AGENT_NAME}'",
+            **{agent_username_localpart(agent_name): f"agent '{agent_name}'" for agent_name in self.agents},
+            **{agent_username_localpart(team_name): f"team '{team_name}'" for team_name in self.teams},
         }
         conflict = reserved_localparts.get(self.mindroom_user.username)
         if conflict:

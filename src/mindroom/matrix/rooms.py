@@ -20,7 +20,7 @@ from .client import (
     leave_room,
     matrix_client,
 )
-from .identity import MatrixID, extract_server_name_from_homeserver
+from .identity import MatrixID, extract_server_name_from_homeserver, managed_room_alias_localpart
 from .state import MatrixRoom, MatrixState
 from .users import INTERNAL_USER_ACCOUNT_KEY
 
@@ -190,7 +190,8 @@ async def ensure_room_exists(  # noqa: C901, PLR0912
     # First, try to resolve the room alias on the server
     # This handles cases where the room exists on server but not in our state
     server_name = extract_server_name_from_homeserver(client.homeserver)
-    full_alias = f"#{room_key}:{server_name}"
+    alias_localpart = managed_room_alias_localpart(room_key)
+    full_alias = f"#{alias_localpart}:{server_name}"
 
     response = await client.room_resolve_alias(full_alias)
     if isinstance(response, nio.RoomResolveAliasResponse):
@@ -229,10 +230,12 @@ async def ensure_room_exists(  # noqa: C901, PLR0912
                     reason="matrix_room_access.reconcile_existing_rooms is false",
                 )
         else:
-            # Room exists but we can't join - this means the room was created
-            # but this user isn't a member. Return the room ID anyway since
-            # the room does exist and invitations will be handled separately.
-            logger.debug(f"Room {room_key} exists but user not a member, returning room ID for invitation handling")
+            msg = (
+                f"Managed room alias '{full_alias}' already exists as '{room_id}' but this MindRoom could not join it. "
+                "This usually means another installation already owns this alias. "
+                "Choose a different MINDROOM_NAMESPACE (or different room key) and retry."
+            )
+            raise RuntimeError(msg)
         return str(room_id)
 
     # Room alias doesn't exist on server, so we can create it
@@ -252,7 +255,7 @@ async def ensure_room_exists(  # noqa: C901, PLR0912
     created_room_id = await create_room(
         client=client,
         name=room_name,
-        alias=room_key,
+        alias=alias_localpart,
         topic=topic,
         power_users=power_users or [],
     )

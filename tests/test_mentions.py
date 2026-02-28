@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+import mindroom.matrix.identity as matrix_identity
 from mindroom.config import Config
 from mindroom.matrix.mentions import format_message_with_mentions, parse_mentions_in_text
 from mindroom.tool_events import TOOL_TRACE_KEY, ToolTraceEntry
+
+if TYPE_CHECKING:
+    from _pytest.monkeypatch import MonkeyPatch
 
 
 class TestMentionParsing:
@@ -53,6 +59,17 @@ class TestMentionParsing:
         # Should replace with sender's domain
         assert processed == "Ask @mindroom_calculator:localhost for help"
         assert mentions == ["@mindroom_calculator:localhost"]
+
+    def test_parse_with_namespaced_full_mention(self, monkeypatch: MonkeyPatch) -> None:
+        """Full localparts that include namespace suffix should resolve to configured agents."""
+        monkeypatch.setattr(matrix_identity, "_ACTIVE_NAMESPACE", "a1b2c3d4")
+        config = Config.from_yaml()
+
+        text = "Ask @mindroom_calculator_a1b2c3d4:matrix.org for help"
+        processed, mentions, markdown = parse_mentions_in_text(text, "localhost", config)
+
+        assert processed == "Ask @mindroom_calculator_a1b2c3d4:localhost for help"
+        assert mentions == ["@mindroom_calculator_a1b2c3d4:localhost"]
 
     def test_custom_domain(self) -> None:
         """Test with custom sender domain."""

@@ -314,15 +314,15 @@ async def test_existing_room_reconciliation_skipped_when_not_joined(monkeypatch:
     configure_access = AsyncMock(return_value=True)
     monkeypatch.setattr(matrix_rooms, "configure_managed_room_access", configure_access)
 
-    room_id = await matrix_rooms.ensure_room_exists(
-        client=mock_client,
-        room_key="lobby",
-        config=config,
-        room_name="Lobby",
-        power_users=[],
-    )
+    with pytest.raises(RuntimeError, match="could not join"):
+        await matrix_rooms.ensure_room_exists(
+            client=mock_client,
+            room_key="lobby",
+            config=config,
+            room_name="Lobby",
+            power_users=[],
+        )
 
-    assert room_id == "!lobby:example.com"
     configure_access.assert_not_awaited()
 
 

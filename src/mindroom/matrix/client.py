@@ -106,7 +106,10 @@ async def _login_and_sync_display_name(
             logger.warning(f"Failed to set display name for existing user: {display_response}")
         return
 
-    msg = f"Login failed for existing user {user_id} with provided password: {login_response}"
+    msg = (
+        f"Matrix account collision for {user_id}: the user already exists but login with the configured password failed "
+        f"({login_response}). Set a unique MINDROOM_NAMESPACE (or choose different names) and retry."
+    )
     raise ValueError(msg)
 
 

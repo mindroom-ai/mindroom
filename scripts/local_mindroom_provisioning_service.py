@@ -50,6 +50,8 @@ DEFAULT_LISTEN_HOST = "127.0.0.1"
 DEFAULT_LISTEN_PORT = 8776
 RATE_LIMIT_CLEANUP_INTERVAL_SECONDS = 300
 RATE_LIMIT_STALE_SECONDS = 3600
+NAMESPACE_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
+NAMESPACE_LENGTH = 8
 
 
 @dataclass(slots=True)
@@ -90,6 +92,7 @@ class LocalConnection:
     user_id: str
     client_name: str
     fingerprint: str
+    namespace: str
     client_secret_hash: str
     created_at: datetime
     last_seen_at: datetime
@@ -122,6 +125,7 @@ class LocalConnectionOut(BaseModel):
     id: str
     client_name: str
     fingerprint: str
+    namespace: str
     created_at: datetime
     last_seen_at: datetime
     revoked_at: datetime | None = None
@@ -149,6 +153,7 @@ class PairCompleteResponse(BaseModel):
     connection: LocalConnectionOut
     client_id: str
     client_secret: str
+    namespace: str
     owner_user_id: str
 
 
@@ -198,6 +203,20 @@ def _now_utc() -> datetime:
 
 def _hash_token(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _derive_namespace(seed: str) -> str:
+    """Derive a compact namespace from an identifier."""
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:NAMESPACE_LENGTH]
+
+
+def _generate_connection_namespace(state: ProvisioningState) -> str:
+    """Generate a namespace that is unique within persisted provisioning state."""
+    existing = {connection.namespace for connection in state.connections.values()}
+    while True:
+        candidate = "".join(secrets.choice(NAMESPACE_ALPHABET) for _ in range(NAMESPACE_LENGTH))
+        if candidate not in existing:
+            return candidate
 
 
 def _as_utc_iso(dt: datetime | None) -> str | None:
@@ -303,6 +322,7 @@ def _serialize_connection(connection: LocalConnection) -> LocalConnectionOut:
         id=connection.id,
         client_name=connection.client_name,
         fingerprint=connection.fingerprint,
+        namespace=connection.namespace,
         created_at=connection.created_at,
         last_seen_at=connection.last_seen_at,
         revoked_at=connection.revoked_at,
@@ -332,6 +352,7 @@ def _connections_payload(state: ProvisioningState) -> list[dict[str, str | None]
             "user_id": connection.user_id,
             "client_name": connection.client_name,
             "fingerprint": connection.fingerprint,
+            "namespace": connection.namespace,
             "client_secret_hash": connection.client_secret_hash,
             "created_at": _as_utc_iso(connection.created_at),
             "last_seen_at": _as_utc_iso(connection.last_seen_at),
@@ -381,11 +402,18 @@ def _load_state_from_disk_unlocked(state: ProvisioningState, state_path: Path) -
         state.pair_session_by_hash[session.pair_code_hash] = session.id
 
     for item in payload.get("connections", []):
+        connection_id = item["id"]
+        namespace = item.get("namespace")
+        if isinstance(namespace, str):
+            namespace = namespace.strip().lower()
+        if not isinstance(namespace, str) or not namespace:
+            namespace = _derive_namespace(connection_id)
         connection = LocalConnection(
-            id=item["id"],
+            id=connection_id,
             user_id=item["user_id"],
             client_name=item["client_name"],
             fingerprint=item["fingerprint"],
+            namespace=namespace,
             client_secret_hash=item["client_secret_hash"],
             created_at=_from_utc_iso(item["created_at"]) or _now_utc(),
             last_seen_at=_from_utc_iso(item["last_seen_at"]) or _now_utc(),
@@ -687,11 +715,13 @@ async def pair_complete(
 
         client_secret = secrets.token_urlsafe(32)
         connection_id = secrets.token_urlsafe(18)
+        namespace = _generate_connection_namespace(state)
         connection = LocalConnection(
             id=connection_id,
             user_id=session.user_id,
             client_name=payload.client_name.strip(),
             fingerprint=payload.client_pubkey_or_fingerprint.strip(),
+            namespace=namespace,
             client_secret_hash=_hash_token(client_secret),
             created_at=now,
             last_seen_at=now,
@@ -707,6 +737,7 @@ async def pair_complete(
         connection=_serialize_connection(connection),
         client_id=connection.id,
         client_secret=client_secret,
+        namespace=connection.namespace,
         owner_user_id=session.user_id,
     )
 

@@ -91,6 +91,9 @@ def test_pairing_and_register_agent_flow(tmp_path: Path, monkeypatch: pytest.Mon
         client_id = payload["client_id"]
         client_secret = payload["client_secret"]
         assert payload["owner_user_id"] == "@alice:mindroom.chat"
+        assert isinstance(payload["namespace"], str)
+        assert len(payload["namespace"]) == 8
+        assert payload["namespace"] == payload["connection"]["namespace"]
 
         connected = client.get(
             "/v1/local-mindroom/pair/status",
@@ -222,6 +225,7 @@ def test_state_persists_between_restarts(tmp_path: Path, monkeypatch: pytest.Mon
         )
         assert listed.status_code == 200
         assert len(listed.json()["connections"]) == 1
+        assert isinstance(listed.json()["connections"][0]["namespace"], str)
 
 
 @pytest.mark.asyncio

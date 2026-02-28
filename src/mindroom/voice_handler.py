@@ -16,6 +16,7 @@ from .ai import get_model_instance
 from .commands import get_command_list
 from .constants import VOICE_PREFIX
 from .logging_config import get_logger
+from .matrix.identity import agent_username_localpart
 from .thread_utils import get_available_agents_for_sender
 
 if TYPE_CHECKING:
@@ -194,7 +195,10 @@ async def _process_transcription(
 
         agent_list = (
             "\n".join(
-                [f"  - @{name} or @mindroom_{name} (spoken as: {agent_display_names[name]})" for name in agent_names],
+                [
+                    f"  - @{name} or @{agent_username_localpart(name)} (spoken as: {agent_display_names[name]})"
+                    for name in agent_names
+                ],
             )
             if agent_names
             else "  (none)"

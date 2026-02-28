@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import pytest
 
+import mindroom.matrix.identity as matrix_identity
 from mindroom.config import AgentConfig, Config, ModelConfig
-from mindroom.matrix.identity import MatrixID, ThreadStateKey, extract_agent_name, is_agent_id
+from mindroom.matrix.identity import MatrixID, ThreadStateKey, agent_username_localpart, extract_agent_name, is_agent_id
 
 
 class TestMatrixID:
@@ -70,6 +71,18 @@ class TestMatrixID:
         assert mid.domain == domain
         assert mid.full_id == f"@mindroom_router:{domain}"
         assert mid.agent_name(self.config) == "router"
+
+    def test_namespaced_agent_localpart_and_parsing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Agent IDs should use and require configured namespace suffixes."""
+        monkeypatch.setattr(matrix_identity, "_ACTIVE_NAMESPACE", "a1b2c3d4")
+        domain = self.config.domain
+
+        assert agent_username_localpart("calculator") == "mindroom_calculator_a1b2c3d4"
+        namespaced_id = MatrixID.parse(f"@mindroom_calculator_a1b2c3d4:{domain}")
+        assert namespaced_id.agent_name(self.config) == "calculator"
+
+        legacy_id = MatrixID.parse(f"@mindroom_calculator:{domain}")
+        assert legacy_id.agent_name(self.config) is None
 
 
 class TestThreadStateKey:

@@ -310,12 +310,17 @@ def connect(
         console.print(
             "[yellow]Warning:[/yellow] Pairing response included malformed owner_user_id; skipping config owner autofill.",
         )
+    if credentials.namespace_invalid:
+        console.print(
+            "[yellow]Warning:[/yellow] Pairing response included malformed namespace; derived a fallback namespace.",
+        )
 
     if persist_env:
         env_path = cli_connect.persist_local_provisioning_env(
             provisioning_url=resolved_provisioning_url,
             client_id=credentials.client_id,
             client_secret=credentials.client_secret,
+            namespace=credentials.namespace,
             config_path=resolved_config_path,
         )
         console.print("[green]Paired successfully.[/green]")
@@ -333,6 +338,7 @@ def connect(
         provisioning_url=resolved_provisioning_url,
         client_id=credentials.client_id,
         client_secret=credentials.client_secret,
+        namespace=credentials.namespace,
         owner_user_id=credentials.owner_user_id,
     )
 
@@ -800,6 +806,7 @@ def _print_pairing_success_with_exports(
     provisioning_url: str,
     client_id: str,
     client_secret: str,
+    namespace: str,
     owner_user_id: str | None,
 ) -> None:
     """Print non-persisted exports for local provisioning credentials."""
@@ -808,6 +815,7 @@ def _print_pairing_success_with_exports(
     console.print(f"  export MINDROOM_PROVISIONING_URL={provisioning_url}")
     console.print(f"  export MINDROOM_LOCAL_CLIENT_ID={client_id}")
     console.print(f"  export MINDROOM_LOCAL_CLIENT_SECRET={client_secret}")
+    console.print(f"  export MINDROOM_NAMESPACE={namespace}")
     if owner_user_id:
         console.print(
             f"\nOwner user ID from pairing: {owner_user_id} (not persisted in --no-persist-env mode).",

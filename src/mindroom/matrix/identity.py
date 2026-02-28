@@ -2,14 +2,73 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, ClassVar
 
-from mindroom.constants import MATRIX_SERVER_NAME, ROUTER_AGENT_NAME
+from mindroom.constants import MATRIX_SERVER_NAME, MINDROOM_NAMESPACE, ROUTER_AGENT_NAME
 
 if TYPE_CHECKING:
     from mindroom.config import Config
+
+_NAMESPACE_PATTERN = re.compile(r"^[a-z0-9]{4,32}$")
+
+
+def _normalize_namespace(namespace: str | None) -> str | None:
+    """Normalize and validate an installation namespace."""
+    if namespace is None:
+        return None
+    normalized = namespace.strip().lower()
+    if not normalized:
+        return None
+    if not _NAMESPACE_PATTERN.fullmatch(normalized):
+        msg = f"MINDROOM_NAMESPACE must match ^[a-z0-9]{{4,32}}$ (got: {namespace!r})"
+        raise ValueError(msg)
+    return normalized
+
+
+_ACTIVE_NAMESPACE = _normalize_namespace(MINDROOM_NAMESPACE)
+
+
+def mindroom_namespace() -> str | None:
+    """Return the configured installation namespace, if any."""
+    return _ACTIVE_NAMESPACE
+
+
+def strip_agent_namespace_suffix(agent_identifier: str) -> str | None:
+    """Return the agent name without namespace suffix, or None if namespace mismatches."""
+    namespace = mindroom_namespace()
+    if not namespace:
+        return agent_identifier
+
+    suffix = f"_{namespace}"
+    if not agent_identifier.endswith(suffix):
+        return None
+
+    stripped = agent_identifier[: -len(suffix)]
+    return stripped or None
+
+
+def managed_room_alias_localpart(room_key: str) -> str:
+    """Build the managed room alias localpart for a room key."""
+    namespace = mindroom_namespace()
+    if not namespace:
+        return room_key
+    return f"{room_key}_{namespace}"
+
+
+def managed_room_key_from_alias_localpart(alias_localpart: str) -> str | None:
+    """Extract the configured managed room key from an alias localpart."""
+    namespace = mindroom_namespace()
+    if not namespace:
+        return alias_localpart
+
+    suffix = f"_{namespace}"
+    if not alias_localpart.endswith(suffix):
+        return None
+    room_key = alias_localpart[: -len(suffix)]
+    return room_key or None
 
 
 @dataclass(frozen=True)
@@ -48,26 +107,21 @@ class MatrixID:
         A cross-domain ID like ``@mindroom_assistant:evil.com`` is never
         treated as a local agent, even if the localpart matches.
         """
-        if self.domain != config.domain:
-            return None
-        if not self.username.startswith(self.AGENT_PREFIX):
+        if self.domain != config.domain or not self.username.startswith(self.AGENT_PREFIX):
             return None
 
         # Remove prefix
-        name = self.username[len(self.AGENT_PREFIX) :]
+        agent_identifier = self.username[len(self.AGENT_PREFIX) :]
+        name = strip_agent_namespace_suffix(agent_identifier)
+        if name is None:
+            return None
 
         # Special check for the router agent:
         # The router is a built-in agent that handles command routing and doesn't
         # appear in config.agents. Without this check, extract_agent_name() would
         # return None for router messages, causing other agents to incorrectly
         # respond to router's error messages (e.g., when schedule parsing fails).
-        if name == ROUTER_AGENT_NAME:
-            return name
-
-        # Validate against both regular agents and teams
-        if name in config.agents:
-            return name
-        if name in config.teams:
+        if name == ROUTER_AGENT_NAME or name in config.agents or name in config.teams:
             return name
         return None
 
@@ -137,6 +191,9 @@ def extract_agent_name(sender_id: str, config: Config) -> str | None:
 
 def agent_username_localpart(agent_name: str) -> str:
     """Build the Matrix username localpart for an agent-like entity."""
+    namespace = mindroom_namespace()
+    if namespace:
+        return f"{MatrixID.AGENT_PREFIX}{agent_name}_{namespace}"
     return f"{MatrixID.AGENT_PREFIX}{agent_name}"
 
 

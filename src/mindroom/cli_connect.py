@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -16,6 +17,7 @@ if TYPE_CHECKING:
 
 _PAIR_CODE_RE = re.compile(r"^[A-Z0-9]{4}-[A-Z0-9]{4}$")
 _MATRIX_USER_ID_RE = re.compile(r"^@[^:\s]+:[^\s]+$")
+_NAMESPACE_RE = re.compile(r"^[a-z0-9]{4,32}$")
 _LEGACY_OWNER_PLACEHOLDER = "__PLACEHOLDER__"
 
 
@@ -25,7 +27,9 @@ class PairCompleteResult:
 
     client_id: str
     client_secret: str
+    namespace: str
     owner_user_id: str | None = None
+    namespace_invalid: bool = False
     owner_user_id_invalid: bool = False
 
 
@@ -76,11 +80,19 @@ def complete_local_pairing(
     owner_user_id_invalid = (
         isinstance(raw_owner_user_id, str) and bool(raw_owner_user_id.strip()) and parsed_owner_user_id is None
     )
+    client_id = _required_non_empty_string(data, "client_id")
+    raw_namespace = data.get("namespace")
+    parsed_namespace = _parse_namespace(raw_namespace)
+    namespace_invalid = isinstance(raw_namespace, str) and bool(raw_namespace.strip()) and parsed_namespace is None
+    if parsed_namespace is None:
+        parsed_namespace = _derive_namespace(client_id)
 
     return PairCompleteResult(
-        client_id=_required_non_empty_string(data, "client_id"),
+        client_id=client_id,
         client_secret=_required_non_empty_string(data, "client_secret"),
+        namespace=parsed_namespace,
         owner_user_id=parsed_owner_user_id,
+        namespace_invalid=namespace_invalid,
         owner_user_id_invalid=owner_user_id_invalid,
     )
 
@@ -90,6 +102,7 @@ def persist_local_provisioning_env(
     provisioning_url: str,
     client_id: str,
     client_secret: str,
+    namespace: str,
     config_path: str | Path = CONFIG_PATH,
 ) -> Path:
     """Write local provisioning credentials to .env next to the active config file."""
@@ -101,6 +114,7 @@ def persist_local_provisioning_env(
         "MINDROOM_PROVISIONING_URL": provisioning_url.rstrip("/"),
         "MINDROOM_LOCAL_CLIENT_ID": client_id,
         "MINDROOM_LOCAL_CLIENT_SECRET": client_secret,
+        "MINDROOM_NAMESPACE": namespace,
     }
     for key, value in updates.items():
         lines = _upsert_env_var(lines, key, value)
@@ -149,6 +163,23 @@ def _parse_owner_user_id(raw_value: object) -> str | None:
     if _MATRIX_USER_ID_RE.fullmatch(candidate_owner_user_id):
         return candidate_owner_user_id
     return None
+
+
+def _parse_namespace(raw_value: object) -> str | None:
+    """Parse optional installation namespace from pairing response."""
+    if not isinstance(raw_value, str):
+        return None
+    namespace = raw_value.strip().lower()
+    if not namespace:
+        return None
+    if _NAMESPACE_RE.fullmatch(namespace):
+        return namespace
+    return None
+
+
+def _derive_namespace(seed: str) -> str:
+    """Derive a deterministic namespace from an identifier."""
+    return sha256(seed.encode("utf-8")).hexdigest()[:8]
 
 
 def _extract_error_detail(response: httpx.Response) -> str:
