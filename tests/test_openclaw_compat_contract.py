@@ -775,6 +775,32 @@ async def test_openclaw_compat_exec_requires_shell_tool_in_context(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_openclaw_compat_exec_allowed_when_openclaw_compat_in_tools(tmp_path: Path) -> None:
+    """Verify exec works when the agent lists openclaw_compat (not shell) in tools."""
+    tool = OpenClawCompatTools()
+    entrypoint = MagicMock(return_value="ok")
+    tool._shell.functions["run_shell_command"].entrypoint = entrypoint
+    config = MagicMock()
+    config.agents = {"openclaw": SimpleNamespace(tools=["openclaw_compat", "python"])}
+    ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id="$ctx-thread:localhost",
+        requester_id="@user:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+
+    with openclaw_tool_context(ctx):
+        payload = json.loads(await tool.exec("echo hi"))
+
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "exec"
+    entrypoint.assert_called_once_with(["echo", "hi"])
+
+
+@pytest.mark.asyncio
 async def test_openclaw_compat_sessions_history_mixed_timestamp_types_sorted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -527,7 +527,11 @@ class OpenClawCompatTools(Toolkit):
             return False
         agent_config = agents.get(context.agent_name)
         agent_tools = getattr(agent_config, "tools", None)
-        return isinstance(agent_tools, list) and tool_name in agent_tools
+        if not isinstance(agent_tools, list):
+            return False
+        # openclaw_compat bundles shell, file, web, browser, scheduler, etc.
+        # so listing it is sufficient to enable all bundled tools.
+        return tool_name in agent_tools or "openclaw_compat" in agent_tools
 
     def _read_agent_sessions(self, context: OpenClawToolContext) -> list[dict[str, Any]]:
         db_path = context.storage_path / "sessions" / f"{context.agent_name}.db"
