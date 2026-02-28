@@ -77,7 +77,7 @@ class TestBotScheduleCommands:
         )
 
         # Mock the shared schedule entrypoint
-        with patch("mindroom.bot.schedule_task") as mock_schedule:
+        with patch("mindroom.command_handler.schedule_task") as mock_schedule:
             mock_schedule.return_value = ("task123", "✅ Scheduled: 5 minutes from now")
 
             # Mock response tracker for the test
@@ -119,7 +119,7 @@ class TestBotScheduleCommands:
 
         command = Command(type=CommandType.SCHEDULE, args={"full_text": "tomorrow"}, raw_text=event.body)
 
-        with patch("mindroom.bot.schedule_task") as mock_schedule:
+        with patch("mindroom.command_handler.schedule_task") as mock_schedule:
             mock_schedule.return_value = ("task456", "✅ Scheduled for tomorrow")
 
             await mock_agent_bot._handle_command(room, event, command)
@@ -143,7 +143,7 @@ class TestBotScheduleCommands:
 
         command = Command(type=CommandType.LIST_SCHEDULES, args={}, raw_text=event.body)
 
-        with patch("mindroom.bot.list_scheduled_tasks") as mock_list:
+        with patch("mindroom.command_handler.list_scheduled_tasks") as mock_list:
             mock_list.return_value = "**Scheduled Tasks:**\n• task123 - Tomorrow: Test"
 
             await mock_agent_bot._handle_command(room, event, command)
@@ -172,7 +172,7 @@ class TestBotScheduleCommands:
 
         command = Command(type=CommandType.CANCEL_SCHEDULE, args={"task_id": "task123"}, raw_text=event.body)
 
-        with patch("mindroom.bot.cancel_scheduled_task") as mock_cancel:
+        with patch("mindroom.command_handler.cancel_scheduled_task") as mock_cancel:
             mock_cancel.return_value = "✅ Cancelled task `task123`"
 
             await mock_agent_bot._handle_command(room, event, command)
@@ -198,7 +198,7 @@ class TestBotScheduleCommands:
             raw_text=event.body,
         )
 
-        with patch("mindroom.bot.cancel_all_scheduled_tasks") as mock_cancel_all:
+        with patch("mindroom.command_handler.cancel_all_scheduled_tasks") as mock_cancel_all:
             mock_cancel_all.return_value = "✅ Cancelled 3 scheduled task(s)"
 
             await mock_agent_bot._handle_command(room, event, command)
@@ -229,7 +229,7 @@ class TestBotScheduleCommands:
             raw_text=event.body,
         )
 
-        with patch("mindroom.bot.edit_scheduled_task") as mock_edit:
+        with patch("mindroom.command_handler.edit_scheduled_task") as mock_edit:
             mock_edit.return_value = "✅ Updated task `task123`."
 
             await mock_agent_bot._handle_command(room, event, command)
@@ -264,7 +264,7 @@ class TestBotScheduleCommands:
 
         command = Command(type=CommandType.SCHEDULE, args={"full_text": "in 5 minutes Test"}, raw_text=event.body)
 
-        with patch("mindroom.bot.schedule_task") as mock_schedule:
+        with patch("mindroom.command_handler.schedule_task") as mock_schedule:
             mock_schedule.return_value = ("task123", "✅ Scheduled: 5 minutes from now")
 
             await mock_agent_bot._handle_command(room, event, command)
@@ -556,7 +556,7 @@ class TestCommandHandling:
             with (
                 patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock),
                 patch("mindroom.bot.is_dm_room", return_value=False),
-                patch("mindroom.bot.resolve_skill_command_spec") as mock_resolve_spec,
+                patch("mindroom.command_handler.resolve_skill_command_spec") as mock_resolve_spec,
             ):
                 await bot._on_message(room, event)
 
