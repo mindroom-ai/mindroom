@@ -8,7 +8,7 @@ Use this page for support requests related to MindRoom and MindRoom clients (inc
 
 ## Contact
 
-- Email: `support@mindroom.chat` (update if different before App Store submission)
+- Email: `support@mindroom.chat`
 
 ## What to Include in a Support Request
 

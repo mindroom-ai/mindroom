@@ -104,4 +104,4 @@ We may update this policy from time to time. The "Last updated" date will change
 
 For privacy questions, contact:
 
-- `support@mindroom.chat` (update if different before App Store submission)
+- `support@mindroom.chat`
