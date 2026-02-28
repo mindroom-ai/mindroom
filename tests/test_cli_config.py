@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     import pytest
 
 runner = CliRunner()
+_OWNER_PLACEHOLDER = "__MINDROOM_OWNER_USER_ID_FROM_PAIRING__"
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -44,6 +45,8 @@ class TestConfigInit:
         content = target.read_text()
         assert "agents:" in content
         assert "models:" in content
+        assert "authorization:" in content
+        assert _OWNER_PLACEHOLDER in content
 
     def test_init_minimal(self, tmp_path: Path) -> None:
         """Config init --minimal creates a bare-minimum config."""
@@ -53,6 +56,8 @@ class TestConfigInit:
         content = target.read_text()
         assert "agents:" in content
         assert "# MindRoom Configuration (minimal)" in content
+        assert "authorization:" in content
+        assert _OWNER_PLACEHOLDER in content
 
     def test_init_profile_minimal(self, tmp_path: Path) -> None:
         """Config init --profile minimal creates the minimal template."""
@@ -677,7 +682,16 @@ class TestConnect:
     ) -> None:
         """Successful pairing should write provisioning credentials to .env."""
         cfg = tmp_path / "config.yaml"
-        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        cfg.write_text(
+            "models: {}\nagents: {}\nrouter:\n  model: default\n"
+            "authorization:\n"
+            "  default_room_access: false\n"
+            "  global_users:\n"
+            f"    - {_OWNER_PLACEHOLDER}\n"
+            "  agent_reply_permissions:\n"
+            '    "*":\n'
+            f"      - {_OWNER_PLACEHOLDER}\n",
+        )
         monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
         monkeypatch.setattr("mindroom.cli.socket.gethostname", lambda: "devbox")
 
@@ -688,6 +702,7 @@ class TestConnect:
                 json={
                     "client_id": "client-123",
                     "client_secret": "secret-123",
+                    "owner_user_id": "@alice:mindroom.chat",
                     "connection": {
                         "id": "conn-1",
                         "client_name": "devbox",
@@ -717,6 +732,10 @@ class TestConnect:
         assert "MINDROOM_PROVISIONING_URL=https://provisioning.example" in env_content
         assert "MINDROOM_LOCAL_CLIENT_ID=client-123" in env_content
         assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in env_content
+        assert "MINDROOM_OWNER_USER_ID=@alice:mindroom.chat" in env_content
+        updated_config = cfg.read_text()
+        assert _OWNER_PLACEHOLDER not in updated_config
+        assert "@alice:mindroom.chat" in updated_config
 
     def test_connect_no_persist_prints_exports(
         self,
@@ -731,7 +750,11 @@ class TestConnect:
             "mindroom.cli.httpx.post",
             lambda *_a, **_kw: httpx.Response(
                 200,
-                json={"client_id": "client-123", "client_secret": "secret-123"},
+                json={
+                    "client_id": "client-123",
+                    "client_secret": "secret-123",
+                    "owner_user_id": "@alice:mindroom.chat",
+                },
             ),
         )
 
@@ -751,6 +774,7 @@ class TestConnect:
         assert "export MINDROOM_PROVISIONING_URL=https://provisioning.example" in result.output
         assert "export MINDROOM_LOCAL_CLIENT_ID=client-123" in result.output
         assert "export MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in result.output
+        assert "export MINDROOM_OWNER_USER_ID=@alice:mindroom.chat" in result.output
         assert not (tmp_path / ".env").exists()
 
     def test_connect_uses_runtime_env_default_provisioning_url(
@@ -771,7 +795,11 @@ class TestConnect:
             called["kwargs"] = kwargs
             return httpx.Response(
                 200,
-                json={"client_id": "client-123", "client_secret": "secret-123"},
+                json={
+                    "client_id": "client-123",
+                    "client_secret": "secret-123",
+                    "owner_user_id": "@alice:mindroom.chat",
+                },
             )
 
         monkeypatch.setattr("mindroom.cli.httpx.post", _fake_post)
@@ -789,6 +817,7 @@ class TestConnect:
         assert result.exit_code == 0
         assert called["url"] == "https://env-provisioning.example/v1/local-mindroom/pair/complete"
         assert "export MINDROOM_PROVISIONING_URL=https://env-provisioning.example" in result.output
+        assert "export MINDROOM_OWNER_USER_ID=@alice:mindroom.chat" in result.output
 
     def test_connect_passes_matrix_ssl_verify_to_httpx(
         self,
@@ -808,7 +837,11 @@ class TestConnect:
             called["kwargs"] = kwargs
             return httpx.Response(
                 200,
-                json={"client_id": "client-123", "client_secret": "secret-123"},
+                json={
+                    "client_id": "client-123",
+                    "client_secret": "secret-123",
+                    "owner_user_id": "@alice:mindroom.chat",
+                },
             )
 
         monkeypatch.setattr("mindroom.cli.httpx.post", _fake_post)

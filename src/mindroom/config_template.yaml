@@ -40,6 +40,19 @@ matrix_room_access:
   invite_only_rooms: []             # Room keys/aliases/IDs that stay invite-only/private
   reconcile_existing_rooms: false   # When true, migrate current managed rooms to target policy
 
+# Authorization defaults (recommended for public deployments)
+# Replace __MINDROOM_OWNER_USER_ID_FROM_PAIRING__ with your Matrix user ID,
+# e.g. @alice:mindroom.chat.
+authorization:
+  default_room_access: false
+  global_users:
+    # Replace with your Matrix user ID (example: @alice:mindroom.chat).
+    - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
+  agent_reply_permissions:
+    "*":
+      # Replace with your Matrix user ID (example: @alice:mindroom.chat).
+      - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
+
 # Default settings for all agents
 defaults:
   tools:

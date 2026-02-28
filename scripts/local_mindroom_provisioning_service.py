@@ -149,6 +149,7 @@ class PairCompleteResponse(BaseModel):
     connection: LocalConnectionOut
     client_id: str
     client_secret: str
+    owner_user_id: str
 
 
 class ConnectionsResponse(BaseModel):
@@ -706,6 +707,7 @@ async def pair_complete(
         connection=_serialize_connection(connection),
         client_id=connection.id,
         client_secret=client_secret,
+        owner_user_id=session.user_id,
     )
 
 
