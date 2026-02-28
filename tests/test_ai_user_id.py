@@ -12,7 +12,9 @@ from agno.run.base import RunStatus
 
 from mindroom.ai import ai_response, stream_agent_response
 from mindroom.bot import AgentBot
-from mindroom.config import AgentConfig, Config, ModelConfig
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.openclaw_context import OpenClawToolContext, get_openclaw_tool_context
 
 if TYPE_CHECKING:

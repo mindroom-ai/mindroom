@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, ClassVar
 from mindroom.constants import MATRIX_SERVER_NAME, MINDROOM_NAMESPACE, ROUTER_AGENT_NAME
 
 if TYPE_CHECKING:
-    from mindroom.config import Config
+    from mindroom.config.main import Config
 
 _NAMESPACE_PATTERN = re.compile(r"^[a-z0-9]{4,32}$")
 

@@ -11,8 +11,8 @@ import nio
 from mindroom.logging_config import get_logger
 from mindroom.topic_generator import ensure_room_has_topic, generate_room_topic_ai
 
+from .avatar import check_and_set_avatar
 from .client import (
-    check_and_set_avatar,
     create_room,
     ensure_room_directory_visibility,
     ensure_room_join_rule,
@@ -25,7 +25,7 @@ from .state import MatrixRoom, MatrixState
 from .users import INTERNAL_USER_ACCOUNT_KEY
 
 if TYPE_CHECKING:
-    from mindroom.config import Config
+    from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 

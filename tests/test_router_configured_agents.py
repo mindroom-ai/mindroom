@@ -2,7 +2,9 @@
 
 from unittest.mock import MagicMock
 
-from mindroom.config import AgentConfig, Config, ModelConfig
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.thread_utils import get_available_agents_in_room, get_configured_agents_for_room
 
 

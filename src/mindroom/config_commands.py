@@ -9,7 +9,7 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
-from .config import Config
+from .config.main import Config
 from .constants import CONFIG_PATH
 from .logging_config import get_logger
 

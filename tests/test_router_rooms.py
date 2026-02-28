@@ -9,7 +9,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from mindroom.bot import MultiAgentOrchestrator, create_bot_for_entity
-from mindroom.config import AgentConfig, Config, TeamConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
@@ -209,7 +210,7 @@ async def test_orchestrator_creates_router_with_all_rooms(
     def mock_load_config(_config_path: Path | None = None) -> Config:
         return config_with_rooms
 
-    monkeypatch.setattr("mindroom.config.Config.from_yaml", mock_load_config)
+    monkeypatch.setattr("mindroom.config.main.Config.from_yaml", mock_load_config)
     monkeypatch.setattr("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", AsyncMock())
     monkeypatch.setattr("mindroom.bot.MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
 
@@ -292,7 +293,7 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyP
         load_config_counter[0] += 1
         return result
 
-    monkeypatch.setattr("mindroom.config.Config.from_yaml", mock_load_config)
+    monkeypatch.setattr("mindroom.config.main.Config.from_yaml", mock_load_config)
     monkeypatch.setattr("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", AsyncMock())
     monkeypatch.setattr("mindroom.bot.MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
 

@@ -20,7 +20,7 @@ from .matrix.state import MatrixState
 from .matrix.users import INTERNAL_USER_ACCOUNT_KEY
 
 if TYPE_CHECKING:
-    from .config import Config
+    from .config.main import Config
 
 logger = get_logger(__name__)
 

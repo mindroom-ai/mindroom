@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 import mindroom.tools  # noqa: F401
-from mindroom.config import Config
+from mindroom.config.main import Config
 from mindroom.custom_tools.memory import MemoryTools
 from mindroom.tools_metadata import TOOL_METADATA
 

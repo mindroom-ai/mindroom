@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.bot import AgentBot
-from mindroom.config import Config
+from mindroom.config.main import Config
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator

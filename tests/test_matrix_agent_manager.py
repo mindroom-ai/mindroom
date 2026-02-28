@@ -9,8 +9,7 @@ import nio
 import pytest
 import yaml
 
-from mindroom.config import Config
-from mindroom.matrix.client import register_user
+from mindroom.config.main import Config
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import (
     INTERNAL_USER_AGENT_NAME,
@@ -19,6 +18,7 @@ from mindroom.matrix.users import (
     ensure_all_agent_users,
     get_agent_credentials,
     login_agent_user,
+    register_user,
     save_agent_credentials,
 )
 
@@ -172,7 +172,7 @@ class TestMatrixRegistration:
         mock_client.login.return_value = mock_login_response
         mock_client.set_displayname.return_value = AsyncMock()
 
-        with patch("mindroom.matrix.client.matrix_client") as mock_matrix_client:
+        with patch("mindroom.matrix.users.matrix_client") as mock_matrix_client:
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
             user_id = await register_user("http://localhost:8008", "test_user", "test_pass", "Test User")
@@ -193,7 +193,7 @@ class TestMatrixRegistration:
         mock_client.login.return_value = MagicMock(spec=nio.LoginResponse)
         mock_client.set_displayname.return_value = AsyncMock()
 
-        with patch("mindroom.matrix.client.matrix_client") as mock_matrix_client:
+        with patch("mindroom.matrix.users.matrix_client") as mock_matrix_client:
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
             user_id = await register_user("http://localhost:8008", "existing_user", "test_pass", "Existing User")
@@ -212,7 +212,7 @@ class TestMatrixRegistration:
         mock_client.register.return_value = mock_response
         mock_client.login.return_value = MagicMock(spec=nio.LoginError)
 
-        with patch("mindroom.matrix.client.matrix_client") as mock_matrix_client:
+        with patch("mindroom.matrix.users.matrix_client") as mock_matrix_client:
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
             with pytest.raises(ValueError, match="Matrix account collision"):
@@ -227,7 +227,7 @@ class TestMatrixRegistration:
         mock_response.status_code = "M_FORBIDDEN"
         mock_client.register.return_value = mock_response
 
-        with patch("mindroom.matrix.client.matrix_client") as mock_matrix_client:
+        with patch("mindroom.matrix.users.matrix_client") as mock_matrix_client:
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
             with pytest.raises(ValueError, match="Failed to register user"):
@@ -253,7 +253,7 @@ class TestMatrixRegistration:
         )
         mock_client.set_displayname.return_value = AsyncMock()
 
-        with patch("mindroom.matrix.client.matrix_client") as mock_matrix_client:
+        with patch("mindroom.matrix.users.matrix_client") as mock_matrix_client:
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
             user_id = await register_user("http://localhost:8008", "test_user", test_pass, "Test User")
@@ -282,12 +282,12 @@ class TestMatrixRegistration:
 
         with (
             patch(
-                "mindroom.matrix.client.provisioning.register_user_via_provisioning_service",
+                "mindroom.matrix.users.provisioning.register_user_via_provisioning_service",
                 new_callable=AsyncMock,
             ) as mock_register,
-            patch("mindroom.matrix.client.matrix_client") as mock_matrix_client,
+            patch("mindroom.matrix.users.matrix_client") as mock_matrix_client,
             patch(
-                "mindroom.matrix.client.provisioning.registration_token_from_env",
+                "mindroom.matrix.users.provisioning.registration_token_from_env",
                 return_value=None,
             ),
         ):
@@ -331,12 +331,12 @@ class TestMatrixRegistration:
 
         with (
             patch(
-                "mindroom.matrix.client.provisioning.register_user_via_provisioning_service",
+                "mindroom.matrix.users.provisioning.register_user_via_provisioning_service",
                 new_callable=AsyncMock,
             ) as mock_register,
-            patch("mindroom.matrix.client.matrix_client") as mock_matrix_client,
+            patch("mindroom.matrix.users.matrix_client") as mock_matrix_client,
             patch(
-                "mindroom.matrix.client.provisioning.registration_token_from_env",
+                "mindroom.matrix.users.provisioning.registration_token_from_env",
                 return_value=None,
             ),
         ):
@@ -373,16 +373,16 @@ class TestMatrixRegistration:
 
         with (
             patch(
-                "mindroom.matrix.client.provisioning.register_user_via_provisioning_service",
+                "mindroom.matrix.users.provisioning.register_user_via_provisioning_service",
                 new_callable=AsyncMock,
             ) as mock_register,
-            patch("mindroom.matrix.client.matrix_client") as mock_matrix_client,
+            patch("mindroom.matrix.users.matrix_client") as mock_matrix_client,
             patch(
-                "mindroom.matrix.client.provisioning.registration_token_from_env",
+                "mindroom.matrix.users.provisioning.registration_token_from_env",
                 return_value=None,
             ),
             patch(
-                "mindroom.matrix.client.extract_server_name_from_homeserver",
+                "mindroom.matrix.users.extract_server_name_from_homeserver",
                 return_value="mindroom.chat",
             ),
         ):
@@ -425,8 +425,8 @@ class TestMatrixRegistration:
         mock_client.register.return_value = nio.ErrorResponse("unknown error")
 
         with (
-            patch("mindroom.matrix.client.matrix_client") as mock_matrix_client,
-            patch("mindroom.matrix.client._homeserver_requires_registration_token", new_callable=AsyncMock) as mock_req,
+            patch("mindroom.matrix.users.matrix_client") as mock_matrix_client,
+            patch("mindroom.matrix.users._homeserver_requires_registration_token", new_callable=AsyncMock) as mock_req,
         ):
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
             mock_req.return_value = True

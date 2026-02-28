@@ -13,7 +13,7 @@ from .logging_config import get_logger
 from .matrix.identity import MatrixID
 
 if TYPE_CHECKING:
-    from .config import Config
+    from .config.main import Config
 
 logger = get_logger(__name__)
 

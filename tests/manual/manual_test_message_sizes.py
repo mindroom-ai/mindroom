@@ -13,7 +13,7 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
-from mindroom.config import Config
+from mindroom.config.main import Config
 from mindroom.matrix.client import get_joined_rooms, get_room_name, matrix_client, send_message
 
 DEFAULT_INTERNAL_USERNAME = Config().mindroom_user.username

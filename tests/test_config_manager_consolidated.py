@@ -5,7 +5,10 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from mindroom.config import AgentConfig, Config, DefaultsConfig, KnowledgeBaseConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.knowledge import KnowledgeBaseConfig
+from mindroom.config.main import Config
+from mindroom.config.models import DefaultsConfig
 from mindroom.custom_tools.config_manager import ConfigManagerTools, InfoType
 
 

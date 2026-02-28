@@ -7,7 +7,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.config import AgentConfig, Config, ModelConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.presence import (
     build_agent_status_message,

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.config import Config
+from mindroom.config.main import Config
 from mindroom.memory.auto_flush import (
     MemoryAutoFlushWorker,
     mark_auto_flush_dirty_session,

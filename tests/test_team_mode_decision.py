@@ -8,7 +8,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.config import AgentConfig, Config, DefaultsConfig
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import DefaultsConfig
 from mindroom.teams import (
     TeamMode,
     TeamModeDecision,

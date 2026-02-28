@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
     import nio
 
-    from .config import Config
+    from .config.main import Config
 
 from .matrix.client import get_latest_thread_event_id_if_needed
 

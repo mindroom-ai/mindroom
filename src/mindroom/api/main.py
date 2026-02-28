@@ -5,7 +5,7 @@ import os
 import secrets
 import shutil
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
@@ -26,7 +26,7 @@ from mindroom.api.openai_compat import router as openai_compat_router
 from mindroom.api.schedules import router as schedules_router
 from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
-from mindroom.config import Config
+from mindroom.config.main import Config
 from mindroom.constants import CONFIG_PATH, CONFIG_TEMPLATE_PATH, safe_replace
 from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.tool_dependencies import auto_install_enabled, auto_install_tool_extra
@@ -131,6 +131,41 @@ def save_config_to_file(config: dict[str, Any]) -> None:
 # Global variable to store current config
 config: dict[str, Any] = {}
 config_lock = threading.Lock()
+
+
+def _run_config_write[T](
+    mutate: Callable[[], T],
+    *,
+    error_prefix: str,
+    save_payload: dict[str, Any] | None = None,
+) -> T:
+    """Mutate config under lock and persist atomically."""
+    try:
+        with config_lock:
+            result = mutate()
+            save_config_to_file(config if save_payload is None else save_payload)
+            return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"{error_prefix}: {e!s}") from e
+
+
+def _sanitize_entity_payload(entity_data: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of entity data without API-only ID fields."""
+    payload = entity_data.copy()
+    payload.pop("id", None)
+    return payload
+
+
+def _resolve_unique_entity_id(base_id: str, entities: dict[str, Any]) -> str:
+    """Return a unique ID, appending a numeric suffix when needed."""
+    if base_id not in entities:
+        return base_id
+    counter = 1
+    while f"{base_id}_{counter}" in entities:
+        counter += 1
+    return f"{base_id}_{counter}"
 
 
 # =========================
@@ -258,16 +293,13 @@ async def load_config(_user: Annotated[dict, Depends(verify_user)]) -> dict[str,
 @app.put("/api/config/save")
 async def save_config(new_config: Config, _user: Annotated[dict, Depends(verify_user)]) -> dict[str, bool]:
     """Save configuration to file."""
-    try:
-        config_dict = new_config.model_dump(exclude_none=True)
-        with config_lock:
-            save_config_to_file(config_dict)
-            # Update current config
-            config.update(config_dict)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save configuration: {e!s}") from e
-    else:
-        return {"success": True}
+    config_dict = new_config.model_dump(exclude_none=True)
+
+    def mutate() -> None:
+        config.update(config_dict)
+
+    _run_config_write(mutate, error_prefix="Failed to save configuration", save_payload=config_dict)
+    return {"success": True}
 
 
 @app.get("/api/config/agents")
@@ -290,67 +322,43 @@ async def update_agent(
     _user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, bool]:
     """Update a specific agent."""
-    try:
-        with config_lock:
-            if "agents" not in config:
-                config["agents"] = {}
 
-            # Remove ID from agent_data if present
-            agent_data_copy = agent_data.copy()
-            agent_data_copy.pop("id", None)
+    def mutate() -> None:
+        if "agents" not in config:
+            config["agents"] = {}
+        config["agents"][agent_id] = _sanitize_entity_payload(agent_data)
 
-            config["agents"][agent_id] = agent_data_copy
-            save_config_to_file(config)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save agent: {e!s}") from e
-    else:
-        return {"success": True}
+    _run_config_write(mutate, error_prefix="Failed to save agent")
+    return {"success": True}
 
 
 @app.post("/api/config/agents")
 async def create_agent(agent_data: dict[str, Any], _user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Create a new agent."""
-    agent_id = agent_data.get("display_name", "new_agent").lower().replace(" ", "_")
+    base_agent_id = agent_data.get("display_name", "new_agent").lower().replace(" ", "_")
 
-    try:
-        with config_lock:
-            if "agents" not in config:
-                config["agents"] = {}
+    def mutate() -> str:
+        if "agents" not in config:
+            config["agents"] = {}
+        agent_id = _resolve_unique_entity_id(base_agent_id, config["agents"])
+        config["agents"][agent_id] = _sanitize_entity_payload(agent_data)
+        return agent_id
 
-            # Check if agent already exists
-            if agent_id in config["agents"]:
-                # Generate unique ID
-                counter = 1
-                while f"{agent_id}_{counter}" in config["agents"]:
-                    counter += 1
-                agent_id = f"{agent_id}_{counter}"
-
-            # Remove ID from agent_data if present
-            agent_data_copy = agent_data.copy()
-            agent_data_copy.pop("id", None)
-
-            config["agents"][agent_id] = agent_data_copy
-            save_config_to_file(config)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create agent: {e!s}") from e
-    else:
-        return {"id": agent_id, "success": True}
+    agent_id = _run_config_write(mutate, error_prefix="Failed to create agent")
+    return {"id": agent_id, "success": True}
 
 
 @app.delete("/api/config/agents/{agent_id}")
 async def delete_agent(agent_id: str, _user: Annotated[dict, Depends(verify_user)]) -> dict[str, bool]:
     """Delete an agent."""
-    with config_lock:
+
+    def mutate() -> None:
         if "agents" not in config or agent_id not in config["agents"]:
             raise HTTPException(status_code=404, detail="Agent not found")
-
         del config["agents"][agent_id]
-        try:
-            save_config_to_file(config)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to delete agent: {e!s}") from e
-        else:
-            return {"success": True}
+
+    _run_config_write(mutate, error_prefix="Failed to delete agent")
+    return {"success": True}
 
 
 @app.get("/api/config/teams")
@@ -373,67 +381,43 @@ async def update_team(
     _user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, bool]:
     """Update a specific team."""
-    try:
-        with config_lock:
-            if "teams" not in config:
-                config["teams"] = {}
 
-            # Remove ID from team_data if present
-            team_data_copy = team_data.copy()
-            team_data_copy.pop("id", None)
+    def mutate() -> None:
+        if "teams" not in config:
+            config["teams"] = {}
+        config["teams"][team_id] = _sanitize_entity_payload(team_data)
 
-            config["teams"][team_id] = team_data_copy
-            save_config_to_file(config)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save team: {e!s}") from e
-    else:
-        return {"success": True}
+    _run_config_write(mutate, error_prefix="Failed to save team")
+    return {"success": True}
 
 
 @app.post("/api/config/teams")
 async def create_team(team_data: dict[str, Any], _user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Create a new team."""
-    team_id = team_data.get("display_name", "new_team").lower().replace(" ", "_")
+    base_team_id = team_data.get("display_name", "new_team").lower().replace(" ", "_")
 
-    try:
-        with config_lock:
-            if "teams" not in config:
-                config["teams"] = {}
+    def mutate() -> str:
+        if "teams" not in config:
+            config["teams"] = {}
+        team_id = _resolve_unique_entity_id(base_team_id, config["teams"])
+        config["teams"][team_id] = _sanitize_entity_payload(team_data)
+        return team_id
 
-            # Check if team already exists
-            if team_id in config["teams"]:
-                # Generate unique ID
-                counter = 1
-                while f"{team_id}_{counter}" in config["teams"]:
-                    counter += 1
-                team_id = f"{team_id}_{counter}"
-
-            # Remove ID from team_data if present
-            team_data_copy = team_data.copy()
-            team_data_copy.pop("id", None)
-
-            config["teams"][team_id] = team_data_copy
-            save_config_to_file(config)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create team: {e!s}") from e
-    else:
-        return {"id": team_id, "success": True}
+    team_id = _run_config_write(mutate, error_prefix="Failed to create team")
+    return {"id": team_id, "success": True}
 
 
 @app.delete("/api/config/teams/{team_id}")
 async def delete_team(team_id: str, _user: Annotated[dict, Depends(verify_user)]) -> dict[str, bool]:
     """Delete a team."""
-    with config_lock:
+
+    def mutate() -> None:
         if "teams" not in config or team_id not in config["teams"]:
             raise HTTPException(status_code=404, detail="Team not found")
-
         del config["teams"][team_id]
-        try:
-            save_config_to_file(config)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to delete team: {e!s}") from e
-        else:
-            return {"success": True}
+
+    _run_config_write(mutate, error_prefix="Failed to delete team")
+    return {"success": True}
 
 
 @app.get("/api/config/models")
@@ -451,17 +435,14 @@ async def update_model(
     _user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, bool]:
     """Update a model configuration."""
-    try:
-        with config_lock:
-            if "models" not in config:
-                config["models"] = {}
 
-            config["models"][model_id] = model_data
-            save_config_to_file(config)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save model: {e!s}") from e
-    else:
-        return {"success": True}
+    def mutate() -> None:
+        if "models" not in config:
+            config["models"] = {}
+        config["models"][model_id] = model_data
+
+    _run_config_write(mutate, error_prefix="Failed to save model")
+    return {"success": True}
 
 
 @app.get("/api/config/room-models")
@@ -478,14 +459,12 @@ async def update_room_models(
     _user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, bool]:
     """Update room-specific model overrides."""
-    try:
-        with config_lock:
-            config["room_models"] = room_models
-            save_config_to_file(config)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save room models: {e!s}") from e
-    else:
-        return {"success": True}
+
+    def mutate() -> None:
+        config["room_models"] = room_models
+
+    _run_config_write(mutate, error_prefix="Failed to save room models")
+    return {"success": True}
 
 
 @app.get("/api/rooms")

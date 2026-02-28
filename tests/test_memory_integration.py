@@ -10,7 +10,7 @@ import pytest
 from agno.models.ollama import Ollama
 
 from mindroom.ai import ai_response
-from mindroom.config import Config
+from mindroom.config.main import Config
 
 if TYPE_CHECKING:
     from pathlib import Path

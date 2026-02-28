@@ -441,7 +441,9 @@ class TestIntegrationWithScheduling:
         # Create a proper config with the research agent configured for the room
         import nio  # noqa: PLC0415
 
-        from mindroom.config import AgentConfig, Config, RouterConfig  # noqa: PLC0415
+        from mindroom.config.agent import AgentConfig  # noqa: PLC0415
+        from mindroom.config.main import Config  # noqa: PLC0415
+        from mindroom.config.models import RouterConfig  # noqa: PLC0415
 
         config = Config(
             agents={

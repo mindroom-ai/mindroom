@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
-from mindroom.config import Config
+from mindroom.config.main import Config
 from mindroom.matrix import client as matrix_client
 from mindroom.matrix import rooms as matrix_rooms
 from tests.conftest import TEST_ACCESS_TOKEN
