@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom.bot import MultiAgentOrchestrator
 from mindroom.config.main import Config
+from mindroom.orchestrator import MultiAgentOrchestrator
 
 
 class TestTeamRoomUpdates:
@@ -69,8 +69,8 @@ class TestTeamRoomUpdates:
                 with (
                     patch("mindroom.topic_generator.generate_room_topic_ai", mock_generate_room_topic_ai),
                     patch("mindroom.matrix.rooms.generate_room_topic_ai", mock_generate_room_topic_ai),
-                    patch("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
-                    patch("mindroom.bot.MultiAgentOrchestrator._setup_rooms_and_memberships", new=AsyncMock()),
+                    patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
+                    patch("mindroom.orchestrator.MultiAgentOrchestrator._setup_rooms_and_memberships", new=AsyncMock()),
                 ):
                     orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
 
@@ -131,8 +131,8 @@ class TestTeamRoomUpdates:
                 with (
                     patch("mindroom.topic_generator.generate_room_topic_ai", mock_generate_room_topic_ai),
                     patch("mindroom.matrix.rooms.generate_room_topic_ai", mock_generate_room_topic_ai),
-                    patch("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
-                    patch("mindroom.bot.MultiAgentOrchestrator._setup_rooms_and_memberships", new=AsyncMock()),
+                    patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
+                    patch("mindroom.orchestrator.MultiAgentOrchestrator._setup_rooms_and_memberships", new=AsyncMock()),
                 ):
                     orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
 
@@ -213,8 +213,8 @@ class TestTeamRoomUpdates:
                 with (
                     patch("mindroom.topic_generator.generate_room_topic_ai", mock_generate_room_topic_ai),
                     patch("mindroom.matrix.rooms.generate_room_topic_ai", mock_generate_room_topic_ai),
-                    patch("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
-                    patch("mindroom.bot.MultiAgentOrchestrator._setup_rooms_and_memberships", new=AsyncMock()),
+                    patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
+                    patch("mindroom.orchestrator.MultiAgentOrchestrator._setup_rooms_and_memberships", new=AsyncMock()),
                 ):
                     orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
 

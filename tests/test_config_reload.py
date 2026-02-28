@@ -8,12 +8,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from mindroom.bot import AgentBot, MultiAgentOrchestrator, _get_changed_agents
+from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.orchestrator import MultiAgentOrchestrator, _get_changed_agents
 
 from .conftest import TEST_PASSWORD
 
@@ -510,8 +511,8 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
     monkeypatch.setattr("mindroom.bot.AgentBot.sync_forever", AsyncMock())
     monkeypatch.setattr("mindroom.bot.TeamBot.start", mock_start)
     monkeypatch.setattr("mindroom.bot.TeamBot.sync_forever", AsyncMock())
-    monkeypatch.setattr("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", AsyncMock())
-    monkeypatch.setattr("mindroom.bot.MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
+    monkeypatch.setattr("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", AsyncMock())
+    monkeypatch.setattr("mindroom.orchestrator.MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
 
     orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
 
