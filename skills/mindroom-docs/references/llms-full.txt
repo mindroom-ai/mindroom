@@ -2778,7 +2778,7 @@ memory:
   backend: file
   auto_flush:
     enabled: true
-    flush_interval_seconds: 180
+    flush_interval_seconds: 1800
     idle_seconds: 120
     max_dirty_age_seconds: 600
     stale_ttl_seconds: 86400

@@ -242,3 +242,8 @@ class TestMemoryConfig:
         assert memory.auto_flush.batch.max_sessions_per_agent_per_cycle == 2
         assert memory.auto_flush.extractor.max_messages_per_flush == 12
         assert memory.auto_flush.extractor.max_chars_per_flush == 9000
+
+    def test_memory_auto_flush_default_interval_is_30_minutes(self) -> None:
+        """Auto-flush should default to a half-hour worker interval."""
+        memory = MemoryConfig()
+        assert memory.auto_flush.flush_interval_seconds == 1800

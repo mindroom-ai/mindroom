@@ -322,7 +322,7 @@ class MemoryAutoFlushConfig(BaseModel):
 
     enabled: bool = Field(default=False, description="Enable background file-memory auto-flush worker")
     flush_interval_seconds: int = Field(
-        default=180,
+        default=1800,
         ge=5,
         description="Background auto-flush loop interval",
     )
