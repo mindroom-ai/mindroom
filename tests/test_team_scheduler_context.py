@@ -9,7 +9,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.bot import AgentBot
-from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.openclaw_context import get_openclaw_tool_context

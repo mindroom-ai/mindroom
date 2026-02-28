@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.bot import MultiAgentOrchestrator, _cancel_sync_task, _stop_entities
-from mindroom.config import Config
+from mindroom.config.main import Config
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
     from agno.knowledge.document import Document
 
-    from .config import Config
+    from .config.main import Config
 
 logger = get_logger(__name__)
 

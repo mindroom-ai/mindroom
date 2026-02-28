@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock, call
 
 import pytest
 
-from mindroom.config import Config, KnowledgeBaseConfig, KnowledgeGitConfig
+from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
+from mindroom.config.main import Config
 from mindroom.knowledge import (
     KnowledgeManager,
     get_knowledge_manager,

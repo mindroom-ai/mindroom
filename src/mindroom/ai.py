@@ -54,7 +54,8 @@ if TYPE_CHECKING:
     from agno.models.base import Model
     from agno.session.agent import AgentSession
 
-    from .config import Config, ModelConfig
+    from .config.main import Config
+    from .config.models import ModelConfig
     from .tool_events import ToolTraceEntry
 
 logger = get_logger(__name__)

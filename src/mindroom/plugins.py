@@ -15,7 +15,7 @@ from .logging_config import get_logger
 from .skills import set_plugin_skill_roots
 
 if TYPE_CHECKING:
-    from .config import Config
+    from .config.main import Config
 
 logger = get_logger(__name__)
 

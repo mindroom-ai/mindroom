@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfoNotFoundError
 
 import pytest
 
-from mindroom.config import Config
+from mindroom.config.main import Config
 from mindroom.scheduling import _format_scheduled_time
 
 

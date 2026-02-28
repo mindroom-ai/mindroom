@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
-from mindroom.config import Config
+from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling import CronSchedule, ScheduledWorkflow, parse_workflow_schedule

@@ -11,7 +11,9 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.commands import Command, CommandType
-from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, VOICE_PREFIX
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser

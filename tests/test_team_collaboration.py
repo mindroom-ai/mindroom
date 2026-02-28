@@ -8,7 +8,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.bot import AgentBot
-from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_utils import get_agents_in_thread
 
@@ -462,7 +464,9 @@ class TestRouterTeamFormation:
 
         import nio  # noqa: PLC0415
 
-        from mindroom.config import AgentConfig, Config, ModelConfig  # noqa: PLC0415
+        from mindroom.config.agent import AgentConfig  # noqa: PLC0415
+        from mindroom.config.main import Config  # noqa: PLC0415
+        from mindroom.config.models import ModelConfig  # noqa: PLC0415
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
 
         config = Config(
@@ -520,7 +524,9 @@ class TestRouterTeamFormation:
 
         import nio  # noqa: PLC0415
 
-        from mindroom.config import AgentConfig, Config, ModelConfig  # noqa: PLC0415
+        from mindroom.config.agent import AgentConfig  # noqa: PLC0415
+        from mindroom.config.main import Config  # noqa: PLC0415
+        from mindroom.config.models import ModelConfig  # noqa: PLC0415
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
 
         config = Config(

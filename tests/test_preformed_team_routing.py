@@ -15,7 +15,9 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot, TeamBot
-from mindroom.config import AgentConfig, Config, RouterConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.main import Config
+from mindroom.config.models import RouterConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 

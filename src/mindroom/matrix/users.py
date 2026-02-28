@@ -7,7 +7,7 @@ from functools import cached_property
 import httpx
 import nio
 
-from mindroom.config import Config
+from mindroom.config.main import Config
 from mindroom.constants import MATRIX_SSL_VERIFY, ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 

@@ -11,7 +11,9 @@ import yaml
 from agno.tools import Toolkit
 
 from mindroom.commands import get_command_help
-from mindroom.config import AgentConfig, AgentLearningMode, Config, TeamConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.main import Config
+from mindroom.config.models import AgentLearningMode  # noqa: TC001
 from mindroom.constants import CONFIG_PATH
 from mindroom.logging_config import get_logger
 from mindroom.tools_metadata import TOOL_METADATA, ToolCategory, ToolStatus

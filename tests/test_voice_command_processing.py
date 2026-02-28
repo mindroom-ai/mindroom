@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.bot import AgentBot
-from mindroom.config import Config
+from mindroom.config.main import Config
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 
 

@@ -32,7 +32,7 @@ from .matrix.message_builder import build_message_content
 from .thread_utils import get_agents_in_thread, get_available_agents_in_room
 
 if TYPE_CHECKING:
-    from .config import Config
+    from .config.main import Config
 
 logger = get_logger(__name__)
 

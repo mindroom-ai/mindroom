@@ -20,7 +20,7 @@ from .matrix.identity import agent_username_localpart
 from .thread_utils import get_available_agents_for_sender
 
 if TYPE_CHECKING:
-    from .config import Config
+    from .config.main import Config
 
 logger = get_logger(__name__)
 VOICE_MENTION_PATTERN = re.compile(

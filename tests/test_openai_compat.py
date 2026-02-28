@@ -21,7 +21,9 @@ from mindroom.api.openai_compat import (
     _extract_content_text,
     _is_error_response,
 )
-from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig, RouterConfig
 
 
 @pytest.fixture
@@ -1963,7 +1965,7 @@ class TestTeamCompletion:
 
     def test_build_team_passes_knowledge_to_member_agents(self) -> None:
         """Team member creation resolves and passes configured knowledge."""
-        from mindroom.config import KnowledgeBaseConfig  # noqa: PLC0415
+        from mindroom.config.knowledge import KnowledgeBaseConfig  # noqa: PLC0415
 
         config = Config(
             agents={
@@ -2015,7 +2017,7 @@ class TestTeamCompletion:
 @pytest.fixture
 def knowledge_config() -> Config:
     """Config with an agent that has knowledge_bases assigned."""
-    from mindroom.config import KnowledgeBaseConfig  # noqa: PLC0415
+    from mindroom.config.knowledge import KnowledgeBaseConfig  # noqa: PLC0415
 
     return Config(
         agents={
@@ -2172,7 +2174,7 @@ class TestKnowledgeIntegration:
         from fastapi import FastAPI  # noqa: PLC0415
 
         from mindroom.api.openai_compat import router  # noqa: PLC0415
-        from mindroom.config import KnowledgeBaseConfig  # noqa: PLC0415
+        from mindroom.config.knowledge import KnowledgeBaseConfig  # noqa: PLC0415
 
         # Add a second knowledge base and assign both to the research agent
         knowledge_config.knowledge_bases["wiki"] = KnowledgeBaseConfig(path="./test_wiki")

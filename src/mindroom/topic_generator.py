@@ -13,7 +13,7 @@ from mindroom.constants import STORAGE_PATH_OBJ
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from mindroom.config import Config
+    from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 

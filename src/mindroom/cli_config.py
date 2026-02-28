@@ -18,7 +18,7 @@ from pydantic import ValidationError
 from rich.console import Console
 from rich.syntax import Syntax
 
-from mindroom.config import Config
+from mindroom.config.main import Config
 from mindroom.constants import (
     CONFIG_PATH,
     OWNER_MATRIX_USER_ID_PLACEHOLDER,

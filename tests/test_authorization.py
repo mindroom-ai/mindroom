@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from mindroom.config import AuthorizationConfig, Config
+from mindroom.config.auth import AuthorizationConfig
+from mindroom.config.main import Config
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.matrix.state import MatrixRoom, MatrixState
 from mindroom.thread_utils import (

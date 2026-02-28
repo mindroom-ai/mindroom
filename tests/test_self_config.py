@@ -7,7 +7,10 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from mindroom.agents import create_agent
-from mindroom.config import AgentConfig, Config, DefaultsConfig, KnowledgeBaseConfig, ModelConfig
+from mindroom.config.agent import AgentConfig
+from mindroom.config.knowledge import KnowledgeBaseConfig
+from mindroom.config.main import Config
+from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools.self_config import SelfConfigTools
 
 _DEFAULT_MODELS = {"default": ModelConfig(provider="openai", id="gpt-4o")}

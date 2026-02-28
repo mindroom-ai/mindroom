@@ -15,7 +15,9 @@ import pytest
 from agno.models.ollama import Ollama
 
 from mindroom.bot import AgentBot, MessageContext
-from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
 
 from .conftest import TEST_PASSWORD
@@ -561,7 +563,7 @@ class TestRoutingRegression:
     @patch("mindroom.teams.Team.arun")
     @patch("mindroom.bot.ai_response")
     @patch("mindroom.teams.get_model_instance")
-    @patch("mindroom.config.Config.from_yaml")
+    @patch("mindroom.config.main.Config.from_yaml")
     async def test_multiple_mentions_each_responds_once(
         self,
         mock_from_yaml: MagicMock,

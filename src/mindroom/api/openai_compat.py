@@ -35,7 +35,7 @@ from mindroom.ai import (
     get_model_instance,
     stream_agent_response,
 )
-from mindroom.config import Config
+from mindroom.config.main import Config
 from mindroom.constants import CONFIG_PATH, ROUTER_AGENT_NAME, STORAGE_PATH_OBJ
 from mindroom.knowledge import get_knowledge_manager, initialize_knowledge_managers
 from mindroom.knowledge_utils import resolve_agent_knowledge

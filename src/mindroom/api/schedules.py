@@ -27,7 +27,7 @@ from mindroom.scheduling import (
 if TYPE_CHECKING:
     from nio import AsyncClient
 
-    from mindroom.config import Config
+    from mindroom.config.main import Config
 
 router = APIRouter(prefix="/api/schedules", tags=["schedules"])
 logger = get_logger(__name__)

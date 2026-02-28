@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from mindroom.config import Config
+from mindroom.config.main import Config
 from mindroom.thread_utils import is_authorized_sender
 
 
