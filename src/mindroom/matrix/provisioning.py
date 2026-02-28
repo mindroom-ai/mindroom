@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 _PAIR_CODE_RE = re.compile(r"^[A-Z0-9]{4}-[A-Z0-9]{4}$")
-_MATRIX_USER_ID_RE = re.compile(r"^@[^:\s]+:[^:\s]+$")
+_MATRIX_USER_ID_RE = re.compile(r"^@[^:\s]+:[^\s]+$")
 _LEGACY_OWNER_PLACEHOLDER = "__PLACEHOLDER__"
 
 
@@ -138,7 +138,6 @@ def persist_local_provisioning_env(
     provisioning_url: str,
     client_id: str,
     client_secret: str,
-    owner_user_id: str | None = None,
     config_path: str | Path = CONFIG_PATH,
 ) -> Path:
     """Write local provisioning credentials to .env next to the active config file."""
@@ -151,8 +150,6 @@ def persist_local_provisioning_env(
         "MINDROOM_LOCAL_CLIENT_ID": client_id,
         "MINDROOM_LOCAL_CLIENT_SECRET": client_secret,
     }
-    if owner_user_id:
-        updates["MINDROOM_OWNER_USER_ID"] = owner_user_id
     for key, value in updates.items():
         lines = _upsert_env_var(lines, key, value)
 

@@ -304,7 +304,6 @@ def connect(
             provisioning_url=resolved_provisioning_url,
             client_id=credentials.client_id,
             client_secret=credentials.client_secret,
-            owner_user_id=credentials.owner_user_id,
             config_path=CONFIG_PATH,
         )
         console.print("[green]Paired successfully.[/green]")
@@ -796,7 +795,12 @@ def _print_pairing_success_with_exports(
     console.print(f"  export MINDROOM_LOCAL_CLIENT_ID={client_id}")
     console.print(f"  export MINDROOM_LOCAL_CLIENT_SECRET={client_secret}")
     if owner_user_id:
-        console.print(f"  export MINDROOM_OWNER_USER_ID={owner_user_id}")
+        console.print(
+            f"\nOwner user ID from pairing: {owner_user_id} (not persisted in --no-persist-env mode).",
+        )
+        console.print(
+            "Update your config.yaml owner placeholder(s) manually if you rely on authorization defaults.",
+        )
     console.print("\nThen run:")
     console.print("  uv run mindroom run")
 
