@@ -789,11 +789,6 @@ class AgentBot:
         # root event so routed relay messages can forward original attachments.
         context = dispatch.context
         thread_images = await self._fetch_thread_images(room.room_id, context.thread_id) if context.thread_id else []
-        thread_audio = (
-            await self._fetch_thread_audio(room.room_id, context.thread_id)
-            if context.thread_id and is_voice_raw_audio_fallback(event.source)
-            else []
-        )
         thread_attachment_ids = (
             await resolve_thread_attachment_ids(
                 self.client,
@@ -808,6 +803,15 @@ class AgentBot:
         resolved_attachment_ids, attachment_audio, attachment_files, attachment_videos = resolve_attachment_media(
             self.storage_path,
             attachment_ids,
+            room_id=room.room_id,
+        )
+        # Fetch thread-root audio only when voice fallback is flagged AND no
+        # attachment already carries the same recording (avoids duplicate audio).
+        is_fallback = is_voice_raw_audio_fallback(event.source)
+        thread_audio = (
+            await self._fetch_thread_audio(room.room_id, context.thread_id)
+            if context.thread_id and is_fallback and not attachment_audio
+            else []
         )
         merged_audio = [*thread_audio, *attachment_audio]
         prompt_text = append_attachment_ids_prompt(event.body, resolved_attachment_ids)
@@ -1080,6 +1084,7 @@ class AgentBot:
         resolved_attachment_ids, attachment_audio, attachment_files, attachment_videos = resolve_attachment_media(
             self.storage_path,
             [attachment_record.attachment_id],
+            room_id=room.room_id,
         )
 
         action = await self._resolve_dispatch_action(

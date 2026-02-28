@@ -534,7 +534,7 @@ async def test_openclaw_compat_message_send_supports_attachment_only(tmp_path: P
         openclaw_tool_context(ctx),
         patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")),
     ):
-        payload = json.loads(await tool.message(action="send", attachments=[str(sample_file)]))
+        payload = json.loads(await tool.message(action="send", attachments=[str(sample_file)], allow_local_paths=True))
 
     assert payload["status"] == "ok"
     assert payload["event_id"] == "$file_evt"

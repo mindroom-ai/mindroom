@@ -44,6 +44,8 @@ def _resolve_context_attachment_path(
 def _resolve_attachment_reference(
     context: OpenClawToolContext,
     raw_reference: object,
+    *,
+    allow_local_paths: bool,
 ) -> tuple[Path | None, str | None, str | None]:
     if not isinstance(raw_reference, str):
         return None, None, "attachments entries must be strings."
@@ -54,9 +56,10 @@ def _resolve_attachment_reference(
 
     if reference.startswith("att_"):
         attachment_path, error = _resolve_context_attachment_path(context, reference)
-        if error is not None:
-            return None, None, error
-        return attachment_path, reference, None
+        return (None, None, error) if error is not None else (attachment_path, reference, None)
+
+    if not allow_local_paths:
+        return None, None, "Local file paths are disabled. Use attachment IDs or set allow_local_paths=true."
 
     path = Path(reference).expanduser().resolve()
     if not path.is_file():
@@ -67,6 +70,8 @@ def _resolve_attachment_reference(
 def resolve_attachment_references(
     context: OpenClawToolContext,
     attachments: list[str] | None,
+    *,
+    allow_local_paths: bool = False,
 ) -> tuple[list[Path], list[str], str | None]:
     """Resolve context attachment IDs or file paths into local files."""
     if not attachments:
@@ -75,7 +80,11 @@ def resolve_attachment_references(
     resolved_paths: list[Path] = []
     resolved_attachment_ids: list[str] = []
     for raw_reference in attachments:
-        path, attachment_id, error = _resolve_attachment_reference(context, raw_reference)
+        path, attachment_id, error = _resolve_attachment_reference(
+            context,
+            raw_reference,
+            allow_local_paths=allow_local_paths,
+        )
         if error is not None:
             return [], [], error
         if path is None:
@@ -171,6 +180,7 @@ class AttachmentTools(Toolkit):
         attachments: list[str] | None = None,
         room_id: str | None = None,
         thread_id: str | None = None,
+        allow_local_paths: bool = False,
     ) -> str:
         """Send attachment IDs or local file paths to a Matrix room/thread."""
         context = get_openclaw_tool_context()
@@ -183,6 +193,7 @@ class AttachmentTools(Toolkit):
         attachment_paths, resolved_attachment_ids, attachment_error = resolve_attachment_references(
             context,
             attachments,
+            allow_local_paths=allow_local_paths,
         )
         if attachment_error is not None:
             return attachment_tool_payload("error", message=attachment_error)

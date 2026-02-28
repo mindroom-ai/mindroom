@@ -353,6 +353,26 @@ def resolve_attachments(storage_path: Path, attachment_ids: list[str]) -> list[A
     return resolved
 
 
+def filter_attachments_for_context(
+    attachment_records: list[AttachmentRecord],
+    *,
+    room_id: str,
+) -> tuple[list[AttachmentRecord], list[str]]:
+    """Keep only attachments registered for *room_id*.
+
+    Attachments without a stored ``room_id`` (e.g. legacy records) are
+    allowed through so existing data doesn't silently break.
+    """
+    allowed_records: list[AttachmentRecord] = []
+    rejected_attachment_ids: list[str] = []
+    for record in attachment_records:
+        if record.room_id is not None and record.room_id != room_id:
+            rejected_attachment_ids.append(record.attachment_id)
+        else:
+            allowed_records.append(record)
+    return allowed_records, rejected_attachment_ids
+
+
 async def resolve_thread_attachment_ids(
     client: nio.AsyncClient,
     storage_path: Path,
@@ -375,6 +395,16 @@ async def resolve_thread_attachment_ids(
         nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
     ):
         return []
+
+    existing_attachment_id = attachment_id_for_event(event.event_id)
+    existing_record = load_attachment(storage_path, existing_attachment_id)
+    if (
+        existing_record is not None
+        and existing_record.room_id == room_id
+        and existing_record.thread_id == thread_id
+        and existing_record.local_path.is_file()
+    ):
+        return [existing_record.attachment_id]
 
     record = await register_file_or_video_attachment(
         client,
