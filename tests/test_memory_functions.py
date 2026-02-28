@@ -840,6 +840,37 @@ class TestMemoryFunctions:
         assert allowed["memory"] == "Helper private memory"
 
     @pytest.mark.asyncio
+    async def test_team_context_resolves_file_backend_from_agent_overrides(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Team-context reads should use file backend when all members override to file."""
+        config.memory.backend = "mem0"
+        config.memory.file.path = str(storage_path / "memory-files")
+        config.memory.team_reads_member_memory = True
+        config.agents["calculator"].memory_backend = "file"
+        config.agents["general"].memory_backend = "file"
+
+        await add_agent_memory("Calculator private memory", "calculator", storage_path, config)
+        calculator_memories = await list_all_agent_memories("calculator", storage_path, config)
+        calculator_memory_id = calculator_memories[0]["id"]
+
+        with patch(
+            "mindroom.memory.functions.create_memory_instance",
+            side_effect=AssertionError("Mem0 should not be used for file-backed team context"),
+        ):
+            allowed = await get_agent_memory(
+                calculator_memory_id,
+                ["calculator", "general"],
+                storage_path,
+                config,
+            )
+
+        assert allowed is not None
+        assert allowed["memory"] == "Calculator private memory"
+
+    @pytest.mark.asyncio
     async def test_file_backend_rejects_path_traversal_memory_id(self, storage_path: Path, config: Config) -> None:
         """Path-based IDs should not be able to escape the scope directory."""
         config.memory.backend = "file"

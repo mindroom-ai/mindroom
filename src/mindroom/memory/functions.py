@@ -65,7 +65,7 @@ def _use_file_memory_backend(config: Config, *, agent_name: str | None = None) -
 def _caller_uses_file_memory_backend(config: Config, caller_context: str | list[str]) -> bool:
     if isinstance(caller_context, str):
         return _use_file_memory_backend(config, agent_name=caller_context)
-    return _use_file_memory_backend(config)
+    return _team_uses_file_memory_backend(config, caller_context)
 
 
 def _team_uses_file_memory_backend(config: Config, agent_names: list[str]) -> bool:
