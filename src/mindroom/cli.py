@@ -295,9 +295,14 @@ def connect(
             matrix_ssl_verify=MATRIX_SSL_VERIFY,
             post_request=httpx.post,
         )
-    except ValueError as exc:
+    except (TypeError, ValueError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from None
+
+    if credentials.owner_user_id_invalid:
+        console.print(
+            "[yellow]Warning:[/yellow] Pairing response included malformed owner_user_id; skipping config owner autofill.",
+        )
 
     if persist_env:
         env_path = provisioning.persist_local_provisioning_env(

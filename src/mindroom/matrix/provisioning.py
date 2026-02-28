@@ -82,6 +82,7 @@ class ProvisioningPairCompleteResult:
     client_id: str
     client_secret: str
     owner_user_id: str | None = None
+    owner_user_id_invalid: bool = False
 
 
 def is_valid_pair_code(pair_code: str) -> bool:
@@ -126,10 +127,17 @@ def complete_local_pairing(
         msg = "Provisioning service returned unexpected response."
         raise TypeError(msg)
 
+    raw_owner_user_id = data.get("owner_user_id")
+    parsed_owner_user_id = _parse_owner_user_id(raw_owner_user_id)
+    owner_user_id_invalid = (
+        isinstance(raw_owner_user_id, str) and bool(raw_owner_user_id.strip()) and parsed_owner_user_id is None
+    )
+
     return ProvisioningPairCompleteResult(
         client_id=_required_non_empty_string(data, "client_id"),
         client_secret=_required_non_empty_string(data, "client_secret"),
-        owner_user_id=_parse_owner_user_id(data.get("owner_user_id")),
+        owner_user_id=parsed_owner_user_id,
+        owner_user_id_invalid=owner_user_id_invalid,
     )
 
 

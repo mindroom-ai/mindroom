@@ -821,25 +821,21 @@ class TestConnect:
         assert "Owner user ID from pairing: @alice:mindroom.chat" in result.output
         assert "export MINDROOM_OWNER_USER_ID=" not in result.output
 
-    def test_connect_accepts_owner_user_id_with_server_port(
+    def test_connect_warns_when_owner_user_id_is_malformed(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Owner MXID with explicit server port should be accepted and applied."""
+        """Malformed owner_user_id should warn and skip placeholder replacement."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models: {}\nagents: {}\nrouter:\n  model: default\n"
             "authorization:\n"
             "  default_room_access: false\n"
             "  global_users:\n"
-            f"    - {_OWNER_PLACEHOLDER}\n"
-            "  agent_reply_permissions:\n"
-            '    "*":\n'
-            f"      - {_OWNER_PLACEHOLDER}\n",
+            f"    - {_OWNER_PLACEHOLDER}\n",
         )
         monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
-        monkeypatch.setattr("mindroom.cli.socket.gethostname", lambda: "devbox")
         monkeypatch.setattr(
             "mindroom.cli.httpx.post",
             lambda *_a, **_kw: httpx.Response(
@@ -847,7 +843,7 @@ class TestConnect:
                 json={
                     "client_id": "client-123",
                     "client_secret": "secret-123",
-                    "owner_user_id": "@alice:mindroom.chat:8448",
+                    "owner_user_id": "not-a-mxid",
                 },
             ),
         )
@@ -864,9 +860,9 @@ class TestConnect:
         )
 
         assert result.exit_code == 0
+        assert "malformed owner_user_id" in _strip_ansi(result.output)
         updated_config = cfg.read_text()
-        assert _OWNER_PLACEHOLDER not in updated_config
-        assert "@alice:mindroom.chat:8448" in updated_config
+        assert _OWNER_PLACEHOLDER in updated_config
 
     def test_connect_passes_matrix_ssl_verify_to_httpx(
         self,
