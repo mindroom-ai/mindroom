@@ -362,6 +362,34 @@ def test_config_rejects_duplicate_agent_knowledge_base_assignment() -> None:
         )
 
 
+def test_config_resolves_per_agent_memory_backend_override() -> None:
+    """Per-agent memory backend overrides should take precedence over global defaults."""
+    config = Config(
+        agents={
+            "general": AgentConfig(display_name="General"),
+            "writer": AgentConfig(display_name="Writer", memory_backend="file"),
+        },
+        memory={"backend": "mem0"},
+    )
+
+    assert config.get_agent_memory_backend("general") == "mem0"
+    assert config.get_agent_memory_backend("writer") == "file"
+
+
+def test_config_reports_mixed_memory_backend_usage() -> None:
+    """Config helper methods should report effective mixed backend usage."""
+    config = Config(
+        agents={
+            "general": AgentConfig(display_name="General", memory_backend="file"),
+            "writer": AgentConfig(display_name="Writer", memory_backend="mem0"),
+        },
+        memory={"backend": "mem0"},
+    )
+
+    assert config.uses_file_memory() is True
+    assert config.uses_mem0_memory() is True
+
+
 def test_config_accepts_valid_agent_knowledge_base_assignment() -> None:
     """Agent knowledge base assignment is valid when the base is configured."""
     config = Config(

@@ -1,6 +1,7 @@
 import type { PROVIDERS } from '@/lib/providers';
 
 export type ProviderType = keyof typeof PROVIDERS;
+export type MemoryBackend = 'mem0' | 'file';
 
 export interface ModelConfig {
   provider: ProviderType;
@@ -10,7 +11,7 @@ export interface ModelConfig {
 }
 
 export interface MemoryConfig {
-  backend?: 'mem0' | 'file';
+  backend?: MemoryBackend;
   team_reads_member_memory?: boolean;
   embedder: {
     provider: string;
@@ -84,6 +85,7 @@ export interface Agent {
   markdown?: boolean; // Per-agent markdown override
   learning?: boolean; // Defaults to true when omitted
   learning_mode?: LearningMode; // Defaults to always when omitted
+  memory_backend?: MemoryBackend; // Per-agent memory backend override (inherits memory.backend when omitted)
   model?: string; // Reference to a model in the models section
   show_tool_calls?: boolean; // Show tool call details inline in responses (defaults to true)
   sandbox_tools?: string[]; // Tool names to execute through sandbox proxy (overrides defaults)

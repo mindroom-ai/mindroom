@@ -56,8 +56,21 @@ _FILE_MEMORY_ENTRY_PATTERN = re.compile(r"^- \[id=(?P<id>[^\]]+)\]\s*(?P<memory>
 _FILE_MEMORY_PATH_ID_PATTERN = re.compile(r"^file:(?P<path>[^:]+):(?P<line>\d+)$")
 
 
-def _use_file_memory_backend(config: Config) -> bool:
-    return config.memory.backend == "file"
+def _use_file_memory_backend(config: Config, *, agent_name: str | None = None) -> bool:
+    if agent_name is None:
+        return config.memory.backend == "file"
+    return config.get_agent_memory_backend(agent_name) == "file"
+
+
+def _caller_uses_file_memory_backend(config: Config, caller_context: str | list[str]) -> bool:
+    if isinstance(caller_context, str):
+        return _use_file_memory_backend(config, agent_name=caller_context)
+    return _team_uses_file_memory_backend(config, caller_context)
+
+
+def _team_uses_file_memory_backend(config: Config, agent_names: list[str]) -> bool:
+    """Return whether all team members resolve to file-backed memory."""
+    return all(_use_file_memory_backend(config, agent_name=agent_name) for agent_name in agent_names)
 
 
 def _file_memory_root(storage_path: Path, config: Config) -> Path:
@@ -433,7 +446,7 @@ async def add_agent_memory(
         metadata: Optional metadata to store with memory
 
     """
-    if _use_file_memory_backend(config):
+    if _use_file_memory_backend(config, agent_name=agent_name):
         _append_scope_memory_entry(f"agent_{agent_name}", content, storage_path, config)
         logger.info("File memory added", agent=agent_name)
         return
@@ -521,7 +534,7 @@ async def search_agent_memories(
         List of relevant memories from both individual and team contexts
 
     """
-    if _use_file_memory_backend(config):
+    if _use_file_memory_backend(config, agent_name=agent_name):
         results = _search_scope_memory_entries(f"agent_{agent_name}", query, storage_path, config, limit=limit)
         existing_memories = {r.get("memory", "") for r in results}
         for team_id in get_team_ids_for_agent(agent_name, config):
@@ -579,7 +592,7 @@ async def list_all_agent_memories(
         List of all agent memories
 
     """
-    if _use_file_memory_backend(config):
+    if _use_file_memory_backend(config, agent_name=agent_name):
         results, _ = _load_scope_id_entries(f"agent_{agent_name}", storage_path, config)
         return results[:limit]
 
@@ -606,7 +619,7 @@ async def get_agent_memory(
         The memory dict, or None if not found
 
     """
-    if _use_file_memory_backend(config):
+    if _caller_uses_file_memory_backend(config, caller_context):
         for scope_user_id in sorted(_get_allowed_memory_user_ids(caller_context, config)):
             result = _get_scope_memory_by_id(scope_user_id, memory_id, storage_path, config)
             if result is not None:
@@ -634,7 +647,7 @@ async def update_agent_memory(
         config: Application configuration
 
     """
-    if _use_file_memory_backend(config):
+    if _caller_uses_file_memory_backend(config, caller_context):
         for scope_user_id in sorted(_get_allowed_memory_user_ids(caller_context, config)):
             if _replace_scope_memory_entry(scope_user_id, memory_id, content, storage_path, config):
                 logger.info("File memory updated", memory_id=memory_id, scope=scope_user_id)
@@ -664,7 +677,7 @@ async def delete_agent_memory(
         config: Application configuration
 
     """
-    if _use_file_memory_backend(config):
+    if _caller_uses_file_memory_backend(config, caller_context):
         for scope_user_id in sorted(_get_allowed_memory_user_ids(caller_context, config)):
             if _replace_scope_memory_entry(scope_user_id, memory_id, None, storage_path, config):
                 logger.info("File memory deleted", memory_id=memory_id, scope=scope_user_id)
@@ -699,7 +712,7 @@ async def add_room_memory(
 
     """
     safe_room_id = room_id.replace(":", "_").replace("!", "")
-    if _use_file_memory_backend(config):
+    if _use_file_memory_backend(config, agent_name=agent_name):
         _append_scope_memory_entry(f"room_{safe_room_id}", content, storage_path, config)
         logger.debug("File room memory added", room_id=room_id)
         return
@@ -723,6 +736,7 @@ async def search_room_memories(
     room_id: str,
     storage_path: Path,
     config: Config,
+    agent_name: str | None = None,
     limit: int = 3,
 ) -> list[MemoryResult]:
     """Search room memories.
@@ -732,6 +746,7 @@ async def search_room_memories(
         room_id: Room ID
         storage_path: Storage path for memory
         config: Application configuration
+        agent_name: Optional agent to resolve per-agent memory backend
         limit: Maximum number of results
 
     Returns:
@@ -739,7 +754,7 @@ async def search_room_memories(
 
     """
     safe_room_id = room_id.replace(":", "_").replace("!", "")
-    if _use_file_memory_backend(config):
+    if _use_file_memory_backend(config, agent_name=agent_name):
         return _search_scope_memory_entries(f"room_{safe_room_id}", query, storage_path, config, limit=limit)
 
     memory = await create_memory_instance(storage_path, config)
@@ -797,7 +812,7 @@ async def build_memory_enhanced_prompt(
 
     """
     logger.debug("Building enhanced prompt", agent=agent_name)
-    if _use_file_memory_backend(config):
+    if _use_file_memory_backend(config, agent_name=agent_name):
         return await _build_file_memory_enhanced_prompt(prompt, agent_name, storage_path, config, room_id)
 
     enhanced_prompt = prompt
@@ -808,7 +823,7 @@ async def build_memory_enhanced_prompt(
         logger.debug("Agent memories added", count=len(agent_memories))
 
     if room_id:
-        room_memories = await search_room_memories(prompt, room_id, storage_path, config)
+        room_memories = await search_room_memories(prompt, room_id, storage_path, config, agent_name=agent_name)
         if room_memories:
             room_context = format_memories_as_context(room_memories, "room")
             enhanced_prompt = f"{room_context}\n\n{enhanced_prompt}"
@@ -840,7 +855,7 @@ async def _build_file_memory_enhanced_prompt(
         if room_entrypoint:
             context_chunks.append(f"[File memory entrypoint (room)]\n{room_entrypoint}")
 
-        room_memories = await search_room_memories(prompt, room_id, storage_path, config)
+        room_memories = await search_room_memories(prompt, room_id, storage_path, config, agent_name=agent_name)
         if room_memories:
             context_chunks.append(format_memories_as_context(room_memories, "room file"))
 
@@ -1003,7 +1018,13 @@ async def store_conversation_memory(
 
     messages = _build_memory_messages(prompt, thread_history, user_id)
 
-    if _use_file_memory_backend(config):
+    use_file_backend = (
+        _use_file_memory_backend(config, agent_name=agent_name)
+        if isinstance(agent_name, str)
+        else _team_uses_file_memory_backend(config, agent_name)
+    )
+
+    if use_file_backend:
         _store_file_conversation_memory(prompt, agent_name, storage_path, config, room_id)
         return
 

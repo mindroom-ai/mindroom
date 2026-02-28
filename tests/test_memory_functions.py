@@ -513,6 +513,55 @@ class TestMemoryFunctions:
             assert metadata["team_members"] == team_agents  # Original order preserved
 
     @pytest.mark.asyncio
+    async def test_store_conversation_memory_respects_agent_backend_override(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Conversation storage should resolve backend from per-agent override."""
+        config.memory.backend = "file"
+        config.agents["calculator"].memory_backend = "mem0"
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory) as mock_create:
+            await store_conversation_memory(
+                "What is 2+2?",
+                "calculator",
+                storage_path,
+                "session123",
+                config,
+            )
+
+        mock_create.assert_called_once_with(storage_path, config)
+        mock_memory.add.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_store_conversation_memory_team_uses_mem0_when_any_member_overrides(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Team conversation storage should use Mem0 when any team member resolves to Mem0."""
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "memory-files")
+        config.agents["calculator"].memory_backend = "mem0"
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory) as mock_create:
+            await store_conversation_memory(
+                "Analyze our quarterly metrics",
+                ["calculator", "finance"],
+                storage_path,
+                "session-team",
+                config,
+            )
+
+        mock_create.assert_called_once_with(storage_path, config)
+        mock_memory.add.assert_called_once()
+        team_memory_file = storage_path / "memory-files" / "team_calculator+finance" / "MEMORY.md"
+        assert not team_memory_file.exists()
+
+    @pytest.mark.asyncio
     async def test_search_agent_memories_with_teams(
         self,
         mock_memory: AsyncMock,
@@ -583,6 +632,43 @@ class TestMemoryFunctions:
         assert "User prefers concise responses" in content
 
     @pytest.mark.asyncio
+    async def test_agent_memory_backend_override_to_file_uses_file_storage(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Per-agent file override should use file storage even when global backend is mem0."""
+        config.memory.backend = "mem0"
+        config.memory.file.path = str(storage_path / "memory-files")
+        config.agents["general"].memory_backend = "file"
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory) as mock_create:
+            await add_agent_memory("Remember this", "general", storage_path, config)
+
+        mock_create.assert_not_called()
+        memory_file = storage_path / "memory-files" / "agent_general" / "MEMORY.md"
+        assert memory_file.exists()
+        assert "Remember this" in memory_file.read_text(encoding="utf-8")
+
+    @pytest.mark.asyncio
+    async def test_agent_memory_backend_override_to_mem0_uses_mem0_storage(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Per-agent mem0 override should use Mem0 even when global backend is file."""
+        config.memory.backend = "file"
+        config.agents["general"].memory_backend = "mem0"
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory) as mock_create:
+            await add_agent_memory("Remember this", "general", storage_path, config)
+
+        mock_create.assert_called_once_with(storage_path, config)
+        mock_memory.add.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_file_backend_prompt_includes_entrypoint(self, storage_path: Path, config: Config) -> None:
         """File backend should include MEMORY.md entrypoint context in the prompt."""
         config.memory.backend = "file"
@@ -599,6 +685,39 @@ class TestMemoryFunctions:
         assert "[File memory entrypoint (agent)]" in enhanced
         assert "Project uses FastAPI." in enhanced
         assert "How do we build the API?" in enhanced
+
+    @pytest.mark.asyncio
+    async def test_file_backend_room_prompt_search_uses_agent_override(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Room memory search in file prompt path should honor per-agent file overrides."""
+        config.memory.backend = "mem0"
+        config.memory.file.path = str(storage_path / "memory-files")
+        config.agents["general"].memory_backend = "file"
+
+        await add_room_memory(
+            "Room memory note",
+            "!room:server",
+            storage_path,
+            config,
+            agent_name="general",
+        )
+
+        with patch(
+            "mindroom.memory.functions.create_memory_instance",
+            side_effect=AssertionError("Mem0 should not be used for file-backed agent prompt building"),
+        ):
+            enhanced = await build_memory_enhanced_prompt(
+                "Room memory note",
+                "general",
+                storage_path,
+                config,
+                room_id="!room:server",
+            )
+
+        assert "Room memory note" in enhanced
 
     @pytest.mark.asyncio
     async def test_file_backend_search_skips_structured_line_duplicates(
@@ -719,6 +838,37 @@ class TestMemoryFunctions:
         allowed = await get_agent_memory(helper_memory_id, ["helper", "test_agent"], storage_path, config)
         assert allowed is not None
         assert allowed["memory"] == "Helper private memory"
+
+    @pytest.mark.asyncio
+    async def test_team_context_resolves_file_backend_from_agent_overrides(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Team-context reads should use file backend when all members override to file."""
+        config.memory.backend = "mem0"
+        config.memory.file.path = str(storage_path / "memory-files")
+        config.memory.team_reads_member_memory = True
+        config.agents["calculator"].memory_backend = "file"
+        config.agents["general"].memory_backend = "file"
+
+        await add_agent_memory("Calculator private memory", "calculator", storage_path, config)
+        calculator_memories = await list_all_agent_memories("calculator", storage_path, config)
+        calculator_memory_id = calculator_memories[0]["id"]
+
+        with patch(
+            "mindroom.memory.functions.create_memory_instance",
+            side_effect=AssertionError("Mem0 should not be used for file-backed team context"),
+        ):
+            allowed = await get_agent_memory(
+                calculator_memory_id,
+                ["calculator", "general"],
+                storage_path,
+                config,
+            )
+
+        assert allowed is not None
+        assert allowed["memory"] == "Calculator private memory"
 
     @pytest.mark.asyncio
     async def test_file_backend_rejects_path_traversal_memory_id(self, storage_path: Path, config: Config) -> None:

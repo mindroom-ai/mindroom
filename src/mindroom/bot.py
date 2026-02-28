@@ -74,6 +74,7 @@ from .matrix.users import (
 from .memory import store_conversation_memory
 from .memory.auto_flush import (
     MemoryAutoFlushWorker,
+    auto_flush_enabled,
     mark_auto_flush_dirty_session,
     reprioritize_auto_flush_sessions,
 )
@@ -2014,7 +2015,7 @@ class AgentBot:
                 room_id=room_id,
                 thread_id=thread_id,
             )
-            if self.config.memory.backend != "file":
+            if self.config.get_agent_memory_backend(agent_name) != "file":
                 create_background_task(
                     store_conversation_memory(
                         prompt,
@@ -2256,7 +2257,7 @@ class AgentBot:
                 room_id=room_id,
                 thread_id=thread_id,
             )
-            if self.config.memory.backend != "file":
+            if self.config.get_agent_memory_backend(self.agent_name) != "file":
                 create_background_task(
                     store_conversation_memory(
                         prompt,
@@ -2798,21 +2799,20 @@ class TeamBot(AgentBot):
         session_id = create_session_id(room_id, thread_id)
         # Convert MatrixID list to agent names for memory storage
         agent_names = [mid.agent_name(self.config) or mid.username for mid in self.team_agents]
-        if self.config.memory.backend != "file":
-            create_background_task(
-                store_conversation_memory(
-                    prompt,
-                    agent_names,  # Pass list of agent names for team storage
-                    self.storage_path,
-                    session_id,
-                    self.config,
-                    room_id,
-                    thread_history,
-                    user_id,
-                ),
-                name=f"memory_save_team_{session_id}",
-            )
-            self.logger.info(f"Storing memory for team: {agent_names}")
+        create_background_task(
+            store_conversation_memory(
+                prompt,
+                agent_names,  # Pass list of agent names for team storage
+                self.storage_path,
+                session_id,
+                self.config,
+                room_id,
+                thread_history,
+                user_id,
+            ),
+            name=f"memory_save_team_{session_id}",
+        )
+        self.logger.info(f"Storing memory for team: {agent_names}")
 
         # Use the shared team response helper
         await self._generate_team_response_helper(
@@ -2865,7 +2865,7 @@ class MultiAgentOrchestrator:
             await self._stop_memory_auto_flush_worker()
             return
 
-        enabled = config.memory.backend == "file" and config.memory.auto_flush.enabled
+        enabled = auto_flush_enabled(config)
         if not enabled:
             await self._stop_memory_auto_flush_worker()
             return

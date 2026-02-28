@@ -51,6 +51,10 @@ class AgentConfig(BaseModel):
         description="Learning mode for Agno Learning: always (automatic) or agentic (tool-driven)",
     )
     model: str = Field(default="default", description="Model name")
+    memory_backend: MemoryBackend | None = Field(
+        default=None,
+        description="Memory backend override for this agent ('mem0' or 'file'); inherits memory.backend when omitted",
+    )
     knowledge_bases: list[str] = Field(
         default_factory=list,
         description="Knowledge base IDs assigned to this agent",
@@ -977,6 +981,27 @@ class Config(BaseModel):
                 if default_tool_name not in tool_names:
                     tool_names.append(default_tool_name)
         return tool_names
+
+    def get_agent_memory_backend(self, agent_name: str) -> MemoryBackend:
+        """Get effective memory backend for one agent."""
+        agent_config = self.agents.get(agent_name)
+        if agent_config is None:
+            return self.memory.backend
+        if agent_config.memory_backend is not None:
+            return agent_config.memory_backend
+        return self.memory.backend
+
+    def uses_file_memory(self) -> bool:
+        """Return whether any configured agent uses file-backed memory."""
+        if not self.agents:
+            return self.memory.backend == "file"
+        return any(self.get_agent_memory_backend(agent_name) == "file" for agent_name in self.agents)
+
+    def uses_mem0_memory(self) -> bool:
+        """Return whether any configured agent uses Mem0-backed memory."""
+        if not self.agents:
+            return self.memory.backend == "mem0"
+        return any(self.get_agent_memory_backend(agent_name) == "mem0" for agent_name in self.agents)
 
     def get_all_configured_rooms(self) -> set[str]:
         """Extract all room aliases configured for agents and teams.
