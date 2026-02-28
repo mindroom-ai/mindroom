@@ -879,7 +879,12 @@ async def fetch_thread_history(
                 messages_by_event_id=messages_by_event_id,
             )
 
-        # Once the thread root is seen, all older pages are outside this thread.
+        # Continue paginating until we either find the thread root (oldest
+        # possible thread event) or run out of room history pages.
+        #
+        # We intentionally do NOT stop on a page that has zero thread events:
+        # in busy rooms, unrelated events can fill a page and hide older thread
+        # messages in subsequent pages.
         if root_message_found or not response.end:
             break
         from_token = response.end
