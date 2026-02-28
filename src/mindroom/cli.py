@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mindroom.config import Config
+from mindroom import cli_connect
 from mindroom.cli_config import (
     _check_env_keys,
     _format_validation_errors,
@@ -66,7 +67,6 @@ app.add_typer(config_app, name="config")
 
 _CINNY_DEFAULT_IMAGE = "ghcr.io/mindroom-ai/mindroom-cinny:latest"
 _CINNY_DEFAULT_CONTAINER = "mindroom-cinny-local"
-_PAIR_CODE_RE = re.compile(r"^[A-Z0-9]{4}-[A-Z0-9]{4}$")
 
 
 @app.command()
@@ -274,7 +274,7 @@ def connect(
 ) -> None:
     """Pair this local MindRoom install with the hosted provisioning service."""
     normalized_pair_code = pair_code.strip().upper()
-    if not _PAIR_CODE_RE.fullmatch(normalized_pair_code):
+    if not cli_connect.is_valid_pair_code(normalized_pair_code):
         console.print("[red]Error:[/red] Invalid pair code format. Expected ABCD-EFGH.")
         raise typer.Exit(1)
 
@@ -285,58 +285,51 @@ def connect(
         console.print("[red]Error:[/red] Invalid provisioning URL.")
         raise typer.Exit(1)
 
-    payload = {
-        "pair_code": normalized_pair_code,
-        "client_name": client_name.strip() or socket.gethostname(),
-        "client_pubkey_or_fingerprint": _local_client_fingerprint(),
-    }
-    endpoint = f"{resolved_provisioning_url.rstrip('/')}/v1/local-mindroom/pair/complete"
-
+    normalized_client_name = client_name.strip() or socket.gethostname()
     try:
-        response = httpx.post(endpoint, json=payload, timeout=10, verify=MATRIX_SSL_VERIFY)
-    except httpx.HTTPError as exc:
-        console.print(f"[red]Error:[/red] Could not reach provisioning service: {exc}")
+        credentials = cli_connect.complete_local_pairing(
+            provisioning_url=resolved_provisioning_url,
+            pair_code=normalized_pair_code,
+            client_name=normalized_client_name,
+            client_fingerprint=_local_client_fingerprint(),
+            matrix_ssl_verify=MATRIX_SSL_VERIFY,
+            post_request=httpx.post,
+        )
+    except (TypeError, ValueError) as exc:
+        console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from None
 
-    if not response.is_success:
-        detail = _extract_error_detail(response)
-        console.print(f"[red]Error:[/red] Pairing failed ({response.status_code}): {detail}")
-        raise typer.Exit(1)
-
-    try:
-        data = response.json()
-    except ValueError:
-        console.print("[red]Error:[/red] Provisioning service returned invalid JSON.")
-        raise typer.Exit(1) from None
-
-    client_id = data.get("client_id")
-    client_secret = data.get("client_secret")
-    if not isinstance(client_id, str) or not client_id.strip():
-        console.print("[red]Error:[/red] Missing client_id in pairing response.")
-        raise typer.Exit(1)
-    if not isinstance(client_secret, str) or not client_secret.strip():
-        console.print("[red]Error:[/red] Missing client_secret in pairing response.")
-        raise typer.Exit(1)
+    if credentials.owner_user_id_invalid:
+        console.print(
+            "[yellow]Warning:[/yellow] Pairing response included malformed owner_user_id; skipping config owner autofill.",
+        )
 
     if persist_env:
-        env_path = _persist_local_provisioning_env(
+        env_path = cli_connect.persist_local_provisioning_env(
             provisioning_url=resolved_provisioning_url,
-            client_id=client_id,
-            client_secret=client_secret,
+            client_id=credentials.client_id,
+            client_secret=credentials.client_secret,
+            config_path=CONFIG_PATH,
         )
         console.print("[green]Paired successfully.[/green]")
         console.print(f"  Saved credentials to: {env_path}")
+        if credentials.owner_user_id:
+            config_path = Path(CONFIG_PATH).expanduser().resolve()
+            if cli_connect.replace_owner_placeholders_in_config(
+                config_path=config_path,
+                owner_user_id=credentials.owner_user_id,
+            ):
+                console.print(f"  Updated owner placeholder(s) in: {config_path}")
         console.print("\nNext step:")
         console.print("  uv run mindroom run")
         return
 
-    console.print("[green]Paired successfully.[/green]")
-    console.print("\nExport these variables before running MindRoom:")
-    console.print(f"  export MINDROOM_PROVISIONING_URL={resolved_provisioning_url}")
-    console.print(f"  export MINDROOM_LOCAL_CLIENT_ID={client_id}")
-    console.print(f"  export MINDROOM_LOCAL_CLIENT_SECRET={client_secret}")
-    console.print("\nThen run:")
-    console.print("  uv run mindroom run")
+    _print_pairing_success_with_exports(
+        provisioning_url=resolved_provisioning_url,
+        client_id=credentials.client_id,
+        client_secret=credentials.client_secret,
+        owner_user_id=credentials.owner_user_id,
+    )
 
 
 @app.command("local-stack-setup")
@@ -793,27 +786,28 @@ def _persist_local_matrix_env(homeserver_url: str, server_name: str) -> Path:
     return env_path
 
 
-def _persist_local_provisioning_env(
+def _print_pairing_success_with_exports(
     *,
     provisioning_url: str,
     client_id: str,
     client_secret: str,
-) -> Path:
-    """Write local provisioning credentials to .env next to the active config file."""
-    env_path = Path(CONFIG_PATH).expanduser().resolve().parent / ".env"
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
-
-    updates = {
-        "MINDROOM_PROVISIONING_URL": provisioning_url.rstrip("/"),
-        "MINDROOM_LOCAL_CLIENT_ID": client_id,
-        "MINDROOM_LOCAL_CLIENT_SECRET": client_secret,
-    }
-    for key, value in updates.items():
-        lines = _upsert_env_var(lines, key, value)
-
-    env_path.write_text(f"{'\n'.join(lines)}\n", encoding="utf-8")
-    return env_path
+    owner_user_id: str | None,
+) -> None:
+    """Print non-persisted exports for local provisioning credentials."""
+    console.print("[green]Paired successfully.[/green]")
+    console.print("\nExport these variables before running MindRoom:")
+    console.print(f"  export MINDROOM_PROVISIONING_URL={provisioning_url}")
+    console.print(f"  export MINDROOM_LOCAL_CLIENT_ID={client_id}")
+    console.print(f"  export MINDROOM_LOCAL_CLIENT_SECRET={client_secret}")
+    if owner_user_id:
+        console.print(
+            f"\nOwner user ID from pairing: {owner_user_id} (not persisted in --no-persist-env mode).",
+        )
+        console.print(
+            "Update your config.yaml owner placeholder(s) manually if you rely on authorization defaults.",
+        )
+    console.print("\nThen run:")
+    console.print("  uv run mindroom run")
 
 
 def _local_client_fingerprint() -> str:
@@ -821,23 +815,6 @@ def _local_client_fingerprint() -> str:
     raw = f"{socket.gethostname()}:{Path(CONFIG_PATH).expanduser().resolve()}"
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
-
-
-def _extract_error_detail(response: httpx.Response) -> str:
-    """Extract a compact error detail from JSON or plaintext responses."""
-    try:
-        body = response.json()
-    except ValueError:
-        text = response.text.strip()
-        return text or "unknown error"
-
-    if isinstance(body, dict):
-        detail = body.get("detail")
-        if isinstance(detail, str):
-            return detail
-        if detail is not None:
-            return str(detail)
-    return "unknown error"
 
 
 def _upsert_env_var(lines: list[str], key: str, value: str) -> list[str]:

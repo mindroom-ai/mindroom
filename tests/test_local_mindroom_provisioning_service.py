@@ -90,6 +90,7 @@ def test_pairing_and_register_agent_flow(tmp_path: Path, monkeypatch: pytest.Mon
         payload = complete.json()
         client_id = payload["client_id"]
         client_secret = payload["client_secret"]
+        assert payload["owner_user_id"] == "@alice:mindroom.chat"
 
         connected = client.get(
             "/v1/local-mindroom/pair/status",
