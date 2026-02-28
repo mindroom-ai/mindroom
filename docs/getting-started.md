@@ -178,6 +178,7 @@ MATRIX_HOMESERVER=https://matrix.example.com
 # AI provider API keys
 OPENAI_API_KEY=your_openai_key
 # OPENROUTER_API_KEY=your_openrouter_key
+# ANTHROPIC_API_KEY=your_anthropic_key
 
 # Optional: protect the dashboard API (recommended for non-localhost)
 # MINDROOM_API_KEY=your-secret-key
