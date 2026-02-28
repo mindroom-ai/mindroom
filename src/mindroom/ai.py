@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
-    from agno.media import Image
+    from agno.media import Audio, File, Image, Video
     from agno.models.base import Model
     from agno.session.agent import AgentSession
 
@@ -679,19 +679,25 @@ async def _cached_agent_run(
     agent_name: str,
     storage_path: Path,
     user_id: str | None = None,
+    audio: Sequence[Audio] | None = None,
     images: Sequence[Image] | None = None,
+    files: Sequence[File] | None = None,
+    videos: Sequence[Video] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> RunOutput:
     """Cached wrapper for agent.arun() calls."""
-    # Skip cache when images are present (large bytes, unlikely to repeat)
+    # Skip cache when media is present (large bytes, unlikely to repeat)
     # or when Agno history is enabled (prompt can be identical but replayed history differs)
-    cache = None if (images or agent.add_history_to_context) else get_cache(storage_path)
+    cache = None if (audio or images or files or videos or agent.add_history_to_context) else get_cache(storage_path)
     if cache is None:
         return await agent.arun(
             full_prompt,
             session_id=session_id,
             user_id=user_id,
+            audio=audio,
             images=images,
+            files=files,
+            videos=videos,
             metadata=metadata,
         )
 
@@ -782,7 +788,10 @@ async def ai_response(
     knowledge: Knowledge | None = None,
     user_id: str | None = None,
     include_interactive_questions: bool = True,
+    audio: Sequence[Audio] | None = None,
     images: Sequence[Image] | None = None,
+    files: Sequence[File] | None = None,
+    videos: Sequence[Video] | None = None,
     reply_to_event_id: str | None = None,
     show_tool_calls: bool = True,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
@@ -803,7 +812,10 @@ async def ai_response(
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
+        audio: Optional audio clips to pass to the AI model
         images: Optional images to pass to the AI model for vision analysis
+        files: Optional files to pass to the AI model for file-capable models
+        videos: Optional videos to pass to the AI model for video-capable models
         reply_to_event_id: Matrix event ID of the triggering message, stored
             in run metadata for unseen message tracking and edit cleanup.
         show_tool_calls: Whether to include tool call details inline in the response text.
@@ -847,7 +859,10 @@ async def ai_response(
             agent_name,
             storage_path,
             user_id=user_id,
+            audio=audio,
             images=images,
+            files=files,
+            videos=videos,
             metadata=metadata,
         )
     except Exception as e:
@@ -886,7 +901,10 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     knowledge: Knowledge | None = None,
     user_id: str | None = None,
     include_interactive_questions: bool = True,
+    audio: Sequence[Audio] | None = None,
     images: Sequence[Image] | None = None,
+    files: Sequence[File] | None = None,
+    videos: Sequence[Video] | None = None,
     reply_to_event_id: str | None = None,
     show_tool_calls: bool = True,
     run_metadata_collector: dict[str, Any] | None = None,
@@ -909,7 +927,10 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
+        audio: Optional audio clips to pass to the AI model
         images: Optional images to pass to the AI model for vision analysis
+        files: Optional files to pass to the AI model for file-capable models
+        videos: Optional videos to pass to the AI model for video-capable models
         reply_to_event_id: Matrix event ID of the triggering message, stored
             in run metadata for unseen message tracking and edit cleanup.
         show_tool_calls: Whether to include tool call details inline in the streamed response.
@@ -943,8 +964,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
 
     metadata = _build_run_metadata(reply_to_event_id, unseen_event_ids)
 
-    # Check cache (skip when images are present or history is enabled)
-    cache = None if (images or agent.add_history_to_context) else get_cache(storage_path)
+    # Check cache (skip when media is present or history is enabled)
+    cache = None if (audio or images or agent.add_history_to_context) else get_cache(storage_path)
     if cache is not None:
         model = agent.model
         assert model is not None
@@ -993,7 +1014,10 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             full_prompt,
             session_id=session_id,
             user_id=user_id,
+            audio=audio,
             images=images,
+            files=files,
+            videos=videos,
             stream=True,
             stream_events=True,
             metadata=metadata,

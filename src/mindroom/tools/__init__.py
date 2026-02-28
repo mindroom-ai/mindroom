@@ -17,6 +17,7 @@ from .agentql import agentql_tools
 from .airflow import airflow_tools
 from .apify import apify_tools
 from .arxiv import arxiv_tools
+from .attachments import attachments_tools
 from .aws_lambda import aws_lambda_tools
 from .aws_ses import aws_ses_tools
 from .baidusearch import baidusearch_tools
@@ -130,6 +131,7 @@ __all__ = [
     "airflow_tools",
     "apify_tools",
     "arxiv_tools",
+    "attachments_tools",
     "aws_lambda_tools",
     "aws_ses_tools",
     "baidusearch_tools",

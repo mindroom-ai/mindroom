@@ -1,0 +1,95 @@
+"""Tests for the model-agnostic attachments toolkit."""
+
+from __future__ import annotations
+
+import json
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from mindroom.attachments import register_local_attachment
+from mindroom.custom_tools.attachments import AttachmentTools
+from mindroom.openclaw_context import OpenClawToolContext, openclaw_tool_context
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+def _tool_context(tmp_path: Path, *, attachment_ids: tuple[str, ...] = ()) -> OpenClawToolContext:
+    config = MagicMock()
+    config.agents = {"general": SimpleNamespace(tools=["attachments"])}
+    return OpenClawToolContext(
+        agent_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread:localhost",
+        requester_id="@user:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+        attachment_ids=attachment_ids,
+    )
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_lists_context_attachments(tmp_path: Path) -> None:
+    """Tool should list attachment metadata scoped to current runtime context."""
+    tool = AttachmentTools()
+    sample_file = tmp_path / "sample.txt"
+    sample_file.write_text("hello", encoding="utf-8")
+    attachment = register_local_attachment(
+        tmp_path,
+        sample_file,
+        kind="file",
+        attachment_id="att_sample",
+    )
+    assert attachment is not None
+
+    with openclaw_tool_context(_tool_context(tmp_path, attachment_ids=(attachment.attachment_id,))):
+        payload = json.loads(await tool.list_attachments())
+
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "attachments"
+    assert payload["attachment_ids"] == ["att_sample"]
+    assert payload["attachments"][0]["attachment_id"] == "att_sample"
+    assert payload["attachments"][0]["available"] is True
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_sends_attachment_ids(tmp_path: Path) -> None:
+    """Tool should resolve attachment IDs and upload them to Matrix."""
+    tool = AttachmentTools()
+    sample_file = tmp_path / "upload.txt"
+    sample_file.write_text("payload", encoding="utf-8")
+    attachment = register_local_attachment(
+        tmp_path,
+        sample_file,
+        kind="file",
+        attachment_id="att_upload",
+    )
+    assert attachment is not None
+
+    with (
+        openclaw_tool_context(_tool_context(tmp_path, attachment_ids=("att_upload",))),
+        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
+    ):
+        payload = json.loads(await tool.send_attachments(attachments=["att_upload"]))
+
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "attachments"
+    assert payload["event_id"] == "$file_evt"
+    assert payload["resolved_attachment_ids"] == ["att_upload"]
+    mocked.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_requires_context() -> None:
+    """Tool should return an explicit error when runtime context is unavailable."""
+    tool = AttachmentTools()
+    with openclaw_tool_context(None):
+        payload = json.loads(await tool.list_attachments())
+
+    assert payload["status"] == "error"
+    assert payload["tool"] == "attachments"
+    assert "context" in payload["message"]

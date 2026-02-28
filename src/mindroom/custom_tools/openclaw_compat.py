@@ -19,6 +19,11 @@ from agno.tools import Toolkit
 from agno.tools.duckduckgo import DuckDuckGoTools
 from agno.tools.website import WebsiteTools
 
+from mindroom.custom_tools.attachments import (
+    get_attachment_listing,
+    resolve_attachment_references,
+    send_attachment_paths,
+)
 from mindroom.custom_tools.coding import CodingTools
 from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.logging_config import get_logger
@@ -1001,28 +1006,63 @@ class OpenClawCompatTools(Toolkit):
         *,
         action: str,
         message: str | None,
+        attachments: list[str] | None,
         room_id: str,
         effective_thread_id: str | None,
     ) -> str:
-        if message is None or not message.strip():
-            return self._payload("message", "error", action=action, message="Message cannot be empty.")
+        attachment_paths, resolved_attachment_ids, attachment_error = resolve_attachment_references(
+            context,
+            attachments,
+        )
+        if attachment_error is not None:
+            return self._payload("message", "error", action=action, message=attachment_error)
+
+        text_body = message.strip() if isinstance(message, str) else ""
+        if not text_body and not attachment_paths:
+            return self._payload(
+                "message",
+                "error",
+                action=action,
+                message="Message cannot be empty unless attachments are provided.",
+            )
         if action in {"thread-reply", "reply"} and effective_thread_id is None:
             return self._payload("message", "error", action=action, message="thread_id is required for replies.")
 
-        event_id = await self._send_matrix_text(
+        text_event_id: str | None = None
+        if text_body:
+            text_event_id = await self._send_matrix_text(
+                context,
+                room_id=room_id,
+                text=text_body,
+                thread_id=effective_thread_id,
+            )
+            if text_event_id is None:
+                return self._payload(
+                    "message",
+                    "error",
+                    action=action,
+                    room_id=room_id,
+                    message="Failed to send message to Matrix.",
+                )
+
+        attachment_event_ids, send_error = await send_attachment_paths(
             context,
             room_id=room_id,
-            text=message.strip(),
             thread_id=effective_thread_id,
+            attachment_paths=attachment_paths,
         )
-        if event_id is None:
+        if send_error is not None:
             return self._payload(
                 "message",
                 "error",
                 action=action,
                 room_id=room_id,
-                message="Failed to send message to Matrix.",
+                event_id=text_event_id,
+                attachment_event_ids=attachment_event_ids,
+                message=send_error,
             )
+
+        event_id = text_event_id or (attachment_event_ids[-1] if attachment_event_ids else None)
         return self._payload(
             "message",
             "ok",
@@ -1030,6 +1070,27 @@ class OpenClawCompatTools(Toolkit):
             room_id=room_id,
             thread_id=effective_thread_id,
             event_id=event_id,
+            attachment_event_ids=attachment_event_ids,
+            resolved_attachment_ids=resolved_attachment_ids,
+        )
+
+    @staticmethod
+    async def _message_attachments(context: OpenClawToolContext, target: str | None) -> str:
+        requested_attachment_ids, attachments, missing_attachment_ids, error = get_attachment_listing(context, target)
+        if error is not None:
+            return OpenClawCompatTools._payload(
+                "message",
+                "error",
+                action="attachments",
+                message=error,
+            )
+        return OpenClawCompatTools._payload(
+            "message",
+            "ok",
+            action="attachments",
+            attachment_ids=requested_attachment_ids,
+            attachments=attachments,
+            missing_attachment_ids=missing_attachment_ids,
         )
 
     async def _message_react(
@@ -1127,6 +1188,7 @@ class OpenClawCompatTools(Toolkit):
         self,
         action: str = "send",
         message: str | None = None,
+        attachments: list[str] | None = None,
         channel: str | None = None,
         target: str | None = None,
         thread_id: str | None = None,
@@ -1147,6 +1209,7 @@ class OpenClawCompatTools(Toolkit):
                 context,
                 action=normalized_action,
                 message=message,
+                attachments=attachments,
                 room_id=room_id,
                 effective_thread_id=effective_thread_id,
             )
@@ -1163,12 +1226,14 @@ class OpenClawCompatTools(Toolkit):
                 room_id=room_id,
                 effective_thread_id=thread_id or context.thread_id,
             )
+        if normalized_action == "attachments":
+            return await self._message_attachments(context, target)
 
         return self._payload(
             "message",
             "error",
             action=action,
-            message="Unsupported action. Use send, thread-reply, react, or read.",
+            message="Unsupported action. Use send, thread-reply, react, read, or attachments.",
         )
 
     async def cron(self, request: str) -> str:

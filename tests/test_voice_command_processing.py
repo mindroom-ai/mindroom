@@ -5,10 +5,18 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from agno.media import Audio
 
+from mindroom.attachments import load_attachment
 from mindroom.bot import AgentBot
 from mindroom.config import Config
-from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
+from mindroom.constants import (
+    ATTACHMENT_IDS_KEY,
+    ORIGINAL_SENDER_KEY,
+    ROUTER_AGENT_NAME,
+    VOICE_PREFIX,
+    VOICE_RAW_AUDIO_FALLBACK_KEY,
+)
 
 
 @pytest.mark.asyncio
@@ -187,3 +195,58 @@ async def test_router_voice_transcription_blocked_by_router_reply_permissions(tm
 
     bot._send_response.assert_not_called()
     bot.response_tracker.mark_responded.assert_called_once_with("$voice_event")
+
+
+@pytest.mark.asyncio
+async def test_router_voice_transcription_falls_back_to_raw_audio(tmp_path) -> None:  # noqa: ANN001
+    """Router relays raw audio metadata when transcription is unavailable."""
+    agent_user = MagicMock()
+    agent_user.user_id = "@mindroom_router:example.com"
+    agent_user.agent_name = ROUTER_AGENT_NAME
+
+    config = Config(
+        authorization={"default_room_access": True},
+        voice={"enabled": True},
+    )
+
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        rooms=["!test:example.com"],
+    )
+    bot.response_tracker = MagicMock()
+    bot.response_tracker.has_responded.return_value = False
+    bot.logger = MagicMock()
+    bot.client = MagicMock()
+    bot._send_response = AsyncMock(return_value="$response")
+    bot._derive_conversation_context = AsyncMock(return_value=(False, "$thread", []))
+
+    room = MagicMock()
+    room.room_id = "!test:example.com"
+
+    event = MagicMock()
+    event.sender = "@alice:example.com"
+    event.event_id = "$voice_event"
+    event.body = "voice.ogg"
+    event.source = {"content": {"body": "voice.ogg"}}
+
+    with (
+        patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+    ):
+        mock_voice.return_value = None
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        await bot._on_voice_message(room, event)
+
+    bot._send_response.assert_called_once()
+    assert bot._send_response.call_args.kwargs["response_text"] == f"{VOICE_PREFIX}[Attached voice message]"
+    extra_content = bot._send_response.call_args.kwargs["extra_content"]
+    assert extra_content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
+    assert extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] is True
+    assert extra_content[ATTACHMENT_IDS_KEY] == ["att_voiceevent"]
+    attachment = load_attachment(tmp_path, "att_voiceevent")
+    assert attachment is not None
+    assert attachment.local_path.exists()
+    assert attachment.local_path.is_file()

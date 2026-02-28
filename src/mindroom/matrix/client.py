@@ -2,6 +2,7 @@
 
 import io
 import json
+import mimetypes
 import re
 import ssl as ssl_module
 from collections.abc import AsyncGenerator
@@ -13,6 +14,7 @@ from typing import Any
 import httpx
 import markdown
 import nio
+from nio import crypto
 
 from mindroom.config import RoomDirectoryVisibility, RoomJoinRule
 from mindroom.constants import ENCRYPTION_KEYS_DIR, MATRIX_SSL_VERIFY
@@ -730,6 +732,128 @@ async def send_message(client: nio.AsyncClient, room_id: str, content: dict[str,
         return str(response.event_id)
     logger.error(f"Failed to send message to {room_id}: {response}")
     return None
+
+
+def _guess_mimetype(file_path: Path) -> str:
+    guessed_mimetype, _ = mimetypes.guess_type(file_path.name)
+    return guessed_mimetype or "application/octet-stream"
+
+
+async def _upload_file_as_mxc(
+    client: nio.AsyncClient,
+    room_id: str,
+    file_path: Path,
+    *,
+    mimetype: str,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Upload a local file as MXC, encrypting payloads in encrypted rooms."""
+    try:
+        file_bytes = file_path.read_bytes()
+    except OSError:
+        logger.exception("Failed to read file before upload", path=str(file_path))
+        return None, None
+
+    info: dict[str, Any] = {"size": len(file_bytes), "mimetype": mimetype}
+    room = client.rooms.get(room_id)
+    room_encrypted = bool(room and room.encrypted)
+    upload_bytes = file_bytes
+    encrypted_file_payload: dict[str, Any] | None = None
+    upload_mimetype = mimetype
+    upload_name = file_path.name
+
+    if room_encrypted:
+        try:
+            encrypted_bytes, encryption_keys = crypto.attachments.encrypt_attachment(file_bytes)
+        except Exception:
+            logger.exception("Failed to encrypt file attachment", path=str(file_path))
+            return None, None
+        upload_bytes = encrypted_bytes
+        upload_mimetype = "application/octet-stream"
+        upload_name = f"{file_path.name}.enc"
+        encrypted_file_payload = {
+            "url": "",
+            "key": encryption_keys["key"],
+            "iv": encryption_keys["iv"],
+            "hashes": encryption_keys["hashes"],
+            "v": "v2",
+            "mimetype": mimetype,
+            "size": len(file_bytes),
+        }
+
+    def data_provider(_monitor: object, _data: object) -> io.BytesIO:
+        return io.BytesIO(upload_bytes)
+
+    try:
+        upload_response = await client.upload(
+            data_provider=data_provider,
+            content_type=upload_mimetype,
+            filename=upload_name,
+            filesize=len(upload_bytes),
+        )
+    except Exception:
+        logger.exception("Failed uploading Matrix file", path=str(file_path))
+        return None, None
+
+    upload_result = upload_response[0] if isinstance(upload_response, tuple) else upload_response
+
+    if not isinstance(upload_result, nio.UploadResponse):
+        logger.error("Failed file upload response", path=str(file_path), response=str(upload_result))
+        return None, None
+    if not upload_result.content_uri:
+        logger.error("File upload missing MXC URI", path=str(file_path))
+        return None, None
+
+    mxc_uri = str(upload_result.content_uri)
+    upload_payload: dict[str, Any] = {"info": info}
+    if encrypted_file_payload is not None:
+        encrypted_file_payload["url"] = mxc_uri
+        upload_payload["file"] = encrypted_file_payload
+    return mxc_uri, upload_payload
+
+
+async def send_file_message(
+    client: nio.AsyncClient,
+    room_id: str,
+    file_path: str | Path,
+    *,
+    thread_id: str | None = None,
+    caption: str | None = None,
+) -> str | None:
+    """Upload a file and send it as an ``m.file`` message."""
+    resolved_path = Path(file_path).expanduser().resolve()
+    if not resolved_path.is_file():
+        logger.error("Cannot send non-file attachment", path=str(resolved_path))
+        return None
+
+    mimetype = _guess_mimetype(resolved_path)
+    mxc_uri, upload_payload = await _upload_file_as_mxc(client, room_id, resolved_path, mimetype=mimetype)
+    if mxc_uri is None or upload_payload is None:
+        return None
+
+    info = upload_payload.get("info")
+    if not isinstance(info, dict):
+        info = {"size": resolved_path.stat().st_size, "mimetype": mimetype}
+
+    content: dict[str, Any] = {
+        "msgtype": "m.file",
+        "body": caption or resolved_path.name,
+        "filename": resolved_path.name,
+        "info": info,
+    }
+    encrypted_file_payload = upload_payload.get("file")
+    if isinstance(encrypted_file_payload, dict):
+        content["file"] = encrypted_file_payload
+    else:
+        content["url"] = mxc_uri
+
+    if thread_id:
+        content["m.relates_to"] = {
+            "rel_type": "m.thread",
+            "event_id": thread_id,
+            "is_falling_back": True,
+        }
+
+    return await send_message(client, room_id, content)
 
 
 def _history_message_sort_key(message: dict[str, Any]) -> tuple[int, str]:

@@ -5309,6 +5309,21 @@
     {
       "auth_provider": null,
       "category": "productivity",
+      "config_fields": [],
+      "dependencies": [],
+      "description": "List and send context-scoped file attachments",
+      "display_name": "Attachments",
+      "docs_url": null,
+      "helper_text": null,
+      "icon": "Paperclip",
+      "icon_color": "text-teal-500",
+      "name": "attachments",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "auth_provider": null,
+      "category": "productivity",
       "config_fields": [
         {
           "default": null,
