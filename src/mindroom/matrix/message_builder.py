@@ -1,8 +1,104 @@
 """Matrix message content builder with proper threading support."""
 
+import re
+from html import escape
 from typing import Any
 
-from .client import markdown_to_html
+import markdown
+
+_HTML_TAG_PATTERN = re.compile(r"</?([A-Za-z][A-Za-z0-9-]*)(?:\s+[^<>]*)?\s*/?>")
+
+# Standard Matrix-safe HTML tags.
+_GENERAL_FORMATTED_BODY_TAGS = frozenset(
+    {
+        "a",
+        "b",
+        "blockquote",
+        "br",
+        "caption",
+        "code",
+        "del",
+        "details",
+        "div",
+        "em",
+        "font",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "hr",
+        "i",
+        "img",
+        "li",
+        "ol",
+        "p",
+        "pre",
+        "s",
+        "span",
+        "strike",
+        "strong",
+        "sub",
+        "summary",
+        "sup",
+        "table",
+        "tbody",
+        "td",
+        "th",
+        "thead",
+        "tr",
+        "u",
+        "ul",
+    },
+)
+
+_ALLOWED_FORMATTED_BODY_TAGS = _GENERAL_FORMATTED_BODY_TAGS
+
+
+def _escape_unsupported_html_tags(html_text: str) -> str:
+    """Escape raw tags that Matrix clients commonly strip entirely.
+
+    Unknown tags from model output (e.g. ``<search>``) can disappear in some
+    clients. Escaping unsupported tags keeps them visible as literal text.
+    """
+
+    def _replace_tag(match: re.Match[str]) -> str:
+        tag_name = match.group(1).lower()
+        if tag_name in _ALLOWED_FORMATTED_BODY_TAGS:
+            return match.group(0)
+        return escape(match.group(0))
+
+    return _HTML_TAG_PATTERN.sub(_replace_tag, html_text)
+
+
+def markdown_to_html(text: str) -> str:
+    """Convert markdown text to HTML for Matrix formatted messages.
+
+    Args:
+        text: The markdown text to convert
+
+    Returns:
+        HTML formatted text
+
+    """
+    # Configure markdown with common extensions
+    md = markdown.Markdown(
+        extensions=[
+            "markdown.extensions.fenced_code",
+            "markdown.extensions.codehilite",
+            "markdown.extensions.tables",
+            "markdown.extensions.nl2br",
+        ],
+        extension_configs={
+            "markdown.extensions.codehilite": {
+                "use_pygments": True,  # Use Pygments for syntax highlighting.
+                "noclasses": True,  # Use inline styles instead of CSS classes
+            },
+        },
+    )
+    html_text: str = md.convert(text)
+    return _escape_unsupported_html_tags(html_text)
 
 
 def build_thread_relation(
