@@ -47,10 +47,7 @@ uvx mindroom connect --pair-code ABCD-EFGH
 Notes:
 
 - Pair code is short-lived (10 minutes).
-- `mindroom connect` writes `MINDROOM_LOCAL_CLIENT_ID`, `MINDROOM_LOCAL_CLIENT_SECRET`, and `MINDROOM_NAMESPACE` into `.env`.
-- Those credentials are not Matrix access tokens.
-- They only authorize provisioning endpoints for local onboarding.
-- `MINDROOM_NAMESPACE` is appended to managed agent usernames and room aliases to avoid collisions on shared homeservers.
+- `mindroom connect` writes local provisioning values (including `MINDROOM_NAMESPACE`) into `.env`.
 
 ### 4. Run MindRoom
 
