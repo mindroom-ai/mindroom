@@ -105,6 +105,7 @@ export function AgentEditor() {
       learning: defaultLearning,
       learning_mode: defaultLearningMode,
       memory_backend: undefined,
+      memory_file_path: undefined,
     },
   });
   const learningEnabled = useWatch({ name: 'learning', control });
@@ -113,6 +114,8 @@ export function AgentEditor() {
   const numHistoryMessages = useWatch({ name: 'num_history_messages', control });
   const agentTools = useWatch({ name: 'tools', control });
   const includeDefaultTools = useWatch({ name: 'include_default_tools', control });
+  const memoryBackend = useWatch({ name: 'memory_backend', control });
+  const effectiveMemoryBackend = memoryBackend ?? globalMemoryBackend;
 
   // Compute effective tools: agent tools + defaults.tools (when include_default_tools is enabled)
   const effectiveTools = useMemo(() => {
@@ -183,6 +186,7 @@ export function AgentEditor() {
         context_files: selectedAgent.context_files ?? [],
         learning: selectedAgent.learning ?? defaultLearning,
         learning_mode: selectedAgent.learning_mode ?? defaultLearningMode,
+        memory_file_path: selectedAgent.memory_file_path ?? undefined,
       });
     }
   }, [defaultLearning, defaultLearningMode, selectedAgent, reset]);
@@ -362,6 +366,31 @@ export function AgentEditor() {
                 <SelectItem value="file">File (markdown memory)</SelectItem>
               </SelectContent>
             </Select>
+          )}
+        />
+      </FieldGroup>
+
+      {/* Memory File Path */}
+      <FieldGroup
+        label="Memory File Path"
+        helperText="Optional directory for this agent's file-memory scope. Used only when effective backend is file."
+        htmlFor="memory_file_path"
+      >
+        <Controller
+          name="memory_file_path"
+          control={control}
+          render={({ field }) => (
+            <Input
+              id="memory_file_path"
+              value={field.value ?? ''}
+              placeholder="./openclaw_data"
+              disabled={effectiveMemoryBackend !== 'file'}
+              onChange={e => {
+                const resolved = e.target.value === '' ? undefined : e.target.value;
+                field.onChange(resolved);
+                handleFieldChange('memory_file_path', resolved);
+              }}
+            />
           )}
         />
       </FieldGroup>
