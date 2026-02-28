@@ -242,3 +242,56 @@ async def test_worker_keeps_session_dirty_when_new_activity_arrives_mid_flush(
     assert session_state["dirty"] is True
     assert session_state["in_flight"] is False
     assert session_state["last_flushed_session_updated_at"] == 100
+
+
+@pytest.mark.asyncio
+async def test_worker_no_reply_does_not_requeue_without_new_dirty_mark(
+    tmp_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NO_REPLY flushes should clear dirty state unless new activity marked it dirty again."""
+    storage_path = tmp_path
+    session_updated_at = 100
+
+    mark_auto_flush_dirty_session(
+        storage_path,
+        config,
+        agent_name="general",
+        session_id="s1",
+        room_id="!room:example",
+        thread_id="t1",
+    )
+
+    def _load_session(_storage: Path, _agent: str, _sid: str) -> _FakeSession:
+        return _FakeSession(
+            updated_at=session_updated_at,
+            messages=[_FakeMessage(role="user", content="no durable memory here")],
+        )
+
+    async def _fake_no_reply(**_: object) -> None:
+        nonlocal session_updated_at
+        # Simulate unrelated session timestamp movement during extractor execution.
+        session_updated_at = 200
+
+    monkeypatch.setattr("mindroom.memory.auto_flush._load_agent_session", _load_session)
+    monkeypatch.setattr(
+        "mindroom.memory.auto_flush._extract_memory_summary",
+        _fake_no_reply,
+    )
+    append_calls: list[str] = []
+    monkeypatch.setattr(
+        "mindroom.memory.auto_flush.append_agent_daily_memory",
+        lambda *_args, **_kwargs: append_calls.append("called"),
+    )
+
+    worker = MemoryAutoFlushWorker(storage_path=storage_path, config_provider=lambda: config)
+    await worker._run_cycle(config)
+
+    payload = json.loads((storage_path / "memory_flush_state.json").read_text(encoding="utf-8"))
+    session_state = payload["sessions"]["general:s1"]
+    assert session_state["dirty"] is False
+    assert session_state["in_flight"] is False
+    assert session_state["last_flushed_session_updated_at"] == 100
+    assert session_state["last_session_updated_at"] == 200
+    assert append_calls == []
