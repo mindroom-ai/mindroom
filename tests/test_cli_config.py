@@ -57,7 +57,7 @@ class TestConfigInit:
         default_cfg = tmp_path / ".mindroom" / "config.yaml"
         monkeypatch.setattr("mindroom.cli_config.CONFIG_PATH", default_cfg)
 
-        result = runner.invoke(app, ["config", "init"])
+        result = runner.invoke(app, ["config", "init"], input="openai\n")
 
         assert result.exit_code == 0
         assert default_cfg.exists()
