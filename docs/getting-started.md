@@ -52,9 +52,7 @@ uvx mindroom connect --pair-code ABCD-EFGH
 Notes:
 
 - Pair code is short-lived (10 minutes).
-- `mindroom connect` writes local provisioning credentials into `.env`.
-- Those credentials are not Matrix access tokens.
-- They only authorize provisioning endpoints for local onboarding.
+- `mindroom connect` writes local provisioning values (including `MINDROOM_NAMESPACE`) into `.env`.
 
 ### 4. Run MindRoom
 

@@ -81,8 +81,10 @@ MindRoom then:
 
 - `MINDROOM_LOCAL_CLIENT_ID`
 - `MINDROOM_LOCAL_CLIENT_SECRET`
+- `MINDROOM_NAMESPACE`
 
-These are **not Matrix user access tokens**.
+`MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` are **not Matrix user access tokens**.
+`MINDROOM_NAMESPACE` is appended to managed agent usernames and room aliases to avoid collisions on shared homeservers.
 
 They can only call provisioning-service endpoints that accept local client credentials (for example agent registration flows).
 Revoke them from `Settings -> Local MindRoom` in the chat UI.
