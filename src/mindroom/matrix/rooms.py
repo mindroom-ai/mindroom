@@ -232,8 +232,8 @@ async def ensure_room_exists(  # noqa: C901, PLR0912
         else:
             msg = (
                 f"Managed room alias '{full_alias}' already exists as '{room_id}' but this MindRoom could not join it. "
-                "This usually means another installation already owns this alias. "
-                "Choose a different MINDROOM_NAMESPACE (or different room key) and retry."
+                "Possible causes: another installation owns this alias, the room is invite-only, or server-side access policies prevent joining. "
+                "If on a shared homeserver, try setting a unique MINDROOM_NAMESPACE."
             )
             raise RuntimeError(msg)
         return str(room_id)
