@@ -57,7 +57,7 @@ const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
   },
   auto_flush: {
     enabled: false,
-    flush_interval_seconds: 180,
+    flush_interval_seconds: 1800,
     idle_seconds: 120,
     max_dirty_age_seconds: 600,
     stale_ttl_seconds: 86400,
@@ -470,10 +470,10 @@ export function MemoryConfig() {
                   id="flush-interval-seconds"
                   type="number"
                   min={5}
-                  value={localConfig.auto_flush?.flush_interval_seconds ?? 180}
+                  value={localConfig.auto_flush?.flush_interval_seconds ?? 1800}
                   onChange={e =>
                     updateAutoFlush({
-                      flush_interval_seconds: parseInteger(e.target.value, 180),
+                      flush_interval_seconds: parseInteger(e.target.value, 1800),
                     })
                   }
                   className="transition-colors hover:border-ring focus:border-ring"

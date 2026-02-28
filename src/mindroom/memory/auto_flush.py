@@ -50,6 +50,8 @@ class FlushSessionEntry(TypedDict, total=False):
     next_attempt_at: int | None
     consecutive_failures: int
     priority_boost_at: int | None
+    dirty_revision: int
+    flush_started_dirty_revision: int | None
 
 
 class FlushState(TypedDict):
@@ -142,6 +144,9 @@ def mark_auto_flush_dirty_session(
         sessions = state["sessions"]
         existing = sessions.get(key, {})
         first_dirty_at = existing.get("first_dirty_at", now)
+        dirty_revision = existing.get("dirty_revision", 0)
+        if not isinstance(dirty_revision, int):
+            dirty_revision = 0
         if not existing.get("dirty", False):
             first_dirty_at = now
 
@@ -152,6 +157,7 @@ def mark_auto_flush_dirty_session(
             "room_id": room_id,
             "thread_id": thread_id,
             "dirty": True,
+            "dirty_revision": dirty_revision + 1,
             # Keep in-flight status if a flush is already running for this key.
             "in_flight": bool(existing.get("in_flight", False)),
             "first_dirty_at": first_dirty_at,
@@ -410,7 +416,7 @@ class MemoryAutoFlushWorker:
         finally:
             _WAKE_EVENTS.discard(self._wake_event)
 
-    async def _run_cycle(self, config: Config) -> None:  # noqa: C901, PLR0915
+    async def _run_cycle(self, config: Config) -> None:  # noqa: C901, PLR0912, PLR0915
         now = _now_ts()
         settings = config.memory.auto_flush
 
@@ -491,6 +497,10 @@ class MemoryAutoFlushWorker:
                 latest_entry = latest_state["sessions"].get(key, entry)
                 latest_entry["in_flight"] = True
                 latest_entry["last_session_updated_at"] = session_updated_at
+                flush_started_dirty_revision = latest_entry.get("dirty_revision", 0)
+                if not isinstance(flush_started_dirty_revision, int):
+                    flush_started_dirty_revision = 0
+                latest_entry["flush_started_dirty_revision"] = flush_started_dirty_revision
                 latest_state["sessions"][key] = latest_entry
                 _write_state_unlocked(self.storage_path, latest_state)
 
@@ -527,6 +537,7 @@ class MemoryAutoFlushWorker:
                 latest_entry["consecutive_failures"] = failures
                 latest_entry["next_attempt_at"] = now + cooldown
                 latest_entry["in_flight"] = False
+                latest_entry.pop("flush_started_dirty_revision", None)
                 latest_state["sessions"][key] = latest_entry
                 _write_state_unlocked(self.storage_path, latest_state)
             logger.warning(
@@ -545,6 +556,7 @@ class MemoryAutoFlushWorker:
                 latest_entry["consecutive_failures"] = failures
                 latest_entry["next_attempt_at"] = now + cooldown
                 latest_entry["in_flight"] = False
+                latest_entry.pop("flush_started_dirty_revision", None)
                 latest_state["sessions"][key] = latest_entry
                 _write_state_unlocked(self.storage_path, latest_state)
             logger.exception("Memory auto-flush failed", agent=agent_name, session_id=session_id)
@@ -558,12 +570,21 @@ class MemoryAutoFlushWorker:
         with _STATE_LOCK:
             latest_state = _read_state_unlocked(self.storage_path)
             latest_entry = latest_state["sessions"].get(key, entry)
+            flush_started_dirty_revision = entry.get("flush_started_dirty_revision")
+            has_newer_dirty_marks = (
+                isinstance(flush_started_dirty_revision, int)
+                and isinstance(latest_entry.get("dirty_revision"), int)
+                and latest_entry["dirty_revision"] > flush_started_dirty_revision
+            )
             has_newer_updates = (
                 isinstance(latest_session_updated_at, int)
                 and isinstance(session_updated_at, int)
                 and latest_session_updated_at > session_updated_at
             )
-            latest_entry["dirty"] = has_newer_updates
+            # Only requeue if the session was explicitly marked dirty again during this flush.
+            latest_entry["dirty"] = (
+                has_newer_dirty_marks if isinstance(flush_started_dirty_revision, int) else has_newer_updates
+            )
             latest_entry["in_flight"] = False
             latest_entry["last_flushed_at"] = now
             if isinstance(latest_session_updated_at, int):
@@ -572,6 +593,7 @@ class MemoryAutoFlushWorker:
                 latest_entry["last_flushed_session_updated_at"] = session_updated_at
             latest_entry["next_attempt_at"] = None
             latest_entry["consecutive_failures"] = 0
+            latest_entry.pop("flush_started_dirty_revision", None)
             if not latest_entry["dirty"]:
                 latest_entry["priority_boost_at"] = None
             latest_state["sessions"][key] = latest_entry
