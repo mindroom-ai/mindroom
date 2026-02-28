@@ -170,6 +170,29 @@ def _create_task_wrapper(
     return wrapper
 
 
+def _is_concrete_matrix_user_id(user_id: str) -> bool:
+    """Return whether this string is a concrete Matrix user ID."""
+    return (
+        user_id.startswith("@") and ":" in user_id and "*" not in user_id and "?" not in user_id and " " not in user_id
+    )
+
+
+def _get_authorized_user_ids_to_invite(config: Config) -> set[str]:
+    """Collect Matrix users from authorization config that can be invited."""
+    user_ids = set(config.authorization.global_users)
+    for room_users in config.authorization.room_permissions.values():
+        user_ids.update(room_users)
+
+    concrete_user_ids = {user_id for user_id in user_ids if _is_concrete_matrix_user_id(user_id)}
+    skipped = sorted(user_ids - concrete_user_ids)
+    if skipped:
+        logger.warning(
+            "Skipping non-concrete authorization user IDs for invites",
+            user_ids=skipped,
+        )
+    return concrete_user_ids
+
+
 def _format_agent_description(agent_name: str, config: Config) -> str:
     """Format a concise agent description for the welcome message."""
     if agent_name in config.agents:
@@ -3133,12 +3156,14 @@ class MultiAgentOrchestrator:
             return
 
         server_name = extract_server_name_from_homeserver(MATRIX_HOMESERVER)
+        authorized_user_ids = _get_authorized_user_ids_to_invite(config)
 
         # First, invite the user account to all rooms
         state = MatrixState.load()
         user_account = state.get_account(INTERNAL_USER_ACCOUNT_KEY)
         if user_account:
             user_id = MatrixID.from_username(user_account.username, server_name).full_id
+            authorized_user_ids.discard(user_id)
             for room_id in joined_rooms:
                 room_members = await get_room_members(router_bot.client, room_id)
                 if user_id not in room_members:
@@ -3158,6 +3183,19 @@ class MultiAgentOrchestrator:
             # Get current members of the room
             current_members = await get_room_members(router_bot.client, room_id)
 
+            # Invite authorized human users for this room
+            for authorized_user_id in authorized_user_ids:
+                if authorized_user_id in current_members:
+                    continue
+                if not is_authorized_sender(authorized_user_id, config, room_id):
+                    continue
+
+                success = await invite_to_room(router_bot.client, room_id, authorized_user_id)
+                if success:
+                    logger.info(f"Invited authorized user {authorized_user_id} to room {room_id}")
+                else:
+                    logger.warning(f"Failed to invite authorized user {authorized_user_id} to room {room_id}")
+
             # Invite missing bots
             for bot_username in configured_bots:
                 bot_user_id = MatrixID.from_username(bot_username, server_name).full_id
@@ -3170,7 +3208,7 @@ class MultiAgentOrchestrator:
                     else:
                         logger.warning(f"Failed to invite {bot_username} to room {room_id}")
 
-        logger.info("Ensured room invitations for all configured agents")
+        logger.info("Ensured room invitations for all configured agents and authorized users")
 
 
 async def _identify_entities_to_restart(

@@ -133,6 +133,7 @@ mindroom run
 ## Documentation
 
 - [Getting Started](https://docs.mindroom.chat/getting-started/index.md) - Installation and first steps
+- [Hosted Matrix Deployment](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) - Run only `uvx mindroom` locally against hosted Matrix
 - [Configuration](https://docs.mindroom.chat/configuration/index.md) - All configuration options
 - [Cultures](https://docs.mindroom.chat/configuration/cultures/index.md) - Configure shared agent cultures
 - [Dashboard](https://docs.mindroom.chat/dashboard/index.md) - Web UI for configuration

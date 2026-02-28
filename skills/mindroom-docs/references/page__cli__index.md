@@ -85,6 +85,38 @@ Start MindRoom with your configuration.
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
+## connect
+
+Pair this local MindRoom install with a provisioning service.
+
+Default provisioning URL is `https://mindroom.chat` unless you override it with `--provisioning-url` or `MINDROOM_PROVISIONING_URL`.
+
+```
+mindroom connect --pair-code ABCD-EFGH
+```
+
+On success (default `--persist-env`), this writes to `.env` next to `config.yaml`:
+
+- `MINDROOM_PROVISIONING_URL`
+- `MINDROOM_LOCAL_CLIENT_ID`
+- `MINDROOM_LOCAL_CLIENT_SECRET`
+
+If your config still contains the owner placeholder token `__MINDROOM_OWNER_USER_ID_FROM_PAIRING__`, `connect` will auto-replace it when pairing returns a valid `owner_user_id`.
+
+Use `--no-persist-env` if you want to export variables only for the current shell session.
+
+```
+mindroom connect --pair-code ABCD-EFGH --no-persist-env
+```
+
+Use `--provisioning-url` for non-default deployments:
+
+```
+mindroom connect \
+  --pair-code ABCD-EFGH \
+  --provisioning-url https://matrix.example.com
+```
+
 ## local-stack-setup
 
 Start local Synapse and the MindRoom Cinny client container for development.
@@ -162,6 +194,12 @@ mindroom run --log-level DEBUG
 
 ```
 mindroom run --storage-path /data/mindroom
+```
+
+### Pair local install with hosted provisioning
+
+```
+mindroom connect --pair-code ABCD-EFGH
 ```
 
 ### Start local Synapse + Cinny (default local setup)
