@@ -64,17 +64,28 @@ def resolve_attachment_media(
     attachment_ids: list[str],
     *,
     room_id: str | None = None,
+    thread_id: str | None = None,
 ) -> tuple[list[str], list[Audio], list[File], list[Video]]:
     """Resolve attachment IDs into Agno media objects.
 
-    When *room_id* is provided, only attachments registered for that room are
-    included.  Mismatched records are silently dropped with a debug log.
+    When *room_id* is provided, only attachments registered for the current
+    room/thread context are included. Mismatched records are dropped with a
+    debug log.
     """
     attachment_records = resolve_attachments(storage_path, attachment_ids)
     if room_id is not None:
-        attachment_records, rejected = filter_attachments_for_context(attachment_records, room_id=room_id)
+        attachment_records, rejected = filter_attachments_for_context(
+            attachment_records,
+            room_id=room_id,
+            thread_id=thread_id,
+        )
         if rejected:
-            logger.debug("Rejected cross-room attachment IDs", rejected=rejected, room_id=room_id)
+            logger.debug(
+                "Rejected out-of-context attachment IDs",
+                rejected=rejected,
+                room_id=room_id,
+                thread_id=thread_id,
+            )
     resolved_attachment_ids = [record.attachment_id for record in attachment_records]
     attachment_audio, attachment_files, attachment_videos = attachment_records_to_media(attachment_records)
     return resolved_attachment_ids, attachment_audio, attachment_files, attachment_videos

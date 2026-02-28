@@ -84,6 +84,25 @@ async def test_attachments_tool_sends_attachment_ids(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_attachments_tool_rejects_local_paths_by_default(tmp_path: Path) -> None:
+    """Tool should reject direct filesystem paths unless explicitly enabled."""
+    tool = AttachmentTools()
+    sample_file = tmp_path / "upload.txt"
+    sample_file.write_text("payload", encoding="utf-8")
+
+    with (
+        openclaw_tool_context(_tool_context(tmp_path)),
+        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
+    ):
+        payload = json.loads(await tool.send_attachments(attachments=[str(sample_file)]))
+
+    assert payload["status"] == "error"
+    assert payload["tool"] == "attachments"
+    assert "Local file paths are disabled" in payload["message"]
+    mocked.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_attachments_tool_requires_context() -> None:
     """Tool should return an explicit error when runtime context is unavailable."""
     tool = AttachmentTools()

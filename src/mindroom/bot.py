@@ -804,6 +804,7 @@ class AgentBot:
             self.storage_path,
             attachment_ids,
             room_id=room.room_id,
+            thread_id=context.thread_id,
         )
         # Fetch thread-root audio only when voice fallback is flagged AND no
         # attachment already carries the same recording (avoids duplicate audio).
@@ -1085,6 +1086,7 @@ class AgentBot:
             self.storage_path,
             [attachment_record.attachment_id],
             room_id=room.room_id,
+            thread_id=context.thread_id,
         )
 
         action = await self._resolve_dispatch_action(

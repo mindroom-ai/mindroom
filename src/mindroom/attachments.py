@@ -357,19 +357,27 @@ def filter_attachments_for_context(
     attachment_records: list[AttachmentRecord],
     *,
     room_id: str,
+    thread_id: str | None = None,
 ) -> tuple[list[AttachmentRecord], list[str]]:
-    """Keep only attachments registered for *room_id*.
-
-    Attachments without a stored ``room_id`` (e.g. legacy records) are
-    allowed through so existing data doesn't silently break.
-    """
+    """Keep only attachments registered for the current room/thread context."""
     allowed_records: list[AttachmentRecord] = []
     rejected_attachment_ids: list[str] = []
     for record in attachment_records:
-        if record.room_id is not None and record.room_id != room_id:
+        if record.room_id != room_id:
             rejected_attachment_ids.append(record.attachment_id)
-        else:
+            continue
+
+        if thread_id is None:
+            if record.thread_id is None:
+                allowed_records.append(record)
+            else:
+                rejected_attachment_ids.append(record.attachment_id)
+            continue
+
+        if record.thread_id == thread_id:
             allowed_records.append(record)
+        else:
+            rejected_attachment_ids.append(record.attachment_id)
     return allowed_records, rejected_attachment_ids
 
 

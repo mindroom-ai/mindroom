@@ -543,6 +543,39 @@ async def test_openclaw_compat_message_send_supports_attachment_only(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_openclaw_compat_message_send_rejects_local_paths_by_default(tmp_path: Path) -> None:
+    """Verify message send rejects local file paths unless explicitly enabled."""
+    tool = OpenClawCompatTools()
+    tool._send_matrix_text = AsyncMock()
+    config = MagicMock()
+    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
+    ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id="$ctx-thread:localhost",
+        requester_id="@user:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+    sample_file = tmp_path / "upload.txt"
+    sample_file.write_text("payload", encoding="utf-8")
+
+    with (
+        openclaw_tool_context(ctx),
+        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
+    ):
+        payload = json.loads(await tool.message(action="send", attachments=[str(sample_file)]))
+
+    assert payload["status"] == "error"
+    assert payload["tool"] == "message"
+    assert payload["action"] == "send"
+    assert "Local file paths are disabled" in payload["message"]
+    tool._send_matrix_text.assert_not_awaited()
+    mocked.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_openclaw_compat_sessions_send_returns_error_when_matrix_send_fails(tmp_path: Path) -> None:
     """Verify sessions_send returns an error payload when Matrix send fails."""
     tool = OpenClawCompatTools()

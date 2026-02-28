@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.attachment_media import attachment_records_to_media
+from mindroom.attachment_media import attachment_records_to_media, resolve_attachment_media
 from mindroom.attachments import (
     attachment_id_for_event,
+    filter_attachments_for_context,
     load_attachment,
     merge_attachment_ids,
     parse_attachment_ids_from_event_source,
@@ -73,3 +74,126 @@ def test_merge_attachment_ids_preserves_order() -> None:
     """Merge should preserve first-seen ordering across sources."""
     merged = merge_attachment_ids(["att_1", "att_2"], ["att_2", "att_3"], ["att_1"])
     assert merged == ["att_1", "att_2", "att_3"]
+
+
+def test_filter_attachments_for_context_enforces_room_and_thread(tmp_path: Path) -> None:
+    """Thread mode should keep only exact room/thread matches."""
+    file_path = tmp_path / "payload.txt"
+    file_path.write_text("payload", encoding="utf-8")
+
+    matching = register_local_attachment(
+        tmp_path,
+        file_path,
+        kind="file",
+        attachment_id="att_matching",
+        room_id="!room:localhost",
+        thread_id="$thread_a",
+    )
+    wrong_thread = register_local_attachment(
+        tmp_path,
+        file_path,
+        kind="file",
+        attachment_id="att_wrong_thread",
+        room_id="!room:localhost",
+        thread_id="$thread_b",
+    )
+    wrong_room = register_local_attachment(
+        tmp_path,
+        file_path,
+        kind="file",
+        attachment_id="att_wrong_room",
+        room_id="!other:localhost",
+        thread_id="$thread_a",
+    )
+    legacy_unscoped = register_local_attachment(
+        tmp_path,
+        file_path,
+        kind="file",
+        attachment_id="att_legacy",
+        room_id=None,
+        thread_id="$thread_a",
+    )
+    assert matching is not None
+    assert wrong_thread is not None
+    assert wrong_room is not None
+    assert legacy_unscoped is not None
+
+    records = resolve_attachments(
+        tmp_path,
+        ["att_matching", "att_wrong_thread", "att_wrong_room", "att_legacy"],
+    )
+    allowed, rejected = filter_attachments_for_context(
+        records,
+        room_id="!room:localhost",
+        thread_id="$thread_a",
+    )
+
+    assert [record.attachment_id for record in allowed] == ["att_matching"]
+    assert rejected == ["att_wrong_thread", "att_wrong_room", "att_legacy"]
+
+
+def test_filter_attachments_for_context_room_mode_rejects_threaded_ids(tmp_path: Path) -> None:
+    """Room mode should reject attachments scoped to any specific thread."""
+    file_path = tmp_path / "payload.txt"
+    file_path.write_text("payload", encoding="utf-8")
+
+    room_scoped = register_local_attachment(
+        tmp_path,
+        file_path,
+        kind="file",
+        attachment_id="att_room_scoped",
+        room_id="!room:localhost",
+        thread_id=None,
+    )
+    thread_scoped = register_local_attachment(
+        tmp_path,
+        file_path,
+        kind="file",
+        attachment_id="att_thread_scoped",
+        room_id="!room:localhost",
+        thread_id="$thread_a",
+    )
+    assert room_scoped is not None
+    assert thread_scoped is not None
+
+    records = resolve_attachments(tmp_path, ["att_room_scoped", "att_thread_scoped"])
+    allowed, rejected = filter_attachments_for_context(records, room_id="!room:localhost", thread_id=None)
+
+    assert [record.attachment_id for record in allowed] == ["att_room_scoped"]
+    assert rejected == ["att_thread_scoped"]
+
+
+def test_resolve_attachment_media_drops_cross_thread_ids(tmp_path: Path) -> None:
+    """Media resolution should enforce room/thread provenance on attachment IDs."""
+    file_path = tmp_path / "payload.txt"
+    file_path.write_text("payload", encoding="utf-8")
+
+    allowed = register_local_attachment(
+        tmp_path,
+        file_path,
+        kind="file",
+        attachment_id="att_ok",
+        room_id="!room:localhost",
+        thread_id="$thread_a",
+    )
+    rejected = register_local_attachment(
+        tmp_path,
+        file_path,
+        kind="file",
+        attachment_id="att_wrong_thread",
+        room_id="!room:localhost",
+        thread_id="$thread_b",
+    )
+    assert allowed is not None
+    assert rejected is not None
+
+    resolved_ids, _, files, _ = resolve_attachment_media(
+        tmp_path,
+        ["att_ok", "att_wrong_thread"],
+        room_id="!room:localhost",
+        thread_id="$thread_a",
+    )
+
+    assert resolved_ids == ["att_ok"]
+    assert len(files) == 1
+    assert str(files[0].filepath) == str(file_path.resolve())
