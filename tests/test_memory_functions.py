@@ -12,6 +12,7 @@ from mindroom.memory.functions import (
     MemoryResult,
     add_agent_memory,
     add_room_memory,
+    append_agent_daily_memory,
     build_memory_enhanced_prompt,
     delete_agent_memory,
     format_memories_as_context,
@@ -908,6 +909,86 @@ class TestMemoryFunctions:
         # Unknown agent has no teams
         team_ids = get_team_ids_for_agent("unknown", config)
         assert len(team_ids) == 0
+
+    @pytest.mark.asyncio
+    async def test_memory_file_path_uses_custom_scope_dir(self, storage_path: Path, config: Config) -> None:
+        """memory_file_path should override the default scope directory."""
+        workspace = storage_path / "my-workspace"
+        workspace.mkdir(parents=True)
+        (workspace / "MEMORY.md").write_text("# Memory\n\nExisting curated memory.\n", encoding="utf-8")
+
+        config.memory.backend = "file"
+        config.agents["general"].memory_backend = "file"
+        config.agents["general"].memory_file_path = str(workspace)
+
+        await add_agent_memory("New memory entry", "general", storage_path, config)
+
+        # Memory should be written to the custom workspace MEMORY.md, not the default scope
+        content = (workspace / "MEMORY.md").read_text(encoding="utf-8")
+        assert "Existing curated memory." in content
+        assert "New memory entry" in content
+
+        # Default scope dir should NOT be created
+        default_scope = storage_path / "memory_files" / "agent_general"
+        assert not default_scope.exists()
+
+    @pytest.mark.asyncio
+    async def test_memory_file_path_entrypoint_loaded_in_prompt(self, storage_path: Path, config: Config) -> None:
+        """File backend prompt should auto-load MEMORY.md from the custom scope."""
+        workspace = storage_path / "my-workspace"
+        workspace.mkdir(parents=True)
+        (workspace / "MEMORY.md").write_text("# Memory\n\nI prefer Python over JavaScript.\n", encoding="utf-8")
+
+        config.memory.backend = "file"
+        config.agents["general"].memory_backend = "file"
+        config.agents["general"].memory_file_path = str(workspace)
+
+        enhanced = await build_memory_enhanced_prompt("What language?", "general", storage_path, config)
+        assert "I prefer Python over JavaScript." in enhanced
+
+    @pytest.mark.asyncio
+    async def test_memory_file_path_daily_files_in_custom_scope(self, storage_path: Path, config: Config) -> None:
+        """Auto-flush daily files should be written inside the custom scope directory."""
+        workspace = storage_path / "my-workspace"
+        workspace.mkdir(parents=True)
+
+        config.memory.backend = "file"
+        config.agents["general"].memory_backend = "file"
+        config.agents["general"].memory_file_path = str(workspace)
+
+        result = append_agent_daily_memory("Daily note", "general", storage_path, config)
+        assert result["memory"] == "Daily note"
+
+        # Daily file should be inside workspace/memory/
+        daily_files = list((workspace / "memory").rglob("*.md"))
+        assert len(daily_files) == 1
+        assert "Daily note" in daily_files[0].read_text(encoding="utf-8")
+
+    @pytest.mark.asyncio
+    async def test_memory_file_path_does_not_affect_other_agents(self, storage_path: Path, config: Config) -> None:
+        """Agents without memory_file_path should still use the default scope."""
+        workspace = storage_path / "my-workspace"
+        workspace.mkdir(parents=True)
+
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "memory-files")
+        config.agents["general"].memory_file_path = str(workspace)
+
+        # Add memory to agent with custom path
+        await add_agent_memory("Custom workspace memory", "general", storage_path, config)
+
+        # Add memory to agent without custom path
+        await add_agent_memory("Default scope memory", "calculator", storage_path, config)
+
+        # Custom agent should use workspace
+        general_memories = await list_all_agent_memories("general", storage_path, config)
+        assert any(m["memory"] == "Custom workspace memory" for m in general_memories)
+
+        # Other agent should use default scope
+        calc_memories = await list_all_agent_memories("calculator", storage_path, config)
+        assert any(m["memory"] == "Default scope memory" for m in calc_memories)
+        calc_file = storage_path / "memory-files" / "agent_calculator" / "MEMORY.md"
+        assert calc_file.exists()
 
     def test_memory_result_typed_dict(self) -> None:
         """Test MemoryResult TypedDict structure."""

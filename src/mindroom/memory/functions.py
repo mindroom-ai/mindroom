@@ -96,7 +96,22 @@ def _resolve_scope_markdown_path(scope_path: Path, relative_path: str) -> Path |
     return candidate
 
 
+def _agent_name_from_scope_id(scope_user_id: str) -> str | None:
+    """Extract the agent name from a scope user ID like 'agent_foo', or None for non-agent scopes."""
+    if scope_user_id.startswith("agent_"):
+        return scope_user_id[len("agent_") :]
+    return None
+
+
 def _scope_dir(scope_user_id: str, storage_path: Path, config: Config, *, create: bool) -> Path:
+    agent_name = _agent_name_from_scope_id(scope_user_id)
+    if agent_name is not None:
+        agent_config = config.agents.get(agent_name)
+        if agent_config is not None and agent_config.memory_file_path is not None:
+            scope_path = resolve_config_relative_path(agent_config.memory_file_path)
+            if create:
+                scope_path.mkdir(parents=True, exist_ok=True)
+            return scope_path
     scope_path = _file_memory_root(storage_path, config) / _scope_dir_name(scope_user_id)
     if create:
         scope_path.mkdir(parents=True, exist_ok=True)

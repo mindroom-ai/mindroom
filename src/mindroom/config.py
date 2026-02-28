@@ -55,6 +55,10 @@ class AgentConfig(BaseModel):
         default=None,
         description="Memory backend override for this agent ('mem0' or 'file'); inherits memory.backend when omitted",
     )
+    memory_file_path: str | None = Field(
+        default=None,
+        description="Custom directory to use as the file-memory scope for this agent instead of the default <root>/agent_<name>/",
+    )
     knowledge_bases: list[str] = Field(
         default_factory=list,
         description="Knowledge base IDs assigned to this agent",
