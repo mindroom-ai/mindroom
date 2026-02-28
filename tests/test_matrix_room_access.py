@@ -314,15 +314,15 @@ async def test_existing_room_reconciliation_skipped_when_not_joined(monkeypatch:
     configure_access = AsyncMock(return_value=True)
     monkeypatch.setattr(matrix_rooms, "configure_managed_room_access", configure_access)
 
-    room_id = await matrix_rooms.ensure_room_exists(
-        client=mock_client,
-        room_key="lobby",
-        config=config,
-        room_name="Lobby",
-        power_users=[],
-    )
+    with pytest.raises(RuntimeError, match="could not join"):
+        await matrix_rooms.ensure_room_exists(
+            client=mock_client,
+            room_key="lobby",
+            config=config,
+            room_name="Lobby",
+            power_users=[],
+        )
 
-    assert room_id == "!lobby:example.com"
     configure_access.assert_not_awaited()
 
 
@@ -355,3 +355,30 @@ async def test_configure_managed_room_access_respects_alias_invite_only(monkeypa
     assert result is True
     ensure_join_rule.assert_awaited_once_with(mock_client, "!secret:example.com", "invite")
     ensure_directory_visibility.assert_awaited_once_with(mock_client, "!secret:example.com", "private")
+
+
+@pytest.mark.asyncio
+async def test_ensure_all_rooms_exist_continues_after_room_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A single room setup failure should not abort setup for remaining rooms."""
+    config = Config()
+    mock_client = AsyncMock()
+
+    monkeypatch.setattr(Config, "get_all_configured_rooms", lambda _self: ["lobby", "ops"])
+    monkeypatch.setattr("mindroom.agents.get_agent_ids_for_room", lambda _room_key, _config: [])
+
+    async def _ensure_room_exists(*, room_key: str, **_kwargs: object) -> str:
+        if room_key == "lobby":
+            msg = "join failed"
+            raise RuntimeError(msg)
+        return "!ops:example.com"
+
+    ensure_room_exists_mock = AsyncMock(side_effect=_ensure_room_exists)
+    monkeypatch.setattr(matrix_rooms, "ensure_room_exists", ensure_room_exists_mock)
+    logger_exception = MagicMock()
+    monkeypatch.setattr(matrix_rooms.logger, "exception", logger_exception)
+
+    room_ids = await matrix_rooms.ensure_all_rooms_exist(mock_client, config)
+
+    assert room_ids == {"ops": "!ops:example.com"}
+    assert ensure_room_exists_mock.await_count == 2
+    logger_exception.assert_called_once()

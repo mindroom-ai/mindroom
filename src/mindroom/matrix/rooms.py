@@ -20,7 +20,7 @@ from .client import (
     leave_room,
     matrix_client,
 )
-from .identity import MatrixID, extract_server_name_from_homeserver
+from .identity import MatrixID, extract_server_name_from_homeserver, managed_room_alias_localpart
 from .state import MatrixRoom, MatrixState
 from .users import INTERNAL_USER_ACCOUNT_KEY
 
@@ -190,7 +190,8 @@ async def ensure_room_exists(  # noqa: C901, PLR0912
     # First, try to resolve the room alias on the server
     # This handles cases where the room exists on server but not in our state
     server_name = extract_server_name_from_homeserver(client.homeserver)
-    full_alias = f"#{room_key}:{server_name}"
+    alias_localpart = managed_room_alias_localpart(room_key)
+    full_alias = f"#{alias_localpart}:{server_name}"
 
     response = await client.room_resolve_alias(full_alias)
     if isinstance(response, nio.RoomResolveAliasResponse):
@@ -229,10 +230,12 @@ async def ensure_room_exists(  # noqa: C901, PLR0912
                     reason="matrix_room_access.reconcile_existing_rooms is false",
                 )
         else:
-            # Room exists but we can't join - this means the room was created
-            # but this user isn't a member. Return the room ID anyway since
-            # the room does exist and invitations will be handled separately.
-            logger.debug(f"Room {room_key} exists but user not a member, returning room ID for invitation handling")
+            msg = (
+                f"Managed room alias '{full_alias}' already exists as '{room_id}' but this MindRoom could not join it. "
+                "Possible causes: another installation owns this alias, the room is invite-only, or server-side access policies prevent joining. "
+                "If on a shared homeserver, try setting a unique MINDROOM_NAMESPACE."
+            )
+            raise RuntimeError(msg)
         return str(room_id)
 
     # Room alias doesn't exist on server, so we can create it
@@ -252,7 +255,7 @@ async def ensure_room_exists(  # noqa: C901, PLR0912
     created_room_id = await create_room(
         client=client,
         name=room_name,
-        alias=room_key,
+        alias=alias_localpart,
         topic=topic,
         power_users=power_users or [],
     )
@@ -326,12 +329,19 @@ async def ensure_all_rooms_exist(
         power_users = get_agent_ids_for_room(room_key, config)
 
         # Ensure room exists
-        room_id = await ensure_room_exists(
-            client=client,
-            room_key=room_key,
-            config=config,
-            power_users=power_users,
-        )
+        try:
+            room_id = await ensure_room_exists(
+                client=client,
+                room_key=room_key,
+                config=config,
+                power_users=power_users,
+            )
+        except RuntimeError:
+            logger.exception(
+                "Failed to ensure managed room; continuing with remaining rooms",
+                room_key=room_key,
+            )
+            continue
 
         if room_id:
             room_ids[room_key] = room_id

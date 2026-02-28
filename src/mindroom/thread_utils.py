@@ -8,7 +8,7 @@ from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any
 
 from .constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
-from .matrix.identity import MatrixID, extract_agent_name, room_alias_localpart
+from .matrix.identity import MatrixID, extract_agent_name, managed_room_key_from_alias_localpart, room_alias_localpart
 from .matrix.rooms import resolve_room_aliases
 from .matrix.state import MatrixState
 
@@ -243,6 +243,9 @@ def _room_permission_lookup_keys(
         localpart = room_alias_localpart(room_alias)
         if localpart:
             keys.append(localpart)
+            managed_room_key = managed_room_key_from_alias_localpart(localpart)
+            if managed_room_key:
+                keys.append(managed_room_key)
     return list(dict.fromkeys(keys))
 
 

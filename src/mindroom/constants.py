@@ -118,6 +118,9 @@ ENABLE_AI_CACHE = env_flag("MINDROOM_ENABLE_AI_CACHE", default=True)
 MATRIX_HOMESERVER = os.getenv("MATRIX_HOMESERVER", "http://localhost:8008")
 # (for federation setups where hostname != server_name)
 MATRIX_SERVER_NAME = os.getenv("MATRIX_SERVER_NAME", None)
+# Optional installation namespace suffix used to avoid collisions on shared homeservers.
+# When set, managed users/rooms are namespaced as "<name>_<namespace>".
+MINDROOM_NAMESPACE = os.getenv("MINDROOM_NAMESPACE", "").strip().lower() or None
 
 # Placeholder used in starter config templates. `mindroom connect` can
 # automatically replace this token with the owner Matrix user ID returned

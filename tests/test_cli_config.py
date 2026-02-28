@@ -741,6 +741,7 @@ class TestConnect:
                 json={
                     "client_id": "client-123",
                     "client_secret": "secret-123",
+                    "namespace": "a1b2c3d4",
                     "owner_user_id": "@alice:mindroom.chat",
                     "connection": {
                         "id": "conn-1",
@@ -771,6 +772,7 @@ class TestConnect:
         assert "MINDROOM_PROVISIONING_URL=https://provisioning.example" in env_content
         assert "MINDROOM_LOCAL_CLIENT_ID=client-123" in env_content
         assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in env_content
+        assert "MINDROOM_NAMESPACE=a1b2c3d4" in env_content
         assert "MINDROOM_OWNER_USER_ID=" not in env_content
         updated_config = cfg.read_text()
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER not in updated_config
@@ -808,6 +810,7 @@ class TestConnect:
                 json={
                     "client_id": "client-123",
                     "client_secret": "secret-123",
+                    "namespace": "a1b2c3d4",
                     "owner_user_id": "@alice:mindroom.chat",
                 },
             ),
@@ -851,6 +854,7 @@ class TestConnect:
                 json={
                     "client_id": "client-123",
                     "client_secret": "secret-123",
+                    "namespace": "a1b2c3d4",
                     "owner_user_id": "@alice:mindroom.chat",
                 },
             ),
@@ -872,6 +876,7 @@ class TestConnect:
         assert "export MINDROOM_PROVISIONING_URL=https://provisioning.example" in result.output
         assert "export MINDROOM_LOCAL_CLIENT_ID=client-123" in result.output
         assert "export MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in result.output
+        assert "export MINDROOM_NAMESPACE=a1b2c3d4" in result.output
         assert "Owner user ID from pairing: @alice:mindroom.chat" in result.output
         assert "export MINDROOM_OWNER_USER_ID=" not in result.output
         assert not (tmp_path / ".env").exists()
@@ -897,6 +902,7 @@ class TestConnect:
                 json={
                     "client_id": "client-123",
                     "client_secret": "secret-123",
+                    "namespace": "a1b2c3d4",
                     "owner_user_id": "@alice:mindroom.chat",
                 },
             )
@@ -916,6 +922,7 @@ class TestConnect:
         assert result.exit_code == 0
         assert called["url"] == "https://env-provisioning.example/v1/local-mindroom/pair/complete"
         assert "export MINDROOM_PROVISIONING_URL=https://env-provisioning.example" in result.output
+        assert "export MINDROOM_NAMESPACE=a1b2c3d4" in result.output
         assert "Owner user ID from pairing: @alice:mindroom.chat" in result.output
         assert "export MINDROOM_OWNER_USER_ID=" not in result.output
 
@@ -941,6 +948,7 @@ class TestConnect:
                 json={
                     "client_id": "client-123",
                     "client_secret": "secret-123",
+                    "namespace": "a1b2c3d4",
                     "owner_user_id": "not-a-mxid",
                 },
             ),
@@ -983,6 +991,7 @@ class TestConnect:
                 json={
                     "client_id": "client-123",
                     "client_secret": "secret-123",
+                    "namespace": "a1b2c3d4",
                     "owner_user_id": "@alice:mindroom.chat",
                 },
             )

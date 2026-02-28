@@ -334,3 +334,26 @@ def test_mindroom_user_username_rejects_agent_collision() -> None:
             },
             mindroom_user={"username": "mindroom_assistant", "display_name": "Alice"},
         )
+
+
+def test_agent_and_team_names_must_not_overlap() -> None:
+    """Agent keys and team keys must be distinct to avoid identity collisions."""
+    with pytest.raises(ValueError, match="Agent and team names must be distinct"):
+        Config(
+            agents={
+                "assistant": {
+                    "display_name": "Assistant",
+                    "role": "Test assistant",
+                    "rooms": ["test_room"],
+                },
+            },
+            teams={
+                "assistant": {
+                    "display_name": "Assistant Team",
+                    "role": "Team role",
+                    "agents": ["assistant"],
+                    "model": "default",
+                },
+            },
+            models={"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+        )
