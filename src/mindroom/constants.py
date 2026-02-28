@@ -21,7 +21,7 @@ ROUTER_AGENT_NAME = "router"
 # persistent volume instead of the package directory (which may be read-only).
 _CONFIG_PATH_ENV = os.getenv("MINDROOM_CONFIG_PATH")
 
-# Search order: env var > ./config.yaml > ~/.mindroom/config.yaml
+# Search order for existing files: env var > ./config.yaml > ~/.mindroom/config.yaml
 _CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config.yaml"]
 
 
@@ -59,7 +59,7 @@ def resolve_config_relative_path(raw_path: str | Path, *, config_path: Path | No
 
 
 def find_config() -> Path:
-    """Find the first existing config file, or fall back to ./config.yaml.
+    """Find the first existing config file, or fall back to ~/.mindroom/config.yaml.
 
     Returns the original (possibly relative) path, not a resolved one,
     so that derived paths like STORAGE_PATH stay relative and display
@@ -70,7 +70,7 @@ def find_config() -> Path:
     for path in _CONFIG_SEARCH_PATHS:
         if path.exists():
             return path
-    return _CONFIG_SEARCH_PATHS[0]  # default to ./config.yaml for creation
+    return _CONFIG_SEARCH_PATHS[-1]  # default to ~/.mindroom/config.yaml for creation
 
 
 CONFIG_PATH = find_config()
