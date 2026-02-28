@@ -529,9 +529,9 @@ class TestCommandThreadContextRoomMode:
         )
 
         with (
-            patch("mindroom.bot.check_agent_mentioned", return_value=([], False, False)),
+            patch("mindroom.command_handler.check_agent_mentioned", return_value=([], False, False)),
             patch(
-                "mindroom.bot.schedule_task",
+                "mindroom.command_handler.schedule_task",
                 new_callable=AsyncMock,
                 return_value=("task123", "scheduled"),
             ) as mock_schedule,
