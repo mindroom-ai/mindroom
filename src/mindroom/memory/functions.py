@@ -68,6 +68,11 @@ def _caller_uses_file_memory_backend(config: Config, caller_context: str | list[
     return _use_file_memory_backend(config)
 
 
+def _team_uses_file_memory_backend(config: Config, agent_names: list[str]) -> bool:
+    """Return whether all team members resolve to file-backed memory."""
+    return all(_use_file_memory_backend(config, agent_name=agent_name) for agent_name in agent_names)
+
+
 def _file_memory_root(storage_path: Path, config: Config) -> Path:
     configured_path = config.memory.file.path
     if configured_path:
@@ -850,7 +855,7 @@ async def _build_file_memory_enhanced_prompt(
         if room_entrypoint:
             context_chunks.append(f"[File memory entrypoint (room)]\n{room_entrypoint}")
 
-        room_memories = await search_room_memories(prompt, room_id, storage_path, config)
+        room_memories = await search_room_memories(prompt, room_id, storage_path, config, agent_name=agent_name)
         if room_memories:
             context_chunks.append(format_memories_as_context(room_memories, "room file"))
 
@@ -1016,7 +1021,7 @@ async def store_conversation_memory(
     use_file_backend = (
         _use_file_memory_backend(config, agent_name=agent_name)
         if isinstance(agent_name, str)
-        else _use_file_memory_backend(config)
+        else _team_uses_file_memory_backend(config, agent_name)
     )
 
     if use_file_backend:

@@ -536,6 +536,32 @@ class TestMemoryFunctions:
         mock_memory.add.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_store_conversation_memory_team_uses_mem0_when_any_member_overrides(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Team conversation storage should use Mem0 when any team member resolves to Mem0."""
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "memory-files")
+        config.agents["calculator"].memory_backend = "mem0"
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory) as mock_create:
+            await store_conversation_memory(
+                "Analyze our quarterly metrics",
+                ["calculator", "finance"],
+                storage_path,
+                "session-team",
+                config,
+            )
+
+        mock_create.assert_called_once_with(storage_path, config)
+        mock_memory.add.assert_called_once()
+        team_memory_file = storage_path / "memory-files" / "team_calculator+finance" / "MEMORY.md"
+        assert not team_memory_file.exists()
+
+    @pytest.mark.asyncio
     async def test_search_agent_memories_with_teams(
         self,
         mock_memory: AsyncMock,
@@ -659,6 +685,39 @@ class TestMemoryFunctions:
         assert "[File memory entrypoint (agent)]" in enhanced
         assert "Project uses FastAPI." in enhanced
         assert "How do we build the API?" in enhanced
+
+    @pytest.mark.asyncio
+    async def test_file_backend_room_prompt_search_uses_agent_override(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Room memory search in file prompt path should honor per-agent file overrides."""
+        config.memory.backend = "mem0"
+        config.memory.file.path = str(storage_path / "memory-files")
+        config.agents["general"].memory_backend = "file"
+
+        await add_room_memory(
+            "Room memory note",
+            "!room:server",
+            storage_path,
+            config,
+            agent_name="general",
+        )
+
+        with patch(
+            "mindroom.memory.functions.create_memory_instance",
+            side_effect=AssertionError("Mem0 should not be used for file-backed agent prompt building"),
+        ):
+            enhanced = await build_memory_enhanced_prompt(
+                "Room memory note",
+                "general",
+                storage_path,
+                config,
+                room_id="!room:server",
+            )
+
+        assert "Room memory note" in enhanced
 
     @pytest.mark.asyncio
     async def test_file_backend_search_skips_structured_line_duplicates(
