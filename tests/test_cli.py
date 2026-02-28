@@ -10,9 +10,8 @@ import pytest
 
 from mindroom.bot import MultiAgentOrchestrator
 from mindroom.config import Config
-from mindroom.matrix.client import register_user
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
+from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, register_user
 
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
@@ -58,7 +57,7 @@ class TestUserAccountManagement:
         )
         mock_client.set_displayname.return_value = AsyncMock()
 
-        with patch("mindroom.matrix.client.matrix_client", return_value=mock_context):
+        with patch("mindroom.matrix.users.matrix_client", return_value=mock_context):
             user_id = await register_user("http://localhost:8008", "test_user", TEST_PASSWORD, "Test User")
 
             assert user_id == "@test_user:localhost"
@@ -89,7 +88,7 @@ class TestUserAccountManagement:
         )
         mock_client.set_displayname.return_value = AsyncMock()
 
-        with patch("mindroom.matrix.client.matrix_client", return_value=mock_context):
+        with patch("mindroom.matrix.users.matrix_client", return_value=mock_context):
             # Should return the user_id even when user exists
             user_id = await register_user("http://localhost:8008", "existing_user", "test_password", "Existing User")
 
@@ -123,7 +122,7 @@ class TestUserAccountManagement:
         mock_client.set_displayname.return_value = AsyncMock()
 
         with (
-            patch("mindroom.matrix.client.matrix_client", return_value=mock_context),
+            patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
             patch("mindroom.matrix.state.MATRIX_STATE_FILE", tmp_path / "matrix_state.yaml"),
             patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
         ):
@@ -172,7 +171,7 @@ class TestUserAccountManagement:
             )
 
             with (
-                patch("mindroom.matrix.client.matrix_client", return_value=mock_context),
+                patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
                 patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
             ):
                 orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
@@ -220,7 +219,7 @@ class TestUserAccountManagement:
             mock_client.set_displayname.return_value = AsyncMock()
 
             with (
-                patch("mindroom.matrix.client.matrix_client", return_value=mock_context),
+                patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
                 patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
             ):
                 orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
@@ -255,7 +254,7 @@ class TestUserAccountManagement:
         mock_client.set_displayname.return_value = AsyncMock()
 
         with (
-            patch("mindroom.matrix.client.matrix_client", return_value=mock_context),
+            patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
             patch("mindroom.matrix.state.MATRIX_STATE_FILE", tmp_path / "matrix_state.yaml"),
             patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
         ):
