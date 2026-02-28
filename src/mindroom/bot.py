@@ -16,6 +16,7 @@ from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
 from . import config_confirmation, image_handler, interactive, voice_handler
 from .agents import create_agent, create_session_storage, get_rooms_for_entity, remove_run_by_event_id
 from .ai import ai_response, stream_agent_response
+from .attachment_media import resolve_attachment_media
 from .attachments import (
     append_attachment_ids_prompt,
     extract_file_or_video_caption,
@@ -24,7 +25,6 @@ from .attachments import (
     parse_attachment_ids_from_event_source,
     register_audio_attachment,
     register_file_or_video_attachment,
-    resolve_attachment_media,
     resolve_thread_attachment_ids,
 )
 from .background_tasks import create_background_task, wait_for_background_tasks
@@ -290,6 +290,38 @@ class MessageContext:
     thread_history: list[dict]
     mentioned_agents: list[MatrixID]
     has_non_agent_mentions: bool
+
+
+type DispatchEvent = (
+    nio.RoomMessageText
+    | nio.RoomMessageImage
+    | nio.RoomEncryptedImage
+    | nio.RoomMessageFile
+    | nio.RoomEncryptedFile
+    | nio.RoomMessageVideo
+    | nio.RoomEncryptedVideo
+)
+
+
+@dataclass(frozen=True)
+class _PreparedDispatch:
+    """Common dispatch context reused across media handlers."""
+
+    requester_user_id: str
+    context: MessageContext
+
+
+@dataclass(frozen=True)
+class _DispatchPayload:
+    """Media payload passed to team/individual response executors."""
+
+    prompt: str
+    audio: Sequence[Audio] | None = None
+    images: Sequence[Image] | None = None
+    files: Sequence[File] | None = None
+    videos: Sequence[Video] | None = None
+    attachment_ids: list[str] | None = None
+    include_none_keys: tuple[str, ...] = ()
 
 
 @dataclass
@@ -705,7 +737,7 @@ class AgentBot:
         else:
             self.logger.error("Failed to join room", room_id=room.room_id)
 
-    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:  # noqa: C901, PLR0911
+    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         self.logger.info("Received message", event_id=event.event_id, room_id=room.room_id, sender=event.sender)
         assert self.client is not None
         if not isinstance(event.body, str) or is_in_progress_message(event.body):
@@ -721,9 +753,6 @@ class AgentBot:
             await self._handle_message_edit(room, event, event_info)
             return
 
-        # We only receive events from rooms we're in - no need to check access
-        _is_dm_room = await is_dm_room(self.client, room.room_id)
-
         await interactive.handle_text_response(self.client, room, event, self.agent_name)
 
         # Router handles commands exclusively
@@ -735,42 +764,30 @@ class AgentBot:
                 await self._handle_command(room, event, command)
             return
 
-        context = await self._extract_message_context(room, event)
-
-        # Check if the sender is an agent
-        sender_agent_name = extract_agent_name(requester_user_id, self.config)
-
-        # Skip unmentioned messages authored by agents. Relayed messages carrying
-        # original-sender metadata resolve to that user before this check.
-        if sender_agent_name and not context.am_i_mentioned:
-            self.logger.debug("Ignoring message from other agent (not mentioned)")
+        dispatch = await self._prepare_dispatch(
+            room,
+            event,
+            requester_user_id=requester_user_id,
+            event_label="message",
+        )
+        if dispatch is None:
             return
 
         message_attachment_ids = parse_attachment_ids_from_event_source(event.source)
 
-        # Router dispatch (routing / skip) — shared with image handler
-        if await self._handle_router_dispatch(
+        action = await self._resolve_dispatch_action(
             room,
             event,
-            context,
-            requester_user_id,
+            dispatch,
+            message_for_decision=event.body,
             extra_content={ATTACHMENT_IDS_KEY: message_attachment_ids} if message_attachment_ids else None,
-        ):
-            return
-
-        # Decide: team response, individual response, or skip
-        action = await self._resolve_response_action(
-            context,
-            room,
-            requester_user_id,
-            event.body,
-            _is_dm_room,
         )
-        if action.kind == "skip":
+        if action is None:
             return
 
         # If responding in a thread, include supported media from the thread
         # root event so routed relay messages can forward original attachments.
+        context = dispatch.context
         thread_images = await self._fetch_thread_images(room.room_id, context.thread_id) if context.thread_id else []
         thread_audio = (
             await self._fetch_thread_audio(room.room_id, context.thread_id)
@@ -794,48 +811,22 @@ class AgentBot:
         )
         merged_audio = [*thread_audio, *attachment_audio]
         prompt_text = append_attachment_ids_prompt(event.body, resolved_attachment_ids)
-
-        if action.kind == "team":
-            assert action.form_team is not None
-            response_event_id = await self._generate_team_response_helper(
-                room_id=room.room_id,
-                reply_to_event_id=event.event_id,
-                thread_id=context.thread_id,
-                message=prompt_text,
-                team_agents=action.form_team.agents,
-                team_mode=action.form_team.mode,
-                thread_history=context.thread_history,
-                requester_user_id=requester_user_id,
-                existing_event_id=None,
+        await self._execute_dispatch_action(
+            room,
+            event,
+            dispatch,
+            action,
+            _DispatchPayload(
+                prompt=prompt_text,
                 audio=merged_audio or None,
                 images=thread_images or None,
                 files=attachment_files or None,
                 videos=attachment_videos or None,
                 attachment_ids=resolved_attachment_ids or None,
-            )
-            self.response_tracker.mark_responded(event.event_id, response_event_id)
-            return
-
-        # Individual response
-        if not context.am_i_mentioned:
-            self.logger.info("Will respond: only agent in thread")
-
-        self.logger.info("Processing", event_id=event.event_id)
-
-        response_event_id = await self._generate_response(
-            room_id=room.room_id,
-            prompt=prompt_text,
-            reply_to_event_id=event.event_id,
-            thread_id=context.thread_id,
-            thread_history=context.thread_history,
-            user_id=requester_user_id,
-            audio=merged_audio or None,
-            images=thread_images or None,
-            files=attachment_files or None,
-            videos=attachment_videos or None,
-            attachment_ids=resolved_attachment_ids or None,
+                include_none_keys=("audio", "images", "files", "videos", "attachment_ids"),
+            ),
+            processing_log="Processing",
         )
-        self.response_tracker.mark_responded(event.event_id, response_event_id)
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""
@@ -1018,33 +1009,23 @@ class AgentBot:
         """Handle image message events by passing the image to the AI model."""
         assert self.client is not None
 
-        requester_user_id = self._precheck_event(room, event)
-        if requester_user_id is None:
-            return
-
-        # Skip messages from other agents unless mentioned
-        sender_agent_name = extract_agent_name(requester_user_id, self.config)
-        context = await self._extract_message_context(room, event)
-
-        if sender_agent_name and not context.am_i_mentioned:
-            self.logger.debug("Ignoring image from other agent (not mentioned)")
-            return
-
-        # Router dispatch (routing / skip) — shared with text handler
-        caption = image_handler.extract_caption(event)
-        if await self._handle_router_dispatch(room, event, context, requester_user_id, message=caption):
-            return
-
-        # Decide: team response, individual response, or skip (before downloading)
-        _is_dm_room = await is_dm_room(self.client, room.room_id)
-        action = await self._resolve_response_action(
-            context,
+        dispatch = await self._prepare_dispatch(
             room,
-            requester_user_id,
-            event.body,
-            _is_dm_room,
+            event,
+            event_label="image",
         )
-        if action.kind == "skip":
+        if dispatch is None:
+            return
+
+        caption = image_handler.extract_caption(event)
+        action = await self._resolve_dispatch_action(
+            room,
+            event,
+            dispatch,
+            message_for_decision=event.body,
+            router_message=caption,
+        )
+        if action is None:
             return
 
         # Download image only after confirming we should respond
@@ -1054,33 +1035,17 @@ class AgentBot:
             self.response_tracker.mark_responded(event.event_id)
             return
 
-        self.logger.info("Processing image", event_id=event.event_id)
-
-        if action.kind == "team":
-            assert action.form_team is not None
-            response_event_id = await self._generate_team_response_helper(
-                room_id=room.room_id,
-                reply_to_event_id=event.event_id,
-                thread_id=context.thread_id,
-                message=caption,
-                team_agents=action.form_team.agents,
-                team_mode=action.form_team.mode,
-                thread_history=context.thread_history,
-                requester_user_id=requester_user_id,
-                existing_event_id=None,
-                images=[image],
-            )
-        else:
-            response_event_id = await self._generate_response(
-                room_id=room.room_id,
+        await self._execute_dispatch_action(
+            room,
+            event,
+            dispatch,
+            action,
+            _DispatchPayload(
                 prompt=caption,
-                reply_to_event_id=event.event_id,
-                thread_id=context.thread_id,
-                thread_history=context.thread_history,
-                user_id=requester_user_id,
                 images=[image],
-            )
-        self.response_tracker.mark_responded(event.event_id, response_event_id)
+            ),
+            processing_log="Processing image",
+        )
 
     async def _on_file_or_video_message(
         self,
@@ -1090,18 +1055,15 @@ class AgentBot:
         """Handle file/video events by registering attachment IDs for tool/model access."""
         assert self.client is not None
 
-        requester_user_id = self._precheck_event(room, event)
-        if requester_user_id is None:
+        dispatch = await self._prepare_dispatch(
+            room,
+            event,
+            event_label="media",
+        )
+        if dispatch is None:
             return
 
-        # Skip messages from other agents unless mentioned
-        sender_agent_name = extract_agent_name(requester_user_id, self.config)
-        context = await self._extract_message_context(room, event)
-
-        if sender_agent_name and not context.am_i_mentioned:
-            self.logger.debug("Ignoring media from other agent (not mentioned)")
-            return
-
+        context = dispatch.context
         attachment_record = await register_file_or_video_attachment(
             self.client,
             self.storage_path,
@@ -1120,67 +1082,36 @@ class AgentBot:
             [attachment_record.attachment_id],
         )
 
-        # Router dispatch (routing / skip) — shared with text and image handlers.
-        if await self._handle_router_dispatch(
+        action = await self._resolve_dispatch_action(
             room,
             event,
-            context,
-            requester_user_id,
-            message=caption,
+            dispatch,
+            message_for_decision=event.body,
+            router_message=caption,
             extra_content={
                 ORIGINAL_SENDER_KEY: event.sender,
                 ATTACHMENT_IDS_KEY: resolved_attachment_ids,
             },
-        ):
-            return
-
-        # Decide: team response, individual response, or skip.
-        _is_dm_room = await is_dm_room(self.client, room.room_id)
-        action = await self._resolve_response_action(
-            context,
-            room,
-            requester_user_id,
-            event.body,
-            _is_dm_room,
         )
-        if action.kind == "skip":
+        if action is None:
             return
 
         prompt_text = append_attachment_ids_prompt(caption, resolved_attachment_ids)
-
-        self.logger.info("Processing media message", event_id=event.event_id)
-
-        if action.kind == "team":
-            assert action.form_team is not None
-            response_event_id = await self._generate_team_response_helper(
-                room_id=room.room_id,
-                reply_to_event_id=event.event_id,
-                thread_id=context.thread_id,
-                message=prompt_text,
-                team_agents=action.form_team.agents,
-                team_mode=action.form_team.mode,
-                thread_history=context.thread_history,
-                requester_user_id=requester_user_id,
-                existing_event_id=None,
-                audio=attachment_audio or None,
-                files=attachment_files or None,
-                videos=attachment_videos or None,
-                attachment_ids=resolved_attachment_ids or None,
-            )
-        else:
-            response_event_id = await self._generate_response(
-                room_id=room.room_id,
+        await self._execute_dispatch_action(
+            room,
+            event,
+            dispatch,
+            action,
+            _DispatchPayload(
                 prompt=prompt_text,
-                reply_to_event_id=event.event_id,
-                thread_id=context.thread_id,
-                thread_history=context.thread_history,
-                user_id=requester_user_id,
                 audio=attachment_audio or None,
                 files=attachment_files or None,
                 videos=attachment_videos or None,
                 attachment_ids=resolved_attachment_ids or None,
-            )
-        self.response_tracker.mark_responded(event.event_id, response_event_id)
+                include_none_keys=("audio", "files", "videos", "attachment_ids"),
+            ),
+            processing_log="Processing media message",
+        )
 
     async def _derive_conversation_context(
         self,
@@ -1261,6 +1192,127 @@ class AgentBot:
             return None
 
         return requester_user_id
+
+    async def _prepare_dispatch(
+        self,
+        room: nio.MatrixRoom,
+        event: DispatchEvent,
+        *,
+        requester_user_id: str | None = None,
+        event_label: str,
+    ) -> _PreparedDispatch | None:
+        """Run common precheck/context/sender-gating for dispatch handlers."""
+        effective_requester_user_id = requester_user_id or self._precheck_event(room, event)
+        if effective_requester_user_id is None:
+            return None
+
+        context = await self._extract_message_context(room, event)
+        sender_agent_name = extract_agent_name(effective_requester_user_id, self.config)
+        if sender_agent_name and not context.am_i_mentioned:
+            self.logger.debug(f"Ignoring {event_label} from other agent (not mentioned)")
+            return None
+
+        return _PreparedDispatch(
+            requester_user_id=effective_requester_user_id,
+            context=context,
+        )
+
+    async def _resolve_dispatch_action(
+        self,
+        room: nio.MatrixRoom,
+        event: DispatchEvent,
+        dispatch: _PreparedDispatch,
+        *,
+        message_for_decision: str,
+        router_message: str | None = None,
+        extra_content: dict[str, Any] | None = None,
+    ) -> _ResponseAction | None:
+        """Resolve routing + team/individual/skip action for a prepared dispatch."""
+        if await self._handle_router_dispatch(
+            room,
+            event,
+            dispatch.context,
+            dispatch.requester_user_id,
+            message=router_message,
+            extra_content=extra_content,
+        ):
+            return None
+
+        assert self.client is not None
+        dm_room = await is_dm_room(self.client, room.room_id)
+        action = await self._resolve_response_action(
+            dispatch.context,
+            room,
+            dispatch.requester_user_id,
+            message_for_decision,
+            dm_room,
+        )
+        if action.kind == "skip":
+            return None
+        return action
+
+    async def _execute_dispatch_action(
+        self,
+        room: nio.MatrixRoom,
+        event: DispatchEvent,
+        dispatch: _PreparedDispatch,
+        action: _ResponseAction,
+        payload: _DispatchPayload,
+        *,
+        processing_log: str,
+    ) -> None:
+        """Execute resolved dispatch action and mark the source event responded."""
+        payload_kwargs = self._payload_media_kwargs(payload)
+
+        if action.kind == "team":
+            assert action.form_team is not None
+            response_event_id = await self._generate_team_response_helper(
+                room_id=room.room_id,
+                reply_to_event_id=event.event_id,
+                thread_id=dispatch.context.thread_id,
+                message=payload.prompt,
+                team_agents=action.form_team.agents,
+                team_mode=action.form_team.mode,
+                thread_history=dispatch.context.thread_history,
+                requester_user_id=dispatch.requester_user_id,
+                existing_event_id=None,
+                **payload_kwargs,
+            )
+            self.response_tracker.mark_responded(event.event_id, response_event_id)
+            return
+
+        if not dispatch.context.am_i_mentioned:
+            self.logger.info("Will respond: only agent in thread")
+
+        self.logger.info(processing_log, event_id=event.event_id)
+        response_kwargs: dict[str, Any] = {
+            "room_id": room.room_id,
+            "prompt": payload.prompt,
+            "reply_to_event_id": event.event_id,
+            "thread_id": dispatch.context.thread_id,
+            "thread_history": dispatch.context.thread_history,
+            "user_id": dispatch.requester_user_id,
+        }
+        response_kwargs.update(payload_kwargs)
+
+        response_event_id = await self._generate_response(**response_kwargs)
+        self.response_tracker.mark_responded(event.event_id, response_event_id)
+
+    @staticmethod
+    def _payload_media_kwargs(payload: _DispatchPayload) -> dict[str, Any]:
+        """Build optional media kwargs for response helper calls."""
+        kwargs: dict[str, Any] = {}
+        if payload.audio is not None or "audio" in payload.include_none_keys:
+            kwargs["audio"] = payload.audio
+        if payload.images is not None or "images" in payload.include_none_keys:
+            kwargs["images"] = payload.images
+        if payload.files is not None or "files" in payload.include_none_keys:
+            kwargs["files"] = payload.files
+        if payload.videos is not None or "videos" in payload.include_none_keys:
+            kwargs["videos"] = payload.videos
+        if payload.attachment_ids is not None or "attachment_ids" in payload.include_none_keys:
+            kwargs["attachment_ids"] = payload.attachment_ids
+        return kwargs
 
     def _can_reply_to_sender(self, sender_id: str) -> bool:
         """Return whether this entity may reply to *sender_id*."""

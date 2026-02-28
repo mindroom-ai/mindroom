@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.attachment_media import attachment_records_to_media
 from mindroom.attachments import (
     attachment_id_for_event,
-    attachment_records_to_media,
     load_attachment,
     merge_attachment_ids,
     parse_attachment_ids_from_event_source,

@@ -1,0 +1,72 @@
+"""Matrix media transport helpers shared across handlers."""
+
+from __future__ import annotations
+
+import nio
+from nio import crypto
+
+from mindroom.logging_config import get_logger
+
+logger = get_logger(__name__)
+
+
+def _event_id_for_log(event: nio.RoomMessageMedia | nio.RoomEncryptedMedia) -> str | None:
+    event_id = getattr(event, "event_id", None)
+    return event_id if isinstance(event_id, str) else None
+
+
+def media_mime_type(event: nio.RoomMessageMedia | nio.RoomEncryptedMedia) -> str | None:
+    """Extract MIME type from Matrix media events."""
+    if isinstance(event, nio.RoomEncryptedMedia):
+        mimetype = getattr(event, "mimetype", None)
+        if isinstance(mimetype, str) and mimetype:
+            return mimetype
+
+    source = getattr(event, "source", {})
+    content = source.get("content", {}) if isinstance(source, dict) else {}
+    info = content.get("info", {}) if isinstance(content, dict) else {}
+    mimetype = info.get("mimetype") if isinstance(info, dict) else None
+    return mimetype if isinstance(mimetype, str) and mimetype else None
+
+
+def _decrypt_encrypted_media_bytes(
+    event: nio.RoomEncryptedMedia,
+    encrypted_bytes: bytes,
+) -> bytes | None:
+    """Decrypt encrypted Matrix media payload bytes."""
+    try:
+        key = event.source["content"]["file"]["key"]["k"]
+        sha256 = event.source["content"]["file"]["hashes"]["sha256"]
+        iv = event.source["content"]["file"]["iv"]
+    except (KeyError, TypeError):
+        logger.exception("Encrypted media payload missing decryption fields", event_id=_event_id_for_log(event))
+        return None
+
+    try:
+        return crypto.attachments.decrypt_attachment(encrypted_bytes, key, sha256, iv)
+    except Exception:
+        logger.exception("Media decryption failed", event_id=_event_id_for_log(event))
+        return None
+
+
+async def download_media_bytes(
+    client: nio.AsyncClient,
+    event: nio.RoomMessageMedia | nio.RoomEncryptedMedia,
+) -> bytes | None:
+    """Download and decrypt Matrix media payload bytes."""
+    try:
+        response = await client.download(event.url)
+    except Exception:
+        logger.exception("Error downloading media")
+        return None
+
+    if isinstance(response, nio.DownloadError):
+        logger.error("Media download failed", event_id=_event_id_for_log(event), error=str(response))
+        return None
+    if not isinstance(response.body, bytes):
+        logger.error("Media download returned non-bytes payload", event_id=_event_id_for_log(event))
+        return None
+
+    if isinstance(event, nio.RoomEncryptedMedia):
+        return _decrypt_encrypted_media_bytes(event, response.body)
+    return response.body

@@ -11,11 +11,10 @@ from typing import Any, Literal
 from uuid import uuid4
 
 import nio
-from agno.media import Audio, File, Video
-from nio import crypto
 
 from .constants import ATTACHMENT_IDS_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
 from .logging_config import get_logger
+from .matrix.media import download_media_bytes, media_mime_type
 
 logger = get_logger(__name__)
 
@@ -146,20 +145,6 @@ def store_media_bytes_locally(
     return media_path
 
 
-def media_mime_type(
-    event: nio.RoomMessageMedia | nio.RoomEncryptedMedia,
-) -> str | None:
-    """Extract MIME type from Matrix media events."""
-    if isinstance(event, nio.RoomEncryptedMedia):
-        mimetype = getattr(event, "mimetype", None)
-        if isinstance(mimetype, str) and mimetype:
-            return mimetype
-    content = event.source.get("content", {})
-    info = content.get("info", {}) if isinstance(content, dict) else {}
-    mimetype = info.get("mimetype") if isinstance(info, dict) else None
-    return mimetype if isinstance(mimetype, str) and mimetype else None
-
-
 def extract_file_or_video_caption(
     event: FileOrVideoEvent,
 ) -> str:
@@ -172,46 +157,6 @@ def extract_file_or_video_caption(
     if isinstance(event, nio.RoomMessageVideo | nio.RoomEncryptedVideo):
         return "[Attached video]"
     return "[Attached file]"
-
-
-def _decrypt_encrypted_media_bytes(event: nio.RoomEncryptedMedia, encrypted_bytes: bytes) -> bytes | None:
-    """Decrypt encrypted Matrix media payload bytes."""
-    try:
-        key = event.source["content"]["file"]["key"]["k"]
-        sha256 = event.source["content"]["file"]["hashes"]["sha256"]
-        iv = event.source["content"]["file"]["iv"]
-    except (KeyError, TypeError):
-        logger.exception("Encrypted media payload missing decryption fields", event_id=event.event_id)
-        return None
-
-    try:
-        return crypto.attachments.decrypt_attachment(encrypted_bytes, key, sha256, iv)
-    except Exception:
-        logger.exception("Media decryption failed", event_id=event.event_id)
-        return None
-
-
-async def download_media_bytes(
-    client: nio.AsyncClient,
-    event: nio.RoomMessageMedia | nio.RoomEncryptedMedia,
-) -> bytes | None:
-    """Download and decrypt Matrix media payload bytes."""
-    try:
-        response = await client.download(event.url)
-    except Exception:
-        logger.exception("Error downloading media")
-        return None
-
-    if isinstance(response, nio.DownloadError):
-        logger.error("Media download failed", event_id=event.event_id, error=str(response))
-        return None
-    if not isinstance(response.body, bytes):
-        logger.error("Media download returned non-bytes payload", event_id=event.event_id)
-        return None
-
-    if isinstance(event, nio.RoomEncryptedMedia):
-        return _decrypt_encrypted_media_bytes(event, response.body)
-    return response.body
 
 
 async def store_file_or_video_locally(
@@ -441,61 +386,6 @@ async def resolve_thread_attachment_ids(
     if record is None:
         return []
     return [record.attachment_id]
-
-
-def attachment_records_to_media(
-    attachment_records: list[AttachmentRecord],
-) -> tuple[list[Audio], list[File], list[Video]]:
-    """Convert persisted attachments into Agno media objects."""
-    audio: list[Audio] = []
-    files: list[File] = []
-    videos: list[Video] = []
-
-    for record in attachment_records:
-        if not record.local_path.is_file():
-            continue
-        if record.kind == "audio":
-            audio.append(
-                Audio(
-                    filepath=str(record.local_path),
-                    mime_type=record.mime_type,
-                ),
-            )
-        elif record.kind == "file":
-            try:
-                file_media = File(
-                    filepath=str(record.local_path),
-                    mime_type=record.mime_type,
-                    filename=record.filename,
-                )
-            except Exception:
-                # Agno validates file MIME types against a strict allow-list.
-                # Fall back to filepath+filename so arbitrary attachments still work.
-                file_media = File(
-                    filepath=str(record.local_path),
-                    filename=record.filename,
-                )
-            files.append(file_media)
-        elif record.kind == "video":
-            videos.append(
-                Video(
-                    filepath=str(record.local_path),
-                    mime_type=record.mime_type,
-                ),
-            )
-
-    return audio, files, videos
-
-
-def resolve_attachment_media(
-    storage_path: Path,
-    attachment_ids: list[str],
-) -> tuple[list[str], list[Audio], list[File], list[Video]]:
-    """Resolve attachment IDs into Agno media objects."""
-    attachment_records = resolve_attachments(storage_path, attachment_ids)
-    resolved_attachment_ids = [record.attachment_id for record in attachment_records]
-    attachment_audio, attachment_files, attachment_videos = attachment_records_to_media(attachment_records)
-    return resolved_attachment_ids, attachment_audio, attachment_files, attachment_videos
 
 
 def attachments_for_tool_payload(

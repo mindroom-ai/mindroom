@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
-import nio
+from typing import TYPE_CHECKING
+
 from agno.media import Image
-from nio import crypto
 
 from .logging_config import get_logger
+from .matrix import media as matrix_media
+from .matrix.media import download_media_bytes, media_mime_type
+
+if TYPE_CHECKING:
+    import nio
 
 logger = get_logger(__name__)
+crypto = matrix_media.crypto
 
 
 def extract_caption(event: nio.RoomMessageImage | nio.RoomEncryptedImage) -> str:
@@ -47,43 +53,7 @@ async def download_image(
         agno Image object or None if download failed
 
     """
-    try:
-        mxc = event.url
-        response = await client.download(mxc)
-        if isinstance(response, nio.DownloadError):
-            logger.error(f"Image download failed: {response}")
-            return None
-
-        if isinstance(event, nio.RoomMessageImage):
-            image_bytes = response.body
-        else:
-            # Decrypt the image (same pattern as voice_handler._download_audio).
-            # Return None on malformed payloads to match this function's contract.
-            try:
-                key = event.source["content"]["file"]["key"]["k"]
-                sha256 = event.source["content"]["file"]["hashes"]["sha256"]
-                iv = event.source["content"]["file"]["iv"]
-            except (KeyError, TypeError):
-                logger.exception(
-                    "Encrypted image payload missing decryption fields",
-                    event_id=getattr(event, "event_id", None),
-                )
-                return None
-
-            try:
-                image_bytes = crypto.attachments.decrypt_attachment(response.body, key, sha256, iv)
-            except Exception:
-                logger.exception("Image decryption failed")
-                return None
-
-        # Prefer Matrix-provided mimetype metadata and keep it unset when absent.
-        # For encrypted images, nio parses info.mimetype -> file.mimetype into
-        # event.mimetype; for unencrypted images we read content.info.mimetype.
-        if isinstance(event, nio.RoomEncryptedImage):
-            mime_type = event.mimetype
-        else:
-            mime_type = event.source.get("content", {}).get("info", {}).get("mimetype")
-        return Image(content=image_bytes, mime_type=mime_type)
-    except Exception:
-        logger.exception("Error downloading image")
-    return None
+    image_bytes = await download_media_bytes(client, event)
+    if image_bytes is None:
+        return None
+    return Image(content=image_bytes, mime_type=media_mime_type(event))

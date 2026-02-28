@@ -8,22 +8,25 @@ import uuid
 from typing import TYPE_CHECKING
 
 import httpx
-import nio
 from agno.agent import Agent
 from agno.media import Audio
-from nio import crypto
 
 from .ai import get_model_instance
 from .commands import get_command_list
 from .constants import VOICE_PREFIX
 from .logging_config import get_logger
+from .matrix import media as matrix_media
 from .matrix.identity import agent_username_localpart
+from .matrix.media import download_media_bytes, media_mime_type
 from .thread_utils import get_available_agents_for_sender
 
 if TYPE_CHECKING:
+    import nio
+
     from .config import Config
 
 logger = get_logger(__name__)
+crypto = matrix_media.crypto
 VOICE_MENTION_PATTERN = re.compile(
     r"(?<![\w])@(?:(?P<prefix>mindroom_))?(?P<name>[A-Za-z0-9_]+)(?::[A-Za-z0-9.\-]+)?",
 )
@@ -117,53 +120,15 @@ async def download_audio(
         logger.error("Downloaded audio payload is not bytes")
         return None
 
-    if isinstance(event, nio.RoomEncryptedAudio):
-        mime_type = event.mimetype
-    else:
-        source = getattr(event, "source", {})
-        content = source.get("content", {}) if isinstance(source, dict) else {}
-        info = content.get("info", {}) if isinstance(content, dict) else {}
-        mime_type = info.get("mimetype") if isinstance(info, dict) else None
-
-    return Audio(content=audio_data, mime_type=mime_type)
+    return Audio(content=audio_data, mime_type=media_mime_type(event))
 
 
 async def _download_audio(
     client: nio.AsyncClient,
     event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
 ) -> bytes | None:
-    """Download and decrypt audio file from Matrix.
-
-    Args:
-        client: Matrix client
-        event: Audio event
-
-    Returns:
-        Audio file bytes or None if failed
-
-    """
-    try:
-        # Unencrypted audio
-        mxc = event.url
-        response = await client.download(mxc)
-        if isinstance(response, nio.DownloadError):
-            logger.error(f"Download failed: {response}")
-            return None
-        if isinstance(event, nio.RoomMessageAudio):
-            return response.body
-
-        assert isinstance(event, nio.RoomEncryptedAudio)
-        # Decrypt the audio
-        return crypto.attachments.decrypt_attachment(
-            response.body,
-            event.source["content"]["file"]["key"]["k"],
-            event.source["content"]["file"]["hashes"]["sha256"],
-            event.source["content"]["file"]["iv"],
-        )
-
-    except Exception:
-        logger.exception("Error downloading audio")
-    return None
+    """Download and decrypt audio file bytes from Matrix."""
+    return await download_media_bytes(client, event)
 
 
 async def _transcribe_audio(audio_data: bytes, config: Config) -> str | None:
