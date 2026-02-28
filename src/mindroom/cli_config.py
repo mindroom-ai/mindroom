@@ -91,7 +91,7 @@ def config_init(
         None,
         "--path",
         "-p",
-        help="Where to create the config file (default: ./config.yaml).",
+        help="Where to create the config file (default: auto-detected, usually ~/.mindroom/config.yaml).",
     ),
     force: bool = typer.Option(
         False,
@@ -114,7 +114,7 @@ def config_init(
 
     Generates a YAML config with one agent, one model, and sensible defaults.
     """
-    target = _resolve_config_path(path) if path else Path("config.yaml").resolve()
+    target = _resolve_config_path(path)
 
     if target.exists() and not force:
         console.print(f"[yellow]Config file already exists:[/yellow] {target}")
