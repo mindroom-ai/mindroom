@@ -71,8 +71,8 @@ agents:
 
 models:
   default:
-    provider: anthropic
-    id: claude-sonnet-4-5-latest
+    provider: openai
+    id: gpt-5.2
 
 defaults:
   tools: [scheduler]
@@ -86,7 +86,7 @@ defaults:
 MATRIX_HOMESERVER=https://matrix.example.com
 
 # AI provider API keys
-ANTHROPIC_API_KEY=your_api_key
+OPENAI_API_KEY=your_api_key
 ```
 
 1. Run MindRoom:
@@ -162,6 +162,9 @@ mindroom run
 - [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) - Admin OAuth setup for Gmail/Calendar/Drive/Sheets
 - [Google Services OAuth (Individual)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) - Single-user OAuth setup
 - [CLI Reference](https://docs.mindroom.chat/cli/index.md) - Command-line interface
+- [Support](https://docs.mindroom.chat/support/index.md) - Contact and troubleshooting help
+- [Privacy Policy](https://docs.mindroom.chat/privacy/index.md) - Privacy and data handling information
+- [Terms of Service](https://docs.mindroom.chat/terms/index.md) - Terms for using MindRoom services and clients
 
 ## License
 
@@ -172,9 +175,11 @@ mindroom run
 
 This guide will help you set up MindRoom and create your first AI agent.
 
-## Recommended: Hosted Matrix + Local Backend (`uvx` only)
+## Recommended: Hosted Matrix + Local Backend (`uv` only)
 
 If you do not want to self-host Matrix yet, this is the simplest setup. You only run the MindRoom backend locally.
+
+**Prerequisite:** Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
 ### 1. Create a local project
 
@@ -197,8 +202,8 @@ $EDITOR .env
 
 Set at least one key:
 
-- `ANTHROPIC_API_KEY=...`, or
 - `OPENAI_API_KEY=...`, or
+- `OPENROUTER_API_KEY=...`, or
 - another supported provider key.
 
 ### 3. Pair your local install from chat UI
@@ -317,7 +322,7 @@ Create a `config.yaml` in your working directory:
 
 agents: assistant: display_name: Assistant role: A helpful AI assistant that can answer questions model: default include_default_tools: true rooms: [lobby] # Optional: file-based context (OpenClaw-style) # context_files: [./workspace/SOUL.md, ./workspace/USER.md]
 
-models: default: provider: anthropic id: claude-sonnet-4-5-latest
+models: default: provider: openai id: gpt-5.2
 
 defaults: tools: [scheduler] markdown: true
 
@@ -345,11 +350,11 @@ MATRIX_HOMESERVER=https://matrix.example.com
 
 # AI provider API keys
 
-ANTHROPIC_API_KEY=your_anthropic_key
+OPENAI_API_KEY=your_openai_key
 
-# OPENAI_API_KEY=your_openai_key
+# OPENROUTER_API_KEY=your_openrouter_key
 
-# GOOGLE_API_KEY=your_google_key
+# ANTHROPIC_API_KEY=your_anthropic_key
 
 # Optional: protect the dashboard API (recommended for non-localhost)
 
@@ -3884,14 +3889,14 @@ Full stack:
 
 ```
 # .env in the full stack repo
-ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
 # Add other providers as needed
 ```
 
 Direct and single-container deployments:
 
 1. **Matrix homeserver** - Set `MATRIX_HOMESERVER` (must allow open registration for agent accounts)
-1. **AI provider keys** - At least one of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.
+1. **AI provider keys** - At least one of `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, etc.
 1. **Persistent storage** - Mount `mindroom_data/` to persist agent state (including `sessions/`, `learning/`, and memory data)
 
 See the [Docker guide](https://docs.mindroom.chat/deployment/docker/#environment-variables) for the complete environment variable reference.
@@ -3936,8 +3941,8 @@ This creates `config.yaml` and `.env` with hosted defaults.
 Edit `.env` and set at least one provider key:
 
 ```
-ANTHROPIC_API_KEY=...
-# or OPENAI_API_KEY=...
+OPENAI_API_KEY=...
+# or OPENROUTER_API_KEY=...
 ```
 
 ## 3. Pair This Install

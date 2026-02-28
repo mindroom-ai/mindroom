@@ -70,8 +70,8 @@ agents:
 
 models:
   default:
-    provider: anthropic
-    id: claude-sonnet-4-5-latest
+    provider: openai
+    id: gpt-5.2
 
 defaults:
   tools: [scheduler]
@@ -85,7 +85,7 @@ defaults:
 MATRIX_HOMESERVER=https://matrix.example.com
 
 # AI provider API keys
-ANTHROPIC_API_KEY=your_api_key
+OPENAI_API_KEY=your_api_key
 ```
 
 3. Run MindRoom:

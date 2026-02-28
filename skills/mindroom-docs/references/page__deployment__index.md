@@ -93,14 +93,14 @@ Full stack:
 
 ```
 # .env in the full stack repo
-ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
 # Add other providers as needed
 ```
 
 Direct and single-container deployments:
 
 1. **Matrix homeserver** - Set `MATRIX_HOMESERVER` (must allow open registration for agent accounts)
-1. **AI provider keys** - At least one of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.
+1. **AI provider keys** - At least one of `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, etc.
 1. **Persistent storage** - Mount `mindroom_data/` to persist agent state (including `sessions/`, `learning/`, and memory data)
 
 See the [Docker guide](https://docs.mindroom.chat/deployment/docker/#environment-variables) for the complete environment variable reference.
