@@ -17,12 +17,15 @@ from agno.models.ollama import Ollama
 from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
 
+from mindroom.attachments import attachment_id_for_event
 from mindroom.bot import AgentBot, MessageContext, MultiAgentOrchestrator, MultiKnowledgeVectorDb
 from mindroom.config import AgentConfig, AuthorizationConfig, Config, DefaultsConfig, KnowledgeBaseConfig, ModelConfig
-from mindroom.constants import MEDIA_LOCAL_PATH_KEY, ORIGINAL_SENDER_KEY
+from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.teams import TeamFormationDecision, TeamMode
+from mindroom.thread_utils import is_authorized_sender as is_authorized_sender_for_test
 from mindroom.tool_events import ToolTraceEntry
 
 from .conftest import TEST_PASSWORD
@@ -656,8 +659,11 @@ class TestAgentBot:
                 user_id="@user:localhost",
                 audio=None,
                 images=None,
+                files=None,
+                videos=None,
                 reply_to_event_id="event123",
                 show_tool_calls=True,
+                run_metadata_collector=ANY,
             )
             mock_ai_response.assert_not_called()
             # With streaming and stop button: initial message + reaction + edits
@@ -676,21 +682,24 @@ class TestAgentBot:
                 user_id="@user:localhost",
                 audio=None,
                 images=None,
+                files=None,
+                videos=None,
                 reply_to_event_id="event123",
                 show_tool_calls=True,
                 tool_trace_collector=ANY,
+                run_metadata_collector=ANY,
             )
             mock_stream_agent_response.assert_not_called()
             # With stop button support: initial + reaction + final
             assert bot.client.room_send.call_count >= 2
 
     @pytest.mark.asyncio
-    async def test_non_streaming_hidden_tool_calls_still_send_tool_trace(
+    async def test_non_streaming_hidden_tool_calls_do_not_send_tool_trace(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Hidden inline tool calls should still propagate structured tool metadata."""
+        """Hidden tool calls should not propagate structured tool metadata."""
 
         @asynccontextmanager
         async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
@@ -739,9 +748,7 @@ class TestAgentBot:
         assert event_id == "$response"
         assert mock_ai.call_args.kwargs["show_tool_calls"] is False
         tool_trace = bot._send_response.call_args.kwargs["tool_trace"]
-        assert tool_trace is not None
-        assert len(tool_trace) == 1
-        assert tool_trace[0].tool_name == "read_file"
+        assert tool_trace is None
 
     @pytest.mark.asyncio
     async def test_skill_command_uses_target_agent_show_tool_calls_setting(
@@ -1190,14 +1197,21 @@ class TestAgentBot:
         ):
             await bot._on_file_or_video_message(room, event)
 
-        bot._generate_response.assert_awaited_once_with(
-            room_id="!test:localhost",
-            prompt=f"[Attached file]\n\nLocal media file path: {local_media_path}",
-            reply_to_event_id="$file_event",
-            thread_id=None,
-            thread_history=[],
-            user_id="@user:localhost",
-        )
+        bot._generate_response.assert_awaited_once()
+        generate_kwargs = bot._generate_response.await_args.kwargs
+        attachment_id = attachment_id_for_event("$file_event")
+        assert generate_kwargs["room_id"] == "!test:localhost"
+        assert generate_kwargs["reply_to_event_id"] == "$file_event"
+        assert generate_kwargs["thread_id"] is None
+        assert generate_kwargs["thread_history"] == []
+        assert generate_kwargs["user_id"] == "@user:localhost"
+        assert generate_kwargs["attachment_ids"] == [attachment_id]
+        assert "Available attachment IDs" in generate_kwargs["prompt"]
+        assert attachment_id in generate_kwargs["prompt"]
+        assert generate_kwargs["files"] is not None
+        assert len(generate_kwargs["files"]) == 1
+        assert str(generate_kwargs["files"][0].filepath) == str(local_media_path)
+        assert generate_kwargs["videos"] is None
         tracker.mark_responded.assert_called_once_with("$file_event", "$response")
 
     @pytest.mark.asyncio
@@ -1419,7 +1433,7 @@ class TestAgentBot:
         assert call_kwargs["requester_user_id"] == "@user:localhost"
         assert call_kwargs["extra_content"] == {
             ORIGINAL_SENDER_KEY: "@user:localhost",
-            MEDIA_LOCAL_PATH_KEY: str(local_media_path),
+            ATTACHMENT_IDS_KEY: [attachment_id_for_event("$file_route")],
         }
 
     @pytest.mark.asyncio
@@ -1956,6 +1970,96 @@ class TestMultiAgentOrchestrator:
         orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
         assert orchestrator.agent_bots == {}
         assert not orchestrator.running
+
+    @pytest.mark.asyncio
+    async def test_ensure_room_invitations_invites_authorized_users(self, tmp_path: Path) -> None:
+        """Global users and room-permitted users should be invited to managed rooms."""
+        config = Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="GeneralAgent",
+                    rooms=["!room1:localhost", "!room2:localhost"],
+                ),
+            },
+            authorization={
+                "global_users": ["@alice:localhost"],
+                "room_permissions": {"!room1:localhost": ["@bob:localhost"]},
+                "default_room_access": False,
+            },
+        )
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator.config = config
+
+        router_bot = MagicMock()
+        router_bot.client = AsyncMock()
+        orchestrator.agent_bots = {"router": router_bot}
+
+        room_members = {
+            "!room1:localhost": {"@mindroom_general:localhost", "@mindroom_router:localhost"},
+            "!room2:localhost": {"@mindroom_general:localhost", "@mindroom_router:localhost"},
+        }
+
+        async def mock_get_room_members(_client: AsyncMock, room_id: str) -> set[str]:
+            return room_members[room_id]
+
+        mock_invite = AsyncMock(return_value=True)
+
+        with (
+            patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
+            patch("mindroom.bot.is_authorized_sender", side_effect=is_authorized_sender_for_test),
+            patch("mindroom.bot.get_joined_rooms", new=AsyncMock(return_value=list(room_members))),
+            patch("mindroom.bot.get_room_members", side_effect=mock_get_room_members),
+            patch("mindroom.bot.invite_to_room", mock_invite),
+            patch("mindroom.bot.MatrixState.load", return_value=MatrixState()),
+        ):
+            await orchestrator._ensure_room_invitations()
+
+        invited_users_by_room = {(call.args[1], call.args[2]) for call in mock_invite.await_args_list}
+        assert invited_users_by_room == {
+            ("!room1:localhost", "@alice:localhost"),
+            ("!room2:localhost", "@alice:localhost"),
+            ("!room1:localhost", "@bob:localhost"),
+        }
+
+    @pytest.mark.asyncio
+    async def test_ensure_room_invitations_skips_non_matrix_authorization_entries(self, tmp_path: Path) -> None:
+        """Only concrete Matrix user IDs should be invited from authorization lists."""
+        config = Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="GeneralAgent",
+                    rooms=["!room1:localhost"],
+                ),
+            },
+            authorization={
+                "global_users": ["@alice:localhost", "@admin:*", "alice"],
+                "default_room_access": False,
+            },
+        )
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator.config = config
+
+        router_bot = MagicMock()
+        router_bot.client = AsyncMock()
+        orchestrator.agent_bots = {"router": router_bot}
+
+        async def mock_get_room_members(_client: AsyncMock, _room_id: str) -> set[str]:
+            return {"@mindroom_general:localhost", "@mindroom_router:localhost"}
+
+        mock_invite = AsyncMock(return_value=True)
+
+        with (
+            patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
+            patch("mindroom.bot.is_authorized_sender", side_effect=is_authorized_sender_for_test),
+            patch("mindroom.bot.get_joined_rooms", new=AsyncMock(return_value=["!room1:localhost"])),
+            patch("mindroom.bot.get_room_members", side_effect=mock_get_room_members),
+            patch("mindroom.bot.invite_to_room", mock_invite),
+            patch("mindroom.bot.MatrixState.load", return_value=MatrixState()),
+        ):
+            await orchestrator._ensure_room_invitations()
+
+        invited_users = [call.args[2] for call in mock_invite.await_args_list]
+        assert invited_users == ["@alice:localhost"]
 
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator initialization

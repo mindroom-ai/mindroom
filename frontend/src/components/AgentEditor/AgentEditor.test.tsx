@@ -75,6 +75,13 @@ describe('AgentEditor', () => {
       default: { provider: 'test', id: 'test-model' },
       custom: { provider: 'custom', id: 'custom-model' },
     },
+    memory: {
+      backend: 'mem0',
+      embedder: {
+        provider: 'openai',
+        config: { model: 'text-embedding-3-small' },
+      },
+    },
     agents: { test_agent: mockAgent },
     knowledge_bases: {
       legal: { path: './legal', watch: true },
@@ -301,8 +308,8 @@ describe('AgentEditor', () => {
     render(<AgentEditor />);
 
     // calculator and file should appear as checkboxes
-    expect(screen.getByRole('checkbox', { name: /calculator/i })).toBeTruthy();
-    expect(screen.getByRole('checkbox', { name: /file/i })).toBeTruthy();
+    expect(screen.getByRole('checkbox', { name: 'Calculator' })).toBeTruthy();
+    expect(screen.getByRole('checkbox', { name: 'File' })).toBeTruthy();
 
     // delegate should NOT appear even though useTools returns it
     expect(screen.queryByRole('checkbox', { name: /agent delegation/i })).toBeNull();
@@ -403,6 +410,46 @@ describe('AgentEditor', () => {
       'test_agent',
       expect.objectContaining({
         model: 'custom',
+      })
+    );
+  });
+
+  it('updates memory backend when selected', () => {
+    render(<AgentEditor />);
+
+    const memoryBackendSelect = screen.getByLabelText('Memory Backend');
+    fireEvent.click(memoryBackendSelect);
+
+    const fileOption = screen.getByRole('option', { name: 'File (markdown memory)' });
+    fireEvent.click(fileOption);
+
+    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+      'test_agent',
+      expect.objectContaining({
+        memory_backend: 'file',
+      })
+    );
+  });
+
+  it('clears memory backend override when inherit is selected', () => {
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [{ ...mockAgent, memory_backend: 'file' }],
+      rooms: mockStore.rooms,
+    });
+
+    render(<AgentEditor />);
+
+    const memoryBackendSelect = screen.getByLabelText('Memory Backend');
+    fireEvent.click(memoryBackendSelect);
+
+    const inheritOption = screen.getByRole('option', { name: /Inherit global/i });
+    fireEvent.click(inheritOption);
+
+    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+      'test_agent',
+      expect.objectContaining({
+        memory_backend: undefined,
       })
     );
   });

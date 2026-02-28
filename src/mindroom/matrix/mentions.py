@@ -7,7 +7,7 @@ from mindroom.config import Config
 from mindroom.tool_events import build_tool_trace_content
 
 from .client import markdown_to_html
-from .identity import MatrixID
+from .identity import MatrixID, mindroom_namespace
 from .message_builder import build_message_content
 
 if TYPE_CHECKING:
@@ -71,31 +71,31 @@ def _process_mention(match: re.Match, config: Config, sender_domain: str) -> tup
 
     """
     original = match.group(0)
-    prefix = match.group(1) or ""  # "mindroom_" or empty
     name = match.group(2)
 
     # Skip user-like mentions (e.g. mindroom_user_*)
     if name.startswith("user_"):
         return None
 
-    # Try to find the agent (case-insensitive)
+    # Try to find the agent (case-insensitive), accepting optional namespace suffix.
+    candidate_names = [name]
+    namespace = mindroom_namespace()
+    if namespace:
+        suffix = f"_{namespace}"
+        if name.lower().endswith(suffix):
+            stripped = name[: -len(suffix)]
+            if stripped:
+                candidate_names.append(stripped)
+
     agent_name = None
-    name_lower = name.lower()
-
-    # Check for direct match (case-insensitive)
-    for config_agent_name in config.agents:
-        if config_agent_name.lower() == name_lower:
-            agent_name = config_agent_name
-            break
-
-    # If not found, try with mindroom_ prefix removed
-    if not agent_name and prefix:
-        name_without_prefix = name.replace("mindroom_", "")
-        name_without_prefix_lower = name_without_prefix.lower()
+    for candidate_name in candidate_names:
+        candidate_lower = candidate_name.lower()
         for config_agent_name in config.agents:
-            if config_agent_name.lower() == name_without_prefix_lower:
+            if config_agent_name.lower() == candidate_lower:
                 agent_name = config_agent_name
                 break
+        if agent_name:
+            break
 
     if agent_name:
         agent_config = config.agents[agent_name]
@@ -113,6 +113,7 @@ def format_message_with_mentions(
     reply_to_event_id: str | None = None,
     latest_thread_event_id: str | None = None,
     tool_trace: list["ToolTraceEntry"] | None = None,
+    extra_content: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Parse text for mentions and create properly formatted Matrix message.
 
@@ -126,6 +127,7 @@ def format_message_with_mentions(
         reply_to_event_id: Optional event ID to reply to (for genuine replies)
         latest_thread_event_id: Optional latest event ID in thread (for fallback compatibility)
         tool_trace: Optional structured tool trace metadata
+        extra_content: Optional custom metadata fields merged into content
 
     Returns:
         Properly formatted content dict for room_send
@@ -136,7 +138,12 @@ def format_message_with_mentions(
     # Convert markdown (with links) to HTML
     # The markdown converter will properly handle the [@DisplayName](url) format
     formatted_html = markdown_to_html(markdown_text)
-    extra_content = build_tool_trace_content(tool_trace)
+    tool_trace_content = build_tool_trace_content(tool_trace)
+    merged_extra_content: dict[str, Any] = {}
+    if tool_trace_content:
+        merged_extra_content.update(tool_trace_content)
+    if extra_content:
+        merged_extra_content.update(extra_content)
 
     return build_message_content(
         body=plain_text,
@@ -145,5 +152,5 @@ def format_message_with_mentions(
         thread_event_id=thread_event_id,
         reply_to_event_id=reply_to_event_id,
         latest_thread_event_id=latest_thread_event_id,
-        extra_content=extra_content,
+        extra_content=merged_extra_content or None,
     )

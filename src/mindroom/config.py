@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, safe_replace
 from .logging_config import get_logger
-from .matrix.identity import room_alias_localpart
+from .matrix.identity import agent_username_localpart, managed_room_key_from_alias_localpart, room_alias_localpart
 
 if TYPE_CHECKING:
     from .matrix.identity import MatrixID
@@ -21,6 +21,7 @@ logger = get_logger(__name__)
 
 AgentLearningMode = Literal["always", "agentic"]
 CultureMode = Literal["automatic", "agentic", "manual"]
+MemoryBackend = Literal["mem0", "file"]
 RoomAccessMode = Literal["single_user_private", "multi_user"]
 MultiUserJoinRule = Literal["public", "knock"]
 RoomJoinRule = Literal["invite", "public", "knock"]
@@ -50,6 +51,10 @@ class AgentConfig(BaseModel):
         description="Learning mode for Agno Learning: always (automatic) or agentic (tool-driven)",
     )
     model: str = Field(default="default", description="Model name")
+    memory_backend: MemoryBackend | None = Field(
+        default=None,
+        description="Memory backend override for this agent ('mem0' or 'file'); inherits memory.backend when omitted",
+    )
     knowledge_bases: list[str] = Field(
         default_factory=list,
         description="Knowledge base IDs assigned to this agent",
@@ -57,10 +62,6 @@ class AgentConfig(BaseModel):
     context_files: list[str] = Field(
         default_factory=list,
         description="File paths read at agent init and prepended to role context",
-    )
-    memory_dir: str | None = Field(
-        default=None,
-        description="Directory containing MEMORY.md and dated memory files to auto-load into role context",
     )
     thread_mode: Literal["thread", "room"] = Field(
         default="thread",
@@ -113,11 +114,15 @@ class AgentConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def reject_legacy_knowledge_base_field(cls, data: object) -> object:
-        """Reject legacy single knowledge_base field to prevent silent misconfiguration."""
-        if isinstance(data, dict) and "knowledge_base" in data:
-            msg = "Agent field 'knowledge_base' was removed. Use 'knowledge_bases' (list) instead."
-            raise ValueError(msg)
+    def reject_legacy_agent_fields(cls, data: object) -> object:
+        """Reject removed legacy fields to prevent silent misconfiguration."""
+        if isinstance(data, dict):
+            if "knowledge_base" in data:
+                msg = "Agent field 'knowledge_base' was removed. Use 'knowledge_bases' (list) instead."
+                raise ValueError(msg)
+            if "memory_dir" in data:
+                msg = "Agent field 'memory_dir' was removed. Use 'context_files' and memory.backend=file instead."
+                raise ValueError(msg)
         return data
 
     @field_validator("knowledge_bases")
@@ -188,7 +193,7 @@ class DefaultsConfig(BaseModel):
     max_preload_chars: int = Field(
         default=50000,
         ge=1,
-        description="Hard cap for extra role preload context loaded from context_files and memory_dir",
+        description="Hard cap for extra role preload context loaded from context_files",
     )
 
     @model_validator(mode="after")
@@ -237,14 +242,153 @@ class MemoryLLMConfig(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict, description="Provider-specific LLM config")
 
 
+class MemoryFileConfig(BaseModel):
+    """File-backed memory configuration."""
+
+    path: str | None = Field(
+        default=None,
+        description=(
+            "Directory for file-backed memory. Relative paths resolve from the config "
+            "directory. Defaults to <storage_path>/memory_files when omitted."
+        ),
+    )
+    max_entrypoint_lines: int = Field(
+        default=200,
+        ge=1,
+        description="Maximum number of lines to preload from MEMORY.md",
+    )
+
+
+class MemoryAutoFlushBatchConfig(BaseModel):
+    """Batching controls for background memory auto-flush."""
+
+    max_sessions_per_cycle: int = Field(
+        default=10,
+        ge=1,
+        description="Maximum sessions processed in one auto-flush loop iteration",
+    )
+    max_sessions_per_agent_per_cycle: int = Field(
+        default=3,
+        ge=1,
+        description="Maximum sessions per agent processed in one auto-flush loop iteration",
+    )
+
+
+class MemoryAutoFlushContextConfig(BaseModel):
+    """Existing-memory context limits injected into extraction runs."""
+
+    memory_snippets: int = Field(
+        default=5,
+        ge=0,
+        description="Maximum number of MEMORY.md snippets included for extraction dedupe context",
+    )
+    snippet_max_chars: int = Field(
+        default=400,
+        ge=1,
+        description="Maximum characters per included memory snippet",
+    )
+
+
+class MemoryAutoFlushExtractorConfig(BaseModel):
+    """Extraction limits for one background memory flush job."""
+
+    no_reply_token: str = Field(
+        default="NO_REPLY",
+        description="Token indicating no durable memory should be written",
+    )
+    max_messages_per_flush: int = Field(
+        default=20,
+        ge=1,
+        description="Maximum session chat messages considered by one extraction job",
+    )
+    max_chars_per_flush: int = Field(
+        default=12000,
+        ge=1,
+        description="Maximum message characters considered by one extraction job",
+    )
+    max_extraction_seconds: int = Field(
+        default=30,
+        ge=1,
+        description="Timeout for one extraction job before retrying in a later cycle",
+    )
+    include_memory_context: MemoryAutoFlushContextConfig = Field(
+        default_factory=MemoryAutoFlushContextConfig,
+        description="Bounds for existing memory context included during extraction",
+    )
+
+
+class MemoryAutoFlushConfig(BaseModel):
+    """Background memory auto-flush configuration."""
+
+    enabled: bool = Field(default=False, description="Enable background file-memory auto-flush worker")
+    flush_interval_seconds: int = Field(
+        default=180,
+        ge=5,
+        description="Background auto-flush loop interval",
+    )
+    idle_seconds: int = Field(
+        default=120,
+        ge=0,
+        description="Session idle time before dirty session becomes flush-eligible",
+    )
+    max_dirty_age_seconds: int = Field(
+        default=600,
+        ge=1,
+        description="Force flush eligibility once a session remains dirty for this long",
+    )
+    stale_ttl_seconds: int = Field(
+        default=86400,
+        ge=60,
+        description="Drop stale flush-state entries older than this TTL",
+    )
+    max_cross_session_reprioritize: int = Field(
+        default=5,
+        ge=0,
+        description="Maximum same-agent dirty sessions reprioritized per incoming prompt",
+    )
+    retry_cooldown_seconds: int = Field(
+        default=30,
+        ge=1,
+        description="Cooldown before retrying a failed extraction attempt",
+    )
+    max_retry_cooldown_seconds: int = Field(
+        default=300,
+        ge=1,
+        description="Upper bound for retry cooldown backoff",
+    )
+    batch: MemoryAutoFlushBatchConfig = Field(
+        default_factory=MemoryAutoFlushBatchConfig,
+        description="Batch sizing controls for each auto-flush cycle",
+    )
+    extractor: MemoryAutoFlushExtractorConfig = Field(
+        default_factory=MemoryAutoFlushExtractorConfig,
+        description="Extraction-window and timeout controls for auto-flush",
+    )
+
+
 class MemoryConfig(BaseModel):
     """Memory system configuration."""
 
+    backend: MemoryBackend = Field(
+        default="mem0",
+        description="Memory backend: 'mem0' (vector memory) or 'file' (markdown memory files)",
+    )
+    team_reads_member_memory: bool = Field(
+        default=False,
+        description=(
+            "When true, team-context memory reads can access member agent memories in addition to the shared team scope"
+        ),
+    )
     embedder: MemoryEmbedderConfig = Field(
         default_factory=MemoryEmbedderConfig,
         description="Embedder configuration for memory",
     )
     llm: MemoryLLMConfig | None = Field(default=None, description="LLM configuration for memory")
+    file: MemoryFileConfig = Field(default_factory=MemoryFileConfig, description="File-backed memory configuration")
+    auto_flush: MemoryAutoFlushConfig = Field(
+        default_factory=MemoryAutoFlushConfig,
+        description="Background auto-flush behavior for file-backed memory",
+    )
 
 
 class KnowledgeGitConfig(BaseModel):
@@ -289,7 +433,9 @@ class KnowledgeBaseConfig(BaseModel):
 class ModelConfig(BaseModel):
     """Configuration for an AI model."""
 
-    provider: str = Field(description="Model provider (openai, anthropic, ollama, etc)")
+    provider: str = Field(
+        description="Model provider (openai, anthropic, vertexai_claude, ollama, etc)",
+    )
     id: str = Field(description="Model ID specific to the provider")
     host: str | None = Field(default=None, description="Optional host URL (e.g., for Ollama)")
     api_key: str | None = Field(default=None, description="Optional API key (usually from env vars)")
@@ -536,6 +682,9 @@ class MatrixRoomAccessConfig(BaseModel):
             localpart = room_alias_localpart(room_alias)
             if localpart:
                 identifiers.add(localpart)
+                managed_room_key = managed_room_key_from_alias_localpart(localpart)
+                if managed_room_key:
+                    identifiers.add(managed_room_key)
         return any(identifier in self.invite_only_rooms for identifier in identifiers)
 
     def get_target_join_rule(
@@ -611,6 +760,10 @@ class Config(BaseModel):
         invalid = sorted(invalid_agents + invalid_teams)
         if invalid:
             msg = f"Agent/team names must be alphanumeric/underscore only, got: {', '.join(invalid)}"
+            raise ValueError(msg)
+        overlapping_names = sorted(set(self.agents) & set(self.teams))
+        if overlapping_names:
+            msg = f"Agent and team names must be distinct, overlapping keys: {', '.join(overlapping_names)}"
             raise ValueError(msg)
         return self
 
@@ -699,9 +852,9 @@ class Config(BaseModel):
     def validate_internal_user_username_not_reserved(self) -> Config:
         """Ensure the internal user localpart does not collide with bot accounts."""
         reserved_localparts = {
-            f"mindroom_{ROUTER_AGENT_NAME}": f"router '{ROUTER_AGENT_NAME}'",
-            **{f"mindroom_{agent_name}": f"agent '{agent_name}'" for agent_name in self.agents},
-            **{f"mindroom_{team_name}": f"team '{team_name}'" for team_name in self.teams},
+            agent_username_localpart(ROUTER_AGENT_NAME): f"router '{ROUTER_AGENT_NAME}'",
+            **{agent_username_localpart(agent_name): f"agent '{agent_name}'" for agent_name in self.agents},
+            **{agent_username_localpart(team_name): f"team '{team_name}'" for team_name in self.teams},
         }
         conflict = reserved_localparts.get(self.mindroom_user.username)
         if conflict:
@@ -835,6 +988,27 @@ class Config(BaseModel):
                 if default_tool_name not in tool_names:
                     tool_names.append(default_tool_name)
         return tool_names
+
+    def get_agent_memory_backend(self, agent_name: str) -> MemoryBackend:
+        """Get effective memory backend for one agent."""
+        agent_config = self.agents.get(agent_name)
+        if agent_config is None:
+            return self.memory.backend
+        if agent_config.memory_backend is not None:
+            return agent_config.memory_backend
+        return self.memory.backend
+
+    def uses_file_memory(self) -> bool:
+        """Return whether any configured agent uses file-backed memory."""
+        if not self.agents:
+            return self.memory.backend == "file"
+        return any(self.get_agent_memory_backend(agent_name) == "file" for agent_name in self.agents)
+
+    def uses_mem0_memory(self) -> bool:
+        """Return whether any configured agent uses Mem0-backed memory."""
+        if not self.agents:
+            return self.memory.backend == "mem0"
+        return any(self.get_agent_memory_backend(agent_name) == "mem0" for agent_name in self.agents)
 
     def get_all_configured_rooms(self) -> set[str]:
         """Extract all room aliases configured for agents and teams.

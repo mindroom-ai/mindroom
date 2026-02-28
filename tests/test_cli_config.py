@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import re
+import subprocess
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -10,6 +12,7 @@ import httpx
 from typer.testing import CliRunner
 
 from mindroom.cli import app
+from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -36,12 +39,29 @@ class TestConfigInit:
     def test_init_creates_config(self, tmp_path: Path) -> None:
         """Config init creates a valid config.yaml at the target path."""
         target = tmp_path / "config.yaml"
-        result = runner.invoke(app, ["config", "init", "--path", str(target)])
+        result = runner.invoke(app, ["config", "init", "--path", str(target)], input="openai\n")
         assert result.exit_code == 0
         assert target.exists()
         content = target.read_text()
         assert "agents:" in content
         assert "models:" in content
+        assert "authorization:" in content
+        assert OWNER_MATRIX_USER_ID_PLACEHOLDER in content
+
+    def test_init_without_path_uses_detected_default_location(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Config init without --path should write to the detected config location."""
+        default_cfg = tmp_path / ".mindroom" / "config.yaml"
+        monkeypatch.setattr("mindroom.cli_config.CONFIG_PATH", default_cfg)
+
+        result = runner.invoke(app, ["config", "init"], input="openai\n")
+
+        assert result.exit_code == 0
+        assert default_cfg.exists()
+        assert (default_cfg.parent / ".env").exists()
 
     def test_init_minimal(self, tmp_path: Path) -> None:
         """Config init --minimal creates a bare-minimum config."""
@@ -51,11 +71,34 @@ class TestConfigInit:
         content = target.read_text()
         assert "agents:" in content
         assert "# MindRoom Configuration (minimal)" in content
+        assert "authorization:" in content
+        assert OWNER_MATRIX_USER_ID_PLACEHOLDER in content
+
+    def test_init_profile_minimal(self, tmp_path: Path) -> None:
+        """Config init --profile minimal creates the minimal template."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--profile", "minimal"])
+        assert result.exit_code == 0
+        content = target.read_text()
+        assert "# MindRoom Configuration (minimal)" in content
+
+    def test_init_profile_public_writes_public_matrix_defaults(self, tmp_path: Path) -> None:
+        """Public profile should prefill hosted Matrix defaults and token placeholder."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--profile", "public"])
+        assert result.exit_code == 0
+
+        env_content = (tmp_path / ".env").read_text()
+        assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
+        assert "MATRIX_SERVER_NAME=mindroom.chat" in env_content
+        assert "MINDROOM_PROVISIONING_URL=https://mindroom.chat" in env_content
+        assert "MATRIX_REGISTRATION_TOKEN=" in env_content
+        assert "\n\n\n# AI provider API keys" not in env_content
 
     def test_init_creates_env_with_dashboard_key(self, tmp_path: Path) -> None:
         """Config init writes a random MINDROOM_API_KEY to .env."""
         target = tmp_path / "config.yaml"
-        result = runner.invoke(app, ["config", "init", "--path", str(target)])
+        result = runner.invoke(app, ["config", "init", "--path", str(target)], input="openai\n")
         assert result.exit_code == 0
 
         env_path = tmp_path / ".env"
@@ -73,7 +116,10 @@ class TestConfigInit:
         target = tmp_path / "config.yaml"
         env_path = tmp_path / ".env"
         env_path.write_text("ANTHROPIC_API_KEY=sk-existing\n")
-        result = runner.invoke(app, ["config", "init", "--path", str(target), "--force"])
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--force", "--provider", "openai"],
+        )
         assert result.exit_code == 0
         assert env_path.read_text() == "ANTHROPIC_API_KEY=sk-existing\n"
 
@@ -89,11 +135,32 @@ class TestConfigInit:
         """Config init --force overwrites without prompting."""
         target = tmp_path / "config.yaml"
         target.write_text("existing")
-        result = runner.invoke(app, ["config", "init", "--path", str(target), "--force"])
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--force", "--provider", "openai"],
+        )
         assert result.exit_code == 0
         content = target.read_text()
         assert content != "existing"
         assert "agents:" in content
+
+    def test_init_openai_preset_uses_openai_models(self, tmp_path: Path) -> None:
+        """Config init --provider openai prepopulates OpenAI defaults."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
+        assert result.exit_code == 0
+        content = target.read_text()
+        assert "provider: openai" in content
+        assert "id: gpt-5.2" in content
+
+    def test_init_openrouter_preset_uses_openrouter_models(self, tmp_path: Path) -> None:
+        """Config init --provider openrouter uses OpenRouter with Claude model."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openrouter"])
+        assert result.exit_code == 0
+        content = target.read_text()
+        assert "provider: openrouter" in content
+        assert "anthropic/claude-sonnet-4-5" in content
 
 
 # ---------------------------------------------------------------------------
@@ -637,3 +704,447 @@ class TestDoctor:
         result = runner.invoke(app, ["doctor"])
         assert result.exit_code == 0
         assert "Memory LLM (openai): OPENAI_API_KEY not set" in result.output
+
+
+# ---------------------------------------------------------------------------
+# mindroom connect
+# ---------------------------------------------------------------------------
+
+
+class TestConnect:
+    """Tests for `mindroom connect` pairing command."""
+
+    def test_connect_persists_local_provisioning_credentials(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Successful pairing should write provisioning credentials to .env."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models: {}\nagents: {}\nrouter:\n  model: default\n"
+            "authorization:\n"
+            "  default_room_access: false\n"
+            "  global_users:\n"
+            f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
+            "  agent_reply_permissions:\n"
+            '    "*":\n'
+            f"      - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+        )
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mindroom.cli.socket.gethostname", lambda: "devbox")
+
+        monkeypatch.setattr(
+            "mindroom.cli.httpx.post",
+            lambda *_a, **_kw: httpx.Response(
+                200,
+                json={
+                    "client_id": "client-123",
+                    "client_secret": "secret-123",
+                    "namespace": "a1b2c3d4",
+                    "owner_user_id": "@alice:mindroom.chat",
+                    "connection": {
+                        "id": "conn-1",
+                        "client_name": "devbox",
+                        "fingerprint": "sha256:abc",
+                        "created_at": "2026-02-27T12:00:00Z",
+                        "last_seen_at": "2026-02-27T12:00:00Z",
+                        "revoked_at": None,
+                    },
+                },
+            ),
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "connect",
+                "--pair-code",
+                "ABCD-EFGH",
+                "--provisioning-url",
+                "https://provisioning.example",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert "Paired successfully" in result.output
+        env_content = (tmp_path / ".env").read_text()
+        assert "MINDROOM_PROVISIONING_URL=https://provisioning.example" in env_content
+        assert "MINDROOM_LOCAL_CLIENT_ID=client-123" in env_content
+        assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in env_content
+        assert "MINDROOM_NAMESPACE=a1b2c3d4" in env_content
+        assert "MINDROOM_OWNER_USER_ID=" not in env_content
+        updated_config = cfg.read_text()
+        assert OWNER_MATRIX_USER_ID_PLACEHOLDER not in updated_config
+        assert "@alice:mindroom.chat" in updated_config
+
+    def test_connect_path_overrides_env_and_config_target(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--path should control where .env is written and which config gets placeholder updates."""
+        default_cfg = tmp_path / "default" / "config.yaml"
+        default_cfg.parent.mkdir(parents=True, exist_ok=True)
+        default_cfg.write_text(
+            "models: {}\nagents: {}\nrouter:\n  model: default\n"
+            "authorization:\n"
+            "  default_room_access: false\n"
+            "  global_users:\n"
+            f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+        )
+        target_cfg = tmp_path / "custom" / "config.yaml"
+        target_cfg.parent.mkdir(parents=True, exist_ok=True)
+        target_cfg.write_text(
+            "models: {}\nagents: {}\nrouter:\n  model: default\n"
+            "authorization:\n"
+            "  default_room_access: false\n"
+            "  global_users:\n"
+            f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+        )
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", default_cfg)
+        monkeypatch.setattr(
+            "mindroom.cli.httpx.post",
+            lambda *_a, **_kw: httpx.Response(
+                200,
+                json={
+                    "client_id": "client-123",
+                    "client_secret": "secret-123",
+                    "namespace": "a1b2c3d4",
+                    "owner_user_id": "@alice:mindroom.chat",
+                },
+            ),
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "connect",
+                "--pair-code",
+                "ABCD-EFGH",
+                "--provisioning-url",
+                "https://provisioning.example",
+                "--path",
+                str(target_cfg),
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert (target_cfg.parent / ".env").exists()
+        assert not (default_cfg.parent / ".env").exists()
+        updated_target_config = target_cfg.read_text()
+        unchanged_default_config = default_cfg.read_text()
+        assert OWNER_MATRIX_USER_ID_PLACEHOLDER not in updated_target_config
+        assert "@alice:mindroom.chat" in updated_target_config
+        assert OWNER_MATRIX_USER_ID_PLACEHOLDER in unchanged_default_config
+
+    def test_connect_no_persist_prints_exports(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--no-persist-env should print export commands and avoid writing .env."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
+        monkeypatch.setattr(
+            "mindroom.cli.httpx.post",
+            lambda *_a, **_kw: httpx.Response(
+                200,
+                json={
+                    "client_id": "client-123",
+                    "client_secret": "secret-123",
+                    "namespace": "a1b2c3d4",
+                    "owner_user_id": "@alice:mindroom.chat",
+                },
+            ),
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "connect",
+                "--pair-code",
+                "ABCD-EFGH",
+                "--provisioning-url",
+                "https://provisioning.example",
+                "--no-persist-env",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert "export MINDROOM_PROVISIONING_URL=https://provisioning.example" in result.output
+        assert "export MINDROOM_LOCAL_CLIENT_ID=client-123" in result.output
+        assert "export MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in result.output
+        assert "export MINDROOM_NAMESPACE=a1b2c3d4" in result.output
+        assert "Owner user ID from pairing: @alice:mindroom.chat" in result.output
+        assert "export MINDROOM_OWNER_USER_ID=" not in result.output
+        assert not (tmp_path / ".env").exists()
+
+    def test_connect_uses_runtime_env_default_provisioning_url(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Provisioning URL default should be read at command runtime."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
+        monkeypatch.setenv("MINDROOM_PROVISIONING_URL", "https://env-provisioning.example")
+
+        called: dict[str, object] = {}
+
+        def _fake_post(url: str, **kwargs: object) -> httpx.Response:
+            called["url"] = url
+            called["kwargs"] = kwargs
+            return httpx.Response(
+                200,
+                json={
+                    "client_id": "client-123",
+                    "client_secret": "secret-123",
+                    "namespace": "a1b2c3d4",
+                    "owner_user_id": "@alice:mindroom.chat",
+                },
+            )
+
+        monkeypatch.setattr("mindroom.cli.httpx.post", _fake_post)
+
+        result = runner.invoke(
+            app,
+            [
+                "connect",
+                "--pair-code",
+                "ABCD-EFGH",
+                "--no-persist-env",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert called["url"] == "https://env-provisioning.example/v1/local-mindroom/pair/complete"
+        assert "export MINDROOM_PROVISIONING_URL=https://env-provisioning.example" in result.output
+        assert "export MINDROOM_NAMESPACE=a1b2c3d4" in result.output
+        assert "Owner user ID from pairing: @alice:mindroom.chat" in result.output
+        assert "export MINDROOM_OWNER_USER_ID=" not in result.output
+
+    def test_connect_warns_when_owner_user_id_is_malformed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Malformed owner_user_id should warn and skip placeholder replacement."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models: {}\nagents: {}\nrouter:\n  model: default\n"
+            "authorization:\n"
+            "  default_room_access: false\n"
+            "  global_users:\n"
+            f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+        )
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
+        monkeypatch.setattr(
+            "mindroom.cli.httpx.post",
+            lambda *_a, **_kw: httpx.Response(
+                200,
+                json={
+                    "client_id": "client-123",
+                    "client_secret": "secret-123",
+                    "namespace": "a1b2c3d4",
+                    "owner_user_id": "not-a-mxid",
+                },
+            ),
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "connect",
+                "--pair-code",
+                "ABCD-EFGH",
+                "--provisioning-url",
+                "https://provisioning.example",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert "malformed owner_user_id" in _strip_ansi(result.output)
+        updated_config = cfg.read_text()
+        assert OWNER_MATRIX_USER_ID_PLACEHOLDER in updated_config
+
+    def test_connect_passes_matrix_ssl_verify_to_httpx(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Connect should pass MATRIX_SSL_VERIFY through to httpx.post."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mindroom.cli.MATRIX_SSL_VERIFY", False)
+
+        called: dict[str, object] = {}
+
+        def _fake_post(url: str, **kwargs: object) -> httpx.Response:
+            called["url"] = url
+            called["kwargs"] = kwargs
+            return httpx.Response(
+                200,
+                json={
+                    "client_id": "client-123",
+                    "client_secret": "secret-123",
+                    "namespace": "a1b2c3d4",
+                    "owner_user_id": "@alice:mindroom.chat",
+                },
+            )
+
+        monkeypatch.setattr("mindroom.cli.httpx.post", _fake_post)
+
+        result = runner.invoke(
+            app,
+            [
+                "connect",
+                "--pair-code",
+                "ABCD-EFGH",
+                "--provisioning-url",
+                "https://provisioning.example",
+                "--no-persist-env",
+            ],
+        )
+
+        assert result.exit_code == 0
+        kwargs = called["kwargs"]
+        assert isinstance(kwargs, dict)
+        assert kwargs["verify"] is False
+
+
+# ---------------------------------------------------------------------------
+# mindroom local-stack-setup
+# ---------------------------------------------------------------------------
+
+
+class TestLocalStackSetup:
+    """Tests for `mindroom local-stack-setup`."""
+
+    def test_starts_synapse_and_cinny_containers(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Command starts Synapse compose and the Cinny container."""
+        synapse_dir = tmp_path / "matrix"
+        synapse_dir.mkdir()
+        (synapse_dir / "docker-compose.yml").write_text("services: {}\n")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(tmp_path / "mindroom_data"))
+        monkeypatch.setattr("mindroom.cli.sys.platform", "linux")
+        monkeypatch.setattr("mindroom.cli.shutil.which", lambda _name: "/usr/bin/docker")
+        monkeypatch.setattr("mindroom.cli.httpx.get", lambda *_a, **_kw: httpx.Response(200, json={}))
+        monkeypatch.setattr("mindroom.cli.time.sleep", lambda *_a, **_kw: None)
+
+        commands: list[list[str]] = []
+
+        def _fake_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            commands.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr("mindroom.cli.subprocess.run", _fake_run)
+
+        result = runner.invoke(
+            app,
+            [
+                "local-stack-setup",
+                "--synapse-dir",
+                str(synapse_dir),
+                "--cinny-port",
+                "18080",
+                "--cinny-container-name",
+                "mindroom-cinny-test",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert ["docker", "compose", "up", "-d"] in commands
+        assert any(cmd[:3] == ["docker", "rm", "-f"] for cmd in commands)
+        assert any(cmd[:3] == ["docker", "run", "-d"] for cmd in commands)
+
+        cinny_config = tmp_path / "mindroom_data" / "local" / "cinny-config.json"
+        assert cinny_config.exists()
+        config = json.loads(cinny_config.read_text())
+        assert config["homeserverList"] == ["http://localhost:8008"]
+        assert config["featuredCommunities"]["rooms"] == ["#lobby:localhost"]
+
+        env_path = tmp_path / ".env"
+        assert env_path.exists()
+        env_content = env_path.read_text()
+        assert "MATRIX_HOMESERVER=http://localhost:8008" in env_content
+        assert "MATRIX_SSL_VERIFY=false" in env_content
+        assert "MATRIX_SERVER_NAME=localhost" in env_content
+        assert "Local stack is ready." in result.output
+
+    def test_skip_synapse_skips_compose_start(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """--skip-synapse should not run docker compose up."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(tmp_path / "mindroom_data"))
+        monkeypatch.setattr("mindroom.cli.sys.platform", "linux")
+        monkeypatch.setattr("mindroom.cli.shutil.which", lambda _name: "/usr/bin/docker")
+        monkeypatch.setattr("mindroom.cli.httpx.get", lambda *_a, **_kw: httpx.Response(200, json={}))
+        monkeypatch.setattr("mindroom.cli.time.sleep", lambda *_a, **_kw: None)
+
+        commands: list[list[str]] = []
+
+        def _fake_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            commands.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr("mindroom.cli.subprocess.run", _fake_run)
+
+        result = runner.invoke(app, ["local-stack-setup", "--skip-synapse"])
+
+        assert result.exit_code == 0
+        assert ["docker", "compose", "up", "-d"] not in commands
+        assert any(cmd[:3] == ["docker", "run", "-d"] for cmd in commands)
+
+    def test_no_persist_env_prints_inline_command(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """--no-persist-env should not write .env and should print inline env usage."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+
+        monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mindroom.cli.STORAGE_PATH", str(tmp_path / "mindroom_data"))
+        monkeypatch.setattr("mindroom.cli.sys.platform", "linux")
+        monkeypatch.setattr("mindroom.cli.shutil.which", lambda _name: "/usr/bin/docker")
+        monkeypatch.setattr("mindroom.cli.httpx.get", lambda *_a, **_kw: httpx.Response(200, json={}))
+        monkeypatch.setattr("mindroom.cli.time.sleep", lambda *_a, **_kw: None)
+        monkeypatch.setattr(
+            "mindroom.cli.subprocess.run",
+            lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""),
+        )
+
+        result = runner.invoke(app, ["local-stack-setup", "--skip-synapse", "--no-persist-env"])
+
+        assert result.exit_code == 0
+        assert not (tmp_path / ".env").exists()
+        assert "MATRIX_HOMESERVER=http://localhost:8008 MATRIX_SSL_VERIFY=false" in result.output
+        assert "uv run" in result.output
+        assert "mindroom run" in result.output
+
+    def test_rejects_unsupported_platform(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Command fails on unsupported operating systems."""
+        monkeypatch.setattr("mindroom.cli.sys.platform", "win32")
+        monkeypatch.setattr("mindroom.cli.shutil.which", lambda _name: "/usr/bin/docker")
+
+        result = runner.invoke(app, ["local-stack-setup", "--skip-synapse"])
+
+        assert result.exit_code == 1
+        assert "supports Linux and macOS only" in result.output
+
+    def test_requires_docker_binary(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Command fails when Docker is missing from PATH."""
+        monkeypatch.setattr("mindroom.cli.sys.platform", "linux")
+        monkeypatch.setattr("mindroom.cli.shutil.which", lambda _name: None)
+
+        result = runner.invoke(app, ["local-stack-setup", "--skip-synapse"])
+
+        assert result.exit_code == 1
+        assert "Docker is required" in result.output

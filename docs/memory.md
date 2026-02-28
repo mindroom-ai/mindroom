@@ -4,58 +4,136 @@ icon: lucide/brain
 
 # Memory System
 
-MindRoom uses Mem0 for persistent memory across conversations. Memory is automatically enabled for all agents and uses ChromaDB for semantic search.
+MindRoom supports two memory backends:
+
+- `mem0`: vector memory (semantic retrieval + extraction via Mem0)
+- `file`: markdown memory files (`MEMORY.md` plus optional dated notes)
+
+Set the global default backend with `memory.backend`.
+Override the backend per agent with `agents.<name>.memory_backend`.
+
+OpenClaw compatibility uses this same backend selection; there is no separate OpenClaw-only memory engine.
+
+Optional:
+- `memory.team_reads_member_memory: true` allows team-context memory reads to include member agent scopes.
 
 ## Memory Scopes
 
 | Scope | User ID Format | Description |
-|-------|----------------|-------------|
-| Agent | `agent_<name>` | User preferences, past conversations, learned context |
-| Room | `room_<safe_room_id>` | Project context, technical decisions, shared knowledge |
-| Team | `team_<agent1>+<agent2>+...` | Shared team conversations and findings |
+|---|---|---|
+| Agent | `agent_<name>` | Agent preferences and durable user context |
+| Room | `room_<safe_room_id>` | Shared room/project context |
+| Team | `team_<agent1>+<agent2>+...` | Shared team conversation memory |
 
-**Notes:**
-- Room IDs are sanitized (`:` → `_`, `!` removed) for storage compatibility
-- Team IDs use sorted agent names joined with `+`
-- When searching agent memories, team memories are automatically included and deduplicated
+Notes:
+- Room IDs are sanitized (`:` -> `_`, `!` removed).
+- Team IDs are sorted agent names joined by `+`.
 
-## Configuration
+## Backend: `mem0`
 
-Configure memory in your `config.yaml`:
+`mem0` keeps the existing behavior:
+- semantic retrieval before response
+- automatic extraction after turns
+- storage in Chroma-backed Mem0 collections
+
+Example:
 
 ```yaml
 memory:
+  backend: mem0
   embedder:
-    provider: openai  # or "ollama"
+    provider: openai
     config:
       model: text-embedding-3-small
-      host: null  # Optional: for self-hosted models
-
-  llm:  # Optional: for memory extraction
-    provider: openai  # or "ollama", "anthropic"
-    config:
-      model: gpt-5-mini
-      temperature: 0.1
-      host: null  # For Ollama
 ```
 
-The `host` field is converted internally to `openai_base_url` or `ollama_base_url` depending on the provider.
+## Backend: `file`
 
-**Default**: When the `llm` section is omitted, MindRoom falls back to Ollama with `llama3.2` at `http://localhost:11434`.
+`file` keeps memory in markdown files and treats files as source-of-truth.
 
-## How Memory Works
+Example:
 
-1. **Semantic Retrieval**: Before responding, agents search for relevant memories (limit: 3 per scope)
-2. **Context Enhancement**: Retrieved memories are prepended to the prompt with a note that they may not be relevant
-3. **Automatic Storage**: After each conversation, Mem0 extracts and stores relevant information
+```yaml
+memory:
+  backend: file
+  file:
+    path: ./mindroom_data/memory_files
+    max_entrypoint_lines: 200
+```
 
-## Storage
+Per-agent override example:
 
-Memories are stored in ChromaDB at `<storage_path>/chroma/` with collection name `mindroom_memories`.
+```yaml
+memory:
+  backend: mem0
 
-## Memory Tool (Optional)
+agents:
+  coder:
+    display_name: Coder
+    role: Write and review code
+    memory_backend: file
+```
 
-For explicit memory control, add the `memory` tool to an agent:
+### File layout
+
+Under `memory.file.path` (or `<storage_path>/memory_files` by default), MindRoom stores per-scope folders such as:
+
+- `agent_<name>/MEMORY.md`
+- `agent_<name>/memory/YYYY-MM-DD.md`
+- `room_<safe_room_id>/MEMORY.md`
+- `room_<safe_room_id>/memory/YYYY-MM-DD.md`
+- `team_<sorted_members>/MEMORY.md`
+- `team_<sorted_members>/memory/YYYY-MM-DD.md`
+
+## File Auto-Flush Worker
+
+When the effective backend is `file` for at least one agent, you can enable background auto-flush:
+
+```yaml
+memory:
+  backend: file
+  auto_flush:
+    enabled: true
+    flush_interval_seconds: 180
+    idle_seconds: 120
+    max_dirty_age_seconds: 600
+    stale_ttl_seconds: 86400
+    max_cross_session_reprioritize: 5
+    batch:
+      max_sessions_per_cycle: 10
+      max_sessions_per_agent_per_cycle: 3
+    extractor:
+      no_reply_token: NO_REPLY
+      max_messages_per_flush: 20
+      max_chars_per_flush: 12000
+      max_extraction_seconds: 30
+```
+
+High-level behavior:
+
+1. Turns mark sessions dirty.
+2. Background worker picks eligible dirty sessions in bounded batches.
+3. Worker runs a model-driven extraction (not keyword heuristics) to produce durable memories.
+4. If extractor returns `NO_REPLY`, nothing is written.
+5. Successful writes append to memory files via normal memory APIs.
+
+## UI Configuration
+
+The Dashboard **Memory** page supports:
+- backend selection (`mem0` vs `file`)
+- team/member read toggle (`team_reads_member_memory`)
+- embedder provider/model/host
+- file backend settings (`path`, `max_entrypoint_lines`)
+- auto-flush settings (intervals, idle/age thresholds, retries)
+- batch sizing
+- extractor settings (`no_reply_token`, message/char/time limits, memory-context bounds)
+
+Save from the Memory page to persist changes to `config.yaml`.
+Use the Dashboard **Agents** page to set an agent-specific **Memory Backend** override.
+
+## Optional Memory Tool
+
+For explicit agent-controlled memory operations, add the `memory` tool:
 
 ```yaml
 agents:
@@ -63,6 +141,4 @@ agents:
     tools: [memory]
 ```
 
-This provides functions: `add_memory`, `search_memory`, `get_all_memories`, `delete_all_memories`.
-
-Note: The `memory` tool is for the built-in agent memory system. The separate `mem0` tool is for Mem0's cloud service.
+This exposes `add_memory`, `search_memory`, `get_all_memories`, and `delete_all_memories`.

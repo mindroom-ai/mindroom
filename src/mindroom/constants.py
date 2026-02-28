@@ -21,7 +21,7 @@ ROUTER_AGENT_NAME = "router"
 # persistent volume instead of the package directory (which may be read-only).
 _CONFIG_PATH_ENV = os.getenv("MINDROOM_CONFIG_PATH")
 
-# Search order: env var > ./config.yaml > ~/.mindroom/config.yaml
+# Search order for existing files: env var > ./config.yaml > ~/.mindroom/config.yaml
 _CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config.yaml"]
 
 
@@ -59,7 +59,7 @@ def resolve_config_relative_path(raw_path: str | Path, *, config_path: Path | No
 
 
 def find_config() -> Path:
-    """Find the first existing config file, or fall back to ./config.yaml.
+    """Find the first existing config file, or fall back to ~/.mindroom/config.yaml.
 
     Returns the original (possibly relative) path, not a resolved one,
     so that derived paths like STORAGE_PATH stay relative and display
@@ -70,7 +70,7 @@ def find_config() -> Path:
     for path in _CONFIG_SEARCH_PATHS:
         if path.exists():
             return path
-    return _CONFIG_SEARCH_PATHS[0]  # default to ./config.yaml for creation
+    return _CONFIG_SEARCH_PATHS[-1]  # default to ~/.mindroom/config.yaml for creation
 
 
 CONFIG_PATH = find_config()
@@ -113,14 +113,24 @@ VOICE_PREFIX = "🎤 "
 ORIGINAL_SENDER_KEY = "com.mindroom.original_sender"
 VOICE_RAW_AUDIO_FALLBACK_KEY = "com.mindroom.voice_raw_audio_fallback"
 MEDIA_LOCAL_PATH_KEY = "com.mindroom.media_local_path"
+ATTACHMENT_IDS_KEY = "com.mindroom.attachment_ids"
 # Backward-compat alias for previously voice-only metadata key usage.
 VOICE_RAW_AUDIO_LOCAL_PATH_KEY = MEDIA_LOCAL_PATH_KEY
+AI_RUN_METADATA_KEY = "io.mindroom.ai_run"
 ENABLE_AI_CACHE = env_flag("MINDROOM_ENABLE_AI_CACHE", default=True)
 
 # Matrix
 MATRIX_HOMESERVER = os.getenv("MATRIX_HOMESERVER", "http://localhost:8008")
 # (for federation setups where hostname != server_name)
 MATRIX_SERVER_NAME = os.getenv("MATRIX_SERVER_NAME", None)
+# Optional installation namespace suffix used to avoid collisions on shared homeservers.
+# When set, managed users/rooms are namespaced as "<name>_<namespace>".
+MINDROOM_NAMESPACE = os.getenv("MINDROOM_NAMESPACE", "").strip().lower() or None
+
+# Placeholder used in starter config templates. `mindroom connect` can
+# automatically replace this token with the owner Matrix user ID returned
+# by the provisioning service.
+OWNER_MATRIX_USER_ID_PLACEHOLDER = "__MINDROOM_OWNER_USER_ID_FROM_PAIRING__"
 MATRIX_SSL_VERIFY = env_flag("MATRIX_SSL_VERIFY", default=True)
 
 

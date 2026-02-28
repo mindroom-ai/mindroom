@@ -137,8 +137,11 @@ async def test_agent_processes_direct_mention(
                     user_id=test_user_id,
                     audio=None,
                     images=None,
+                    files=None,
+                    videos=None,
                     reply_to_event_id="$test_event:localhost",
                     show_tool_calls=True,
+                    run_metadata_collector=ANY,
                 )
 
                 # Verify message was sent (thinking + streaming updates)
@@ -425,9 +428,12 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 user_id=test_user_id,
                 audio=None,
                 images=None,
+                files=None,
+                videos=None,
                 reply_to_event_id=f"$test_event2:{domain}",
                 show_tool_calls=True,
                 tool_trace_collector=ANY,
+                run_metadata_collector=ANY,
             )
 
             # Verify thread response format (team response with mocking issue)

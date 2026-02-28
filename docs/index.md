@@ -70,8 +70,8 @@ agents:
 
 models:
   default:
-    provider: anthropic
-    id: claude-sonnet-4-5-latest
+    provider: openai
+    id: gpt-5.2
 
 defaults:
   tools: [scheduler]
@@ -85,12 +85,20 @@ defaults:
 MATRIX_HOMESERVER=https://matrix.example.com
 
 # AI provider API keys
-ANTHROPIC_API_KEY=your_api_key
+OPENAI_API_KEY=your_api_key
 ```
 
 3. Run MindRoom:
 
 ```bash
+mindroom run
+```
+
+For local development with a host-installed backend plus Dockerized Synapse + Cinny
+(Linux/macOS), you can bootstrap the local stack with:
+
+```bash
+mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
 mindroom run
 ```
 
@@ -131,6 +139,7 @@ mindroom run
 ## Documentation
 
 - [Getting Started](getting-started.md) - Installation and first steps
+- [Hosted Matrix Deployment](deployment/hosted-matrix.md) - Run only `uvx mindroom` locally against hosted Matrix
 - [Configuration](configuration/index.md) - All configuration options
 - [Cultures](configuration/cultures.md) - Configure shared agent cultures
 - [Dashboard](dashboard.md) - Web UI for configuration
@@ -153,6 +162,9 @@ mindroom run
 - [Google Services OAuth](deployment/google-services-oauth.md) - Admin OAuth setup for Gmail/Calendar/Drive/Sheets
 - [Google Services OAuth (Individual)](deployment/google-services-user-oauth.md) - Single-user OAuth setup
 - [CLI Reference](cli.md) - Command-line interface
+- [Support](support.md) - Contact and troubleshooting help
+- [Privacy Policy](privacy.md) - Privacy and data handling information
+- [Terms of Service](terms.md) - Terms for using MindRoom services and clients
 
 ## License
 

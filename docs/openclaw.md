@@ -7,9 +7,9 @@ icon: lucide/folder-input
 MindRoom supports a practical OpenClaw-compatible workflow focused on workspace portability:
 
 - Reuse your OpenClaw markdown files (`SOUL.md`, `AGENTS.md`, `USER.md`, `MEMORY.md`, etc.)
-- Keep daily memory logs in `memory/YYYY-MM-DD.md`
 - Use `openclaw_compat` tool names where supported
-- Add semantic recall over historical memory via knowledge bases
+- Use MindRoom's unified memory backend (`memory.backend`) for persistence
+- Optionally add semantic recall over workspace files via knowledge bases
 
 ## What this is (and is not)
 
@@ -23,10 +23,10 @@ Works well:
 
 Not included:
 
-- OpenClaw gateway control plane (`gateway` returns `not_configured`)
+- OpenClaw gateway control plane
 - Device nodes and canvas platform tools
 - `tts` and `image` tool aliases (use MindRoom's native TTS/image tools directly)
-- Heartbeat runtime — schedule heartbeats via `cron`/`scheduler` instead
+- Heartbeat runtime - schedule heartbeats via `cron`/`scheduler` instead
 
 ## The `openclaw_compat` toolkit
 
@@ -40,7 +40,8 @@ The `openclaw_compat` tool provides OpenClaw-named aliases so prompts and skills
 | `message`, `sessions_*` | Matrix client calls |
 | `subagents`, `agents_list` | Agent registry lookup |
 | `browser` | `BrowserTools` (Playwright, host target only) |
-| `gateway`, `nodes`, `canvas` | Stubs (`not_configured`) |
+
+Memory is not a separate OpenClaw subsystem in MindRoom. It uses the normal MindRoom memory backend.
 
 ## Drop-in config
 
@@ -58,11 +59,10 @@ agents:
 
     instructions:
       - You wake up fresh each session with no memory of previous conversations. Your context files are already loaded into your system prompt.
-      - Today's and yesterday's daily memory files from `memory_dir` are pre-loaded. For older history, use `search_knowledge_base`.
-      - IMPORTANT: If you want to remember something, write it to `./openclaw_data/memory/YYYY-MM-DD.md` (append, never overwrite).
-      - Curate long-term memory in `MEMORY.md` by distilling important points from recent daily files.
+      - Important long-term context is persisted by the configured MindRoom memory backend. If something must be preserved exactly, write/update the relevant file directly.
+      - MEMORY.md is curated long-term memory; daily files are short-lived notes and logs.
       - Ask before external/public actions and destructive operations.
-      - Before answering prior-history questions, search memory files first with `search_knowledge_base`.
+      - Before answering prior-history questions, search memory files first with `search_knowledge_base` when configured.
 
     context_files:
       - ./openclaw_data/SOUL.md
@@ -73,7 +73,6 @@ agents:
       - ./openclaw_data/TOOLS.md
       - ./openclaw_data/HEARTBEAT.md
 
-    memory_dir: ./openclaw_data/memory
     knowledge_bases: [openclaw_memory]
 
     tools:
@@ -95,13 +94,13 @@ knowledge_bases:
     path: ./openclaw_data/memory
     watch: true
 
-defaults:
-  max_preload_chars: 50000
-
-models:
-  opus:
-    provider: anthropic
-    id: claude-opus-4-6-latest
+memory:
+  backend: file
+  file:
+    path: ./openclaw_data/memory
+    max_entrypoint_lines: 200
+  auto_flush:
+    enabled: true
 ```
 
 ## Recommended workspace layout
@@ -120,29 +119,26 @@ openclaw_data/
     └── topic-notes.md
 ```
 
-## Memory behavior
+## Unified memory behavior
 
-`memory_dir` is document-based context loading, not Mem0:
+OpenClaw-compatible agents use the same memory system as every other MindRoom agent:
 
-- Loads `MEMORY.md` (uppercase, OpenClaw standard) plus yesterday/today dated files from the directory
-- Injects those files into role context at agent creation/reload
-- Does not perform semantic search by itself
+- `memory.backend: mem0` for vector memory
+- `memory.backend: file` for file-first memory
+- optional `knowledge_bases` for semantic recall over arbitrary workspace folders
 
-**Case sensitivity note:** `memory_dir` lookup is case-sensitive and expects `MEMORY.md`. On case-sensitive filesystems (typical Linux), lowercase `memory.md` will not be loaded.
-
-For older history, use `knowledge_bases` on your memory folder — this provides semantic search across all files regardless of date.
+Recommended for OpenClaw-style setups: `memory.backend: file` with `memory.auto_flush.enabled: true`.
 
 ## Context Management
 
 MindRoom includes built-in context controls for OpenClaw-style agents:
 
-- **Conversation history** is managed by Agno's session system — previous turns (including tool calls and results) are automatically replayed. Control depth with `num_history_runs` or `num_history_messages` (see [Agents](configuration/agents.md)).
-- **Preloaded role context** from `context_files` + `memory_dir` is hard-capped by `defaults.max_preload_chars`.
-- If preload exceeds the cap, truncation priority is: daily files → `MEMORY.md` → personality files (`SOUL.md`, etc.), with a truncation marker appended.
+- **Conversation history** is managed by Agno's session system - previous turns (including tool calls and results) are automatically replayed. Control depth with `num_history_runs` or `num_history_messages` (see [Agents](configuration/agents.md)).
+- **Preloaded role context** from `context_files` is hard-capped by `defaults.max_preload_chars`.
 
 ## Known limitations
 
-**Threading model:** MindRoom responds in Matrix threads by default. OpenClaw uses continuous room-level conversations. To match this behavior on mobile or via bridges (Telegram, Signal, WhatsApp), set `thread_mode: room` on the agent — this sends plain room messages with a single persistent session per room instead of creating threads.
+**Threading model:** MindRoom responds in Matrix threads by default. OpenClaw uses continuous room-level conversations. To match this behavior on mobile or via bridges (Telegram, Signal, WhatsApp), set `thread_mode: room` on the agent - this sends plain room messages with a single persistent session per room instead of creating threads.
 
 ## Privacy guidance
 

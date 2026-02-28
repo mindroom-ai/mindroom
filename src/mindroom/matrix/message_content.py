@@ -6,6 +6,7 @@ including handling large messages that are stored as MXC attachments.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from html import unescape
@@ -45,6 +46,8 @@ def _attachment_mimetype(content: dict[str, Any]) -> str | None:
             return "text/html"
         if normalized_filename.endswith(".txt"):
             return "text/plain"
+        if normalized_filename.endswith(".json"):
+            return "application/json"
 
     return None
 
@@ -74,6 +77,27 @@ def _html_to_text(html_text: str) -> str:
     return text.strip()
 
 
+def _extract_large_message_v2_body(payload_json: str) -> str | None:
+    """Extract prompt body text from a v2 large-message sidecar JSON payload."""
+    try:
+        payload = json.loads(payload_json)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    nested_new_content = payload.get("m.new_content")
+    if isinstance(nested_new_content, dict):
+        nested_body = nested_new_content.get("body")
+        if isinstance(nested_body, str):
+            return nested_body
+
+    body = payload.get("body")
+    if isinstance(body, str):
+        return body
+    return None
+
+
 async def _get_full_message_body(
     message_data: dict[str, Any],
     client: nio.AsyncClient | None = None,
@@ -96,6 +120,8 @@ async def _get_full_message_body(
 
     # Check if this is a large message with our custom metadata
     if "io.mindroom.long_text" in content:
+        long_text_meta = content.get("io.mindroom.long_text")
+        long_text_version = long_text_meta.get("version") if isinstance(long_text_meta, dict) else None
         # This is a large message - need to fetch the attachment
         if not client:
             logger.warning("Cannot fetch large message attachment without client, returning preview")
@@ -121,8 +147,15 @@ async def _get_full_message_body(
             mimetype=_attachment_mimetype(content),
         )
         if full_text:
-            return full_text
-        logger.warning("Failed to download large message, returning preview")
+            if long_text_version == 2:
+                extracted_body = _extract_large_message_v2_body(full_text)
+                if extracted_body is not None:
+                    return extracted_body
+                logger.warning("Invalid large-message v2 payload JSON, returning preview")
+            else:
+                return full_text
+        else:
+            logger.warning("Failed to download large message, returning preview")
         return body
 
     # Regular message or no custom metadata
@@ -252,6 +285,28 @@ async def extract_and_resolve_message(
         data["body"] = await _get_full_message_body(data, client)
 
     return data
+
+
+async def extract_edit_body(
+    event_source: dict[str, Any],
+    client: nio.AsyncClient | None = None,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Extract body/content from an edit event's ``m.new_content`` payload."""
+    content = event_source.get("content", {})
+    new_content = content.get("m.new_content", {})
+
+    body = new_content.get("body")
+    if not isinstance(body, str):
+        return None, None
+
+    resolved_body = body
+    if client and "io.mindroom.long_text" in new_content:
+        resolved_body = await _get_full_message_body(
+            {"body": body, "content": new_content},
+            client,
+        )
+
+    return resolved_body, dict(new_content)
 
 
 def _clean_expired_cache() -> None:

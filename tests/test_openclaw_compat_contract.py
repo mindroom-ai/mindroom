@@ -8,11 +8,12 @@ import sqlite3
 from itertools import count
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 import mindroom.tools  # noqa: F401
+from mindroom.attachments import register_local_attachment
 from mindroom.custom_tools.openclaw_compat import OpenClawCompatTools
 from mindroom.openclaw_context import OpenClawToolContext, get_openclaw_tool_context, openclaw_tool_context
 from mindroom.thread_utils import create_session_id
@@ -30,9 +31,6 @@ OPENCLAW_COMPAT_CORE_TOOLS = {
     "sessions_spawn",
     "subagents",
     "message",
-    "gateway",
-    "nodes",
-    "canvas",
 }
 
 OPENCLAW_COMPAT_ALIAS_TOOLS = {
@@ -96,22 +94,11 @@ async def test_openclaw_compat_placeholder_responses_are_json() -> None:
         ("subagents", await tool.subagents()),
         ("message", await tool.message(action="send", message="hi")),
     ]
-    not_configured = [
-        ("gateway", await tool.gateway(action="config.get")),
-        ("nodes", await tool.nodes(action="status")),
-        ("canvas", await tool.canvas(action="snapshot")),
-    ]
 
     for expected_tool_name, raw_response in context_required:
         payload = json.loads(raw_response)
         assert payload["tool"] == expected_tool_name
         assert payload["status"] == "error"
-        assert "message" in payload
-
-    for expected_tool_name, raw_response in not_configured:
-        payload = json.loads(raw_response)
-        assert payload["tool"] == expected_tool_name
-        assert payload["status"] == "not_configured"
         assert "message" in payload
 
 
@@ -481,6 +468,78 @@ async def test_openclaw_compat_message_reply_uses_context_thread(tmp_path: Path)
         text="hello",
         thread_id="$ctx-thread:localhost",
     )
+
+
+@pytest.mark.asyncio
+async def test_openclaw_compat_message_attachments_lists_context_ids(tmp_path: Path) -> None:
+    """Verify message attachments action returns current-context attachment metadata."""
+    tool = OpenClawCompatTools()
+    sample_file = tmp_path / "sample.txt"
+    sample_file.write_text("hello", encoding="utf-8")
+    attachment = register_local_attachment(
+        tmp_path,
+        sample_file,
+        kind="file",
+        room_id="!room:localhost",
+        thread_id="$ctx-thread:localhost",
+        source_event_id="$root",
+        sender="@user:localhost",
+    )
+    assert attachment is not None
+
+    config = MagicMock()
+    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
+    ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id="$ctx-thread:localhost",
+        requester_id="@user:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+        attachment_ids=(attachment.attachment_id,),
+    )
+
+    with openclaw_tool_context(ctx):
+        payload = json.loads(await tool.message(action="attachments"))
+
+    assert payload["status"] == "ok"
+    assert payload["action"] == "attachments"
+    assert payload["attachment_ids"] == [attachment.attachment_id]
+    assert payload["attachments"][0]["attachment_id"] == attachment.attachment_id
+    assert payload["attachments"][0]["available"] is True
+    assert payload["attachments"][0]["local_path"] == str(sample_file.resolve())
+
+
+@pytest.mark.asyncio
+async def test_openclaw_compat_message_send_supports_attachment_only(tmp_path: Path) -> None:
+    """Verify message send can upload files without a text body."""
+    tool = OpenClawCompatTools()
+    tool._send_matrix_text = AsyncMock()
+    config = MagicMock()
+    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
+    ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id="$ctx-thread:localhost",
+        requester_id="@user:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+    sample_file = tmp_path / "upload.txt"
+    sample_file.write_text("payload", encoding="utf-8")
+
+    with (
+        openclaw_tool_context(ctx),
+        patch("mindroom.custom_tools.openclaw_compat.send_file_message", new=AsyncMock(return_value="$file_evt")),
+    ):
+        payload = json.loads(await tool.message(action="send", attachments=[str(sample_file)]))
+
+    assert payload["status"] == "ok"
+    assert payload["event_id"] == "$file_evt"
+    assert payload["attachment_event_ids"] == ["$file_evt"]
+    tool._send_matrix_text.assert_not_awaited()
 
 
 @pytest.mark.asyncio

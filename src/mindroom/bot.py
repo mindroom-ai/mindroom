@@ -19,6 +19,14 @@ from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
 from . import config_confirmation, image_handler, interactive, voice_handler
 from .agents import create_agent, create_session_storage, get_rooms_for_entity, remove_run_by_event_id
 from .ai import ai_response, stream_agent_response
+from .attachments import (
+    attachment_id_for_event,
+    attachment_records_to_media,
+    merge_attachment_ids,
+    parse_attachment_ids_from_event_source,
+    register_local_attachment,
+    resolve_attachments,
+)
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .commands import (
     Command,
@@ -30,9 +38,9 @@ from .commands import (
 from .config import Config
 from .config_commands import handle_config_command
 from .constants import (
+    ATTACHMENT_IDS_KEY,
     CONFIG_PATH,
     MATRIX_HOMESERVER,
-    MEDIA_LOCAL_PATH_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     VOICE_PREFIX,
@@ -82,6 +90,12 @@ from .matrix.users import (
     login_agent_user,
 )
 from .memory import store_conversation_memory
+from .memory.auto_flush import (
+    MemoryAutoFlushWorker,
+    auto_flush_enabled,
+    mark_auto_flush_dirty_session,
+    reprioritize_auto_flush_sessions,
+)
 from .openclaw_context import OpenClawToolContext, openclaw_tool_context
 from .plugins import load_plugins
 from .response_tracker import ResponseTracker
@@ -136,7 +150,7 @@ if TYPE_CHECKING:
     import structlog
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
-    from agno.media import Audio, Image
+    from agno.media import Audio, File, Image, Video
     from agno.tools.function import Function
     from agno.tools.toolkit import Toolkit
 
@@ -178,6 +192,29 @@ def _create_task_wrapper(
         _task = asyncio.create_task(error_handler())  # noqa: RUF006
 
     return wrapper
+
+
+def _is_concrete_matrix_user_id(user_id: str) -> bool:
+    """Return whether this string is a concrete Matrix user ID."""
+    return (
+        user_id.startswith("@") and ":" in user_id and "*" not in user_id and "?" not in user_id and " " not in user_id
+    )
+
+
+def _get_authorized_user_ids_to_invite(config: Config) -> set[str]:
+    """Collect Matrix users from authorization config that can be invited."""
+    user_ids = set(config.authorization.global_users)
+    for room_users in config.authorization.room_permissions.values():
+        user_ids.update(room_users)
+
+    concrete_user_ids = {user_id for user_id in user_ids if _is_concrete_matrix_user_id(user_id)}
+    skipped = sorted(user_ids - concrete_user_ids)
+    if skipped:
+        logger.warning(
+            "Skipping non-concrete authorization user IDs for invites",
+            user_ids=skipped,
+        )
+    return concrete_user_ids
 
 
 def _format_agent_description(agent_name: str, config: Config) -> str:
@@ -537,11 +574,9 @@ def _is_voice_raw_audio_fallback(event_source: dict) -> bool:
     return bool(content.get(VOICE_RAW_AUDIO_FALLBACK_KEY, False))
 
 
-def _media_local_path(event_source: dict) -> str | None:
-    """Return local media path metadata for relay events, when present."""
-    content = event_source.get("content", {})
-    value = content.get(MEDIA_LOCAL_PATH_KEY)
-    return value if isinstance(value, str) and value else None
+def _attachment_ids(event_source: dict) -> list[str]:
+    """Return attachment IDs included in Matrix event metadata."""
+    return parse_attachment_ids_from_event_source(event_source)
 
 
 def _extension_from_mime_type(mime_type: str | None) -> str:
@@ -684,8 +719,10 @@ def create_bot_for_entity(
     if entity_name in config.teams:
         team_config = config.teams[entity_name]
         rooms = resolve_room_aliases(team_config.rooms)
-        # Convert agent names to MatrixID objects
-        team_matrix_ids = [MatrixID.from_username(agent_name, config.domain) for agent_name in team_config.agents]
+        # Convert team member agent names into canonical agent Matrix IDs.
+        # Team streaming resolves config agents from these IDs, so they must keep
+        # the `mindroom_` prefix used by MatrixID.from_agent().
+        team_matrix_ids = [MatrixID.from_agent(agent_name, config.domain) for agent_name in team_config.agents]
         return TeamBot(
             agent_user=agent_user,
             storage_path=storage_path,
@@ -854,6 +891,59 @@ class AgentBot:
             return []
         audio = await voice_handler.download_audio(self.client, event)
         return [audio] if audio else []
+
+    async def _fetch_thread_attachment_ids(self, room_id: str, thread_id: str) -> list[str]:
+        """Resolve attachment IDs from a thread root, creating one for raw file/video roots when needed."""
+        assert self.client is not None
+        response = await self.client.room_get_event(room_id, thread_id)
+        if not isinstance(response, nio.RoomGetEventResponse):
+            return []
+        event = response.event
+
+        event_attachment_ids = _attachment_ids(event.source)
+        if event_attachment_ids:
+            return event_attachment_ids
+
+        if not isinstance(
+            event,
+            nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
+        ):
+            return []
+
+        local_media_path = await _store_file_or_video_locally(self.client, self.storage_path, event)
+        if local_media_path is None:
+            return []
+
+        content = event.source.get("content", {})
+        filename = content.get("filename")
+        if not isinstance(filename, str) or not filename:
+            filename = event.body
+        kind = "video" if isinstance(event, nio.RoomMessageVideo | nio.RoomEncryptedVideo) else "file"
+        record = register_local_attachment(
+            self.storage_path,
+            local_media_path,
+            kind=kind,
+            attachment_id=attachment_id_for_event(event.event_id),
+            filename=filename if isinstance(filename, str) else None,
+            mime_type=_media_mime_type(event),
+            room_id=room_id,
+            thread_id=thread_id,
+            source_event_id=event.event_id,
+            sender=event.sender,
+        )
+        if record is None:
+            return []
+        return [record.attachment_id]
+
+    def _resolve_attachment_media(
+        self,
+        attachment_ids: list[str],
+    ) -> tuple[list[str], list[Audio], list[File], list[Video]]:
+        """Resolve attachment IDs into media objects for models and tools."""
+        attachment_records = resolve_attachments(self.storage_path, attachment_ids)
+        resolved_attachment_ids = [record.attachment_id for record in attachment_records]
+        attachment_audio, attachment_files, attachment_videos = attachment_records_to_media(attachment_records)
+        return resolved_attachment_ids, attachment_audio, attachment_files, attachment_videos
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
@@ -1172,8 +1262,16 @@ class AgentBot:
             self.logger.debug("Ignoring message from other agent (not mentioned)")
             return
 
+        message_attachment_ids = _attachment_ids(event.source)
+
         # Router dispatch (routing / skip) — shared with image handler
-        if await self._handle_router_dispatch(room, event, context, requester_user_id):
+        if await self._handle_router_dispatch(
+            room,
+            event,
+            context,
+            requester_user_id,
+            extra_content={ATTACHMENT_IDS_KEY: message_attachment_ids} if message_attachment_ids else None,
+        ):
             return
 
         # Decide: team response, individual response, or skip
@@ -1195,10 +1293,20 @@ class AgentBot:
             if context.thread_id and _is_voice_raw_audio_fallback(event.source)
             else []
         )
-        local_audio_path = _media_local_path(event.source)
+        thread_attachment_ids = (
+            await self._fetch_thread_attachment_ids(room.room_id, context.thread_id) if context.thread_id else []
+        )
+        attachment_ids = merge_attachment_ids(message_attachment_ids, thread_attachment_ids)
+        resolved_attachment_ids, attachment_audio, attachment_files, attachment_videos = self._resolve_attachment_media(
+            attachment_ids,
+        )
+        merged_audio = [*thread_audio, *attachment_audio]
         prompt_text = event.body
-        if local_audio_path:
-            prompt_text = f"{prompt_text}\n\nLocal media file path: {local_audio_path}"
+        if resolved_attachment_ids:
+            prompt_text = (
+                f"{prompt_text}\n\nAvailable attachment IDs: {', '.join(resolved_attachment_ids)}. "
+                "Use tool calls to inspect or process them."
+            )
 
         if action.kind == "team":
             assert action.form_team is not None
@@ -1212,8 +1320,11 @@ class AgentBot:
                 thread_history=context.thread_history,
                 requester_user_id=requester_user_id,
                 existing_event_id=None,
-                audio=thread_audio or None,
+                audio=merged_audio or None,
                 images=thread_images or None,
+                files=attachment_files or None,
+                videos=attachment_videos or None,
+                attachment_ids=resolved_attachment_ids or None,
             )
             self.response_tracker.mark_responded(event.event_id, response_event_id)
             return
@@ -1231,8 +1342,11 @@ class AgentBot:
             thread_id=context.thread_id,
             thread_history=context.thread_history,
             user_id=requester_user_id,
-            audio=thread_audio or None,
+            audio=merged_audio or None,
             images=thread_images or None,
+            files=attachment_files or None,
+            videos=attachment_videos or None,
+            attachment_ids=resolved_attachment_ids or None,
         )
         self.response_tracker.mark_responded(event.event_id, response_event_id)
 
@@ -1390,12 +1504,25 @@ class AgentBot:
             voice_audio.mime_type,
         )
         fallback_message = f"{VOICE_PREFIX}{voice_handler.extract_caption(event)}"
-        fallback_extra_content: dict[str, str | bool] = {
+        fallback_extra_content: dict[str, str | bool | list[str]] = {
             ORIGINAL_SENDER_KEY: event.sender,
             VOICE_RAW_AUDIO_FALLBACK_KEY: True,
         }
         if local_audio_path is not None:
-            fallback_extra_content[MEDIA_LOCAL_PATH_KEY] = str(local_audio_path)
+            attachment_record = register_local_attachment(
+                self.storage_path,
+                local_audio_path,
+                kind="audio",
+                attachment_id=attachment_id_for_event(event.event_id),
+                filename=event.body if isinstance(event.body, str) else None,
+                mime_type=voice_audio.mime_type,
+                room_id=room.room_id,
+                thread_id=thread_id,
+                source_event_id=event.event_id,
+                sender=event.sender,
+            )
+            if attachment_record is not None:
+                fallback_extra_content[ATTACHMENT_IDS_KEY] = [attachment_record.attachment_id]
         response_event_id = await self._send_response(
             room_id=room.room_id,
             reply_to_event_id=event.event_id,
@@ -1482,7 +1609,7 @@ class AgentBot:
         room: nio.MatrixRoom,
         event: nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
     ) -> None:
-        """Handle file/video events by exposing a local path to agent prompts."""
+        """Handle file/video events by registering attachment IDs for tool/model access."""
         assert self.client is not None
 
         requester_user_id = self._precheck_event(room, event)
@@ -1504,7 +1631,31 @@ class AgentBot:
             return
 
         caption = _extract_file_or_video_caption(event)
-        local_media_path_str = str(local_media_path)
+        content = event.source.get("content", {})
+        filename = content.get("filename")
+        if not isinstance(filename, str) or not filename:
+            filename = event.body
+        media_kind = "video" if isinstance(event, nio.RoomMessageVideo | nio.RoomEncryptedVideo) else "file"
+        attachment_record = register_local_attachment(
+            self.storage_path,
+            local_media_path,
+            kind=media_kind,
+            attachment_id=attachment_id_for_event(event.event_id),
+            filename=filename if isinstance(filename, str) else None,
+            mime_type=_media_mime_type(event),
+            room_id=room.room_id,
+            thread_id=context.thread_id,
+            source_event_id=event.event_id,
+            sender=event.sender,
+        )
+        if attachment_record is None:
+            self.logger.error("Failed to register media attachment", event_id=event.event_id)
+            self.response_tracker.mark_responded(event.event_id)
+            return
+
+        resolved_attachment_ids, attachment_audio, attachment_files, attachment_videos = self._resolve_attachment_media(
+            [attachment_record.attachment_id],
+        )
 
         # Router dispatch (routing / skip) — shared with text and image handlers.
         if await self._handle_router_dispatch(
@@ -1515,7 +1666,7 @@ class AgentBot:
             message=caption,
             extra_content={
                 ORIGINAL_SENDER_KEY: event.sender,
-                MEDIA_LOCAL_PATH_KEY: local_media_path_str,
+                ATTACHMENT_IDS_KEY: resolved_attachment_ids,
             },
         ):
             return
@@ -1532,7 +1683,12 @@ class AgentBot:
         if action.kind == "skip":
             return
 
-        prompt_text = f"{caption}\n\nLocal media file path: {local_media_path_str}"
+        prompt_text = caption
+        if resolved_attachment_ids:
+            prompt_text = (
+                f"{caption}\n\nAvailable attachment IDs: {', '.join(resolved_attachment_ids)}. "
+                "Use tool calls to inspect or process them."
+            )
 
         self.logger.info("Processing media message", event_id=event.event_id)
 
@@ -1548,6 +1704,10 @@ class AgentBot:
                 thread_history=context.thread_history,
                 requester_user_id=requester_user_id,
                 existing_event_id=None,
+                audio=attachment_audio or None,
+                files=attachment_files or None,
+                videos=attachment_videos or None,
+                attachment_ids=resolved_attachment_ids or None,
             )
         else:
             response_event_id = await self._generate_response(
@@ -1557,6 +1717,10 @@ class AgentBot:
                 thread_id=context.thread_id,
                 thread_history=context.thread_history,
                 user_id=requester_user_id,
+                audio=attachment_audio or None,
+                files=attachment_files or None,
+                videos=attachment_videos or None,
+                attachment_ids=resolved_attachment_ids or None,
             )
         self.response_tracker.mark_responded(event.event_id, response_event_id)
 
@@ -1843,6 +2007,7 @@ class AgentBot:
         user_id: str | None,
         *,
         agent_name: str | None = None,
+        attachment_ids: list[str] | None = None,
     ) -> OpenClawToolContext | None:
         """Build runtime context for OpenClaw-compatible tool calls."""
         if self.client is None:
@@ -1855,6 +2020,7 @@ class AgentBot:
             client=self.client,
             config=self.config,
             storage_path=self.storage_path,
+            attachment_ids=tuple(attachment_ids or []),
         )
 
     async def _generate_team_response_helper(
@@ -1870,6 +2036,9 @@ class AgentBot:
         existing_event_id: str | None = None,
         audio: Sequence[Audio] | None = None,
         images: Sequence[Image] | None = None,
+        files: Sequence[File] | None = None,
+        videos: Sequence[Video] | None = None,
+        attachment_ids: list[str] | None = None,
     ) -> str | None:
         """Generate a team response (shared between preformed teams and TeamBot).
 
@@ -1899,7 +2068,12 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             user_id=requester_user_id,
         )
-        openclaw_context = self._build_openclaw_context(room_id, thread_id, requester_user_id)
+        openclaw_context = self._build_openclaw_context(
+            room_id,
+            thread_id,
+            requester_user_id,
+            attachment_ids=attachment_ids,
+        )
         orchestrator = self.orchestrator
         if orchestrator is None:
             msg = "Orchestrator is not set"
@@ -1922,6 +2096,8 @@ class AgentBot:
                             model_name=model_name,
                             audio=audio,
                             images=images,
+                            files=files,
+                            videos=videos,
                             show_tool_calls=self.show_tool_calls,
                         )
 
@@ -1962,6 +2138,8 @@ class AgentBot:
                             model_name=model_name,
                             audio=audio,
                             images=images,
+                            files=files,
+                            videos=videos,
                         )
 
                 # Either edit the thinking message or send new
@@ -2114,6 +2292,9 @@ class AgentBot:
         user_id: str | None = None,
         audio: Sequence[Audio] | None = None,
         images: Sequence[Image] | None = None,
+        files: Sequence[File] | None = None,
+        videos: Sequence[Video] | None = None,
+        attachment_ids: list[str] | None = None,
     ) -> str | None:
         """Process a message and send a response (non-streaming)."""
         assert self.client is not None
@@ -2128,8 +2309,14 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
         )
-        openclaw_context = self._build_openclaw_context(room_id, thread_id, user_id)
+        openclaw_context = self._build_openclaw_context(
+            room_id,
+            thread_id,
+            user_id,
+            attachment_ids=attachment_ids,
+        )
         tool_trace: list[ToolTraceEntry] = []
+        run_metadata_content: dict[str, Any] = {}
 
         try:
             # Show typing indicator while generating response
@@ -2147,9 +2334,12 @@ class AgentBot:
                         user_id=user_id,
                         audio=audio,
                         images=images,
+                        files=files,
+                        videos=videos,
                         reply_to_event_id=reply_to_event_id,
                         show_tool_calls=self.show_tool_calls,
                         tool_trace_collector=tool_trace,
+                        run_metadata_collector=run_metadata_content,
                     )
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
@@ -2164,7 +2354,14 @@ class AgentBot:
 
         if existing_event_id:
             # Edit the existing message
-            await self._edit_message(room_id, existing_event_id, response_text, thread_id, tool_trace=tool_trace)
+            await self._edit_message(
+                room_id,
+                existing_event_id,
+                response_text,
+                thread_id,
+                tool_trace=tool_trace if self.show_tool_calls else None,
+                extra_content=run_metadata_content or None,
+            )
             return existing_event_id
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
@@ -2173,7 +2370,8 @@ class AgentBot:
             reply_to_event_id,
             response.formatted_text,
             thread_id,
-            tool_trace=tool_trace,
+            tool_trace=tool_trace if self.show_tool_calls else None,
+            extra_content=run_metadata_content or None,
         )
         if event_id and response.option_map and response.options_list:
             # For interactive questions, use the same thread root that _send_response uses:
@@ -2210,6 +2408,12 @@ class AgentBot:
             return None
 
         session_id = create_session_id(room_id, thread_id)
+        reprioritize_auto_flush_sessions(
+            self.storage_path,
+            self.config,
+            agent_name=agent_name,
+            active_session_id=session_id,
+        )
         knowledge = self._knowledge_for_agent(agent_name)
         scheduler_context = self._build_scheduling_tool_context(
             room_id=room_id,
@@ -2220,6 +2424,7 @@ class AgentBot:
         openclaw_context = self._build_openclaw_context(room_id, thread_id, user_id, agent_name=agent_name)
         show_tool_calls = self._show_tool_calls_for_agent(agent_name)
         tool_trace: list[ToolTraceEntry] = []
+        run_metadata_content: dict[str, Any] = {}
 
         async with typing_indicator(self.client, room_id):
             with scheduling_tool_context(scheduler_context), openclaw_tool_context(openclaw_context):
@@ -2235,6 +2440,7 @@ class AgentBot:
                     reply_to_event_id=reply_to_event_id,
                     show_tool_calls=show_tool_calls,
                     tool_trace_collector=tool_trace,
+                    run_metadata_collector=run_metadata_content,
                 )
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
@@ -2245,7 +2451,8 @@ class AgentBot:
             thread_id,
             reply_to_event=reply_to_event,
             skip_mentions=True,
-            tool_trace=tool_trace,
+            tool_trace=tool_trace if show_tool_calls else None,
+            extra_content=run_metadata_content or None,
         )
 
         if event_id and response.option_map and response.options_list:
@@ -2265,19 +2472,28 @@ class AgentBot:
             )
 
         try:
-            create_background_task(
-                store_conversation_memory(
-                    prompt,
-                    agent_name,
-                    self.storage_path,
-                    session_id,
-                    self.config,
-                    room_id,
-                    thread_history,
-                    user_id,
-                ),
-                name=f"memory_save_{agent_name}_{session_id}",
+            mark_auto_flush_dirty_session(
+                self.storage_path,
+                self.config,
+                agent_name=agent_name,
+                session_id=session_id,
+                room_id=room_id,
+                thread_id=thread_id,
             )
+            if self.config.get_agent_memory_backend(agent_name) != "file":
+                create_background_task(
+                    store_conversation_memory(
+                        prompt,
+                        agent_name,
+                        self.storage_path,
+                        session_id,
+                        self.config,
+                        room_id,
+                        thread_history,
+                        user_id,
+                    ),
+                    name=f"memory_save_{agent_name}_{session_id}",
+                )
         except Exception:  # pragma: no cover
             self.logger.debug("Skipping memory storage due to configuration error")
 
@@ -2335,6 +2551,9 @@ class AgentBot:
         user_id: str | None = None,
         audio: Sequence[Audio] | None = None,
         images: Sequence[Image] | None = None,
+        files: Sequence[File] | None = None,
+        videos: Sequence[Video] | None = None,
+        attachment_ids: list[str] | None = None,
     ) -> str | None:
         """Process a message and send a response (streaming)."""
         assert self.client is not None
@@ -2349,7 +2568,13 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
         )
-        openclaw_context = self._build_openclaw_context(room_id, thread_id, user_id)
+        openclaw_context = self._build_openclaw_context(
+            room_id,
+            thread_id,
+            user_id,
+            attachment_ids=attachment_ids,
+        )
+        run_metadata_content: dict[str, Any] = {}
 
         try:
             # Show typing indicator while generating response
@@ -2367,8 +2592,11 @@ class AgentBot:
                         user_id=user_id,
                         audio=audio,
                         images=images,
+                        files=files,
+                        videos=videos,
                         reply_to_event_id=reply_to_event_id,
                         show_tool_calls=self.show_tool_calls,
+                        run_metadata_collector=run_metadata_content,
                     )
 
                     event_id, accumulated = await send_streaming_response(
@@ -2383,6 +2611,7 @@ class AgentBot:
                         existing_event_id=existing_event_id,
                         room_mode=self.thread_mode == "room",
                         show_tool_calls=self.show_tool_calls,
+                        extra_content=run_metadata_content,
                     )
 
             # Handle interactive questions if present
@@ -2395,11 +2624,9 @@ class AgentBot:
             )
 
         except asyncio.CancelledError:
-            # Handle cancellation - send a message showing it was stopped
+            # send_streaming_response already preserves partial text and appends
+            # a cancellation marker for the final edit.
             self.logger.info("Streaming cancelled by user", message_id=existing_event_id)
-            if existing_event_id:
-                cancelled_text = "**[Response cancelled by user]**"
-                await self._edit_message(room_id, existing_event_id, cancelled_text, thread_id)
             raise
         except Exception as e:
             self.logger.exception("Error in streaming response", error=str(e))
@@ -2419,6 +2646,9 @@ class AgentBot:
         user_id: str | None = None,
         audio: Sequence[Audio] | None = None,
         images: Sequence[Image] | None = None,
+        files: Sequence[File] | None = None,
+        videos: Sequence[Video] | None = None,
+        attachment_ids: list[str] | None = None,
     ) -> str | None:
         """Generate and send/edit a response using AI.
 
@@ -2433,6 +2663,9 @@ class AgentBot:
             user_id: User ID of the sender for identifying user messages in history
             audio: Optional audio clips to pass to the AI model
             images: Optional images to pass to the AI model
+            files: Optional files to pass to the AI model
+            videos: Optional videos to pass to the AI model
+            attachment_ids: Attachment IDs available for tool-side file processing
 
         Returns:
             Event ID of the response message, or None if failed
@@ -2442,6 +2675,12 @@ class AgentBot:
 
         # Prepare session id for memory storage (store after sending response)
         session_id = create_session_id(room_id, thread_id)
+        reprioritize_auto_flush_sessions(
+            self.storage_path,
+            self.config,
+            agent_name=self.agent_name,
+            active_session_id=session_id,
+        )
 
         # Dynamically determine whether to use streaming based on user presence
         use_streaming = await should_use_streaming(
@@ -2464,6 +2703,9 @@ class AgentBot:
                     user_id=user_id,
                     audio=audio,
                     images=images,
+                    files=files,
+                    videos=videos,
+                    attachment_ids=attachment_ids,
                 )
             else:
                 await self._process_and_respond(
@@ -2476,6 +2718,9 @@ class AgentBot:
                     user_id=user_id,
                     audio=audio,
                     images=images,
+                    files=files,
+                    videos=videos,
+                    attachment_ids=attachment_ids,
                 )
 
         # Use unified handler for cancellation support
@@ -2497,19 +2742,28 @@ class AgentBot:
         # Store memory after response generation; ignore errors in tests/mocks
         # TODO: Remove try-except and fix tests
         try:
-            create_background_task(
-                store_conversation_memory(
-                    prompt,
-                    self.agent_name,
-                    self.storage_path,
-                    session_id,
-                    self.config,
-                    room_id,
-                    thread_history,
-                    user_id,
-                ),
-                name=f"memory_save_{self.agent_name}_{session_id}",
+            mark_auto_flush_dirty_session(
+                self.storage_path,
+                self.config,
+                agent_name=self.agent_name,
+                session_id=session_id,
+                room_id=room_id,
+                thread_id=thread_id,
             )
+            if self.config.get_agent_memory_backend(self.agent_name) != "file":
+                create_background_task(
+                    store_conversation_memory(
+                        prompt,
+                        self.agent_name,
+                        self.storage_path,
+                        session_id,
+                        self.config,
+                        room_id,
+                        thread_history,
+                        user_id,
+                    ),
+                    name=f"memory_save_{self.agent_name}_{session_id}",
+                )
         except Exception:  # pragma: no cover
             self.logger.debug("Skipping memory storage due to configuration error")
 
@@ -2561,6 +2815,7 @@ class AgentBot:
                 reply_to_event_id=None,
                 latest_thread_event_id=None,
                 tool_trace=tool_trace,
+                extra_content=extra_content,
             )
         else:
             # Get the latest message in thread for MSC3440 fallback compatibility
@@ -2579,13 +2834,12 @@ class AgentBot:
                 reply_to_event_id=reply_to_event_id,
                 latest_thread_event_id=latest_thread_event_id,
                 tool_trace=tool_trace,
+                extra_content=extra_content,
             )
 
         # Add metadata to indicate mentions should be ignored for responses
         if skip_mentions:
             content["com.mindroom.skip_mentions"] = True
-        if extra_content:
-            content.update(extra_content)
 
         assert self.client is not None
         event_id = await send_message(self.client, room_id, content)
@@ -2602,6 +2856,7 @@ class AgentBot:
         new_text: str,
         thread_id: str | None,
         tool_trace: list[ToolTraceEntry] | None = None,
+        extra_content: dict[str, Any] | None = None,
     ) -> bool:
         """Edit an existing message.
 
@@ -2619,6 +2874,7 @@ class AgentBot:
                 new_text,
                 sender_domain=sender_domain,
                 tool_trace=tool_trace,
+                extra_content=extra_content,
             )
         else:
             # For edits in threads, we need to get the latest thread event ID for MSC3440 compliance
@@ -2641,6 +2897,7 @@ class AgentBot:
                 thread_event_id=thread_id,
                 latest_thread_event_id=latest_thread_event_id,
                 tool_trace=tool_trace,
+                extra_content=extra_content,
             )
 
         assert self.client is not None
@@ -3035,6 +3292,9 @@ class TeamBot(AgentBot):
         user_id: str | None = None,
         audio: Sequence[Audio] | None = None,
         images: Sequence[Image] | None = None,
+        files: Sequence[File] | None = None,
+        videos: Sequence[Video] | None = None,
+        attachment_ids: list[str] | None = None,
     ) -> None:
         """Generate a team response instead of individual agent response."""
         if not prompt.strip():
@@ -3074,6 +3334,9 @@ class TeamBot(AgentBot):
             existing_event_id=existing_event_id,
             audio=audio,
             images=images,
+            files=files,
+            videos=videos,
+            attachment_ids=attachment_ids,
         )
 
 
@@ -3087,10 +3350,47 @@ class MultiAgentOrchestrator:
     config: Config | None = field(default=None, init=False)
     _sync_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     knowledge_managers: dict[str, KnowledgeManager] = field(default_factory=dict, init=False)
+    _memory_auto_flush_worker: MemoryAutoFlushWorker | None = field(default=None, init=False)
+    _memory_auto_flush_task: asyncio.Task | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         """Store a canonical absolute storage path to survive runtime cwd changes."""
         self.storage_path = self.storage_path.expanduser().resolve()
+
+    async def _stop_memory_auto_flush_worker(self) -> None:
+        """Stop the background memory auto-flush worker if running."""
+        worker = self._memory_auto_flush_worker
+        task = self._memory_auto_flush_task
+        self._memory_auto_flush_worker = None
+        self._memory_auto_flush_task = None
+
+        if worker is not None:
+            worker.stop()
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _sync_memory_auto_flush_worker(self) -> None:
+        """Start or stop background memory auto-flush worker based on current config."""
+        config = self.config
+        if config is None:
+            await self._stop_memory_auto_flush_worker()
+            return
+
+        enabled = auto_flush_enabled(config)
+        if not enabled:
+            await self._stop_memory_auto_flush_worker()
+            return
+
+        task = self._memory_auto_flush_task
+        if task is not None and not task.done():
+            return
+
+        worker = MemoryAutoFlushWorker(
+            storage_path=self.storage_path,
+            config_provider=lambda: self.config,
+        )
+        self._memory_auto_flush_worker = worker
+        self._memory_auto_flush_task = asyncio.create_task(worker.run(), name="memory_auto_flush_worker")
 
     async def _ensure_user_account(self, config: Config) -> None:
         """Ensure a user account exists, creating one if necessary.
@@ -3200,6 +3500,7 @@ class MultiAgentOrchestrator:
             msg = "Configuration not loaded"
             raise RuntimeError(msg)
         await self._configure_knowledge(config, start_watcher=True)
+        await self._sync_memory_auto_flush_worker()
 
         # Setup rooms and have all bots join them
         await self._setup_rooms_and_memberships(list(self.agent_bots.values()))
@@ -3250,6 +3551,7 @@ class MultiAgentOrchestrator:
         # Only apply the new config after all validation/account checks succeed.
         self.config = new_config
         await self._configure_knowledge(new_config, start_watcher=self.running)
+        await self._sync_memory_auto_flush_worker()
 
         # Always update config for ALL existing bots (even those being restarted will get new config when recreated)
         logger.info(
@@ -3337,6 +3639,7 @@ class MultiAgentOrchestrator:
     async def stop(self) -> None:
         """Stop all agent bots."""
         self.running = False
+        await self._stop_memory_auto_flush_worker()
         await shutdown_knowledge_managers()
         self.knowledge_managers = {}
 
@@ -3440,12 +3743,14 @@ class MultiAgentOrchestrator:
             return
 
         server_name = extract_server_name_from_homeserver(MATRIX_HOMESERVER)
+        authorized_user_ids = _get_authorized_user_ids_to_invite(config)
 
         # First, invite the user account to all rooms
         state = MatrixState.load()
         user_account = state.get_account(INTERNAL_USER_ACCOUNT_KEY)
         if user_account:
             user_id = MatrixID.from_username(user_account.username, server_name).full_id
+            authorized_user_ids.discard(user_id)
             for room_id in joined_rooms:
                 room_members = await get_room_members(router_bot.client, room_id)
                 if user_id not in room_members:
@@ -3465,6 +3770,19 @@ class MultiAgentOrchestrator:
             # Get current members of the room
             current_members = await get_room_members(router_bot.client, room_id)
 
+            # Invite authorized human users for this room
+            for authorized_user_id in authorized_user_ids:
+                if authorized_user_id in current_members:
+                    continue
+                if not is_authorized_sender(authorized_user_id, config, room_id):
+                    continue
+
+                success = await invite_to_room(router_bot.client, room_id, authorized_user_id)
+                if success:
+                    logger.info(f"Invited authorized user {authorized_user_id} to room {room_id}")
+                else:
+                    logger.warning(f"Failed to invite authorized user {authorized_user_id} to room {room_id}")
+
             # Invite missing bots
             for bot_username in configured_bots:
                 bot_user_id = MatrixID.from_username(bot_username, server_name).full_id
@@ -3477,7 +3795,7 @@ class MultiAgentOrchestrator:
                     else:
                         logger.warning(f"Failed to invite {bot_username} to room {room_id}")
 
-        logger.info("Ensured room invitations for all configured agents")
+        logger.info("Ensured room invitations for all configured agents and authorized users")
 
 
 async def _identify_entities_to_restart(

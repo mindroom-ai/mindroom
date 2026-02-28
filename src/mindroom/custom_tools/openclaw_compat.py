@@ -10,8 +10,9 @@ import shlex
 import sqlite3
 import subprocess
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from threading import Lock
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from uuid import uuid4
 
 import nio
@@ -19,18 +20,16 @@ from agno.tools import Toolkit
 from agno.tools.duckduckgo import DuckDuckGoTools
 from agno.tools.website import WebsiteTools
 
+from mindroom.attachments import attachments_for_tool_payload, load_attachment, resolve_attachments
 from mindroom.custom_tools.coding import CodingTools
 from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import fetch_thread_history, send_message
+from mindroom.matrix.client import fetch_thread_history, send_file_message, send_message
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_content import extract_and_resolve_message
 from mindroom.openclaw_context import OpenClawToolContext, get_openclaw_tool_context
 from mindroom.thread_utils import create_session_id
 from mindroom.tools_metadata import get_tool_by_name
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 logger = get_logger(__name__)
 
@@ -65,9 +64,6 @@ class OpenClawCompatTools(Toolkit):
                 self.sessions_spawn,
                 self.subagents,
                 self.message,
-                self.gateway,
-                self.nodes,
-                self.canvas,
                 self.cron,
                 self.web_search,
                 self.web_fetch,
@@ -1004,28 +1000,66 @@ class OpenClawCompatTools(Toolkit):
         *,
         action: str,
         message: str | None,
+        attachments: list[str] | None,
         room_id: str,
         effective_thread_id: str | None,
     ) -> str:
-        if message is None or not message.strip():
-            return self._payload("message", "error", action=action, message="Message cannot be empty.")
-        if action in {"thread-reply", "reply"} and effective_thread_id is None:
-            return self._payload("message", "error", action=action, message="thread_id is required for replies.")
-
-        event_id = await self._send_matrix_text(
+        attachment_paths, resolved_attachment_ids, attachment_error = self._resolve_message_attachments(
             context,
-            room_id=room_id,
-            text=message.strip(),
-            thread_id=effective_thread_id,
+            attachments,
         )
-        if event_id is None:
+        if attachment_error is not None:
+            return self._payload("message", "error", action=action, message=attachment_error)
+
+        text_body = message.strip() if isinstance(message, str) else ""
+        if not text_body and not attachment_paths:
             return self._payload(
                 "message",
                 "error",
                 action=action,
-                room_id=room_id,
-                message="Failed to send message to Matrix.",
+                message="Message cannot be empty unless attachments are provided.",
             )
+        if action in {"thread-reply", "reply"} and effective_thread_id is None:
+            return self._payload("message", "error", action=action, message="thread_id is required for replies.")
+
+        text_event_id: str | None = None
+        if text_body:
+            text_event_id = await self._send_matrix_text(
+                context,
+                room_id=room_id,
+                text=text_body,
+                thread_id=effective_thread_id,
+            )
+            if text_event_id is None:
+                return self._payload(
+                    "message",
+                    "error",
+                    action=action,
+                    room_id=room_id,
+                    message="Failed to send message to Matrix.",
+                )
+
+        attachment_event_ids: list[str] = []
+        for attachment_path in attachment_paths:
+            attachment_event_id = await send_file_message(
+                context.client,
+                room_id,
+                attachment_path,
+                thread_id=effective_thread_id,
+            )
+            if attachment_event_id is None:
+                return self._payload(
+                    "message",
+                    "error",
+                    action=action,
+                    room_id=room_id,
+                    event_id=text_event_id,
+                    attachment_event_ids=attachment_event_ids,
+                    message=f"Failed to send attachment: {attachment_path}",
+                )
+            attachment_event_ids.append(attachment_event_id)
+
+        event_id = text_event_id or (attachment_event_ids[-1] if attachment_event_ids else None)
         return self._payload(
             "message",
             "ok",
@@ -1033,6 +1067,96 @@ class OpenClawCompatTools(Toolkit):
             room_id=room_id,
             thread_id=effective_thread_id,
             event_id=event_id,
+            attachment_event_ids=attachment_event_ids,
+            resolved_attachment_ids=resolved_attachment_ids,
+        )
+
+    @staticmethod
+    def _resolve_context_attachment_path(
+        context: OpenClawToolContext,
+        attachment_id: str,
+    ) -> tuple[Path | None, str | None]:
+        if attachment_id not in context.attachment_ids:
+            return None, f"Attachment ID is not available in this context: {attachment_id}"
+
+        attachment = load_attachment(context.storage_path, attachment_id)
+        if attachment is None:
+            return None, f"Attachment metadata not found: {attachment_id}"
+        if not attachment.local_path.is_file():
+            return None, f"Attachment file is missing on disk: {attachment_id}"
+        return attachment.local_path, None
+
+    @staticmethod
+    def _resolve_attachment_reference(
+        context: OpenClawToolContext,
+        raw_reference: object,
+    ) -> tuple[Path | None, str | None, str | None]:
+        if not isinstance(raw_reference, str):
+            return None, None, "attachments entries must be strings."
+
+        reference = raw_reference.strip()
+        if not reference:
+            return None, None, None
+
+        if reference.startswith("att_"):
+            attachment_path, error = OpenClawCompatTools._resolve_context_attachment_path(context, reference)
+            if error is not None:
+                return None, None, error
+            return attachment_path, reference, None
+
+        path = Path(reference).expanduser().resolve()
+        if not path.is_file():
+            return None, None, f"Attachment path is not a file: {reference}"
+        return path, None, None
+
+    @staticmethod
+    def _resolve_message_attachments(
+        context: OpenClawToolContext,
+        attachments: list[str] | None,
+    ) -> tuple[list[Path], list[str], str | None]:
+        if not attachments:
+            return [], [], None
+
+        resolved_paths: list[Path] = []
+        resolved_attachment_ids: list[str] = []
+        for raw_reference in attachments:
+            path, attachment_id, error = OpenClawCompatTools._resolve_attachment_reference(context, raw_reference)
+            if error is not None:
+                return [], [], error
+            if path is None:
+                continue
+
+            resolved_paths.append(path)
+            if attachment_id is not None:
+                resolved_attachment_ids.append(attachment_id)
+        return resolved_paths, resolved_attachment_ids, None
+
+    @staticmethod
+    async def _message_attachments(context: OpenClawToolContext, target: str | None) -> str:
+        requested_attachment_ids = list(context.attachment_ids)
+        if target and target.strip():
+            target_attachment_id = target.strip()
+            if target_attachment_id not in context.attachment_ids:
+                return OpenClawCompatTools._payload(
+                    "message",
+                    "error",
+                    action="attachments",
+                    message=f"Attachment ID is not available in this context: {target_attachment_id}",
+                )
+            requested_attachment_ids = [target_attachment_id]
+
+        attachment_records = resolve_attachments(context.storage_path, requested_attachment_ids)
+        resolved_attachment_ids = [record.attachment_id for record in attachment_records]
+        missing_attachment_ids = [
+            attachment_id for attachment_id in requested_attachment_ids if attachment_id not in resolved_attachment_ids
+        ]
+        return OpenClawCompatTools._payload(
+            "message",
+            "ok",
+            action="attachments",
+            attachment_ids=requested_attachment_ids,
+            attachments=attachments_for_tool_payload(attachment_records),
+            missing_attachment_ids=missing_attachment_ids,
         )
 
     async def _message_react(
@@ -1130,6 +1254,7 @@ class OpenClawCompatTools(Toolkit):
         self,
         action: str = "send",
         message: str | None = None,
+        attachments: list[str] | None = None,
         channel: str | None = None,
         target: str | None = None,
         thread_id: str | None = None,
@@ -1150,6 +1275,7 @@ class OpenClawCompatTools(Toolkit):
                 context,
                 action=normalized_action,
                 message=message,
+                attachments=attachments,
                 room_id=room_id,
                 effective_thread_id=effective_thread_id,
             )
@@ -1166,64 +1292,14 @@ class OpenClawCompatTools(Toolkit):
                 room_id=room_id,
                 effective_thread_id=thread_id or context.thread_id,
             )
+        if normalized_action == "attachments":
+            return await self._message_attachments(context, target)
 
         return self._payload(
             "message",
             "error",
             action=action,
-            message="Unsupported action. Use send, thread-reply, react, or read.",
-        )
-
-    async def gateway(
-        self,
-        action: str,
-        raw: str | None = None,
-        base_hash: str | None = None,
-        note: str | None = None,
-    ) -> str:
-        """Invoke gateway lifecycle/config operations."""
-        return self._payload(
-            "gateway",
-            "not_configured",
-            action=action,
-            raw=raw,
-            base_hash=base_hash,
-            note=note,
-            message="gateway requires an OpenClaw Gateway endpoint and is not configured in MindRoom.",
-        )
-
-    async def nodes(
-        self,
-        action: str,
-        node: str | None = None,
-    ) -> str:
-        """Invoke node discovery and control operations."""
-        return self._payload(
-            "nodes",
-            "not_configured",
-            action=action,
-            node=node,
-            message="nodes requires an OpenClaw Gateway endpoint and is not configured in MindRoom.",
-        )
-
-    async def canvas(
-        self,
-        action: str,
-        node: str | None = None,
-        target: str | None = None,
-        url: str | None = None,
-        java_script: str | None = None,
-    ) -> str:
-        """Control canvas operations on a node."""
-        return self._payload(
-            "canvas",
-            "not_configured",
-            action=action,
-            node=node,
-            target=target,
-            url=url,
-            java_script=java_script,
-            message="canvas requires an OpenClaw Gateway endpoint and is not configured in MindRoom.",
+            message="Unsupported action. Use send, thread-reply, react, read, or attachments.",
         )
 
     async def cron(self, request: str) -> str:

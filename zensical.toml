@@ -46,6 +46,7 @@ nav = [
   ] },
   { "Deployment" = [
     { "Overview" = "deployment/index.md" },
+    { "Hosted Matrix + Local Backend" = "deployment/hosted-matrix.md" },
     { "Bridges" = [
       { "Overview" = "deployment/bridges/index.md" },
       { "Telegram" = "deployment/bridges/telegram.md" },

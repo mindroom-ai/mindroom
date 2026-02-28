@@ -12,6 +12,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
+from html import escape
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import uuid4
 
@@ -769,7 +770,39 @@ def _resolve_completed_tool_id(tool: ToolExecution, tool_state: _ToolStreamState
 
 
 def _inject_tool_metadata(tool_message: str, *, tool_id: str, state: Literal["start", "done"]) -> str:
-    return tool_message.replace("<tool>", f'<tool id="{tool_id}" state="{state}">', 1)
+    return f'<tool id="{tool_id}" state="{state}">{tool_message}</tool>'
+
+
+def _escape_tool_payload_text(text: str) -> str:
+    return escape(text, quote=True)
+
+
+def _format_openai_tool_call_display(tool_name: str, args_preview: str | None) -> str:
+    safe_tool_name = _escape_tool_payload_text(tool_name)
+    if not args_preview:
+        return f"{safe_tool_name}()"
+    return f"{safe_tool_name}({_escape_tool_payload_text(args_preview)})"
+
+
+def _format_openai_stream_tool_message(
+    tool: ToolExecution,
+    *,
+    completed: bool,
+) -> str:
+    if completed:
+        _, trace = format_tool_completed_event(tool)
+    else:
+        _, trace = format_tool_started_event(tool)
+    if trace is None:
+        return ""
+
+    call_display = _format_openai_tool_call_display(trace.tool_name, trace.args_preview)
+    if not completed:
+        return call_display
+
+    if trace.result_preview is None:
+        return f"{call_display}\n"
+    return f"{call_display}\n{_escape_tool_payload_text(trace.result_preview)}"
 
 
 def _format_stream_tool_event(
@@ -781,23 +814,21 @@ def _format_stream_tool_event(
         tool = event.tool
         if tool is None:
             return None
-        tool_msg, _ = format_tool_started_event(tool)
-        if not tool_msg:
-            return None
+        tool_msg = _format_openai_stream_tool_message(tool, completed=False)
         tool_id = _resolve_started_tool_id(tool, tool_state)
         state: Literal["start", "done"] = "start"
     elif isinstance(event, (ToolCallCompletedEvent, TeamToolCallCompletedEvent)):
         tool = event.tool
         if tool is None:
             return None
-        tool_msg, _ = format_tool_completed_event(tool)
-        if not tool_msg:
-            return None
+        tool_msg = _format_openai_stream_tool_message(tool, completed=True)
         tool_id = _resolve_completed_tool_id(tool, tool_state)
         state = "done"
     else:
         return None
 
+    if not tool_msg:
+        return None
     return _inject_tool_metadata(tool_msg, tool_id=tool_id, state=state)
 
 
@@ -1020,33 +1051,15 @@ async def _stream_team_completion(
     )
 
 
-def _extract_team_stream_text(
-    event: RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str,
-    tool_state: _ToolStreamState,
-) -> str | None:
-    """Extract text content from a team stream event."""
-    if isinstance(event, TeamContentEvent) and event.content:
-        return str(event.content)
-    if isinstance(event, RunContentEvent) and event.content:
-        return str(event.content)
-    if isinstance(event, TeamRunOutput):
-        return _format_team_output(event)
-    if isinstance(event, str):
-        return event
-    return _format_stream_tool_event(event, tool_state)
-
-
-def _extract_team_stream_error(event: RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str) -> str | None:
+def _extract_team_stream_error(event: RunOutputEvent | TeamRunOutputEvent) -> str | None:
     """Extract explicit error text from a team stream event."""
     if isinstance(event, (RunErrorEvent, TeamRunErrorEvent)):
         return str(event.content or "Unknown team error")
-    if isinstance(event, str) and _is_error_response(event):
-        return event
     return None
 
 
 def _team_stream_preflight_error(
-    first_event: RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str | None,
+    first_event: RunOutputEvent | TeamRunOutputEvent | None,
     team_name: str,
 ) -> JSONResponse | None:
     """Validate first team stream event before SSE response begins."""
@@ -1061,43 +1074,101 @@ def _team_stream_preflight_error(
     return _error_response(500, "Team execution failed", error_type="server_error")
 
 
+def _classify_team_event(
+    event: RunOutputEvent | TeamRunOutputEvent,
+    tool_state: _ToolStreamState,
+) -> str | None:
+    """Classify a team stream event and return formatted content, or ``None`` to skip.
+
+    Team leader content (``TeamContentEvent``) is streamed directly — it is the
+    synthesized answer and never interleaves.
+    Member agent content (``RunContentEvent``) is skipped to prevent interleaving
+    from parallel members.
+    Tool events (agent-level and team-level) are emitted for progress feedback.
+    """
+    # Tool events — emit for progress feedback
+    tool_text = _format_stream_tool_event(event, tool_state)
+    if tool_text is not None:
+        return tool_text
+
+    # Team leader content — stream directly (synthesized answer)
+    if isinstance(event, TeamContentEvent) and event.content:
+        return str(event.content)
+
+    # Everything else (member content, reasoning, memory, hooks, etc.) — skip.
+    return None
+
+
+def _finalize_pending_tools(tool_state: _ToolStreamState) -> str | None:
+    """Build done tags for tool calls that started but never completed."""
+    if not tool_state.tool_ids_by_call_id:
+        return None
+    parts = [
+        f'<tool id="{tool_id}" state="done">(interrupted)</tool>' for tool_id in tool_state.tool_ids_by_call_id.values()
+    ]
+    tool_state.tool_ids_by_call_id.clear()
+    return "".join(parts)
+
+
 async def _team_stream_event_generator(
     *,
-    stream: AsyncIterator[RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str],
-    first_event: RunOutputEvent | TeamRunOutputEvent | TeamRunOutput | str,
+    stream: AsyncIterator[RunOutputEvent | TeamRunOutputEvent],
+    first_event: RunOutputEvent | TeamRunOutputEvent,
     completion_id: str,
     created: int,
     model_id: str,
     team_name: str,
 ) -> AsyncIterator[str]:
-    """Yield SSE chunks for team streaming responses."""
+    """Yield SSE chunks for team streaming responses.
+
+    Streams team leader content (``TeamContentEvent``) directly for real-time output.
+    Skips member agent content (``RunContentEvent``) to prevent interleaving.
+    Emits all tool events (agent-level and team-level) for progress feedback.
+
+    The caller (``_stream_team_completion``) validates the first event via
+    ``_team_stream_preflight_error`` before entering this generator, so
+    ``first_event`` is guaranteed to be non-error.
+    """
     tool_state = _ToolStreamState()
+
+    def _chunk(content: str) -> str:
+        return f"data: {_chunk_json(completion_id, created, model_id, delta={'content': content})}\n\n"
 
     # 1. Role announcement
     yield f"data: {_chunk_json(completion_id, created, model_id, delta={'role': 'assistant'})}\n\n"
 
-    # 2. First event
-    first_text = _extract_team_stream_text(first_event, tool_state)
-    if first_text:
-        yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': first_text})}\n\n"
+    # 2. First event (guaranteed non-error by preflight)
+    text = _classify_team_event(first_event, tool_state)
+    if text:
+        yield _chunk(text)
 
     # 3. Remaining events
     try:
         async for event in stream:
-            error_text = _extract_team_stream_error(event)
-            if error_text is not None:
-                logger.warning("Team stream emitted error event", team=team_name, error=error_text)
-                yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': 'Team execution failed.'})}\n\n"
+            if _extract_team_stream_error(event) is not None:
+                logger.warning("Team stream emitted error event", team=team_name)
+                pending = _finalize_pending_tools(tool_state)
+                if pending:
+                    yield _chunk(pending)
+                yield _chunk("Team execution failed.")
                 break
 
-            text = _extract_team_stream_text(event, tool_state)
+            text = _classify_team_event(event, tool_state)
             if text:
-                yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': text})}\n\n"
+                yield _chunk(text)
     except Exception:
         logger.exception("Team stream failed during iteration", team=team_name)
-        yield f"data: {_chunk_json(completion_id, created, model_id, delta={'content': 'Team execution failed.'})}\n\n"
+        pending = _finalize_pending_tools(tool_state)
+        if pending:
+            yield _chunk(pending)
+        yield _chunk("Team execution failed.")
 
-    # 4. Finish
+    # 4. Finalize any tool calls that started but never completed
+    pending = _finalize_pending_tools(tool_state)
+    if pending:
+        yield _chunk(pending)
+
+    # 5. Finish
     logger.info("Team completion sent", team=team_name, stream=True)
     yield f"data: {_chunk_json(completion_id, created, model_id, delta={}, finish_reason='stop')}\n\n"
     yield "data: [DONE]\n\n"

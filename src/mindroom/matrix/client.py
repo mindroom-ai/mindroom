@@ -2,7 +2,7 @@
 
 import io
 import json
-import os
+import mimetypes
 import re
 import ssl as ssl_module
 from collections.abc import AsyncGenerator
@@ -11,24 +11,27 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
+import httpx
 import markdown
 import nio
+from nio import crypto
 
 from mindroom.config import RoomDirectoryVisibility, RoomJoinRule
-from mindroom.constants import ENCRYPTION_KEYS_DIR
+from mindroom.constants import ENCRYPTION_KEYS_DIR, MATRIX_SSL_VERIFY
 from mindroom.logging_config import get_logger
 
+from . import provisioning
 from .event_info import EventInfo
 from .identity import MatrixID, extract_server_name_from_homeserver
 from .large_messages import prepare_large_message
-from .message_content import extract_and_resolve_message
+from .message_content import extract_and_resolve_message, extract_edit_body
 
 logger = get_logger(__name__)
 
 
 def _maybe_ssl_context(homeserver: str) -> ssl_module.SSLContext | None:
     if homeserver.startswith("https://"):
-        if os.getenv("MATRIX_SSL_VERIFY", "true").lower() == "false":
+        if not MATRIX_SSL_VERIFY:
             # Create context that disables verification for dev/self-signed certs
             ssl_context = ssl_module.create_default_context()
             ssl_context.check_hostname = False
@@ -38,6 +41,78 @@ def _maybe_ssl_context(homeserver: str) -> ssl_module.SSLContext | None:
             ssl_context = ssl_module.create_default_context()
         return ssl_context
     return None
+
+
+async def _homeserver_requires_registration_token(homeserver: str) -> bool:
+    """Check whether the homeserver advertises registration-token flow."""
+    url = f"{homeserver.rstrip('/')}/_matrix/client/v3/register"
+    try:
+        async with httpx.AsyncClient(timeout=5, verify=MATRIX_SSL_VERIFY) as client:
+            response = await client.post(url, json={})
+            data = response.json()
+    except (httpx.HTTPError, ValueError):
+        return False
+
+    flows = data.get("flows")
+    if not isinstance(flows, list):
+        return False
+    for flow in flows:
+        if not isinstance(flow, dict):
+            continue
+        stages = flow.get("stages")
+        if isinstance(stages, list) and "m.login.registration_token" in stages:
+            return True
+    return False
+
+
+async def _registration_failure_message(
+    response: nio.ErrorResponse,
+    homeserver: str,
+    registration_token: str | None,
+) -> str | None:
+    if (
+        response.status_code == "M_FORBIDDEN"
+        and registration_token
+        and "Invalid registration token" in (response.message or "")
+    ):
+        return (
+            "Matrix registration failed: MATRIX_REGISTRATION_TOKEN is invalid. "
+            "Generate/issue a valid token for bot provisioning and try again."
+        )
+
+    if (
+        response.message == "unknown error"
+        and not registration_token
+        and await _homeserver_requires_registration_token(homeserver)
+    ):
+        return (
+            "Matrix homeserver requires registration tokens for account creation. "
+            "Set MATRIX_REGISTRATION_TOKEN and retry."
+        )
+
+    return None
+
+
+async def _login_and_sync_display_name(
+    *,
+    client: nio.AsyncClient,
+    user_id: str,
+    password: str,
+    display_name: str,
+) -> None:
+    """Login with known password and keep display name synchronized."""
+    login_response = await client.login(password)
+    if isinstance(login_response, nio.LoginResponse):
+        display_response = await client.set_displayname(display_name)
+        if isinstance(display_response, nio.ErrorResponse):
+            logger.warning(f"Failed to set display name for existing user: {display_response}")
+        return
+
+    msg = (
+        f"Matrix account collision for {user_id}: the user already exists but login with the configured password failed "
+        f"({login_response}). Set a unique MINDROOM_NAMESPACE (or choose different names) and retry."
+    )
+    raise ValueError(msg)
 
 
 def create_matrix_client(
@@ -165,13 +240,60 @@ async def register_user(
     server_name = extract_server_name_from_homeserver(homeserver)
     user_id = MatrixID.from_username(username, server_name).full_id
 
-    async with matrix_client(homeserver, user_id=user_id) as client:
-        # Try to register the user
-        response = await client.register(
+    registration_token = provisioning.registration_token_from_env()
+    provisioning_url = provisioning.provisioning_url_from_env()
+    creds = provisioning.required_local_provisioning_client_credentials_for_registration(
+        provisioning_url=provisioning_url,
+        registration_token=registration_token,
+    )
+    if creds and provisioning_url:
+        client_id, client_secret = creds
+        provisioning_result = await provisioning.register_user_via_provisioning_service(
+            provisioning_url=provisioning_url,
+            client_id=client_id,
+            client_secret=client_secret,
+            homeserver=homeserver,
             username=username,
             password=password,
-            device_name="mindroom_agent",
+            display_name=display_name,
         )
+        if provisioning_result.status == "created":
+            logger.info(f"✅ Successfully registered user via provisioning service: {provisioning_result.user_id}")
+            return provisioning_result.user_id
+
+        login_user_id = user_id
+        if provisioning_result.user_id != user_id:
+            logger.warning(
+                "Provisioning service returned mismatched user_id for user_in_use; using local server_name-derived ID",
+                provisioning_user_id=provisioning_result.user_id,
+                expected_user_id=user_id,
+            )
+
+        logger.info(f"User {login_user_id} already exists (provisioning service)")
+        async with matrix_client(homeserver, user_id=login_user_id) as client:
+            await _login_and_sync_display_name(
+                client=client,
+                user_id=login_user_id,
+                password=password,
+                display_name=display_name,
+            )
+        return login_user_id
+
+    async with matrix_client(homeserver, user_id=user_id) as client:
+        # Try to register the user
+        if registration_token:
+            response = await client.register_with_token(
+                username=username,
+                password=password,
+                registration_token=registration_token,
+                device_name="mindroom_agent",
+            )
+        else:
+            response = await client.register(
+                username=username,
+                password=password,
+                device_name="mindroom_agent",
+            )
 
         if isinstance(response, nio.RegisterResponse):
             logger.info(f"✅ Successfully registered user: {user_id}")
@@ -188,15 +310,18 @@ async def register_user(
             return user_id
         if isinstance(response, nio.ErrorResponse) and response.status_code == "M_USER_IN_USE":
             logger.info(f"User {user_id} already exists")
-            # Keep display name in sync when account already exists.
-            login_response = await client.login(password)
-            if isinstance(login_response, nio.LoginResponse):
-                display_response = await client.set_displayname(display_name)
-                if isinstance(display_response, nio.ErrorResponse):
-                    logger.warning(f"Failed to set display name for existing user: {display_response}")
-                return user_id
-            msg = f"Login failed for existing user {user_id} with provided password: {login_response}"
-            raise ValueError(msg)
+            await _login_and_sync_display_name(
+                client=client,
+                user_id=user_id,
+                password=password,
+                display_name=display_name,
+            )
+            return user_id
+
+        if isinstance(response, nio.ErrorResponse):
+            failure_message = await _registration_failure_message(response, homeserver, registration_token)
+            if failure_message:
+                raise ValueError(failure_message)
         msg = f"Failed to register user {username}: {response}"
         raise ValueError(msg)
 
@@ -609,6 +734,216 @@ async def send_message(client: nio.AsyncClient, room_id: str, content: dict[str,
     return None
 
 
+def _guess_mimetype(file_path: Path) -> str:
+    guessed_mimetype, _ = mimetypes.guess_type(file_path.name)
+    return guessed_mimetype or "application/octet-stream"
+
+
+async def _upload_file_as_mxc(
+    client: nio.AsyncClient,
+    room_id: str,
+    file_path: Path,
+    *,
+    mimetype: str,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Upload a local file as MXC, encrypting payloads in encrypted rooms."""
+    try:
+        file_bytes = file_path.read_bytes()
+    except OSError:
+        logger.exception("Failed to read file before upload", path=str(file_path))
+        return None, None
+
+    info: dict[str, Any] = {"size": len(file_bytes), "mimetype": mimetype}
+    room = client.rooms.get(room_id)
+    room_encrypted = bool(room and room.encrypted)
+    upload_bytes = file_bytes
+    encrypted_file_payload: dict[str, Any] | None = None
+    upload_mimetype = mimetype
+    upload_name = file_path.name
+
+    if room_encrypted:
+        try:
+            encrypted_bytes, encryption_keys = crypto.attachments.encrypt_attachment(file_bytes)
+        except Exception:
+            logger.exception("Failed to encrypt file attachment", path=str(file_path))
+            return None, None
+        upload_bytes = encrypted_bytes
+        upload_mimetype = "application/octet-stream"
+        upload_name = f"{file_path.name}.enc"
+        encrypted_file_payload = {
+            "url": "",
+            "key": encryption_keys["key"],
+            "iv": encryption_keys["iv"],
+            "hashes": encryption_keys["hashes"],
+            "v": "v2",
+            "mimetype": mimetype,
+            "size": len(file_bytes),
+        }
+
+    def data_provider(_monitor: object, _data: object) -> io.BytesIO:
+        return io.BytesIO(upload_bytes)
+
+    try:
+        upload_response = await client.upload(
+            data_provider=data_provider,
+            content_type=upload_mimetype,
+            filename=upload_name,
+            filesize=len(upload_bytes),
+        )
+    except Exception:
+        logger.exception("Failed uploading Matrix file", path=str(file_path))
+        return None, None
+
+    upload_result = upload_response[0] if isinstance(upload_response, tuple) else upload_response
+
+    if not isinstance(upload_result, nio.UploadResponse):
+        logger.error("Failed file upload response", path=str(file_path), response=str(upload_result))
+        return None, None
+    if not upload_result.content_uri:
+        logger.error("File upload missing MXC URI", path=str(file_path))
+        return None, None
+
+    mxc_uri = str(upload_result.content_uri)
+    upload_payload: dict[str, Any] = {"info": info}
+    if encrypted_file_payload is not None:
+        encrypted_file_payload["url"] = mxc_uri
+        upload_payload["file"] = encrypted_file_payload
+    return mxc_uri, upload_payload
+
+
+async def send_file_message(
+    client: nio.AsyncClient,
+    room_id: str,
+    file_path: str | Path,
+    *,
+    thread_id: str | None = None,
+    caption: str | None = None,
+) -> str | None:
+    """Upload a file and send it as an ``m.file`` message."""
+    resolved_path = Path(file_path).expanduser().resolve()
+    if not resolved_path.is_file():
+        logger.error("Cannot send non-file attachment", path=str(resolved_path))
+        return None
+
+    mimetype = _guess_mimetype(resolved_path)
+    mxc_uri, upload_payload = await _upload_file_as_mxc(client, room_id, resolved_path, mimetype=mimetype)
+    if mxc_uri is None or upload_payload is None:
+        return None
+
+    info = upload_payload.get("info")
+    if not isinstance(info, dict):
+        info = {"size": resolved_path.stat().st_size, "mimetype": mimetype}
+
+    content: dict[str, Any] = {
+        "msgtype": "m.file",
+        "body": caption or resolved_path.name,
+        "filename": resolved_path.name,
+        "info": info,
+    }
+    encrypted_file_payload = upload_payload.get("file")
+    if isinstance(encrypted_file_payload, dict):
+        content["file"] = encrypted_file_payload
+    else:
+        content["url"] = mxc_uri
+
+    if thread_id:
+        content["m.relates_to"] = {
+            "rel_type": "m.thread",
+            "event_id": thread_id,
+            "is_falling_back": True,
+        }
+
+    return await send_message(client, room_id, content)
+
+
+def _history_message_sort_key(message: dict[str, Any]) -> tuple[int, str]:
+    """Sort thread history messages by timestamp and event ID."""
+    return (message["timestamp"], message["event_id"])
+
+
+def _record_latest_thread_edit(
+    event: nio.RoomMessageText,
+    *,
+    event_info: EventInfo,
+    thread_id: str,
+    latest_edits_by_original_event_id: dict[str, nio.RoomMessageText],
+) -> bool:
+    """Track latest relevant edit for a thread, returning True if event is an edit."""
+    if not (event_info.is_edit and event_info.thread_id_from_edit == thread_id and event_info.original_event_id):
+        return False
+
+    original_event_id = event_info.original_event_id
+    current_latest_edit = latest_edits_by_original_event_id.get(original_event_id)
+    if current_latest_edit is None or (event.server_timestamp, event.event_id) > (
+        current_latest_edit.server_timestamp,
+        current_latest_edit.event_id,
+    ):
+        latest_edits_by_original_event_id[original_event_id] = event
+    return True
+
+
+async def _record_thread_message(
+    event: nio.RoomMessageText,
+    *,
+    event_info: EventInfo,
+    client: nio.AsyncClient,
+    thread_id: str,
+    root_message_found: bool,
+    messages: list[dict[str, Any]],
+    messages_by_event_id: dict[str, dict[str, Any]],
+) -> bool:
+    """Record root/thread message into history and return updated root flag."""
+    if event.event_id in messages_by_event_id:
+        return root_message_found
+
+    is_root_message = event.event_id == thread_id
+    is_thread_message = event_info.is_thread and event_info.thread_id == thread_id
+
+    if is_root_message and not root_message_found:
+        message_data = await extract_and_resolve_message(event, client)
+        messages.append(message_data)
+        messages_by_event_id[event.event_id] = message_data
+        return True
+
+    if is_thread_message:
+        message_data = await extract_and_resolve_message(event, client)
+        messages.append(message_data)
+        messages_by_event_id[event.event_id] = message_data
+
+    return root_message_found
+
+
+async def _apply_thread_edits_to_history(
+    client: nio.AsyncClient,
+    *,
+    messages: list[dict[str, Any]],
+    messages_by_event_id: dict[str, dict[str, Any]],
+    latest_edits_by_original_event_id: dict[str, nio.RoomMessageText],
+) -> None:
+    """Apply latest edits to history entries and synthesize missing originals."""
+    for original_event_id, edit_event in latest_edits_by_original_event_id.items():
+        edited_body, edited_content = await extract_edit_body(edit_event.source, client)
+        if edited_body is None:
+            continue
+
+        existing_message = messages_by_event_id.get(original_event_id)
+        if existing_message is not None:
+            existing_message["body"] = edited_body
+            if edited_content is not None:
+                existing_message["content"] = edited_content
+            continue
+
+        synthesized_message = {
+            "sender": edit_event.sender,
+            "body": edited_body,
+            "timestamp": edit_event.server_timestamp,
+            "event_id": original_event_id,
+            "content": edited_content if edited_content is not None else {},
+        }
+        messages.append(synthesized_message)
+        messages_by_event_id[original_event_id] = synthesized_message
+
+
 async def fetch_thread_history(
     client: nio.AsyncClient,
     room_id: str,
@@ -625,7 +960,9 @@ async def fetch_thread_history(
         List of messages in chronological order, each containing sender, body, timestamp, and event_id
 
     """
-    messages = []
+    messages: list[dict[str, Any]] = []
+    messages_by_event_id: dict[str, dict[str, Any]] = {}
+    latest_edits_by_original_event_id: dict[str, nio.RoomMessageText] = {}
     from_token = None
     root_message_found = False
 
@@ -646,26 +983,42 @@ async def fetch_thread_history(
         if not response.chunk:
             break
 
-        thread_messages_found = 0
         for event in response.chunk:
-            if isinstance(event, nio.RoomMessageText):
-                if event.event_id == thread_id and not root_message_found:
-                    message_data = await extract_and_resolve_message(event, client)
-                    messages.append(message_data)
-                    root_message_found = True
-                    thread_messages_found += 1
-                else:
-                    event_info = EventInfo.from_event(event.source)
-                    if event_info.is_thread and event_info.thread_id == thread_id:
-                        message_data = await extract_and_resolve_message(event, client)
-                        messages.append(message_data)
-                        thread_messages_found += 1
+            if not isinstance(event, nio.RoomMessageText):
+                continue
 
-        if not response.end or thread_messages_found == 0:
+            event_info = EventInfo.from_event(event.source)
+            if _record_latest_thread_edit(
+                event,
+                event_info=event_info,
+                thread_id=thread_id,
+                latest_edits_by_original_event_id=latest_edits_by_original_event_id,
+            ):
+                continue
+
+            root_message_found = await _record_thread_message(
+                event,
+                event_info=event_info,
+                client=client,
+                thread_id=thread_id,
+                root_message_found=root_message_found,
+                messages=messages,
+                messages_by_event_id=messages_by_event_id,
+            )
+
+        # Once the thread root is seen, all older pages are outside this thread.
+        if root_message_found or not response.end:
             break
         from_token = response.end
 
-    return list(reversed(messages))  # Return in chronological order
+    await _apply_thread_edits_to_history(
+        client,
+        messages=messages,
+        messages_by_event_id=messages_by_event_id,
+        latest_edits_by_original_event_id=latest_edits_by_original_event_id,
+    )
+    messages.sort(key=_history_message_sort_key)
+    return messages
 
 
 async def _latest_thread_event_id(
@@ -727,10 +1080,6 @@ async def get_latest_thread_event_id_if_needed(
     return None
 
 
-_CONSECUTIVE_TOOL_BLOCKS = re.compile(
-    r"(<tool>[\s\S]*?</tool>)(\s*<tool>[\s\S]*?</tool>)+",
-)
-
 _HTML_TAG_PATTERN = re.compile(r"</?([A-Za-z][A-Za-z0-9-]*)(?:\s+[^<>]*)?\s*/?>")
 
 # Standard Matrix-safe HTML tags.
@@ -778,22 +1127,14 @@ _GENERAL_FORMATTED_BODY_TAGS = frozenset(
     },
 )
 
-# MindRoom custom tags intentionally rendered by custom Element forks.
-_MINDROOM_CUSTOM_TAGS = (
-    "tool",  # MindRoom: single tool call block (call + optional result), rendered as a collapsible entry.
-    "tool-group",  # MindRoom: wrapper for consecutive tool blocks so the UI renders one grouped collapsible.
-)
-_MINDROOM_FORMATTED_BODY_TAGS = frozenset(_MINDROOM_CUSTOM_TAGS)
-
-_ALLOWED_FORMATTED_BODY_TAGS = _GENERAL_FORMATTED_BODY_TAGS | _MINDROOM_FORMATTED_BODY_TAGS
+_ALLOWED_FORMATTED_BODY_TAGS = _GENERAL_FORMATTED_BODY_TAGS
 
 
 def _escape_unsupported_html_tags(html_text: str) -> str:
     """Escape raw tags that Matrix clients commonly strip entirely.
 
     Unknown tags from model output (e.g. ``<search>``) can disappear in some
-    clients. Escaping only the unsupported tags keeps them visible while still
-    preserving intentional tags like ``<tool>`` for custom renderers.
+    clients. Escaping unsupported tags keeps them visible as literal text.
     """
 
     def _replace_tag(match: re.Match[str]) -> str:
@@ -815,13 +1156,6 @@ def markdown_to_html(text: str) -> str:
         HTML formatted text
 
     """
-    # Group consecutive <tool> blocks into <tool-group> so the frontend
-    # can render them as a single merged collapsible.
-    text = _CONSECUTIVE_TOOL_BLOCKS.sub(
-        lambda m: f"<tool-group>{m.group(0)}</tool-group>",
-        text,
-    )
-
     # Configure markdown with common extensions
     md = markdown.Markdown(
         extensions=[
@@ -837,9 +1171,6 @@ def markdown_to_html(text: str) -> str:
             },
         },
     )
-    # Register custom elements as block-level so markdown doesn't wrap them
-    # in <p> tags or convert \n to <br /> inside them.
-    md.block_level_elements.extend(_MINDROOM_CUSTOM_TAGS)
     html_text: str = md.convert(text)
     return _escape_unsupported_html_tags(html_text)
 

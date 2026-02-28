@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+import mindroom.matrix.identity as matrix_identity
 from mindroom.config import Config
 from mindroom.matrix.mentions import format_message_with_mentions, parse_mentions_in_text
 from mindroom.tool_events import TOOL_TRACE_KEY, ToolTraceEntry
+
+if TYPE_CHECKING:
+    from _pytest.monkeypatch import MonkeyPatch
 
 
 class TestMentionParsing:
@@ -53,6 +59,17 @@ class TestMentionParsing:
         # Should replace with sender's domain
         assert processed == "Ask @mindroom_calculator:localhost for help"
         assert mentions == ["@mindroom_calculator:localhost"]
+
+    def test_parse_with_namespaced_full_mention(self, monkeypatch: MonkeyPatch) -> None:
+        """Full localparts that include namespace suffix should resolve to configured agents."""
+        monkeypatch.setattr(matrix_identity, "_ACTIVE_NAMESPACE", "a1b2c3d4")
+        config = Config.from_yaml()
+
+        text = "Ask @mindroom_calculator_a1b2c3d4:matrix.org for help"
+        processed, mentions, markdown = parse_mentions_in_text(text, "localhost", config)
+
+        assert processed == "Ask @mindroom_calculator_a1b2c3d4:localhost for help"
+        assert mentions == ["@mindroom_calculator_a1b2c3d4:localhost"]
 
     def test_custom_domain(self) -> None:
         """Test with custom sender domain."""
@@ -128,8 +145,25 @@ class TestMentionParsing:
         )
 
         assert TOOL_TRACE_KEY in content
-        assert content[TOOL_TRACE_KEY]["version"] == 1
+        assert content[TOOL_TRACE_KEY]["version"] == 2
         assert content[TOOL_TRACE_KEY]["events"][0]["tool_name"] == "save_file"
+
+    def test_format_message_with_mentions_merges_extra_content(self) -> None:
+        """Custom metadata should be merged with structured tool trace content."""
+        config = Config.from_yaml()
+        trace = [ToolTraceEntry(type="tool_call_started", tool_name="save_file")]
+
+        content = format_message_with_mentions(
+            config,
+            "Done.",
+            sender_domain="matrix.org",
+            tool_trace=trace,
+            extra_content={"io.mindroom.ai_run": {"version": 1, "usage": {"total_tokens": 42}}},
+        )
+
+        assert TOOL_TRACE_KEY in content
+        assert content["io.mindroom.ai_run"]["version"] == 1
+        assert content["io.mindroom.ai_run"]["usage"]["total_tokens"] == 42
 
     def test_no_mentions_in_text(self) -> None:
         """Test text with no mentions."""

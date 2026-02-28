@@ -49,6 +49,7 @@ export function AgentEditor() {
   const defaultMarkdown = config?.defaults.markdown ?? true;
   const defaultCompressToolResults = config?.defaults.compress_tool_results ?? true;
   const defaultEnableSessionSummaries = config?.defaults.enable_session_summaries ?? false;
+  const globalMemoryBackend = config?.memory?.backend ?? 'mem0';
   const knowledgeBaseNames = useMemo(
     () => Object.keys(config?.knowledge_bases || {}).sort(),
     [config?.knowledge_bases]
@@ -103,6 +104,7 @@ export function AgentEditor() {
       context_files: [],
       learning: defaultLearning,
       learning_mode: defaultLearningMode,
+      memory_backend: undefined,
     },
   });
   const learningEnabled = useWatch({ name: 'learning', control });
@@ -333,6 +335,37 @@ export function AgentEditor() {
         />
       </FieldGroup>
 
+      {/* Memory Backend */}
+      <FieldGroup
+        label="Memory Backend"
+        helperText={`Inherit global backend (${globalMemoryBackend}) or override for this agent.`}
+        htmlFor="memory_backend"
+      >
+        <Controller
+          name="memory_backend"
+          control={control}
+          render={({ field }) => (
+            <Select
+              value={field.value ?? 'inherit'}
+              onValueChange={value => {
+                const resolved = value === 'inherit' ? undefined : (value as 'mem0' | 'file');
+                field.onChange(resolved);
+                handleFieldChange('memory_backend', resolved);
+              }}
+            >
+              <SelectTrigger id="memory_backend">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="inherit">Inherit global ({globalMemoryBackend})</SelectItem>
+                <SelectItem value="mem0">Mem0 (vector memory)</SelectItem>
+                <SelectItem value="file">File (markdown memory)</SelectItem>
+              </SelectContent>
+            </Select>
+          )}
+        />
+      </FieldGroup>
+
       {/* Thread Mode */}
       <FieldGroup
         label="Thread Mode"
@@ -436,31 +469,6 @@ export function AgentEditor() {
                 </div>
               ))}
             </div>
-          )}
-        />
-      </FieldGroup>
-
-      {/* Memory Directory */}
-      <FieldGroup
-        label="Memory Directory"
-        helperText="Directory containing MEMORY.md and dated memory files to auto-load into role context"
-        htmlFor="memory_dir"
-      >
-        <Controller
-          name="memory_dir"
-          control={control}
-          render={({ field }) => (
-            <Input
-              {...field}
-              value={field.value ?? ''}
-              id="memory_dir"
-              placeholder="./memories/agent_name"
-              onChange={e => {
-                const value = e.target.value || undefined;
-                field.onChange(value);
-                handleFieldChange('memory_dir', value);
-              }}
-            />
           )}
         />
       </FieldGroup>

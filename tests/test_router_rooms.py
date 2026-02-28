@@ -11,6 +11,7 @@ import pytest
 from mindroom.bot import MultiAgentOrchestrator, create_bot_for_entity
 from mindroom.config import AgentConfig, Config, TeamConfig
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 
 from .conftest import TEST_PASSWORD
@@ -99,6 +100,10 @@ def test_team_bot_uses_defaults_streaming_setting(
 
     assert team_bot is not None
     assert team_bot.enable_streaming is False
+    assert team_bot.team_agents == [
+        MatrixID.from_agent("agent1", config_with_rooms.domain),
+        MatrixID.from_agent("agent2", config_with_rooms.domain),
+    ]
 
 
 @pytest.mark.asyncio

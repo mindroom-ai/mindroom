@@ -39,7 +39,10 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 | `tool_dependencies.py` | Auto-install per-tool optional dependencies at runtime |
 | `ai.py` | AI model instantiation, caching, and response generation |
 | `credentials.py` | Unified credential management (CredentialsManager) |
-| `matrix/` | Matrix protocol integration (client, users, rooms, presence) |
+| `matrix/` | Matrix protocol integration (client, users, rooms, presence, provisioning, message formatting) |
+| `matrix/large_messages.py` | Large-message sidecar storage and retrieval for oversized Matrix payloads |
+| `matrix/message_content.py` | Canonical Matrix message content building for text, edits, and tool traces |
+| `matrix/provisioning.py` | Hosted provisioning client flow used for local pairing and server-side agent registration |
 | `commands.py` | Chat command parsing (`!help`, `!schedule`, `!skill`, etc.) |
 | `voice_handler.py` | Voice message download, transcription, and command recognition |
 | `sandbox_proxy.py` | Container sandbox proxy for isolating shell/python tools |
@@ -63,6 +66,7 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 | `cli.py` | Main CLI entry point (Typer app) |
 | `cli_banner.py` | CLI startup banner |
 | `cli_config.py` | Config subcommand logic |
+| `cli_connect.py` | `mindroom connect` pairing helpers and owner placeholder replacement |
 | `config_commands.py` | Chat-based config commands (`!config`) |
 | `credentials_sync.py` | `.env` to credentials vault sync |
 | `logging_config.py` | Structured logging setup |
@@ -102,6 +106,17 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 | `cluster/` | Terraform + Helm for hosted deployments |
 | `local/` | Docker Compose helpers for local dev stacks |
 
+### Ecosystem Repositories
+
+MindRoom also maintains related repositories under `github.com/mindroom-ai`:
+- `mindroom-element` - our Element fork for MindRoom message UX: collapsible tool-trace rendering, `!` command autocomplete synced from backend commands, long-text sidecar hydration, AI run metadata tooltip, and MindRoom branding/thread-first defaults. See `README.md` and `FORK_CHANGES.md` in that repo.
+- `synapse` - our Synapse fork for MindRoom streaming workloads: optional compact-edit collapsing for superseded `m.replace` events across `/sync`, Sliding Sync, pagination, and context responses, plus `/versions` advertisement via `org.mindroom.compact_edits` and fork-owned Docker/CI flows. See `README.md` and `FORK_CHANGES.md`.
+- `mindroom-librechat` - our LibreChat fork that parses MindRoom inline `<tool>` / `<tool-group>` tags into native `ToolCall` cards so tool execution stays server-side; also includes fork Docker CI and MindRoom-specific UX additions. See `README.md` and `.mindroom/` docs (`fork-context.md`, `tool-tag-rendering.md`).
+- `mindroom-cinny` - our Cinny fork optimized for MindRoom agent workflows with MindRoom branding/default homeserver config, subpath deployment support (runtime/build base path for `/mindroom`), and thread/auth/sidebar UX refinements. See `README.md` and `FORK_CHANGES.md`.
+- `mindroom-stack` - a full Docker Compose reference stack that boots MindRoom backend/frontend, Synapse + Postgres + Redis, and Element together, including first-login and model/API-key setup guidance.
+
+In this dev environment, many of these repositories are cloned in the parent directory (`../`) and can be inspected directly.
+
 ### Configuration Model
 
 The authoritative config is `config.yaml`, loaded via Pydantic models in `src/mindroom/config.py`:
@@ -119,6 +134,7 @@ agents:
     knowledge_bases: [engineering_docs]
 
 defaults:
+  tools: [scheduler]
   markdown: true
   enable_streaming: true
 
@@ -157,10 +173,24 @@ voice:
     provider: openai
     model: whisper-1
 
+mindroom_user:
+  username: mindroom_user
+  display_name: MindRoomUser
+
+matrix_room_access:
+  mode: single_user_private
+  multi_user_join_rule: public
+  publish_to_room_directory: false
+  invite_only_rooms: []
+  reconcile_existing_rooms: false
+
 authorization:
-  global_users: []
-  room_permissions: {}
   default_room_access: false
+  global_users:
+    - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
+  agent_reply_permissions:
+    "*":
+      - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
 
 timezone: America/Los_Angeles
 ```
@@ -189,6 +219,7 @@ Teams (`src/mindroom/teams.py`) let multiple agents work together:
 - **Keep it DRY**: Don't Repeat Yourself. Reuse code wherever possible.
 - **Be Ruthless with Code Removal**: Aggressively remove any unused code, including functions, imports, and variables.
 - **Prefer dataclasses**: Use `dataclasses` that can be typed over dictionaries for better type safety and clarity.
+- **Documentation Line Style**: In Markdown docs, write one sentence per line, and never split a single sentence across multiple lines.
 - Do not wrap things in try-excepts unless it's necessary. Avoid wrapping things that should not fail.
 - NEVER put imports in the function, unless it is to avoid circular imports. Imports should be at the top of the file.
 
@@ -274,6 +305,31 @@ MATRIX_HOMESERVER=http://localhost:8008 MATRIX_SSL_VERIFY=false \
 uv run --python 3.13 matty thread "Lobby" t1
 ```
 
+### Hosted Matrix Run (`uvx`) + Pairing
+
+Use this when Matrix + chat UI are hosted and only the MindRoom backend runs locally.
+
+1) Initialize local config with hosted defaults
+```bash
+mkdir -p ~/mindroom-local
+cd ~/mindroom-local
+uvx mindroom config init --profile public
+```
+
+2) Add at least one model provider key in `.env` (for example `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`)
+
+3) Generate a pair code in `https://chat.mindroom.chat` (`Settings -> Local MindRoom`) and pair locally
+```bash
+uvx mindroom connect --pair-code ABCD-EFGH
+```
+
+4) Start MindRoom
+```bash
+uvx mindroom run
+```
+
+`mindroom connect` writes `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` to `.env` (unless `--no-persist-env` is used) and auto-replaces owner placeholder tokens in `config.yaml` when `owner_user_id` is returned.
+
 ### SaaS Platform Commands
 
 #### Development
@@ -305,7 +361,7 @@ helm upgrade --install platform ./cluster/k8s/platform -f cluster/k8s/platform/v
 # - Tracks status
 
 # Manual Helm deployment (debugging only, not for production):
-# helm upgrade --install instance-1 ./k8s/instance \
+# helm upgrade --install instance-1 ./cluster/k8s/instance \
 #   --namespace mindroom-instances \
 #   -f values-with-secrets.yaml  # Never commit this file!
 
@@ -451,8 +507,17 @@ matty thread-reply "test_room" t1 "@mindroom_research find information about X"
 ## 5. Quick Reference
 
 ```bash
+# Preflight check before running
+mindroom doctor
+
 # Run the stack
 uv run mindroom run --storage-path mindroom_data
+
+# Pair local install with hosted provisioning
+mindroom connect --pair-code ABCD-EFGH
+
+# Bootstrap local Synapse + MindRoom Cinny (Docker)
+mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
 
 # Update credentials
 # Edit .env and restart; sync step mirrors keys to credentials vault

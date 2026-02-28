@@ -28,14 +28,14 @@ def _patch_config_globals(
 class TestFindConfig:
     """Tests for find_config()."""
 
-    def test_returns_cwd_config_when_nothing_exists(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Falls back to the first search path (./config.yaml) when no file exists."""
+    def test_returns_home_config_when_nothing_exists(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Falls back to ~/.mindroom/config.yaml when no file exists."""
         cwd_config = tmp_path / "config.yaml"
         home_config = tmp_path / ".mindroom" / "config.yaml"
         _patch_config_globals(monkeypatch, search_paths=[cwd_config, home_config])
 
         result = constants_mod.find_config()
-        assert result == cwd_config
+        assert result == home_config
 
     def test_returns_home_config_when_cwd_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Discovers ~/.mindroom/config.yaml when ./config.yaml doesn't exist."""

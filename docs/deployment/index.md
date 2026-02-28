@@ -10,6 +10,7 @@ MindRoom can be deployed in various ways depending on your needs.
 
 | Method | Best For |
 |--------|----------|
+| [Hosted Matrix + local backend](hosted-matrix.md) | Simplest setup: run only `uvx mindroom run` locally |
 | Full Stack (Docker Compose) | All-in-one: backend + frontend + Matrix (Synapse) + Element |
 | [Docker (single container)](docker.md) | Backend-only or when you already have Matrix |
 | [Kubernetes](kubernetes.md) | Multi-tenant SaaS, production |
@@ -31,6 +32,22 @@ Use these guides if you want users to connect Google accounts in the MindRoom fr
 
 ## Quick Start
 
+### Hosted Matrix + local backend (simplest)
+
+```bash
+mkdir -p ~/mindroom-local
+cd ~/mindroom-local
+uvx mindroom config init --profile public
+$EDITOR .env
+uvx mindroom connect --pair-code ABCD-EFGH
+uvx mindroom run
+```
+
+Generate the pair code in `https://chat.mindroom.chat` under:
+`Settings -> Local MindRoom`.
+
+See [Hosted Matrix deployment](hosted-matrix.md) for the full walkthrough.
+
 ### Full Stack (recommended)
 
 ```bash
@@ -49,6 +66,13 @@ mindroom run --storage-path ./mindroom_data
 ```
 
 The config file path is set via `MINDROOM_CONFIG_PATH` (defaults to `./config.yaml`).
+
+If you want local Matrix + Cinny with a host-installed backend (Linux/macOS), use:
+
+```bash
+mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+mindroom run --storage-path ./mindroom_data
+```
 
 ### Docker (single container)
 
@@ -74,14 +98,16 @@ Full stack:
 
 ```bash
 # .env in the full stack repo
-ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
 # Add other providers as needed
 ```
 
 Direct and single-container deployments:
 
 1. **Matrix homeserver** - Set `MATRIX_HOMESERVER` (must allow open registration for agent accounts)
-2. **AI provider keys** - At least one of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.
+2. **AI provider keys** - At least one of `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, etc.
 3. **Persistent storage** - Mount `mindroom_data/` to persist agent state (including `sessions/`, `learning/`, and memory data)
 
 See the [Docker guide](docker.md#environment-variables) for the complete environment variable reference.
+
+Hosted `mindroom.chat` deployments additionally use values from `mindroom connect` (`MINDROOM_LOCAL_CLIENT_ID`, `MINDROOM_LOCAL_CLIENT_SECRET`, and `MINDROOM_NAMESPACE`) to bootstrap agent registrations and avoid collisions on shared homeservers.
