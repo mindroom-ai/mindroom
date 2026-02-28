@@ -260,10 +260,9 @@ async def save_config(new_config: Config, _user: Annotated[dict, Depends(verify_
     """Save configuration to file."""
     try:
         config_dict = new_config.model_dump(exclude_none=True)
-        save_config_to_file(config_dict)
-
-        # Update current config
         with config_lock:
+            save_config_to_file(config_dict)
+            # Update current config
             config.update(config_dict)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save configuration: {e!s}") from e
@@ -291,19 +290,17 @@ async def update_agent(
     _user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, bool]:
     """Update a specific agent."""
-    with config_lock:
-        if "agents" not in config:
-            config["agents"] = {}
-
-        # Remove ID from agent_data if present
-        agent_data_copy = agent_data.copy()
-        agent_data_copy.pop("id", None)
-
-        config["agents"][agent_id] = agent_data_copy
-
-    # Save to file
     try:
-        save_config_to_file(config)
+        with config_lock:
+            if "agents" not in config:
+                config["agents"] = {}
+
+            # Remove ID from agent_data if present
+            agent_data_copy = agent_data.copy()
+            agent_data_copy.pop("id", None)
+
+            config["agents"][agent_id] = agent_data_copy
+            save_config_to_file(config)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save agent: {e!s}") from e
     else:
@@ -315,27 +312,25 @@ async def create_agent(agent_data: dict[str, Any], _user: Annotated[dict, Depend
     """Create a new agent."""
     agent_id = agent_data.get("display_name", "new_agent").lower().replace(" ", "_")
 
-    with config_lock:
-        if "agents" not in config:
-            config["agents"] = {}
-
-        # Check if agent already exists
-        if agent_id in config["agents"]:
-            # Generate unique ID
-            counter = 1
-            while f"{agent_id}_{counter}" in config["agents"]:
-                counter += 1
-            agent_id = f"{agent_id}_{counter}"
-
-        # Remove ID from agent_data if present
-        agent_data_copy = agent_data.copy()
-        agent_data_copy.pop("id", None)
-
-        config["agents"][agent_id] = agent_data_copy
-
-    # Save to file
     try:
-        save_config_to_file(config)
+        with config_lock:
+            if "agents" not in config:
+                config["agents"] = {}
+
+            # Check if agent already exists
+            if agent_id in config["agents"]:
+                # Generate unique ID
+                counter = 1
+                while f"{agent_id}_{counter}" in config["agents"]:
+                    counter += 1
+                agent_id = f"{agent_id}_{counter}"
+
+            # Remove ID from agent_data if present
+            agent_data_copy = agent_data.copy()
+            agent_data_copy.pop("id", None)
+
+            config["agents"][agent_id] = agent_data_copy
+            save_config_to_file(config)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create agent: {e!s}") from e
     else:
@@ -350,14 +345,12 @@ async def delete_agent(agent_id: str, _user: Annotated[dict, Depends(verify_user
             raise HTTPException(status_code=404, detail="Agent not found")
 
         del config["agents"][agent_id]
-
-    # Save to file
-    try:
-        save_config_to_file(config)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete agent: {e!s}") from e
-    else:
-        return {"success": True}
+        try:
+            save_config_to_file(config)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to delete agent: {e!s}") from e
+        else:
+            return {"success": True}
 
 
 @app.get("/api/config/teams")
@@ -380,19 +373,17 @@ async def update_team(
     _user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, bool]:
     """Update a specific team."""
-    with config_lock:
-        if "teams" not in config:
-            config["teams"] = {}
-
-        # Remove ID from team_data if present
-        team_data_copy = team_data.copy()
-        team_data_copy.pop("id", None)
-
-        config["teams"][team_id] = team_data_copy
-
-    # Save to file
     try:
-        save_config_to_file(config)
+        with config_lock:
+            if "teams" not in config:
+                config["teams"] = {}
+
+            # Remove ID from team_data if present
+            team_data_copy = team_data.copy()
+            team_data_copy.pop("id", None)
+
+            config["teams"][team_id] = team_data_copy
+            save_config_to_file(config)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save team: {e!s}") from e
     else:
@@ -404,27 +395,25 @@ async def create_team(team_data: dict[str, Any], _user: Annotated[dict, Depends(
     """Create a new team."""
     team_id = team_data.get("display_name", "new_team").lower().replace(" ", "_")
 
-    with config_lock:
-        if "teams" not in config:
-            config["teams"] = {}
-
-        # Check if team already exists
-        if team_id in config["teams"]:
-            # Generate unique ID
-            counter = 1
-            while f"{team_id}_{counter}" in config["teams"]:
-                counter += 1
-            team_id = f"{team_id}_{counter}"
-
-        # Remove ID from team_data if present
-        team_data_copy = team_data.copy()
-        team_data_copy.pop("id", None)
-
-        config["teams"][team_id] = team_data_copy
-
-    # Save to file
     try:
-        save_config_to_file(config)
+        with config_lock:
+            if "teams" not in config:
+                config["teams"] = {}
+
+            # Check if team already exists
+            if team_id in config["teams"]:
+                # Generate unique ID
+                counter = 1
+                while f"{team_id}_{counter}" in config["teams"]:
+                    counter += 1
+                team_id = f"{team_id}_{counter}"
+
+            # Remove ID from team_data if present
+            team_data_copy = team_data.copy()
+            team_data_copy.pop("id", None)
+
+            config["teams"][team_id] = team_data_copy
+            save_config_to_file(config)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create team: {e!s}") from e
     else:
@@ -439,14 +428,12 @@ async def delete_team(team_id: str, _user: Annotated[dict, Depends(verify_user)]
             raise HTTPException(status_code=404, detail="Team not found")
 
         del config["teams"][team_id]
-
-    # Save to file
-    try:
-        save_config_to_file(config)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete team: {e!s}") from e
-    else:
-        return {"success": True}
+        try:
+            save_config_to_file(config)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to delete team: {e!s}") from e
+        else:
+            return {"success": True}
 
 
 @app.get("/api/config/models")
@@ -464,15 +451,13 @@ async def update_model(
     _user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, bool]:
     """Update a model configuration."""
-    with config_lock:
-        if "models" not in config:
-            config["models"] = {}
-
-        config["models"][model_id] = model_data
-
-    # Save to file
     try:
-        save_config_to_file(config)
+        with config_lock:
+            if "models" not in config:
+                config["models"] = {}
+
+            config["models"][model_id] = model_data
+            save_config_to_file(config)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save model: {e!s}") from e
     else:
@@ -493,12 +478,10 @@ async def update_room_models(
     _user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, bool]:
     """Update room-specific model overrides."""
-    with config_lock:
-        config["room_models"] = room_models
-
-    # Save to file
     try:
-        save_config_to_file(config)
+        with config_lock:
+            config["room_models"] = room_models
+            save_config_to_file(config)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save room models: {e!s}") from e
     else:

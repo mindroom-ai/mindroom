@@ -10,8 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from .constants import CREDENTIALS_DIR
+from .logging_config import get_logger
 
 SERVICE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9:_-]+$")
+logger = get_logger(__name__)
 
 
 def validate_service_name(service: str) -> str:
@@ -75,6 +77,11 @@ class CredentialsManager:
                     data: dict[str, Any] = json.load(f)
                     return data
             except Exception:
+                logger.exception(
+                    "Failed to load credentials",
+                    service=service,
+                    path=str(credentials_path),
+                )
                 return None
         return None
 
