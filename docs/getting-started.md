@@ -32,8 +32,8 @@ $EDITOR .env
 
 Set at least one key:
 
-- `ANTHROPIC_API_KEY=...`, or
 - `OPENAI_API_KEY=...`, or
+- `OPENROUTER_API_KEY=...`, or
 - another supported provider key.
 
 ### 3. Pair your local install from chat UI
@@ -151,8 +151,8 @@ agents:
 
 models:
   default:
-    provider: anthropic
-    id: claude-sonnet-4-5-latest
+    provider: openai
+    id: gpt-5.2
 
 defaults:
   tools: [scheduler]
@@ -176,9 +176,8 @@ MATRIX_HOMESERVER=https://matrix.example.com
 # MATRIX_SERVER_NAME=example.com
 
 # AI provider API keys
-ANTHROPIC_API_KEY=your_anthropic_key
-# OPENAI_API_KEY=your_openai_key
-# GOOGLE_API_KEY=your_google_key
+OPENAI_API_KEY=your_openai_key
+# OPENROUTER_API_KEY=your_openrouter_key
 
 # Optional: protect the dashboard API (recommended for non-localhost)
 # MINDROOM_API_KEY=your-secret-key

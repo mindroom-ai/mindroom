@@ -1,7 +1,3 @@
----
-icon: lucide/cloud-cog
----
-
 # Hosted Matrix + Local Backend
 
 This guide covers the simplest production-like setup:
@@ -12,11 +8,11 @@ This guide covers the simplest production-like setup:
 
 ## What Runs Where
 
-| Component | Runs on | Purpose |
-|----------|---------|---------|
-| `chat.mindroom.chat` | Hosted web app | Login UI and pairing UI |
-| `mindroom.chat` | Hosted Matrix + provisioning API | Matrix transport + local onboarding API |
-| `uvx mindroom run` | Your machine/server | Agent orchestration, tools, model calls |
+| Component            | Runs on                          | Purpose                                 |
+| -------------------- | -------------------------------- | --------------------------------------- |
+| `chat.mindroom.chat` | Hosted web app                   | Login UI and pairing UI                 |
+| `mindroom.chat`      | Hosted Matrix + provisioning API | Matrix transport + local onboarding API |
+| `uvx mindroom run`   | Your machine/server              | Agent orchestration, tools, model calls |
 
 ## Prerequisites
 
@@ -27,7 +23,7 @@ This guide covers the simplest production-like setup:
 
 ## 1. Initialize Local Config
 
-```bash
+```
 mkdir -p ~/mindroom-local
 cd ~/mindroom-local
 uvx mindroom config init --profile public
@@ -39,7 +35,7 @@ This creates `config.yaml` and `.env` with hosted defaults.
 
 Edit `.env` and set at least one provider key:
 
-```bash
+```
 OPENAI_API_KEY=...
 # or OPENROUTER_API_KEY=...
 ```
@@ -47,11 +43,11 @@ OPENAI_API_KEY=...
 ## 3. Pair This Install
 
 1. Open `https://chat.mindroom.chat`.
-2. Go to `Settings -> Local MindRoom`.
-3. Click `Generate Pair Code`.
-4. Run locally:
+1. Go to `Settings -> Local MindRoom`.
+1. Click `Generate Pair Code`.
+1. Run locally:
 
-```bash
+```
 uvx mindroom connect --pair-code ABCD-EFGH
 ```
 
@@ -64,16 +60,16 @@ After successful pairing, local provisioning credentials are written to `.env` u
 
 ## 4. Start MindRoom
 
-```bash
+```
 uvx mindroom run
 ```
 
 MindRoom then:
 
 1. Connects to `MATRIX_HOMESERVER`
-2. Creates/updates configured agent Matrix users
-3. Joins/creates configured rooms
-4. Starts processing messages
+1. Creates/updates configured agent Matrix users
+1. Joins/creates configured rooms
+1. Starts processing messages
 
 ## Credential Model (Important)
 
@@ -84,8 +80,7 @@ MindRoom then:
 
 These are **not Matrix user access tokens**.
 
-They can only call provisioning-service endpoints that accept local client credentials (for example agent registration flows).
-Revoke them from `Settings -> Local MindRoom` in the chat UI.
+They can only call provisioning-service endpoints that accept local client credentials (for example agent registration flows). Revoke them from `Settings -> Local MindRoom` in the chat UI.
 
 ## Trust Model (Hosted Server vs Message Privacy)
 
