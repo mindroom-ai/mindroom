@@ -12,6 +12,7 @@ import httpx
 from typer.testing import CliRunner
 
 from mindroom.cli import app
+from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -19,7 +20,6 @@ if TYPE_CHECKING:
     import pytest
 
 runner = CliRunner()
-_OWNER_PLACEHOLDER = "__MINDROOM_OWNER_USER_ID_FROM_PAIRING__"
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -46,7 +46,7 @@ class TestConfigInit:
         assert "agents:" in content
         assert "models:" in content
         assert "authorization:" in content
-        assert _OWNER_PLACEHOLDER in content
+        assert OWNER_MATRIX_USER_ID_PLACEHOLDER in content
 
     def test_init_minimal(self, tmp_path: Path) -> None:
         """Config init --minimal creates a bare-minimum config."""
@@ -57,7 +57,7 @@ class TestConfigInit:
         assert "agents:" in content
         assert "# MindRoom Configuration (minimal)" in content
         assert "authorization:" in content
-        assert _OWNER_PLACEHOLDER in content
+        assert OWNER_MATRIX_USER_ID_PLACEHOLDER in content
 
     def test_init_profile_minimal(self, tmp_path: Path) -> None:
         """Config init --profile minimal creates the minimal template."""
@@ -687,10 +687,10 @@ class TestConnect:
             "authorization:\n"
             "  default_room_access: false\n"
             "  global_users:\n"
-            f"    - {_OWNER_PLACEHOLDER}\n"
+            f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
             "  agent_reply_permissions:\n"
             '    "*":\n'
-            f"      - {_OWNER_PLACEHOLDER}\n",
+            f"      - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
         )
         monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
         monkeypatch.setattr("mindroom.cli.socket.gethostname", lambda: "devbox")
@@ -734,7 +734,7 @@ class TestConnect:
         assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in env_content
         assert "MINDROOM_OWNER_USER_ID=" not in env_content
         updated_config = cfg.read_text()
-        assert _OWNER_PLACEHOLDER not in updated_config
+        assert OWNER_MATRIX_USER_ID_PLACEHOLDER not in updated_config
         assert "@alice:mindroom.chat" in updated_config
 
     def test_connect_no_persist_prints_exports(
@@ -833,7 +833,7 @@ class TestConnect:
             "authorization:\n"
             "  default_room_access: false\n"
             "  global_users:\n"
-            f"    - {_OWNER_PLACEHOLDER}\n",
+            f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
         )
         monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
         monkeypatch.setattr(
@@ -862,7 +862,7 @@ class TestConnect:
         assert result.exit_code == 0
         assert "malformed owner_user_id" in _strip_ansi(result.output)
         updated_config = cfg.read_text()
-        assert _OWNER_PLACEHOLDER in updated_config
+        assert OWNER_MATRIX_USER_ID_PLACEHOLDER in updated_config
 
     def test_connect_passes_matrix_ssl_verify_to_httpx(
         self,
