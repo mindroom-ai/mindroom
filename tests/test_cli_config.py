@@ -39,7 +39,7 @@ class TestConfigInit:
     def test_init_creates_config(self, tmp_path: Path) -> None:
         """Config init creates a valid config.yaml at the target path."""
         target = tmp_path / "config.yaml"
-        result = runner.invoke(app, ["config", "init", "--path", str(target)])
+        result = runner.invoke(app, ["config", "init", "--path", str(target)], input="openai\n")
         assert result.exit_code == 0
         assert target.exists()
         content = target.read_text()
@@ -83,7 +83,7 @@ class TestConfigInit:
     def test_init_creates_env_with_dashboard_key(self, tmp_path: Path) -> None:
         """Config init writes a random MINDROOM_API_KEY to .env."""
         target = tmp_path / "config.yaml"
-        result = runner.invoke(app, ["config", "init", "--path", str(target)])
+        result = runner.invoke(app, ["config", "init", "--path", str(target)], input="openai\n")
         assert result.exit_code == 0
 
         env_path = tmp_path / ".env"
@@ -101,7 +101,10 @@ class TestConfigInit:
         target = tmp_path / "config.yaml"
         env_path = tmp_path / ".env"
         env_path.write_text("ANTHROPIC_API_KEY=sk-existing\n")
-        result = runner.invoke(app, ["config", "init", "--path", str(target), "--force"])
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--force", "--provider", "openai"],
+        )
         assert result.exit_code == 0
         assert env_path.read_text() == "ANTHROPIC_API_KEY=sk-existing\n"
 
@@ -117,11 +120,32 @@ class TestConfigInit:
         """Config init --force overwrites without prompting."""
         target = tmp_path / "config.yaml"
         target.write_text("existing")
-        result = runner.invoke(app, ["config", "init", "--path", str(target), "--force"])
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--force", "--provider", "openai"],
+        )
         assert result.exit_code == 0
         content = target.read_text()
         assert content != "existing"
         assert "agents:" in content
+
+    def test_init_openai_preset_uses_openai_models(self, tmp_path: Path) -> None:
+        """Config init --provider openai prepopulates OpenAI defaults."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
+        assert result.exit_code == 0
+        content = target.read_text()
+        assert "provider: openai" in content
+        assert "id: gpt-5.2" in content
+
+    def test_init_openrouter_preset_uses_openrouter_models(self, tmp_path: Path) -> None:
+        """Config init --provider openrouter uses OpenRouter with Claude model."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openrouter"])
+        assert result.exit_code == 0
+        content = target.read_text()
+        assert "provider: openrouter" in content
+        assert "anthropic/claude-sonnet-4-5" in content
 
 
 # ---------------------------------------------------------------------------
