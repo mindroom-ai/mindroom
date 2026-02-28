@@ -143,29 +143,6 @@ def _create_task_wrapper(
     return wrapper
 
 
-def _is_concrete_matrix_user_id(user_id: str) -> bool:
-    """Return whether this string is a concrete Matrix user ID."""
-    return (
-        user_id.startswith("@") and ":" in user_id and "*" not in user_id and "?" not in user_id and " " not in user_id
-    )
-
-
-def _get_authorized_user_ids_to_invite(config: Config) -> set[str]:
-    """Collect Matrix users from authorization config that can be invited."""
-    user_ids = set(config.authorization.global_users)
-    for room_users in config.authorization.room_permissions.values():
-        user_ids.update(room_users)
-
-    concrete_user_ids = {user_id for user_id in user_ids if _is_concrete_matrix_user_id(user_id)}
-    skipped = sorted(user_ids - concrete_user_ids)
-    if skipped:
-        logger.warning(
-            "Skipping non-concrete authorization user IDs for invites",
-            user_ids=skipped,
-        )
-    return concrete_user_ids
-
-
 @dataclass(frozen=True)
 class _ResponseAction:
     """Result of the shared team-formation / should-respond decision."""

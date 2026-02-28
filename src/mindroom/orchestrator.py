@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 import uvicorn
 
 from .agents import get_rooms_for_entity
-from .bot import AgentBot, TeamBot, _get_authorized_user_ids_to_invite, create_bot_for_entity
+from .bot import AgentBot, TeamBot, create_bot_for_entity
 from .config.main import Config
 from .constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME
 from .credentials_sync import sync_env_to_credentials
@@ -134,30 +134,7 @@ class MultiAgentOrchestrator:
         all_entities = [ROUTER_AGENT_NAME, *list(config.agents.keys()), *list(config.teams.keys())]
 
         for entity_name in all_entities:
-            # Create a temporary agent user object (will be updated by ensure_user_account)
-            if entity_name == ROUTER_AGENT_NAME:
-                temp_user = AgentMatrixUser(
-                    agent_name=ROUTER_AGENT_NAME,
-                    user_id="",  # Will be set by ensure_user_account
-                    display_name="RouterAgent",
-                    password="",  # Will be set by ensure_user_account
-                )
-            elif entity_name in config.agents:
-                temp_user = AgentMatrixUser(
-                    agent_name=entity_name,
-                    user_id="",
-                    display_name=config.agents[entity_name].display_name,
-                    password="",
-                )
-            elif entity_name in config.teams:
-                temp_user = AgentMatrixUser(
-                    agent_name=entity_name,
-                    user_id="",
-                    display_name=config.teams[entity_name].display_name,
-                    password="",
-                )
-            else:
-                continue
+            temp_user = _create_temp_user(entity_name, config)
 
             bot = create_bot_for_entity(entity_name, temp_user, config, self.storage_path)
             if bot is None:
@@ -512,6 +489,29 @@ async def _identify_entities_to_restart(
         entities_to_restart.add(ROUTER_AGENT_NAME)
 
     return entities_to_restart
+
+
+def _is_concrete_matrix_user_id(user_id: str) -> bool:
+    """Return whether this string is a concrete Matrix user ID."""
+    return (
+        user_id.startswith("@") and ":" in user_id and "*" not in user_id and "?" not in user_id and " " not in user_id
+    )
+
+
+def _get_authorized_user_ids_to_invite(config: Config) -> set[str]:
+    """Collect Matrix users from authorization config that can be invited."""
+    user_ids = set(config.authorization.global_users)
+    for room_users in config.authorization.room_permissions.values():
+        user_ids.update(room_users)
+
+    concrete_user_ids = {user_id for user_id in user_ids if _is_concrete_matrix_user_id(user_id)}
+    skipped = sorted(user_ids - concrete_user_ids)
+    if skipped:
+        logger.warning(
+            "Skipping non-concrete authorization user IDs for invites",
+            user_ids=skipped,
+        )
+    return concrete_user_ids
 
 
 def _get_changed_agents(config: Config | None, new_config: Config, agent_bots: dict[str, Any]) -> set[str]:
