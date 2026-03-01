@@ -71,7 +71,7 @@ agents:
 | `list_attachments(target?)`                              | List metadata for attachments in the current context (ID, filename, MIME type, size) |
 | `send_attachments(attachment_ids, room_id?, thread_id?)` | Upload and send context attachment IDs to a Matrix room or thread                    |
 
-By default, `send_attachments` accepts only attachment IDs from the current context. Local file path references are disabled unless operators set `MINDROOM_ATTACHMENTS_ALLOW_LOCAL_PATH_REFERENCES=true`.
+`send_attachments` accepts only attachment IDs from the current context. Direct local file path references are not supported.
 
 ### Why use this tool?
 

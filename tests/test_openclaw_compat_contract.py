@@ -570,8 +570,8 @@ async def test_openclaw_compat_message_send_supports_attachment_only(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_openclaw_compat_message_send_rejects_local_paths_by_default(tmp_path: Path) -> None:
-    """Verify message send rejects local file paths unless enabled by server policy."""
+async def test_openclaw_compat_message_send_rejects_non_attachment_id_references(tmp_path: Path) -> None:
+    """Verify message send only accepts context attachment IDs in attachments[]."""
     tool = OpenClawCompatTools()
     tool._send_matrix_text = AsyncMock()
     config = MagicMock()
@@ -597,7 +597,7 @@ async def test_openclaw_compat_message_send_rejects_local_paths_by_default(tmp_p
     assert payload["status"] == "error"
     assert payload["tool"] == "message"
     assert payload["action"] == "send"
-    assert "Local file paths are disabled" in payload["message"]
+    assert "must be context attachment IDs" in payload["message"]
     tool._send_matrix_text.assert_not_awaited()
     mocked.assert_not_awaited()
 

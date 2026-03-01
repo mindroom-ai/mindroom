@@ -79,8 +79,8 @@ async def test_attachments_tool_sends_attachment_ids(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_attachments_tool_rejects_local_paths_by_default(tmp_path: Path) -> None:
-    """Tool should reject direct filesystem paths unless enabled by server policy."""
+async def test_attachments_tool_rejects_non_attachment_id_references(tmp_path: Path) -> None:
+    """Tool should require context attachment IDs and reject raw filesystem paths."""
     tool = AttachmentTools()
     sample_file = tmp_path / "upload.txt"
     sample_file.write_text("payload", encoding="utf-8")
@@ -93,29 +93,24 @@ async def test_attachments_tool_rejects_local_paths_by_default(tmp_path: Path) -
 
     assert payload["status"] == "error"
     assert payload["tool"] == "attachments"
-    assert "Local file paths are disabled" in payload["message"]
+    assert "must be context attachment IDs" in payload["message"]
     mocked.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_attachments_tool_rejects_local_paths_outside_storage_scope(tmp_path: Path) -> None:
-    """Server-enabled local paths must still resolve under the storage path."""
+async def test_attachments_tool_rejects_non_att_prefix_references(tmp_path: Path) -> None:
+    """Tool should reject references that do not use the att_ attachment-id format."""
     tool = AttachmentTools()
-    storage_scope = tmp_path / "storage_scope"
-    storage_scope.mkdir(parents=True, exist_ok=True)
-    outside_file = tmp_path / "outside.txt"
-    outside_file.write_text("payload", encoding="utf-8")
 
     with (
-        patch("mindroom.custom_tools.attachments.ATTACHMENTS_ALLOW_LOCAL_PATH_REFERENCES", True),
-        attachment_tool_context(_tool_context(storage_scope)),
+        attachment_tool_context(_tool_context(tmp_path)),
         patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
     ):
-        payload = json.loads(await tool.send_attachments(attachments=[str(outside_file)]))
+        payload = json.loads(await tool.send_attachments(attachments=["upload.txt"]))
 
     assert payload["status"] == "error"
     assert payload["tool"] == "attachments"
-    assert "must be under storage path" in payload["message"]
+    assert "must be context attachment IDs" in payload["message"]
     mocked.assert_not_awaited()
 
 

@@ -115,7 +115,6 @@ VOICE_PREFIX = "🎤 "
 ORIGINAL_SENDER_KEY = "com.mindroom.original_sender"
 VOICE_RAW_AUDIO_FALLBACK_KEY = "com.mindroom.voice_raw_audio_fallback"
 ATTACHMENT_IDS_KEY = "com.mindroom.attachment_ids"
-ATTACHMENTS_ALLOW_LOCAL_PATH_REFERENCES = env_flag("MINDROOM_ATTACHMENTS_ALLOW_LOCAL_PATH_REFERENCES")
 AI_RUN_METADATA_KEY = "io.mindroom.ai_run"
 ENABLE_AI_CACHE = env_flag("MINDROOM_ENABLE_AI_CACHE", default=True)
 
