@@ -129,6 +129,18 @@ def _entry_recency(entry: dict[str, Any]) -> float:
     )
 
 
+def _bounded_limit(limit: int | None, *, default: int = 50, maximum: int = 200) -> int:
+    if limit is None:
+        return default
+    return max(1, min(limit, maximum))
+
+
+def _bounded_offset(offset: int | None) -> int:
+    if offset is None:
+        return 0
+    return max(0, offset)
+
+
 def _session_key_to_room_thread(session_key: str) -> tuple[str, str | None]:
     marker = ":$"
     if marker in session_key:
@@ -426,11 +438,18 @@ class SubAgentsTools(Toolkit):
             target_agent=target_agent,
         )
 
-    async def list_sessions(self) -> str:
+    async def list_sessions(
+        self,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> str:
         """List tracked sub-agent sessions."""
         context = get_session_tools_context()
         if context is None:
             return _context_error("list_sessions")
+
+        requested_limit = _bounded_limit(limit)
+        requested_offset = _bounded_offset(offset)
 
         registry = await asyncio.to_thread(_load_registry, context)
         sessions = [
@@ -438,10 +457,19 @@ class SubAgentsTools(Toolkit):
             for key, entry in registry.items()
             if isinstance(entry, dict) and _in_scope(entry, context)
         ]
+        sessions.sort(
+            key=lambda session: (_entry_recency(session), str(session.get("session_key", ""))),
+            reverse=True,
+        )
+
+        total = len(sessions)
+        paged_sessions = sessions[requested_offset : requested_offset + requested_limit]
 
         return _payload(
             "list_sessions",
             "ok",
-            sessions=sessions,
-            total=len(sessions),
+            sessions=paged_sessions,
+            total=total,
+            limit=requested_limit,
+            offset=requested_offset,
         )
