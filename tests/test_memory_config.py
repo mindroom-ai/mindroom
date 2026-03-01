@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
-from mindroom.bot import MultiAgentOrchestrator
+from mindroom.orchestrator import MultiAgentOrchestrator
 
 if TYPE_CHECKING:
     import pytest

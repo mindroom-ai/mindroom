@@ -40,9 +40,9 @@ if TYPE_CHECKING:
     from agno.media import Image
     from agno.models.response import ToolExecution
 
-    from .bot import MultiAgentOrchestrator
     from .config.main import Config
     from .matrix.identity import MatrixID
+    from .orchestrator import MultiAgentOrchestrator
 
 
 logger = get_logger(__name__)
