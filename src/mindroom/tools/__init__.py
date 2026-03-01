@@ -103,6 +103,7 @@ from .sleep import sleep_tools
 from .spider import spider_tools
 from .spotify import spotify_tools
 from .sql import sql_tools
+from .subagents import subagents_tools
 from .tavily import tavily_tools
 from .telegram import telegram_tools
 from .todoist import todoist_tools
@@ -218,6 +219,7 @@ __all__ = [
     "spider_tools",
     "spotify_tools",
     "sql_tools",
+    "subagents_tools",
     "tavily_tools",
     "telegram_tools",
     "todoist_tools",

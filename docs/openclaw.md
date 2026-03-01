@@ -19,7 +19,7 @@ Works well:
 
 - File-based identity and memory documents
 - OpenClaw-inspired behavior and instructions
-- `sessions_*`, `subagents`, `web_*`, `exec/process`, `cron`, `browser` compatibility surface
+- `sessions_send`, `sessions_spawn`, `list_sessions`, `agents_list`, `web_*`, `exec/process`, `cron`, `browser` compatibility surface
 - Native Matrix messaging via `matrix_message` (`send`, `reply`, `thread-reply`, `react`, `read`, `context`)
 
 Not included:
@@ -38,8 +38,7 @@ The `openclaw_compat` tool provides OpenClaw-named aliases so prompts and skills
 | `exec`, `process` | `ShellTools` |
 | `web_search`, `web_fetch` | `DuckDuckGoTools`, `WebsiteTools` |
 | `cron` | `SchedulerTools` |
-| `sessions_*` | OpenClaw-compatible session orchestration |
-| `subagents`, `agents_list` | Agent registry lookup |
+| `agents_list`, `sessions_send`, `sessions_spawn`, `list_sessions` | `SubAgentsTools` (also available standalone as `subagents`) |
 | `browser` | `BrowserTools` (Playwright, host target only) |
 
 Attachment handling is provided by the standalone `attachments` tool, not `openclaw_compat.message`.
