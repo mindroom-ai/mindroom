@@ -263,6 +263,8 @@ type DispatchEvent = (
     | nio.RoomEncryptedVideo
 )
 
+type DispatchOrVoiceEvent = DispatchEvent | nio.RoomMessageAudio | nio.RoomEncryptedAudio
+
 
 @dataclass(frozen=True)
 class _PreparedDispatch:
@@ -1102,15 +1104,7 @@ class AgentBot:
 
     def _requester_user_id_for_event(
         self,
-        event: nio.RoomMessageText
-        | nio.RoomMessageImage
-        | nio.RoomEncryptedImage
-        | nio.RoomMessageAudio
-        | nio.RoomEncryptedAudio
-        | nio.RoomMessageFile
-        | nio.RoomEncryptedFile
-        | nio.RoomMessageVideo
-        | nio.RoomEncryptedVideo,
+        event: DispatchOrVoiceEvent,
     ) -> str:
         """Return the effective requester for per-user reply checks."""
         return get_effective_sender_id_for_reply_permissions(event.sender, event.source, self.config)
@@ -1118,15 +1112,7 @@ class AgentBot:
     def _precheck_event(
         self,
         room: nio.MatrixRoom,
-        event: nio.RoomMessageText
-        | nio.RoomMessageImage
-        | nio.RoomEncryptedImage
-        | nio.RoomMessageAudio
-        | nio.RoomEncryptedAudio
-        | nio.RoomMessageFile
-        | nio.RoomEncryptedFile
-        | nio.RoomMessageVideo
-        | nio.RoomEncryptedVideo,
+        event: DispatchOrVoiceEvent,
         *,
         is_edit: bool = False,
     ) -> str | None:
@@ -1280,13 +1266,7 @@ class AgentBot:
     async def _handle_router_dispatch(
         self,
         room: nio.MatrixRoom,
-        event: nio.RoomMessageText
-        | nio.RoomMessageImage
-        | nio.RoomEncryptedImage
-        | nio.RoomMessageFile
-        | nio.RoomEncryptedFile
-        | nio.RoomMessageVideo
-        | nio.RoomEncryptedVideo,
+        event: DispatchEvent,
         context: MessageContext,
         requester_user_id: str,
         *,
@@ -2459,13 +2439,7 @@ class AgentBot:
     async def _handle_ai_routing(
         self,
         room: nio.MatrixRoom,
-        event: nio.RoomMessageText
-        | nio.RoomMessageImage
-        | nio.RoomEncryptedImage
-        | nio.RoomMessageFile
-        | nio.RoomEncryptedFile
-        | nio.RoomMessageVideo
-        | nio.RoomEncryptedVideo,
+        event: DispatchEvent,
         thread_history: list[dict],
         thread_id: str | None = None,
         message: str | None = None,
