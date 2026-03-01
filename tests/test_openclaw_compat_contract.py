@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import os
+from itertools import count
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
@@ -671,6 +672,56 @@ async def test_openclaw_compat_sessions_send_label_resolves_to_tracked_session(
 
 
 @pytest.mark.asyncio
+async def test_openclaw_compat_sessions_send_label_prefers_most_recent_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify label lookup prefers the most recently touched in-scope session."""
+    tool = OpenClawCompatTools()
+    send_mock = AsyncMock(return_value="$evt")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+
+    epoch_counter = count(1)
+    iso_counter = count(1)
+    monkeypatch.setattr(subagents_module, "_now_epoch", lambda: float(next(epoch_counter)))
+    monkeypatch.setattr(
+        subagents_module,
+        "_now_iso",
+        lambda: f"2026-01-01T00:00:{next(iso_counter):02d}+00:00",
+    )
+
+    config = MagicMock()
+    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
+    ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id="$ctx-thread:localhost",
+        requester_id="@alice:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+
+    older_session = create_session_id(ctx.room_id, "$older:localhost")
+    newer_session = create_session_id(ctx.room_id, "$newer:localhost")
+    subagents_module._record_session(ctx, session_key=older_session, label="work", target_agent="openclaw")
+    subagents_module._record_session(ctx, session_key=newer_session, label="work", target_agent="openclaw")
+
+    with openclaw_tool_context(ctx):
+        payload = json.loads(await call_openclaw_subagent_tool(tool, "sessions_send", message="hello", label="work"))
+
+    assert payload["status"] == "ok"
+    assert payload["session_key"] == newer_session
+    send_mock.assert_awaited_once_with(
+        ctx,
+        room_id=ctx.room_id,
+        text="hello",
+        thread_id="$newer:localhost",
+        original_sender=ctx.requester_id,
+    )
+
+
+@pytest.mark.asyncio
 async def test_openclaw_compat_sessions_spawn_returns_error_when_matrix_send_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -883,6 +934,35 @@ async def test_list_sessions_empty_when_no_sessions(tmp_path: Path) -> None:
     assert payload["total"] == 0
 
 
+def test_load_registry_falls_back_to_legacy_openclaw_path(tmp_path: Path) -> None:
+    """Verify _load_registry reads legacy openclaw/session_registry.json when needed."""
+    config = MagicMock()
+    ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id=None,
+        requester_id="@user:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+    legacy_dir = tmp_path / "openclaw"
+    legacy_dir.mkdir(parents=True)
+    legacy_data = {
+        "sessions": {
+            "!room:localhost:$thread:localhost": {
+                "label": "legacy-session",
+                "target_agent": "code",
+            },
+        },
+    }
+    (legacy_dir / "session_registry.json").write_text(json.dumps(legacy_data))
+
+    registry = subagents_module._load_registry(ctx)
+    assert "!room:localhost:$thread:localhost" in registry
+    assert registry["!room:localhost:$thread:localhost"]["label"] == "legacy-session"
+
+
 def test_load_registry_migrates_old_format(tmp_path: Path) -> None:
     """Verify _load_registry extracts sessions from old {sessions: {}, runs: {}} format."""
     config = MagicMock()
@@ -934,6 +1014,38 @@ def test_record_session_updates_existing(tmp_path: Path) -> None:
     registry = subagents_module._load_registry(ctx)
     assert registry[session_key]["label"] == "second"
     assert registry[session_key]["target_agent"] == "code"
+
+
+def test_record_session_does_not_mutate_foreign_scope_entry(tmp_path: Path) -> None:
+    """Verify out-of-scope updates do not mutate an existing tracked session entry."""
+    config = MagicMock()
+    owner_ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id=None,
+        requester_id="@owner:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+    foreign_ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id=None,
+        requester_id="@foreign:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+    session_key = "!room:localhost:$thread:localhost"
+
+    subagents_module._record_session(owner_ctx, session_key=session_key, label="owner", target_agent="code")
+    subagents_module._record_session(foreign_ctx, session_key=session_key, label="foreign", target_agent="research")
+
+    registry = subagents_module._load_registry(owner_ctx)
+    assert registry[session_key]["label"] == "owner"
+    assert registry[session_key]["target_agent"] == "code"
+    assert registry[session_key]["requester_id"] == "@owner:localhost"
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,7 @@ import asyncio
 import json
 from datetime import UTC, datetime
 from threading import Lock
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from agno.tools import Toolkit
 
@@ -25,6 +25,10 @@ _REGISTRY_LOCK = Lock()
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _now_epoch() -> float:
+    return datetime.now(UTC).timestamp()
 
 
 def _payload(tool_name: str, status: str, **kwargs: object) -> str:
@@ -48,24 +52,38 @@ def _registry_path(context: SessionToolsContext) -> Path:
     return context.storage_path / "subagents" / "session_registry.json"
 
 
+def _legacy_registry_path(context: SessionToolsContext) -> Path:
+    return context.storage_path / "openclaw" / "session_registry.json"
+
+
+def _normalize_registry(loaded: object) -> dict[str, Any]:
+    if not isinstance(loaded, dict):
+        return {}
+
+    loaded_dict = cast("dict[str, Any]", loaded)
+
+    # Migration: old format had {"sessions": {...}, "runs": {...}}
+    sessions = loaded_dict.get("sessions")
+    if isinstance(sessions, dict):
+        return cast("dict[str, Any]", sessions)
+
+    return loaded_dict
+
+
 def _load_registry(context: SessionToolsContext) -> dict[str, Any]:
     path = _registry_path(context)
     if not path.is_file():
-        return {}
+        legacy_path = _legacy_registry_path(context)
+        if not legacy_path.is_file():
+            return {}
+        path = legacy_path
 
     raw = path.read_text(encoding="utf-8").strip()
     if not raw:
         return {}
 
     loaded = json.loads(raw)
-    if not isinstance(loaded, dict):
-        return {}
-
-    # Migration: old format had {"sessions": {...}, "runs": {...}}
-    if "sessions" in loaded and isinstance(loaded["sessions"], dict):
-        return loaded["sessions"]
-
-    return loaded
+    return _normalize_registry(loaded)
 
 
 def _save_registry(context: SessionToolsContext, registry: dict[str, Any]) -> None:
@@ -74,6 +92,41 @@ def _save_registry(context: SessionToolsContext, registry: dict[str, Any]) -> No
     tmp_path = path.with_suffix(".tmp")
     tmp_path.write_text(json.dumps(registry, sort_keys=True, indent=2), encoding="utf-8")
     tmp_path.replace(path)
+
+
+def _coerce_epoch(value: object) -> float:
+    epoch = 0.0
+    if value is None or isinstance(value, bool):
+        return epoch
+    if isinstance(value, int | float):
+        return float(value)
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return epoch
+        try:
+            return float(text)
+        except ValueError:
+            iso_value = f"{text[:-1]}+00:00" if text.endswith("Z") else text
+            try:
+                parsed = datetime.fromisoformat(iso_value)
+            except ValueError:
+                return epoch
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            epoch = parsed.timestamp()
+
+    return epoch
+
+
+def _entry_recency(entry: dict[str, Any]) -> float:
+    return max(
+        _coerce_epoch(entry.get("updated_at_epoch")),
+        _coerce_epoch(entry.get("updated_at")),
+        _coerce_epoch(entry.get("created_at_epoch")),
+        _coerce_epoch(entry.get("created_at")),
+    )
 
 
 def _session_key_to_room_thread(session_key: str) -> tuple[str, str | None]:
@@ -141,14 +194,28 @@ def _record_session(
     target_agent: str | None = None,
 ) -> None:
     room_id, thread_id = _session_key_to_room_thread(session_key)
+    now_iso = _now_iso()
+    now_epoch = _now_epoch()
+
     with _REGISTRY_LOCK:
         registry = _load_registry(context)
         existing = registry.get(session_key)
         if isinstance(existing, dict):
+            if not _in_scope(existing, context):
+                return
+
+            existing["agent_name"] = context.agent_name
+            existing["room_id"] = room_id
+            existing["thread_id"] = thread_id
+            existing["requester_id"] = context.requester_id
+            existing.setdefault("created_at", now_iso)
+            existing.setdefault("created_at_epoch", now_epoch)
             if label is not None:
                 existing["label"] = label
             if target_agent is not None:
                 existing["target_agent"] = target_agent
+            existing["updated_at"] = now_iso
+            existing["updated_at_epoch"] = now_epoch
         else:
             registry[session_key] = {
                 "label": label,
@@ -157,7 +224,10 @@ def _record_session(
                 "room_id": room_id,
                 "thread_id": thread_id,
                 "requester_id": context.requester_id,
-                "created_at": _now_iso(),
+                "created_at": now_iso,
+                "created_at_epoch": now_epoch,
+                "updated_at": now_iso,
+                "updated_at_epoch": now_epoch,
             }
         _save_registry(context, registry)
 
@@ -174,10 +244,17 @@ def _in_scope(entry: dict[str, Any], context: SessionToolsContext) -> bool:
 def _resolve_by_label(context: SessionToolsContext, label: str) -> str | None:
     with _REGISTRY_LOCK:
         registry = _load_registry(context)
-    for key, entry in registry.items():
-        if isinstance(entry, dict) and entry.get("label") == label and _in_scope(entry, context):
-            return key
-    return None
+
+    candidates = [
+        (key, entry)
+        for key, entry in registry.items()
+        if isinstance(entry, dict) and entry.get("label") == label and _in_scope(entry, context)
+    ]
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: (_entry_recency(item[1]), item[0]), reverse=True)
+    return candidates[0][0]
 
 
 def _lookup_target_agent(context: SessionToolsContext, session_key: str) -> str | None:
