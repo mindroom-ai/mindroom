@@ -34,6 +34,14 @@ def attachment_tool_payload(status: str, **kwargs: object) -> str:
     return json.dumps(payload, sort_keys=True)
 
 
+def _is_within_directory(path: Path, directory: Path) -> bool:
+    try:
+        path.relative_to(directory)
+    except ValueError:
+        return False
+    return True
+
+
 def _resolve_context_attachment_path(
     context: AttachmentToolContext,
     attachment_id: str,
@@ -68,13 +76,17 @@ def _resolve_attachment_reference(
             return ResolvedAttachmentReference(None, None, error)
         return ResolvedAttachmentReference(attachment_path, reference, None)
 
-    if allow_local_paths:
-        path = Path(reference).expanduser().resolve()
-        if path.is_file():
-            return ResolvedAttachmentReference(path, None, None)
-        error = f"Attachment path is not a file: {reference}"
-    else:
+    if not allow_local_paths:
         error = "Local file paths are disabled. Use attachment IDs or set allow_local_paths=true."
+    else:
+        storage_path = context.storage_path.expanduser().resolve()
+        path = Path(reference).expanduser().resolve()
+        if not _is_within_directory(path, storage_path):
+            error = f"Local file paths must be under storage path: {storage_path}"
+        elif not path.is_file():
+            error = f"Attachment path is not a file: {reference}"
+        else:
+            return ResolvedAttachmentReference(path, None, None)
 
     return ResolvedAttachmentReference(None, None, error)
 
@@ -194,7 +206,7 @@ class AttachmentTools(Toolkit):
         thread_id: str | None = None,
         allow_local_paths: bool = False,
     ) -> str:
-        """Send attachment IDs or local file paths to a Matrix room/thread."""
+        """Send attachment IDs or storage-scoped local file paths to a Matrix room/thread."""
         context = get_attachment_tool_context()
         if context is None:
             return attachment_tool_payload(

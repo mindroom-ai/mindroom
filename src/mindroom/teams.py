@@ -20,11 +20,11 @@ from pydantic import BaseModel, Field
 
 from . import agent_prompts
 from .ai import get_model_instance
+from .authorization import get_available_agents_in_room
 from .constants import ROUTER_AGENT_NAME
 from .error_handling import get_user_friendly_error_message
 from .logging_config import get_logger
 from .matrix.rooms import get_room_alias_from_id
-from .thread_utils import get_available_agents_in_room
 from .tool_events import (
     StructuredStreamChunk,
     ToolTraceEntry,

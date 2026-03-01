@@ -12,12 +12,12 @@ from agno.agent import Agent
 from agno.media import Audio
 
 from .ai import get_model_instance
+from .authorization import get_available_agents_for_sender
 from .commands import get_command_list
 from .constants import VOICE_PREFIX
 from .logging_config import get_logger
 from .matrix.identity import agent_username_localpart
 from .matrix.media import download_media_bytes, media_mime_type
-from .thread_utils import get_available_agents_for_sender
 
 if TYPE_CHECKING:
     import nio

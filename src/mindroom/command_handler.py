@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from . import config_confirmation
+from .authorization import get_available_agents_for_sender
 from .commands import Command, CommandType, get_command_help, handle_widget_command
 from .config_commands import handle_config_command
 from .constants import ROUTER_AGENT_NAME
@@ -20,7 +21,7 @@ from .scheduling import (
     schedule_task,
 )
 from .skills import resolve_skill_command_spec
-from .thread_utils import check_agent_mentioned, get_available_agents_for_sender, get_configured_agents_for_room
+from .thread_utils import check_agent_mentioned, get_configured_agents_for_room
 from .tools_metadata import get_tool_by_name
 
 if TYPE_CHECKING:

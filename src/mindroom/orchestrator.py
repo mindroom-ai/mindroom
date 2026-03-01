@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 import uvicorn
 
 from .agents import get_rooms_for_entity
+from .authorization import is_authorized_sender
 from .bot import AgentBot, TeamBot, create_bot_for_entity
 from .config.main import Config
 from .constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME
@@ -31,7 +32,6 @@ from .matrix.users import (
 from .memory.auto_flush import MemoryAutoFlushWorker, auto_flush_enabled
 from .plugins import load_plugins
 from .skills import clear_skill_cache, get_skill_snapshot
-from .thread_utils import is_authorized_sender
 
 if TYPE_CHECKING:
     from .knowledge import KnowledgeManager

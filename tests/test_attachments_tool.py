@@ -98,6 +98,27 @@ async def test_attachments_tool_rejects_local_paths_by_default(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_attachments_tool_rejects_local_paths_outside_storage_scope(tmp_path: Path) -> None:
+    """Tool should reject local paths that resolve outside the context storage path."""
+    tool = AttachmentTools()
+    storage_scope = tmp_path / "storage_scope"
+    storage_scope.mkdir(parents=True, exist_ok=True)
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_text("payload", encoding="utf-8")
+
+    with (
+        attachment_tool_context(_tool_context(storage_scope)),
+        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
+    ):
+        payload = json.loads(await tool.send_attachments(attachments=[str(outside_file)], allow_local_paths=True))
+
+    assert payload["status"] == "error"
+    assert payload["tool"] == "attachments"
+    assert "must be under storage path" in payload["message"]
+    mocked.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_attachments_tool_requires_context() -> None:
     """Tool should return an explicit error when runtime context is unavailable."""
     tool = AttachmentTools()
