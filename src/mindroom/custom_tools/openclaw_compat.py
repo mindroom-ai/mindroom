@@ -189,7 +189,7 @@ class OpenClawCompatTools(Toolkit):
         if action in {"thread-reply", "reply"} and effective_thread_id is None:
             return self._payload("message", "error", action=action, message="thread_id is required for replies.")
 
-        event_id = await _subagents_mod._send_matrix_text(
+        event_id = await _subagents_mod.send_matrix_text(
             context,
             room_id=room_id,
             text=message.strip(),

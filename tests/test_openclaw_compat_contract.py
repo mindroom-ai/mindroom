@@ -468,7 +468,7 @@ async def test_openclaw_compat_message_send_does_not_force_current_thread(
     """Verify message send stays room-level unless thread_id is explicitly provided."""
     tool = OpenClawCompatTools()
     send_mock = AsyncMock(return_value="$evt")
-    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    monkeypatch.setattr(subagents_module, "send_matrix_text", send_mock)
     config = MagicMock()
     config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
     ctx = OpenClawToolContext(
@@ -503,7 +503,7 @@ async def test_openclaw_compat_message_reply_uses_context_thread(
     """Verify replies default to the active context thread when none is passed."""
     tool = OpenClawCompatTools()
     send_mock = AsyncMock(return_value="$evt")
-    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    monkeypatch.setattr(subagents_module, "send_matrix_text", send_mock)
     config = MagicMock()
     config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
     ctx = OpenClawToolContext(
@@ -538,7 +538,7 @@ async def test_openclaw_compat_sessions_send_returns_error_when_matrix_send_fail
     """Verify sessions_send returns an error payload when Matrix send fails."""
     tool = OpenClawCompatTools()
     send_mock = AsyncMock(return_value=None)
-    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    monkeypatch.setattr(subagents_module, "send_matrix_text", send_mock)
     config = MagicMock()
     config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
     ctx = OpenClawToolContext(
@@ -567,7 +567,7 @@ async def test_openclaw_compat_sessions_send_relays_original_sender(
     """Verify sessions_send relays requester identity for bot-authored dispatch events."""
     tool = OpenClawCompatTools()
     send_mock = AsyncMock(return_value="$evt")
-    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    monkeypatch.setattr(subagents_module, "send_matrix_text", send_mock)
     config = MagicMock()
     config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
     ctx = OpenClawToolContext(
@@ -601,7 +601,7 @@ async def test_openclaw_compat_sessions_send_rejects_room_mode_threaded_dispatch
     """Verify threaded dispatch is rejected when target agent uses thread_mode=room."""
     tool = OpenClawCompatTools()
     send_mock = AsyncMock(return_value="$evt")
-    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    monkeypatch.setattr(subagents_module, "send_matrix_text", send_mock)
     config = MagicMock()
     config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
     config.get_entity_thread_mode = MagicMock(return_value="room")
@@ -641,7 +641,7 @@ async def test_openclaw_compat_sessions_send_label_resolves_to_tracked_session(
     """Verify label lookup resolves to a tracked session."""
     tool = OpenClawCompatTools()
     send_mock = AsyncMock(return_value="$evt")
-    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    monkeypatch.setattr(subagents_module, "send_matrix_text", send_mock)
     config = MagicMock()
     config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
     ctx = OpenClawToolContext(
@@ -679,7 +679,7 @@ async def test_openclaw_compat_sessions_send_label_prefers_most_recent_session(
     """Verify label lookup prefers the most recently touched in-scope session."""
     tool = OpenClawCompatTools()
     send_mock = AsyncMock(return_value="$evt")
-    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    monkeypatch.setattr(subagents_module, "send_matrix_text", send_mock)
 
     epoch_counter = count(1)
     iso_counter = count(1)
@@ -729,7 +729,7 @@ async def test_openclaw_compat_sessions_spawn_returns_error_when_matrix_send_fai
     """Verify sessions_spawn returns an error payload when Matrix send fails."""
     tool = OpenClawCompatTools()
     send_mock = AsyncMock(return_value=None)
-    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    monkeypatch.setattr(subagents_module, "send_matrix_text", send_mock)
     config = MagicMock()
     config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
     ctx = OpenClawToolContext(
@@ -758,7 +758,7 @@ async def test_openclaw_compat_sessions_spawn_relays_original_sender(
     """Verify sessions_spawn relays requester identity for bot-authored dispatch events."""
     tool = OpenClawCompatTools()
     send_mock = AsyncMock(return_value="$event")
-    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    monkeypatch.setattr(subagents_module, "send_matrix_text", send_mock)
     config = MagicMock()
     config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
     ctx = OpenClawToolContext(
@@ -798,7 +798,7 @@ async def test_openclaw_compat_sessions_spawn_rejects_room_mode_target_agent(
     """Verify isolated spawn is rejected when target agent uses thread_mode=room."""
     tool = OpenClawCompatTools()
     send_mock = AsyncMock(return_value="$event")
-    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    monkeypatch.setattr(subagents_module, "send_matrix_text", send_mock)
     config = MagicMock()
     config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
     config.get_entity_thread_mode = MagicMock(return_value="room")
@@ -828,7 +828,7 @@ async def test_openclaw_compat_message_send_returns_error_when_matrix_send_fails
 ) -> None:
     """Verify message send returns an error payload when Matrix send fails."""
     tool = OpenClawCompatTools()
-    monkeypatch.setattr(subagents_module, "_send_matrix_text", AsyncMock(return_value=None))
+    monkeypatch.setattr(subagents_module, "send_matrix_text", AsyncMock(return_value=None))
     config = MagicMock()
     config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
     ctx = OpenClawToolContext(
@@ -1094,7 +1094,7 @@ async def test_resolve_by_label_scoped_by_context(
     """Verify label lookup only resolves sessions from the active context scope."""
     tool = OpenClawCompatTools()
     send_mock = AsyncMock(return_value="$evt")
-    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    monkeypatch.setattr(subagents_module, "send_matrix_text", send_mock)
     config = MagicMock()
     config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
     ctx_owner = OpenClawToolContext(
