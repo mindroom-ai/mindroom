@@ -187,9 +187,10 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 |------|------|-------------|-----------------|
 | :lucide-sliders-horizontal: | `custom_api` | Custom API calls | Varies |
 | :lucide-sliders-horizontal: | `config_manager` | MindRoom configuration management | - |
+| :lucide-workflow: | `subagents` | Spawn and communicate with sub-agent sessions | - |
 
 Tool presets are config-only macros, not runtime tools.
-For OpenClaw workspace portability, `openclaw_compat` expands to `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, and `matrix_message`.
+For OpenClaw workspace portability, `openclaw_compat` expands to `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, `subagents`, and `matrix_message`.
 
 ## Claude Agent Sessions
 

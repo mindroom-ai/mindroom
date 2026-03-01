@@ -33,6 +33,7 @@ OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
     "website",
     "browser",
     "scheduler",
+    "subagents",
     "matrix_message",
 )
 logger = get_logger(__name__)

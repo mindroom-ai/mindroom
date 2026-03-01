@@ -136,6 +136,7 @@ def test_openclaw_compat_preset_expansion_dedupes_preserving_order() -> None:
         "duckduckgo",
         "website",
         "scheduler",
+        "subagents",
         "matrix_message",
         "python",
     ]
