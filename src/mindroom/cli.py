@@ -164,7 +164,7 @@ async def _run(
     console.print("Press Ctrl+C to stop\n")
 
     try:
-        from mindroom.bot import main as bot_main  # noqa: PLC0415  # lazy: heavy import
+        from mindroom.orchestrator import main as bot_main  # noqa: PLC0415  # lazy: heavy import
 
         await bot_main(
             log_level=log_level,

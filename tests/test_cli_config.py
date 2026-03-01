@@ -339,7 +339,7 @@ class TestRunApiFlags:
         )
         monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
         mock_main = AsyncMock()
-        with patch("mindroom.bot.main", mock_main):
+        with patch("mindroom.orchestrator.main", mock_main):
             result = runner.invoke(app, ["run"])
         assert result.exit_code == 0
         mock_main.assert_awaited_once()
@@ -358,7 +358,7 @@ class TestRunApiFlags:
         )
         monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
         mock_main = AsyncMock()
-        with patch("mindroom.bot.main", mock_main):
+        with patch("mindroom.orchestrator.main", mock_main):
             result = runner.invoke(app, ["run", "--no-api"])
         assert result.exit_code == 0
         assert mock_main.call_args.kwargs["api"] is False
@@ -373,7 +373,7 @@ class TestRunApiFlags:
         )
         monkeypatch.setattr("mindroom.cli.CONFIG_PATH", cfg)
         mock_main = AsyncMock()
-        with patch("mindroom.bot.main", mock_main):
+        with patch("mindroom.orchestrator.main", mock_main):
             result = runner.invoke(app, ["run", "--api-port", "9000", "--api-host", "127.0.0.1"])
         assert result.exit_code == 0
         assert mock_main.call_args.kwargs["api_port"] == 9000

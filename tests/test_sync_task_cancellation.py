@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom.bot import MultiAgentOrchestrator, _cancel_sync_task, _stop_entities
 from mindroom.config.main import Config
+from mindroom.orchestrator import MultiAgentOrchestrator, _cancel_sync_task, _stop_entities
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -49,7 +49,7 @@ async def test_cancel_sync_task_missing_entity() -> None:
 async def test_stop_entities_cancels_sync_tasks() -> None:
     """Test that _stop_entities properly cancels sync tasks."""
     # Use patch to mock _cancel_sync_task since we tested it separately
-    with patch("mindroom.bot._cancel_sync_task") as mock_cancel:
+    with patch("mindroom.orchestrator._cancel_sync_task") as mock_cancel:
         mock_cancel.side_effect = lambda name, tasks: tasks.pop(name, None)
 
         # Create mock bots
@@ -96,11 +96,11 @@ async def test_stop_entities_cancels_sync_tasks() -> None:
 async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
     """Test that MultiAgentOrchestrator properly tracks sync tasks."""
     with (
-        patch("mindroom.bot.create_bot_for_entity") as mock_create_bot,
-        patch("mindroom.bot._sync_forever_with_restart"),
-        patch("mindroom.bot.ensure_all_rooms_exist") as mock_ensure_rooms,
-        patch("mindroom.bot.ensure_user_in_rooms") as mock_ensure_user,
-        patch("mindroom.bot.create_agent_user") as mock_create_user,
+        patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
+        patch("mindroom.orchestrator._sync_forever_with_restart"),
+        patch("mindroom.orchestrator.ensure_all_rooms_exist") as mock_ensure_rooms,
+        patch("mindroom.orchestrator.ensure_user_in_rooms") as mock_ensure_user,
+        patch("mindroom.orchestrator.create_agent_user") as mock_create_user,
     ):
         # Setup mocks
         mock_create_user.return_value = MagicMock()
@@ -145,13 +145,13 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
 async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> None:
     """Test that update_config properly cancels old sync tasks."""
     with (
-        patch("mindroom.bot.Config.from_yaml") as mock_from_yaml,
-        patch("mindroom.bot._identify_entities_to_restart") as mock_identify,
-        patch("mindroom.bot._stop_entities") as mock_stop_entities,
-        patch("mindroom.bot.create_bot_for_entity") as mock_create_bot,
-        patch("mindroom.bot._sync_forever_with_restart"),
-        patch("mindroom.bot._create_temp_user") as mock_create_temp_user,
-        patch("mindroom.bot.MultiAgentOrchestrator._setup_rooms_and_memberships", new=AsyncMock()),
+        patch("mindroom.orchestrator.Config.from_yaml") as mock_from_yaml,
+        patch("mindroom.orchestrator._identify_entities_to_restart") as mock_identify,
+        patch("mindroom.orchestrator._stop_entities") as mock_stop_entities,
+        patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
+        patch("mindroom.orchestrator._sync_forever_with_restart"),
+        patch("mindroom.orchestrator._create_temp_user") as mock_create_temp_user,
+        patch("mindroom.orchestrator.MultiAgentOrchestrator._setup_rooms_and_memberships", new=AsyncMock()),
     ):
         # Create orchestrator with existing agent
         orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
@@ -212,11 +212,11 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
     agent — causing duplicate replies.
     """
     with (
-        patch("mindroom.bot.Config.from_yaml") as mock_from_yaml,
-        patch("mindroom.bot.create_bot_for_entity") as mock_create_bot,
-        patch("mindroom.bot._sync_forever_with_restart"),
-        patch("mindroom.bot._stop_entities"),
-        patch("mindroom.bot._create_temp_user") as mock_create_temp_user,
+        patch("mindroom.orchestrator.Config.from_yaml") as mock_from_yaml,
+        patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
+        patch("mindroom.orchestrator._sync_forever_with_restart"),
+        patch("mindroom.orchestrator._stop_entities"),
+        patch("mindroom.orchestrator._create_temp_user") as mock_create_temp_user,
         patch.object(MultiAgentOrchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
     ):
         # --- existing orchestrator with one agent running ---
@@ -292,7 +292,7 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
     """Test that stop() cancels all sync tasks."""
-    with patch("mindroom.bot._cancel_sync_task") as mock_cancel:
+    with patch("mindroom.orchestrator._cancel_sync_task") as mock_cancel:
         orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
 
         # Track which tasks are cancelled

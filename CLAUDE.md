@@ -15,7 +15,7 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 
 ### Core MindRoom (`src/mindroom/`)
 
-**MultiAgentOrchestrator** (`bot.py`) is the heart of the system - it boots every configured entity (router, agents, teams), provisions Matrix users, and keeps sync loops alive with hot-reload support when `config.yaml` changes.
+**MultiAgentOrchestrator** (`orchestrator.py`) is the heart of the system - it boots every configured entity (router, agents, teams), provisions Matrix users, and keeps sync loops alive with hot-reload support when `config.yaml` changes.
 
 **Entity types**:
 - `router`: Built-in traffic director that greets rooms and decides which agent should answer
@@ -25,7 +25,8 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 **Key modules**:
 | Module | Purpose |
 |--------|---------|
-| `bot.py` | MultiAgentOrchestrator - boots agents, manages sync loops, hot-reload |
+| `orchestrator.py` | MultiAgentOrchestrator - boots agents, manages sync loops, hot-reload |
+| `bot.py` | AgentBot and TeamBot runtime for Matrix event handling, responses, and room behavior |
 | `agents.py` | Agent creation and configuration |
 | `config/` | Pydantic models for YAML config parsing (root model in `config/main.py`) |
 | `routing.py` | Intelligent agent selection when no agent is mentioned |

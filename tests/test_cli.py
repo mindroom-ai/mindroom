@@ -8,10 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import MultiAgentOrchestrator
 from mindroom.config.main import Config
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, register_user
+from mindroom.orchestrator import MultiAgentOrchestrator
 
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
