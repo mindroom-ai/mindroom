@@ -221,7 +221,12 @@ class AttachmentTools(Toolkit):
             return attachment_tool_payload("error", message="attachments cannot be empty.")
 
         effective_room_id = room_id or context.room_id
-        effective_thread_id = context.thread_id if thread_id is None else thread_id
+        if thread_id is not None:
+            effective_thread_id = thread_id
+        elif effective_room_id == context.room_id:
+            effective_thread_id = context.thread_id
+        else:
+            effective_thread_id = None
         attachment_event_ids, send_error = await send_attachment_paths(
             context,
             room_id=effective_room_id,

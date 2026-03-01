@@ -130,6 +130,41 @@ async def test_attachments_tool_requires_context() -> None:
     assert "context" in payload["message"]
 
 
+@pytest.mark.asyncio
+async def test_attachments_tool_cross_room_send_does_not_inherit_source_thread(tmp_path: Path) -> None:
+    """Sending to a different room without explicit thread_id should not inherit source thread."""
+    tool = AttachmentTools()
+    sample_file = tmp_path / "upload.txt"
+    sample_file.write_text("payload", encoding="utf-8")
+    attachment = register_local_attachment(
+        tmp_path,
+        sample_file,
+        kind="file",
+        attachment_id="att_cross",
+    )
+    assert attachment is not None
+
+    ctx = _tool_context(tmp_path, attachment_ids=("att_cross",))
+    assert ctx.thread_id is not None  # context has a thread
+
+    with (
+        attachment_tool_context(ctx),
+        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
+    ):
+        payload = json.loads(
+            await tool.send_attachments(
+                attachments=["att_cross"],
+                room_id="!other:localhost",  # different room
+                # thread_id intentionally omitted
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    mocked.assert_awaited_once()
+    call_kwargs = mocked.await_args.kwargs
+    assert call_kwargs["thread_id"] is None  # must NOT inherit source thread
+
+
 def test_attachment_context_none_temporarily_clears_nested_scope(tmp_path: Path) -> None:
     """attachment_tool_context(None) should clear and then restore an outer context."""
     ctx = _tool_context(tmp_path, attachment_ids=("att_upload",))
