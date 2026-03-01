@@ -707,9 +707,6 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
-        bot._build_scheduling_tool_context = MagicMock(return_value=None)
-        bot._build_openclaw_context = MagicMock(return_value=None)
-        bot._build_matrix_message_tool_context = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response")
 
         with (
@@ -760,9 +757,6 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
-        bot._build_scheduling_tool_context = MagicMock(return_value=None)
-        bot._build_openclaw_context = MagicMock(return_value=None)
-        bot._build_matrix_message_tool_context = MagicMock(return_value=None)
         bot._handle_interactive_question = AsyncMock()
 
         with (
@@ -812,8 +806,6 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
-        bot._build_scheduling_tool_context = MagicMock(return_value=None)
-        bot._build_openclaw_context = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response")
 
         async def fake_ai_response(*_args: object, **kwargs: object) -> str:
@@ -880,8 +872,6 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
-        bot._build_scheduling_tool_context = MagicMock(return_value=None)
-        bot._build_openclaw_context = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response")
 
         with (
@@ -922,12 +912,12 @@ class TestAgentBot:
         # Should not send any response
         bot.client.room_send.assert_not_called()
 
-    def test_build_scheduling_tool_context_uses_active_client_when_room_cached(
+    def test_build_tool_runtime_context_populates_room_when_cached(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Scheduler context should use the active bot client when room cache is present."""
+        """Runtime context should include the room object when the client cache has it."""
         config = Config(
             agents={
                 "calculator": AgentConfig(
@@ -943,7 +933,7 @@ class TestAgentBot:
         bot.client = MagicMock(rooms={room_id: local_room})
         bot.orchestrator = MagicMock()
 
-        context = bot._build_scheduling_tool_context(
+        context = bot._build_tool_runtime_context(
             room_id=room_id,
             thread_id="$thread",
             reply_to_event_id="$event",
@@ -956,12 +946,12 @@ class TestAgentBot:
         assert context.thread_id == "$thread"
         assert context.requester_id == "@user:localhost"
 
-    def test_build_scheduling_tool_context_returns_none_when_room_not_cached(
+    def test_build_tool_runtime_context_room_none_when_not_cached(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Scheduler context should be skipped when active client has no room cache entry."""
+        """Runtime context should have room=None when the client has no cache entry."""
         config = Config(
             agents={
                 "calculator": AgentConfig(
@@ -975,21 +965,22 @@ class TestAgentBot:
         bot.client = MagicMock(rooms={})
         bot.orchestrator = MagicMock()
 
-        context = bot._build_scheduling_tool_context(
+        context = bot._build_tool_runtime_context(
             room_id=room_id,
             thread_id="$thread",
             reply_to_event_id="$event",
             user_id="@user:localhost",
         )
 
-        assert context is None
+        assert context is not None
+        assert context.room is None
 
-    def test_build_scheduling_tool_context_returns_none_when_client_unavailable(
+    def test_build_tool_runtime_context_returns_none_when_client_unavailable(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Scheduler context should be skipped when no Matrix client is available."""
+        """Runtime context should be None when no Matrix client is available."""
         config = Config(
             agents={
                 "calculator": AgentConfig(
@@ -1001,7 +992,7 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = None
 
-        context = bot._build_scheduling_tool_context(
+        context = bot._build_tool_runtime_context(
             room_id="!test:localhost",
             thread_id="$thread",
             reply_to_event_id="$event",

@@ -57,20 +57,17 @@ from .matrix.users import (
     create_agent_user,
     login_agent_user,
 )
-from .matrix_tool_context import MatrixMessageToolContext
 from .memory import store_conversation_memory
 from .memory.auto_flush import (
     mark_auto_flush_dirty_session,
     reprioritize_auto_flush_sessions,
 )
-from .openclaw_context import OpenClawToolContext
 from .response_tracker import ResponseTracker
 from .room_cleanup import cleanup_all_orphaned_bots
 from .routing import suggest_agent_for_message
 from .scheduling import (
     restore_scheduled_tasks,
 )
-from .scheduling_context import SchedulingToolContext
 from .stop import StopManager
 from .streaming import (
     IN_PROGRESS_MARKER,
@@ -1159,40 +1156,6 @@ class AgentBot:
             has_non_agent_mentions=has_non_agent_mentions,
         )
 
-    def _build_scheduling_tool_context(
-        self,
-        room_id: str,
-        thread_id: str | None,
-        reply_to_event_id: str,
-        user_id: str | None,
-    ) -> SchedulingToolContext | None:
-        """Build runtime context for scheduler tool calls during response generation."""
-        context = AgentBot._build_tool_runtime_context(
-            self,
-            room_id=room_id,
-            thread_id=thread_id,
-            reply_to_event_id=reply_to_event_id,
-            user_id=user_id,
-        )
-        if context is None:
-            self.logger.warning("No Matrix client available for scheduling tool context")
-            return None
-        if context.room is None:
-            self.logger.warning(
-                "Skipping scheduler tool context because room is not cached",
-                room_id=room_id,
-            )
-            return None
-
-        return SchedulingToolContext(
-            client=context.client,
-            room=context.room,
-            room_id=context.room_id,
-            thread_id=context.resolved_thread_id,
-            requester_id=context.requester_id,
-            config=context.config,
-        )
-
     def _cached_room(self, room_id: str) -> nio.MatrixRoom | None:
         """Return room from client cache when available."""
         client = self.client
@@ -1219,72 +1182,13 @@ class AgentBot:
             agent_name=agent_name or self.agent_name,
             room_id=room_id,
             thread_id=thread_id,
-            resolved_thread_id=AgentBot._resolve_reply_thread_id(self, thread_id, reply_to_event_id),
+            resolved_thread_id=self._resolve_reply_thread_id(thread_id, reply_to_event_id),
             requester_id=user_id or self.matrix_id.full_id,
             client=self.client,
             config=self.config,
             room=self._cached_room(room_id),
             reply_to_event_id=reply_to_event_id,
             storage_path=self.storage_path,
-        )
-
-    def _build_openclaw_context(
-        self,
-        room_id: str,
-        thread_id: str | None,
-        user_id: str | None,
-        *,
-        agent_name: str | None = None,
-    ) -> OpenClawToolContext | None:
-        """Build runtime context for OpenClaw-compatible tool calls."""
-        context = AgentBot._build_tool_runtime_context(
-            self,
-            room_id=room_id,
-            thread_id=thread_id,
-            reply_to_event_id=None,
-            user_id=user_id,
-            agent_name=agent_name,
-        )
-        if context is None:
-            return None
-        return OpenClawToolContext(
-            agent_name=context.agent_name,
-            room_id=context.room_id,
-            thread_id=context.thread_id,
-            requester_id=context.requester_id,
-            client=context.client,
-            config=context.config,
-            storage_path=context.storage_path or self.storage_path,
-        )
-
-    def _build_matrix_message_tool_context(
-        self,
-        room_id: str,
-        thread_id: str | None,
-        reply_to_event_id: str | None,
-        user_id: str | None,
-        *,
-        agent_name: str | None = None,
-    ) -> MatrixMessageToolContext | None:
-        """Build runtime context for native Matrix messaging tool calls."""
-        context = AgentBot._build_tool_runtime_context(
-            self,
-            room_id=room_id,
-            thread_id=thread_id,
-            reply_to_event_id=reply_to_event_id,
-            user_id=user_id,
-            agent_name=agent_name,
-        )
-        if context is None:
-            return None
-        return MatrixMessageToolContext(
-            agent_name=context.agent_name,
-            room_id=context.room_id,
-            thread_id=context.resolved_thread_id,
-            requester_id=context.requester_id,
-            client=context.client,
-            config=context.config,
-            reply_to_event_id=context.reply_to_event_id,
         )
 
     def _agent_has_matrix_messaging_tool(self, agent_name: str) -> bool:
@@ -1367,8 +1271,7 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             include_context=include_matrix_prompt_context,
         )
-        tool_context = AgentBot._build_tool_runtime_context(
-            self,
+        tool_context = self._build_tool_runtime_context(
             room_id=room_id,
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
@@ -1600,8 +1503,7 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             include_context=self._agent_has_matrix_messaging_tool(self.agent_name),
         )
-        tool_context = AgentBot._build_tool_runtime_context(
-            self,
+        tool_context = self._build_tool_runtime_context(
             room_id=room_id,
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
@@ -1711,8 +1613,7 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             include_context=self._agent_has_matrix_messaging_tool(agent_name),
         )
-        tool_context = AgentBot._build_tool_runtime_context(
-            self,
+        tool_context = self._build_tool_runtime_context(
             room_id=room_id,
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
@@ -1862,8 +1763,7 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             include_context=self._agent_has_matrix_messaging_tool(self.agent_name),
         )
-        tool_context = AgentBot._build_tool_runtime_context(
-            self,
+        tool_context = self._build_tool_runtime_context(
             room_id=room_id,
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,

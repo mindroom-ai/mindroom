@@ -244,6 +244,25 @@ class MatrixMessageTools(Toolkit):
             messages=resolved,
         )
 
+    @staticmethod
+    def _safe_thread_id(
+        context: MatrixMessageToolContext,
+        *,
+        room_id: str,
+        thread_id: str | None,
+    ) -> str | None:
+        """Return thread_id only when it belongs to the target room.
+
+        When the caller targets a different room, the current context's
+        thread_id is invalid there, so we only fall back to it for the
+        same room.
+        """
+        if thread_id is not None:
+            return thread_id
+        if room_id == context.room_id:
+            return context.thread_id
+        return None
+
     def _message_context(
         self,
         context: MatrixMessageToolContext,
@@ -253,7 +272,11 @@ class MatrixMessageTools(Toolkit):
         normalized_action: str,
     ) -> str:
         resolved_room_id = room_id or context.room_id
-        resolved_thread_id = thread_id or context.thread_id
+        resolved_thread_id = self._safe_thread_id(
+            context,
+            room_id=resolved_room_id,
+            thread_id=thread_id,
+        )
         if room_id and not self._room_access_allowed(context, resolved_room_id):
             return self._payload(
                 "error",
@@ -282,10 +305,11 @@ class MatrixMessageTools(Toolkit):
         thread_id: str | None,
         limit: int | None,
     ) -> str:
+        safe_thread = self._safe_thread_id(context, room_id=room_id, thread_id=thread_id)
         if action in {"send", "thread-reply", "reply"}:
             effective_thread_id = thread_id
             if action in {"thread-reply", "reply"} and effective_thread_id is None:
-                effective_thread_id = context.thread_id
+                effective_thread_id = safe_thread
             return await self._message_send_or_reply(
                 context,
                 action=action,
@@ -304,7 +328,7 @@ class MatrixMessageTools(Toolkit):
             return await self._message_read(
                 context,
                 room_id=room_id,
-                effective_thread_id=thread_id or context.thread_id,
+                effective_thread_id=safe_thread,
                 read_limit=self._read_limit(limit),
             )
         return self._payload(

@@ -276,3 +276,62 @@ async def test_matrix_message_context_returns_runtime_metadata() -> None:
     assert payload["room_id"] == ctx.room_id
     assert payload["thread_id"] == "$thread-root:localhost"
     assert payload["reply_to_event_id"] == "$event:localhost"
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_cross_room_reply_does_not_inherit_context_thread() -> None:
+    """Authorized cross-room reply should not inherit the origin room's thread."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(thread_id="$origin-thread:localhost")
+
+    with (
+        patch("mindroom.custom_tools.matrix_message.is_authorized_sender", return_value=True),
+        matrix_message_tool_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(action="reply", message="hello", room_id="!other:localhost"),
+        )
+
+    assert payload["status"] == "error"
+    assert "thread_id is required" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_cross_room_read_defaults_to_room_level() -> None:
+    """Authorized cross-room read should not use the origin room's thread."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(thread_id="$origin-thread:localhost")
+    response = MagicMock(spec=nio.RoomMessagesResponse)
+    response.chunk = []
+    ctx.client.room_messages.return_value = response
+
+    with (
+        patch("mindroom.custom_tools.matrix_message.is_authorized_sender", return_value=True),
+        matrix_message_tool_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(action="read", room_id="!other:localhost"),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["action"] == "read"
+    assert "thread_id" not in payload
+    ctx.client.room_messages.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_cross_room_context_does_not_leak_thread() -> None:
+    """Authorized cross-room context should not return the origin room's thread."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(thread_id="$origin-thread:localhost", reply_to_event_id="$evt:localhost")
+
+    with (
+        patch("mindroom.custom_tools.matrix_message.is_authorized_sender", return_value=True),
+        matrix_message_tool_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(action="context", room_id="!other:localhost"),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["thread_id"] is None
