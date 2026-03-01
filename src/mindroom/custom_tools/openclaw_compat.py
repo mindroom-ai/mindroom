@@ -24,7 +24,6 @@ from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import fetch_thread_history, send_message
 from mindroom.matrix.mentions import format_message_with_mentions
-from mindroom.matrix_tool_context import MatrixMessageToolContext, matrix_message_tool_context
 from mindroom.openclaw_context import OpenClawToolContext, get_openclaw_tool_context
 from mindroom.thread_utils import create_session_id
 from mindroom.tools_metadata import get_tool_by_name
@@ -575,24 +574,6 @@ class OpenClawCompatTools(Toolkit):
         )
         return await send_message(context.client, room_id, content)
 
-    @staticmethod
-    def _to_matrix_message_context(context: OpenClawToolContext) -> MatrixMessageToolContext:
-        """Convert OpenClaw context to native Matrix messaging context.
-
-        ``reply_to_event_id`` is not available in ``OpenClawToolContext``, so the
-        compat wrapper's ``context`` action will not surface it.  Native agents
-        should use ``MatrixMessageTools`` directly to get full metadata.
-        """
-        return MatrixMessageToolContext(
-            agent_name=context.agent_name,
-            room_id=context.room_id,
-            thread_id=context.thread_id,
-            requester_id=context.requester_id,
-            client=context.client,
-            config=context.config,
-            reply_to_event_id=None,
-        )
-
     async def agents_list(self) -> str:
         """List agent ids available for `sessions_spawn` targeting."""
         context = get_openclaw_tool_context()
@@ -1019,16 +1000,14 @@ class OpenClawCompatTools(Toolkit):
         if context is None:
             return self._context_error("message")
 
-        matrix_context = self._to_matrix_message_context(context)
-        with matrix_message_tool_context(matrix_context):
-            native_payload_raw = await self._matrix_message.matrix_message(
-                action=action,
-                message=message,
-                room_id=channel,
-                target=target,
-                thread_id=thread_id,
-                limit=limit,
-            )
+        native_payload_raw = await self._matrix_message.matrix_message(
+            action=action,
+            message=message,
+            room_id=channel,
+            target=target,
+            thread_id=thread_id,
+            limit=limit,
+        )
 
         try:
             native_payload = json.loads(native_payload_raw)
