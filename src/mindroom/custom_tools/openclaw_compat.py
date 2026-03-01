@@ -19,7 +19,6 @@ from agno.tools.duckduckgo import DuckDuckGoTools
 from agno.tools.website import WebsiteTools
 
 from mindroom.custom_tools.coding import CodingTools
-from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import fetch_thread_history, send_message
@@ -63,7 +62,6 @@ class OpenClawCompatTools(Toolkit):
                 self.sessions_send,
                 self.sessions_spawn,
                 self.subagents,
-                self.message,
                 self.cron,
                 self.web_search,
                 self.web_fetch,
@@ -84,7 +82,6 @@ class OpenClawCompatTools(Toolkit):
         self._shell = get_tool_by_name("shell")
         self._browser_tool: Toolkit | None = None
         self._coding = CodingTools()
-        self._matrix_message = MatrixMessageTools()
 
     @staticmethod
     def _payload(tool_name: str, status: str, **kwargs: object) -> str:
@@ -985,40 +982,6 @@ class OpenClawCompatTools(Toolkit):
             action=action,
             message="Unsupported action. Use list, kill, or steer.",
         )
-
-    async def message(
-        self,
-        action: str = "send",
-        message: str | None = None,
-        channel: str | None = None,
-        target: str | None = None,
-        thread_id: str | None = None,
-        limit: int | None = None,
-    ) -> str:
-        """Compatibility wrapper over the native matrix_message tool."""
-        context = get_openclaw_tool_context()
-        if context is None:
-            return self._context_error("message")
-
-        native_payload_raw = await self._matrix_message.matrix_message(
-            action=action,
-            message=message,
-            room_id=channel,
-            target=target,
-            thread_id=thread_id,
-            limit=limit,
-        )
-
-        try:
-            native_payload = json.loads(native_payload_raw)
-        except json.JSONDecodeError:
-            return native_payload_raw
-
-        if not isinstance(native_payload, dict):
-            return native_payload_raw
-
-        native_payload["tool"] = "message"
-        return json.dumps(native_payload, sort_keys=True)
 
     async def cron(self, request: str) -> str:
         """Schedule a task using the scheduler tool."""

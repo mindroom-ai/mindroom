@@ -1199,7 +1199,7 @@ class AgentBot:
             return False
         if not isinstance(tool_names, list | tuple | set):
             return False
-        return "matrix_message" in tool_names or "openclaw_compat" in tool_names
+        return "matrix_message" in tool_names
 
     def _append_matrix_prompt_context(
         self,
@@ -1223,7 +1223,7 @@ class AgentBot:
                 f"room_id: {room_id}",
                 f"thread_id: {effective_thread_id or 'none'}",
                 f"reply_to_event_id: {reply_to_event_id or 'none'}",
-                "Use these IDs when calling matrix_message or message tools.",
+                "Use these IDs when calling matrix_message.",
             ),
         )
         return f"{prompt.rstrip()}\n\n{metadata_block}"

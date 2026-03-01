@@ -782,6 +782,26 @@ class TestAgentBot:
         assert "thread_id: $event456" in model_prompt
         assert "reply_to_event_id: $event456" in model_prompt
 
+    def test_agent_has_matrix_messaging_tool_when_openclaw_compat_enabled(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """openclaw_compat should imply matrix_message availability without explicit config."""
+        config = Config(
+            agents={
+                "calculator": AgentConfig(
+                    display_name="CalculatorAgent",
+                    rooms=["!test:localhost"],
+                    tools=["openclaw_compat"],
+                    include_default_tools=False,
+                ),
+            },
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+
+        assert bot._agent_has_matrix_messaging_tool("calculator") is True
+
     @pytest.mark.asyncio
     async def test_non_streaming_hidden_tool_calls_do_not_send_tool_trace(
         self,

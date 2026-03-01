@@ -1990,12 +1990,11 @@ The `openclaw_compat` tool provides OpenClaw-named aliases so prompts and skills
 | `exec`, `process`          | `ShellTools`                                  |
 | `web_search`, `web_fetch`  | `DuckDuckGoTools`, `WebsiteTools`             |
 | `cron`                     | `SchedulerTools`                              |
-| `message`                  | Native `matrix_message` compatibility wrapper |
 | `sessions_*`               | OpenClaw-compatible session orchestration     |
 | `subagents`, `agents_list` | Agent registry lookup                         |
 | `browser`                  | `BrowserTools` (Playwright, host target only) |
 
-Memory is not a separate OpenClaw subsystem in MindRoom. It uses the normal MindRoom memory backend.
+Memory is not a separate OpenClaw subsystem in MindRoom. It uses the normal MindRoom memory backend. When `openclaw_compat` is enabled for an agent, `matrix_message` is added automatically as the messaging tool.
 
 ## Drop-in config
 
