@@ -731,6 +731,54 @@ class TestAgentBot:
         assert "reply_to_event_id: $event123" in model_prompt
 
     @pytest.mark.asyncio
+    async def test_process_and_respond_includes_matrix_metadata_when_openclaw_compat_enabled(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """openclaw_compat agents should receive room/thread/event ids in the model prompt."""
+
+        @asynccontextmanager
+        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
+            yield
+
+        config = Config(
+            agents={
+                "calculator": AgentConfig(
+                    display_name="CalculatorAgent",
+                    rooms=["!test:localhost"],
+                    tools=["openclaw_compat"],
+                    include_default_tools=False,
+                ),
+            },
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot.client = AsyncMock()
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._send_response = AsyncMock(return_value="$response")
+
+        with (
+            patch("mindroom.bot.typing_indicator", noop_typing_indicator),
+            patch("mindroom.bot.ai_response", new_callable=AsyncMock) as mock_ai,
+        ):
+            mock_ai.return_value = "Handled"
+            event_id = await bot._process_and_respond(
+                room_id="!test:localhost",
+                prompt="Please send an update",
+                reply_to_event_id="$event123",
+                thread_id=None,
+                thread_history=[],
+                user_id="@user:localhost",
+            )
+
+        assert event_id == "$response"
+        model_prompt = mock_ai.call_args.kwargs["prompt"]
+        assert "[Matrix metadata for tool calls]" in model_prompt
+        assert "room_id: !test:localhost" in model_prompt
+        assert "thread_id: $event123" in model_prompt
+        assert "reply_to_event_id: $event123" in model_prompt
+
+    @pytest.mark.asyncio
     async def test_process_and_respond_streaming_includes_matrix_metadata_when_tool_enabled(
         self,
         mock_agent_user: AgentMatrixUser,

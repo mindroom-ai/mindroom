@@ -12,7 +12,7 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
-from mindroom.matrix_tool_context import MatrixMessageToolContext, matrix_message_tool_context
+from mindroom.tool_runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tools_metadata import TOOL_METADATA, get_tool_by_name
 
 
@@ -26,19 +26,22 @@ def _make_context(
     room_id: str = "!room:localhost",
     thread_id: str | None = "$thread:localhost",
     reply_to_event_id: str | None = "$reply:localhost",
-) -> MatrixMessageToolContext:
+) -> ToolRuntimeContext:
     config = Config(agents={"general": AgentConfig(display_name="General Agent")})
     client = AsyncMock()
     client.room_send = AsyncMock()
     client.room_messages = AsyncMock()
-    return MatrixMessageToolContext(
+    return ToolRuntimeContext(
         agent_name="general",
         room_id=room_id,
         thread_id=thread_id,
+        resolved_thread_id=thread_id,
         requester_id="@user:localhost",
         client=client,
         config=config,
+        room=None,
         reply_to_event_id=reply_to_event_id,
+        storage_path=None,
     )
 
 
@@ -65,7 +68,7 @@ async def test_matrix_message_send_defaults_to_room_level() -> None:
 
     with (
         patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
-        matrix_message_tool_context(ctx),
+        tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="send", message="hello"))
 
@@ -85,9 +88,28 @@ async def test_matrix_message_reply_defaults_to_context_thread() -> None:
 
     with (
         patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
-        matrix_message_tool_context(ctx),
+        tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="reply", message="hello"))
+
+    assert payload["status"] == "ok"
+    assert payload["thread_id"] == "$ctx-thread:localhost"
+    sent_content = mock_send.await_args.args[2]
+    relates_to = sent_content.get("m.relates_to", {})
+    assert relates_to.get("event_id") == "$ctx-thread:localhost"
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_thread_reply_defaults_to_context_thread() -> None:
+    """thread-reply action should use current runtime thread when thread_id is omitted."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(thread_id="$ctx-thread:localhost")
+
+    with (
+        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_message(action="thread-reply", message="hello"))
 
     assert payload["status"] == "ok"
     assert payload["thread_id"] == "$ctx-thread:localhost"
@@ -105,7 +127,7 @@ async def test_matrix_message_react_happy_path() -> None:
     response.event_id = "$react"
     ctx.client.room_send.return_value = response
 
-    with matrix_message_tool_context(ctx):
+    with tool_runtime_context(ctx):
         payload = json.loads(await tool.matrix_message(action="react", message="🔥", target="$target"))
 
     assert payload["status"] == "ok"
@@ -136,7 +158,7 @@ async def test_matrix_message_read_thread_enforces_max_limit() -> None:
             "mindroom.custom_tools.matrix_message.fetch_thread_history",
             new=AsyncMock(return_value=thread_messages),
         ) as mock_fetch,
-        matrix_message_tool_context(ctx),
+        tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="read", limit=999))
 
@@ -174,7 +196,7 @@ async def test_matrix_message_read_room_happy_path() -> None:
             "mindroom.custom_tools.matrix_message.extract_and_resolve_message",
             new=AsyncMock(return_value={"event_id": "$evt", "body": "hello"}),
         ) as mock_extract,
-        matrix_message_tool_context(ctx),
+        tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="read", limit=5))
 
@@ -196,7 +218,7 @@ async def test_matrix_message_send_validates_non_empty_message() -> None:
     tool = MatrixMessageTools()
     ctx = _make_context()
 
-    with matrix_message_tool_context(ctx):
+    with tool_runtime_context(ctx):
         payload = json.loads(await tool.matrix_message(action="send", message="  "))
 
     assert payload["status"] == "error"
@@ -209,7 +231,7 @@ async def test_matrix_message_reply_requires_thread_when_context_has_none() -> N
     tool = MatrixMessageTools()
     ctx = _make_context(thread_id=None)
 
-    with matrix_message_tool_context(ctx):
+    with tool_runtime_context(ctx):
         payload = json.loads(await tool.matrix_message(action="reply", message="hello"))
 
     assert payload["status"] == "error"
@@ -222,7 +244,7 @@ async def test_matrix_message_react_requires_target() -> None:
     tool = MatrixMessageTools()
     ctx = _make_context()
 
-    with matrix_message_tool_context(ctx):
+    with tool_runtime_context(ctx):
         payload = json.loads(await tool.matrix_message(action="react", message="👍"))
 
     assert payload["status"] == "error"
@@ -235,11 +257,26 @@ async def test_matrix_message_explicit_room_target_requires_authorization() -> N
     tool = MatrixMessageTools()
     ctx = _make_context()
 
-    with matrix_message_tool_context(ctx):
+    with tool_runtime_context(ctx):
         payload = json.loads(await tool.matrix_message(action="send", message="hello", room_id="!other:localhost"))
 
     assert payload["status"] == "error"
     assert "Not authorized" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_rejects_unsupported_action() -> None:
+    """Unsupported actions should return a clear validation error."""
+    tool = MatrixMessageTools()
+    ctx = _make_context()
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_message(action="delete", message="hello"))
+
+    assert payload["status"] == "error"
+    assert payload["action"] == "delete"
+    assert "Unsupported action" in payload["message"]
+    assert "reply" in payload["message"]
 
 
 @pytest.mark.asyncio
@@ -252,7 +289,7 @@ async def test_matrix_message_rate_limit_guardrail() -> None:
         patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")),
         patch.object(MatrixMessageTools, "_RATE_LIMIT_MAX_ACTIONS", 1),
         patch.object(MatrixMessageTools, "_RATE_LIMIT_WINDOW_SECONDS", 60.0),
-        matrix_message_tool_context(ctx),
+        tool_runtime_context(ctx),
     ):
         first = json.loads(await tool.matrix_message(action="send", message="first"))
         second = json.loads(await tool.matrix_message(action="send", message="second"))
@@ -268,7 +305,7 @@ async def test_matrix_message_context_returns_runtime_metadata() -> None:
     tool = MatrixMessageTools()
     ctx = _make_context(thread_id="$thread-root:localhost", reply_to_event_id="$event:localhost")
 
-    with matrix_message_tool_context(ctx):
+    with tool_runtime_context(ctx):
         payload = json.loads(await tool.matrix_message(action="context"))
 
     assert payload["status"] == "ok"
@@ -286,7 +323,7 @@ async def test_matrix_message_cross_room_reply_does_not_inherit_context_thread()
 
     with (
         patch("mindroom.custom_tools.matrix_message.is_authorized_sender", return_value=True),
-        matrix_message_tool_context(ctx),
+        tool_runtime_context(ctx),
     ):
         payload = json.loads(
             await tool.matrix_message(action="reply", message="hello", room_id="!other:localhost"),
@@ -307,7 +344,7 @@ async def test_matrix_message_cross_room_read_defaults_to_room_level() -> None:
 
     with (
         patch("mindroom.custom_tools.matrix_message.is_authorized_sender", return_value=True),
-        matrix_message_tool_context(ctx),
+        tool_runtime_context(ctx),
     ):
         payload = json.loads(
             await tool.matrix_message(action="read", room_id="!other:localhost"),
@@ -327,7 +364,7 @@ async def test_matrix_message_cross_room_context_does_not_leak_thread() -> None:
 
     with (
         patch("mindroom.custom_tools.matrix_message.is_authorized_sender", return_value=True),
-        matrix_message_tool_context(ctx),
+        tool_runtime_context(ctx),
     ):
         payload = json.loads(
             await tool.matrix_message(action="context", room_id="!other:localhost"),

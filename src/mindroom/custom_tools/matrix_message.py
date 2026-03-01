@@ -15,7 +15,7 @@ from mindroom.authorization import is_authorized_sender
 from mindroom.matrix.client import fetch_thread_history, get_latest_thread_event_id_if_needed, send_message
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_content import extract_and_resolve_message
-from mindroom.matrix_tool_context import MatrixMessageToolContext, get_matrix_message_tool_context
+from mindroom.tool_runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 
 class MatrixMessageTools(Toolkit):
@@ -57,7 +57,7 @@ class MatrixMessageTools(Toolkit):
         return max(1, min(limit, cls._MAX_READ_LIMIT))
 
     @staticmethod
-    def _room_access_allowed(context: MatrixMessageToolContext, room_id: str) -> bool:
+    def _room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool:
         if room_id == context.room_id:
             return True
         room_alias = room_id if room_id.startswith("#") else None
@@ -69,7 +69,7 @@ class MatrixMessageTools(Toolkit):
         )
 
     @classmethod
-    def _check_rate_limit(cls, context: MatrixMessageToolContext, room_id: str) -> str | None:
+    def _check_rate_limit(cls, context: ToolRuntimeContext, room_id: str) -> str | None:
         key = (context.agent_name, context.requester_id, room_id)
         now = time.monotonic()
         cutoff = now - cls._RATE_LIMIT_WINDOW_SECONDS
@@ -101,7 +101,7 @@ class MatrixMessageTools(Toolkit):
 
     async def _send_matrix_text(
         self,
-        context: MatrixMessageToolContext,
+        context: ToolRuntimeContext,
         *,
         room_id: str,
         text: str,
@@ -123,7 +123,7 @@ class MatrixMessageTools(Toolkit):
 
     async def _message_send_or_reply(
         self,
-        context: MatrixMessageToolContext,
+        context: ToolRuntimeContext,
         *,
         action: str,
         message: str | None,
@@ -158,7 +158,7 @@ class MatrixMessageTools(Toolkit):
 
     async def _message_react(
         self,
-        context: MatrixMessageToolContext,
+        context: ToolRuntimeContext,
         *,
         message: str | None,
         room_id: str,
@@ -200,7 +200,7 @@ class MatrixMessageTools(Toolkit):
 
     async def _message_read(
         self,
-        context: MatrixMessageToolContext,
+        context: ToolRuntimeContext,
         *,
         room_id: str,
         effective_thread_id: str | None,
@@ -246,7 +246,7 @@ class MatrixMessageTools(Toolkit):
 
     @staticmethod
     def _safe_thread_id(
-        context: MatrixMessageToolContext,
+        context: ToolRuntimeContext,
         *,
         room_id: str,
         thread_id: str | None,
@@ -260,12 +260,12 @@ class MatrixMessageTools(Toolkit):
         if thread_id is not None:
             return thread_id
         if room_id == context.room_id:
-            return context.thread_id
+            return context.resolved_thread_id
         return None
 
     def _message_context(
         self,
-        context: MatrixMessageToolContext,
+        context: ToolRuntimeContext,
         *,
         room_id: str | None,
         thread_id: str | None,
@@ -297,7 +297,7 @@ class MatrixMessageTools(Toolkit):
 
     async def _dispatch_action(
         self,
-        context: MatrixMessageToolContext,
+        context: ToolRuntimeContext,
         *,
         action: str,
         message: str | None,
@@ -306,11 +306,16 @@ class MatrixMessageTools(Toolkit):
         thread_id: str | None,
         limit: int | None,
     ) -> str:
-        safe_thread = self._safe_thread_id(context, room_id=room_id, thread_id=thread_id)
-        if action in {"send", "thread-reply", "reply"}:
-            effective_thread_id = thread_id
-            if action in {"thread-reply", "reply"} and effective_thread_id is None:
-                effective_thread_id = safe_thread
+        if action == "send":
+            return await self._message_send_or_reply(
+                context,
+                action=action,
+                message=message,
+                room_id=room_id,
+                effective_thread_id=thread_id,
+            )
+        if action in {"thread-reply", "reply"}:
+            effective_thread_id = self._safe_thread_id(context, room_id=room_id, thread_id=thread_id)
             return await self._message_send_or_reply(
                 context,
                 action=action,
@@ -326,6 +331,7 @@ class MatrixMessageTools(Toolkit):
                 target=target,
             )
         if action == "read":
+            safe_thread = self._safe_thread_id(context, room_id=room_id, thread_id=thread_id)
             return await self._message_read(
                 context,
                 room_id=room_id,
@@ -357,7 +363,7 @@ class MatrixMessageTools(Toolkit):
         - context: Return runtime room/thread/event metadata for tool targeting.
 
         """
-        context = get_matrix_message_tool_context()
+        context = get_tool_runtime_context()
         if context is None:
             return self._context_error()
 

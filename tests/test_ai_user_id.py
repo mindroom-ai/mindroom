@@ -15,8 +15,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.openclaw_context import get_openclaw_tool_context
-from mindroom.tool_runtime_context import ToolRuntimeContext
+from mindroom.tool_runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -58,7 +57,7 @@ class TestUserIdPassthrough:
         with patch("mindroom.bot.ai_response") as mock_ai:
 
             async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
-                context = get_openclaw_tool_context()
+                context = get_tool_runtime_context()
                 assert context is not None
                 assert context.room_id == "!test:localhost"
                 assert context.thread_id is None
@@ -114,7 +113,7 @@ class TestUserIdPassthrough:
         with patch("mindroom.bot.stream_agent_response") as mock_stream:
 
             def fake_stream_agent_response(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
-                context = get_openclaw_tool_context()
+                context = get_tool_runtime_context()
                 assert context is not None
                 assert context.room_id == "!test:localhost"
                 assert context.thread_id is None
