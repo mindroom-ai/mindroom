@@ -9,21 +9,24 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.attachments import register_local_attachment
-from mindroom.attachments_context import AttachmentToolContext, attachment_tool_context, get_attachment_tool_context
 from mindroom.custom_tools.attachments import AttachmentTools
+from mindroom.tool_runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _tool_context(tmp_path: Path, *, attachment_ids: tuple[str, ...] = ()) -> AttachmentToolContext:
+def _tool_context(tmp_path: Path, *, attachment_ids: tuple[str, ...] = ()) -> ToolRuntimeContext:
     client = MagicMock()
     client.rooms = {"!room:localhost": MagicMock()}
-    return AttachmentToolContext(
+    return ToolRuntimeContext(
+        agent_name="openclaw",
         room_id="!room:localhost",
         thread_id="$thread:localhost",
+        resolved_thread_id="$thread:localhost",
         requester_id="@user:localhost",
         client=client,
+        config=MagicMock(),
         storage_path=tmp_path,
         attachment_ids=attachment_ids,
     )
@@ -43,7 +46,7 @@ async def test_attachments_tool_lists_context_attachments(tmp_path: Path) -> Non
     )
     assert attachment is not None
 
-    with attachment_tool_context(_tool_context(tmp_path, attachment_ids=(attachment.attachment_id,))):
+    with tool_runtime_context(_tool_context(tmp_path, attachment_ids=(attachment.attachment_id,))):
         payload = json.loads(await tool.list_attachments())
 
     assert payload["status"] == "ok"
@@ -68,7 +71,7 @@ async def test_attachments_tool_sends_attachment_ids(tmp_path: Path) -> None:
     assert attachment is not None
 
     with (
-        attachment_tool_context(_tool_context(tmp_path, attachment_ids=("att_upload",))),
+        tool_runtime_context(_tool_context(tmp_path, attachment_ids=("att_upload",))),
         patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
     ):
         payload = json.loads(await tool.send_attachments(attachments=["att_upload"]))
@@ -88,7 +91,7 @@ async def test_attachments_tool_rejects_non_attachment_id_references(tmp_path: P
     sample_file.write_text("payload", encoding="utf-8")
 
     with (
-        attachment_tool_context(_tool_context(tmp_path)),
+        tool_runtime_context(_tool_context(tmp_path)),
         patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
     ):
         payload = json.loads(await tool.send_attachments(attachments=[str(sample_file)]))
@@ -105,7 +108,7 @@ async def test_attachments_tool_rejects_non_att_prefix_references(tmp_path: Path
     tool = AttachmentTools()
 
     with (
-        attachment_tool_context(_tool_context(tmp_path)),
+        tool_runtime_context(_tool_context(tmp_path)),
         patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
     ):
         payload = json.loads(await tool.send_attachments(attachments=["upload.txt"]))
@@ -120,7 +123,7 @@ async def test_attachments_tool_rejects_non_att_prefix_references(tmp_path: Path
 async def test_attachments_tool_requires_context() -> None:
     """Tool should return an explicit error when runtime context is unavailable."""
     tool = AttachmentTools()
-    with attachment_tool_context(None):
+    with tool_runtime_context(None):
         payload = json.loads(await tool.list_attachments())
 
     assert payload["status"] == "error"
@@ -148,7 +151,7 @@ async def test_attachments_tool_cross_room_send_does_not_inherit_source_thread(t
     ctx.client.rooms["!other:localhost"] = MagicMock()
 
     with (
-        attachment_tool_context(ctx),
+        tool_runtime_context(ctx),
         patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
     ):
         payload = json.loads(
@@ -183,7 +186,7 @@ async def test_attachments_tool_rejects_send_to_unjoined_room(tmp_path: Path) ->
     # !other:localhost is NOT in ctx.client.rooms
 
     with (
-        attachment_tool_context(ctx),
+        tool_runtime_context(ctx),
         patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
     ):
         payload = json.loads(
@@ -198,11 +201,11 @@ async def test_attachments_tool_rejects_send_to_unjoined_room(tmp_path: Path) ->
     mocked.assert_not_awaited()
 
 
-def test_attachment_context_none_temporarily_clears_nested_scope(tmp_path: Path) -> None:
-    """attachment_tool_context(None) should clear and then restore an outer context."""
+def test_tool_runtime_context_none_temporarily_clears_nested_scope(tmp_path: Path) -> None:
+    """tool_runtime_context(None) should clear and then restore an outer context."""
     ctx = _tool_context(tmp_path, attachment_ids=("att_upload",))
-    with attachment_tool_context(ctx):
-        assert get_attachment_tool_context() is ctx
-        with attachment_tool_context(None):
-            assert get_attachment_tool_context() is None
-        assert get_attachment_tool_context() is ctx
+    with tool_runtime_context(ctx):
+        assert get_tool_runtime_context() is ctx
+        with tool_runtime_context(None):
+            assert get_tool_runtime_context() is None
+        assert get_tool_runtime_context() is ctx

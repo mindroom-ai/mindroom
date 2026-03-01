@@ -1079,12 +1079,12 @@ class TestAgentBot:
 
         assert context is None
 
-    def test_build_attachment_tool_context_resolves_thread_root_from_reply_target(
+    def test_build_tool_runtime_context_sets_attachment_scope_and_thread_root(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Attachment tool context should use the effective outgoing thread root."""
+        """Tool runtime context should carry attachment scope and effective thread root."""
         config = Config(
             agents={
                 "calculator": AgentConfig(
@@ -1096,16 +1096,17 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = MagicMock()
 
-        context = bot._build_attachment_tool_context(
+        context = bot._build_tool_runtime_context(
             room_id="!test:localhost",
             thread_id=None,
-            user_id="@user:localhost",
             reply_to_event_id="$root_event",
+            user_id="@user:localhost",
             attachment_ids=["att_1"],
         )
 
         assert context is not None
-        assert context.thread_id == "$root_event"
+        assert context.thread_id is None
+        assert context.resolved_thread_id == "$root_event"
         assert context.attachment_ids == ("att_1",)
 
     @pytest.mark.asyncio

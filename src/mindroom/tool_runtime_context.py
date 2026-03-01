@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -30,6 +30,7 @@ class ToolRuntimeContext:
     room: nio.MatrixRoom | None = None
     reply_to_event_id: str | None = None
     storage_path: Path | None = None
+    attachment_ids: tuple[str, ...] = field(default_factory=tuple)
 
 
 _TOOL_RUNTIME_CONTEXT: ContextVar[ToolRuntimeContext | None] = ContextVar(
@@ -46,9 +47,6 @@ def get_tool_runtime_context() -> ToolRuntimeContext | None:
 @contextmanager
 def tool_runtime_context(context: ToolRuntimeContext | None) -> Iterator[None]:
     """Set shared tool runtime context for the current async execution scope."""
-    if context is None:
-        yield
-        return
     token = _TOOL_RUNTIME_CONTEXT.set(context)
     try:
         yield

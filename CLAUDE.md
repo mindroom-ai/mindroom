@@ -52,7 +52,7 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 | `image_handler.py` | Image message download, decryption, and AI processing |
 | `attachments.py` | Attachment persistence, registration, and context-scoped resolution |
 | `attachment_media.py` | Convert attachment records to Agno media objects |
-| `attachments_context.py` | Runtime ContextVar for attachment tool scope |
+| `tool_runtime_context.py` | Shared runtime ContextVar for tool calls (including attachment scope) |
 | `matrix/media.py` | Shared Matrix media download and decryption helpers |
 | `api/` | FastAPI REST API (dashboard, credentials, OpenAI-compatible endpoint) |
 | `custom_tools/` | Built-in custom tool implementations (gmail, calendar, scheduler, etc.) |

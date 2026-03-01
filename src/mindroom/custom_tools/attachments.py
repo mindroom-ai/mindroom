@@ -8,13 +8,13 @@ from typing import TYPE_CHECKING, NamedTuple
 from agno.tools import Toolkit
 
 from mindroom.attachments import attachments_for_tool_payload, load_attachment, resolve_attachments
-from mindroom.attachments_context import get_attachment_tool_context
 from mindroom.matrix.client import send_file_message
+from mindroom.tool_runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.attachments_context import AttachmentToolContext
+    from mindroom.tool_runtime_context import ToolRuntimeContext
 
 
 class _ResolvedAttachmentReference(NamedTuple):
@@ -36,9 +36,11 @@ def _attachment_tool_payload(status: str, **kwargs: object) -> str:
 
 
 def _resolve_context_attachment_path(
-    context: AttachmentToolContext,
+    context: ToolRuntimeContext,
     attachment_id: str,
 ) -> tuple[Path | None, str | None]:
+    if context.storage_path is None:
+        return None, "Attachment storage path is unavailable in this runtime path."
     if attachment_id not in context.attachment_ids:
         return None, f"Attachment ID is not available in this context: {attachment_id}"
 
@@ -51,7 +53,7 @@ def _resolve_context_attachment_path(
 
 
 def _resolve_attachment_reference(
-    context: AttachmentToolContext,
+    context: ToolRuntimeContext,
     raw_reference: object,
 ) -> _ResolvedAttachmentReference:
     if not isinstance(raw_reference, str):
@@ -75,7 +77,7 @@ def _resolve_attachment_reference(
 
 
 def resolve_attachment_references(
-    context: AttachmentToolContext,
+    context: ToolRuntimeContext,
     attachments: list[str] | None,
 ) -> tuple[list[Path], list[str], str | None]:
     """Resolve context attachment IDs into local files."""
@@ -101,10 +103,13 @@ def resolve_attachment_references(
 
 
 def get_attachment_listing(
-    context: AttachmentToolContext,
+    context: ToolRuntimeContext,
     target: str | None,
 ) -> tuple[list[str], list[dict[str, object]], list[str], str | None]:
     """List requested context attachments and report missing metadata records."""
+    if context.storage_path is None:
+        return [], [], [], "Attachment storage path is unavailable in this runtime path."
+
     requested_attachment_ids = list(context.attachment_ids)
     if target and target.strip():
         target_attachment_id = target.strip()
@@ -126,7 +131,7 @@ def get_attachment_listing(
 
 
 async def send_attachment_paths(
-    context: AttachmentToolContext,
+    context: ToolRuntimeContext,
     *,
     room_id: str,
     thread_id: str | None,
@@ -161,11 +166,11 @@ class AttachmentTools(Toolkit):
 
     async def list_attachments(self, target: str | None = None) -> str:
         """List attachment metadata for current tool context."""
-        context = get_attachment_tool_context()
+        context = get_tool_runtime_context()
         if context is None:
             return _attachment_tool_payload(
                 "error",
-                message="Attachment tool context is unavailable in this runtime path.",
+                message="Tool runtime context is unavailable in this runtime path.",
             )
 
         requested_attachment_ids, attachments, missing_attachment_ids, error = get_attachment_listing(context, target)
@@ -186,11 +191,11 @@ class AttachmentTools(Toolkit):
         thread_id: str | None = None,
     ) -> str:
         """Send context attachment IDs to a Matrix room/thread."""
-        context = get_attachment_tool_context()
+        context = get_tool_runtime_context()
         if context is None:
             return _attachment_tool_payload(
                 "error",
-                message="Attachment tool context is unavailable in this runtime path.",
+                message="Tool runtime context is unavailable in this runtime path.",
             )
 
         attachment_paths, resolved_attachment_ids, attachment_error = resolve_attachment_references(

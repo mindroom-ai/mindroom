@@ -26,7 +26,6 @@ from .attachments import (
     register_file_or_video_attachment,
     resolve_thread_attachment_ids,
 )
-from .attachments_context import AttachmentToolContext, attachment_tool_context
 from .authorization import (
     filter_agents_by_sender_permissions,
     get_available_agents_for_sender,
@@ -1469,6 +1468,7 @@ class AgentBot:
         user_id: str | None,
         *,
         agent_name: str | None = None,
+        attachment_ids: list[str] | None = None,
     ) -> ToolRuntimeContext | None:
         """Build shared runtime context for all tool calls."""
         if self.client is None:
@@ -1483,26 +1483,6 @@ class AgentBot:
             config=self.config,
             room=self._cached_room(room_id),
             reply_to_event_id=reply_to_event_id,
-            storage_path=self.storage_path,
-        )
-
-    def _build_attachment_tool_context(
-        self,
-        room_id: str,
-        thread_id: str | None,
-        user_id: str | None,
-        *,
-        reply_to_event_id: str | None = None,
-        attachment_ids: list[str] | None = None,
-    ) -> AttachmentToolContext | None:
-        """Build runtime context for attachments toolkit calls."""
-        if self.client is None:
-            return None
-        return AttachmentToolContext(
-            client=self.client,
-            room_id=room_id,
-            thread_id=self._resolve_reply_thread_id(thread_id, reply_to_event_id),
-            requester_id=user_id or self.matrix_id.full_id,
             storage_path=self.storage_path,
             attachment_ids=tuple(attachment_ids or []),
         )
@@ -1592,12 +1572,6 @@ class AgentBot:
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             user_id=requester_user_id,
-        )
-        attachment_context = self._build_attachment_tool_context(
-            room_id=room_id,
-            thread_id=thread_id,
-            user_id=requester_user_id,
-            reply_to_event_id=reply_to_event_id,
             attachment_ids=payload.attachment_ids,
         )
         orchestrator = self.orchestrator
@@ -1612,7 +1586,7 @@ class AgentBot:
             if use_streaming and not existing_event_id:
                 # Show typing indicator while team generates streaming response
                 async with typing_indicator(client, room_id):
-                    with tool_runtime_context(tool_context), attachment_tool_context(attachment_context):
+                    with tool_runtime_context(tool_context):
                         response_stream = team_response_stream(
                             agent_ids=team_agents,
                             message=model_message,
@@ -1651,7 +1625,7 @@ class AgentBot:
             else:
                 # Show typing indicator while team generates non-streaming response
                 async with typing_indicator(client, room_id):
-                    with tool_runtime_context(tool_context), attachment_tool_context(attachment_context):
+                    with tool_runtime_context(tool_context):
                         response_text = await team_response(
                             agent_names=agent_names,
                             mode=mode,
@@ -1833,12 +1807,6 @@ class AgentBot:
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
-        )
-        attachment_context = self._build_attachment_tool_context(
-            room_id=room_id,
-            thread_id=thread_id,
-            user_id=user_id,
-            reply_to_event_id=reply_to_event_id,
             attachment_ids=attachment_ids,
         )
         tool_trace: list[ToolTraceEntry] = []
@@ -1847,7 +1815,7 @@ class AgentBot:
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
-                with tool_runtime_context(tool_context), attachment_tool_context(attachment_context):
+                with tool_runtime_context(tool_context):
                     response_text = await ai_response(
                         agent_name=self.agent_name,
                         prompt=model_prompt,
@@ -1952,18 +1920,12 @@ class AgentBot:
             user_id=user_id,
             agent_name=agent_name,
         )
-        attachment_context = self._build_attachment_tool_context(
-            room_id=room_id,
-            thread_id=thread_id,
-            user_id=user_id,
-            reply_to_event_id=reply_to_event_id,
-        )
         show_tool_calls = self._show_tool_calls_for_agent(agent_name)
         tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
 
         async with typing_indicator(self.client, room_id):
-            with tool_runtime_context(tool_context), attachment_tool_context(attachment_context):
+            with tool_runtime_context(tool_context):
                 response_text = await ai_response(
                     agent_name=agent_name,
                     prompt=model_prompt,
@@ -2108,12 +2070,6 @@ class AgentBot:
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
-        )
-        attachment_context = self._build_attachment_tool_context(
-            room_id=room_id,
-            thread_id=thread_id,
-            user_id=user_id,
-            reply_to_event_id=reply_to_event_id,
             attachment_ids=attachment_ids,
         )
         run_metadata_content: dict[str, Any] = {}
@@ -2121,7 +2077,7 @@ class AgentBot:
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
-                with tool_runtime_context(tool_context), attachment_tool_context(attachment_context):
+                with tool_runtime_context(tool_context):
                     response_stream = stream_agent_response(
                         agent_name=self.agent_name,
                         prompt=model_prompt,
