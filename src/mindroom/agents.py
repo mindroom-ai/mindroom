@@ -476,7 +476,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 tools.append(SelfConfigTools(agent_name=agent_name, config_path=config_path))
             else:
                 tools.append(get_tool_by_name(tool_name, sandbox_tools_override=sandbox_tools))
-        except ValueError as e:
+        except (ValueError, ImportError) as e:
             logger.warning(f"Could not load tool '{tool_name}' for agent '{agent_name}': {e}")
 
     # Auto-inject delegation tool when delegate_to is configured

@@ -162,6 +162,36 @@ def test_create_agent_uses_native_tool_lookups_for_openclaw_preset(
 
 @patch("mindroom.agents.get_tool_by_name")
 @patch("mindroom.agents.SqliteDb")
+def test_create_agent_continues_when_preset_tool_import_fails(
+    mock_storage: MagicMock,  # noqa: ARG001
+    mock_get_tool_by_name: MagicMock,
+) -> None:
+    """Optional dependency import failures should not abort preset-based agent creation."""
+
+    def _lookup_tool(name: str, *, sandbox_tools_override: list[str] | None = None) -> MagicMock:  # noqa: ARG001
+        if name == "browser":
+            missing_dependency_message = "No module named 'playwright'"
+            raise ImportError(missing_dependency_message)
+        tool = MagicMock()
+        tool.name = name
+        return tool
+
+    mock_get_tool_by_name.side_effect = _lookup_tool
+
+    config = Config.from_yaml()
+    config.agents["summary"].tools = ["openclaw_compat"]
+    config.agents["summary"].include_default_tools = False
+
+    agent = create_agent("summary", config=config)
+
+    tool_names = [tool.name for tool in agent.tools]
+    assert "browser" not in tool_names
+    assert "shell" in tool_names
+    assert "matrix_message" in tool_names
+
+
+@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.agents.SqliteDb")
 def test_create_agent_expands_openclaw_preset_for_sandbox_tool_overrides(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
