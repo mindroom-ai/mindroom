@@ -89,6 +89,7 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 
 | Icon | Tool | Description | Config Required |
 |------|------|-------------|-----------------|
+| :lucide-message-square: | `matrix_message` | Native Matrix messaging actions (`send`, `reply`, `thread-reply`, `react`, `read`, `context`) | - |
 | :lucide-message-square: | `gmail` | Read, search, and manage Gmail emails | Google OAuth |
 | :lucide-message-square: | `slack` | Send messages and manage channels | `token` |
 | :lucide-message-square: | `discord` | Interact with Discord channels and servers | `bot_token` |
@@ -186,7 +187,7 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 |------|------|-------------|-----------------|
 | :lucide-sliders-horizontal: | `custom_api` | Custom API calls | Varies |
 | :lucide-sliders-horizontal: | `config_manager` | MindRoom configuration management | - |
-| :lucide-sliders-horizontal: | `openclaw_compat` | OpenClaw-compatible tool aliases (see [OpenClaw](../openclaw.md)) | - |
+| :lucide-sliders-horizontal: | `openclaw_compat` | OpenClaw compatibility aliases for sessions/subagents/workspace flows (see [OpenClaw](../openclaw.md)) | - |
 
 ## Claude Agent Sessions
 

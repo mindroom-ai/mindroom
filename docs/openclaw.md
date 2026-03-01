@@ -19,7 +19,8 @@ Works well:
 
 - File-based identity and memory documents
 - OpenClaw-inspired behavior and instructions
-- `sessions_*`, `message`, `subagents`, `web_*`, `exec/process`, `cron`, `browser` compatibility surface
+- `sessions_*`, `subagents`, `web_*`, `exec/process`, `cron`, `browser` compatibility surface
+- Native Matrix messaging via `matrix_message` (`send`, `reply`, `thread-reply`, `react`, `read`, `context`)
 
 Not included:
 
@@ -37,7 +38,8 @@ The `openclaw_compat` tool provides OpenClaw-named aliases so prompts and skills
 | `exec`, `process` | `ShellTools` |
 | `web_search`, `web_fetch` | `DuckDuckGoTools`, `WebsiteTools` |
 | `cron` | `SchedulerTools` |
-| `message`, `sessions_*` | Matrix client calls |
+| `message` | Native `matrix_message` compatibility wrapper |
+| `sessions_*` | OpenClaw-compatible session orchestration |
 | `subagents`, `agents_list` | Agent registry lookup |
 | `browser` | `BrowserTools` (Playwright, host target only) |
 
@@ -98,6 +100,7 @@ memory:
 `memory_file_path` points the file-memory scope directly at the workspace root, so `MEMORY.md` is loaded automatically by the file backend as the entrypoint — no need to list it in `context_files`.
 `memory_file_path` is ignored unless the effective backend is `file`; if you switch this agent to `mem0`, re-add `MEMORY.md` to `context_files` when you still want it preloaded.
 The `openclaw_compat` toolkit already bundles shell, file operations, web search, web fetch, browser, and scheduler aliases, so listing those tools individually is not necessary.
+Use `matrix_message` as the first-class messaging tool for non-OpenClaw agents.
 
 ## Recommended workspace layout
 

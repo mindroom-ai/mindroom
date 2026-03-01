@@ -411,7 +411,18 @@ async def test_openclaw_compat_agents_list_with_runtime_context(tmp_path: Path) 
 async def test_openclaw_compat_message_send_does_not_force_current_thread(tmp_path: Path) -> None:
     """Verify message send stays room-level unless thread_id is explicitly provided."""
     tool = OpenClawCompatTools()
-    tool._send_matrix_text = AsyncMock(return_value="$evt")
+    tool._matrix_message.matrix_message = AsyncMock(
+        return_value=json.dumps(
+            {
+                "status": "ok",
+                "tool": "matrix_message",
+                "action": "send",
+                "room_id": "!room:localhost",
+                "thread_id": None,
+                "event_id": "$evt",
+            },
+        ),
+    )
     config = MagicMock()
     config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
     ctx = OpenClawToolContext(
@@ -430,11 +441,13 @@ async def test_openclaw_compat_message_send_does_not_force_current_thread(tmp_pa
     assert payload["status"] == "ok"
     assert payload["tool"] == "message"
     assert payload["thread_id"] is None
-    tool._send_matrix_text.assert_awaited_once_with(
-        ctx,
-        room_id="!room:localhost",
-        text="hello",
+    tool._matrix_message.matrix_message.assert_awaited_once_with(
+        action="send",
+        message="hello",
+        room_id=None,
+        target=None,
         thread_id=None,
+        limit=None,
     )
 
 
@@ -442,7 +455,18 @@ async def test_openclaw_compat_message_send_does_not_force_current_thread(tmp_pa
 async def test_openclaw_compat_message_reply_uses_context_thread(tmp_path: Path) -> None:
     """Verify replies default to the active context thread when none is passed."""
     tool = OpenClawCompatTools()
-    tool._send_matrix_text = AsyncMock(return_value="$evt")
+    tool._matrix_message.matrix_message = AsyncMock(
+        return_value=json.dumps(
+            {
+                "status": "ok",
+                "tool": "matrix_message",
+                "action": "reply",
+                "room_id": "!room:localhost",
+                "thread_id": "$ctx-thread:localhost",
+                "event_id": "$evt",
+            },
+        ),
+    )
     config = MagicMock()
     config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
     ctx = OpenClawToolContext(
@@ -461,11 +485,13 @@ async def test_openclaw_compat_message_reply_uses_context_thread(tmp_path: Path)
     assert payload["status"] == "ok"
     assert payload["tool"] == "message"
     assert payload["thread_id"] == "$ctx-thread:localhost"
-    tool._send_matrix_text.assert_awaited_once_with(
-        ctx,
-        room_id="!room:localhost",
-        text="hello",
-        thread_id="$ctx-thread:localhost",
+    tool._matrix_message.matrix_message.assert_awaited_once_with(
+        action="reply",
+        message="hello",
+        room_id=None,
+        target=None,
+        thread_id=None,
+        limit=None,
     )
 
 
@@ -680,7 +706,16 @@ async def test_openclaw_compat_subagents_kill_all_scopes_to_context(tmp_path: Pa
 async def test_openclaw_compat_message_send_returns_error_when_matrix_send_fails(tmp_path: Path) -> None:
     """Verify message send returns an error payload when Matrix send fails."""
     tool = OpenClawCompatTools()
-    tool._send_matrix_text = AsyncMock(return_value=None)
+    tool._matrix_message.matrix_message = AsyncMock(
+        return_value=json.dumps(
+            {
+                "status": "error",
+                "tool": "matrix_message",
+                "action": "send",
+                "message": "Failed to send message to Matrix.",
+            },
+        ),
+    )
     config = MagicMock()
     config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
     ctx = OpenClawToolContext(
