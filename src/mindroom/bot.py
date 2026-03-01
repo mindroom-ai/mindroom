@@ -1357,15 +1357,6 @@ class AgentBot:
                 available_agents = get_available_agents_for_sender(room, requester_user_id, self.config)
                 if len(available_agents) == 1:
                     self.logger.info("Skipping routing: only one agent present")
-                elif extra_content is None:
-                    await self._handle_ai_routing(
-                        room,
-                        event,
-                        context.thread_history,
-                        context.thread_id,
-                        message=message,
-                        requester_user_id=requester_user_id,
-                    )
                 else:
                     await self._handle_ai_routing(
                         room,
@@ -1630,15 +1621,13 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             user_id=requester_user_id,
         )
-        tool_contexts = self._build_runtime_tool_contexts(
+        openclaw_context, attachment_context = self._build_runtime_tool_contexts(
             room_id,
             thread_id,
             requester_user_id,
             agent_name=self.agent_name,
             attachment_ids=attachment_ids,
         )
-        openclaw_context = tool_contexts[0]
-        attachment_context = tool_contexts[1]
         orchestrator = self.orchestrator
         if orchestrator is None:
             msg = "Orchestrator is not set"
@@ -1882,15 +1871,13 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
         )
-        tool_contexts = self._build_runtime_tool_contexts(
+        openclaw_context, attachment_context = self._build_runtime_tool_contexts(
             room_id,
             thread_id,
             user_id,
             agent_name=self.agent_name,
             attachment_ids=attachment_ids,
         )
-        openclaw_context = tool_contexts[0]
-        attachment_context = tool_contexts[1]
         tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
 
@@ -2001,14 +1988,12 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
         )
-        tool_contexts = self._build_runtime_tool_contexts(
+        openclaw_context, attachment_context = self._build_runtime_tool_contexts(
             room_id,
             thread_id,
             user_id,
             agent_name=agent_name,
         )
-        openclaw_context = tool_contexts[0]
-        attachment_context = tool_contexts[1]
         show_tool_calls = self._show_tool_calls_for_agent(agent_name)
         tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
@@ -2159,15 +2144,13 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
         )
-        tool_contexts = self._build_runtime_tool_contexts(
+        openclaw_context, attachment_context = self._build_runtime_tool_contexts(
             room_id,
             thread_id,
             user_id,
             agent_name=self.agent_name,
             attachment_ids=attachment_ids,
         )
-        openclaw_context = tool_contexts[0]
-        attachment_context = tool_contexts[1]
         run_metadata_content: dict[str, Any] = {}
 
         try:
@@ -2565,21 +2548,13 @@ class AgentBot:
             thread_mode_override=target_thread_mode,
         )
 
-        if extra_content is None:
-            event_id = await self._send_response(
-                room_id=room.room_id,
-                reply_to_event_id=event.event_id,
-                response_text=response_text,
-                thread_id=thread_event_id,
-            )
-        else:
-            event_id = await self._send_response(
-                room_id=room.room_id,
-                reply_to_event_id=event.event_id,
-                response_text=response_text,
-                thread_id=thread_event_id,
-                extra_content=extra_content,
-            )
+        event_id = await self._send_response(
+            room_id=room.room_id,
+            reply_to_event_id=event.event_id,
+            response_text=response_text,
+            thread_id=thread_event_id,
+            extra_content=extra_content,
+        )
         if event_id:
             self.logger.info("Routed to agent", suggested_agent=suggested_agent)
             self.response_tracker.mark_responded(event.event_id)

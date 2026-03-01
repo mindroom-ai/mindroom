@@ -1012,7 +1012,9 @@ class OpenClawCompatTools(Toolkit):
         room_id: str,
         effective_thread_id: str | None,
     ) -> str:
-        attachment_context = self._attachment_context(context)
+        attachment_context = self._attachment_context()
+        if attachment_context is None:
+            attachment_context = self._attachment_fallback_context(context)
         attachment_paths, resolved_attachment_ids, attachment_error = resolve_attachment_references(
             attachment_context,
             attachments,
@@ -1079,9 +1081,17 @@ class OpenClawCompatTools(Toolkit):
         )
 
     @staticmethod
-    async def _message_attachments(context: OpenClawToolContext, target: str | None) -> str:
+    async def _message_attachments(_context: OpenClawToolContext, target: str | None) -> str:
+        attachment_context = OpenClawCompatTools._attachment_context()
+        if attachment_context is None:
+            return OpenClawCompatTools._payload(
+                "message",
+                "error",
+                action="attachments",
+                message="Attachment tool context is unavailable in this runtime path.",
+            )
         requested_attachment_ids, attachments, missing_attachment_ids, error = get_attachment_listing(
-            OpenClawCompatTools._attachment_context(context),
+            attachment_context,
             target,
         )
         if error is not None:
@@ -1101,11 +1111,13 @@ class OpenClawCompatTools(Toolkit):
         )
 
     @staticmethod
-    def _attachment_context(context: OpenClawToolContext) -> AttachmentToolContext:
-        """Convert OpenClaw runtime context into attachments toolkit context."""
-        attachment_context = get_attachment_tool_context()
-        if attachment_context is not None:
-            return attachment_context
+    def _attachment_context() -> AttachmentToolContext | None:
+        """Return the active attachments runtime context if present."""
+        return get_attachment_tool_context()
+
+    @staticmethod
+    def _attachment_fallback_context(context: OpenClawToolContext) -> AttachmentToolContext:
+        """Create a fallback attachments context for local-path send operations."""
         return AttachmentToolContext(
             client=context.client,
             room_id=context.room_id,
