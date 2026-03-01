@@ -86,6 +86,7 @@ export interface Agent {
   learning?: boolean; // Defaults to true when omitted
   learning_mode?: LearningMode; // Defaults to always when omitted
   memory_backend?: MemoryBackend; // Per-agent memory backend override (inherits memory.backend when omitted)
+  memory_file_path?: string; // Per-agent file-memory scope directory (used when effective backend is file)
   model?: string; // Reference to a model in the models section
   show_tool_calls?: boolean; // Show tool call details inline in responses (defaults to true)
   sandbox_tools?: string[]; // Tool names to execute through sandbox proxy (overrides defaults)

@@ -520,15 +520,6 @@ class OpenClawCompatTools(Toolkit):
             for session in sessions
         ]
 
-    @staticmethod
-    def _tool_enabled_for_agent(context: OpenClawToolContext, tool_name: str) -> bool:
-        agents = getattr(context.config, "agents", None)
-        if not isinstance(agents, dict):
-            return False
-        agent_config = agents.get(context.agent_name)
-        agent_tools = getattr(agent_config, "tools", None)
-        return isinstance(agent_tools, list) and tool_name in agent_tools
-
     def _read_agent_sessions(self, context: OpenClawToolContext) -> list[dict[str, Any]]:
         db_path = context.storage_path / "sessions" / f"{context.agent_name}.db"
         if not db_path.is_file():
@@ -1283,14 +1274,6 @@ class OpenClawCompatTools(Toolkit):
         """Shared shell execution for exec and process."""
         if not command.strip():
             return self._payload(tool_name, "error", message="command cannot be empty")
-
-        context = get_openclaw_tool_context()
-        if context is not None and not self._tool_enabled_for_agent(context, "shell"):
-            return self._payload(
-                tool_name,
-                "error",
-                message=f"shell tool is not enabled for agent '{context.agent_name}'.",
-            )
 
         parse_error: str | None = None
         try:

@@ -70,7 +70,7 @@ vi.mock('./EnhancedConfigDialog', () => ({
 }));
 
 // Mock integration providers
-vi.mock('./integrations', () => ({
+vi.mock('./integrations/index', () => ({
   integrationProviders: {
     google: {
       getConfig: () => ({

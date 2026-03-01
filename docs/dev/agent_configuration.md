@@ -63,6 +63,7 @@ memory:
 ```
 
 You can override the memory backend per agent with `memory_backend`.
+You can set a per-agent file-memory scope directory with `memory_file_path` when using file memory.
 
 ## Router Configuration
 
@@ -149,6 +150,7 @@ agents:
     learning: true  # Optional: enable Agno Learning (defaults to true)
     learning_mode: "always"  # Optional: "always" or "agentic"
     memory_backend: "file"  # Optional: per-agent override ("mem0" or "file")
+    memory_file_path: "./openclaw_data"  # Optional: per-agent file-memory scope directory
     knowledge_bases:
       - docs
     context_files:
@@ -170,6 +172,7 @@ agents:
 - **learning**: Enable Agno Learning for this agent (default: true)
 - **learning_mode**: Learning mode (`always` or `agentic`, default: `always`)
 - **memory_backend**: Optional per-agent memory backend override (`mem0` or `file`), inherits from `memory.backend` when omitted
+- **memory_file_path**: Optional directory for this agent's file-memory scope, resolved relative to `config.yaml`
 - **knowledge_bases**: List of configured knowledge base IDs assigned to this agent
 - **context_files**: File paths loaded into role context when the agent is created/reloaded
 - **model**: (Optional) Specific model to use for this agent, overrides the default model
