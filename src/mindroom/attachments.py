@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import json
@@ -164,6 +165,22 @@ def store_media_bytes_locally(
     return media_path
 
 
+async def store_media_bytes_locally_async(
+    storage_path: Path,
+    event_id: str,
+    media_bytes: bytes | None,
+    mime_type: str | None,
+) -> Path | None:
+    """Persist media bytes without blocking the event loop."""
+    return await asyncio.to_thread(
+        store_media_bytes_locally,
+        storage_path,
+        event_id,
+        media_bytes,
+        mime_type,
+    )
+
+
 def extract_file_or_video_caption(
     event: FileOrVideoEvent,
 ) -> str:
@@ -185,7 +202,12 @@ async def store_file_or_video_locally(
 ) -> Path | None:
     """Download and persist file/video media to local storage."""
     media_bytes = await download_media_bytes(client, event)
-    return store_media_bytes_locally(storage_path, event.event_id, media_bytes, media_mime_type(event))
+    return await store_media_bytes_locally_async(
+        storage_path,
+        event.event_id,
+        media_bytes,
+        media_mime_type(event),
+    )
 
 
 def attachment_id_for_event(event_id: str) -> str:
@@ -255,11 +277,16 @@ def _collect_attachment_cleanup_state(
     return active_media_paths, active_media_ref_counts, expired_records, stale_record_paths
 
 
-def _remove_paths(paths: list[Path]) -> None:
+def _remove_paths(paths: list[Path]) -> int:
     """Delete filesystem paths, ignoring filesystem errors."""
+    removed = 0
     for path in paths:
-        with contextlib.suppress(OSError):
+        try:
             path.unlink(missing_ok=True)
+        except OSError:
+            continue
+        removed += 1
+    return removed
 
 
 def _collect_removable_media_paths(
@@ -287,12 +314,13 @@ def _prune_orphan_incoming_media(
     *,
     cutoff: datetime,
     active_media_paths: set[Path],
-) -> None:
+) -> int:
     """Delete old incoming-media files that are no longer referenced."""
     incoming_media_dir = _incoming_media_dir(storage_path)
     if not incoming_media_dir.is_dir():
-        return
+        return 0
 
+    removed = 0
     for media_path in incoming_media_dir.iterdir():
         if not media_path.is_file():
             continue
@@ -302,8 +330,12 @@ def _prune_orphan_incoming_media(
         media_mtime = _record_mtime(media_path)
         if media_mtime is None or media_mtime >= cutoff:
             continue
-        with contextlib.suppress(OSError):
+        try:
             media_path.unlink(missing_ok=True)
+        except OSError:
+            continue
+        removed += 1
+    return removed
 
 
 def _cleanup_attachment_storage(storage_path: Path) -> None:
@@ -319,18 +351,26 @@ def _cleanup_attachment_storage(storage_path: Path) -> None:
             cutoff=cutoff,
         )
     )
-    _remove_paths(stale_record_paths)
+    stale_records_removed = _remove_paths(stale_record_paths)
 
     removable_media_paths = _collect_removable_media_paths(
         storage_path,
         expired_records=expired_records,
         active_media_ref_counts=active_media_ref_counts,
     )
-    _remove_paths(list(removable_media_paths))
-    _prune_orphan_incoming_media(
+    expired_media_removed = _remove_paths(list(removable_media_paths))
+    orphan_media_removed = _prune_orphan_incoming_media(
         storage_path,
         cutoff=cutoff,
         active_media_paths=active_media_paths,
+    )
+    logger.debug(
+        "Attachment cleanup completed",
+        stale_records_removed=stale_records_removed,
+        expired_records_removed=len(expired_records),
+        expired_media_removed=expired_media_removed,
+        orphan_media_removed=orphan_media_removed,
+        active_media_paths=len(active_media_paths),
     )
 
 
@@ -441,7 +481,7 @@ async def register_file_or_video_attachment(
     )
 
 
-def register_audio_attachment(
+async def register_audio_attachment(
     storage_path: Path,
     *,
     event_id: str,
@@ -453,7 +493,7 @@ def register_audio_attachment(
     filename: str | None = None,
 ) -> AttachmentRecord | None:
     """Persist raw audio bytes and register them as an attachment record."""
-    local_audio_path = store_media_bytes_locally(
+    local_audio_path = await store_media_bytes_locally_async(
         storage_path,
         event_id,
         audio_bytes,

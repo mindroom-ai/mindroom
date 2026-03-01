@@ -1,5 +1,6 @@
 """Matrix client operations and utilities."""
 
+import asyncio
 import io
 import json
 import mimetypes
@@ -559,7 +560,7 @@ async def _upload_file_as_mxc(
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Upload a local file as MXC, encrypting payloads in encrypted rooms."""
     try:
-        file_bytes = file_path.read_bytes()
+        file_bytes = await asyncio.to_thread(file_path.read_bytes)
     except OSError:
         logger.exception("Failed to read file before upload", path=str(file_path))
         return None, None

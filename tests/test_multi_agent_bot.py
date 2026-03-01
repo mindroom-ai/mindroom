@@ -1589,6 +1589,135 @@ class TestAgentBot:
         assert sent_extra_content[ATTACHMENT_IDS_KEY] == [attachment_record.attachment_id]
 
     @pytest.mark.asyncio
+    async def test_multi_agent_file_event_registers_attachment_once(self, tmp_path: Path) -> None:
+        """A file event in a multi-agent room should register exactly one attachment."""
+        config = Config(
+            agents={
+                "router": AgentConfig(display_name="Router", rooms=["!test:localhost"]),
+                "general": AgentConfig(display_name="General", rooms=["!test:localhost"]),
+                "calculator": AgentConfig(display_name="Calculator", rooms=["!test:localhost"]),
+            },
+            authorization={"default_room_access": True},
+        )
+        config.ids = {
+            "router": MatrixID.from_username("mindroom_router", "localhost"),
+            "general": MatrixID.from_username("mindroom_general", "localhost"),
+            "calculator": MatrixID.from_username("mindroom_calculator", "localhost"),
+        }
+
+        router_bot = AgentBot(
+            AgentMatrixUser(
+                agent_name="router",
+                user_id="@mindroom_router:localhost",
+                display_name="Router",
+                password=TEST_PASSWORD,
+                access_token="mock_test_token",  # noqa: S106
+            ),
+            tmp_path,
+            config=config,
+        )
+        general_bot = AgentBot(
+            AgentMatrixUser(
+                agent_name="general",
+                user_id="@mindroom_general:localhost",
+                display_name="General",
+                password=TEST_PASSWORD,
+                access_token="mock_test_token",  # noqa: S106
+            ),
+            tmp_path,
+            config=config,
+        )
+
+        router_bot.client = AsyncMock()
+        general_bot.client = AsyncMock()
+        router_bot.response_tracker = MagicMock()
+        router_bot.response_tracker.has_responded.return_value = False
+        general_bot.response_tracker = MagicMock()
+        general_bot.response_tracker.has_responded.return_value = False
+        router_bot._send_response = AsyncMock(return_value="$route")
+        general_bot._generate_response = AsyncMock()
+
+        message_context = MessageContext(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        )
+        router_bot._extract_message_context = AsyncMock(return_value=message_context)
+        general_bot._extract_message_context = AsyncMock(return_value=message_context)
+
+        router_room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
+        general_room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
+        room_users = {
+            "@mindroom_router:localhost": None,
+            "@mindroom_general:localhost": None,
+            "@mindroom_calculator:localhost": None,
+            "@user:localhost": None,
+        }
+        router_room.users = room_users
+        general_room.users = room_users
+
+        file_event = nio.RoomMessageFile.from_dict(
+            {
+                "event_id": "$file_once",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.file",
+                    "body": "report.pdf",
+                    "url": "mxc://localhost/file_once",
+                    "info": {"mimetype": "application/pdf"},
+                },
+            },
+        )
+
+        media_path = tmp_path / "incoming_media" / "file_once.pdf"
+        media_path.parent.mkdir(parents=True, exist_ok=True)
+        media_path.write_bytes(b"%PDF")
+        attachment_record = register_local_attachment(
+            tmp_path,
+            media_path,
+            kind="file",
+            attachment_id=attachment_id_for_event("$file_once"),
+            filename="report.pdf",
+            mime_type="application/pdf",
+            room_id=router_room.room_id,
+            thread_id=None,
+            source_event_id="$file_once",
+            sender="@user:localhost",
+        )
+        assert attachment_record is not None
+
+        with (
+            patch("mindroom.bot.is_authorized_sender", return_value=True),
+            patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
+            patch(
+                "mindroom.bot.decide_team_formation",
+                new_callable=AsyncMock,
+                return_value=TeamFormationDecision(
+                    should_form_team=False,
+                    agents=[],
+                    mode=TeamMode.COLLABORATE,
+                ),
+            ),
+            patch("mindroom.bot.suggest_agent_for_message", new_callable=AsyncMock, return_value="general"),
+            patch(
+                "mindroom.bot.register_file_or_video_attachment",
+                new_callable=AsyncMock,
+                return_value=attachment_record,
+            ) as mock_register,
+        ):
+            await router_bot._on_file_or_video_message(router_room, file_event)
+            await general_bot._on_file_or_video_message(general_room, file_event)
+
+        mock_register.assert_awaited_once()
+        assert mock_register.await_args.kwargs["room_id"] == "!test:localhost"
+        assert mock_register.await_args.kwargs["thread_id"] == "$file_once"
+        general_bot._generate_response.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_router_dispatch_parity_text_and_image_route_under_same_conditions(self, tmp_path: Path) -> None:
         """Router should route both text and image when the decision context is equivalent."""
         agent_user = AgentMatrixUser(

@@ -136,6 +136,35 @@ def test_register_local_attachment_returns_none_on_metadata_write_failure(tmp_pa
     assert not metadata_path.exists()
 
 
+def test_register_local_attachment_throttles_cleanup_runs(tmp_path: Path) -> None:
+    """Cleanup should run once per throttle window even with repeated registrations."""
+    file_path = tmp_path / "payload.txt"
+    file_path.write_text("payload", encoding="utf-8")
+
+    with (
+        patch("mindroom.attachments._last_cleanup_time", None),
+        patch("mindroom.attachments._cleanup_attachment_storage") as mock_cleanup,
+    ):
+        first = register_local_attachment(
+            tmp_path,
+            file_path,
+            kind="file",
+            attachment_id="att_first",
+            room_id="!room:localhost",
+        )
+        second = register_local_attachment(
+            tmp_path,
+            file_path,
+            kind="file",
+            attachment_id="att_second",
+            room_id="!room:localhost",
+        )
+
+    assert first is not None
+    assert second is not None
+    mock_cleanup.assert_called_once_with(tmp_path)
+
+
 def test_merge_attachment_ids_preserves_order() -> None:
     """Merge should preserve first-seen ordering across sources."""
     merged = merge_attachment_ids(["att_1", "att_2"], ["att_2", "att_3"], ["att_1"])

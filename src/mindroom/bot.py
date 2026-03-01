@@ -985,7 +985,7 @@ class AgentBot:
             event_id=event.event_id,
             sender=event.sender,
         )
-        attachment_record = register_audio_attachment(
+        attachment_record = await register_audio_attachment(
             self.storage_path,
             event_id=event.event_id,
             audio_bytes=voice_audio.content,
