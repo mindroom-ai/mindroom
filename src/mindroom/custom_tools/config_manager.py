@@ -436,7 +436,6 @@ class ConfigManagerTools(Toolkit):
     def _list_available_tools(self) -> str:
         """List all available tools that can be used by agents."""
         tools_by_category: dict[str, list[tuple[str, str]]] = {}
-        preset_entries: list[tuple[str, str]] = []
 
         for tool_name in sorted(TOOL_METADATA.keys()):
             metadata = TOOL_METADATA[tool_name]
