@@ -30,7 +30,7 @@ These rules are required for this implementation run.
 - Phase 2 personality + memory auto-loading
 - Phase 3 session/subagent registry foundation
 - Phase 4 read-only compatibility tools + alias tools
-- Phase 5 active orchestration tools (`sessions_send`, `sessions_spawn`, `subagents`, `message`)
+- Phase 5 active orchestration tools (`sessions_send`, `sessions_spawn`, `list_sessions`, `message`)
 - Phase 6 rollout/config wiring + gateway/nodes/canvas fallback behavior
 - Tests and contract updates
 
@@ -64,11 +64,11 @@ These rules are required for this implementation run.
 
 - Implement persistent lightweight registry for OpenClaw-compatible session metadata.
 - Track canonical current session key from Matrix room/thread context.
-- Support listing/history/status lookups from registry + existing runtime data.
+- Support session lookup workflows from registry + existing runtime data.
 
 ### Phase 4: Read-Only Tools + Aliases
 
-- Implement `agents_list`, `session_status`, `sessions_list`, `sessions_history`.
+- Implement `agents_list` and `list_sessions` as the final read-only session surface.
 - Implement aliases:
   - `cron`
   - `web_search`
@@ -80,7 +80,7 @@ These rules are required for this implementation run.
 ### Phase 5: Active Orchestration and Matrix Messaging
 
 - Implement `sessions_send` and `sessions_spawn` against Matrix runtime context.
-- Implement `subagents` (`list`, `kill`, `steer`) on top of spawned run tracking.
+- Expose standalone sub-agent orchestration through the `subagents` toolkit.
 - Implement `message` actions for send/reply/react/read with thread support.
 
 ### Phase 6: Rollout and Config Cleanup

@@ -15,7 +15,7 @@ Works well:
 
 - File-based identity and memory documents
 - OpenClaw-inspired behavior and instructions
-- `sessions_*`, `subagents`, `web_*`, `exec/process`, `cron`, `browser` compatibility surface
+- `sessions_send`, `sessions_spawn`, `list_sessions`, `agents_list`, `web_*`, `exec/process`, `cron`, `browser` compatibility surface
 - Native Matrix messaging via `matrix_message` (`send`, `reply`, `thread-reply`, `react`, `read`, `context`)
 
 Not included:
@@ -29,14 +29,13 @@ Not included:
 
 The `openclaw_compat` tool provides OpenClaw-named aliases so prompts and skills written for OpenClaw work without rewriting tool calls:
 
-| OpenClaw tool              | MindRoom backend                              |
-| -------------------------- | --------------------------------------------- |
-| `exec`, `process`          | `ShellTools`                                  |
-| `web_search`, `web_fetch`  | `DuckDuckGoTools`, `WebsiteTools`             |
-| `cron`                     | `SchedulerTools`                              |
-| `sessions_*`               | OpenClaw-compatible session orchestration     |
-| `subagents`, `agents_list` | Agent registry lookup                         |
-| `browser`                  | `BrowserTools` (Playwright, host target only) |
+| OpenClaw tool                                                     | MindRoom backend                                            |
+| ----------------------------------------------------------------- | ----------------------------------------------------------- |
+| `exec`, `process`                                                 | `ShellTools`                                                |
+| `web_search`, `web_fetch`                                         | `DuckDuckGoTools`, `WebsiteTools`                           |
+| `cron`                                                            | `SchedulerTools`                                            |
+| `agents_list`, `sessions_send`, `sessions_spawn`, `list_sessions` | `SubAgentsTools` (also available standalone as `subagents`) |
+| `browser`                                                         | `BrowserTools` (Playwright, host target only)               |
 
 Memory is not a separate OpenClaw subsystem in MindRoom. It uses the normal MindRoom memory backend. When `openclaw_compat` is enabled for an agent, `matrix_message` is added automatically as the messaging tool.
 
