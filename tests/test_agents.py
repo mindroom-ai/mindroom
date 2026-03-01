@@ -108,6 +108,79 @@ def test_agent_include_default_tools_false_skips_config_defaults(mock_storage: M
     assert "calculator" not in tool_names
 
 
+def test_openclaw_compat_preset_expands_to_native_tools() -> None:
+    """openclaw_compat should expand into native tool names in effective resolution."""
+    config = Config.from_yaml()
+    config.agents["summary"].tools = ["openclaw_compat"]
+    config.agents["summary"].include_default_tools = False
+
+    assert config.get_agent_tools("summary") == list(Config.TOOL_PRESETS["openclaw_compat"])
+
+
+def test_openclaw_compat_preset_expansion_dedupes_preserving_order() -> None:
+    """Preset expansion should preserve first-seen order while deduping entries."""
+    config = Config.from_yaml()
+    config.agents["summary"].tools = [
+        "browser",
+        "openclaw_compat",
+        "shell",
+        "coding",
+        "browser",
+    ]
+    config.defaults.tools = ["openclaw_compat", "python", "scheduler"]
+
+    assert config.get_agent_tools("summary") == [
+        "browser",
+        "shell",
+        "coding",
+        "duckduckgo",
+        "website",
+        "scheduler",
+        "subagents",
+        "matrix_message",
+        "python",
+    ]
+
+
+@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.agents.SqliteDb")
+def test_create_agent_uses_native_tool_lookups_for_openclaw_preset(
+    mock_storage: MagicMock,  # noqa: ARG001
+    mock_get_tool_by_name: MagicMock,
+) -> None:
+    """Agent construction should resolve preset entries to native tool lookups."""
+    mock_get_tool_by_name.return_value = MagicMock()
+    config = Config.from_yaml()
+    config.agents["summary"].tools = ["openclaw_compat"]
+    config.agents["summary"].include_default_tools = False
+
+    create_agent("summary", config=config)
+
+    looked_up_tools = [call.args[0] for call in mock_get_tool_by_name.call_args_list]
+    assert looked_up_tools == list(Config.TOOL_PRESETS["openclaw_compat"])
+
+
+@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.agents.SqliteDb")
+def test_create_agent_expands_openclaw_preset_for_sandbox_tool_overrides(
+    mock_storage: MagicMock,  # noqa: ARG001
+    mock_get_tool_by_name: MagicMock,
+) -> None:
+    """Sandbox override list should receive native tool names after preset expansion."""
+    mock_get_tool_by_name.return_value = MagicMock()
+    config = Config.from_yaml()
+    config.agents["summary"].tools = ["openclaw_compat"]
+    config.agents["summary"].include_default_tools = False
+    config.agents["summary"].sandbox_tools = ["openclaw_compat"]
+
+    create_agent("summary", config=config)
+
+    expected_sandbox = list(Config.TOOL_PRESETS["openclaw_compat"])
+    sandbox_overrides = [call.kwargs["sandbox_tools_override"] for call in mock_get_tool_by_name.call_args_list]
+    assert sandbox_overrides
+    assert all(override == expected_sandbox for override in sandbox_overrides)
+
+
 @patch("mindroom.agents.SqliteDb")
 def test_openclaw_compat_auto_includes_matrix_message_tool(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """openclaw_compat should implicitly include matrix_message for the agent."""
@@ -116,12 +189,12 @@ def test_openclaw_compat_auto_includes_matrix_message_tool(mock_storage: MagicMo
     config.agents["summary"].include_default_tools = False
 
     effective_tools = config.get_agent_tools("summary")
-    assert "openclaw_compat" in effective_tools
+    assert "openclaw_compat" not in effective_tools
     assert "matrix_message" in effective_tools
 
     agent = create_agent("summary", config=config)
     tool_names = [tool.name for tool in agent.tools]
-    assert "openclaw_compat" in tool_names
+    assert "openclaw_compat" not in tool_names
     assert "matrix_message" in tool_names
 
 

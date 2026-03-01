@@ -184,6 +184,23 @@ def test_get_tools(test_client: TestClient) -> None:
     assert "icon_color" in first_tool  # New field we added
 
 
+def test_get_tools_includes_preset_metadata(test_client: TestClient) -> None:
+    """Preset tool entries should appear in the tools response with expected shape."""
+    response = test_client.get("/api/tools/")
+    assert response.status_code == 200
+
+    tools_by_name = {tool["name"]: tool for tool in response.json()["tools"]}
+    assert "openclaw_compat" in tools_by_name
+
+    preset = tools_by_name["openclaw_compat"]
+    assert preset["category"] == "preset"
+    assert preset["status"] == "available"
+    assert preset["setup_type"] == "none"
+    assert preset["helper_text"] is not None
+    assert "shell" in preset["helper_text"]
+    assert preset["display_name"] == "Openclaw Compat"
+
+
 def test_get_rooms(test_client: TestClient) -> None:
     """Test getting all rooms."""
     # Load config first
