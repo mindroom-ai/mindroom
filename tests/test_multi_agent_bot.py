@@ -1106,15 +1106,19 @@ class TestAgentBot:
         ):
             await bot._on_image_message(room, event)
 
-        bot._generate_response.assert_awaited_once_with(
-            room_id="!test:localhost",
-            prompt="[Attached image]",
-            reply_to_event_id="$img_event",
-            thread_id=None,
-            thread_history=[],
-            user_id="@user:localhost",
-            images=[image],
-        )
+        bot._generate_response.assert_awaited_once()
+        generate_kwargs = bot._generate_response.await_args.kwargs
+        assert generate_kwargs["room_id"] == "!test:localhost"
+        assert generate_kwargs["prompt"] == "[Attached image]"
+        assert generate_kwargs["reply_to_event_id"] == "$img_event"
+        assert generate_kwargs["thread_id"] is None
+        assert generate_kwargs["thread_history"] == []
+        assert generate_kwargs["user_id"] == "@user:localhost"
+        assert generate_kwargs["images"] == [image]
+        assert generate_kwargs["audio"] is None
+        assert generate_kwargs["files"] is None
+        assert generate_kwargs["videos"] is None
+        assert generate_kwargs["attachment_ids"] is None
         tracker.mark_responded.assert_called_once_with("$img_event", "$response")
 
     @pytest.mark.asyncio
@@ -1262,7 +1266,7 @@ class TestAgentBot:
         assert generate_kwargs["files"] is not None
         assert len(generate_kwargs["files"]) == 1
         assert str(generate_kwargs["files"][0].filepath) == str(local_media_path)
-        assert "videos" not in generate_kwargs
+        assert generate_kwargs["videos"] is None
         tracker.mark_responded.assert_called_once_with("$file_event", "$response")
 
     @pytest.mark.asyncio
@@ -1403,11 +1407,11 @@ class TestAgentBot:
         )
 
     @pytest.mark.asyncio
-    async def test_router_routes_file_messages_with_local_path_metadata(
+    async def test_router_routes_file_messages_with_sender_metadata(
         self,
         tmp_path: Path,
     ) -> None:
-        """Router should pass local file path metadata when routing file messages."""
+        """Router should pass sender metadata when routing file messages."""
         agent_user = AgentMatrixUser(
             agent_name="router",
             user_id="@mindroom_router:localhost",
@@ -1497,10 +1501,92 @@ class TestAgentBot:
         call_kwargs = bot._handle_ai_routing.call_args.kwargs
         assert call_kwargs["message"] == "[Attached file]"
         assert call_kwargs["requester_user_id"] == "@user:localhost"
-        assert call_kwargs["extra_content"] == {
-            ORIGINAL_SENDER_KEY: "@user:localhost",
-            ATTACHMENT_IDS_KEY: [attachment_id_for_event("$file_route")],
+        assert call_kwargs["extra_content"] == {ORIGINAL_SENDER_KEY: "@user:localhost"}
+
+    @pytest.mark.asyncio
+    async def test_router_routing_registers_file_with_effective_thread_scope(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Router should register routed file attachments using the outgoing thread scope."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+
+        config = Config(
+            agents={
+                "router": AgentConfig(display_name="Router"),
+                "general": AgentConfig(display_name="General", thread_mode="room"),
+            },
+        )
+        config.ids = {
+            "router": MatrixID.from_username("mindroom_router", "localhost"),
+            "general": MatrixID.from_username("mindroom_general", "localhost"),
         }
+
+        bot = AgentBot(agent_user, tmp_path, config=config)
+        bot.client = AsyncMock()
+        bot.response_tracker = MagicMock()
+        bot._send_response = AsyncMock(return_value="$route")
+
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
+        event = nio.RoomMessageFile.from_dict(
+            {
+                "event_id": "$file_route",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.file",
+                    "body": "report.pdf",
+                    "url": "mxc://localhost/test_file",
+                    "info": {"mimetype": "application/pdf"},
+                },
+            },
+        )
+        media_path = tmp_path / "incoming_media" / "file_route.pdf"
+        media_path.parent.mkdir(parents=True, exist_ok=True)
+        media_path.write_bytes(b"%PDF")
+        attachment_record = register_local_attachment(
+            tmp_path,
+            media_path,
+            kind="file",
+            attachment_id=attachment_id_for_event("$file_route"),
+            filename="report.pdf",
+            mime_type="application/pdf",
+            room_id=room.room_id,
+            thread_id=None,
+            source_event_id="$file_route",
+            sender="@user:localhost",
+        )
+        assert attachment_record is not None
+
+        with (
+            patch("mindroom.bot.filter_agents_by_sender_permissions", return_value=[config.ids["general"]]),
+            patch("mindroom.bot.suggest_agent_for_message", new_callable=AsyncMock, return_value="general"),
+            patch(
+                "mindroom.bot.register_file_or_video_attachment",
+                new_callable=AsyncMock,
+                return_value=attachment_record,
+            ) as mock_register_file,
+        ):
+            await bot._handle_ai_routing(
+                room=room,
+                event=event,
+                thread_history=[],
+                thread_id=None,
+                message="[Attached file]",
+                requester_user_id="@user:localhost",
+                extra_content={ORIGINAL_SENDER_KEY: "@user:localhost"},
+            )
+
+        mock_register_file.assert_awaited_once()
+        assert mock_register_file.await_args.kwargs["thread_id"] is None
+        sent_extra_content = bot._send_response.await_args.kwargs["extra_content"]
+        assert sent_extra_content[ATTACHMENT_IDS_KEY] == [attachment_record.attachment_id]
 
     @pytest.mark.asyncio
     async def test_router_dispatch_parity_text_and_image_route_under_same_conditions(self, tmp_path: Path) -> None:

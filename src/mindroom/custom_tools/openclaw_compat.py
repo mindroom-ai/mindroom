@@ -1003,9 +1003,16 @@ class OpenClawCompatTools(Toolkit):
         room_id: str,
         effective_thread_id: str | None,
     ) -> str:
-        attachment_context = self._attachment_context()
+        attachment_context = get_attachment_tool_context()
         if attachment_context is None:
-            attachment_context = self._attachment_fallback_context(context)
+            attachment_context = AttachmentToolContext(
+                client=context.client,
+                room_id=context.room_id,
+                thread_id=context.thread_id,
+                requester_id=context.requester_id,
+                storage_path=context.storage_path,
+                attachment_ids=(),
+            )
         attachment_paths, resolved_attachment_ids, attachment_error = resolve_attachment_references(
             attachment_context,
             attachments,
@@ -1071,11 +1078,10 @@ class OpenClawCompatTools(Toolkit):
             resolved_attachment_ids=resolved_attachment_ids,
         )
 
-    @staticmethod
-    async def _message_attachments(_context: OpenClawToolContext, target: str | None) -> str:
-        attachment_context = OpenClawCompatTools._attachment_context()
+    async def _message_attachments(self, target: str | None) -> str:
+        attachment_context = get_attachment_tool_context()
         if attachment_context is None:
-            return OpenClawCompatTools._payload(
+            return self._payload(
                 "message",
                 "error",
                 action="attachments",
@@ -1086,36 +1092,19 @@ class OpenClawCompatTools(Toolkit):
             target,
         )
         if error is not None:
-            return OpenClawCompatTools._payload(
+            return self._payload(
                 "message",
                 "error",
                 action="attachments",
                 message=error,
             )
-        return OpenClawCompatTools._payload(
+        return self._payload(
             "message",
             "ok",
             action="attachments",
             attachment_ids=requested_attachment_ids,
             attachments=attachments,
             missing_attachment_ids=missing_attachment_ids,
-        )
-
-    @staticmethod
-    def _attachment_context() -> AttachmentToolContext | None:
-        """Return the active attachments runtime context if present."""
-        return get_attachment_tool_context()
-
-    @staticmethod
-    def _attachment_fallback_context(context: OpenClawToolContext) -> AttachmentToolContext:
-        """Create a fallback attachments context for local-path send operations."""
-        return AttachmentToolContext(
-            client=context.client,
-            room_id=context.room_id,
-            thread_id=context.thread_id,
-            requester_id=context.requester_id,
-            storage_path=context.storage_path,
-            attachment_ids=(),
         )
 
     async def _message_react(
@@ -1254,7 +1243,7 @@ class OpenClawCompatTools(Toolkit):
                 effective_thread_id=thread_id or context.thread_id,
             )
         if normalized_action == "attachments":
-            return await self._message_attachments(context, target)
+            return await self._message_attachments(target)
 
         return self._payload(
             "message",

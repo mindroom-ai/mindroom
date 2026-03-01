@@ -35,11 +35,7 @@ def attachment_tool_payload(status: str, **kwargs: object) -> str:
 
 
 def _is_within_directory(path: Path, directory: Path) -> bool:
-    try:
-        path.relative_to(directory)
-    except ValueError:
-        return False
-    return True
+    return path.is_relative_to(directory)
 
 
 def _resolve_context_attachment_path(

@@ -130,7 +130,7 @@ Voice messages in Matrix are:
 - Detected as `RoomMessageAudio` or `RoomEncryptedAudio` events
 - Downloaded from the Matrix media server
 - Decrypted if end-to-end encrypted (using the encryption key from the event)
-- Saved temporarily as `.ogg` files for processing
+- Processed in memory as audio bytes for STT requests
 - Sent to the STT service via the OpenAI-compatible API
 
 The router agent handles all voice message processing to avoid duplicate transcriptions.
@@ -162,6 +162,7 @@ When voice is enabled but no STT provider is configured (or transcription fails)
 4. When an agent responds in the thread, it automatically receives the raw audio as an Agno `Audio` object
 
 This means voice messages still reach agents even without STT -- agents with audio-capable models can process the raw audio directly.
+Attachment IDs in this fallback path use the same context-scoping rules described in [File & Video Attachments](attachments.md).
 
 ## Limitations
 

@@ -54,6 +54,7 @@ Available attachment IDs: att_abc123. Use tool calls to inspect or process them.
 
 Attachment IDs are **context-scoped** -- an attachment registered in one room or thread is not accessible from another.
 This prevents cross-room data leakage.
+Voice raw-audio fallback uses the same attachment ID mechanism; see [Voice Fallback](voice.md#voice-fallback-no-stt-configured).
 
 ## The `attachments` Tool
 

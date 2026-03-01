@@ -17,7 +17,6 @@ from .ai import ai_response, stream_agent_response
 from .attachment_media import resolve_attachment_media
 from .attachments import (
     append_attachment_ids_prompt,
-    attachment_id_for_event,
     extract_file_or_video_caption,
     is_voice_raw_audio_fallback,
     merge_attachment_ids,
@@ -1030,17 +1029,13 @@ class AgentBot:
 
         context = dispatch.context
         caption = extract_file_or_video_caption(event)
-        predicted_attachment_id = attachment_id_for_event(event.event_id)
         action = await self._resolve_dispatch_action(
             room,
             event,
             dispatch,
             message_for_decision=event.body,
             router_message=caption,
-            extra_content={
-                ORIGINAL_SENDER_KEY: event.sender,
-                ATTACHMENT_IDS_KEY: [predicted_attachment_id],
-            },
+            extra_content={ORIGINAL_SENDER_KEY: event.sender},
         )
         if action is None:
             return
@@ -1228,8 +1223,6 @@ class AgentBot:
         processing_log: str,
     ) -> None:
         """Execute resolved dispatch action and mark the source event responded."""
-        payload_kwargs = self._payload_media_kwargs(payload)
-
         if action.kind == "team":
             assert action.form_team is not None
             response_event_id = await self._generate_team_response_helper(
@@ -1242,7 +1235,11 @@ class AgentBot:
                 thread_history=dispatch.context.thread_history,
                 requester_user_id=dispatch.requester_user_id,
                 existing_event_id=None,
-                **payload_kwargs,
+                audio=payload.audio,
+                images=payload.images,
+                files=payload.files,
+                videos=payload.videos,
+                attachment_ids=payload.attachment_ids,
             )
             self.response_tracker.mark_responded(event.event_id, response_event_id)
             return
@@ -1251,34 +1248,20 @@ class AgentBot:
             self.logger.info("Will respond: only agent in thread")
 
         self.logger.info(processing_log, event_id=event.event_id)
-        response_kwargs: dict[str, Any] = {
-            "room_id": room.room_id,
-            "prompt": payload.prompt,
-            "reply_to_event_id": event.event_id,
-            "thread_id": dispatch.context.thread_id,
-            "thread_history": dispatch.context.thread_history,
-            "user_id": dispatch.requester_user_id,
-        }
-        response_kwargs.update(payload_kwargs)
-
-        response_event_id = await self._generate_response(**response_kwargs)
+        response_event_id = await self._generate_response(
+            room_id=room.room_id,
+            prompt=payload.prompt,
+            reply_to_event_id=event.event_id,
+            thread_id=dispatch.context.thread_id,
+            thread_history=dispatch.context.thread_history,
+            user_id=dispatch.requester_user_id,
+            audio=payload.audio,
+            images=payload.images,
+            files=payload.files,
+            videos=payload.videos,
+            attachment_ids=payload.attachment_ids,
+        )
         self.response_tracker.mark_responded(event.event_id, response_event_id)
-
-    @staticmethod
-    def _payload_media_kwargs(payload: _DispatchPayload) -> dict[str, Any]:
-        """Build optional media kwargs for response helper calls."""
-        kwargs: dict[str, Any] = {}
-        if payload.audio is not None:
-            kwargs["audio"] = payload.audio
-        if payload.images is not None:
-            kwargs["images"] = payload.images
-        if payload.files is not None:
-            kwargs["files"] = payload.files
-        if payload.videos is not None:
-            kwargs["videos"] = payload.videos
-        if payload.attachment_ids is not None:
-            kwargs["attachment_ids"] = payload.attachment_ids
-        return kwargs
 
     def _can_reply_to_sender(self, sender_id: str) -> bool:
         """Return whether this entity may reply to *sender_id*."""
@@ -2515,13 +2498,31 @@ class AgentBot:
             event_source=event.source,
             thread_mode_override=target_thread_mode,
         )
+        routed_extra_content = dict(extra_content) if extra_content is not None else {}
+        if isinstance(
+            event,
+            nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
+        ):
+            assert self.client is not None
+            attachment_record = await register_file_or_video_attachment(
+                self.client,
+                self.storage_path,
+                room_id=room.room_id,
+                thread_id=thread_event_id,
+                event=event,
+            )
+            if attachment_record is None:
+                self.logger.error("Failed to register routed media attachment", event_id=event.event_id)
+                routed_extra_content.pop(ATTACHMENT_IDS_KEY, None)
+            else:
+                routed_extra_content[ATTACHMENT_IDS_KEY] = [attachment_record.attachment_id]
 
         event_id = await self._send_response(
             room_id=room.room_id,
             reply_to_event_id=event.event_id,
             response_text=response_text,
             thread_id=thread_event_id,
-            extra_content=extra_content,
+            extra_content=routed_extra_content or None,
         )
         if event_id:
             self.logger.info("Routed to agent", suggested_agent=suggested_agent)
