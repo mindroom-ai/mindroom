@@ -694,6 +694,7 @@ agents:
     learning: true                 # Optional: Override default (inherits from defaults section)
     learning_mode: always          # Optional: Override default (inherits from defaults section)
     memory_backend: file           # Optional: Per-agent memory backend override (mem0 or file)
+    memory_file_path: ./openclaw_data  # Optional: Per-agent file-memory scope directory (relative to config.yaml)
     knowledge_bases: [docs]         # Optional: Assign one or more configured knowledge bases
     context_files:                 # Optional: Load files into role context at init/reload
       - ./openclaw_data/SOUL.md
@@ -874,7 +875,7 @@ timezone: America/Los_Angeles      # Default: UTC
 - A model named `default` is required unless agents, teams, and the router all specify explicit non-`default` models
 - Agents can set `knowledge_bases`, but each entry must exist in the top-level `knowledge_bases` section
 - `agents.<name>.context_files` inject file-based context at agent creation/reload (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md))
-- `memory.backend` sets the global memory default, and `agents.<name>.memory_backend` overrides it per agent
+- `memory.backend` sets the global memory default, `agents.<name>.memory_backend` overrides it per agent, and `agents.<name>.memory_file_path` sets a custom file-memory scope for that agent
 - `defaults.max_preload_chars` caps preloaded file context (`context_files`)
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
 - `authorization.agent_reply_permissions` can further restrict which users specific agents/teams/router will reply to
@@ -946,6 +947,9 @@ agents:
     # Memory backend override for this agent (optional: mem0 or file)
     memory_backend: file
 
+    # Custom file-memory scope directory (optional, overrides default <root>/agent_<name>/)
+    memory_file_path: ./openclaw_data
+
     # Assign agent to one or more configured knowledge bases (optional)
     knowledge_bases: [docs]
 
@@ -1000,6 +1004,7 @@ agents:
 | `learning`                    | bool   | `null`      | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`)                                                                                                                               |
 | `learning_mode`               | string | `null`      | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`)                                                                                                                                                 |
 | `memory_backend`              | string | `null`      | Memory backend override for this agent (`"mem0"` or `"file"`). Inherits from global `memory.backend` when omitted                                                                                                                                                                                                                 |
+| `memory_file_path`            | string | `null`      | Custom directory to use as the file-memory scope for this agent instead of the default `<root>/agent_<name>/`. Useful for pointing an agent at an existing workspace (e.g. an OpenClaw workspace). Resolved relative to the config file directory                                                                                 |
 | `knowledge_bases`             | list   | `[]`        | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                                                                                                                                                                                                         |
 | `context_files`               | list   | `[]`        | File paths loaded at agent init/reload and prepended to role context (under `Personality Context`)                                                                                                                                                                                                                                |
 | `thread_mode`                 | string | `"thread"`  | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile                                                                                                                 |
@@ -1999,6 +2004,8 @@ agents:
     display_name: OpenClawAgent
     include_default_tools: false
     learning: false
+    memory_backend: file
+    memory_file_path: ./openclaw_data
     model: opus
     role: OpenClaw-style personal assistant with persistent file-based identity and memory.
     rooms: [personal]
@@ -2015,22 +2022,14 @@ agents:
       - ./openclaw_data/AGENTS.md
       - ./openclaw_data/USER.md
       - ./openclaw_data/IDENTITY.md
-      - ./openclaw_data/MEMORY.md
       - ./openclaw_data/TOOLS.md
       - ./openclaw_data/HEARTBEAT.md
 
     knowledge_bases: [openclaw_memory]
 
     tools:
-      - file
-      - shell
-      - scheduler
-      - duckduckgo
-      - website
       - openclaw_compat
-      - browser
       - python
-      - calculator
 
     skills:
       - transcribe
@@ -2041,13 +2040,13 @@ knowledge_bases:
     watch: true
 
 memory:
-  backend: file
   file:
-    path: ./openclaw_data/memory
     max_entrypoint_lines: 200
   auto_flush:
     enabled: true
 ```
+
+`memory_file_path` points the file-memory scope directly at the workspace root, so `MEMORY.md` is loaded automatically by the file backend as the entrypoint — no need to list it in `context_files`. `memory_file_path` is ignored unless the effective backend is `file`; if you switch this agent to `mem0`, re-add `MEMORY.md` to `context_files` when you still want it preloaded. The `openclaw_compat` toolkit already bundles shell, file operations, web search, web fetch, browser, and scheduler aliases, so listing those tools individually is not necessary.
 
 ## Recommended workspace layout
 
@@ -2069,11 +2068,14 @@ openclaw_data/
 
 OpenClaw-compatible agents use the same memory system as every other MindRoom agent:
 
-- `memory.backend: mem0` for vector memory
-- `memory.backend: file` for file-first memory
+- `memory.backend: mem0` for vector memory (global default)
+- `memory.backend: file` for file-first memory (global default)
+- `memory_backend: file` on an individual agent to override the global default
+- `memory_file_path: ./openclaw_data` to point the file-memory scope at an existing workspace directory instead of the default `<root>/agent_<name>/`
+- Agents that use file memory without `memory_file_path` continue to use the global `memory.file.path` (or the default `<storage_path>/memory_files/`)
 - optional `knowledge_bases` for semantic recall over arbitrary workspace folders
 
-Recommended for OpenClaw-style setups: `memory.backend: file` with `memory.auto_flush.enabled: true`.
+Recommended for OpenClaw-style setups: `memory_backend: file` with `memory_file_path` pointing at the workspace root and `memory.auto_flush.enabled: true`.
 
 ## Context Management
 
@@ -2691,7 +2693,7 @@ MindRoom supports two memory backends:
 - `mem0`: vector memory (semantic retrieval + extraction via Mem0)
 - `file`: markdown memory files (`MEMORY.md` plus optional dated notes)
 
-Set the global default backend with `memory.backend`. Override the backend per agent with `agents.<name>.memory_backend`.
+Set the global default backend with `memory.backend`. Override the backend per agent with `agents.<name>.memory_backend`. Set `agents.<name>.memory_file_path` to point an individual file-backed agent at a custom workspace directory.
 
 OpenClaw compatibility uses this same backend selection; there is no separate OpenClaw-only memory engine.
 
@@ -2756,7 +2758,10 @@ agents:
     display_name: Coder
     role: Write and review code
     memory_backend: file
+    memory_file_path: ./openclaw_data
 ```
+
+`memory_file_path` is resolved relative to `config.yaml`. When set, the agent uses that directory as its memory scope instead of `<storage_path>/memory_files/agent_<name>/`.
 
 ### File layout
 
@@ -2813,7 +2818,7 @@ The Dashboard **Memory** page supports:
 - batch sizing
 - extractor settings (`no_reply_token`, message/char/time limits, memory-context bounds)
 
-Save from the Memory page to persist changes to `config.yaml`. Use the Dashboard **Agents** page to set an agent-specific **Memory Backend** override.
+Save from the Memory page to persist changes to `config.yaml`. Use the Dashboard **Agents** page to set an agent-specific **Memory Backend** override and optional **Memory File Path**.
 
 ## Optional Memory Tool
 

@@ -125,6 +125,20 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def validate_memory_file_path_overrides(self) -> Config:
+        """Ensure memory_file_path is only configured for effective file-backed agents."""
+        invalid_overrides = [
+            agent_name
+            for agent_name, agent_config in self.agents.items()
+            if agent_config.memory_file_path is not None and self.get_agent_memory_backend(agent_name) != "file"
+        ]
+        if invalid_overrides:
+            formatted = ", ".join(sorted(invalid_overrides))
+            msg = f"agents.<name>.memory_file_path requires effective file memory backend; invalid agents: {formatted}"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def validate_culture_assignments(self) -> Config:
         """Ensure culture assignments reference known agents and remain one-to-one."""
         unknown_assignments = [

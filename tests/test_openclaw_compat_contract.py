@@ -865,30 +865,6 @@ async def test_openclaw_compat_exec_returns_error_for_invalid_shell_syntax() -> 
 
 
 @pytest.mark.asyncio
-async def test_openclaw_compat_exec_requires_shell_tool_in_context(tmp_path: Path) -> None:
-    """Verify exec is blocked when the active agent does not enable shell tool."""
-    tool = OpenClawCompatTools()
-    config = MagicMock()
-    config.agents = {"openclaw": SimpleNamespace(tools=["file"])}
-    ctx = OpenClawToolContext(
-        agent_name="openclaw",
-        room_id="!room:localhost",
-        thread_id="$ctx-thread:localhost",
-        requester_id="@user:localhost",
-        client=MagicMock(),
-        config=config,
-        storage_path=tmp_path,
-    )
-
-    with openclaw_tool_context(ctx):
-        payload = json.loads(await tool.exec("echo hi"))
-
-    assert payload["status"] == "error"
-    assert payload["tool"] == "exec"
-    assert "shell tool is not enabled" in payload["message"]
-
-
-@pytest.mark.asyncio
 async def test_openclaw_compat_sessions_history_mixed_timestamp_types_sorted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

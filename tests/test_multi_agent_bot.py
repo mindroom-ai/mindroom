@@ -18,7 +18,7 @@ from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
 
 from mindroom.attachments import attachment_id_for_event, register_local_attachment
-from mindroom.bot import AgentBot, MessageContext, MultiAgentOrchestrator, MultiKnowledgeVectorDb
+from mindroom.bot import AgentBot, MessageContext, MultiKnowledgeVectorDb
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -28,6 +28,7 @@ from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.teams import TeamFormationDecision, TeamMode
 from mindroom.thread_utils import is_authorized_sender as is_authorized_sender_for_test
 from mindroom.tool_events import ToolTraceEntry
@@ -2040,12 +2041,12 @@ class TestMultiAgentOrchestrator:
         mock_invite = AsyncMock(return_value=True)
 
         with (
-            patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
-            patch("mindroom.bot.is_authorized_sender", side_effect=is_authorized_sender_for_test),
-            patch("mindroom.bot.get_joined_rooms", new=AsyncMock(return_value=list(room_members))),
-            patch("mindroom.bot.get_room_members", side_effect=mock_get_room_members),
-            patch("mindroom.bot.invite_to_room", mock_invite),
-            patch("mindroom.bot.MatrixState.load", return_value=MatrixState()),
+            patch("mindroom.orchestrator.MATRIX_HOMESERVER", "http://localhost:8008"),
+            patch("mindroom.orchestrator.is_authorized_sender", side_effect=is_authorized_sender_for_test),
+            patch("mindroom.orchestrator.get_joined_rooms", new=AsyncMock(return_value=list(room_members))),
+            patch("mindroom.orchestrator.get_room_members", side_effect=mock_get_room_members),
+            patch("mindroom.orchestrator.invite_to_room", mock_invite),
+            patch("mindroom.orchestrator.MatrixState.load", return_value=MatrixState()),
         ):
             await orchestrator._ensure_room_invitations()
 
@@ -2084,12 +2085,12 @@ class TestMultiAgentOrchestrator:
         mock_invite = AsyncMock(return_value=True)
 
         with (
-            patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
-            patch("mindroom.bot.is_authorized_sender", side_effect=is_authorized_sender_for_test),
-            patch("mindroom.bot.get_joined_rooms", new=AsyncMock(return_value=["!room1:localhost"])),
-            patch("mindroom.bot.get_room_members", side_effect=mock_get_room_members),
-            patch("mindroom.bot.invite_to_room", mock_invite),
-            patch("mindroom.bot.MatrixState.load", return_value=MatrixState()),
+            patch("mindroom.orchestrator.MATRIX_HOMESERVER", "http://localhost:8008"),
+            patch("mindroom.orchestrator.is_authorized_sender", side_effect=is_authorized_sender_for_test),
+            patch("mindroom.orchestrator.get_joined_rooms", new=AsyncMock(return_value=["!room1:localhost"])),
+            patch("mindroom.orchestrator.get_room_members", side_effect=mock_get_room_members),
+            patch("mindroom.orchestrator.invite_to_room", mock_invite),
+            patch("mindroom.orchestrator.MatrixState.load", return_value=MatrixState()),
         ):
             await orchestrator._ensure_room_invitations()
 
@@ -2115,7 +2116,7 @@ class TestMultiAgentOrchestrator:
         mock_config.teams = {}
         mock_load_config.return_value = mock_config
 
-        with patch("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
+        with patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
             orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
             await orchestrator.initialize()
 
@@ -2145,7 +2146,7 @@ class TestMultiAgentOrchestrator:
         mock_config.get_all_configured_rooms.return_value = ["lobby"]
         mock_load_config.return_value = mock_config
 
-        with patch("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
+        with patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
             orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
             await orchestrator.initialize()  # Need to initialize first
 
@@ -2190,7 +2191,7 @@ class TestMultiAgentOrchestrator:
         mock_config.get_all_configured_rooms.return_value = ["lobby"]
         mock_load_config.return_value = mock_config
 
-        with patch("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
+        with patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
             orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
             await orchestrator.initialize()
 
@@ -2229,7 +2230,7 @@ class TestMultiAgentOrchestrator:
         mock_config.get_all_configured_rooms.return_value = ["lobby"]
         mock_load_config.return_value = mock_config
 
-        with patch("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
+        with patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
             orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
             await orchestrator.initialize()
 
