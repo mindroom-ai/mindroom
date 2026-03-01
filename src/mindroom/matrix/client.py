@@ -658,10 +658,12 @@ async def send_file_message(
         content["url"] = mxc_uri
 
     if thread_id:
+        latest_thread_event_id = await _latest_thread_event_id(client, room_id, thread_id)
         content["m.relates_to"] = {
             "rel_type": "m.thread",
             "event_id": thread_id,
             "is_falling_back": True,
+            "m.in_reply_to": {"event_id": latest_thread_event_id},
         }
 
     return await send_message(client, room_id, content)

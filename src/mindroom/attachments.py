@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +21,15 @@ logger = get_logger(__name__)
 
 AttachmentKind = Literal["audio", "file", "video", "image"]
 FileOrVideoEvent = nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo
+_ATTACHMENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$")
+
+
+def normalize_attachment_id(raw_attachment_id: str) -> str | None:
+    """Normalize attachment IDs and reject unsafe values."""
+    attachment_id = raw_attachment_id.strip()
+    if not attachment_id or not _ATTACHMENT_ID_PATTERN.fullmatch(attachment_id):
+        return None
+    return attachment_id
 
 
 @dataclass(frozen=True)
@@ -69,7 +79,7 @@ def parse_attachment_ids_from_event_source(event_source: dict[str, Any] | None) 
     for raw_attachment_id in raw_attachment_ids:
         if not isinstance(raw_attachment_id, str):
             continue
-        attachment_id = raw_attachment_id.strip()
+        attachment_id = normalize_attachment_id(raw_attachment_id)
         if attachment_id and attachment_id not in normalized:
             normalized.append(attachment_id)
     return normalized
@@ -201,9 +211,14 @@ def register_local_attachment(
         logger.exception("Failed to read attachment file metadata", path=str(local_path))
         return None
 
-    attachment_id = attachment_id or f"att_{uuid4().hex[:16]}"
+    resolved_attachment_id = attachment_id or f"att_{uuid4().hex[:16]}"
+    normalized_attachment_id = normalize_attachment_id(resolved_attachment_id)
+    if normalized_attachment_id is None:
+        logger.warning("Invalid attachment ID", attachment_id=resolved_attachment_id)
+        return None
+
     record = AttachmentRecord(
-        attachment_id=attachment_id,
+        attachment_id=normalized_attachment_id,
         local_path=local_path.resolve(),
         kind=kind,
         filename=filename,
@@ -216,7 +231,7 @@ def register_local_attachment(
         created_at=datetime.now(UTC).isoformat(),
     )
 
-    record_path = _attachment_record_path(storage_path, attachment_id)
+    record_path = _attachment_record_path(storage_path, normalized_attachment_id)
     record_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = record_path.with_suffix(f".{uuid4().hex[:8]}.tmp")
     tmp_path.write_text(json.dumps(record.to_payload(), sort_keys=True), encoding="utf-8")
@@ -293,8 +308,8 @@ def register_audio_attachment(
 
 def load_attachment(storage_path: Path, attachment_id: str) -> AttachmentRecord | None:
     """Load attachment metadata by ID."""
-    normalized_attachment_id = attachment_id.strip()
-    if not normalized_attachment_id:
+    normalized_attachment_id = normalize_attachment_id(attachment_id)
+    if normalized_attachment_id is None:
         return None
     record_path = _attachment_record_path(storage_path, normalized_attachment_id)
     if not record_path.is_file():
@@ -343,8 +358,8 @@ def resolve_attachments(storage_path: Path, attachment_ids: list[str]) -> list[A
     resolved: list[AttachmentRecord] = []
     seen_ids: set[str] = set()
     for attachment_id in attachment_ids:
-        normalized_attachment_id = attachment_id.strip()
-        if not normalized_attachment_id or normalized_attachment_id in seen_ids:
+        normalized_attachment_id = normalize_attachment_id(attachment_id)
+        if normalized_attachment_id is None or normalized_attachment_id in seen_ids:
             continue
         seen_ids.add(normalized_attachment_id)
         record = load_attachment(storage_path, normalized_attachment_id)

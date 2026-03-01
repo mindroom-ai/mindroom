@@ -917,13 +917,18 @@ class AgentBot:
         )
         event_info = EventInfo.from_event(event.source)
         _, thread_id, _ = await self._derive_conversation_context(room.room_id, event_info)
+        effective_thread_id = self._resolve_reply_thread_id(
+            thread_id,
+            event.event_id,
+            event_source=event.source,
+        )
 
         if transcribed_message:
             response_event_id = await self._send_response(
                 room_id=room.room_id,
                 reply_to_event_id=event.event_id,
                 response_text=transcribed_message,
-                thread_id=thread_id,
+                thread_id=effective_thread_id,
                 extra_content={ORIGINAL_SENDER_KEY: event.sender},
             )
             self.response_tracker.mark_responded(event.event_id, response_event_id)
@@ -945,7 +950,7 @@ class AgentBot:
             audio_bytes=voice_audio.content,
             mime_type=voice_audio.mime_type,
             room_id=room.room_id,
-            thread_id=thread_id,
+            thread_id=effective_thread_id,
             sender=event.sender,
             filename=event.body if isinstance(event.body, str) else None,
         )
@@ -960,7 +965,7 @@ class AgentBot:
             room_id=room.room_id,
             reply_to_event_id=event.event_id,
             response_text=fallback_message,
-            thread_id=thread_id,
+            thread_id=effective_thread_id,
             extra_content=fallback_extra_content,
         )
         self.response_tracker.mark_responded(event.event_id, response_event_id)
@@ -1040,11 +1045,16 @@ class AgentBot:
         if action is None:
             return
 
+        effective_thread_id = self._resolve_reply_thread_id(
+            context.thread_id,
+            event.event_id,
+            event_source=event.source,
+        )
         attachment_record = await register_file_or_video_attachment(
             self.client,
             self.storage_path,
             room_id=room.room_id,
-            thread_id=context.thread_id,
+            thread_id=effective_thread_id,
             event=event,
         )
         if attachment_record is None:
@@ -1056,7 +1066,7 @@ class AgentBot:
             self.storage_path,
             [attachment_record.attachment_id],
             room_id=room.room_id,
-            thread_id=context.thread_id,
+            thread_id=effective_thread_id,
         )
         prompt_text = append_attachment_ids_prompt(caption, resolved_attachment_ids)
         await self._execute_dispatch_action(

@@ -1225,7 +1225,7 @@ class TestAgentBot:
             filename="report.pdf",
             mime_type="application/pdf",
             room_id=room.room_id,
-            thread_id=None,
+            thread_id="$file_event",
             source_event_id="$file_event",
             sender="@user:localhost",
         )
