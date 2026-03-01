@@ -8,13 +8,11 @@ import sqlite3
 from itertools import count
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 import mindroom.tools  # noqa: F401
-from mindroom.attachments import register_local_attachment
-from mindroom.attachments_context import AttachmentToolContext, attachment_tool_context
 from mindroom.custom_tools.openclaw_compat import OpenClawCompatTools
 from mindroom.openclaw_context import OpenClawToolContext, get_openclaw_tool_context, openclaw_tool_context
 from mindroom.thread_utils import create_session_id
@@ -472,21 +470,9 @@ async def test_openclaw_compat_message_reply_uses_context_thread(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_openclaw_compat_message_attachments_lists_context_ids(tmp_path: Path) -> None:
-    """Verify message attachments action returns current-context attachment metadata."""
+async def test_openclaw_compat_message_attachments_action_is_unsupported(tmp_path: Path) -> None:
+    """Verify message attachments action is rejected in openclaw_compat."""
     tool = OpenClawCompatTools()
-    sample_file = tmp_path / "sample.txt"
-    sample_file.write_text("hello", encoding="utf-8")
-    attachment = register_local_attachment(
-        tmp_path,
-        sample_file,
-        kind="file",
-        room_id="!room:localhost",
-        thread_id="$ctx-thread:localhost",
-        source_event_id="$root",
-        sender="@user:localhost",
-    )
-    assert attachment is not None
 
     config = MagicMock()
     config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
@@ -499,31 +485,21 @@ async def test_openclaw_compat_message_attachments_lists_context_ids(tmp_path: P
         config=config,
         storage_path=tmp_path,
     )
-    attachment_ctx = AttachmentToolContext(
-        room_id="!room:localhost",
-        thread_id="$ctx-thread:localhost",
-        requester_id="@user:localhost",
-        client=ctx.client,
-        storage_path=tmp_path,
-        attachment_ids=(attachment.attachment_id,),
-    )
 
-    with openclaw_tool_context(ctx), attachment_tool_context(attachment_ctx):
+    with openclaw_tool_context(ctx):
         payload = json.loads(await tool.message(action="attachments"))
 
-    assert payload["status"] == "ok"
+    assert payload["status"] == "error"
+    assert payload["tool"] == "message"
     assert payload["action"] == "attachments"
-    assert payload["attachment_ids"] == [attachment.attachment_id]
-    assert payload["attachments"][0]["attachment_id"] == attachment.attachment_id
-    assert payload["attachments"][0]["available"] is True
-    assert "local_path" not in payload["attachments"][0]
+    assert "Unsupported action" in payload["message"]
 
 
 @pytest.mark.asyncio
-async def test_openclaw_compat_message_send_supports_attachment_only(tmp_path: Path) -> None:
-    """Verify message send can upload context attachment IDs without a text body."""
+async def test_openclaw_compat_message_send_rejects_attachments_parameter(tmp_path: Path) -> None:
+    """Verify message send rejects attachments and points callers to attachments tool."""
     tool = OpenClawCompatTools()
-    tool._send_matrix_text = AsyncMock()
+    tool._send_matrix_text = AsyncMock(return_value="$evt")
     config = MagicMock()
     config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
     ctx = OpenClawToolContext(
@@ -535,43 +511,20 @@ async def test_openclaw_compat_message_send_supports_attachment_only(tmp_path: P
         config=config,
         storage_path=tmp_path,
     )
-    sample_file = tmp_path / "upload.txt"
-    sample_file.write_text("payload", encoding="utf-8")
-    attachment = register_local_attachment(
-        tmp_path,
-        sample_file,
-        kind="file",
-        attachment_id="att_upload",
-        room_id="!room:localhost",
-        thread_id="$ctx-thread:localhost",
-    )
-    assert attachment is not None
-    attachment_ctx = AttachmentToolContext(
-        room_id="!room:localhost",
-        thread_id="$ctx-thread:localhost",
-        requester_id="@user:localhost",
-        client=ctx.client,
-        storage_path=tmp_path,
-        attachment_ids=(attachment.attachment_id,),
-    )
 
-    with (
-        openclaw_tool_context(ctx),
-        attachment_tool_context(attachment_ctx),
-        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")),
-    ):
-        payload = json.loads(await tool.message(action="send", attachments=[attachment.attachment_id]))
+    with openclaw_tool_context(ctx):
+        payload = json.loads(await tool.message(action="send", attachments=["att_upload"], message="hello"))
 
-    assert payload["status"] == "ok"
-    assert payload["event_id"] == "$file_evt"
-    assert payload["attachment_event_ids"] == ["$file_evt"]
-    assert payload["resolved_attachment_ids"] == [attachment.attachment_id]
+    assert payload["status"] == "error"
+    assert payload["tool"] == "message"
+    assert payload["action"] == "send"
+    assert "Use the attachments tool directly" in payload["message"]
     tool._send_matrix_text.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_openclaw_compat_message_send_rejects_non_attachment_id_references(tmp_path: Path) -> None:
-    """Verify message send only accepts context attachment IDs in attachments[]."""
+    """Verify message send always rejects attachments, regardless of reference format."""
     tool = OpenClawCompatTools()
     tool._send_matrix_text = AsyncMock()
     config = MagicMock()
@@ -588,18 +541,14 @@ async def test_openclaw_compat_message_send_rejects_non_attachment_id_references
     sample_file = tmp_path / "upload.txt"
     sample_file.write_text("payload", encoding="utf-8")
 
-    with (
-        openclaw_tool_context(ctx),
-        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
-    ):
+    with openclaw_tool_context(ctx):
         payload = json.loads(await tool.message(action="send", attachments=[str(sample_file)]))
 
     assert payload["status"] == "error"
     assert payload["tool"] == "message"
     assert payload["action"] == "send"
-    assert "must be context attachment IDs" in payload["message"]
+    assert "Use the attachments tool directly" in payload["message"]
     tool._send_matrix_text.assert_not_awaited()
-    mocked.assert_not_awaited()
 
 
 @pytest.mark.asyncio

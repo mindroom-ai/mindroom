@@ -37,6 +37,8 @@ The `openclaw_compat` tool provides OpenClaw-named aliases so prompts and skills
 | `subagents`, `agents_list` | Agent registry lookup                         |
 | `browser`                  | `BrowserTools` (Playwright, host target only) |
 
+Attachment handling is provided by the standalone `attachments` tool, not `openclaw_compat.message`.
+
 Memory is not a separate OpenClaw subsystem in MindRoom. It uses the normal MindRoom memory backend.
 
 ## Drop-in config
@@ -74,6 +76,7 @@ agents:
 
     tools:
       - openclaw_compat
+      - attachments
       - python
 
     skills:
