@@ -38,7 +38,7 @@ def _maybe_ssl_context(homeserver: str) -> ssl_module.SSLContext | None:
     return None
 
 
-def create_matrix_client(
+def _create_matrix_client(
     homeserver: str,
     user_id: str | None = None,
     access_token: str | None = None,
@@ -104,7 +104,7 @@ async def matrix_client(
             response = await client.login(password="secret")
 
     """
-    client = create_matrix_client(homeserver, user_id, access_token)
+    client = _create_matrix_client(homeserver, user_id, access_token)
 
     try:
         yield client
@@ -127,7 +127,7 @@ async def login(homeserver: str, user_id: str, password: str) -> nio.AsyncClient
         ValueError: If login fails
 
     """
-    client = create_matrix_client(homeserver, user_id)
+    client = _create_matrix_client(homeserver, user_id)
 
     response = await client.login(password)
     if isinstance(response, nio.LoginResponse):

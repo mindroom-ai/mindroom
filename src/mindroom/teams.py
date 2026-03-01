@@ -69,7 +69,7 @@ class TeamModeDecision(BaseModel):
     reasoning: str = Field(description="Brief explanation of why this mode was chosen")
 
 
-def format_team_header(agent_names: list[str]) -> str:
+def _format_team_header(agent_names: list[str]) -> str:
     """Format the team response header.
 
     Args:
@@ -82,7 +82,7 @@ def format_team_header(agent_names: list[str]) -> str:
     return f"🤝 **Team Response** ({', '.join(agent_names)}):\n\n"
 
 
-def format_member_contribution(agent_name: str, content: str, indent: int = 0) -> str:
+def _format_member_contribution(agent_name: str, content: str, indent: int = 0) -> str:
     """Format a single team member's contribution.
 
     Args:
@@ -98,7 +98,7 @@ def format_member_contribution(agent_name: str, content: str, indent: int = 0) -
     return f"{indent_str}**{agent_name}**: {content}"
 
 
-def format_team_consensus(consensus: str, indent: int = 0) -> list[str]:
+def _format_team_consensus(consensus: str, indent: int = 0) -> list[str]:
     """Format the team consensus section.
 
     Args:
@@ -117,7 +117,7 @@ def format_team_consensus(consensus: str, indent: int = 0) -> list[str]:
     return parts
 
 
-def format_no_consensus_note(indent: int = 0) -> str:
+def _format_no_consensus_note(indent: int = 0) -> str:
     """Format the note when there's no team consensus.
 
     Args:
@@ -181,19 +181,19 @@ def _format_contributions_recursive(  # noqa: C901
                     agent_name = member_resp.agent_name or "Team Member"
                     content = _get_response_content(member_resp)
                     if content:
-                        parts.append(format_member_contribution(agent_name, content, indent))
+                        parts.append(_format_member_contribution(agent_name, content, indent))
 
         if include_consensus:
             if response.content:
-                parts.extend(format_team_consensus(response.content, indent))
+                parts.extend(_format_team_consensus(response.content, indent))
             elif parts:
-                parts.append(format_no_consensus_note(indent))
+                parts.append(_format_no_consensus_note(indent))
 
     elif isinstance(response, RunOutput):
         agent_name = response.agent_name or "Agent"
         content = _get_response_content(response)
         if content:
-            parts.append(format_member_contribution(agent_name, content, indent))
+            parts.append(_format_member_contribution(agent_name, content, indent))
 
     return parts
 
@@ -577,12 +577,12 @@ async def team_response(
 
     # Don't use @ mentions as that would trigger the agents again
     agent_names = [str(a.name) for a in agents if a.name]
-    team_header = format_team_header(agent_names)
+    team_header = _format_team_header(agent_names)
 
     return team_header + team_response
 
 
-async def team_response_stream_raw(
+async def _team_response_stream_raw(
     agent_ids: list[MatrixID],
     mode: TeamMode,
     message: str,
@@ -675,7 +675,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     logger.info(f"Team streaming setup - agents: {agent_names}, display names: {display_names}")
 
     # Acquire raw event stream
-    raw_stream = await team_response_stream_raw(
+    raw_stream = await _team_response_stream_raw(
         agent_ids=agent_ids,
         mode=mode,
         message=message,
@@ -858,19 +858,19 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         for display in display_names:
             body = per_member.get(display, "").strip()
             if body:
-                parts.append(format_member_contribution(display, body))
+                parts.append(_format_member_contribution(display, body))
         # Then render any late/unknown agents that appeared during stream
         for display, body in per_member.items():
             if display not in display_names and body.strip():
-                parts.append(format_member_contribution(display, body.strip()))
+                parts.append(_format_member_contribution(display, body.strip()))
 
         if consensus.strip():
-            parts.extend(format_team_consensus(consensus.strip()))
+            parts.extend(_format_team_consensus(consensus.strip()))
         elif parts:
-            parts.append(format_no_consensus_note())
+            parts.append(_format_no_consensus_note())
 
         if parts:
-            header = format_team_header(agent_names)
+            header = _format_team_header(agent_names)
             full_text = "\n\n".join(parts)
             chunk_tool_trace = tool_trace.copy() if show_tool_calls and tool_trace else None
             yield StructuredStreamChunk(content=header + full_text, tool_trace=chunk_tool_trace)
