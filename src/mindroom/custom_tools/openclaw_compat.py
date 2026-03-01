@@ -52,12 +52,9 @@ class OpenClawCompatTools(Toolkit):
             name="openclaw_compat",
             tools=[
                 self._subagents_tools.agents_list,
-                self._subagents_tools.session_status,
-                self._subagents_tools.sessions_list,
-                self._subagents_tools.sessions_history,
                 self._subagents_tools.sessions_send,
                 self._subagents_tools.sessions_spawn,
-                self._subagents_tools.subagents,
+                self._subagents_tools.list_sessions,
                 self.message,
                 self.cron,
                 self.web_search,

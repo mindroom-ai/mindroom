@@ -5,8 +5,6 @@ from __future__ import annotations
 import inspect
 import json
 import os
-import sqlite3
-from itertools import count
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
@@ -26,12 +24,9 @@ if TYPE_CHECKING:
 
 OPENCLAW_COMPAT_CORE_TOOLS = {
     "agents_list",
-    "session_status",
-    "sessions_list",
-    "sessions_history",
     "sessions_send",
     "sessions_spawn",
-    "subagents",
+    "list_sessions",
     "message",
 }
 
@@ -52,12 +47,9 @@ OPENCLAW_COMPAT_ALIAS_TOOLS = {
 
 SUBAGENT_TOOLSET_TOOLS = {
     "agents_list",
-    "session_status",
-    "sessions_list",
-    "sessions_history",
     "sessions_send",
     "sessions_spawn",
-    "subagents",
+    "list_sessions",
 }
 
 
@@ -145,15 +137,12 @@ async def test_openclaw_compat_placeholder_responses_are_json() -> None:
     tool = OpenClawCompatTools()
     context_required = [
         ("agents_list", await call_openclaw_subagent_tool(tool, "agents_list")),
-        ("session_status", await call_openclaw_subagent_tool(tool, "session_status")),
-        ("sessions_list", await call_openclaw_subagent_tool(tool, "sessions_list")),
-        ("sessions_history", await call_openclaw_subagent_tool(tool, "sessions_history", session_key="main")),
         (
             "sessions_send",
             await call_openclaw_subagent_tool(tool, "sessions_send", message="hello", session_key="main"),
         ),
         ("sessions_spawn", await call_openclaw_subagent_tool(tool, "sessions_spawn", task="do this")),
-        ("subagents", await call_openclaw_subagent_tool(tool, "subagents")),
+        ("list_sessions", await call_openclaw_subagent_tool(tool, "list_sessions")),
         ("message", await tool.message(action="send", message="hi")),
     ]
 
@@ -636,157 +625,11 @@ async def test_openclaw_compat_sessions_send_rejects_room_mode_threaded_dispatch
 
 
 @pytest.mark.asyncio
-async def test_openclaw_compat_sessions_list_scopes_registry_entries_by_context(tmp_path: Path) -> None:
-    """Verify sessions_list only returns registry sessions from the active requester/thread scope."""
-    tool = OpenClawCompatTools()
-    config = MagicMock()
-    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
-    ctx_a = OpenClawToolContext(
-        agent_name="openclaw",
-        room_id="!room:localhost",
-        thread_id="$thread:localhost",
-        requester_id="@alice:localhost",
-        client=MagicMock(),
-        config=config,
-        storage_path=tmp_path,
-    )
-    ctx_b = OpenClawToolContext(
-        agent_name="openclaw",
-        room_id="!room:localhost",
-        thread_id="$thread:localhost",
-        requester_id="@bob:localhost",
-        client=MagicMock(),
-        config=config,
-        storage_path=tmp_path,
-    )
-    session_a = create_session_id(ctx_a.room_id, "$child-a:localhost")
-    session_b = create_session_id(ctx_b.room_id, "$child-b:localhost")
-    subagents_module._touch_session(ctx_a, session_key=session_a, kind="thread", label="alpha", status="active")
-    subagents_module._touch_session(ctx_b, session_key=session_b, kind="thread", label="beta", status="active")
-
-    with openclaw_tool_context(ctx_a):
-        payload_a = json.loads(await call_openclaw_subagent_tool(tool, "sessions_list"))
-    with openclaw_tool_context(ctx_b):
-        payload_b = json.loads(await call_openclaw_subagent_tool(tool, "sessions_list"))
-
-    assert [session["session_key"] for session in payload_a["sessions"]] == [session_a]
-    assert [session["session_key"] for session in payload_b["sessions"]] == [session_b]
-
-
-def test_subagents_touch_session_rejects_cross_scope_updates(tmp_path: Path) -> None:
-    """Session tracking should not allow metadata writes from out-of-scope requesters."""
-    config = MagicMock()
-    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
-    ctx_a = OpenClawToolContext(
-        agent_name="openclaw",
-        room_id="!room:localhost",
-        thread_id="$thread:localhost",
-        requester_id="@alice:localhost",
-        client=MagicMock(),
-        config=config,
-        storage_path=tmp_path,
-    )
-    ctx_b = OpenClawToolContext(
-        agent_name="openclaw",
-        room_id="!room:localhost",
-        thread_id="$thread:localhost",
-        requester_id="@bob:localhost",
-        client=MagicMock(),
-        config=config,
-        storage_path=tmp_path,
-    )
-    session_key = create_session_id(ctx_a.room_id, "$child:localhost")
-
-    subagents_module._touch_session(
-        ctx_a,
-        session_key=session_key,
-        kind="thread",
-        label="alpha",
-        target_agent="openclaw",
-        status="active",
-    )
-    subagents_module._touch_session(
-        ctx_b,
-        session_key=session_key,
-        kind="thread",
-        label="beta",
-        target_agent="other-agent",
-        status="active",
-    )
-
-    tracked = subagents_module._load_tracked_session(ctx_a, session_key)
-    assert isinstance(tracked, dict)
-    assert tracked["label"] == "alpha"
-    assert tracked["target_agent"] == "openclaw"
-    assert tracked["requester_id"] == "@alice:localhost"
-    assert tracked["scope"]["requester_id"] == "@alice:localhost"
-
-
-@pytest.mark.asyncio
-async def test_openclaw_compat_sessions_send_ignores_out_of_scope_tracked_target_agent(
+async def test_openclaw_compat_sessions_send_label_resolves_to_tracked_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """sessions_send should ignore tracked target_agent values outside the active scope."""
-    tool = OpenClawCompatTools()
-    send_mock = AsyncMock(return_value="$evt")
-    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
-    config = MagicMock()
-    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
-    config.get_entity_thread_mode = MagicMock(side_effect=lambda agent: "room" if agent == "room-agent" else "thread")
-    owner_ctx = OpenClawToolContext(
-        agent_name="openclaw",
-        room_id="!room:localhost",
-        thread_id="$thread:localhost",
-        requester_id="@alice:localhost",
-        client=MagicMock(),
-        config=config,
-        storage_path=tmp_path,
-    )
-    caller_ctx = OpenClawToolContext(
-        agent_name="openclaw",
-        room_id="!room:localhost",
-        thread_id="$thread:localhost",
-        requester_id="@bob:localhost",
-        client=MagicMock(),
-        config=config,
-        storage_path=tmp_path,
-    )
-    session_key = create_session_id(owner_ctx.room_id, "$child:localhost")
-    subagents_module._touch_session(
-        owner_ctx,
-        session_key=session_key,
-        kind="thread",
-        target_agent="room-agent",
-        status="active",
-    )
-
-    with openclaw_tool_context(caller_ctx):
-        payload = json.loads(
-            await call_openclaw_subagent_tool(
-                tool,
-                "sessions_send",
-                message="hello",
-                session_key=session_key,
-            ),
-        )
-
-    assert payload["status"] == "ok"
-    send_mock.assert_awaited_once_with(
-        caller_ctx,
-        room_id=caller_ctx.room_id,
-        text="hello",
-        thread_id="$child:localhost",
-        original_sender=caller_ctx.requester_id,
-    )
-
-
-@pytest.mark.asyncio
-async def test_openclaw_compat_sessions_send_label_prefers_latest_in_scope(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify label lookup is scoped and chooses the most recently updated matching session."""
+    """Verify label lookup resolves to a tracked session."""
     tool = OpenClawCompatTools()
     send_mock = AsyncMock(return_value="$evt")
     monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
@@ -801,52 +644,20 @@ async def test_openclaw_compat_sessions_send_label_prefers_latest_in_scope(
         config=config,
         storage_path=tmp_path,
     )
-    other_ctx = OpenClawToolContext(
-        agent_name="openclaw",
-        room_id="!room:localhost",
-        thread_id="$other-thread:localhost",
-        requester_id="@bob:localhost",
-        client=MagicMock(),
-        config=config,
-        storage_path=tmp_path,
-    )
 
-    epoch_counter = count(1)
-    iso_counter = count(1)
-    monkeypatch.setattr(
-        subagents_module,
-        "_now_epoch",
-        lambda: next(epoch_counter),
-    )
-    monkeypatch.setattr(
-        subagents_module,
-        "_now_iso",
-        lambda: f"2026-01-01T00:00:{next(iso_counter):02d}+00:00",
-    )
-
-    outsider_session = create_session_id(ctx.room_id, "$outside:localhost")
-    older_session = create_session_id(ctx.room_id, "$older:localhost")
-    newer_session = create_session_id(ctx.room_id, "$newer:localhost")
-    subagents_module._touch_session(
-        other_ctx,
-        session_key=outsider_session,
-        kind="thread",
-        label="work",
-        status="active",
-    )
-    subagents_module._touch_session(ctx, session_key=older_session, kind="thread", label="work", status="active")
-    subagents_module._touch_session(ctx, session_key=newer_session, kind="thread", label="work", status="active")
+    session_key = create_session_id(ctx.room_id, "$target:localhost")
+    subagents_module._record_session(ctx, session_key=session_key, label="work", target_agent="openclaw")
 
     with openclaw_tool_context(ctx):
         payload = json.loads(await call_openclaw_subagent_tool(tool, "sessions_send", message="hello", label="work"))
 
     assert payload["status"] == "ok"
-    assert payload["session_key"] == newer_session
+    assert payload["session_key"] == session_key
     send_mock.assert_awaited_once_with(
         ctx,
         room_id=ctx.room_id,
         text="hello",
-        thread_id="$newer:localhost",
+        thread_id="$target:localhost",
         original_sender=ctx.requester_id,
     )
 
@@ -905,6 +716,12 @@ async def test_openclaw_compat_sessions_spawn_relays_original_sender(
         payload = json.loads(await call_openclaw_subagent_tool(tool, "sessions_spawn", task="do thing"))
 
     assert payload["status"] == "ok"
+    assert "session_key" in payload
+    assert payload["target_agent"] == "openclaw"
+    assert payload["event_id"] == "$event"
+    assert "run_id" not in payload
+    assert "parent_session_key" not in payload
+    assert "run" not in payload
     send_mock.assert_awaited_once_with(
         ctx,
         room_id=ctx.room_id,
@@ -946,63 +763,6 @@ async def test_openclaw_compat_sessions_spawn_rejects_room_mode_target_agent(
 
 
 @pytest.mark.asyncio
-async def test_openclaw_compat_subagents_kill_all_scopes_to_context(tmp_path: Path) -> None:
-    """Verify kill-all only updates runs belonging to the active context scope."""
-    tool = OpenClawCompatTools()
-    config = MagicMock()
-    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
-    ctx_a = OpenClawToolContext(
-        agent_name="openclaw",
-        room_id="!room:localhost",
-        thread_id="$thread-a:localhost",
-        requester_id="@alice:localhost",
-        client=MagicMock(),
-        config=config,
-        storage_path=tmp_path,
-    )
-    ctx_b = OpenClawToolContext(
-        agent_name="openclaw",
-        room_id="!room:localhost",
-        thread_id="$thread-b:localhost",
-        requester_id="@bob:localhost",
-        client=MagicMock(),
-        config=config,
-        storage_path=tmp_path,
-    )
-    subagents_module._track_run(
-        ctx_a,
-        run_id="run-a",
-        session_key=create_session_id(ctx_a.room_id, "$thread-a:localhost"),
-        task="task a",
-        target_agent="openclaw",
-        status="accepted",
-        event_id="$event-a",
-    )
-    subagents_module._track_run(
-        ctx_b,
-        run_id="run-b",
-        session_key=create_session_id(ctx_b.room_id, "$thread-b:localhost"),
-        task="task b",
-        target_agent="openclaw",
-        status="accepted",
-        event_id="$event-b",
-    )
-
-    with openclaw_tool_context(ctx_a):
-        kill_payload = json.loads(await call_openclaw_subagent_tool(tool, "subagents", action="kill", target="all"))
-        list_a_payload = json.loads(await call_openclaw_subagent_tool(tool, "subagents", action="list"))
-    with openclaw_tool_context(ctx_b):
-        list_b_payload = json.loads(await call_openclaw_subagent_tool(tool, "subagents", action="list"))
-
-    assert kill_payload["status"] == "ok"
-    assert kill_payload["updated"] == ["run-a"]
-    assert [run["run_id"] for run in list_a_payload["runs"]] == ["run-a"]
-    assert [run["status"] for run in list_a_payload["runs"]] == ["killed"]
-    assert [run["run_id"] for run in list_b_payload["runs"]] == ["run-b"]
-    assert [run["status"] for run in list_b_payload["runs"]] == ["accepted"]
-
-
-@pytest.mark.asyncio
 async def test_openclaw_compat_message_send_returns_error_when_matrix_send_fails(tmp_path: Path) -> None:
     """Verify message send returns an error payload when Matrix send fails."""
     tool = OpenClawCompatTools()
@@ -1029,48 +789,6 @@ async def test_openclaw_compat_message_send_returns_error_when_matrix_send_fails
 
 
 @pytest.mark.asyncio
-async def test_openclaw_compat_subagents_steer_does_not_mark_run_steered_on_dispatch_error(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify steer keeps run state unchanged when dispatch fails."""
-    tool = OpenClawCompatTools()
-    send_mock = AsyncMock(return_value=None)
-    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
-    config = MagicMock()
-    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
-    ctx = OpenClawToolContext(
-        agent_name="openclaw",
-        room_id="!room:localhost",
-        thread_id="$ctx-thread:localhost",
-        requester_id="@alice:localhost",
-        client=MagicMock(),
-        config=config,
-        storage_path=tmp_path,
-    )
-    subagents_module._track_run(
-        ctx,
-        run_id="run-1",
-        session_key=create_session_id(ctx.room_id, "$thread-1:localhost"),
-        task="task",
-        target_agent="openclaw",
-        status="accepted",
-        event_id="$event-1",
-    )
-
-    with openclaw_tool_context(ctx):
-        steer_payload = json.loads(
-            await call_openclaw_subagent_tool(tool, "subagents", action="steer", target="run-1", message="continue"),
-        )
-        list_payload = json.loads(await call_openclaw_subagent_tool(tool, "subagents", action="list"))
-
-    assert steer_payload["status"] == "error"
-    assert steer_payload["dispatch"]["status"] == "error"
-    assert [run["run_id"] for run in list_payload["runs"]] == ["run-1"]
-    assert [run["status"] for run in list_payload["runs"]] == ["accepted"]
-
-
-@pytest.mark.asyncio
 async def test_openclaw_compat_exec_returns_error_for_invalid_shell_syntax() -> None:
     """Verify malformed shell commands return a structured error payload."""
     tool = OpenClawCompatTools()
@@ -1078,102 +796,6 @@ async def test_openclaw_compat_exec_returns_error_for_invalid_shell_syntax() -> 
     assert payload["status"] == "error"
     assert payload["tool"] == "exec"
     assert "invalid shell command" in payload["message"]
-
-
-@pytest.mark.asyncio
-async def test_openclaw_compat_sessions_history_mixed_timestamp_types_sorted(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify mixed matrix/db timestamp formats are sorted without type errors."""
-    tool = OpenClawCompatTools()
-    room_id = "!room:localhost"
-    thread_id = "$thread:localhost"
-    session_key = create_session_id(room_id, thread_id)
-
-    sessions_dir = tmp_path / "sessions"
-    sessions_dir.mkdir(parents=True)
-    db_path = sessions_dir / "openclaw.db"
-    runs = json.dumps(
-        [
-            {
-                "run_id": "run-1",
-                "status": "completed",
-                "created_at": "2026-01-01T00:00:00+00:00",
-                "content_type": "text",
-                "content": "db entry",
-                "input": "hello",
-            },
-        ],
-    )
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            'CREATE TABLE "openclaw_sessions" (session_id TEXT, session_type TEXT, user_id TEXT, created_at INTEGER, updated_at INTEGER, runs TEXT)',
-        )
-        conn.execute(
-            'INSERT INTO "openclaw_sessions" VALUES (?, ?, ?, ?, ?, ?)',
-            (session_key, "thread", "@user:localhost", 1735689600, 1735689600, runs),
-        )
-        conn.commit()
-
-    async def _fake_thread_history(
-        _client: object,
-        passed_room_id: str,
-        passed_thread_id: str,
-    ) -> list[dict[str, object]]:
-        assert passed_room_id == room_id
-        assert passed_thread_id == thread_id
-        return [
-            {
-                "event_id": "$evt",
-                "sender": "@user:localhost",
-                "timestamp": 1735689600000,
-                "body": "matrix entry",
-            },
-        ]
-
-    monkeypatch.setattr("mindroom.custom_tools.subagents.fetch_thread_history", _fake_thread_history)
-
-    config = MagicMock()
-    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
-    ctx = OpenClawToolContext(
-        agent_name="openclaw",
-        room_id=room_id,
-        thread_id=thread_id,
-        requester_id="@user:localhost",
-        client=MagicMock(),
-        config=config,
-        storage_path=tmp_path,
-    )
-
-    with openclaw_tool_context(ctx):
-        payload = json.loads(
-            await call_openclaw_subagent_tool(tool, "sessions_history", session_key=session_key, limit=10),
-        )
-
-    assert payload["status"] == "ok"
-    assert [entry["source"] for entry in payload["history"]] == ["matrix_thread", "agent_db"]
-
-
-def test_openclaw_compat_read_agent_sessions_handles_missing_table(tmp_path: Path) -> None:
-    """Verify session reads tolerate sqlite files without the expected session table."""
-    sessions_dir = tmp_path / "sessions"
-    sessions_dir.mkdir(parents=True)
-    with sqlite3.connect(sessions_dir / "openclaw.db") as conn:
-        conn.execute("CREATE TABLE marker (id INTEGER PRIMARY KEY)")
-    config = MagicMock()
-    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
-    ctx = OpenClawToolContext(
-        agent_name="openclaw",
-        room_id="!room:localhost",
-        thread_id="$ctx-thread:localhost",
-        requester_id="@user:localhost",
-        client=MagicMock(),
-        config=config,
-        storage_path=tmp_path,
-    )
-
-    assert subagents_module._read_agent_sessions(ctx) == []
 
 
 def test_openclaw_context_readable_inside_context_manager(tmp_path: Path) -> None:
@@ -1194,3 +816,110 @@ def test_openclaw_context_readable_inside_context_manager(tmp_path: Path) -> Non
         assert got.agent_name == "test"
         assert got.thread_id is None
     assert get_openclaw_tool_context() is None
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_returns_tracked_sessions(tmp_path: Path) -> None:
+    """Verify list_sessions returns sessions recorded by _record_session."""
+    tool = OpenClawCompatTools()
+    config = MagicMock()
+    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
+    ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id="$thread:localhost",
+        requester_id="@alice:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+    session_key = create_session_id(ctx.room_id, "$child:localhost")
+    subagents_module._record_session(ctx, session_key=session_key, label="my-task", target_agent="code")
+
+    with openclaw_tool_context(ctx):
+        payload = json.loads(await call_openclaw_subagent_tool(tool, "list_sessions"))
+
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "list_sessions"
+    assert payload["total"] == 1
+    session = payload["sessions"][0]
+    assert session["session_key"] == session_key
+    assert session["label"] == "my-task"
+    assert session["target_agent"] == "code"
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_empty_when_no_sessions(tmp_path: Path) -> None:
+    """Verify list_sessions returns empty list when no sessions exist."""
+    tool = OpenClawCompatTools()
+    config = MagicMock()
+    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
+    ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id="$thread:localhost",
+        requester_id="@alice:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+
+    with openclaw_tool_context(ctx):
+        payload = json.loads(await call_openclaw_subagent_tool(tool, "list_sessions"))
+
+    assert payload["status"] == "ok"
+    assert payload["sessions"] == []
+    assert payload["total"] == 0
+
+
+def test_load_registry_migrates_old_format(tmp_path: Path) -> None:
+    """Verify _load_registry extracts sessions from old {sessions: {}, runs: {}} format."""
+    config = MagicMock()
+    ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id=None,
+        requester_id="@user:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+    registry_dir = tmp_path / "subagents"
+    registry_dir.mkdir(parents=True)
+    old_data = {
+        "sessions": {
+            "!room:localhost:$thread:localhost": {
+                "label": "old-session",
+                "target_agent": "code",
+            },
+        },
+        "runs": {"run-1": {"status": "accepted"}},
+    }
+    (registry_dir / "session_registry.json").write_text(json.dumps(old_data))
+
+    registry = subagents_module._load_registry(ctx)
+    assert "!room:localhost:$thread:localhost" in registry
+    assert registry["!room:localhost:$thread:localhost"]["label"] == "old-session"
+    # Runs are discarded during migration
+    assert "runs" not in registry
+
+
+def test_record_session_updates_existing(tmp_path: Path) -> None:
+    """Verify _record_session updates label on existing entry without overwriting other fields."""
+    config = MagicMock()
+    ctx = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room:localhost",
+        thread_id=None,
+        requester_id="@user:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+    session_key = "!room:localhost:$thread:localhost"
+    subagents_module._record_session(ctx, session_key=session_key, label="first", target_agent="code")
+    subagents_module._record_session(ctx, session_key=session_key, label="second")
+
+    registry = subagents_module._load_registry(ctx)
+    assert registry[session_key]["label"] == "second"
+    assert registry[session_key]["target_agent"] == "code"

@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="subagents",
     display_name="Sub-Agents",
-    description="Spawn, steer, and inspect Matrix session and sub-agent runs across agents",
+    description="Spawn and communicate with sub-agent sessions",
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
