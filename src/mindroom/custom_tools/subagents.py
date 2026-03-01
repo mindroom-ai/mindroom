@@ -172,7 +172,7 @@ def _threaded_dispatch_error(
     )
 
 
-async def send_matrix_text(
+async def _send_matrix_text(
     context: ToolRuntimeContext,
     *,
     room_id: str,
@@ -339,7 +339,7 @@ class SubAgentsTools(Toolkit):
         if agent_id:
             outgoing = f"@mindroom_{agent_id} {outgoing}"
 
-        event_id = await send_matrix_text(
+        event_id = await _send_matrix_text(
             context,
             room_id=target_room_id,
             text=outgoing,
@@ -398,7 +398,7 @@ class SubAgentsTools(Toolkit):
             )
 
         spawn_message = f"@mindroom_{target_agent} {task.strip()}"
-        event_id = await send_matrix_text(
+        event_id = await _send_matrix_text(
             context,
             room_id=context.room_id,
             text=spawn_message,
