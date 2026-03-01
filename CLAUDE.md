@@ -57,7 +57,8 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 | `constants.py` | Shared constants, paths, and environment variable defaults |
 | `error_handling.py` | User-friendly error message extraction |
 | `openclaw_context.py` | Runtime context for OpenClaw-compatible tool calls |
-| `thread_utils.py` | Thread analysis, agent detection, authorization checks |
+| `authorization.py` | Sender and per-agent authorization checks |
+| `thread_utils.py` | Thread analysis and agent detection |
 | `file_watcher.py` | File change detection for config hot-reload |
 | `config_confirmation.py` | Interactive config confirmation workflows |
 | `interactive.py` | Interactive Q&A system via Matrix reactions |
