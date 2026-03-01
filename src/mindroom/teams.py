@@ -25,6 +25,7 @@ from .constants import ROUTER_AGENT_NAME
 from .error_handling import get_user_friendly_error_message
 from .logging_config import get_logger
 from .matrix.rooms import get_room_alias_from_id
+from .media_inputs import MediaInputs
 from .tool_events import (
     StructuredStreamChunk,
     ToolTraceEntry,
@@ -34,10 +35,9 @@ from .tool_events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Sequence
+    from collections.abc import AsyncIterator, Callable
 
     import nio
-    from agno.media import Audio, File, Image, Video
     from agno.models.response import ToolExecution
 
     from .config.main import Config
@@ -529,10 +529,7 @@ async def team_response(
     orchestrator: MultiAgentOrchestrator,
     thread_history: list[dict] | None = None,
     model_name: str | None = None,
-    audio: Sequence[Audio] | None = None,
-    images: Sequence[Image] | None = None,
-    files: Sequence[File] | None = None,
-    videos: Sequence[Video] | None = None,
+    media: MediaInputs | None = None,
 ) -> str:
     """Create a team and execute response."""
     agents = _get_agents_from_orchestrator(agent_names, orchestrator)
@@ -540,6 +537,7 @@ async def team_response(
     if not agents:
         return NO_AGENTS_RESPONSE
 
+    media_inputs = media or MediaInputs()
     prompt = _build_prompt_with_context(message, thread_history)
     team = _create_team_instance(agents, agent_names, mode, orchestrator, model_name)
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
@@ -548,7 +546,13 @@ async def team_response(
     logger.info(f"TEAM PROMPT: {prompt[:500]}")
 
     try:
-        response = await team.arun(prompt, audio=audio, images=images, files=files, videos=videos)
+        response = await team.arun(
+            prompt,
+            audio=media_inputs.audio,
+            images=media_inputs.images,
+            files=media_inputs.files,
+            videos=media_inputs.videos,
+        )
     except Exception as e:
         logger.exception(f"Error in team response with agents {agent_list}")
         # Return user-friendly error message
@@ -585,10 +589,7 @@ async def team_response_stream_raw(
     orchestrator: MultiAgentOrchestrator,
     thread_history: list[dict] | None = None,
     model_name: str | None = None,
-    audio: Sequence[Audio] | None = None,
-    images: Sequence[Image] | None = None,
-    files: Sequence[File] | None = None,
-    videos: Sequence[Video] | None = None,
+    media: MediaInputs | None = None,
 ) -> AsyncIterator[Any]:
     """Yield raw team events (for structured live rendering). Falls back to a final response.
 
@@ -606,6 +607,7 @@ async def team_response_stream_raw(
 
         return _empty()
 
+    media_inputs = media or MediaInputs()
     prompt = _build_prompt_with_context(message, thread_history)
     team = _create_team_instance(agents, agent_names, mode, orchestrator, model_name)
 
@@ -618,10 +620,10 @@ async def team_response_stream_raw(
             prompt,
             stream=True,
             stream_events=True,
-            audio=audio,
-            images=images,
-            files=files,
-            videos=videos,
+            audio=media_inputs.audio,
+            images=media_inputs.images,
+            files=media_inputs.files,
+            videos=media_inputs.videos,
         )
     except Exception as e:
         logger.exception(f"Error in team streaming with agents {agent_names}")
@@ -641,10 +643,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     mode: TeamMode = TeamMode.COORDINATE,
     thread_history: list[dict] | None = None,
     model_name: str | None = None,
-    audio: Sequence[Audio] | None = None,
-    images: Sequence[Image] | None = None,
-    files: Sequence[File] | None = None,
-    videos: Sequence[Video] | None = None,
+    media: MediaInputs | None = None,
     show_tool_calls: bool = True,
 ) -> AsyncIterator[TeamStreamChunk]:
     """Aggregate team streaming into a non-stream-style document, live.
@@ -683,10 +682,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         orchestrator=orchestrator,
         thread_history=thread_history,
         model_name=model_name,
-        audio=audio,
-        images=images,
-        files=files,
-        videos=videos,
+        media=media,
     )
 
     def _scope_key_for_agent(agent_name: str) -> str:

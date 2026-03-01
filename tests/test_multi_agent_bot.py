@@ -29,6 +29,7 @@ from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.media_inputs import MediaInputs
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.teams import TeamFormationDecision, TeamMode
 from mindroom.tool_events import ToolTraceEntry
@@ -662,10 +663,7 @@ class TestAgentBot:
                 room_id="!test:localhost",
                 knowledge=None,
                 user_id="@user:localhost",
-                audio=None,
-                images=None,
-                files=None,
-                videos=None,
+                media=MediaInputs(),
                 reply_to_event_id="event123",
                 show_tool_calls=True,
                 run_metadata_collector=ANY,
@@ -685,10 +683,7 @@ class TestAgentBot:
                 room_id="!test:localhost",
                 knowledge=None,
                 user_id="@user:localhost",
-                audio=None,
-                images=None,
-                files=None,
-                videos=None,
+                media=MediaInputs(),
                 reply_to_event_id="event123",
                 show_tool_calls=True,
                 tool_trace_collector=ANY,
@@ -1114,10 +1109,11 @@ class TestAgentBot:
         assert generate_kwargs["thread_id"] is None
         assert generate_kwargs["thread_history"] == []
         assert generate_kwargs["user_id"] == "@user:localhost"
-        assert generate_kwargs["images"] == [image]
-        assert generate_kwargs["audio"] is None
-        assert generate_kwargs["files"] is None
-        assert generate_kwargs["videos"] is None
+        media = generate_kwargs["media"]
+        assert list(media.images) == [image]
+        assert list(media.audio) == []
+        assert list(media.files) == []
+        assert list(media.videos) == []
         assert generate_kwargs["attachment_ids"] is None
         tracker.mark_responded.assert_called_once_with("$img_event", "$response")
 
@@ -1263,10 +1259,10 @@ class TestAgentBot:
         assert generate_kwargs["attachment_ids"] == [attachment_id]
         assert "Available attachment IDs" in generate_kwargs["prompt"]
         assert attachment_id in generate_kwargs["prompt"]
-        assert generate_kwargs["files"] is not None
-        assert len(generate_kwargs["files"]) == 1
-        assert str(generate_kwargs["files"][0].filepath) == str(local_media_path)
-        assert generate_kwargs["videos"] is None
+        media = generate_kwargs["media"]
+        assert len(media.files) == 1
+        assert str(media.files[0].filepath) == str(local_media_path)
+        assert list(media.videos) == []
         tracker.mark_responded.assert_called_once_with("$file_event", "$response")
 
     @pytest.mark.asyncio
@@ -1919,7 +1915,7 @@ class TestAgentBot:
         assert fetch_call.args == ("!test:localhost", "$img_root")
         bot._generate_response.assert_awaited_once()
         call_kwargs = bot._generate_response.call_args.kwargs
-        assert call_kwargs["images"] == [fake_image]
+        assert list(call_kwargs["media"].images) == [fake_image]
 
     @pytest.mark.asyncio
     async def test_decide_team_for_sender_passes_sender_filtered_dm_agents(

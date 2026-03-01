@@ -300,7 +300,7 @@ async def test_agent_receives_thread_audio_on_voice_raw_fallback(mock_home_bot: 
 
     bot._generate_response.assert_called_once()
     call_kwargs = bot._generate_response.call_args.kwargs
-    assert call_kwargs["audio"]
+    assert call_kwargs["media"].audio
     assert call_kwargs["prompt"] == f"{VOICE_PREFIX}[Attached voice message]"
 
 
@@ -372,7 +372,7 @@ async def test_agent_voice_fallback_uses_attachment_audio_without_refetch(mock_h
     fetch_thread_audio.assert_not_awaited()
     bot._generate_response.assert_called_once()
     call_kwargs = bot._generate_response.call_args.kwargs
-    assert call_kwargs["audio"] == attachment_audio
+    assert list(call_kwargs["media"].audio) == attachment_audio
     assert "att_voice" in call_kwargs["prompt"]
 
 
@@ -453,5 +453,5 @@ async def test_followup_text_in_voice_thread_recovers_audio(mock_home_bot: Agent
     call_kwargs = bot._generate_response.call_args.kwargs
     # Audio from the voice-root attachment should be present despite no
     # fallback flag on the current event.
-    assert call_kwargs["audio"] == attachment_audio
+    assert list(call_kwargs["media"].audio) == attachment_audio
     assert "att_voiceroot" in call_kwargs["prompt"]

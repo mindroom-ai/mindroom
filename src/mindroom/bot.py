@@ -75,6 +75,7 @@ from .matrix.users import (
     create_agent_user,
     login_agent_user,
 )
+from .media_inputs import MediaInputs
 from .memory import store_conversation_memory
 from .memory.auto_flush import (
     mark_auto_flush_dirty_session,
@@ -116,12 +117,12 @@ from .thread_utils import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable
 
     import structlog
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
-    from agno.media import Audio, File, Image, Video
+    from agno.media import Audio, Image
 
     from .config.main import Config
     from .orchestrator import MultiAgentOrchestrator
@@ -276,13 +277,10 @@ class _PreparedDispatch:
 
 @dataclass(frozen=True)
 class _DispatchPayload:
-    """Media payload passed to team/individual response executors."""
+    """Dispatch prompt + optional media + attachment metadata."""
 
     prompt: str
-    audio: Sequence[Audio] | None = None
-    images: Sequence[Image] | None = None
-    files: Sequence[File] | None = None
-    videos: Sequence[Video] | None = None
+    media: MediaInputs = field(default_factory=MediaInputs)
     attachment_ids: list[str] | None = None
 
 
@@ -824,10 +822,12 @@ class AgentBot:
             action,
             _DispatchPayload(
                 prompt=prompt_text,
-                audio=merged_audio or None,
-                images=thread_images or None,
-                files=attachment_files or None,
-                videos=attachment_videos or None,
+                media=MediaInputs.from_optional(
+                    audio=merged_audio,
+                    images=thread_images,
+                    files=attachment_files,
+                    videos=attachment_videos,
+                ),
                 attachment_ids=resolved_attachment_ids or None,
             ),
             processing_log="Processing",
@@ -1053,7 +1053,7 @@ class AgentBot:
             action,
             _DispatchPayload(
                 prompt=caption,
-                images=[image],
+                media=MediaInputs.from_optional(images=[image]),
             ),
             processing_log="Processing image",
         )
@@ -1118,9 +1118,11 @@ class AgentBot:
             action,
             _DispatchPayload(
                 prompt=prompt_text,
-                audio=attachment_audio or None,
-                files=attachment_files or None,
-                videos=attachment_videos or None,
+                media=MediaInputs.from_optional(
+                    audio=attachment_audio,
+                    files=attachment_files,
+                    videos=attachment_videos,
+                ),
                 attachment_ids=resolved_attachment_ids or None,
             ),
             processing_log="Processing media message",
@@ -1265,17 +1267,12 @@ class AgentBot:
                 room_id=room.room_id,
                 reply_to_event_id=event.event_id,
                 thread_id=dispatch.context.thread_id,
-                message=payload.prompt,
+                payload=payload,
                 team_agents=action.form_team.agents,
                 team_mode=action.form_team.mode,
                 thread_history=dispatch.context.thread_history,
                 requester_user_id=dispatch.requester_user_id,
                 existing_event_id=None,
-                audio=payload.audio,
-                images=payload.images,
-                files=payload.files,
-                videos=payload.videos,
-                attachment_ids=payload.attachment_ids,
             )
             self.response_tracker.mark_responded(event.event_id, response_event_id)
             return
@@ -1291,10 +1288,7 @@ class AgentBot:
             thread_id=dispatch.context.thread_id,
             thread_history=dispatch.context.thread_history,
             user_id=dispatch.requester_user_id,
-            audio=payload.audio,
-            images=payload.images,
-            files=payload.files,
-            videos=payload.videos,
+            media=payload.media,
             attachment_ids=payload.attachment_ids,
         )
         self.response_tracker.mark_responded(event.event_id, response_event_id)
@@ -1558,17 +1552,13 @@ class AgentBot:
         room_id: str,
         reply_to_event_id: str,
         thread_id: str | None,
-        message: str,
         team_agents: list[MatrixID],
         team_mode: str,
         thread_history: list[dict],
         requester_user_id: str,
         existing_event_id: str | None = None,
-        audio: Sequence[Audio] | None = None,
-        images: Sequence[Image] | None = None,
-        files: Sequence[File] | None = None,
-        videos: Sequence[Video] | None = None,
-        attachment_ids: list[str] | None = None,
+        *,
+        payload: _DispatchPayload,
     ) -> str | None:
         """Generate a team response (shared between preformed teams and TeamBot).
 
@@ -1604,7 +1594,7 @@ class AgentBot:
             requester_user_id,
             reply_to_event_id=reply_to_event_id,
             agent_name=self.agent_name,
-            attachment_ids=attachment_ids,
+            attachment_ids=payload.attachment_ids,
         )
         orchestrator = self.orchestrator
         if orchestrator is None:
@@ -1625,15 +1615,12 @@ class AgentBot:
                     ):
                         response_stream = team_response_stream(
                             agent_ids=team_agents,
-                            message=message,
+                            message=payload.prompt,
                             orchestrator=orchestrator,
                             mode=mode,
                             thread_history=thread_history,
                             model_name=model_name,
-                            audio=audio,
-                            images=images,
-                            files=files,
-                            videos=videos,
+                            media=payload.media,
                             show_tool_calls=self.show_tool_calls,
                         )
 
@@ -1672,14 +1659,11 @@ class AgentBot:
                         response_text = await team_response(
                             agent_names=agent_names,
                             mode=mode,
-                            message=message,
+                            message=payload.prompt,
                             orchestrator=orchestrator,
                             thread_history=thread_history,
                             model_name=model_name,
-                            audio=audio,
-                            images=images,
-                            files=files,
-                            videos=videos,
+                            media=payload.media,
                         )
 
                 # Either edit the thinking message or send new
@@ -1830,10 +1814,7 @@ class AgentBot:
         thread_history: list[dict],
         existing_event_id: str | None = None,
         user_id: str | None = None,
-        audio: Sequence[Audio] | None = None,
-        images: Sequence[Image] | None = None,
-        files: Sequence[File] | None = None,
-        videos: Sequence[Video] | None = None,
+        media: MediaInputs | None = None,
         attachment_ids: list[str] | None = None,
     ) -> str | None:
         """Process a message and send a response (non-streaming)."""
@@ -1841,6 +1822,7 @@ class AgentBot:
         if not prompt.strip():
             return None
 
+        media_inputs = media or MediaInputs()
         session_id = create_session_id(room_id, thread_id)
         knowledge = self._knowledge_for_agent(self.agent_name)
         scheduler_context = self._build_scheduling_tool_context(
@@ -1878,10 +1860,7 @@ class AgentBot:
                         room_id=room_id,
                         knowledge=knowledge,
                         user_id=user_id,
-                        audio=audio,
-                        images=images,
-                        files=files,
-                        videos=videos,
+                        media=media_inputs,
                         reply_to_event_id=reply_to_event_id,
                         show_tool_calls=self.show_tool_calls,
                         tool_trace_collector=tool_trace,
@@ -2105,10 +2084,7 @@ class AgentBot:
         thread_history: list[dict],
         existing_event_id: str | None = None,
         user_id: str | None = None,
-        audio: Sequence[Audio] | None = None,
-        images: Sequence[Image] | None = None,
-        files: Sequence[File] | None = None,
-        videos: Sequence[Video] | None = None,
+        media: MediaInputs | None = None,
         attachment_ids: list[str] | None = None,
     ) -> str | None:
         """Process a message and send a response (streaming)."""
@@ -2116,6 +2092,7 @@ class AgentBot:
         if not prompt.strip():
             return None
 
+        media_inputs = media or MediaInputs()
         session_id = create_session_id(room_id, thread_id)
         knowledge = self._knowledge_for_agent(self.agent_name)
         scheduler_context = self._build_scheduling_tool_context(
@@ -2152,10 +2129,7 @@ class AgentBot:
                         room_id=room_id,
                         knowledge=knowledge,
                         user_id=user_id,
-                        audio=audio,
-                        images=images,
-                        files=files,
-                        videos=videos,
+                        media=media_inputs,
                         reply_to_event_id=reply_to_event_id,
                         show_tool_calls=self.show_tool_calls,
                         run_metadata_collector=run_metadata_content,
@@ -2206,10 +2180,7 @@ class AgentBot:
         thread_history: list[dict],
         existing_event_id: str | None = None,
         user_id: str | None = None,
-        audio: Sequence[Audio] | None = None,
-        images: Sequence[Image] | None = None,
-        files: Sequence[File] | None = None,
-        videos: Sequence[Video] | None = None,
+        media: MediaInputs | None = None,
         attachment_ids: list[str] | None = None,
     ) -> str | None:
         """Generate and send/edit a response using AI.
@@ -2223,10 +2194,7 @@ class AgentBot:
             existing_event_id: If provided, edit this message instead of sending a new one
                              (only used for interactive question responses)
             user_id: User ID of the sender for identifying user messages in history
-            audio: Optional audio clips to pass to the AI model
-            images: Optional images to pass to the AI model
-            files: Optional files to pass to the AI model
-            videos: Optional videos to pass to the AI model
+            media: Optional multimodal inputs (audio/images/files/videos)
             attachment_ids: Attachment IDs available for tool-side file processing
 
         Returns:
@@ -2234,6 +2202,7 @@ class AgentBot:
 
         """
         assert self.client is not None
+        media_inputs = media or MediaInputs()
 
         # Prepare session id for memory storage (store after sending response)
         session_id = create_session_id(room_id, thread_id)
@@ -2263,10 +2232,7 @@ class AgentBot:
                     thread_history,
                     message_id,  # Edit the thinking message or existing
                     user_id=user_id,
-                    audio=audio,
-                    images=images,
-                    files=files,
-                    videos=videos,
+                    media=media_inputs,
                     attachment_ids=attachment_ids,
                 )
             else:
@@ -2278,10 +2244,7 @@ class AgentBot:
                     thread_history,
                     message_id,  # Edit the thinking message or existing
                     user_id=user_id,
-                    audio=audio,
-                    images=images,
-                    files=files,
-                    videos=videos,
+                    media=media_inputs,
                     attachment_ids=attachment_ids,
                 )
 
@@ -2684,10 +2647,7 @@ class TeamBot(AgentBot):
         thread_history: list[dict],
         existing_event_id: str | None = None,
         user_id: str | None = None,
-        audio: Sequence[Audio] | None = None,
-        images: Sequence[Image] | None = None,
-        files: Sequence[File] | None = None,
-        videos: Sequence[Video] | None = None,
+        media: MediaInputs | None = None,
         attachment_ids: list[str] | None = None,
     ) -> None:
         """Generate a team response instead of individual agent response."""
@@ -2715,20 +2675,21 @@ class TeamBot(AgentBot):
         )
         self.logger.info(f"Storing memory for team: {agent_names}")
 
+        media_inputs = media or MediaInputs()
+
         # Use the shared team response helper
         await self._generate_team_response_helper(
             room_id=room_id,
             reply_to_event_id=reply_to_event_id,
             thread_id=thread_id,
-            message=prompt,
+            payload=_DispatchPayload(
+                prompt=prompt,
+                media=media_inputs,
+                attachment_ids=attachment_ids,
+            ),
             team_agents=self.team_agents,
             team_mode=self.team_mode,
             thread_history=thread_history,
             requester_user_id=user_id or "",
             existing_event_id=existing_event_id,
-            audio=audio,
-            images=images,
-            files=files,
-            videos=videos,
-            attachment_ids=attachment_ids,
         )

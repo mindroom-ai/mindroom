@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom.bot import AgentBot
+from mindroom.bot import AgentBot, _DispatchPayload
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -84,7 +84,7 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
             room_id="!team:localhost",
             reply_to_event_id="$user_event",
             thread_id="$thread_root",
-            message="Please coordinate and schedule a reminder",
+            payload=_DispatchPayload(prompt="Please coordinate and schedule a reminder"),
             team_agents=team_agents,
             team_mode="coordinate",
             thread_history=[],
@@ -127,7 +127,7 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
             room_id="!team:localhost",
             reply_to_event_id="$user_event",
             thread_id="$thread_root",
-            message="Please collaborate and schedule a reminder",
+            payload=_DispatchPayload(prompt="Please collaborate and schedule a reminder"),
             team_agents=team_agents,
             team_mode="collaborate",
             thread_history=[],
