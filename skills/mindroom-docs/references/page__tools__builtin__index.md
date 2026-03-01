@@ -179,11 +179,12 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 
 ## Custom & Config
 
-| Icon                        | Tool              | Description                                                                                                                          | Config Required |
-| --------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------ | --------------- |
-| :lucide-sliders-horizontal: | `custom_api`      | Custom API calls                                                                                                                     | Varies          |
-| :lucide-sliders-horizontal: | `config_manager`  | MindRoom configuration management                                                                                                    | -               |
-| :lucide-sliders-horizontal: | `openclaw_compat` | OpenClaw compatibility aliases for sessions/subagents/workspace flows (see [OpenClaw](https://docs.mindroom.chat/openclaw/index.md)) | -               |
+| Icon                        | Tool             | Description                       | Config Required |
+| --------------------------- | ---------------- | --------------------------------- | --------------- |
+| :lucide-sliders-horizontal: | `custom_api`     | Custom API calls                  | Varies          |
+| :lucide-sliders-horizontal: | `config_manager` | MindRoom configuration management | -               |
+
+Tool presets are config-only macros, not runtime tools. For OpenClaw workspace portability, `openclaw_compat` expands to `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, and `matrix_message`.
 
 ## Claude Agent Sessions
 
