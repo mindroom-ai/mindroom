@@ -17,6 +17,7 @@ from .ai import ai_response, stream_agent_response
 from .attachment_media import resolve_attachment_media
 from .attachments import (
     append_attachment_ids_prompt,
+    attachment_id_for_event,
     extract_file_or_video_caption,
     is_voice_raw_audio_fallback,
     merge_attachment_ids,
@@ -1028,6 +1029,22 @@ class AgentBot:
             return
 
         context = dispatch.context
+        caption = extract_file_or_video_caption(event)
+        predicted_attachment_id = attachment_id_for_event(event.event_id)
+        action = await self._resolve_dispatch_action(
+            room,
+            event,
+            dispatch,
+            message_for_decision=event.body,
+            router_message=caption,
+            extra_content={
+                ORIGINAL_SENDER_KEY: event.sender,
+                ATTACHMENT_IDS_KEY: [predicted_attachment_id],
+            },
+        )
+        if action is None:
+            return
+
         attachment_record = await register_file_or_video_attachment(
             self.client,
             self.storage_path,
@@ -1040,28 +1057,12 @@ class AgentBot:
             self.response_tracker.mark_responded(event.event_id)
             return
 
-        caption = extract_file_or_video_caption(event)
         resolved_attachment_ids, attachment_audio, attachment_files, attachment_videos = resolve_attachment_media(
             self.storage_path,
             [attachment_record.attachment_id],
             room_id=room.room_id,
             thread_id=context.thread_id,
         )
-
-        action = await self._resolve_dispatch_action(
-            room,
-            event,
-            dispatch,
-            message_for_decision=event.body,
-            router_message=caption,
-            extra_content={
-                ORIGINAL_SENDER_KEY: event.sender,
-                ATTACHMENT_IDS_KEY: resolved_attachment_ids,
-            },
-        )
-        if action is None:
-            return
-
         prompt_text = append_attachment_ids_prompt(caption, resolved_attachment_ids)
         await self._execute_dispatch_action(
             room,
@@ -1498,6 +1499,7 @@ class AgentBot:
         thread_id: str | None,
         user_id: str | None,
         *,
+        reply_to_event_id: str | None = None,
         attachment_ids: list[str] | None = None,
     ) -> AttachmentToolContext | None:
         """Build runtime context for attachments toolkit calls."""
@@ -1506,7 +1508,7 @@ class AgentBot:
         return AttachmentToolContext(
             client=self.client,
             room_id=room_id,
-            thread_id=thread_id,
+            thread_id=self._resolve_reply_thread_id(thread_id, reply_to_event_id),
             requester_id=user_id or self.matrix_id.full_id,
             storage_path=self.storage_path,
             attachment_ids=tuple(attachment_ids or []),
@@ -1518,6 +1520,7 @@ class AgentBot:
         thread_id: str | None,
         user_id: str | None,
         *,
+        reply_to_event_id: str | None = None,
         agent_name: str | None = None,
         attachment_ids: list[str] | None = None,
     ) -> tuple[OpenClawToolContext | None, AttachmentToolContext | None]:
@@ -1532,6 +1535,7 @@ class AgentBot:
             room_id,
             thread_id,
             user_id,
+            reply_to_event_id=reply_to_event_id,
             attachment_ids=attachment_ids,
         )
         return openclaw_context, attachment_context
@@ -1585,6 +1589,7 @@ class AgentBot:
             room_id,
             thread_id,
             requester_user_id,
+            reply_to_event_id=reply_to_event_id,
             agent_name=self.agent_name,
             attachment_ids=attachment_ids,
         )
@@ -1835,6 +1840,7 @@ class AgentBot:
             room_id,
             thread_id,
             user_id,
+            reply_to_event_id=reply_to_event_id,
             agent_name=self.agent_name,
             attachment_ids=attachment_ids,
         )
@@ -1952,6 +1958,7 @@ class AgentBot:
             room_id,
             thread_id,
             user_id,
+            reply_to_event_id=reply_to_event_id,
             agent_name=agent_name,
         )
         show_tool_calls = self._show_tool_calls_for_agent(agent_name)
@@ -2108,6 +2115,7 @@ class AgentBot:
             room_id,
             thread_id,
             user_id,
+            reply_to_event_id=reply_to_event_id,
             agent_name=self.agent_name,
             attachment_ids=attachment_ids,
         )

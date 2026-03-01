@@ -218,7 +218,7 @@ def register_local_attachment(
 
     record_path = _attachment_record_path(storage_path, attachment_id)
     record_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = record_path.with_suffix(".tmp")
+    tmp_path = record_path.with_suffix(f".{uuid4().hex[:8]}.tmp")
     tmp_path.write_text(json.dumps(record.to_payload(), sort_keys=True), encoding="utf-8")
     tmp_path.replace(record_path)
     return record

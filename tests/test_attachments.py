@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
+from unittest.mock import patch
 
 from mindroom.attachment_media import attachment_records_to_media, resolve_attachment_media
 from mindroom.attachments import (
@@ -14,9 +15,6 @@ from mindroom.attachments import (
     register_local_attachment,
     resolve_attachments,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def test_attachment_id_for_event_is_stable() -> None:
@@ -68,6 +66,42 @@ def test_register_resolve_and_convert_attachment(tmp_path: Path) -> None:
     assert files[0].filename == "payload.zip"
     assert str(files[0].filepath) == str(file_path.resolve())
     assert videos == []
+
+
+def test_register_local_attachment_uses_unique_temp_metadata_paths(tmp_path: Path) -> None:
+    """Repeated writes for the same attachment ID should not reuse temp metadata paths."""
+    file_path = tmp_path / "payload.txt"
+    file_path.write_text("payload", encoding="utf-8")
+
+    replace_sources: list[str] = []
+    original_replace = Path.replace
+
+    def tracked_replace(self: Path, target: Path) -> Path:
+        replace_sources.append(str(self))
+        return original_replace(self, target)
+
+    with patch.object(Path, "replace", new=tracked_replace):
+        first = register_local_attachment(
+            tmp_path,
+            file_path,
+            kind="file",
+            attachment_id="att_same",
+            room_id="!room:localhost",
+        )
+        second = register_local_attachment(
+            tmp_path,
+            file_path,
+            kind="file",
+            attachment_id="att_same",
+            room_id="!room:localhost",
+        )
+
+    assert first is not None
+    assert second is not None
+    assert len(replace_sources) == 2
+    assert replace_sources[0] != replace_sources[1]
+    assert replace_sources[0].endswith(".tmp")
+    assert replace_sources[1].endswith(".tmp")
 
 
 def test_merge_attachment_ids_preserves_order() -> None:

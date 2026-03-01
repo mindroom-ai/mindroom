@@ -920,6 +920,35 @@ class TestAgentBot:
 
         assert context is None
 
+    def test_build_attachment_tool_context_resolves_thread_root_from_reply_target(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Attachment tool context should use the effective outgoing thread root."""
+        config = Config(
+            agents={
+                "calculator": AgentConfig(
+                    display_name="CalculatorAgent",
+                    rooms=["!test:localhost"],
+                ),
+            },
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot.client = MagicMock()
+
+        context = bot._build_attachment_tool_context(
+            room_id="!test:localhost",
+            thread_id=None,
+            user_id="@user:localhost",
+            reply_to_event_id="$root_event",
+            attachment_ids=["att_1"],
+        )
+
+        assert context is not None
+        assert context.thread_id == "$root_event"
+        assert context.attachment_ids == ("att_1",)
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("handler_name", "marks_responded"),
@@ -1458,12 +1487,13 @@ class TestAgentBot:
                 "mindroom.bot.register_file_or_video_attachment",
                 new_callable=AsyncMock,
                 return_value=attachment_record,
-            ),
+            ) as mock_register_file,
         ):
             mock_get_available.return_value = [config.ids["general"], config.ids["calculator"]]
             await bot._on_file_or_video_message(room, event)
 
         bot._handle_ai_routing.assert_called_once()
+        mock_register_file.assert_not_awaited()
         call_kwargs = bot._handle_ai_routing.call_args.kwargs
         assert call_kwargs["message"] == "[Attached file]"
         assert call_kwargs["requester_user_id"] == "@user:localhost"
