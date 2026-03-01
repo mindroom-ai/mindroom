@@ -521,7 +521,7 @@ async def test_openclaw_compat_message_attachments_lists_context_ids(tmp_path: P
 
 @pytest.mark.asyncio
 async def test_openclaw_compat_message_send_supports_attachment_only(tmp_path: Path) -> None:
-    """Verify message send can upload files without a text body."""
+    """Verify message send can upload context attachment IDs without a text body."""
     tool = OpenClawCompatTools()
     tool._send_matrix_text = AsyncMock()
     config = MagicMock()
@@ -537,22 +537,41 @@ async def test_openclaw_compat_message_send_supports_attachment_only(tmp_path: P
     )
     sample_file = tmp_path / "upload.txt"
     sample_file.write_text("payload", encoding="utf-8")
+    attachment = register_local_attachment(
+        tmp_path,
+        sample_file,
+        kind="file",
+        attachment_id="att_upload",
+        room_id="!room:localhost",
+        thread_id="$ctx-thread:localhost",
+    )
+    assert attachment is not None
+    attachment_ctx = AttachmentToolContext(
+        room_id="!room:localhost",
+        thread_id="$ctx-thread:localhost",
+        requester_id="@user:localhost",
+        client=ctx.client,
+        storage_path=tmp_path,
+        attachment_ids=(attachment.attachment_id,),
+    )
 
     with (
         openclaw_tool_context(ctx),
+        attachment_tool_context(attachment_ctx),
         patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")),
     ):
-        payload = json.loads(await tool.message(action="send", attachments=[str(sample_file)], allow_local_paths=True))
+        payload = json.loads(await tool.message(action="send", attachments=[attachment.attachment_id]))
 
     assert payload["status"] == "ok"
     assert payload["event_id"] == "$file_evt"
     assert payload["attachment_event_ids"] == ["$file_evt"]
+    assert payload["resolved_attachment_ids"] == [attachment.attachment_id]
     tool._send_matrix_text.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_openclaw_compat_message_send_rejects_local_paths_by_default(tmp_path: Path) -> None:
-    """Verify message send rejects local file paths unless explicitly enabled."""
+    """Verify message send rejects local file paths unless enabled by server policy."""
     tool = OpenClawCompatTools()
     tool._send_matrix_text = AsyncMock()
     config = MagicMock()

@@ -10,6 +10,7 @@ from agno.tools import Toolkit
 
 from mindroom.attachments import attachments_for_tool_payload, load_attachment, resolve_attachments
 from mindroom.attachments_context import get_attachment_tool_context
+from mindroom.constants import ATTACHMENTS_ALLOW_LOCAL_PATH_REFERENCES
 from mindroom.matrix.client import send_file_message
 
 if TYPE_CHECKING:
@@ -53,11 +54,29 @@ def _resolve_context_attachment_path(
     return attachment.local_path, None
 
 
+def _resolve_local_path_reference(
+    context: AttachmentToolContext,
+    reference: str,
+) -> ResolvedAttachmentReference:
+    if not ATTACHMENTS_ALLOW_LOCAL_PATH_REFERENCES:
+        return ResolvedAttachmentReference(
+            None,
+            None,
+            "Local file paths are disabled by server policy. Use attachment IDs.",
+        )
+
+    storage_path = context.storage_path.expanduser().resolve()
+    path = Path(reference).expanduser().resolve()
+    if not _is_within_directory(path, storage_path):
+        return ResolvedAttachmentReference(None, None, f"Local file paths must be under storage path: {storage_path}")
+    if not path.is_file():
+        return ResolvedAttachmentReference(None, None, f"Attachment path is not a file: {reference}")
+    return ResolvedAttachmentReference(path, None, None)
+
+
 def _resolve_attachment_reference(
     context: AttachmentToolContext,
     raw_reference: object,
-    *,
-    allow_local_paths: bool,
 ) -> ResolvedAttachmentReference:
     if not isinstance(raw_reference, str):
         return ResolvedAttachmentReference(None, None, "attachments entries must be strings.")
@@ -72,28 +91,18 @@ def _resolve_attachment_reference(
             return ResolvedAttachmentReference(None, None, error)
         return ResolvedAttachmentReference(attachment_path, reference, None)
 
-    if not allow_local_paths:
-        error = "Local file paths are disabled. Use attachment IDs or set allow_local_paths=true."
-    else:
-        storage_path = context.storage_path.expanduser().resolve()
-        path = Path(reference).expanduser().resolve()
-        if not _is_within_directory(path, storage_path):
-            error = f"Local file paths must be under storage path: {storage_path}"
-        elif not path.is_file():
-            error = f"Attachment path is not a file: {reference}"
-        else:
-            return ResolvedAttachmentReference(path, None, None)
-
-    return ResolvedAttachmentReference(None, None, error)
+    return _resolve_local_path_reference(context, reference)
 
 
 def resolve_attachment_references(
     context: AttachmentToolContext,
     attachments: list[str] | None,
-    *,
-    allow_local_paths: bool = False,
 ) -> tuple[list[Path], list[str], str | None]:
-    """Resolve context attachment IDs or file paths into local files."""
+    """Resolve context attachment IDs into local files.
+
+    Local path references are disabled by default and may be enabled only by
+    server-side policy.
+    """
     if not attachments:
         return [], [], None
 
@@ -103,7 +112,6 @@ def resolve_attachment_references(
         resolved = _resolve_attachment_reference(
             context,
             raw_reference,
-            allow_local_paths=allow_local_paths,
         )
         if resolved.error is not None:
             return [], [], resolved.error
@@ -200,9 +208,8 @@ class AttachmentTools(Toolkit):
         attachments: list[str] | None = None,
         room_id: str | None = None,
         thread_id: str | None = None,
-        allow_local_paths: bool = False,
     ) -> str:
-        """Send attachment IDs or storage-scoped local file paths to a Matrix room/thread."""
+        """Send context attachment IDs to a Matrix room/thread."""
         context = get_attachment_tool_context()
         if context is None:
             return attachment_tool_payload(
@@ -213,7 +220,6 @@ class AttachmentTools(Toolkit):
         attachment_paths, resolved_attachment_ids, attachment_error = resolve_attachment_references(
             context,
             attachments,
-            allow_local_paths=allow_local_paths,
         )
         if attachment_error is not None:
             return attachment_tool_payload("error", message=attachment_error)

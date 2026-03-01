@@ -80,7 +80,7 @@ async def test_attachments_tool_sends_attachment_ids(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_attachments_tool_rejects_local_paths_by_default(tmp_path: Path) -> None:
-    """Tool should reject direct filesystem paths unless explicitly enabled."""
+    """Tool should reject direct filesystem paths unless enabled by server policy."""
     tool = AttachmentTools()
     sample_file = tmp_path / "upload.txt"
     sample_file.write_text("payload", encoding="utf-8")
@@ -99,7 +99,7 @@ async def test_attachments_tool_rejects_local_paths_by_default(tmp_path: Path) -
 
 @pytest.mark.asyncio
 async def test_attachments_tool_rejects_local_paths_outside_storage_scope(tmp_path: Path) -> None:
-    """Tool should reject local paths that resolve outside the context storage path."""
+    """Server-enabled local paths must still resolve under the storage path."""
     tool = AttachmentTools()
     storage_scope = tmp_path / "storage_scope"
     storage_scope.mkdir(parents=True, exist_ok=True)
@@ -107,10 +107,11 @@ async def test_attachments_tool_rejects_local_paths_outside_storage_scope(tmp_pa
     outside_file.write_text("payload", encoding="utf-8")
 
     with (
+        patch("mindroom.custom_tools.attachments.ATTACHMENTS_ALLOW_LOCAL_PATH_REFERENCES", True),
         attachment_tool_context(_tool_context(storage_scope)),
         patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
     ):
-        payload = json.loads(await tool.send_attachments(attachments=[str(outside_file)], allow_local_paths=True))
+        payload = json.loads(await tool.send_attachments(attachments=[str(outside_file)]))
 
     assert payload["status"] == "error"
     assert payload["tool"] == "attachments"

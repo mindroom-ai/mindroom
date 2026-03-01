@@ -999,7 +999,6 @@ class OpenClawCompatTools(Toolkit):
         action: str,
         message: str | None,
         attachments: list[str] | None,
-        allow_local_paths: bool,
         room_id: str,
         effective_thread_id: str | None,
     ) -> str:
@@ -1016,7 +1015,6 @@ class OpenClawCompatTools(Toolkit):
         attachment_paths, resolved_attachment_ids, attachment_error = resolve_attachment_references(
             attachment_context,
             attachments,
-            allow_local_paths=allow_local_paths,
         )
         if attachment_error is not None:
             return self._payload("message", "error", action=action, message=attachment_error)
@@ -1203,7 +1201,6 @@ class OpenClawCompatTools(Toolkit):
         action: str = "send",
         message: str | None = None,
         attachments: list[str] | None = None,
-        allow_local_paths: bool = False,
         channel: str | None = None,
         target: str | None = None,
         thread_id: str | None = None,
@@ -1225,7 +1222,6 @@ class OpenClawCompatTools(Toolkit):
                 action=normalized_action,
                 message=message,
                 attachments=attachments,
-                allow_local_paths=allow_local_paths,
                 room_id=room_id,
                 effective_thread_id=effective_thread_id,
             )
