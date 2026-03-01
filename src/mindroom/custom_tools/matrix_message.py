@@ -85,8 +85,15 @@ class MatrixMessageTools(Toolkit):
                 )
             history.append(now)
 
-            # Prune keys whose deques are empty to avoid unbounded dict growth
-            stale_keys = [k for k, v in cls._recent_actions.items() if not v]
+            # Time-prune all keys and remove empty ones to avoid unbounded dict growth
+            stale_keys: list[tuple[str, str, str]] = []
+            for k, v in cls._recent_actions.items():
+                if k == key:
+                    continue  # already pruned above
+                while v and v[0] < cutoff:
+                    v.popleft()
+                if not v:
+                    stale_keys.append(k)
             for k in stale_keys:
                 del cls._recent_actions[k]
 
