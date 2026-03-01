@@ -16,7 +16,9 @@ import pytest
 import pytest_asyncio
 
 from mindroom.bot import AgentBot
-from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.reply_chain import merge_thread_and_chain_history
 from mindroom.matrix.users import AgentMatrixUser
 

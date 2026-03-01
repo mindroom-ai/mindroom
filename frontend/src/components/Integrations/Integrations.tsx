@@ -29,7 +29,7 @@ import {
   IntegrationConfig,
   integrationProviders,
   getAllIntegrations,
-} from './integrations';
+} from './integrations/index';
 import { EnhancedConfigDialog } from './EnhancedConfigDialog';
 import { FilterSelector } from '@/components/shared/FilterSelector';
 

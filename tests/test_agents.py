@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-from zoneinfo import ZoneInfo
 
 import pytest
 from agno.agent import Agent
@@ -16,7 +14,10 @@ from pydantic import ValidationError
 
 from mindroom import agent_prompts
 from mindroom.agents import _CULTURE_MANAGER_CACHE, create_agent
-from mindroom.config import AgentConfig, Config, CultureConfig, KnowledgeBaseConfig, ModelConfig
+from mindroom.config.agent import AgentConfig, CultureConfig
+from mindroom.config.knowledge import KnowledgeBaseConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 
 
 @patch("mindroom.agents.SqliteDb")
@@ -234,67 +235,27 @@ def test_agent_context_files_are_loaded_into_role(mock_storage: MagicMock, tmp_p
 
 
 @patch("mindroom.agents.SqliteDb")
-def test_agent_memory_dir_is_loaded_into_role(mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG001
-    """MEMORY.md plus yesterday/today memory files should be prepended to role context."""
-    config = Config.from_yaml()
-    config.timezone = "UTC"
-
-    memory_dir = tmp_path / "memory"
-    memory_dir.mkdir(parents=True, exist_ok=True)
-    (memory_dir / "MEMORY.md").write_text("Long-term memory summary.", encoding="utf-8")
-
-    today = datetime.now(ZoneInfo(config.timezone)).date()
-    yesterday = today - timedelta(days=1)
-    (memory_dir / f"{today.isoformat()}.md").write_text("Today's memory note.", encoding="utf-8")
-    (memory_dir / f"{yesterday.isoformat()}.md").write_text("Yesterday memory note.", encoding="utf-8")
-
-    config.agents["general"].memory_dir = str(memory_dir)
-
-    agent = create_agent("general", config=config, storage_path=tmp_path)
-
-    assert "## Memory Context" in agent.role
-    assert "### MEMORY.md" in agent.role
-    assert "Long-term memory summary." in agent.role
-    assert f"### {yesterday.isoformat()}.md" in agent.role
-    assert "Yesterday memory note." in agent.role
-    assert f"### {today.isoformat()}.md" in agent.role
-    assert "Today's memory note." in agent.role
-
-
-@patch("mindroom.agents.SqliteDb")
-def test_agent_preload_cap_truncates_daily_before_memory_and_personality(
+def test_agent_preload_cap_truncates_context_files_in_order(
     mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
 ) -> None:
-    """Preload cap should drop oldest daily files before MEMORY.md and context files."""
+    """Preload cap should drop earlier context files before later ones."""
     config = Config.from_yaml()
-    config.timezone = "UTC"
-    config.defaults.max_preload_chars = 620
+    config.defaults.max_preload_chars = 420
 
-    soul_path = tmp_path / "SOUL.md"
-    soul_path.write_text("START_SOUL " + "P" * 120 + " END_SOUL", encoding="utf-8")
+    first_path = tmp_path / "FIRST.md"
+    second_path = tmp_path / "SECOND.md"
+    first_path.write_text("FIRST_START " + "A" * 220 + " FIRST_END", encoding="utf-8")
+    second_path.write_text("SECOND_START " + "B" * 220 + " SECOND_END", encoding="utf-8")
 
-    memory_dir = tmp_path / "memory"
-    memory_dir.mkdir(parents=True, exist_ok=True)
-    (memory_dir / "MEMORY.md").write_text("START_MEM " + "M" * 120 + " END_MEM", encoding="utf-8")
-    today = datetime.now(ZoneInfo(config.timezone)).date()
-    yesterday = today - timedelta(days=1)
-    (memory_dir / f"{yesterday.isoformat()}.md").write_text("Y" * 140, encoding="utf-8")
-    (memory_dir / f"{today.isoformat()}.md").write_text("T" * 140, encoding="utf-8")
-
-    config.agents["general"].context_files = [str(soul_path)]
-    config.agents["general"].memory_dir = str(memory_dir)
+    config.agents["general"].context_files = [str(first_path), str(second_path)]
 
     agent = create_agent("general", config=config, storage_path=tmp_path)
 
     assert "[Content truncated - " in agent.role
-    assert f"### {yesterday.isoformat()}.md" not in agent.role
-    assert f"### {today.isoformat()}.md" in agent.role
-    assert "### MEMORY.md" in agent.role
-    assert "### SOUL.md" in agent.role
-    # Verify trimming preserves the start (identity) and removes from the end
-    assert "START_SOUL" in agent.role
-    assert "START_MEM" in agent.role
+    assert "### FIRST.md" not in agent.role
+    assert "### SECOND.md" in agent.role
+    assert "SECOND_START" in agent.role
 
 
 @patch("mindroom.agents.SqliteDb")
@@ -309,32 +270,16 @@ def test_agent_missing_context_file_is_ignored(mock_storage: MagicMock, tmp_path
     assert "does-not-exist.md" not in agent.role
 
 
-@patch("mindroom.agents.SqliteDb")
-def test_agent_missing_memory_dir_is_ignored(mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG001
-    """Missing memory directories should not prevent agent creation."""
-    config = Config.from_yaml()
-    config.agents["general"].memory_dir = str(tmp_path / "missing-memory-dir")
-
-    agent = create_agent("general", config=config, storage_path=tmp_path)
-
-    assert "## Memory Context" not in agent.role
-
-
 def test_agent_relative_context_paths_resolve_from_config_dir(tmp_path: Path) -> None:
     """Relative context paths should resolve from the config directory, not CWD."""
     config = Config.from_yaml()
-    config.timezone = "UTC"
 
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     soul_path = config_dir / "SOUL.md"
     soul_path.write_text("Relative soul context.", encoding="utf-8")
-    memory_dir = config_dir / "memory"
-    memory_dir.mkdir(parents=True, exist_ok=True)
-    (memory_dir / "MEMORY.md").write_text("Relative memory context.", encoding="utf-8")
 
     config.agents["general"].context_files = ["SOUL.md"]
-    config.agents["general"].memory_dir = "memory"
 
     original_cwd = Path.cwd()
     other_cwd = tmp_path / "other"
@@ -347,7 +292,6 @@ def test_agent_relative_context_paths_resolve_from_config_dir(tmp_path: Path) ->
         os.chdir(original_cwd)
 
     assert "Relative soul context." in agent.role
-    assert "Relative memory context." in agent.role
 
 
 def test_config_rejects_unknown_agent_knowledge_base_assignment() -> None:
@@ -386,6 +330,22 @@ def test_config_rejects_legacy_agent_knowledge_base_field() -> None:
         )
 
 
+def test_config_rejects_legacy_agent_memory_dir_field() -> None:
+    """Legacy memory_dir field must fail fast to avoid silent drops."""
+    with pytest.raises(
+        ValidationError,
+        match=re.escape("Agent field 'memory_dir' was removed. Use 'context_files' and memory.backend=file instead."),
+    ):
+        Config(
+            agents={
+                "calculator": {
+                    "display_name": "CalculatorAgent",
+                    "memory_dir": "./memory",
+                },
+            },
+        )
+
+
 def test_config_rejects_duplicate_agent_knowledge_base_assignment() -> None:
     """Each agent knowledge base assignment should be unique."""
     with pytest.raises(ValidationError, match="Duplicate knowledge bases are not allowed: research"):
@@ -403,6 +363,66 @@ def test_config_rejects_duplicate_agent_knowledge_base_assignment() -> None:
                 ),
             },
         )
+
+
+def test_config_resolves_per_agent_memory_backend_override() -> None:
+    """Per-agent memory backend overrides should take precedence over global defaults."""
+    config = Config(
+        agents={
+            "general": AgentConfig(display_name="General"),
+            "writer": AgentConfig(display_name="Writer", memory_backend="file"),
+        },
+        memory={"backend": "mem0"},
+    )
+
+    assert config.get_agent_memory_backend("general") == "mem0"
+    assert config.get_agent_memory_backend("writer") == "file"
+
+
+def test_config_reports_mixed_memory_backend_usage() -> None:
+    """Config helper methods should report effective mixed backend usage."""
+    config = Config(
+        agents={
+            "general": AgentConfig(display_name="General", memory_backend="file"),
+            "writer": AgentConfig(display_name="Writer", memory_backend="mem0"),
+        },
+        memory={"backend": "mem0"},
+    )
+
+    assert config.uses_file_memory() is True
+    assert config.uses_mem0_memory() is True
+
+
+def test_config_rejects_memory_file_path_when_effective_backend_is_mem0() -> None:
+    """memory_file_path should fail fast unless effective backend resolves to file."""
+    with pytest.raises(
+        ValidationError,
+        match=re.escape(
+            "agents.<name>.memory_file_path requires effective file memory backend; invalid agents: general",
+        ),
+    ):
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General", memory_file_path="./openclaw_data"),
+            },
+            memory={"backend": "mem0"},
+        )
+
+
+def test_config_accepts_memory_file_path_with_file_backend_override() -> None:
+    """memory_file_path is valid when effective backend resolves to file."""
+    config = Config(
+        agents={
+            "general": AgentConfig(
+                display_name="General",
+                memory_backend="file",
+                memory_file_path="./openclaw_data",
+            ),
+        },
+        memory={"backend": "mem0"},
+    )
+
+    assert config.agents["general"].memory_file_path == "./openclaw_data"
 
 
 def test_config_accepts_valid_agent_knowledge_base_assignment() -> None:

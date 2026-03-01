@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.mindroom.ai import get_model_instance
-from src.mindroom.config import Config
+from src.mindroom.config.main import Config
 
 
 class TestGeminiIntegration:

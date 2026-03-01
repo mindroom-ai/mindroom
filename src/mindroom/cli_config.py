@@ -10,6 +10,7 @@ import shlex
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Literal
 
 import typer
 import yaml
@@ -17,8 +18,13 @@ from pydantic import ValidationError
 from rich.console import Console
 from rich.syntax import Syntax
 
-from mindroom.config import Config
-from mindroom.constants import CONFIG_PATH, config_search_locations, env_key_for_provider
+from mindroom.config.main import Config
+from mindroom.constants import (
+    CONFIG_PATH,
+    OWNER_MATRIX_USER_ID_PLACEHOLDER,
+    config_search_locations,
+    env_key_for_provider,
+)
 
 console = Console()
 
@@ -36,6 +42,18 @@ CONFIG_PATH_OPTION: Path | None = typer.Option(
     "-p",
     help="Override auto-detection and use this config file path.",
 )
+
+ProviderPreset = Literal["openai", "openrouter"]
+
+_DEFAULT_MODEL_PRESETS: dict[ProviderPreset, tuple[str, str]] = {
+    "openai": ("openai", "gpt-5.2"),
+    "openrouter": ("openrouter", "anthropic/claude-sonnet-4-5"),
+}
+
+_REQUIRED_ENV_KEYS: dict[ProviderPreset, tuple[str, ...]] = {
+    "openai": ("OPENAI_API_KEY",),
+    "openrouter": ("OPENROUTER_API_KEY",),
+}
 
 
 def _resolve_config_path(path: Path | None) -> Path:
@@ -86,7 +104,7 @@ def config_init(
         None,
         "--path",
         "-p",
-        help="Where to create the config file (default: ./config.yaml).",
+        help="Where to create the config file (default: auto-detected, usually ~/.mindroom/config.yaml).",
     ),
     force: bool = typer.Option(
         False,
@@ -99,12 +117,22 @@ def config_init(
         "--minimal",
         help="Generate a bare-minimum config instead of a richer example.",
     ),
+    profile: str = typer.Option(
+        "full",
+        "--profile",
+        help="Template profile: full, minimal, or public (public keeps full YAML and adjusts .env defaults).",
+    ),
+    provider: str | None = typer.Option(
+        None,
+        "--provider",
+        help="Provider preset for generated config: openai or openrouter.",
+    ),
 ) -> None:
     """Create a starter config.yaml with example agents and models.
 
     Generates a YAML config with one agent, one model, and sensible defaults.
     """
-    target = _resolve_config_path(path) if path else Path("config.yaml").resolve()
+    target = _resolve_config_path(path)
 
     if target.exists() and not force:
         console.print(f"[yellow]Config file already exists:[/yellow] {target}")
@@ -112,7 +140,27 @@ def config_init(
             console.print("[dim]Aborted.[/dim]")
             raise typer.Exit(0)
 
-    content = _minimal_template() if minimal else _full_template()
+    selected_profile = "minimal" if minimal else profile.strip().lower()
+    valid_profiles = {"full", "minimal", "public"}
+    if selected_profile not in valid_profiles:
+        msg = f"Invalid profile '{profile}'. Expected one of: {', '.join(sorted(valid_profiles))}"
+        raise typer.BadParameter(msg)
+
+    provider_preset = _normalize_provider_preset(provider) if provider else None
+    if provider and provider_preset is None:
+        console.print("[red]Invalid --provider value.[/red] Use: openai or openrouter.")
+        raise typer.Exit(1)
+
+    if selected_profile == "minimal":
+        selected_preset: ProviderPreset = provider_preset or "openai"
+    elif provider_preset is not None:
+        selected_preset = provider_preset
+    elif selected_profile == "public":
+        selected_preset = "openai"
+    else:
+        selected_preset = _prompt_provider_preset()
+
+    content = _minimal_template(selected_preset) if selected_profile == "minimal" else _full_template(selected_preset)
 
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
@@ -121,7 +169,7 @@ def config_init(
     env_path = target.parent / ".env"
     env_created = False
     if not env_path.exists():
-        env_path.write_text(_env_template(), encoding="utf-8")
+        env_path.write_text(_env_template(selected_profile, selected_preset), encoding="utf-8")
         console.print(f"[green]Env file created:[/green] {env_path}")
         env_created = True
 
@@ -314,26 +362,140 @@ def _check_env_keys(config: Config) -> None:
         console.print("\nYou can set these in a .env file or export them in your shell.")
 
 
-def _full_template() -> str:
-    """Load the bundled config template from the package directory."""
-    return (Path(__file__).parent / "config_template.yaml").read_text(encoding="utf-8")
+def _normalize_provider_preset(provider: str) -> ProviderPreset | None:
+    """Normalize provider preset values used by prompts and CLI flags."""
+    normalized = provider.strip().lower()
+    aliases: dict[str, ProviderPreset] = {
+        "openai": "openai",
+        "o": "openai",
+        "openrouter": "openrouter",
+        "or": "openrouter",
+        "r": "openrouter",
+    }
+    return aliases.get(normalized)
 
 
-def _env_template() -> str:
+def _prompt_provider_preset() -> ProviderPreset:
+    """Prompt the user for a starter provider preset."""
+    while True:
+        raw_value = typer.prompt(
+            "Choose provider preset [openai/openrouter]",
+            default="openai",
+            show_default=True,
+        )
+        provider_preset = _normalize_provider_preset(raw_value)
+        if provider_preset is not None:
+            return provider_preset
+        console.print("[red]Invalid choice.[/red] Enter openai or openrouter.")
+
+
+def _full_template(provider_preset: ProviderPreset) -> str:
+    """Return a provider-aware starter config."""
+    provider, model_id = _DEFAULT_MODEL_PRESETS[provider_preset]
+    return f"""\
+# MindRoom Configuration
+# Generated by: mindroom config init
+# Docs: https://docs.mindroom.chat/
+
+models:
+  default:
+    provider: {provider}
+    id: {model_id}
+
+agents:
+  assistant:
+    display_name: Assistant
+    role: A helpful general-purpose assistant
+    model: default
+    rooms:
+      - lobby
+    tools: []
+    instructions:
+      - Be helpful and conversational
+
+router:
+  model: default
+
+# Set username before first run; once created, it cannot be changed.
+# You can still change display_name later.
+mindroom_user:
+  username: mindroom_user
+  display_name: MindRoomUser
+
+matrix_room_access:
+  mode: single_user_private
+  multi_user_join_rule: public
+  publish_to_room_directory: false
+  invite_only_rooms: []
+  reconcile_existing_rooms: false
+
+# File-based memory requires no external embedder or LLM.
+memory:
+  backend: file
+
+authorization:
+  default_room_access: false
+  global_users:
+    # Replace with your Matrix user ID (example: @alice:mindroom.chat).
+    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}
+  agent_reply_permissions:
+    "*":
+      # Replace with your Matrix user ID (example: @alice:mindroom.chat).
+      - {OWNER_MATRIX_USER_ID_PLACEHOLDER}
+
+defaults:
+  tools:
+    - scheduler
+  markdown: true
+"""
+
+
+def _env_template(profile: str, provider_preset: ProviderPreset) -> str:
     """Return a starter .env file for standalone deployments.
 
     Generates a random dashboard API key.
     """
     api_key = secrets.token_urlsafe(32)
+    if profile == "public":
+        matrix_homeserver = "https://mindroom.chat"
+        extra_matrix = (
+            "# Matrix server_name override (needed when federation hostname differs)\n"
+            "MATRIX_SERVER_NAME=mindroom.chat\n\n"
+            "# Hosted pairing/provisioning API for `mindroom connect` and token issuance\n"
+            "MINDROOM_PROVISIONING_URL=https://mindroom.chat\n\n"
+            "# Required for homeservers that gate bot registration (recommended in public mode)\n"
+            "# Keep this secret; do not commit real values.\n"
+            "MATRIX_REGISTRATION_TOKEN="
+        )
+    else:
+        matrix_homeserver = "https://matrix.example.com"
+        extra_matrix = (
+            "# Matrix registration token (only needed if your homeserver requires it)\n# MATRIX_REGISTRATION_TOKEN="
+        )
+
+    required_env_keys = set(_REQUIRED_ENV_KEYS[provider_preset])
+
+    key_placeholders = {
+        "OPENAI_API_KEY": "your-openai-key-here",
+        "OPENROUTER_API_KEY": "your-openrouter-key-here",
+    }
+
+    provider_lines: list[str] = []
+    for env_key in ("OPENAI_API_KEY", "OPENROUTER_API_KEY"):
+        prefix = "" if env_key in required_env_keys else "# "
+        line = f"{prefix}{env_key}={key_placeholders[env_key]}"
+        provider_lines.append(line)
+
+    provider_lines_text = "\n".join(provider_lines)
+
     return f"""\
 # Matrix homeserver (must allow open registration for agent accounts)
-MATRIX_HOMESERVER=https://matrix.example.com
+MATRIX_HOMESERVER={matrix_homeserver}
 # MATRIX_SSL_VERIFY=false
+{extra_matrix.rstrip()}
 
-# AI provider API keys (at least one required)
-# ANTHROPIC_API_KEY=your-key-here
-# OPENAI_API_KEY=
-# GOOGLE_API_KEY=
+# AI provider API keys (set the uncommented keys for this preset)
+{provider_lines_text}
 
 # Dashboard API key — protects the /api/* dashboard endpoints.
 # When set, all dashboard requests require: Authorization: Bearer <key>
@@ -351,14 +513,17 @@ MINDROOM_API_KEY={api_key}
 """
 
 
-def _minimal_template() -> str:
+def _minimal_template(provider_preset: ProviderPreset = "openai") -> str:
     """Return a bare-minimum inline config."""
-    return """\
+    provider, model_id = _DEFAULT_MODEL_PRESETS[provider_preset]
+    return f"""\
 # MindRoom Configuration (minimal)
+
 models:
   default:
-    provider: anthropic
-    id: claude-sonnet-4-5-latest
+    provider: {provider}
+    id: {model_id}
+
 agents:
   assistant:
     display_name: Assistant
@@ -366,13 +531,26 @@ agents:
     model: default
     rooms:
       - lobby
+
 router:
   model: default
+
 # Set username before first run; once created, it cannot be changed.
 # You can still change display_name later.
 mindroom_user:
   username: mindroom_user
   display_name: MindRoomUser
+
+authorization:
+  default_room_access: false
+  global_users:
+    # Replace with your Matrix user ID (example: @alice:mindroom.chat).
+    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}
+  agent_reply_permissions:
+    "*":
+      # Replace with your Matrix user ID (example: @alice:mindroom.chat).
+      - {OWNER_MATRIX_USER_ID_PLACEHOLDER}
+
 defaults:
   tools:
     - scheduler

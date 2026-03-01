@@ -54,12 +54,16 @@ The memory system uses embeddings to help agents remember and retrieve relevant 
 
 ```yaml
 memory:
+  backend: "mem0"  # Global default backend: "mem0" or "file"
   embedder:
     provider: "ollama"  # Options: openai, ollama, huggingface, sentence-transformers
     config:
       model: "nomic-embed-text"  # Embedding model to use
       host: "http://localhost:11434"  # Ollama host URL
 ```
+
+You can override the memory backend per agent with `memory_backend`.
+You can set a per-agent file-memory scope directory with `memory_file_path` when using file memory.
 
 ## Router Configuration
 
@@ -145,12 +149,13 @@ agents:
       - dev
     learning: true  # Optional: enable Agno Learning (defaults to true)
     learning_mode: "always"  # Optional: "always" or "agentic"
+    memory_backend: "file"  # Optional: per-agent override ("mem0" or "file")
+    memory_file_path: "./openclaw_data"  # Optional: per-agent file-memory scope directory
     knowledge_bases:
       - docs
     context_files:
       - ./workspace/SOUL.md
       - ./workspace/USER.md
-    memory_dir: ./workspace/memory
     model: "anthropic"  # Optional: specific model for this agent (overrides default)
 ```
 
@@ -166,19 +171,19 @@ agents:
 - **rooms**: List of room aliases where this agent should be active
 - **learning**: Enable Agno Learning for this agent (default: true)
 - **learning_mode**: Learning mode (`always` or `agentic`, default: `always`)
+- **memory_backend**: Optional per-agent memory backend override (`mem0` or `file`), inherits from `memory.backend` when omitted
+- **memory_file_path**: Optional directory for this agent's file-memory scope, resolved relative to `config.yaml`
 - **knowledge_bases**: List of configured knowledge base IDs assigned to this agent
 - **context_files**: File paths loaded into role context when the agent is created/reloaded
-- **memory_dir**: Directory loaded into role context for `MEMORY.md` plus yesterday/today `YYYY-MM-DD.md` files
 - **model**: (Optional) Specific model to use for this agent, overrides the default model
 - **allow_self_config**: (Optional) When `true`, gives the agent a scoped tool to read and modify its own configuration at runtime (default: inherits from `defaults.allow_self_config`, which defaults to `false`)
 
 ### File-Based Context Loading
 
-`context_files` and `memory_dir` are useful for OpenClaw-style file memory patterns:
+`context_files` is useful for OpenClaw-style workspace context:
 
 - Paths are resolved relative to `config.yaml`
 - `context_files` are injected in listed order
-- `memory_dir` loads `MEMORY.md` (uppercase) and dated memory files for yesterday/today
 - Content is refreshed when agents are created or reloaded
 
 ## Room Configuration

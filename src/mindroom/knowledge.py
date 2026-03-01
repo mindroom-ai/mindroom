@@ -26,7 +26,8 @@ from .logging_config import get_logger
 if TYPE_CHECKING:
     from agno.knowledge.embedder.base import Embedder
 
-    from .config import Config, KnowledgeBaseConfig, KnowledgeGitConfig
+    from .config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
+    from .config.main import Config
 
 logger = get_logger(__name__)
 

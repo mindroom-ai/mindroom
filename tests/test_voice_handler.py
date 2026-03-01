@@ -8,7 +8,9 @@ import nio
 import pytest
 
 from mindroom import voice_handler
-from mindroom.config import AgentConfig, Config, VoiceConfig, VoiceLLMConfig, VoiceSTTConfig
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.voice import VoiceConfig, VoiceLLMConfig, VoiceSTTConfig
 
 
 class TestVoiceHandler:
@@ -52,7 +54,7 @@ class TestVoiceHandler:
     @pytest.mark.asyncio
     async def test_process_transcription_basic(self) -> None:
         """Test basic transcription processing."""
-        from mindroom.config import AgentConfig, TeamConfig  # noqa: PLC0415
+        from mindroom.config.agent import AgentConfig, TeamConfig  # noqa: PLC0415
 
         config = Config(
             voice=VoiceConfig(enabled=True),

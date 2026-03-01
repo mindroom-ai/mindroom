@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom.config import AgentConfig, Config
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
 from mindroom.voice_handler import (
     _is_speculative_command_rewrite,
     _process_transcription,

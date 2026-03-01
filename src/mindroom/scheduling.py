@@ -19,6 +19,7 @@ from croniter import croniter
 from pydantic import BaseModel, Field
 
 from .ai import get_model_instance
+from .authorization import get_available_agents_in_room
 from .constants import ORIGINAL_SENDER_KEY
 from .logging_config import get_logger
 from .matrix.client import (
@@ -29,10 +30,10 @@ from .matrix.client import (
 from .matrix.identity import MatrixID
 from .matrix.mentions import format_message_with_mentions, parse_mentions_in_text
 from .matrix.message_builder import build_message_content
-from .thread_utils import get_agents_in_thread, get_available_agents_in_room
+from .thread_utils import get_agents_in_thread
 
 if TYPE_CHECKING:
-    from .config import Config
+    from .config.main import Config
 
 logger = get_logger(__name__)
 

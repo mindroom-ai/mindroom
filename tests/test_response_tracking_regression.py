@@ -14,7 +14,9 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.commands import Command, CommandType
-from mindroom.config import AgentConfig, Config, ModelConfig
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
 
 from .conftest import TEST_PASSWORD

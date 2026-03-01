@@ -10,7 +10,7 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot, create_bot_for_entity
-from mindroom.config import Config
+from mindroom.config.main import Config
 from mindroom.matrix.presence import is_user_online, should_use_streaming
 from mindroom.matrix.users import AgentMatrixUser
 
@@ -207,7 +207,7 @@ class TestBotIntegration:
         mock_ai_response.return_value = "Test response"
 
         # Create bot with streaming enabled
-        from mindroom.config import AgentConfig  # noqa: PLC0415
+        from mindroom.config.agent import AgentConfig  # noqa: PLC0415
 
         config = Config(
             agents={
@@ -269,7 +269,7 @@ class TestBotIntegration:
         mock_ai_response.return_value = "Test response"
 
         # Create bot with streaming enabled
-        from mindroom.config import AgentConfig  # noqa: PLC0415
+        from mindroom.config.agent import AgentConfig  # noqa: PLC0415
 
         config = Config(
             agents={

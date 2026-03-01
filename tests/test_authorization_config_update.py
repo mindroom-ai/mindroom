@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from mindroom.config import Config
-from mindroom.thread_utils import is_authorized_sender
+from mindroom.authorization import is_authorized_sender
+from mindroom.config.main import Config
 
 
 def test_authorization_check_uses_updated_config() -> None:

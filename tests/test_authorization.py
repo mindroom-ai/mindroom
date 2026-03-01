@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import pytest
 
-from mindroom.config import AuthorizationConfig, Config
-from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
-from mindroom.matrix.state import MatrixRoom, MatrixState
-from mindroom.thread_utils import (
+from mindroom.authorization import (
     get_effective_sender_id_for_reply_permissions,
     is_authorized_sender,
     is_sender_allowed_for_agent_reply,
 )
+from mindroom.config.auth import AuthorizationConfig
+from mindroom.config.main import Config
+from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
+from mindroom.matrix.state import MatrixRoom, MatrixState
 
 
 @pytest.fixture
@@ -319,7 +320,7 @@ def test_room_specific_permissions_support_managed_room_key(monkeypatch: pytest.
             ),
         },
     )
-    monkeypatch.setattr("mindroom.thread_utils.MatrixState.load", lambda: state)
+    monkeypatch.setattr("mindroom.authorization.MatrixState.load", lambda: state)
 
     assert is_authorized_sender("@bob:example.com", config, "!lobby:example.com")
     assert not is_authorized_sender("@eve:example.com", config, "!lobby:example.com")

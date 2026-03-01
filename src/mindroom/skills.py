@@ -21,7 +21,7 @@ from .credentials import get_credentials_manager
 from .logging_config import get_logger
 
 if TYPE_CHECKING:
-    from .config import Config
+    from .config.main import Config
 
 logger = get_logger(__name__)
 

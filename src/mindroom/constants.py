@@ -7,7 +7,9 @@ codebase.
 
 import os
 import shutil
+import sys
 from pathlib import Path
+from typing import cast
 
 from dotenv import load_dotenv
 
@@ -21,7 +23,7 @@ ROUTER_AGENT_NAME = "router"
 # persistent volume instead of the package directory (which may be read-only).
 _CONFIG_PATH_ENV = os.getenv("MINDROOM_CONFIG_PATH")
 
-# Search order: env var > ./config.yaml > ~/.mindroom/config.yaml
+# Search order for existing files: env var > ./config.yaml > ~/.mindroom/config.yaml
 _CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config.yaml"]
 
 
@@ -59,7 +61,7 @@ def resolve_config_relative_path(raw_path: str | Path, *, config_path: Path | No
 
 
 def find_config() -> Path:
-    """Find the first existing config file, or fall back to ./config.yaml.
+    """Find the first existing config file, or fall back to ~/.mindroom/config.yaml.
 
     Returns the original (possibly relative) path, not a resolved one,
     so that derived paths like STORAGE_PATH stay relative and display
@@ -70,7 +72,7 @@ def find_config() -> Path:
     for path in _CONFIG_SEARCH_PATHS:
         if path.exists():
             return path
-    return _CONFIG_SEARCH_PATHS[0]  # default to ./config.yaml for creation
+    return _CONFIG_SEARCH_PATHS[-1]  # default to ~/.mindroom/config.yaml for creation
 
 
 CONFIG_PATH = find_config()
@@ -118,6 +120,14 @@ ENABLE_AI_CACHE = env_flag("MINDROOM_ENABLE_AI_CACHE", default=True)
 MATRIX_HOMESERVER = os.getenv("MATRIX_HOMESERVER", "http://localhost:8008")
 # (for federation setups where hostname != server_name)
 MATRIX_SERVER_NAME = os.getenv("MATRIX_SERVER_NAME", None)
+# Optional installation namespace suffix used to avoid collisions on shared homeservers.
+# When set, managed users/rooms are namespaced as "<name>_<namespace>".
+MINDROOM_NAMESPACE = os.getenv("MINDROOM_NAMESPACE", "").strip().lower() or None
+
+# Placeholder used in starter config templates. `mindroom connect` can
+# automatically replace this token with the owner Matrix user ID returned
+# by the provisioning service.
+OWNER_MATRIX_USER_ID_PLACEHOLDER = "__MINDROOM_OWNER_USER_ID_FROM_PAIRING__"
 MATRIX_SSL_VERIFY = env_flag("MATRIX_SSL_VERIFY", default=True)
 
 
@@ -134,6 +144,8 @@ PROVIDER_ENV_KEYS: dict[str, str] = {
     "ollama": "OLLAMA_HOST",
 }
 
+_CHROMADB_PY314_PATCHED = False
+
 
 def env_key_for_provider(provider: str) -> str | None:
     """Get the environment variable name for a provider's API key.
@@ -143,6 +155,52 @@ def env_key_for_provider(provider: str) -> str | None:
     if provider == "gemini":
         return PROVIDER_ENV_KEYS.get("google")
     return PROVIDER_ENV_KEYS.get(provider)
+
+
+def patch_chromadb_for_python314() -> None:
+    """Patch pydantic internals so chromadb works on Python 3.14+.
+
+    chromadb currently relies on pydantic v1 `BaseSettings` behavior and defines
+    untyped fields in its settings model. This runtime shim can be removed once
+    chromadb ships an upstream fix.
+    """
+    global _CHROMADB_PY314_PATCHED
+    if _CHROMADB_PY314_PATCHED or sys.version_info < (3, 14):
+        return
+
+    import pydantic  # noqa: PLC0415
+    from pydantic._internal import _model_construction  # noqa: PLC0415
+    from pydantic_settings import BaseSettings  # noqa: PLC0415
+
+    pydantic.BaseSettings = BaseSettings
+
+    original_inspect_namespace = _model_construction.inspect_namespace
+
+    def _patched_inspect_namespace(*args: object, **kwargs: object) -> object:
+        try:
+            return original_inspect_namespace(*args, **kwargs)
+        except pydantic.errors.PydanticUserError as exc:
+            if "non-annotated attribute" not in str(exc):
+                raise
+
+            namespace = args[0] if args else kwargs.get("namespace")
+            raw_annotations = args[1] if len(args) > 1 else kwargs.get("raw_annotations")
+            if not isinstance(namespace, dict) or not isinstance(raw_annotations, dict):
+                raise
+            namespace_dict = cast("dict[str, object]", namespace)
+            raw_annotations_dict = cast("dict[str, object]", raw_annotations)
+
+            for field in (
+                "chroma_coordinator_host",
+                "chroma_logservice_host",
+                "chroma_logservice_port",
+            ):
+                if field in namespace_dict and field not in raw_annotations_dict:
+                    raw_annotations_dict[field] = type(namespace_dict[field])
+            return original_inspect_namespace(*args, **kwargs)
+
+    _model_construction.inspect_namespace = _patched_inspect_namespace
+    _CHROMADB_PY314_PATCHED = True
 
 
 def safe_replace(tmp_path: Path, target_path: Path) -> None:

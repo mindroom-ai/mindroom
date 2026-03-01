@@ -73,6 +73,25 @@ describe('MemoryConfig', () => {
     expect(hostInput).toBeInTheDocument();
   });
 
+  it('updates team reads member memory toggle', async () => {
+    render(<MemoryConfig />);
+
+    const toggle = document.getElementById('team-reads-member-memory');
+    expect(toggle).toBeInTheDocument();
+    fireEvent.click(toggle!);
+
+    const enabledOption = await screen.findByText('Enabled');
+    fireEvent.click(enabledOption);
+
+    await waitFor(() => {
+      expect(mockUpdateMemoryConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          team_reads_member_memory: true,
+        })
+      );
+    });
+  });
+
   it('shows host input for ollama provider', () => {
     const ollamaConfig: Partial<Config> = {
       memory: {
@@ -111,11 +130,17 @@ describe('MemoryConfig', () => {
     fireEvent.click(ollamaOption);
 
     await waitFor(() => {
-      expect(mockUpdateMemoryConfig).toHaveBeenCalledWith({
-        provider: 'ollama',
-        model: 'nomic-embed-text',
-        host: 'http://localhost:11434',
-      });
+      expect(mockUpdateMemoryConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          embedder: expect.objectContaining({
+            provider: 'ollama',
+            config: expect.objectContaining({
+              model: 'nomic-embed-text',
+              host: 'http://localhost:11434',
+            }),
+          }),
+        })
+      );
     });
   });
 
@@ -157,11 +182,17 @@ describe('MemoryConfig', () => {
     fireEvent.change(modelInput, { target: { value: 'my-custom-embedding-model' } });
 
     await waitFor(() => {
-      expect(mockUpdateMemoryConfig).toHaveBeenCalledWith({
-        provider: 'openai',
-        model: 'my-custom-embedding-model',
-        host: '',
-      });
+      expect(mockUpdateMemoryConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          embedder: expect.objectContaining({
+            provider: 'openai',
+            config: expect.objectContaining({
+              model: 'my-custom-embedding-model',
+              host: '',
+            }),
+          }),
+        })
+      );
     });
   });
 
@@ -172,11 +203,17 @@ describe('MemoryConfig', () => {
     fireEvent.change(hostInput, { target: { value: 'http://localhost:9292/v1' } });
 
     await waitFor(() => {
-      expect(mockUpdateMemoryConfig).toHaveBeenCalledWith({
-        provider: 'openai',
-        model: 'text-embedding-3-small',
-        host: 'http://localhost:9292/v1',
-      });
+      expect(mockUpdateMemoryConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          embedder: expect.objectContaining({
+            provider: 'openai',
+            config: expect.objectContaining({
+              model: 'text-embedding-3-small',
+              host: 'http://localhost:9292/v1',
+            }),
+          }),
+        })
+      );
     });
   });
 

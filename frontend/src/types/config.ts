@@ -1,20 +1,51 @@
 import type { PROVIDERS } from '@/lib/providers';
 
 export type ProviderType = keyof typeof PROVIDERS;
+export type MemoryBackend = 'mem0' | 'file';
 
 export interface ModelConfig {
   provider: ProviderType;
   id: string;
   host?: string; // For ollama
-  extra_kwargs?: Record<string, any>; // Additional provider-specific parameters
+  extra_kwargs?: Record<string, unknown>; // Additional provider-specific parameters
 }
 
 export interface MemoryConfig {
+  backend?: MemoryBackend;
+  team_reads_member_memory?: boolean;
   embedder: {
     provider: string;
     config: {
       model: string;
       host?: string;
+    };
+  };
+  file?: {
+    path?: string | null;
+    max_entrypoint_lines?: number;
+  };
+  auto_flush?: {
+    enabled?: boolean;
+    flush_interval_seconds?: number;
+    idle_seconds?: number;
+    max_dirty_age_seconds?: number;
+    stale_ttl_seconds?: number;
+    max_cross_session_reprioritize?: number;
+    retry_cooldown_seconds?: number;
+    max_retry_cooldown_seconds?: number;
+    batch?: {
+      max_sessions_per_cycle?: number;
+      max_sessions_per_agent_per_cycle?: number;
+    };
+    extractor?: {
+      no_reply_token?: string;
+      max_messages_per_flush?: number;
+      max_chars_per_flush?: number;
+      max_extraction_seconds?: number;
+      include_memory_context?: {
+        memory_snippets?: number;
+        snippet_max_chars?: number;
+      };
     };
   };
 }
@@ -51,10 +82,11 @@ export interface Agent {
   rooms: string[];
   knowledge_bases?: string[];
   context_files?: string[]; // File paths read at agent init and prepended to role context
-  memory_dir?: string; // Directory containing MEMORY.md and dated memory files
   markdown?: boolean; // Per-agent markdown override
   learning?: boolean; // Defaults to true when omitted
   learning_mode?: LearningMode; // Defaults to always when omitted
+  memory_backend?: MemoryBackend; // Per-agent memory backend override (inherits memory.backend when omitted)
+  memory_file_path?: string; // Per-agent file-memory scope directory (used when effective backend is file)
   model?: string; // Reference to a model in the models section
   show_tool_calls?: boolean; // Show tool call details inline in responses (defaults to true)
   sandbox_tools?: string[]; // Tool names to execute through sandbox proxy (overrides defaults)
@@ -137,6 +169,6 @@ export interface Config {
   };
   room_models?: Record<string, string>; // Room-specific model overrides for teams
   teams?: Record<string, Omit<Team, 'id'>>; // Teams configuration
-  tools?: Record<string, any>; // Tool configurations
+  tools?: Record<string, unknown>; // Tool configurations
   voice?: VoiceConfig; // Voice configuration
 }

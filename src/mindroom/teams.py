@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
@@ -21,11 +20,11 @@ from pydantic import BaseModel, Field
 
 from . import agent_prompts
 from .ai import get_model_instance
+from .authorization import get_available_agents_in_room
 from .constants import ROUTER_AGENT_NAME
 from .error_handling import get_user_friendly_error_message
 from .logging_config import get_logger
 from .matrix.rooms import get_room_alias_from_id
-from .thread_utils import get_available_agents_in_room
 from .tool_events import (
     StructuredStreamChunk,
     ToolTraceEntry,
@@ -35,14 +34,15 @@ from .tool_events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator, Callable, Sequence
 
     import nio
     from agno.media import Image
+    from agno.models.response import ToolExecution
 
-    from .bot import MultiAgentOrchestrator
-    from .config import Config
+    from .config.main import Config
     from .matrix.identity import MatrixID
+    from .orchestrator import MultiAgentOrchestrator
 
 
 logger = get_logger(__name__)
@@ -672,6 +672,9 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     def _scope_key_for_agent(agent_name: str) -> str:
         return f"agent:{agent_name}"
 
+    def _get_consensus() -> str:
+        return consensus
+
     def _append_to_consensus(text: str) -> None:
         nonlocal consensus
         consensus += text
@@ -689,7 +692,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         scope_key: str,
         get_text: Callable[[], str],
         apply_text: Callable[[str], None],
-        tool: Any,
+        tool: ToolExecution | None,
     ) -> None:
         nonlocal next_tool_index
         if not show_tool_calls:
@@ -709,7 +712,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         scope_key: str,
         get_text: Callable[[], str],
         set_text: Callable[[str], None],
-        tool: Any,
+        tool: ToolExecution | None,
     ) -> None:
         info = extract_tool_completed_info(tool)
         if not info:
@@ -815,16 +818,16 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         elif isinstance(event, TeamToolCallStartedEvent):
             _start_tool(
                 scope_key="team",
-                get_text=lambda: consensus,
-                apply_text=lambda text: _append_to_consensus(text),
+                get_text=_get_consensus,
+                apply_text=_append_to_consensus,
                 tool=event.tool,
             )
 
         elif isinstance(event, TeamToolCallCompletedEvent):
             _complete_tool(
                 scope_key="team",
-                get_text=lambda: consensus,
-                set_text=lambda value: _set_consensus(value),
+                get_text=_get_consensus,
+                set_text=_set_consensus,
                 tool=event.tool,
             )
 

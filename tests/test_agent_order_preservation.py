@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from mindroom.config import AgentConfig, Config, DefaultsConfig
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import DefaultsConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.teams import TeamMode, decide_team_formation
 from mindroom.thread_utils import (

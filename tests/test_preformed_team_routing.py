@@ -7,6 +7,7 @@ These tests ensure that mentioning a predefined team:
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,7 +15,9 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot, TeamBot
-from mindroom.config import AgentConfig, Config, RouterConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.main import Config
+from mindroom.config.models import RouterConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 
@@ -111,8 +114,8 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
     )
     # Convert agent names to MatrixID objects
     team_matrix_ids = [
-        MatrixID.from_username("a1", config_with_team.domain),
-        MatrixID.from_username("a2", config_with_team.domain),
+        MatrixID.from_agent("a1", config_with_team.domain),
+        MatrixID.from_agent("a2", config_with_team.domain),
     ]
     bot = TeamBot(
         agent_user=team_user,
@@ -155,6 +158,76 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
 
 
 @pytest.mark.asyncio
+async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
+    config_with_team: Config,
+    tmp_path: Path,
+) -> None:
+    """TeamBot should always schedule conversation memory storage for team replies."""
+    config_with_team.memory.backend = "mem0"
+    config_with_team.agents["a1"].memory_backend = "file"
+    config_with_team.agents["a2"].memory_backend = "file"
+
+    team_user = AgentMatrixUser(
+        agent_name="t1",
+        user_id=config_with_team.ids["t1"].full_id,
+        display_name="Team One",
+        password="p",  # noqa: S106
+    )
+    team_matrix_ids = [
+        MatrixID.from_agent("a1", config_with_team.domain),
+        MatrixID.from_agent("a2", config_with_team.domain),
+    ]
+    bot = TeamBot(
+        agent_user=team_user,
+        storage_path=tmp_path,
+        config=config_with_team,
+        rooms=["!room:localhost"],
+        team_agents=team_matrix_ids,
+        team_mode="coordinate",
+        enable_streaming=False,
+    )
+    bot.client = AsyncMock()
+    bot.orchestrator = MagicMock()
+    bot._generate_team_response_helper = AsyncMock()
+
+    store_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    scheduled_tasks: list[asyncio.Task[Any]] = []
+
+    async def fake_store_conversation_memory(*args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+        store_calls.append((args, kwargs))
+
+    def schedule_background_task(
+        coro: object,
+        name: str | None = None,
+        error_handler: object | None = None,  # noqa: ARG001
+    ) -> asyncio.Task[Any]:
+        assert asyncio.iscoroutine(coro)
+        task = asyncio.create_task(coro, name=name)
+        scheduled_tasks.append(task)
+        return task
+
+    with (
+        patch("mindroom.bot.store_conversation_memory", new=fake_store_conversation_memory),
+        patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
+    ):
+        await bot._generate_response(
+            room_id="!room:localhost",
+            prompt="@team remember this",
+            reply_to_event_id="$evt1",
+            thread_id=None,
+            thread_history=[],
+            user_id="@user:localhost",
+        )
+
+    if scheduled_tasks:
+        await asyncio.gather(*scheduled_tasks)
+
+    bot._generate_team_response_helper.assert_awaited_once()
+    assert len(store_calls) == 1
+    assert store_calls[0][0][1] == ["a1", "a2"]
+
+
+@pytest.mark.asyncio
 async def test_preformed_team_reply_chain_uses_existing_thread_root(config_with_team: Config, tmp_path: Path) -> None:
     """TeamBot should continue the resolved thread when mention comes as a plain reply."""
     team_user = AgentMatrixUser(
@@ -164,8 +237,8 @@ async def test_preformed_team_reply_chain_uses_existing_thread_root(config_with_
         password="p",  # noqa: S106
     )
     team_matrix_ids = [
-        MatrixID.from_username("a1", config_with_team.domain),
-        MatrixID.from_username("a2", config_with_team.domain),
+        MatrixID.from_agent("a1", config_with_team.domain),
+        MatrixID.from_agent("a2", config_with_team.domain),
     ]
     bot = TeamBot(
         agent_user=team_user,
@@ -242,8 +315,8 @@ async def test_team_does_not_respond_to_different_domain_mention(config_with_tea
     )
     # Convert agent names to MatrixID objects
     team_matrix_ids = [
-        MatrixID.from_username("a1", config_with_team.domain),
-        MatrixID.from_username("a2", config_with_team.domain),
+        MatrixID.from_agent("a1", config_with_team.domain),
+        MatrixID.from_agent("a2", config_with_team.domain),
     ]
     bot = TeamBot(
         agent_user=team_user,

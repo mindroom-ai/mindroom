@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom.bot import MultiAgentOrchestrator
-from mindroom.config import Config
+from mindroom.config.main import Config
+from mindroom.orchestrator import MultiAgentOrchestrator
 
 
 class TestTeamRoomUpdates:
@@ -47,7 +47,7 @@ class TestTeamRoomUpdates:
             "router": {"model": "default"},
         }
 
-        with patch("mindroom.config.Config.from_yaml") as mock_load_config:
+        with patch("mindroom.config.main.Config.from_yaml") as mock_load_config:
             config1 = Config.model_validate(initial_config_data)
             mock_load_config.return_value = config1
 
@@ -69,12 +69,12 @@ class TestTeamRoomUpdates:
                 with (
                     patch("mindroom.topic_generator.generate_room_topic_ai", mock_generate_room_topic_ai),
                     patch("mindroom.matrix.rooms.generate_room_topic_ai", mock_generate_room_topic_ai),
-                    patch("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
-                    patch("mindroom.bot.MultiAgentOrchestrator._setup_rooms_and_memberships", new=AsyncMock()),
+                    patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
+                    patch("mindroom.orchestrator.MultiAgentOrchestrator._setup_rooms_and_memberships", new=AsyncMock()),
                 ):
                     orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
 
-                    with patch("mindroom.bot.create_bot_for_entity") as mock_create_bot:
+                    with patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot:
                         mock_bot = AsyncMock()
                         mock_bot.start = AsyncMock()
                         mock_bot.stop = AsyncMock()
@@ -115,7 +115,7 @@ class TestTeamRoomUpdates:
             "router": {"model": "default"},
         }
 
-        with patch("mindroom.config.Config.from_yaml") as mock_load_config:
+        with patch("mindroom.config.main.Config.from_yaml") as mock_load_config:
             config1 = Config.model_validate(initial_config_data)
             mock_load_config.return_value = config1
 
@@ -131,12 +131,12 @@ class TestTeamRoomUpdates:
                 with (
                     patch("mindroom.topic_generator.generate_room_topic_ai", mock_generate_room_topic_ai),
                     patch("mindroom.matrix.rooms.generate_room_topic_ai", mock_generate_room_topic_ai),
-                    patch("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
-                    patch("mindroom.bot.MultiAgentOrchestrator._setup_rooms_and_memberships", new=AsyncMock()),
+                    patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
+                    patch("mindroom.orchestrator.MultiAgentOrchestrator._setup_rooms_and_memberships", new=AsyncMock()),
                 ):
                     orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
 
-                    with patch("mindroom.bot.create_bot_for_entity") as mock_create_bot:
+                    with patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot:
                         mock_bot = AsyncMock()
                         mock_bot.start = AsyncMock()
                         mock_bot.stop = AsyncMock()
@@ -196,7 +196,7 @@ class TestTeamRoomUpdates:
             "router": {"model": "default"},
         }
 
-        with patch("mindroom.config.Config.from_yaml") as mock_load_config:
+        with patch("mindroom.config.main.Config.from_yaml") as mock_load_config:
             config = Config.model_validate(config_data)
             mock_load_config.return_value = config
 
@@ -213,12 +213,12 @@ class TestTeamRoomUpdates:
                 with (
                     patch("mindroom.topic_generator.generate_room_topic_ai", mock_generate_room_topic_ai),
                     patch("mindroom.matrix.rooms.generate_room_topic_ai", mock_generate_room_topic_ai),
-                    patch("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
-                    patch("mindroom.bot.MultiAgentOrchestrator._setup_rooms_and_memberships", new=AsyncMock()),
+                    patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
+                    patch("mindroom.orchestrator.MultiAgentOrchestrator._setup_rooms_and_memberships", new=AsyncMock()),
                 ):
                     orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
 
-                    with patch("mindroom.bot.create_bot_for_entity") as mock_create_bot:
+                    with patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot:
                         mock_bot = AsyncMock()
                         mock_bot.start = AsyncMock()
                         mock_bot.stop = AsyncMock()

@@ -59,9 +59,6 @@ class OpenClawCompatTools(Toolkit):
                 self._subagents_tools.sessions_spawn,
                 self._subagents_tools.subagents,
                 self.message,
-                self.gateway,
-                self.nodes,
-                self.canvas,
                 self.cron,
                 self.web_search,
                 self.web_fetch,
@@ -386,58 +383,6 @@ class OpenClawCompatTools(Toolkit):
             message="Unsupported action. Use send, thread-reply, react, or read.",
         )
 
-    async def gateway(
-        self,
-        action: str,
-        raw: str | None = None,
-        base_hash: str | None = None,
-        note: str | None = None,
-    ) -> str:
-        """Invoke gateway lifecycle/config operations."""
-        return self._payload(
-            "gateway",
-            "not_configured",
-            action=action,
-            raw=raw,
-            base_hash=base_hash,
-            note=note,
-            message="gateway requires an OpenClaw Gateway endpoint and is not configured in MindRoom.",
-        )
-
-    async def nodes(
-        self,
-        action: str,
-        node: str | None = None,
-    ) -> str:
-        """Invoke node discovery and control operations."""
-        return self._payload(
-            "nodes",
-            "not_configured",
-            action=action,
-            node=node,
-            message="nodes requires an OpenClaw Gateway endpoint and is not configured in MindRoom.",
-        )
-
-    async def canvas(
-        self,
-        action: str,
-        node: str | None = None,
-        target: str | None = None,
-        url: str | None = None,
-        java_script: str | None = None,
-    ) -> str:
-        """Control canvas operations on a node."""
-        return self._payload(
-            "canvas",
-            "not_configured",
-            action=action,
-            node=node,
-            target=target,
-            url=url,
-            java_script=java_script,
-            message="canvas requires an OpenClaw Gateway endpoint and is not configured in MindRoom.",
-        )
-
     async def cron(self, request: str) -> str:
         """Schedule a task using the scheduler tool."""
         if not request.strip():
@@ -550,14 +495,6 @@ class OpenClawCompatTools(Toolkit):
         """Shared shell execution for exec and process."""
         if not command.strip():
             return self._payload(tool_name, "error", message="command cannot be empty")
-
-        context = get_openclaw_tool_context()
-        if context is not None and not self._tool_enabled_for_agent(context, "shell"):
-            return self._payload(
-                tool_name,
-                "error",
-                message=f"shell tool is not enabled for agent '{context.agent_name}'.",
-            )
 
         parse_error: str | None = None
         try:

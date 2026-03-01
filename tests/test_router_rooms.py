@@ -8,10 +8,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from mindroom.bot import MultiAgentOrchestrator, create_bot_for_entity
-from mindroom.config import AgentConfig, Config, TeamConfig
+from mindroom.bot import create_bot_for_entity
+from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.orchestrator import MultiAgentOrchestrator
 
 from .conftest import TEST_PASSWORD
 
@@ -99,6 +102,10 @@ def test_team_bot_uses_defaults_streaming_setting(
 
     assert team_bot is not None
     assert team_bot.enable_streaming is False
+    assert team_bot.team_agents == [
+        MatrixID.from_agent("agent1", config_with_rooms.domain),
+        MatrixID.from_agent("agent2", config_with_rooms.domain),
+    ]
 
 
 @pytest.mark.asyncio
@@ -204,9 +211,9 @@ async def test_orchestrator_creates_router_with_all_rooms(
     def mock_load_config(_config_path: Path | None = None) -> Config:
         return config_with_rooms
 
-    monkeypatch.setattr("mindroom.config.Config.from_yaml", mock_load_config)
-    monkeypatch.setattr("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", AsyncMock())
-    monkeypatch.setattr("mindroom.bot.MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
+    monkeypatch.setattr("mindroom.config.main.Config.from_yaml", mock_load_config)
+    monkeypatch.setattr("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", AsyncMock())
+    monkeypatch.setattr("mindroom.orchestrator.MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
 
     # Create orchestrator
     orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
@@ -287,9 +294,9 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyP
         load_config_counter[0] += 1
         return result
 
-    monkeypatch.setattr("mindroom.config.Config.from_yaml", mock_load_config)
-    monkeypatch.setattr("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", AsyncMock())
-    monkeypatch.setattr("mindroom.bot.MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
+    monkeypatch.setattr("mindroom.config.main.Config.from_yaml", mock_load_config)
+    monkeypatch.setattr("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", AsyncMock())
+    monkeypatch.setattr("mindroom.orchestrator.MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
 
     # Create orchestrator with initial config
     # Mock start/sync_forever at class level so newly created bots in update_config don't perform real login/sync

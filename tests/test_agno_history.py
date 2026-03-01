@@ -30,7 +30,9 @@ from mindroom.ai import (
     ai_response,
 )
 from mindroom.bot import AgentBot
-from mindroom.config import AgentConfig, Config, DefaultsConfig, ModelConfig
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 

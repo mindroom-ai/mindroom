@@ -33,9 +33,6 @@ OPENCLAW_COMPAT_CORE_TOOLS = {
     "sessions_spawn",
     "subagents",
     "message",
-    "gateway",
-    "nodes",
-    "canvas",
 }
 
 OPENCLAW_COMPAT_ALIAS_TOOLS = {
@@ -159,22 +156,11 @@ async def test_openclaw_compat_placeholder_responses_are_json() -> None:
         ("subagents", await call_openclaw_subagent_tool(tool, "subagents")),
         ("message", await tool.message(action="send", message="hi")),
     ]
-    not_configured = [
-        ("gateway", await tool.gateway(action="config.get")),
-        ("nodes", await tool.nodes(action="status")),
-        ("canvas", await tool.canvas(action="snapshot")),
-    ]
 
     for expected_tool_name, raw_response in context_required:
         payload = json.loads(raw_response)
         assert payload["tool"] == expected_tool_name
         assert payload["status"] == "error"
-        assert "message" in payload
-
-    for expected_tool_name, raw_response in not_configured:
-        payload = json.loads(raw_response)
-        assert payload["tool"] == expected_tool_name
-        assert payload["status"] == "not_configured"
         assert "message" in payload
 
 
@@ -1092,30 +1078,6 @@ async def test_openclaw_compat_exec_returns_error_for_invalid_shell_syntax() -> 
     assert payload["status"] == "error"
     assert payload["tool"] == "exec"
     assert "invalid shell command" in payload["message"]
-
-
-@pytest.mark.asyncio
-async def test_openclaw_compat_exec_requires_shell_tool_in_context(tmp_path: Path) -> None:
-    """Verify exec is blocked when the active agent does not enable shell tool."""
-    tool = OpenClawCompatTools()
-    config = MagicMock()
-    config.agents = {"openclaw": SimpleNamespace(tools=["file"])}
-    ctx = OpenClawToolContext(
-        agent_name="openclaw",
-        room_id="!room:localhost",
-        thread_id="$ctx-thread:localhost",
-        requester_id="@user:localhost",
-        client=MagicMock(),
-        config=config,
-        storage_path=tmp_path,
-    )
-
-    with openclaw_tool_context(ctx):
-        payload = json.loads(await tool.exec("echo hi"))
-
-    assert payload["status"] == "error"
-    assert payload["tool"] == "exec"
-    assert "shell tool is not enabled" in payload["message"]
 
 
 @pytest.mark.asyncio

@@ -13,13 +13,14 @@ from agno.agent import Agent
 from nio import crypto
 
 from .ai import get_model_instance
+from .authorization import get_available_agents_for_sender
 from .commands import get_command_list
 from .constants import VOICE_PREFIX
 from .logging_config import get_logger
-from .thread_utils import get_available_agents_for_sender
+from .matrix.identity import agent_username_localpart
 
 if TYPE_CHECKING:
-    from .config import Config
+    from .config.main import Config
 
 logger = get_logger(__name__)
 VOICE_MENTION_PATTERN = re.compile(
@@ -194,7 +195,10 @@ async def _process_transcription(
 
         agent_list = (
             "\n".join(
-                [f"  - @{name} or @mindroom_{name} (spoken as: {agent_display_names[name]})" for name in agent_names],
+                [
+                    f"  - @{name} or @{agent_username_localpart(name)} (spoken as: {agent_display_names[name]})"
+                    for name in agent_names
+                ],
             )
             if agent_names
             else "  (none)"

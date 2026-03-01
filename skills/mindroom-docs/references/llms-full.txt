@@ -71,8 +71,8 @@ agents:
 
 models:
   default:
-    provider: anthropic
-    id: claude-sonnet-4-5-latest
+    provider: openai
+    id: gpt-5.2
 
 defaults:
   tools: [scheduler]
@@ -86,12 +86,19 @@ defaults:
 MATRIX_HOMESERVER=https://matrix.example.com
 
 # AI provider API keys
-ANTHROPIC_API_KEY=your_api_key
+OPENAI_API_KEY=your_api_key
 ```
 
 1. Run MindRoom:
 
 ```
+mindroom run
+```
+
+For local development with a host-installed backend plus Dockerized Synapse + Cinny (Linux/macOS), you can bootstrap the local stack with:
+
+```
+mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
 mindroom run
 ```
 
@@ -132,6 +139,7 @@ mindroom run
 ## Documentation
 
 - [Getting Started](https://docs.mindroom.chat/getting-started/index.md) - Installation and first steps
+- [Hosted Matrix Deployment](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) - Run only `uvx mindroom` locally against hosted Matrix
 - [Configuration](https://docs.mindroom.chat/configuration/index.md) - All configuration options
 - [Cultures](https://docs.mindroom.chat/configuration/cultures/index.md) - Configure shared agent cultures
 - [Dashboard](https://docs.mindroom.chat/dashboard/index.md) - Web UI for configuration
@@ -154,6 +162,9 @@ mindroom run
 - [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) - Admin OAuth setup for Gmail/Calendar/Drive/Sheets
 - [Google Services OAuth (Individual)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) - Single-user OAuth setup
 - [CLI Reference](https://docs.mindroom.chat/cli/index.md) - Command-line interface
+- [Support](https://docs.mindroom.chat/support/index.md) - Contact and troubleshooting help
+- [Privacy Policy](https://docs.mindroom.chat/privacy/index.md) - Privacy and data handling information
+- [Terms of Service](https://docs.mindroom.chat/terms/index.md) - Terms for using MindRoom services and clients
 
 ## License
 
@@ -164,9 +175,68 @@ mindroom run
 
 This guide will help you set up MindRoom and create your first AI agent.
 
-## Recommended: Full Stack Docker Compose (backend + frontend + Matrix + Element)
+## Recommended: Hosted Matrix + Local Backend (`uv` only)
 
-MindRoom depends on a Matrix homeserver plus supporting services. The easiest onboarding is the full stack Docker Compose repo, which brings everything up together.
+If you do not want to self-host Matrix yet, this is the simplest setup. You only run the MindRoom backend locally.
+
+**Prerequisite:** Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
+
+### 1. Create a local project
+
+```
+mkdir -p ~/mindroom-local
+cd ~/mindroom-local
+uvx mindroom config init --profile public
+```
+
+This creates:
+
+- `config.yaml`
+- `.env` prefilled with `MATRIX_HOMESERVER=https://mindroom.chat`
+
+### 2. Add model API key(s)
+
+```
+$EDITOR .env
+```
+
+Set at least one key:
+
+- `OPENAI_API_KEY=...`, or
+- `OPENROUTER_API_KEY=...`, or
+- another supported provider key.
+
+### 3. Pair your local install from chat UI
+
+1. Open `https://chat.mindroom.chat` and sign in.
+1. Go to `Settings -> Local MindRoom`.
+1. Click `Generate Pair Code`.
+1. Run locally:
+
+```
+uvx mindroom connect --pair-code ABCD-EFGH
+```
+
+Notes:
+
+- Pair code is short-lived (10 minutes).
+- `mindroom connect` writes local provisioning values (including `MINDROOM_NAMESPACE`) into `.env`.
+
+### 4. Run MindRoom
+
+```
+uvx mindroom run
+```
+
+### 5. Verify in chat
+
+Send a message mentioning your agent in a room where it is configured.
+
+For a detailed architecture and credential model, see: [Hosted Matrix deployment guide](https://docs.mindroom.chat/deployment/hosted-matrix/index.md).
+
+## Alternative: Full Stack Docker Compose (backend + frontend + Matrix + Element)
+
+Use this when you want everything local: backend, frontend, Matrix homeserver, and a Matrix client in one stack.
 
 **Prereqs:** Docker + Docker Compose.
 
@@ -248,9 +318,9 @@ Create a `config.yaml` in your working directory:
 
 ```
 
-agents: assistant: display_name: Assistant role: A helpful AI assistant that can answer questions model: default include_default_tools: true rooms: [lobby] # Optional: file-based context (OpenClaw-style) # context_files: [./workspace/SOUL.md, ./workspace/USER.md] # memory_dir: ./workspace/memory
+agents: assistant: display_name: Assistant role: A helpful AI assistant that can answer questions model: default include_default_tools: true rooms: [lobby] # Optional: file-based context (OpenClaw-style) # context_files: [./workspace/SOUL.md, ./workspace/USER.md]
 
-models: default: provider: anthropic id: claude-sonnet-4-5-latest
+models: default: provider: openai id: gpt-5.2
 
 defaults: tools: [scheduler] markdown: true
 
@@ -278,17 +348,40 @@ MATRIX_HOMESERVER=https://matrix.example.com
 
 # AI provider API keys
 
-ANTHROPIC_API_KEY=your_anthropic_key
+OPENAI_API_KEY=your_openai_key
 
-# OPENAI_API_KEY=your_openai_key
+# OPENROUTER_API_KEY=your_openrouter_key
 
-# GOOGLE_API_KEY=your_google_key
+# ANTHROPIC_API_KEY=your_anthropic_key
 
 # Optional: protect the dashboard API (recommended for non-localhost)
 
 # MINDROOM_API_KEY=your-secret-key
 
 ```
+
+#### Optional: Bootstrap local Synapse + Cinny with Docker (Linux/macOS)
+
+If you want a local Matrix + client setup without running the full `mindroom-stack` app,
+use the helper command:
+
+```
+
+mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+
+```
+
+If you're running from source in this repo, use:
+
+```
+
+uv run mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+
+```
+
+This starts Synapse from the `mindroom-stack` compose files, starts a MindRoom Cinny
+container, waits for both services to be healthy, and by default writes local Matrix
+settings to `.env` next to your active `config.yaml`.
 
 > [!NOTE]
 > MindRoom automatically creates Matrix user accounts for each agent. Your Matrix homeserver must allow open registration, or you need to configure it to allow registration from localhost. If registration fails, check your homeserver's registration settings.
@@ -350,6 +443,7 @@ Configure AI agents:
 
 - **Display name** and **Role description**
 - **Model** - Select from configured models
+- **Memory backend** - Inherit global memory backend or override per agent (`mem0` or `file`)
 - **Tools** - Organized into configured tools (green badge) and default tools (no config needed)
 - **Instructions** - Custom behavior instructions
 - **Rooms** - Where the agent operates
@@ -390,15 +484,20 @@ Configure AI model providers:
 - **Test connection** to verify model accessibility
 - **Provider API keys** section for configuring credentials
 
-**Runtime-supported providers:** OpenAI, Anthropic, Google Gemini (`google`/`gemini`), Ollama, OpenRouter, Groq, DeepSeek, Cerebras
+**Runtime-supported providers:** OpenAI, Anthropic, Google Gemini (`google`/`gemini`), Vertex AI Claude (`vertexai_claude`), Ollama, OpenRouter, Groq, DeepSeek, Cerebras
 
 ### Memory
 
-Configure the embedder for agent memory:
+Configure global memory defaults:
 
+- **Backend** - Global default backend (`mem0` or `file`)
 - **Provider** - Ollama (local), OpenAI, HuggingFace, or Sentence Transformers
 - **Model** - Provider-specific embedding models
 - **Host URL** - For Ollama provider
+- **File backend settings** - Path and file memory tuning options
+- **Auto-flush settings** - Background extraction and flush controls for file-backed memory
+
+Per-agent overrides are configured from the **Agents** tab using the **Memory backend** selector.
 
 ### Knowledge
 
@@ -594,6 +693,8 @@ agents:
     sandbox_tools: [shell, file]   # Optional: Override default (inherits from defaults section)
     learning: true                 # Optional: Override default (inherits from defaults section)
     learning_mode: always          # Optional: Override default (inherits from defaults section)
+    memory_backend: file           # Optional: Per-agent memory backend override (mem0 or file)
+    memory_file_path: ./openclaw_data  # Optional: Per-agent file-memory scope directory (relative to config.yaml)
     knowledge_bases: [docs]         # Optional: Assign one or more configured knowledge bases
     context_files:                 # Optional: Load files into role context at init/reload
       - ./openclaw_data/SOUL.md
@@ -603,7 +704,6 @@ agents:
       - ./openclaw_data/MEMORY.md
       - ./openclaw_data/TOOLS.md
       - ./openclaw_data/HEARTBEAT.md
-    memory_dir: ./openclaw_data/memory  # Optional: Load MEMORY.md + dated files from this dir
   researcher:
     display_name: Researcher
     role: Research and gather information
@@ -624,10 +724,10 @@ agents:
 # Model configurations (at least a "default" model is recommended)
 models:
   default:
-    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, groq, cerebras, openrouter, deepseek
+    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
     id: claude-sonnet-4-5-latest     # Required: Model ID for the provider
   sonnet:
-    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, groq, cerebras, openrouter, deepseek
+    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
     id: claude-sonnet-4-5-latest     # Required: Model ID for the provider
     host: null                     # Optional: Host URL (e.g., for Ollama)
     api_key: null                  # Optional: API key (usually from env vars)
@@ -661,7 +761,7 @@ defaults:
   enable_streaming: true           # Default: true (stream responses via message edits)
   learning: true                   # Default: true
   learning_mode: always            # Default: always (or agentic)
-  max_preload_chars: 50000         # Hard cap for preloaded context from context_files/memory_dir
+  max_preload_chars: 50000         # Hard cap for preloaded context from context_files
   show_stop_button: false          # Default: false (global only, cannot be overridden per-agent)
   num_history_runs: null           # Number of prior runs to include (null = all)
   num_history_messages: null       # Max messages from history (null = use num_history_runs)
@@ -676,6 +776,7 @@ defaults:
 
 # Memory system configuration (optional)
 memory:
+  backend: mem0                    # Global default backend (mem0 or file); agents can override with memory_backend
   embedder:
     provider: openai               # Default: openai
     config:
@@ -773,8 +874,9 @@ timezone: America/Los_Angeles      # Default: UTC
 - All top-level sections are optional with sensible defaults, but at least one agent is recommended for Matrix interactions
 - A model named `default` is required unless agents, teams, and the router all specify explicit non-`default` models
 - Agents can set `knowledge_bases`, but each entry must exist in the top-level `knowledge_bases` section
-- `agents.<name>.context_files` and `agents.<name>.memory_dir` inject file-based context at agent creation/reload (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md))
-- `defaults.max_preload_chars` caps preloaded file context (`context_files` + `memory_dir`)
+- `agents.<name>.context_files` inject file-based context at agent creation/reload (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md))
+- `memory.backend` sets the global memory default, `agents.<name>.memory_backend` overrides it per agent, and `agents.<name>.memory_file_path` sets a custom file-memory scope for that agent
+- `defaults.max_preload_chars` caps preloaded file context (`context_files`)
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
 - `authorization.agent_reply_permissions` can further restrict which users specific agents/teams/router will reply to
 - `authorization.room_permissions` accepts room IDs, full room aliases, and managed room keys
@@ -842,6 +944,12 @@ agents:
     # Learning mode: always (automatic) or agentic (tool-driven)
     learning_mode: always
 
+    # Memory backend override for this agent (optional: mem0 or file)
+    memory_backend: file
+
+    # Custom file-memory scope directory (optional, overrides default <root>/agent_<name>/)
+    memory_file_path: ./openclaw_data
+
     # Assign agent to one or more configured knowledge bases (optional)
     knowledge_bases: [docs]
 
@@ -854,9 +962,6 @@ agents:
       - ./openclaw_data/MEMORY.md
       - ./openclaw_data/TOOLS.md
       - ./openclaw_data/HEARTBEAT.md
-
-    # Optional: directory-based memory context (MEMORY.md + dated files)
-    memory_dir: ./openclaw_data/memory
 
     # Whether to include defaults.tools for this agent (default: true)
     include_default_tools: true
@@ -885,36 +990,37 @@ agents:
 
 ## Configuration Options
 
-| Option                        | Type   | Default     | Description                                                                                                                                                                                                                                                 |
-| ----------------------------- | ------ | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `display_name`                | string | *required*  | Human-readable name shown in Matrix as the bot's display name                                                                                                                                                                                               |
-| `role`                        | string | `""`        | System prompt describing the agent's purpose — guides its behavior and expertise                                                                                                                                                                            |
-| `model`                       | string | `"default"` | Model name (must match a key in the `models` section)                                                                                                                                                                                                       |
-| `tools`                       | list   | `[]`        | Agent-specific tool names (see [Tools](https://docs.mindroom.chat/tools/index.md)); effective tools are `tools + defaults.tools` with duplicates removed                                                                                                    |
-| `include_default_tools`       | bool   | `true`      | When `true`, append `defaults.tools` to this agent's `tools`; set to `false` to opt this agent out                                                                                                                                                          |
-| `skills`                      | list   | `[]`        | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/index.md))                                                                                                                                                                    |
-| `instructions`                | list   | `[]`        | Extra lines appended to the system prompt after the role                                                                                                                                                                                                    |
-| `rooms`                       | list   | `[]`        | Room aliases to auto-join; rooms are created if they don't exist                                                                                                                                                                                            |
-| `markdown`                    | bool   | `null`      | When enabled, the agent is instructed to format responses as Markdown. Inherits from `defaults.markdown` (default: `true`)                                                                                                                                  |
-| `learning`                    | bool   | `null`      | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`)                                                         |
-| `learning_mode`               | string | `null`      | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`)                                                                           |
-| `knowledge_bases`             | list   | `[]`        | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                                                                                                                                   |
-| `context_files`               | list   | `[]`        | File paths loaded at agent init/reload and prepended to role context (under `Personality Context`)                                                                                                                                                          |
-| `memory_dir`                  | string | `null`      | Directory loaded at agent init/reload for `MEMORY.md` and dated files (under `Memory Context`)                                                                                                                                                              |
-| `thread_mode`                 | string | `"thread"`  | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile                                           |
-| `num_history_runs`            | int    | `null`      | Number of prior Agno runs to include as history context (`null` = all). Mutually exclusive with `num_history_messages`                                                                                                                                      |
-| `num_history_messages`        | int    | `null`      | Max messages from history. Mutually exclusive with `num_history_runs`                                                                                                                                                                                       |
-| `compress_tool_results`       | bool   | `null`      | Compress tool results in history to save context. Inherits from `defaults.compress_tool_results` (default: `true`)                                                                                                                                          |
-| `enable_session_summaries`    | bool   | `null`      | Generate AI summaries of older conversation segments for compaction (each summary costs an extra LLM call). Inherits from `defaults.enable_session_summaries` (default: `false`)                                                                            |
-| `max_tool_calls_from_history` | int    | `null`      | Limit tool call messages replayed from history (`null` = no limit)                                                                                                                                                                                          |
-| `show_tool_calls`             | bool   | `null`      | Show tool call details inline in responses. Inherits from `defaults.show_tool_calls` (default: `true`). Set to `false` to hide `<tool>…</tool>` blocks (metadata is still tracked)                                                                          |
-| `sandbox_tools`               | list   | `null`      | Tool names to execute through the [sandbox proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md). Inherits from `defaults.sandbox_tools` (default: `null` — defers to env vars). Set to `[]` to explicitly disable sandboxing for this agent |
-| `allow_self_config`           | bool   | `null`      | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool                                                   |
-| `delegate_to`                 | list   | `[]`        | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation))                                                                                                                                                     |
+| Option                        | Type   | Default     | Description                                                                                                                                                                                                                                                                                                                       |
+| ----------------------------- | ------ | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `display_name`                | string | *required*  | Human-readable name shown in Matrix as the bot's display name                                                                                                                                                                                                                                                                     |
+| `role`                        | string | `""`        | System prompt describing the agent's purpose — guides its behavior and expertise                                                                                                                                                                                                                                                  |
+| `model`                       | string | `"default"` | Model name (must match a key in the `models` section)                                                                                                                                                                                                                                                                             |
+| `tools`                       | list   | `[]`        | Agent-specific tool names (see [Tools](https://docs.mindroom.chat/tools/index.md)); effective tools are `tools + defaults.tools` with duplicates removed                                                                                                                                                                          |
+| `include_default_tools`       | bool   | `true`      | When `true`, append `defaults.tools` to this agent's `tools`; set to `false` to opt this agent out                                                                                                                                                                                                                                |
+| `skills`                      | list   | `[]`        | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/index.md))                                                                                                                                                                                                                                          |
+| `instructions`                | list   | `[]`        | Extra lines appended to the system prompt after the role                                                                                                                                                                                                                                                                          |
+| `rooms`                       | list   | `[]`        | Room aliases to auto-join; rooms are created if they don't exist                                                                                                                                                                                                                                                                  |
+| `markdown`                    | bool   | `null`      | When enabled, the agent is instructed to format responses as Markdown. Inherits from `defaults.markdown` (default: `true`)                                                                                                                                                                                                        |
+| `learning`                    | bool   | `null`      | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`)                                                                                                                               |
+| `learning_mode`               | string | `null`      | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`)                                                                                                                                                 |
+| `memory_backend`              | string | `null`      | Memory backend override for this agent (`"mem0"` or `"file"`). Inherits from global `memory.backend` when omitted                                                                                                                                                                                                                 |
+| `memory_file_path`            | string | `null`      | Custom directory to use as the file-memory scope for this agent instead of the default `<root>/agent_<name>/`. Useful for pointing an agent at an existing workspace (e.g. an OpenClaw workspace). Resolved relative to the config file directory                                                                                 |
+| `knowledge_bases`             | list   | `[]`        | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                                                                                                                                                                                                         |
+| `context_files`               | list   | `[]`        | File paths loaded at agent init/reload and prepended to role context (under `Personality Context`)                                                                                                                                                                                                                                |
+| `thread_mode`                 | string | `"thread"`  | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile                                                                                                                 |
+| `num_history_runs`            | int    | `null`      | Number of prior Agno runs to include as history context (`null` = all). Mutually exclusive with `num_history_messages`                                                                                                                                                                                                            |
+| `num_history_messages`        | int    | `null`      | Max messages from history. Mutually exclusive with `num_history_runs`                                                                                                                                                                                                                                                             |
+| `compress_tool_results`       | bool   | `null`      | Compress tool results in history to save context. Inherits from `defaults.compress_tool_results` (default: `true`)                                                                                                                                                                                                                |
+| `enable_session_summaries`    | bool   | `null`      | Generate AI summaries of older conversation segments for compaction (each summary costs an extra LLM call). Inherits from `defaults.enable_session_summaries` (default: `false`)                                                                                                                                                  |
+| `max_tool_calls_from_history` | int    | `null`      | Limit tool call messages replayed from history (`null` = no limit)                                                                                                                                                                                                                                                                |
+| `show_tool_calls`             | bool   | `null`      | Show tool-call markers and trace metadata in Matrix messages. Inherits from `defaults.show_tool_calls` (default: `true`). When `false`, inline markers and `io.mindroom.tool_trace` are omitted from sent Matrix message content. Note: this flag is not currently enforced by the OpenAI-compatible `/v1/chat/completions` path. |
+| `sandbox_tools`               | list   | `null`      | Tool names to execute through the [sandbox proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md). Inherits from `defaults.sandbox_tools` (default: `null` — defers to env vars). Set to `[]` to explicitly disable sandboxing for this agent                                                                       |
+| `allow_self_config`           | bool   | `null`      | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool                                                                                                                         |
+| `delegate_to`                 | list   | `[]`        | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation))                                                                                                                                                                                                                           |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
 
-Per-agent fields with a `null` default inherit from the `defaults` section at runtime. Per-agent values override them. `show_stop_button` and `enable_streaming` are global-only settings in `defaults` and cannot be overridden per-agent.
+Per-agent fields with a `null` default inherit from the `defaults` section at runtime. Per-agent values override them. `memory.backend` is the global memory default, and `agents.<name>.memory_backend` overrides it per agent. `show_stop_button` and `enable_streaming` are global-only settings in `defaults` and cannot be overridden per-agent. The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
 
 Learning data is persisted to `mindroom_data/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted.
 
@@ -927,14 +1033,6 @@ You can inject file content directly into an agent's role context without using 
 - Paths are resolved relative to the config file directory
 - Existing files are loaded in list order and added under `Personality Context`
 - Missing files are skipped with a warning in logs
-
-`memory_dir` behavior:
-
-- Paths are resolved relative to the config file directory
-- Loads `MEMORY.md` (uppercase) if present
-- Loads dated files named `YYYY-MM-DD.md` for yesterday and today
-- Content is added under `Memory Context`
-- Preloaded context is capped by `defaults.max_preload_chars`; if exceeded, truncation drops daily files first, then `MEMORY.md`, then personality files
 
 This loading happens when the agent is created (and on config reload), not continuously on every message.
 
@@ -993,7 +1091,7 @@ defaults:
   markdown: true                        # Format responses as Markdown
   learning: true                        # Enable Agno Learning
   learning_mode: always                 # "always" or "agentic"
-  max_preload_chars: 50000              # Hard cap for preloaded context from context_files/memory_dir
+  max_preload_chars: 50000              # Hard cap for preloaded context from context_files
   show_stop_button: false               # Show a stop button while agent is responding (global-only, cannot be overridden per-agent)
   num_history_runs: null                # Number of prior runs to include (null = all)
   num_history_messages: null            # Max messages from history (null = use num_history_runs)
@@ -1001,7 +1099,7 @@ defaults:
   compress_tool_results: true           # Compress tool results in history to save context
   enable_session_summaries: false       # AI summaries of older conversation segments (costs extra LLM call)
   max_tool_calls_from_history: null     # Limit tool call messages replayed from history (null = no limit)
-  show_tool_calls: true                 # Show tool call details inline in responses
+  show_tool_calls: true                 # Show tool-call markers and trace metadata in message content
   sandbox_tools: null                    # Tool names to sandbox (null = use env var config, [] = disable)
   allow_self_config: false               # Allow agents to read/modify their own config at runtime
 ```
@@ -1026,6 +1124,7 @@ Models define the AI providers and model IDs used by agents.
 - `anthropic` - Claude models (Anthropic)
 - `openai` - GPT models and OpenAI-compatible endpoints
 - `google` or `gemini` - Google Gemini models
+- `vertexai_claude` - Anthropic Claude models on Google Vertex AI
 - `ollama` - Local models via Ollama
 - `groq` - Groq-hosted models (fast inference)
 - `openrouter` - OpenRouter-hosted models (access to many providers)
@@ -1069,6 +1168,14 @@ models:
   gemini:
     provider: google
     id: gemini-2.0-flash
+
+  # Anthropic Claude on Vertex AI
+  vertex_claude:
+    provider: vertexai_claude
+    id: claude-sonnet-4@20250514
+    extra_kwargs:
+      project_id: your-gcp-project
+      region: us-central1
 
   # Local via Ollama
   local:
@@ -1851,9 +1958,9 @@ This page remains as a compatibility pointer and will be expanded when native MC
 MindRoom supports a practical OpenClaw-compatible workflow focused on workspace portability:
 
 - Reuse your OpenClaw markdown files (`SOUL.md`, `AGENTS.md`, `USER.md`, `MEMORY.md`, etc.)
-- Keep daily memory logs in `memory/YYYY-MM-DD.md`
 - Use `openclaw_compat` tool names where supported
-- Add semantic recall over historical memory via knowledge bases
+- Use MindRoom's unified memory backend (`memory.backend`) for persistence
+- Optionally add semantic recall over workspace files via knowledge bases
 
 ## What this is (and is not)
 
@@ -1867,24 +1974,25 @@ Works well:
 
 Not included:
 
-- OpenClaw gateway control plane (`gateway` returns `not_configured`)
+- OpenClaw gateway control plane
 - Device nodes and canvas platform tools
 - `tts` and `image` tool aliases (use MindRoom's native TTS/image tools directly)
-- Heartbeat runtime — schedule heartbeats via `cron`/`scheduler` instead
+- Heartbeat runtime - schedule heartbeats via `cron`/`scheduler` instead
 
 ## The `openclaw_compat` toolkit
 
 The `openclaw_compat` tool provides OpenClaw-named aliases so prompts and skills written for OpenClaw work without rewriting tool calls:
 
-| OpenClaw tool                | MindRoom backend                              |
-| ---------------------------- | --------------------------------------------- |
-| `exec`, `process`            | `ShellTools`                                  |
-| `web_search`, `web_fetch`    | `DuckDuckGoTools`, `WebsiteTools`             |
-| `cron`                       | `SchedulerTools`                              |
-| `message`, `sessions_*`      | Matrix client calls                           |
-| `subagents`, `agents_list`   | Agent registry lookup                         |
-| `browser`                    | `BrowserTools` (Playwright, host target only) |
-| `gateway`, `nodes`, `canvas` | Stubs (`not_configured`)                      |
+| OpenClaw tool              | MindRoom backend                              |
+| -------------------------- | --------------------------------------------- |
+| `exec`, `process`          | `ShellTools`                                  |
+| `web_search`, `web_fetch`  | `DuckDuckGoTools`, `WebsiteTools`             |
+| `cron`                     | `SchedulerTools`                              |
+| `message`, `sessions_*`    | Matrix client calls                           |
+| `subagents`, `agents_list` | Agent registry lookup                         |
+| `browser`                  | `BrowserTools` (Playwright, host target only) |
+
+Memory is not a separate OpenClaw subsystem in MindRoom. It uses the normal MindRoom memory backend.
 
 ## Drop-in config
 
@@ -1896,40 +2004,32 @@ agents:
     display_name: OpenClawAgent
     include_default_tools: false
     learning: false
+    memory_backend: file
+    memory_file_path: ./openclaw_data
     model: opus
     role: OpenClaw-style personal assistant with persistent file-based identity and memory.
     rooms: [personal]
 
     instructions:
       - You wake up fresh each session with no memory of previous conversations. Your context files are already loaded into your system prompt.
-      - Today's and yesterday's daily memory files from `memory_dir` are pre-loaded. For older history, use `search_knowledge_base`.
-      - IMPORTANT: If you want to remember something, write it to `./openclaw_data/memory/YYYY-MM-DD.md` (append, never overwrite).
-      - Curate long-term memory in `MEMORY.md` by distilling important points from recent daily files.
+      - Important long-term context is persisted by the configured MindRoom memory backend. If something must be preserved exactly, write/update the relevant file directly.
+      - MEMORY.md is curated long-term memory; daily files are short-lived notes and logs.
       - Ask before external/public actions and destructive operations.
-      - Before answering prior-history questions, search memory files first with `search_knowledge_base`.
+      - Before answering prior-history questions, search memory files first with `search_knowledge_base` when configured.
 
     context_files:
       - ./openclaw_data/SOUL.md
       - ./openclaw_data/AGENTS.md
       - ./openclaw_data/USER.md
       - ./openclaw_data/IDENTITY.md
-      - ./openclaw_data/MEMORY.md
       - ./openclaw_data/TOOLS.md
       - ./openclaw_data/HEARTBEAT.md
 
-    memory_dir: ./openclaw_data/memory
     knowledge_bases: [openclaw_memory]
 
     tools:
-      - file
-      - shell
-      - scheduler
-      - duckduckgo
-      - website
       - openclaw_compat
-      - browser
       - python
-      - calculator
 
     skills:
       - transcribe
@@ -1939,14 +2039,14 @@ knowledge_bases:
     path: ./openclaw_data/memory
     watch: true
 
-defaults:
-  max_preload_chars: 50000
-
-models:
-  opus:
-    provider: anthropic
-    id: claude-opus-4-6-latest
+memory:
+  file:
+    max_entrypoint_lines: 200
+  auto_flush:
+    enabled: true
 ```
+
+`memory_file_path` points the file-memory scope directly at the workspace root, so `MEMORY.md` is loaded automatically by the file backend as the entrypoint — no need to list it in `context_files`. `memory_file_path` is ignored unless the effective backend is `file`; if you switch this agent to `mem0`, re-add `MEMORY.md` to `context_files` when you still want it preloaded. The `openclaw_compat` toolkit already bundles shell, file operations, web search, web fetch, browser, and scheduler aliases, so listing those tools individually is not necessary.
 
 ## Recommended workspace layout
 
@@ -1964,29 +2064,29 @@ openclaw_data/
     └── topic-notes.md
 ```
 
-## Memory behavior
+## Unified memory behavior
 
-`memory_dir` is document-based context loading, not Mem0:
+OpenClaw-compatible agents use the same memory system as every other MindRoom agent:
 
-- Loads `MEMORY.md` (uppercase, OpenClaw standard) plus yesterday/today dated files from the directory
-- Injects those files into role context at agent creation/reload
-- Does not perform semantic search by itself
+- `memory.backend: mem0` for vector memory (global default)
+- `memory.backend: file` for file-first memory (global default)
+- `memory_backend: file` on an individual agent to override the global default
+- `memory_file_path: ./openclaw_data` to point the file-memory scope at an existing workspace directory instead of the default `<root>/agent_<name>/`
+- Agents that use file memory without `memory_file_path` continue to use the global `memory.file.path` (or the default `<storage_path>/memory_files/`)
+- optional `knowledge_bases` for semantic recall over arbitrary workspace folders
 
-**Case sensitivity note:** `memory_dir` lookup is case-sensitive and expects `MEMORY.md`. On case-sensitive filesystems (typical Linux), lowercase `memory.md` will not be loaded.
-
-For older history, use `knowledge_bases` on your memory folder — this provides semantic search across all files regardless of date.
+Recommended for OpenClaw-style setups: `memory_backend: file` with `memory_file_path` pointing at the workspace root and `memory.auto_flush.enabled: true`.
 
 ## Context Management
 
 MindRoom includes built-in context controls for OpenClaw-style agents:
 
-- **Conversation history** is managed by Agno's session system — previous turns (including tool calls and results) are automatically replayed. Control depth with `num_history_runs` or `num_history_messages` (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md)).
-- **Preloaded role context** from `context_files` + `memory_dir` is hard-capped by `defaults.max_preload_chars`.
-- If preload exceeds the cap, truncation priority is: daily files → `MEMORY.md` → personality files (`SOUL.md`, etc.), with a truncation marker appended.
+- **Conversation history** is managed by Agno's session system - previous turns (including tool calls and results) are automatically replayed. Control depth with `num_history_runs` or `num_history_messages` (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md)).
+- **Preloaded role context** from `context_files` is hard-capped by `defaults.max_preload_chars`.
 
 ## Known limitations
 
-**Threading model:** MindRoom responds in Matrix threads by default. OpenClaw uses continuous room-level conversations. To match this behavior on mobile or via bridges (Telegram, Signal, WhatsApp), set `thread_mode: room` on the agent — this sends plain room messages with a single persistent session per room instead of creating threads.
+**Threading model:** MindRoom responds in Matrix threads by default. OpenClaw uses continuous room-level conversations. To match this behavior on mobile or via bridges (Telegram, Signal, WhatsApp), set `thread_mode: room` on the agent - this sends plain room messages with a single persistent session per room instead of creating threads.
 
 ## Privacy guidance
 
@@ -2588,59 +2688,141 @@ Knowledge base configuration supports hot reload. When you change `config.yaml`:
 
 # Memory System
 
-MindRoom uses Mem0 for persistent memory across conversations. Memory is automatically enabled for all agents and uses ChromaDB for semantic search.
+MindRoom supports two memory backends:
+
+- `mem0`: vector memory (semantic retrieval + extraction via Mem0)
+- `file`: markdown memory files (`MEMORY.md` plus optional dated notes)
+
+Set the global default backend with `memory.backend`. Override the backend per agent with `agents.<name>.memory_backend`. Set `agents.<name>.memory_file_path` to point an individual file-backed agent at a custom workspace directory.
+
+OpenClaw compatibility uses this same backend selection; there is no separate OpenClaw-only memory engine.
+
+Optional:
+
+- `memory.team_reads_member_memory: true` allows team-context memory reads to include member agent scopes.
 
 ## Memory Scopes
 
-| Scope | User ID Format               | Description                                            |
-| ----- | ---------------------------- | ------------------------------------------------------ |
-| Agent | `agent_<name>`               | User preferences, past conversations, learned context  |
-| Room  | `room_<safe_room_id>`        | Project context, technical decisions, shared knowledge |
-| Team  | `team_<agent1>+<agent2>+...` | Shared team conversations and findings                 |
+| Scope | User ID Format               | Description                                |
+| ----- | ---------------------------- | ------------------------------------------ |
+| Agent | `agent_<name>`               | Agent preferences and durable user context |
+| Room  | `room_<safe_room_id>`        | Shared room/project context                |
+| Team  | `team_<agent1>+<agent2>+...` | Shared team conversation memory            |
 
-**Notes:**
+Notes:
 
-- Room IDs are sanitized (`:` → `_`, `!` removed) for storage compatibility
-- Team IDs use sorted agent names joined with `+`
-- When searching agent memories, team memories are automatically included and deduplicated
+- Room IDs are sanitized (`:` -> `_`, `!` removed).
+- Team IDs are sorted agent names joined by `+`.
 
-## Configuration
+## Backend: `mem0`
 
-Configure memory in your `config.yaml`:
+`mem0` keeps the existing behavior:
+
+- semantic retrieval before response
+- automatic extraction after turns
+- storage in Chroma-backed Mem0 collections
+
+Example:
 
 ```
 memory:
+  backend: mem0
   embedder:
-    provider: openai  # or "ollama"
+    provider: openai
     config:
       model: text-embedding-3-small
-      host: null  # Optional: for self-hosted models
-
-  llm:  # Optional: for memory extraction
-    provider: openai  # or "ollama", "anthropic"
-    config:
-      model: gpt-5-mini
-      temperature: 0.1
-      host: null  # For Ollama
 ```
 
-The `host` field is converted internally to `openai_base_url` or `ollama_base_url` depending on the provider.
+## Backend: `file`
 
-**Default**: When the `llm` section is omitted, MindRoom falls back to Ollama with `llama3.2` at `http://localhost:11434`.
+`file` keeps memory in markdown files and treats files as source-of-truth.
 
-## How Memory Works
+Example:
 
-1. **Semantic Retrieval**: Before responding, agents search for relevant memories (limit: 3 per scope)
-1. **Context Enhancement**: Retrieved memories are prepended to the prompt with a note that they may not be relevant
-1. **Automatic Storage**: After each conversation, Mem0 extracts and stores relevant information
+```
+memory:
+  backend: file
+  file:
+    path: ./mindroom_data/memory_files
+    max_entrypoint_lines: 200
+```
 
-## Storage
+Per-agent override example:
 
-Memories are stored in ChromaDB at `<storage_path>/chroma/` with collection name `mindroom_memories`.
+```
+memory:
+  backend: mem0
 
-## Memory Tool (Optional)
+agents:
+  coder:
+    display_name: Coder
+    role: Write and review code
+    memory_backend: file
+    memory_file_path: ./openclaw_data
+```
 
-For explicit memory control, add the `memory` tool to an agent:
+`memory_file_path` is resolved relative to `config.yaml`. When set, the agent uses that directory as its memory scope instead of `<storage_path>/memory_files/agent_<name>/`.
+
+### File layout
+
+Under `memory.file.path` (or `<storage_path>/memory_files` by default), MindRoom stores per-scope folders such as:
+
+- `agent_<name>/MEMORY.md`
+- `agent_<name>/memory/YYYY-MM-DD.md`
+- `room_<safe_room_id>/MEMORY.md`
+- `room_<safe_room_id>/memory/YYYY-MM-DD.md`
+- `team_<sorted_members>/MEMORY.md`
+- `team_<sorted_members>/memory/YYYY-MM-DD.md`
+
+## File Auto-Flush Worker
+
+When the effective backend is `file` for at least one agent, you can enable background auto-flush:
+
+```
+memory:
+  backend: file
+  auto_flush:
+    enabled: true
+    flush_interval_seconds: 1800
+    idle_seconds: 120
+    max_dirty_age_seconds: 600
+    stale_ttl_seconds: 86400
+    max_cross_session_reprioritize: 5
+    batch:
+      max_sessions_per_cycle: 10
+      max_sessions_per_agent_per_cycle: 3
+    extractor:
+      no_reply_token: NO_REPLY
+      max_messages_per_flush: 20
+      max_chars_per_flush: 12000
+      max_extraction_seconds: 30
+```
+
+High-level behavior:
+
+1. Turns mark sessions dirty.
+1. Background worker picks eligible dirty sessions in bounded batches.
+1. Worker runs a model-driven extraction (not keyword heuristics) to produce durable memories.
+1. If extractor returns `NO_REPLY`, nothing is written.
+1. Successful writes append to memory files via normal memory APIs.
+
+## UI Configuration
+
+The Dashboard **Memory** page supports:
+
+- backend selection (`mem0` vs `file`)
+- team/member read toggle (`team_reads_member_memory`)
+- embedder provider/model/host
+- file backend settings (`path`, `max_entrypoint_lines`)
+- auto-flush settings (intervals, idle/age thresholds, retries)
+- batch sizing
+- extractor settings (`no_reply_token`, message/char/time limits, memory-context bounds)
+
+Save from the Memory page to persist changes to `config.yaml`. Use the Dashboard **Agents** page to set an agent-specific **Memory Backend** override and optional **Memory File Path**.
+
+## Optional Memory Tool
+
+For explicit agent-controlled memory operations, add the `memory` tool:
 
 ```
 agents:
@@ -2648,9 +2830,7 @@ agents:
     tools: [memory]
 ```
 
-This provides functions: `add_memory`, `search_memory`, `get_all_memories`, `delete_all_memories`.
-
-Note: The `memory` tool is for the built-in agent memory system. The separate `mem0` tool is for Mem0's cloud service.
+This exposes `add_memory`, `search_memory`, `get_all_memories`, and `delete_all_memories`.
 
 # Voice Messages
 
@@ -3265,7 +3445,7 @@ Teams are exposed as `team/<team_name>` models. Selecting `team/super_team` runs
 
 `stream: true` returns Server-Sent Events in the standard OpenAI format: role chunk, content chunks, finish chunk, `[DONE]`.
 
-Tool calls appear inline as text in the stream (not as native OpenAI `tool_calls` deltas).
+Tool calls appear inline as text in the stream (not as native OpenAI `tool_calls` deltas). MindRoom currently emits tool events in stream chunks as inline `<tool id="N" state="start|done">...</tool>` content.
 
 ### Session continuity
 
@@ -3316,6 +3496,7 @@ The OpenAI-compatible API uses its own auth (`OPENAI_COMPAT_API_KEYS`), separate
 
 - **Token usage is always zeros** — Agno doesn't expose token counts
 - **No native `tool_calls` format** — tool results appear inline in content text
+- **`show_tool_calls` config is Matrix-only today** — OpenAI-compatible `/v1/chat/completions` currently includes tool-call text/events regardless of `show_tool_calls: false`
 - **No room memory** — only agent-scoped memory (no `room_id` in API requests)
 - **Scheduler tool unavailable** — scheduling requires Matrix context and returns an error message when no Matrix scheduling context is available
 
@@ -3452,7 +3633,16 @@ Events are processed in background tasks:
 
 Agents stream responses by progressively editing messages. Streaming is enabled only when the requesting user is online (checked via `should_use_streaming()`), saving API calls for offline users.
 
-Tool call telemetry is emitted as structured collapsible blocks (`<tool>...</tool>`, `<validation>...</validation>`) and mirrored in `io.mindroom.tool_trace` metadata on the same message content.
+Tool call telemetry is emitted as plain inline markers and mirrored in `io.mindroom.tool_trace` metadata on the same message content.
+
+Marker format:
+
+```
+Pending:   🔧 `tool_name` [N] ⏳
+Completed: 🔧 `tool_name` [N]
+```
+
+Where `N` is 1-indexed per message and maps to `io.mindroom.tool_trace.events[N-1]`.
 
 ## Presence
 
@@ -3482,12 +3672,12 @@ Returns content with `m.mentions` and `formatted_body` containing clickable link
 
 Messages exceeding the 64KB Matrix event limit are automatically handled by `prepare_large_message()`:
 
-- Messages > 55,000 bytes: Uploaded as attachment (`message.txt` for plain text, `message.html` for formatted HTML)
-- Edits > 27,000 bytes: Lower threshold since edit structure roughly doubles size
+- Messages > 55,000 bytes and edits > 27,000 bytes use a fallback event
+- Full original Matrix message content is uploaded as a JSON sidecar (`message-content.json`)
 - Preview text included in message body (maximum that fits)
-- Custom metadata (`io.mindroom.long_text`) for reconstruction
-- Preserves essential metadata (for example mentions) while dropping bulky optional fields to stay within event limits
-- Encrypted rooms: Content encrypted before upload (`message.txt.enc` for plain text, `message.html.enc` for formatted HTML)
+- Custom metadata (`io.mindroom.long_text.version = 2`) points to sidecar encoding (`matrix_event_content_json`)
+- Preview event is compact (for example no inline `io.mindroom.tool_trace`), while the sidecar preserves full content fidelity
+- Encrypted rooms: sidecar JSON is encrypted before upload (`message-content.json.enc`)
 
 ## Identity Management
 
@@ -3639,12 +3829,13 @@ MindRoom can be deployed in various ways depending on your needs.
 
 ## Deployment Options
 
-| Method                                                                             | Best For                                                    |
-| ---------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Full Stack (Docker Compose)                                                        | All-in-one: backend + frontend + Matrix (Synapse) + Element |
-| [Docker (single container)](https://docs.mindroom.chat/deployment/docker/index.md) | Backend-only or when you already have Matrix                |
-| [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/index.md)            | Multi-tenant SaaS, production                               |
-| Direct                                                                             | Development, simple setups                                  |
+| Method                                                                                        | Best For                                                    |
+| --------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| [Hosted Matrix + local backend](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) | Simplest setup: run only `uvx mindroom run` locally         |
+| Full Stack (Docker Compose)                                                                   | All-in-one: backend + frontend + Matrix (Synapse) + Element |
+| [Docker (single container)](https://docs.mindroom.chat/deployment/docker/index.md)            | Backend-only or when you already have Matrix                |
+| [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/index.md)                       | Multi-tenant SaaS, production                               |
+| Direct                                                                                        | Development, simple setups                                  |
 
 ## Bridges
 
@@ -3661,6 +3852,21 @@ Use these guides if you want users to connect Google accounts in the MindRoom fr
 - [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) - single-user bring-your-own OAuth app setup
 
 ## Quick Start
+
+### Hosted Matrix + local backend (simplest)
+
+```
+mkdir -p ~/mindroom-local
+cd ~/mindroom-local
+uvx mindroom config init --profile public
+$EDITOR .env
+uvx mindroom connect --pair-code ABCD-EFGH
+uvx mindroom run
+```
+
+Generate the pair code in `https://chat.mindroom.chat` under: `Settings -> Local MindRoom`.
+
+See [Hosted Matrix deployment](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) for the full walkthrough.
 
 ### Full Stack (recommended)
 
@@ -3680,6 +3886,13 @@ mindroom run --storage-path ./mindroom_data
 ```
 
 The config file path is set via `MINDROOM_CONFIG_PATH` (defaults to `./config.yaml`).
+
+If you want local Matrix + Cinny with a host-installed backend (Linux/macOS), use:
+
+```
+mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+mindroom run --storage-path ./mindroom_data
+```
 
 ### Docker (single container)
 
@@ -3705,17 +3918,128 @@ Full stack:
 
 ```
 # .env in the full stack repo
-ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
 # Add other providers as needed
 ```
 
 Direct and single-container deployments:
 
 1. **Matrix homeserver** - Set `MATRIX_HOMESERVER` (must allow open registration for agent accounts)
-1. **AI provider keys** - At least one of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.
+1. **AI provider keys** - At least one of `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, etc.
 1. **Persistent storage** - Mount `mindroom_data/` to persist agent state (including `sessions/`, `learning/`, and memory data)
 
 See the [Docker guide](https://docs.mindroom.chat/deployment/docker/#environment-variables) for the complete environment variable reference.
+
+Hosted `mindroom.chat` deployments additionally use values from `mindroom connect` (`MINDROOM_LOCAL_CLIENT_ID`, `MINDROOM_LOCAL_CLIENT_SECRET`, and `MINDROOM_NAMESPACE`) to bootstrap agent registrations and avoid collisions on shared homeservers.
+
+# Hosted Matrix + Local Backend
+
+This guide covers the simplest production-like setup:
+
+- Matrix homeserver is hosted at `https://mindroom.chat`
+- Web chat runs at `https://chat.mindroom.chat`
+- You run only `mindroom run` locally via `uvx`
+
+## What Runs Where
+
+| Component            | Runs on                          | Purpose                                 |
+| -------------------- | -------------------------------- | --------------------------------------- |
+| `chat.mindroom.chat` | Hosted web app                   | Login UI and pairing UI                 |
+| `mindroom.chat`      | Hosted Matrix + provisioning API | Matrix transport + local onboarding API |
+| `uvx mindroom run`   | Your machine/server              | Agent orchestration, tools, model calls |
+
+## Prerequisites
+
+- Python 3.12+
+- `uv` installed
+- A Matrix account that can sign in to `chat.mindroom.chat`
+- At least one AI provider API key
+
+## 1. Initialize Local Config
+
+```
+mkdir -p ~/mindroom-local
+cd ~/mindroom-local
+uvx mindroom config init --profile public
+```
+
+This creates `config.yaml` and `.env` with hosted defaults.
+
+## 2. Add AI Provider Key
+
+Edit `.env` and set at least one provider key:
+
+```
+OPENAI_API_KEY=...
+# or OPENROUTER_API_KEY=...
+```
+
+## 3. Pair This Install
+
+1. Open `https://chat.mindroom.chat`.
+1. Go to `Settings -> Local MindRoom`.
+1. Click `Generate Pair Code`.
+1. Run locally:
+
+```
+uvx mindroom connect --pair-code ABCD-EFGH
+```
+
+Pair code behavior:
+
+- Valid for 600 seconds (10 minutes).
+- Only used to bootstrap local pairing.
+
+After successful pairing, local provisioning credentials are written to `.env` unless you use `--no-persist-env`.
+
+## 4. Start MindRoom
+
+```
+uvx mindroom run
+```
+
+MindRoom then:
+
+1. Connects to `MATRIX_HOMESERVER`
+1. Creates/updates configured agent Matrix users
+1. Joins/creates configured rooms
+1. Starts processing messages
+
+## Credential Model (Important)
+
+`mindroom connect` returns local provisioning credentials:
+
+- `MINDROOM_LOCAL_CLIENT_ID`
+- `MINDROOM_LOCAL_CLIENT_SECRET`
+- `MINDROOM_NAMESPACE`
+
+`MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` are **not Matrix user access tokens**. `MINDROOM_NAMESPACE` is appended to managed agent usernames and room aliases to avoid collisions on shared homeservers.
+
+They can only call provisioning-service endpoints that accept local client credentials (for example agent registration flows). Revoke them from `Settings -> Local MindRoom` in the chat UI.
+
+## Trust Model (Hosted Server vs Message Privacy)
+
+For message *content*, this setup can be effectively zero-trust toward the homeserver operator when rooms are end-to-end encrypted.
+
+- In E2EE rooms, the homeserver stores ciphertext and cannot read message bodies.
+- The local `mindroom run` process holds your agent account keys and performs decryption locally.
+
+Important limits:
+
+- This does **not** hide metadata (room membership, timestamps, event IDs, sender IDs, traffic patterns).
+- If a room is not encrypted, the homeserver can read plaintext.
+- Any model/tool providers you send content to can still see the prompts/data you send to them.
+
+So the precise claim is: encrypted Matrix message content is protected from the hosted homeserver, not that every part of the system is universally invisible.
+
+## If You Self-Host Later
+
+You can keep the same local flow and switch endpoints:
+
+- `MATRIX_HOMESERVER=https://your-matrix.example.com`
+- `MINDROOM_PROVISIONING_URL=https://your-matrix.example.com` (or your dedicated provisioning host)
+
+Then run `mindroom connect` again with a fresh pair code from your own UI.
 
 # Bridges
 
@@ -4389,6 +4713,13 @@ The local Matrix stack includes:
 - **PostgreSQL**: Database backend
 - **Redis**: Caching layer
 
+If you're running the backend on the host (not in Docker), you can use `mindroom local-stack-setup` to start Synapse + MindRoom Cinny and persist local Matrix env vars automatically:
+
+```
+mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+mindroom run
+```
+
 ## Health Checks
 
 The container exposes a health endpoint on port 8765:
@@ -4842,10 +5173,13 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │ --help                -h        Show this message and exit.                            │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ version   Show the current version of Mindroom.                                        │
-│ run       Run the mindroom multi-agent system.                                         │
-│ doctor    Check your environment for common issues.                                    │
-│ config    Manage MindRoom configuration files.                                         │
+│ version             Show the current version of Mindroom.                              │
+│ run                 Run the mindroom multi-agent system.                               │
+│ doctor              Check your environment for common issues.                          │
+│ connect             Pair this local MindRoom install with the hosted provisioning      │
+│                     service.                                                           │
+│ local-stack-setup   Start local Synapse + MindRoom Cinny using Docker only.            │
+│ config              Manage MindRoom configuration files.                               │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -4898,6 +5232,97 @@ Start MindRoom with your configuration.
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
+## connect
+
+Pair this local MindRoom install with a provisioning service.
+
+Default provisioning URL is `https://mindroom.chat` unless you override it with `--provisioning-url` or `MINDROOM_PROVISIONING_URL`.
+
+```
+mindroom connect --pair-code ABCD-EFGH
+```
+
+On success (default `--persist-env`), this writes to `.env` next to `config.yaml`:
+
+- `MINDROOM_PROVISIONING_URL`
+- `MINDROOM_LOCAL_CLIENT_ID`
+- `MINDROOM_LOCAL_CLIENT_SECRET`
+
+If your config still contains the owner placeholder token `__MINDROOM_OWNER_USER_ID_FROM_PAIRING__`, `connect` will auto-replace it when pairing returns a valid `owner_user_id`.
+
+Use `--no-persist-env` if you want to export variables only for the current shell session.
+
+```
+mindroom connect --pair-code ABCD-EFGH --no-persist-env
+```
+
+Use `--provisioning-url` for non-default deployments:
+
+```
+mindroom connect \
+  --pair-code ABCD-EFGH \
+  --provisioning-url https://matrix.example.com
+```
+
+## local-stack-setup
+
+Start local Synapse and the MindRoom Cinny client container for development.
+
+By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, and `MATRIX_SSL_VERIFY=false` into `.env` next to your active `config.yaml` so `mindroom run` works without inline env exports.
+
+```
+ Usage: root local-stack-setup [OPTIONS]
+
+ Start local Synapse + MindRoom Cinny using Docker only.
+
+
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --synapse-dir                                 PATH                 Directory           │
+│                                                                    containing Synapse  │
+│                                                                    docker-compose.yml  │
+│                                                                    (from               │
+│                                                                    mindroom-stack      │
+│                                                                    settings).          │
+│                                                                    [default:           │
+│                                                                    local/matrix]       │
+│ --homeserver-url                              TEXT                 Homeserver URL that │
+│                                                                    Cinny and MindRoom  │
+│                                                                    should use.         │
+│                                                                    [default:           │
+│                                                                    http://localhost:8… │
+│ --server-name                                 TEXT                 Matrix server name  │
+│                                                                    (default: inferred  │
+│                                                                    from                │
+│                                                                    --homeserver-url    │
+│                                                                    hostname).          │
+│                                                                    [default: None]     │
+│ --cinny-port                                  INTEGER RANGE        Local host port for │
+│                                               [1<=x<=65535]        the MindRoom Cinny  │
+│                                                                    container.          │
+│                                                                    [default: 8080]     │
+│ --cinny-image                                 TEXT                 Docker image for    │
+│                                                                    MindRoom Cinny.     │
+│                                                                    [default:           │
+│                                                                    ghcr.io/mindroom-a… │
+│ --cinny-container-n…                          TEXT                 Container name for  │
+│                                                                    MindRoom Cinny.     │
+│                                                                    [default:           │
+│                                                                    mindroom-cinny-loc… │
+│ --skip-synapse                                                     Skip starting       │
+│                                                                    Synapse (assume it  │
+│                                                                    is already          │
+│                                                                    running).           │
+│ --persist-env             --no-persist-env                         Persist Matrix      │
+│                                                                    local dev settings  │
+│                                                                    to .env next to     │
+│                                                                    config.yaml.        │
+│                                                                    [default:           │
+│                                                                    persist-env]        │
+│ --help                -h                                           Show this message   │
+│                                                                    and exit.           │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+```
+
 ## Examples
 
 ### Basic run
@@ -4916,6 +5341,24 @@ mindroom run --log-level DEBUG
 
 ```
 mindroom run --storage-path /data/mindroom
+```
+
+### Pair local install with hosted provisioning
+
+```
+mindroom connect --pair-code ABCD-EFGH
+```
+
+### Start local Synapse + Cinny (default local setup)
+
+```
+mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+```
+
+### Start local stack without writing `.env`
+
+```
+mindroom local-stack-setup --no-persist-env
 ```
 
 ### Show version

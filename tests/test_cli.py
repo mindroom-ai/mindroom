@@ -8,11 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import MultiAgentOrchestrator
-from mindroom.config import Config
-from mindroom.matrix.client import register_user
+from mindroom.config.main import Config
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
+from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, register_user
+from mindroom.orchestrator import MultiAgentOrchestrator
 
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
@@ -21,6 +20,15 @@ if TYPE_CHECKING:
 
 DEFAULT_INTERNAL_USERNAME = Config().mindroom_user.username
 DEFAULT_INTERNAL_DISPLAY_NAME = Config().mindroom_user.display_name
+
+
+@pytest.fixture(autouse=True)
+def _clear_matrix_registration_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep register-user tests deterministic unless explicitly overridden."""
+    monkeypatch.delenv("MATRIX_REGISTRATION_TOKEN", raising=False)
+    monkeypatch.delenv("MINDROOM_PROVISIONING_URL", raising=False)
+    monkeypatch.delenv("MINDROOM_LOCAL_CLIENT_ID", raising=False)
+    monkeypatch.delenv("MINDROOM_LOCAL_CLIENT_SECRET", raising=False)
 
 
 @pytest.fixture
@@ -49,7 +57,7 @@ class TestUserAccountManagement:
         )
         mock_client.set_displayname.return_value = AsyncMock()
 
-        with patch("mindroom.matrix.client.matrix_client", return_value=mock_context):
+        with patch("mindroom.matrix.users.matrix_client", return_value=mock_context):
             user_id = await register_user("http://localhost:8008", "test_user", TEST_PASSWORD, "Test User")
 
             assert user_id == "@test_user:localhost"
@@ -80,7 +88,7 @@ class TestUserAccountManagement:
         )
         mock_client.set_displayname.return_value = AsyncMock()
 
-        with patch("mindroom.matrix.client.matrix_client", return_value=mock_context):
+        with patch("mindroom.matrix.users.matrix_client", return_value=mock_context):
             # Should return the user_id even when user exists
             user_id = await register_user("http://localhost:8008", "existing_user", "test_password", "Existing User")
 
@@ -114,7 +122,7 @@ class TestUserAccountManagement:
         mock_client.set_displayname.return_value = AsyncMock()
 
         with (
-            patch("mindroom.matrix.client.matrix_client", return_value=mock_context),
+            patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
             patch("mindroom.matrix.state.MATRIX_STATE_FILE", tmp_path / "matrix_state.yaml"),
             patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
         ):
@@ -126,7 +134,9 @@ class TestUserAccountManagement:
 
             assert INTERNAL_USER_ACCOUNT_KEY in state.accounts
             assert state.accounts[INTERNAL_USER_ACCOUNT_KEY].username == DEFAULT_INTERNAL_USERNAME
-            assert state.accounts[INTERNAL_USER_ACCOUNT_KEY].password == "user_secure_password"  # noqa: S105
+            generated_password = state.accounts[INTERNAL_USER_ACCOUNT_KEY].password
+            assert generated_password
+            assert generated_password != "user_secure_password"  # noqa: S105
 
             # Verify registration was called
             mock_client.register.assert_called_once()
@@ -161,7 +171,7 @@ class TestUserAccountManagement:
             )
 
             with (
-                patch("mindroom.matrix.client.matrix_client", return_value=mock_context),
+                patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
                 patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
             ):
                 orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
@@ -209,7 +219,7 @@ class TestUserAccountManagement:
             mock_client.set_displayname.return_value = AsyncMock()
 
             with (
-                patch("mindroom.matrix.client.matrix_client", return_value=mock_context),
+                patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
                 patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
             ):
                 orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
@@ -244,7 +254,7 @@ class TestUserAccountManagement:
         mock_client.set_displayname.return_value = AsyncMock()
 
         with (
-            patch("mindroom.matrix.client.matrix_client", return_value=mock_context),
+            patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
             patch("mindroom.matrix.state.MATRIX_STATE_FILE", tmp_path / "matrix_state.yaml"),
             patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
         ):
@@ -253,11 +263,13 @@ class TestUserAccountManagement:
 
             state = MatrixState.load()
             assert state.accounts[INTERNAL_USER_ACCOUNT_KEY].username == "alice"
-            assert state.accounts[INTERNAL_USER_ACCOUNT_KEY].password == "user_secure_password"  # noqa: S105
+            generated_password = state.accounts[INTERNAL_USER_ACCOUNT_KEY].password
+            assert generated_password
+            assert generated_password != "user_secure_password"  # noqa: S105
             mock_client.register.assert_called_once()
             register_call_kwargs = mock_client.register.call_args.kwargs
             assert register_call_kwargs["username"] == "alice"
-            assert register_call_kwargs["password"] == "user_secure_password"  # noqa: S105
+            assert register_call_kwargs["password"] == generated_password
             assert register_call_kwargs["device_name"] == "mindroom_agent"
             mock_client.set_displayname.assert_called_once_with("Alice Smith")
 
@@ -320,4 +332,27 @@ def test_mindroom_user_username_rejects_agent_collision() -> None:
                 },
             },
             mindroom_user={"username": "mindroom_assistant", "display_name": "Alice"},
+        )
+
+
+def test_agent_and_team_names_must_not_overlap() -> None:
+    """Agent keys and team keys must be distinct to avoid identity collisions."""
+    with pytest.raises(ValueError, match="Agent and team names must be distinct"):
+        Config(
+            agents={
+                "assistant": {
+                    "display_name": "Assistant",
+                    "role": "Test assistant",
+                    "rooms": ["test_room"],
+                },
+            },
+            teams={
+                "assistant": {
+                    "display_name": "Assistant Team",
+                    "role": "Team role",
+                    "agents": ["assistant"],
+                    "model": "default",
+                },
+            },
+            models={"default": {"provider": "openai", "id": "gpt-4o-mini"}},
         )

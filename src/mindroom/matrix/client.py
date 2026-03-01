@@ -1,34 +1,28 @@
 """Matrix client operations and utilities."""
 
-import io
 import json
-import os
-import re
 import ssl as ssl_module
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from html import escape
 from pathlib import Path
 from typing import Any
 
-import markdown
 import nio
 
-from mindroom.config import RoomDirectoryVisibility, RoomJoinRule
-from mindroom.constants import ENCRYPTION_KEYS_DIR
+from mindroom.config.matrix import RoomDirectoryVisibility, RoomJoinRule
+from mindroom.constants import ENCRYPTION_KEYS_DIR, MATRIX_SSL_VERIFY
 from mindroom.logging_config import get_logger
 
 from .event_info import EventInfo
-from .identity import MatrixID, extract_server_name_from_homeserver
 from .large_messages import prepare_large_message
-from .message_content import extract_and_resolve_message
+from .message_content import extract_and_resolve_message, extract_edit_body
 
 logger = get_logger(__name__)
 
 
 def _maybe_ssl_context(homeserver: str) -> ssl_module.SSLContext | None:
     if homeserver.startswith("https://"):
-        if os.getenv("MATRIX_SSL_VERIFY", "true").lower() == "false":
+        if not MATRIX_SSL_VERIFY:
             # Create context that disables verification for dev/self-signed certs
             ssl_context = ssl_module.create_default_context()
             ssl_context.check_hostname = False
@@ -138,67 +132,6 @@ async def login(homeserver: str, user_id: str, password: str) -> nio.AsyncClient
     await client.close()
     msg = f"Failed to login {user_id}: {response}"
     raise ValueError(msg)
-
-
-async def register_user(
-    homeserver: str,
-    username: str,
-    password: str,
-    display_name: str,
-) -> str:
-    """Register a new Matrix user account.
-
-    Args:
-        homeserver: The Matrix homeserver URL
-        username: The username for the Matrix account (without domain)
-        password: The password for the account
-        display_name: The display name for the user
-
-    Returns:
-        The full Matrix user ID (e.g., @user:localhost)
-
-    Raises:
-        ValueError: If registration fails
-
-    """
-    # Extract server name from homeserver URL
-    server_name = extract_server_name_from_homeserver(homeserver)
-    user_id = MatrixID.from_username(username, server_name).full_id
-
-    async with matrix_client(homeserver, user_id=user_id) as client:
-        # Try to register the user
-        response = await client.register(
-            username=username,
-            password=password,
-            device_name="mindroom_agent",
-        )
-
-        if isinstance(response, nio.RegisterResponse):
-            logger.info(f"✅ Successfully registered user: {user_id}")
-            # After registration, we already have an access token
-            client.user_id = response.user_id
-            client.access_token = response.access_token
-            client.device_id = response.device_id
-
-            # Set display name using the existing session
-            display_response = await client.set_displayname(display_name)
-            if isinstance(display_response, nio.ErrorResponse):
-                logger.warning(f"Failed to set display name: {display_response}")
-
-            return user_id
-        if isinstance(response, nio.ErrorResponse) and response.status_code == "M_USER_IN_USE":
-            logger.info(f"User {user_id} already exists")
-            # Keep display name in sync when account already exists.
-            login_response = await client.login(password)
-            if isinstance(login_response, nio.LoginResponse):
-                display_response = await client.set_displayname(display_name)
-                if isinstance(display_response, nio.ErrorResponse):
-                    logger.warning(f"Failed to set display name for existing user: {display_response}")
-                return user_id
-            msg = f"Login failed for existing user {user_id} with provided password: {login_response}"
-            raise ValueError(msg)
-        msg = f"Failed to register user {username}: {response}"
-        raise ValueError(msg)
 
 
 async def invite_to_room(
@@ -609,6 +542,94 @@ async def send_message(client: nio.AsyncClient, room_id: str, content: dict[str,
     return None
 
 
+def _history_message_sort_key(message: dict[str, Any]) -> tuple[int, str]:
+    """Sort thread history messages by timestamp and event ID."""
+    return (message["timestamp"], message["event_id"])
+
+
+def _record_latest_thread_edit(
+    event: nio.RoomMessageText,
+    *,
+    event_info: EventInfo,
+    thread_id: str,
+    latest_edits_by_original_event_id: dict[str, nio.RoomMessageText],
+) -> bool:
+    """Track latest relevant edit for a thread, returning True if event is an edit."""
+    if not (event_info.is_edit and event_info.thread_id_from_edit == thread_id and event_info.original_event_id):
+        return False
+
+    original_event_id = event_info.original_event_id
+    current_latest_edit = latest_edits_by_original_event_id.get(original_event_id)
+    if current_latest_edit is None or (event.server_timestamp, event.event_id) > (
+        current_latest_edit.server_timestamp,
+        current_latest_edit.event_id,
+    ):
+        latest_edits_by_original_event_id[original_event_id] = event
+    return True
+
+
+async def _record_thread_message(
+    event: nio.RoomMessageText,
+    *,
+    event_info: EventInfo,
+    client: nio.AsyncClient,
+    thread_id: str,
+    root_message_found: bool,
+    messages: list[dict[str, Any]],
+    messages_by_event_id: dict[str, dict[str, Any]],
+) -> bool:
+    """Record root/thread message into history and return updated root flag."""
+    if event.event_id in messages_by_event_id:
+        return root_message_found
+
+    is_root_message = event.event_id == thread_id
+    is_thread_message = event_info.is_thread and event_info.thread_id == thread_id
+
+    if is_root_message and not root_message_found:
+        message_data = await extract_and_resolve_message(event, client)
+        messages.append(message_data)
+        messages_by_event_id[event.event_id] = message_data
+        return True
+
+    if is_thread_message:
+        message_data = await extract_and_resolve_message(event, client)
+        messages.append(message_data)
+        messages_by_event_id[event.event_id] = message_data
+
+    return root_message_found
+
+
+async def _apply_thread_edits_to_history(
+    client: nio.AsyncClient,
+    *,
+    messages: list[dict[str, Any]],
+    messages_by_event_id: dict[str, dict[str, Any]],
+    latest_edits_by_original_event_id: dict[str, nio.RoomMessageText],
+) -> None:
+    """Apply latest edits to history entries and synthesize missing originals."""
+    for original_event_id, edit_event in latest_edits_by_original_event_id.items():
+        edited_body, edited_content = await extract_edit_body(edit_event.source, client)
+        if edited_body is None:
+            continue
+
+        existing_message = messages_by_event_id.get(original_event_id)
+        if existing_message is not None:
+            existing_message["body"] = edited_body
+            if edited_content is not None:
+                existing_message["content"] = edited_content
+            continue
+
+        synthesized_message = {
+            "sender": edit_event.sender,
+            "body": edited_body,
+            "timestamp": edit_event.server_timestamp,
+            "event_id": original_event_id,
+            "content": edited_content if edited_content is not None else {},
+        }
+        messages.append(synthesized_message)
+        messages_by_event_id[original_event_id] = synthesized_message
+
+
 async def fetch_thread_history(
     client: nio.AsyncClient,
     room_id: str,
@@ -625,7 +646,9 @@ async def fetch_thread_history(
         List of messages in chronological order, each containing sender, body, timestamp, and event_id
 
     """
-    messages = []
+    messages: list[dict[str, Any]] = []
+    messages_by_event_id: dict[str, dict[str, Any]] = {}
+    latest_edits_by_original_event_id: dict[str, nio.RoomMessageText] = {}
     from_token = None
     root_message_found = False
 
@@ -646,26 +669,42 @@ async def fetch_thread_history(
         if not response.chunk:
             break
 
-        thread_messages_found = 0
         for event in response.chunk:
-            if isinstance(event, nio.RoomMessageText):
-                if event.event_id == thread_id and not root_message_found:
-                    message_data = await extract_and_resolve_message(event, client)
-                    messages.append(message_data)
-                    root_message_found = True
-                    thread_messages_found += 1
-                else:
-                    event_info = EventInfo.from_event(event.source)
-                    if event_info.is_thread and event_info.thread_id == thread_id:
-                        message_data = await extract_and_resolve_message(event, client)
-                        messages.append(message_data)
-                        thread_messages_found += 1
+            if not isinstance(event, nio.RoomMessageText):
+                continue
 
-        if not response.end or thread_messages_found == 0:
+            event_info = EventInfo.from_event(event.source)
+            if _record_latest_thread_edit(
+                event,
+                event_info=event_info,
+                thread_id=thread_id,
+                latest_edits_by_original_event_id=latest_edits_by_original_event_id,
+            ):
+                continue
+
+            root_message_found = await _record_thread_message(
+                event,
+                event_info=event_info,
+                client=client,
+                thread_id=thread_id,
+                root_message_found=root_message_found,
+                messages=messages,
+                messages_by_event_id=messages_by_event_id,
+            )
+
+        # Once the thread root is seen, all older pages are outside this thread.
+        if root_message_found or not response.end:
             break
         from_token = response.end
 
-    return list(reversed(messages))  # Return in chronological order
+    await _apply_thread_edits_to_history(
+        client,
+        messages=messages,
+        messages_by_event_id=messages_by_event_id,
+        latest_edits_by_original_event_id=latest_edits_by_original_event_id,
+    )
+    messages.sort(key=_history_message_sort_key)
+    return messages
 
 
 async def _latest_thread_event_id(
@@ -727,101 +766,6 @@ async def get_latest_thread_event_id_if_needed(
     return None
 
 
-_HTML_TAG_PATTERN = re.compile(r"</?([A-Za-z][A-Za-z0-9-]*)(?:\s+[^<>]*)?\s*/?>")
-
-# Standard Matrix-safe HTML tags.
-_GENERAL_FORMATTED_BODY_TAGS = frozenset(
-    {
-        "a",
-        "b",
-        "blockquote",
-        "br",
-        "caption",
-        "code",
-        "del",
-        "details",
-        "div",
-        "em",
-        "font",
-        "h1",
-        "h2",
-        "h3",
-        "h4",
-        "h5",
-        "h6",
-        "hr",
-        "i",
-        "img",
-        "li",
-        "ol",
-        "p",
-        "pre",
-        "s",
-        "span",
-        "strike",
-        "strong",
-        "sub",
-        "summary",
-        "sup",
-        "table",
-        "tbody",
-        "td",
-        "th",
-        "thead",
-        "tr",
-        "u",
-        "ul",
-    },
-)
-
-_ALLOWED_FORMATTED_BODY_TAGS = _GENERAL_FORMATTED_BODY_TAGS
-
-
-def _escape_unsupported_html_tags(html_text: str) -> str:
-    """Escape raw tags that Matrix clients commonly strip entirely.
-
-    Unknown tags from model output (e.g. ``<search>``) can disappear in some
-    clients. Escaping unsupported tags keeps them visible as literal text.
-    """
-
-    def _replace_tag(match: re.Match[str]) -> str:
-        tag_name = match.group(1).lower()
-        if tag_name in _ALLOWED_FORMATTED_BODY_TAGS:
-            return match.group(0)
-        return escape(match.group(0))
-
-    return _HTML_TAG_PATTERN.sub(_replace_tag, html_text)
-
-
-def markdown_to_html(text: str) -> str:
-    """Convert markdown text to HTML for Matrix formatted messages.
-
-    Args:
-        text: The markdown text to convert
-
-    Returns:
-        HTML formatted text
-
-    """
-    # Configure markdown with common extensions
-    md = markdown.Markdown(
-        extensions=[
-            "markdown.extensions.fenced_code",
-            "markdown.extensions.codehilite",
-            "markdown.extensions.tables",
-            "markdown.extensions.nl2br",
-        ],
-        extension_configs={
-            "markdown.extensions.codehilite": {
-                "use_pygments": True,  # Use Pygments for syntax highlighting.
-                "noclasses": True,  # Use inline styles instead of CSS classes
-            },
-        },
-    )
-    html_text: str = md.convert(text)
-    return _escape_unsupported_html_tags(html_text)
-
-
 async def edit_message(
     client: nio.AsyncClient,
     room_id: str,
@@ -856,161 +800,3 @@ async def edit_message(
 
     # send_message will handle large messages, including the lower threshold for edits
     return await send_message(client, room_id, edit_content)
-
-
-async def _upload_avatar_file(
-    client: nio.AsyncClient,
-    avatar_path: Path,
-) -> str | None:
-    """Upload an avatar file to the Matrix server.
-
-    Args:
-        client: Authenticated Matrix client
-        avatar_path: Path to the avatar image file
-
-    Returns:
-        The content URI if successful, None otherwise
-
-    """
-    if not avatar_path.exists():
-        logger.warning(f"Avatar file not found: {avatar_path}")
-        return None
-
-    extension = avatar_path.suffix.lower()
-    content_type = {
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".webp": "image/webp",
-        ".gif": "image/gif",
-    }.get(extension, "image/png")
-
-    with avatar_path.open("rb") as f:
-        avatar_data = f.read()
-
-    file_size = len(avatar_data)
-
-    def data_provider(_upload_monitor: object, _unused_data: object) -> io.BytesIO:
-        return io.BytesIO(avatar_data)
-
-    upload_result = await client.upload(
-        data_provider=data_provider,
-        content_type=content_type,
-        filename=avatar_path.name,
-        filesize=file_size,
-    )
-
-    # nio returns tuple (response, error)
-    if isinstance(upload_result, tuple):
-        upload_response, error = upload_result
-        if error:
-            logger.error(f"Upload error: {error}")
-            return None
-    else:
-        upload_response = upload_result
-
-    if not isinstance(upload_response, nio.UploadResponse):
-        logger.error(f"Failed to upload avatar: {upload_response}")
-        return None
-
-    if not upload_response.content_uri:
-        logger.error("Upload response missing content_uri")
-        return None
-
-    return str(upload_response.content_uri)
-
-
-async def set_avatar_from_file(
-    client: nio.AsyncClient,
-    avatar_path: Path,
-) -> bool:
-    """Set a user's avatar from a local file.
-
-    Args:
-        client: Authenticated Matrix client
-        avatar_path: Path to the avatar image file
-
-    Returns:
-        True if successful, False otherwise
-
-    """
-    avatar_url = await _upload_avatar_file(client, avatar_path)
-    if not avatar_url:
-        return False
-
-    response = await client.set_avatar(avatar_url)
-
-    if isinstance(response, nio.ProfileSetAvatarResponse):
-        logger.info(f"✅ Successfully set avatar for {client.user_id}")
-        return True
-
-    logger.error(f"Failed to set avatar for {client.user_id}: {response}")
-    return False
-
-
-async def check_and_set_avatar(
-    client: nio.AsyncClient,
-    avatar_path: Path,
-    room_id: str | None = None,
-) -> bool:
-    """Check if user or room has an avatar and set it if they don't.
-
-    Args:
-        client: Authenticated Matrix client
-        avatar_path: Path to the avatar image file
-        room_id: Optional room ID for setting room avatar (if None, sets user avatar)
-
-    Returns:
-        True if avatar was already set or successfully set, False otherwise
-
-    """
-    if room_id:
-        # Check room avatar
-        response = await client.room_get_state_event(room_id, "m.room.avatar")
-        if isinstance(response, nio.RoomGetStateEventResponse) and response.content and response.content.get("url"):
-            logger.debug(f"Avatar already set for room {room_id}")
-            return True
-        # Set room avatar
-        return await set_room_avatar_from_file(client, room_id, avatar_path)
-    # Check user avatar
-    response = await client.get_profile(client.user_id)
-    if isinstance(response, nio.ProfileGetResponse) and response.avatar_url:
-        logger.debug(f"Avatar already set for {client.user_id}")
-        return True
-    # Set user avatar
-    return await set_avatar_from_file(client, avatar_path)
-
-
-async def set_room_avatar_from_file(
-    client: nio.AsyncClient,
-    room_id: str,
-    avatar_path: Path,
-) -> bool:
-    """Set the avatar for a Matrix room from a file.
-
-    Args:
-        client: Authenticated Matrix client
-        room_id: The room ID to set the avatar for
-        avatar_path: Path to the avatar image file
-
-    Returns:
-        True if avatar was successfully set, False otherwise
-
-    """
-    avatar_url = await _upload_avatar_file(client, avatar_path)
-    if not avatar_url:
-        return False
-
-    # Set room avatar using room state
-    response = await client.room_put_state(
-        room_id=room_id,
-        event_type="m.room.avatar",
-        content={"url": avatar_url},
-    )
-
-    if isinstance(response, nio.RoomPutStateResponse):
-        logger.info(f"✅ Successfully set avatar for room {room_id}")
-        return True
-
-    logger.error(f"Failed to set avatar for room {room_id}: {response}")
-    return False

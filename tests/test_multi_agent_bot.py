@@ -17,10 +17,17 @@ from agno.models.ollama import Ollama
 from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
 
-from mindroom.bot import AgentBot, MessageContext, MultiAgentOrchestrator, MultiKnowledgeVectorDb
-from mindroom.config import AgentConfig, AuthorizationConfig, Config, DefaultsConfig, KnowledgeBaseConfig, ModelConfig
+from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
+from mindroom.bot import AgentBot, MessageContext, MultiKnowledgeVectorDb
+from mindroom.config.agent import AgentConfig
+from mindroom.config.auth import AuthorizationConfig
+from mindroom.config.knowledge import KnowledgeBaseConfig
+from mindroom.config.main import Config
+from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.teams import TeamFormationDecision, TeamMode
 from mindroom.tool_events import ToolTraceEntry
 
@@ -405,7 +412,7 @@ class TestAgentBot:
         assert [doc.content for doc in docs] == ["research 1", "research 2"]
 
     @pytest.mark.asyncio
-    @patch("mindroom.config.Config.from_yaml")
+    @patch("mindroom.config.main.Config.from_yaml")
     async def test_agent_bot_initialization(
         self,
         mock_load_config: MagicMock,
@@ -437,7 +444,7 @@ class TestAgentBot:
     @patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008")
     @patch("mindroom.bot.login_agent_user")
     @patch("mindroom.bot.AgentBot.ensure_user_account")
-    @patch("mindroom.config.Config.from_yaml")
+    @patch("mindroom.config.main.Config.from_yaml")
     async def test_agent_bot_start(
         self,
         mock_load_config: MagicMock,
@@ -1460,7 +1467,7 @@ class TestAgentBot:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])
-    @patch("mindroom.config.Config.from_yaml")
+    @patch("mindroom.config.main.Config.from_yaml")
     @patch("mindroom.teams.get_model_instance")
     @patch("mindroom.teams.Team.arun")
     @patch("mindroom.bot.ai_response")
@@ -1735,9 +1742,99 @@ class TestMultiAgentOrchestrator:
         assert not orchestrator.running
 
     @pytest.mark.asyncio
+    async def test_ensure_room_invitations_invites_authorized_users(self, tmp_path: Path) -> None:
+        """Global users and room-permitted users should be invited to managed rooms."""
+        config = Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="GeneralAgent",
+                    rooms=["!room1:localhost", "!room2:localhost"],
+                ),
+            },
+            authorization={
+                "global_users": ["@alice:localhost"],
+                "room_permissions": {"!room1:localhost": ["@bob:localhost"]},
+                "default_room_access": False,
+            },
+        )
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator.config = config
+
+        router_bot = MagicMock()
+        router_bot.client = AsyncMock()
+        orchestrator.agent_bots = {"router": router_bot}
+
+        room_members = {
+            "!room1:localhost": {"@mindroom_general:localhost", "@mindroom_router:localhost"},
+            "!room2:localhost": {"@mindroom_general:localhost", "@mindroom_router:localhost"},
+        }
+
+        async def mock_get_room_members(_client: AsyncMock, room_id: str) -> set[str]:
+            return room_members[room_id]
+
+        mock_invite = AsyncMock(return_value=True)
+
+        with (
+            patch("mindroom.orchestrator.MATRIX_HOMESERVER", "http://localhost:8008"),
+            patch("mindroom.orchestrator.is_authorized_sender", side_effect=is_authorized_sender_for_test),
+            patch("mindroom.orchestrator.get_joined_rooms", new=AsyncMock(return_value=list(room_members))),
+            patch("mindroom.orchestrator.get_room_members", side_effect=mock_get_room_members),
+            patch("mindroom.orchestrator.invite_to_room", mock_invite),
+            patch("mindroom.orchestrator.MatrixState.load", return_value=MatrixState()),
+        ):
+            await orchestrator._ensure_room_invitations()
+
+        invited_users_by_room = {(call.args[1], call.args[2]) for call in mock_invite.await_args_list}
+        assert invited_users_by_room == {
+            ("!room1:localhost", "@alice:localhost"),
+            ("!room2:localhost", "@alice:localhost"),
+            ("!room1:localhost", "@bob:localhost"),
+        }
+
+    @pytest.mark.asyncio
+    async def test_ensure_room_invitations_skips_non_matrix_authorization_entries(self, tmp_path: Path) -> None:
+        """Only concrete Matrix user IDs should be invited from authorization lists."""
+        config = Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="GeneralAgent",
+                    rooms=["!room1:localhost"],
+                ),
+            },
+            authorization={
+                "global_users": ["@alice:localhost", "@admin:*", "alice"],
+                "default_room_access": False,
+            },
+        )
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator.config = config
+
+        router_bot = MagicMock()
+        router_bot.client = AsyncMock()
+        orchestrator.agent_bots = {"router": router_bot}
+
+        async def mock_get_room_members(_client: AsyncMock, _room_id: str) -> set[str]:
+            return {"@mindroom_general:localhost", "@mindroom_router:localhost"}
+
+        mock_invite = AsyncMock(return_value=True)
+
+        with (
+            patch("mindroom.orchestrator.MATRIX_HOMESERVER", "http://localhost:8008"),
+            patch("mindroom.orchestrator.is_authorized_sender", side_effect=is_authorized_sender_for_test),
+            patch("mindroom.orchestrator.get_joined_rooms", new=AsyncMock(return_value=["!room1:localhost"])),
+            patch("mindroom.orchestrator.get_room_members", side_effect=mock_get_room_members),
+            patch("mindroom.orchestrator.invite_to_room", mock_invite),
+            patch("mindroom.orchestrator.MatrixState.load", return_value=MatrixState()),
+        ):
+            await orchestrator._ensure_room_invitations()
+
+        invited_users = [call.args[2] for call in mock_invite.await_args_list]
+        assert invited_users == ["@alice:localhost"]
+
+    @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator initialization
     @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-    @patch("mindroom.config.Config.from_yaml")
+    @patch("mindroom.config.main.Config.from_yaml")
     async def test_orchestrator_initialize(
         self,
         mock_load_config: MagicMock,
@@ -1753,7 +1850,7 @@ class TestMultiAgentOrchestrator:
         mock_config.teams = {}
         mock_load_config.return_value = mock_config
 
-        with patch("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
+        with patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
             orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
             await orchestrator.initialize()
 
@@ -1766,7 +1863,7 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator start
     @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-    @patch("mindroom.config.Config.from_yaml")
+    @patch("mindroom.config.main.Config.from_yaml")
     async def test_orchestrator_start(
         self,
         mock_load_config: MagicMock,
@@ -1783,7 +1880,7 @@ class TestMultiAgentOrchestrator:
         mock_config.get_all_configured_rooms.return_value = ["lobby"]
         mock_load_config.return_value = mock_config
 
-        with patch("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
+        with patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
             orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
             await orchestrator.initialize()  # Need to initialize first
 
@@ -1811,7 +1908,7 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator stop
     @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-    @patch("mindroom.config.Config.from_yaml")
+    @patch("mindroom.config.main.Config.from_yaml")
     async def test_orchestrator_stop(
         self,
         mock_load_config: MagicMock,
@@ -1828,7 +1925,7 @@ class TestMultiAgentOrchestrator:
         mock_config.get_all_configured_rooms.return_value = ["lobby"]
         mock_load_config.return_value = mock_config
 
-        with patch("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
+        with patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
             orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
             await orchestrator.initialize()
 
@@ -1849,7 +1946,7 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator streaming
     @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-    @patch("mindroom.config.Config.from_yaml")
+    @patch("mindroom.config.main.Config.from_yaml")
     async def test_orchestrator_streaming_default_config(
         self,
         mock_load_config: MagicMock,
@@ -1867,7 +1964,7 @@ class TestMultiAgentOrchestrator:
         mock_config.get_all_configured_rooms.return_value = ["lobby"]
         mock_load_config.return_value = mock_config
 
-        with patch("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
+        with patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
             orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
             await orchestrator.initialize()
 

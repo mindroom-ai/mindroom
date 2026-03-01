@@ -9,7 +9,7 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot
-from mindroom.config import Config
+from mindroom.config.main import Config
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.stop import StopManager
 

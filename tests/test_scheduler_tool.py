@@ -7,7 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import mindroom.tools  # noqa: F401
-from mindroom.config import AgentConfig, Config
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
 from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling import _extract_mentioned_agents_from_text

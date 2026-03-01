@@ -10,9 +10,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot, MultiAgentOrchestrator
-from mindroom.config import AgentConfig, Config, RouterConfig
+from mindroom.bot import AgentBot
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.orchestrator import MultiAgentOrchestrator
 
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
@@ -162,7 +165,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
     orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
 
     # Patch the config loading to assign rooms
-    with patch("mindroom.config.Config.from_yaml") as mock_config:
+    with patch("mindroom.config.main.Config.from_yaml") as mock_config:
         mock_cfg = MagicMock()
         mock_cfg.agents = {
             "helper": MagicMock(display_name="HelperAgent", rooms=[test_room_id]),
@@ -173,8 +176,8 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
 
         # Patch create_bot_for_entity to create bots with proper user_ids
         with (
-            patch("mindroom.bot.create_bot_for_entity") as mock_create_bot,
-            patch("mindroom.bot.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
+            patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
+            patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
         ):
 
             def create_bot_side_effect(

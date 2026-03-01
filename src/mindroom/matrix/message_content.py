@@ -152,9 +152,10 @@ async def _get_full_message_body(
                 if extracted_body is not None:
                     return extracted_body
                 logger.warning("Invalid large-message v2 payload JSON, returning preview")
-                return body
-            return full_text
-        logger.warning("Failed to download large message, returning preview")
+            else:
+                return full_text
+        else:
+            logger.warning("Failed to download large message, returning preview")
         return body
 
     # Regular message or no custom metadata
@@ -284,6 +285,28 @@ async def extract_and_resolve_message(
         data["body"] = await _get_full_message_body(data, client)
 
     return data
+
+
+async def extract_edit_body(
+    event_source: dict[str, Any],
+    client: nio.AsyncClient | None = None,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Extract body/content from an edit event's ``m.new_content`` payload."""
+    content = event_source.get("content", {})
+    new_content = content.get("m.new_content", {})
+
+    body = new_content.get("body")
+    if not isinstance(body, str):
+        return None, None
+
+    resolved_body = body
+    if client and "io.mindroom.long_text" in new_content:
+        resolved_body = await _get_full_message_body(
+            {"body": body, "content": new_content},
+            client,
+        )
+
+    return resolved_body, dict(new_content)
 
 
 def _clean_expired_cache() -> None:

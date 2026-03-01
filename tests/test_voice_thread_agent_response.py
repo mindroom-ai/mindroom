@@ -10,7 +10,7 @@ import nio
 import pytest
 
 from mindroom.bot import ROUTER_AGENT_NAME, AgentBot
-from mindroom.config import Config
+from mindroom.config.main import Config
 from mindroom.constants import ORIGINAL_SENDER_KEY, VOICE_PREFIX
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser

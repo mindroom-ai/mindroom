@@ -7,16 +7,19 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from mindroom.config import Config
+from mindroom.config.main import Config
 from mindroom.memory.functions import (
     MemoryResult,
     add_agent_memory,
     add_room_memory,
+    append_agent_daily_memory,
     build_memory_enhanced_prompt,
     delete_agent_memory,
     format_memories_as_context,
     get_agent_memory,
+    list_all_agent_memories,
     search_agent_memories,
+    search_room_memories,
     store_conversation_memory,
     update_agent_memory,
 )
@@ -208,6 +211,40 @@ class TestMemoryFunctions:
             assert result is not None
             assert result["id"] == "mem-team"
             mock_memory.get.assert_called_once_with("mem-team")
+
+    @pytest.mark.asyncio
+    async def test_get_agent_memory_team_context_rejects_member_scope_by_default(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Team caller context should not read member agent scope by default."""
+        mock_memory.get.return_value = {"id": "mem-member", "memory": "Member memory", "user_id": "agent_helper"}
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+            result = await get_agent_memory("mem-member", ["helper", "test_agent"], storage_path, config)
+
+            assert result is None
+            mock_memory.get.assert_called_once_with("mem-member")
+
+    @pytest.mark.asyncio
+    async def test_get_agent_memory_team_context_allows_member_scope_when_enabled(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Team caller context can read member scopes when explicitly enabled."""
+        config.memory.team_reads_member_memory = True
+        mock_memory.get.return_value = {"id": "mem-member", "memory": "Member memory", "user_id": "agent_helper"}
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+            result = await get_agent_memory("mem-member", ["helper", "test_agent"], storage_path, config)
+
+            assert result is not None
+            assert result["id"] == "mem-member"
+            mock_memory.get.assert_called_once_with("mem-member")
 
     @pytest.mark.asyncio
     async def test_update_agent_memory_rejects_other_agent_scope(
@@ -477,6 +514,55 @@ class TestMemoryFunctions:
             assert metadata["team_members"] == team_agents  # Original order preserved
 
     @pytest.mark.asyncio
+    async def test_store_conversation_memory_respects_agent_backend_override(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Conversation storage should resolve backend from per-agent override."""
+        config.memory.backend = "file"
+        config.agents["calculator"].memory_backend = "mem0"
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory) as mock_create:
+            await store_conversation_memory(
+                "What is 2+2?",
+                "calculator",
+                storage_path,
+                "session123",
+                config,
+            )
+
+        mock_create.assert_called_once_with(storage_path, config)
+        mock_memory.add.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_store_conversation_memory_team_uses_mem0_when_any_member_overrides(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Team conversation storage should use Mem0 when any team member resolves to Mem0."""
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "memory-files")
+        config.agents["calculator"].memory_backend = "mem0"
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory) as mock_create:
+            await store_conversation_memory(
+                "Analyze our quarterly metrics",
+                ["calculator", "finance"],
+                storage_path,
+                "session-team",
+                config,
+            )
+
+        mock_create.assert_called_once_with(storage_path, config)
+        mock_memory.add.assert_called_once()
+        team_memory_file = storage_path / "memory-files" / "team_calculator+finance" / "MEMORY.md"
+        assert not team_memory_file.exists()
+
+    @pytest.mark.asyncio
     async def test_search_agent_memories_with_teams(
         self,
         mock_memory: AsyncMock,
@@ -528,6 +614,276 @@ class TestMemoryFunctions:
             # Should have called search twice (once for agent, once for team)
             assert mock_memory.search.call_count == 2
 
+    @pytest.mark.asyncio
+    async def test_file_backend_add_and_list_memories(self, storage_path: Path, config: Config) -> None:
+        """File backend should persist entries in MEMORY.md and list them."""
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "memory-files")
+
+        await add_agent_memory("User prefers concise responses", "general", storage_path, config)
+
+        results = await list_all_agent_memories("general", storage_path, config)
+        assert len(results) == 1
+        assert results[0]["memory"] == "User prefers concise responses"
+        assert results[0]["id"].startswith("m_")
+
+        memory_file = storage_path / "memory-files" / "agent_general" / "MEMORY.md"
+        assert memory_file.exists()
+        content = memory_file.read_text(encoding="utf-8")
+        assert "User prefers concise responses" in content
+
+    @pytest.mark.asyncio
+    async def test_agent_memory_backend_override_to_file_uses_file_storage(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Per-agent file override should use file storage even when global backend is mem0."""
+        config.memory.backend = "mem0"
+        config.memory.file.path = str(storage_path / "memory-files")
+        config.agents["general"].memory_backend = "file"
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory) as mock_create:
+            await add_agent_memory("Remember this", "general", storage_path, config)
+
+        mock_create.assert_not_called()
+        memory_file = storage_path / "memory-files" / "agent_general" / "MEMORY.md"
+        assert memory_file.exists()
+        assert "Remember this" in memory_file.read_text(encoding="utf-8")
+
+    @pytest.mark.asyncio
+    async def test_agent_memory_backend_override_to_mem0_uses_mem0_storage(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Per-agent mem0 override should use Mem0 even when global backend is file."""
+        config.memory.backend = "file"
+        config.agents["general"].memory_backend = "mem0"
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory) as mock_create:
+            await add_agent_memory("Remember this", "general", storage_path, config)
+
+        mock_create.assert_called_once_with(storage_path, config)
+        mock_memory.add.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_file_backend_prompt_includes_entrypoint(self, storage_path: Path, config: Config) -> None:
+        """File backend should include MEMORY.md entrypoint context in the prompt."""
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "memory-files")
+
+        memory_dir = storage_path / "memory-files" / "agent_general"
+        memory_dir.mkdir(parents=True, exist_ok=True)
+        (memory_dir / "MEMORY.md").write_text(
+            "# Memory\n\nKey facts:\n- Project uses FastAPI.\n",
+            encoding="utf-8",
+        )
+
+        enhanced = await build_memory_enhanced_prompt("How do we build the API?", "general", storage_path, config)
+        assert "[File memory entrypoint (agent)]" in enhanced
+        assert "Project uses FastAPI." in enhanced
+        assert "How do we build the API?" in enhanced
+
+    @pytest.mark.asyncio
+    async def test_file_backend_room_prompt_search_uses_agent_override(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Room memory search in file prompt path should honor per-agent file overrides."""
+        config.memory.backend = "mem0"
+        config.memory.file.path = str(storage_path / "memory-files")
+        config.agents["general"].memory_backend = "file"
+
+        await add_room_memory(
+            "Room memory note",
+            "!room:server",
+            storage_path,
+            config,
+            agent_name="general",
+        )
+
+        with patch(
+            "mindroom.memory.functions.create_memory_instance",
+            side_effect=AssertionError("Mem0 should not be used for file-backed agent prompt building"),
+        ):
+            enhanced = await build_memory_enhanced_prompt(
+                "Room memory note",
+                "general",
+                storage_path,
+                config,
+                room_id="!room:server",
+            )
+
+        assert "Room memory note" in enhanced
+
+    @pytest.mark.asyncio
+    async def test_file_backend_search_skips_structured_line_duplicates(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Search should not return duplicate hits from structured ID lines in daily files."""
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "memory-files")
+
+        await add_agent_memory("Project owner is Bas", "general", storage_path, config)
+        memories = await list_all_agent_memories("general", storage_path, config)
+        memory_id = memories[0]["id"]
+
+        daily_file = storage_path / "memory-files" / "agent_general" / "memory" / "2026-02-28.md"
+        daily_file.parent.mkdir(parents=True, exist_ok=True)
+        daily_file.write_text(
+            f"- [id={memory_id}] Project owner is Bas\nProject owner is Bas\n",
+            encoding="utf-8",
+        )
+
+        results = await search_agent_memories("owner bas", "general", storage_path, config, limit=10)
+        matching_results = [r for r in results if r.get("memory") == "Project owner is Bas"]
+        assert len(matching_results) == 1
+
+    @pytest.mark.asyncio
+    async def test_file_backend_memory_crud_and_scope(self, storage_path: Path, config: Config) -> None:
+        """File backend should support CRUD and enforce caller scope rules."""
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "memory-files")
+
+        await add_agent_memory("Original memory", "general", storage_path, config)
+        listed = await list_all_agent_memories("general", storage_path, config)
+        memory_id = listed[0]["id"]
+
+        # Owner can read/update/delete
+        result = await get_agent_memory(memory_id, "general", storage_path, config)
+        assert result is not None
+        assert result["memory"] == "Original memory"
+
+        await update_agent_memory(memory_id, "Updated memory", "general", storage_path, config)
+        updated = await get_agent_memory(memory_id, "general", storage_path, config)
+        assert updated is not None
+        assert updated["memory"] == "Updated memory"
+
+        await delete_agent_memory(memory_id, "general", storage_path, config)
+        deleted = await get_agent_memory(memory_id, "general", storage_path, config)
+        assert deleted is None
+
+        # Different agent cannot read or mutate another scope
+        await add_agent_memory("Private memory", "general", storage_path, config)
+        listed_again = await list_all_agent_memories("general", storage_path, config)
+        private_id = listed_again[0]["id"]
+        assert await get_agent_memory(private_id, "other_agent", storage_path, config) is None
+        with pytest.raises(ValueError, match=f"No memory found with id={private_id}"):
+            await update_agent_memory(private_id, "Tampered", "other_agent", storage_path, config)
+
+    @pytest.mark.asyncio
+    async def test_file_backend_store_conversation_memory_with_room(self, storage_path: Path, config: Config) -> None:
+        """File backend should store both agent and room memory from conversation saves."""
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "memory-files")
+
+        await store_conversation_memory(
+            "Remember this requirement",
+            "general",
+            storage_path,
+            "session123",
+            config,
+            room_id="!room:server",
+        )
+
+        agent_results = await search_agent_memories("requirement", "general", storage_path, config, limit=5)
+        room_results = await search_room_memories("requirement", "!room:server", storage_path, config, limit=5)
+        assert any("Remember this requirement" in r.get("memory", "") for r in agent_results)
+        assert any("Remember this requirement" in r.get("memory", "") for r in room_results)
+
+    @pytest.mark.asyncio
+    async def test_file_backend_team_scopes_do_not_collide(self, storage_path: Path, config: Config) -> None:
+        """Distinct team IDs should map to distinct file-memory directories."""
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "memory-files")
+
+        await store_conversation_memory(
+            "Team one memory",
+            ["a_b", "c"],
+            storage_path,
+            "session-one",
+            config,
+        )
+        await store_conversation_memory(
+            "Team two memory",
+            ["a", "b_c"],
+            storage_path,
+            "session-two",
+            config,
+        )
+
+        memory_root = storage_path / "memory-files"
+        assert (memory_root / "team_a_b+c" / "MEMORY.md").exists()
+        assert (memory_root / "team_a+b_c" / "MEMORY.md").exists()
+
+    @pytest.mark.asyncio
+    async def test_file_backend_team_context_member_scope_toggle(self, storage_path: Path, config: Config) -> None:
+        """Team-context reads should honor the member-scope toggle in file backend."""
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "memory-files")
+
+        await add_agent_memory("Helper private memory", "helper", storage_path, config)
+        helper_memories = await list_all_agent_memories("helper", storage_path, config)
+        helper_memory_id = helper_memories[0]["id"]
+
+        blocked = await get_agent_memory(helper_memory_id, ["helper", "test_agent"], storage_path, config)
+        assert blocked is None
+
+        config.memory.team_reads_member_memory = True
+        allowed = await get_agent_memory(helper_memory_id, ["helper", "test_agent"], storage_path, config)
+        assert allowed is not None
+        assert allowed["memory"] == "Helper private memory"
+
+    @pytest.mark.asyncio
+    async def test_team_context_resolves_file_backend_from_agent_overrides(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Team-context reads should use file backend when all members override to file."""
+        config.memory.backend = "mem0"
+        config.memory.file.path = str(storage_path / "memory-files")
+        config.memory.team_reads_member_memory = True
+        config.agents["calculator"].memory_backend = "file"
+        config.agents["general"].memory_backend = "file"
+
+        await add_agent_memory("Calculator private memory", "calculator", storage_path, config)
+        calculator_memories = await list_all_agent_memories("calculator", storage_path, config)
+        calculator_memory_id = calculator_memories[0]["id"]
+
+        with patch(
+            "mindroom.memory.functions.create_memory_instance",
+            side_effect=AssertionError("Mem0 should not be used for file-backed team context"),
+        ):
+            allowed = await get_agent_memory(
+                calculator_memory_id,
+                ["calculator", "general"],
+                storage_path,
+                config,
+            )
+
+        assert allowed is not None
+        assert allowed["memory"] == "Calculator private memory"
+
+    @pytest.mark.asyncio
+    async def test_file_backend_rejects_path_traversal_memory_id(self, storage_path: Path, config: Config) -> None:
+        """Path-based IDs should not be able to escape the scope directory."""
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "memory-files")
+
+        await add_agent_memory("Safe memory", "general", storage_path, config)
+        secret_file = storage_path / "secret.md"
+        secret_file.write_text("Do not read", encoding="utf-8")
+
+        result = await get_agent_memory("file:../../secret.md:1", "general", storage_path, config)
+        assert result is None
+
     def test_get_team_ids_for_agent(self, config: Config) -> None:
         """Test getting team IDs for an agent."""
         from mindroom.memory.functions import get_team_ids_for_agent  # noqa: PLC0415
@@ -553,6 +909,86 @@ class TestMemoryFunctions:
         # Unknown agent has no teams
         team_ids = get_team_ids_for_agent("unknown", config)
         assert len(team_ids) == 0
+
+    @pytest.mark.asyncio
+    async def test_memory_file_path_uses_custom_scope_dir(self, storage_path: Path, config: Config) -> None:
+        """memory_file_path should override the default scope directory."""
+        workspace = storage_path / "my-workspace"
+        workspace.mkdir(parents=True)
+        (workspace / "MEMORY.md").write_text("# Memory\n\nExisting curated memory.\n", encoding="utf-8")
+
+        config.memory.backend = "file"
+        config.agents["general"].memory_backend = "file"
+        config.agents["general"].memory_file_path = str(workspace)
+
+        await add_agent_memory("New memory entry", "general", storage_path, config)
+
+        # Memory should be written to the custom workspace MEMORY.md, not the default scope
+        content = (workspace / "MEMORY.md").read_text(encoding="utf-8")
+        assert "Existing curated memory." in content
+        assert "New memory entry" in content
+
+        # Default scope dir should NOT be created
+        default_scope = storage_path / "memory_files" / "agent_general"
+        assert not default_scope.exists()
+
+    @pytest.mark.asyncio
+    async def test_memory_file_path_entrypoint_loaded_in_prompt(self, storage_path: Path, config: Config) -> None:
+        """File backend prompt should auto-load MEMORY.md from the custom scope."""
+        workspace = storage_path / "my-workspace"
+        workspace.mkdir(parents=True)
+        (workspace / "MEMORY.md").write_text("# Memory\n\nI prefer Python over JavaScript.\n", encoding="utf-8")
+
+        config.memory.backend = "file"
+        config.agents["general"].memory_backend = "file"
+        config.agents["general"].memory_file_path = str(workspace)
+
+        enhanced = await build_memory_enhanced_prompt("What language?", "general", storage_path, config)
+        assert "I prefer Python over JavaScript." in enhanced
+
+    @pytest.mark.asyncio
+    async def test_memory_file_path_daily_files_in_custom_scope(self, storage_path: Path, config: Config) -> None:
+        """Auto-flush daily files should be written inside the custom scope directory."""
+        workspace = storage_path / "my-workspace"
+        workspace.mkdir(parents=True)
+
+        config.memory.backend = "file"
+        config.agents["general"].memory_backend = "file"
+        config.agents["general"].memory_file_path = str(workspace)
+
+        result = append_agent_daily_memory("Daily note", "general", storage_path, config)
+        assert result["memory"] == "Daily note"
+
+        # Daily file should be inside workspace/memory/
+        daily_files = list((workspace / "memory").rglob("*.md"))
+        assert len(daily_files) == 1
+        assert "Daily note" in daily_files[0].read_text(encoding="utf-8")
+
+    @pytest.mark.asyncio
+    async def test_memory_file_path_does_not_affect_other_agents(self, storage_path: Path, config: Config) -> None:
+        """Agents without memory_file_path should still use the default scope."""
+        workspace = storage_path / "my-workspace"
+        workspace.mkdir(parents=True)
+
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "memory-files")
+        config.agents["general"].memory_file_path = str(workspace)
+
+        # Add memory to agent with custom path
+        await add_agent_memory("Custom workspace memory", "general", storage_path, config)
+
+        # Add memory to agent without custom path
+        await add_agent_memory("Default scope memory", "calculator", storage_path, config)
+
+        # Custom agent should use workspace
+        general_memories = await list_all_agent_memories("general", storage_path, config)
+        assert any(m["memory"] == "Custom workspace memory" for m in general_memories)
+
+        # Other agent should use default scope
+        calc_memories = await list_all_agent_memories("calculator", storage_path, config)
+        assert any(m["memory"] == "Default scope memory" for m in calc_memories)
+        calc_file = storage_path / "memory-files" / "agent_calculator" / "MEMORY.md"
+        assert calc_file.exists()
 
     def test_memory_result_typed_dict(self) -> None:
         """Test MemoryResult TypedDict structure."""

@@ -73,6 +73,8 @@ agents:
     sandbox_tools: [shell, file]   # Optional: Override default (inherits from defaults section)
     learning: true                 # Optional: Override default (inherits from defaults section)
     learning_mode: always          # Optional: Override default (inherits from defaults section)
+    memory_backend: file           # Optional: Per-agent memory backend override (mem0 or file)
+    memory_file_path: ./openclaw_data  # Optional: Per-agent file-memory scope directory (relative to config.yaml)
     knowledge_bases: [docs]         # Optional: Assign one or more configured knowledge bases
     context_files:                 # Optional: Load files into role context at init/reload
       - ./openclaw_data/SOUL.md
@@ -82,7 +84,6 @@ agents:
       - ./openclaw_data/MEMORY.md
       - ./openclaw_data/TOOLS.md
       - ./openclaw_data/HEARTBEAT.md
-    memory_dir: ./openclaw_data/memory  # Optional: Load MEMORY.md + dated files from this dir
   researcher:
     display_name: Researcher
     role: Research and gather information
@@ -103,10 +104,10 @@ agents:
 # Model configurations (at least a "default" model is recommended)
 models:
   default:
-    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, groq, cerebras, openrouter, deepseek
+    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
     id: claude-sonnet-4-5-latest     # Required: Model ID for the provider
   sonnet:
-    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, groq, cerebras, openrouter, deepseek
+    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
     id: claude-sonnet-4-5-latest     # Required: Model ID for the provider
     host: null                     # Optional: Host URL (e.g., for Ollama)
     api_key: null                  # Optional: API key (usually from env vars)
@@ -140,7 +141,7 @@ defaults:
   enable_streaming: true           # Default: true (stream responses via message edits)
   learning: true                   # Default: true
   learning_mode: always            # Default: always (or agentic)
-  max_preload_chars: 50000         # Hard cap for preloaded context from context_files/memory_dir
+  max_preload_chars: 50000         # Hard cap for preloaded context from context_files
   show_stop_button: false          # Default: false (global only, cannot be overridden per-agent)
   num_history_runs: null           # Number of prior runs to include (null = all)
   num_history_messages: null       # Max messages from history (null = use num_history_runs)
@@ -155,6 +156,7 @@ defaults:
 
 # Memory system configuration (optional)
 memory:
+  backend: mem0                    # Global default backend (mem0 or file); agents can override with memory_backend
   embedder:
     provider: openai               # Default: openai
     config:
@@ -252,8 +254,9 @@ timezone: America/Los_Angeles      # Default: UTC
 - All top-level sections are optional with sensible defaults, but at least one agent is recommended for Matrix interactions
 - A model named `default` is required unless agents, teams, and the router all specify explicit non-`default` models
 - Agents can set `knowledge_bases`, but each entry must exist in the top-level `knowledge_bases` section
-- `agents.<name>.context_files` and `agents.<name>.memory_dir` inject file-based context at agent creation/reload (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md))
-- `defaults.max_preload_chars` caps preloaded file context (`context_files` + `memory_dir`)
+- `agents.<name>.context_files` inject file-based context at agent creation/reload (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md))
+- `memory.backend` sets the global memory default, `agents.<name>.memory_backend` overrides it per agent, and `agents.<name>.memory_file_path` sets a custom file-memory scope for that agent
+- `defaults.max_preload_chars` caps preloaded file context (`context_files`)
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
 - `authorization.agent_reply_permissions` can further restrict which users specific agents/teams/router will reply to
 - `authorization.room_permissions` accepts room IDs, full room aliases, and managed room keys

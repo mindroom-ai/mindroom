@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from pathlib import Path  # noqa: TC003
+from typing import Literal
 
 import yaml
 from agno.tools import Toolkit
 from pydantic import ValidationError
 
-from mindroom.config import AgentConfig, AgentLearningMode, Config
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import AgentLearningMode  # noqa: TC001
 from mindroom.constants import CONFIG_PATH
 from mindroom.custom_tools.config_manager import validate_knowledge_bases
 from mindroom.logging_config import get_logger
 from mindroom.tools_metadata import TOOL_METADATA
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 logger = get_logger(__name__)
 
@@ -74,7 +74,6 @@ class SelfConfigTools(Toolkit):
         enable_session_summaries: bool | None = None,
         max_tool_calls_from_history: int | None = None,
         context_files: list[str] | None = None,
-        memory_dir: str | None = None,
     ) -> str:
         """Update this agent's own configuration. Only provided fields are changed.
 
@@ -99,7 +98,6 @@ class SelfConfigTools(Toolkit):
             enable_session_summaries: Enable session summaries
             max_tool_calls_from_history: Max tool call messages replayed from history
             context_files: File paths read at agent init
-            memory_dir: Directory containing memory files
 
         Returns:
             Success message with changes or an error message.
@@ -159,7 +157,6 @@ class SelfConfigTools(Toolkit):
             ("enable_session_summaries", enable_session_summaries),
             ("max_tool_calls_from_history", max_tool_calls_from_history),
             ("context_files", context_files),
-            ("memory_dir", memory_dir),
         ]
         non_null_updates = {field_name: value for field_name, value in requested_updates if value is not None}
 
