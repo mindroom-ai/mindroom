@@ -176,7 +176,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
 
         # Patch create_bot_for_entity to create bots with proper user_ids
         with (
-            patch("mindroom.bot.create_bot_for_entity") as mock_create_bot,
+            patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
             patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
         ):
 

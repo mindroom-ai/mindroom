@@ -74,7 +74,7 @@ class TestTeamRoomUpdates:
                 ):
                     orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
 
-                    with patch("mindroom.bot.create_bot_for_entity") as mock_create_bot:
+                    with patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot:
                         mock_bot = AsyncMock()
                         mock_bot.start = AsyncMock()
                         mock_bot.stop = AsyncMock()
@@ -136,7 +136,7 @@ class TestTeamRoomUpdates:
                 ):
                     orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
 
-                    with patch("mindroom.bot.create_bot_for_entity") as mock_create_bot:
+                    with patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot:
                         mock_bot = AsyncMock()
                         mock_bot.start = AsyncMock()
                         mock_bot.stop = AsyncMock()
@@ -218,7 +218,7 @@ class TestTeamRoomUpdates:
                 ):
                     orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
 
-                    with patch("mindroom.bot.create_bot_for_entity") as mock_create_bot:
+                    with patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot:
                         mock_bot = AsyncMock()
                         mock_bot.start = AsyncMock()
                         mock_bot.stop = AsyncMock()
