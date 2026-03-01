@@ -203,6 +203,11 @@ class AttachmentTools(Toolkit):
             return attachment_tool_payload("error", message="attachments cannot be empty.")
 
         effective_room_id = room_id or context.room_id
+        if effective_room_id not in context.client.rooms:
+            return attachment_tool_payload(
+                "error",
+                message=f"Cannot send to room {effective_room_id}: bot has not joined this room.",
+            )
         if thread_id is not None:
             effective_thread_id = thread_id
         elif effective_room_id == context.room_id:

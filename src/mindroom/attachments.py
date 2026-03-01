@@ -150,9 +150,9 @@ def store_media_bytes_locally(
     if media_bytes is None:
         return None
     incoming_media_dir = _incoming_media_dir(storage_path)
-    safe_event_id = "".join(ch if ch.isalnum() else "_" for ch in event_id).strip("_") or "media_event"
+    safe_name = attachment_id_for_event(event_id)
     extension = _extension_from_mime_type(mime_type)
-    media_path = incoming_media_dir / f"{safe_event_id}{extension}"
+    media_path = incoming_media_dir / f"{safe_name}{extension}"
     try:
         incoming_media_dir.mkdir(parents=True, exist_ok=True)
         media_path.write_bytes(media_bytes)

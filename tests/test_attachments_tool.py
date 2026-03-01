@@ -17,11 +17,13 @@ if TYPE_CHECKING:
 
 
 def _tool_context(tmp_path: Path, *, attachment_ids: tuple[str, ...] = ()) -> AttachmentToolContext:
+    client = MagicMock()
+    client.rooms = {"!room:localhost": MagicMock()}
     return AttachmentToolContext(
         room_id="!room:localhost",
         thread_id="$thread:localhost",
         requester_id="@user:localhost",
-        client=MagicMock(),
+        client=client,
         storage_path=tmp_path,
         attachment_ids=attachment_ids,
     )
@@ -142,6 +144,8 @@ async def test_attachments_tool_cross_room_send_does_not_inherit_source_thread(t
 
     ctx = _tool_context(tmp_path, attachment_ids=("att_cross",))
     assert ctx.thread_id is not None  # context has a thread
+    # Add the target room so the join check passes
+    ctx.client.rooms["!other:localhost"] = MagicMock()
 
     with (
         attachment_tool_context(ctx),
@@ -159,6 +163,39 @@ async def test_attachments_tool_cross_room_send_does_not_inherit_source_thread(t
     mocked.assert_awaited_once()
     call_kwargs = mocked.await_args.kwargs
     assert call_kwargs["thread_id"] is None  # must NOT inherit source thread
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_rejects_send_to_unjoined_room(tmp_path: Path) -> None:
+    """Tool should reject sending to a room the bot has not joined."""
+    tool = AttachmentTools()
+    sample_file = tmp_path / "upload.txt"
+    sample_file.write_text("payload", encoding="utf-8")
+    attachment = register_local_attachment(
+        tmp_path,
+        sample_file,
+        kind="file",
+        attachment_id="att_unjoin",
+    )
+    assert attachment is not None
+
+    ctx = _tool_context(tmp_path, attachment_ids=("att_unjoin",))
+    # !other:localhost is NOT in ctx.client.rooms
+
+    with (
+        attachment_tool_context(ctx),
+        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
+    ):
+        payload = json.loads(
+            await tool.send_attachments(
+                attachments=["att_unjoin"],
+                room_id="!other:localhost",
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert "not joined" in payload["message"]
+    mocked.assert_not_awaited()
 
 
 def test_attachment_context_none_temporarily_clears_nested_scope(tmp_path: Path) -> None:
