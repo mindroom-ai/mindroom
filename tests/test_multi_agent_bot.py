@@ -1785,7 +1785,9 @@ class TestAgentBot:
         ):
             await bot._on_message(room, event)
 
-        bot._fetch_thread_images.assert_awaited_once_with("!test:localhost", "$img_root")
+        bot._fetch_thread_images.assert_awaited_once()
+        fetch_call = bot._fetch_thread_images.await_args
+        assert fetch_call.args == ("!test:localhost", "$img_root")
         bot._generate_response.assert_awaited_once()
         call_kwargs = bot._generate_response.call_args.kwargs
         assert call_kwargs["images"] == [fake_image]

@@ -25,6 +25,8 @@ AttachmentKind = Literal["audio", "file", "video"]
 FileOrVideoEvent = nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo
 _ATTACHMENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$")
 _ATTACHMENT_RETENTION_DAYS = 30
+_CLEANUP_INTERVAL = timedelta(hours=1)
+_last_cleanup_time: datetime | None = None
 
 
 def normalize_attachment_id(raw_attachment_id: str) -> str | None:
@@ -332,6 +334,19 @@ def _cleanup_attachment_storage(storage_path: Path) -> None:
     )
 
 
+def _maybe_cleanup_attachment_storage(storage_path: Path) -> None:
+    """Run cleanup at most once per ``_CLEANUP_INTERVAL``."""
+    global _last_cleanup_time
+    now = datetime.now(UTC)
+    if _last_cleanup_time is not None and now - _last_cleanup_time < _CLEANUP_INTERVAL:
+        return
+    try:
+        _cleanup_attachment_storage(storage_path)
+        _last_cleanup_time = now
+    except Exception:
+        logger.exception("Failed to prune expired attachment storage")
+
+
 def register_local_attachment(
     storage_path: Path,
     local_path: Path,
@@ -388,10 +403,7 @@ def register_local_attachment(
             tmp_path.unlink(missing_ok=True)
         return None
 
-    try:
-        _cleanup_attachment_storage(storage_path)
-    except Exception:
-        logger.exception("Failed to prune expired attachment storage")
+    _maybe_cleanup_attachment_storage(storage_path)
 
     return record
 
@@ -559,12 +571,20 @@ async def resolve_thread_attachment_ids(
     *,
     room_id: str,
     thread_id: str,
+    thread_root_event: nio.Event | None = None,
 ) -> list[str]:
-    """Resolve attachment IDs from thread root event metadata or file/video payload."""
-    response = await client.room_get_event(room_id, thread_id)
-    if not isinstance(response, nio.RoomGetEventResponse):
-        return []
-    event = response.event
+    """Resolve attachment IDs from thread root event metadata or file/video payload.
+
+    When *thread_root_event* is provided, the ``room_get_event`` round-trip
+    is skipped, avoiding duplicate homeserver calls when the caller already
+    fetched the root event for image/audio resolution.
+    """
+    event = thread_root_event
+    if event is None:
+        response = await client.room_get_event(room_id, thread_id)
+        if not isinstance(response, nio.RoomGetEventResponse):
+            return []
+        event = response.event
 
     event_attachment_ids = parse_attachment_ids_from_event_source(event.source)
     if event_attachment_ids:
@@ -596,6 +616,10 @@ async def resolve_thread_attachment_ids(
     if not is_file_or_video:
         return []
 
+    assert isinstance(
+        event,
+        nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
+    )
     record = await register_file_or_video_attachment(
         client,
         storage_path,

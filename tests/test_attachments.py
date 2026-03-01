@@ -296,13 +296,15 @@ def test_register_local_attachment_prunes_expired_managed_media(tmp_path: Path) 
 
     fresh_media_path = tmp_path / "incoming_media" / "fresh.bin"
     fresh_media_path.write_bytes(b"fresh")
-    fresh_record = register_local_attachment(
-        tmp_path,
-        fresh_media_path,
-        kind="file",
-        attachment_id="att_fresh",
-        room_id="!room:localhost",
-    )
+    # Reset the cleanup throttle so the second registration triggers cleanup.
+    with patch("mindroom.attachments._last_cleanup_time", None):
+        fresh_record = register_local_attachment(
+            tmp_path,
+            fresh_media_path,
+            kind="file",
+            attachment_id="att_fresh",
+            room_id="!room:localhost",
+        )
     assert fresh_record is not None
 
     assert load_attachment(tmp_path, "att_old") is None
@@ -334,13 +336,15 @@ def test_register_local_attachment_prunes_expired_metadata_without_deleting_unma
     fresh_media_path = tmp_path / "incoming_media" / "fresh.bin"
     fresh_media_path.parent.mkdir(parents=True, exist_ok=True)
     fresh_media_path.write_bytes(b"fresh")
-    fresh_record = register_local_attachment(
-        tmp_path,
-        fresh_media_path,
-        kind="file",
-        attachment_id="att_fresh2",
-        room_id="!room:localhost",
-    )
+    # Reset the cleanup throttle so the second registration triggers cleanup.
+    with patch("mindroom.attachments._last_cleanup_time", None):
+        fresh_record = register_local_attachment(
+            tmp_path,
+            fresh_media_path,
+            kind="file",
+            attachment_id="att_fresh2",
+            room_id="!room:localhost",
+        )
     assert fresh_record is not None
 
     assert load_attachment(tmp_path, "att_external") is None

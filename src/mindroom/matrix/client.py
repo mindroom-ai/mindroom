@@ -594,8 +594,10 @@ async def _upload_file_as_mxc(
             "size": len(file_bytes),
         }
 
+    _upload_payload = upload_bytes  # bind eagerly so the closure is refactor-safe
+
     def data_provider(_monitor: object, _data: object) -> io.BytesIO:
-        return io.BytesIO(upload_bytes)
+        return io.BytesIO(_upload_payload)
 
     try:
         upload_response = await client.upload(

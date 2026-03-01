@@ -399,26 +399,48 @@ class AgentBot:
         """Get or create the StopManager for this agent."""
         return StopManager()
 
-    async def _fetch_thread_images(self, room_id: str, thread_id: str) -> list[Image]:
-        """Download images from the thread root event, if it is an image message."""
+    async def _fetch_thread_root_event(
+        self,
+        room_id: str,
+        thread_id: str,
+    ) -> nio.Event | None:
+        """Fetch the thread root event once for reuse across media helpers."""
         assert self.client is not None
         response = await self.client.room_get_event(room_id, thread_id)
         if not isinstance(response, nio.RoomGetEventResponse):
-            return []
-        event = response.event
-        if not isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage):
+            return None
+        return response.event
+
+    async def _fetch_thread_images(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        thread_root_event: nio.Event | None = None,
+    ) -> list[Image]:
+        """Download images from the thread root event, if it is an image message."""
+        assert self.client is not None
+        event = thread_root_event
+        if event is None:
+            event = await self._fetch_thread_root_event(room_id, thread_id)
+        if event is None or not isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage):
             return []
         img = await image_handler.download_image(self.client, event)
         return [img] if img else []
 
-    async def _fetch_thread_audio(self, room_id: str, thread_id: str) -> list[Audio]:
+    async def _fetch_thread_audio(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        thread_root_event: nio.Event | None = None,
+    ) -> list[Audio]:
         """Download audio from the thread root event, if it is an audio message."""
         assert self.client is not None
-        response = await self.client.room_get_event(room_id, thread_id)
-        if not isinstance(response, nio.RoomGetEventResponse):
-            return []
-        event = response.event
-        if not isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio):
+        event = thread_root_event
+        if event is None:
+            event = await self._fetch_thread_root_event(room_id, thread_id)
+        if event is None or not isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio):
             return []
         audio = await voice_handler.download_audio(self.client, event)
         return [audio] if audio else []
@@ -747,16 +769,29 @@ class AgentBot:
         if action is None:
             return
 
-        # If responding in a thread, include supported media from the thread
-        # root event so routed relay messages can forward original attachments.
+        # If responding in a thread, fetch the root event once and reuse it
+        # across image, audio, and attachment resolution to avoid duplicate
+        # room_get_event round-trips.
         context = dispatch.context
-        thread_images = await self._fetch_thread_images(room.room_id, context.thread_id) if context.thread_id else []
+        thread_root_event = (
+            await self._fetch_thread_root_event(room.room_id, context.thread_id) if context.thread_id else None
+        )
+        thread_images = (
+            await self._fetch_thread_images(
+                room.room_id,
+                context.thread_id,
+                thread_root_event=thread_root_event,
+            )
+            if context.thread_id
+            else []
+        )
         thread_attachment_ids = (
             await resolve_thread_attachment_ids(
                 self.client,
                 self.storage_path,
                 room_id=room.room_id,
                 thread_id=context.thread_id,
+                thread_root_event=thread_root_event,
             )
             if context.thread_id
             else []
@@ -772,7 +807,11 @@ class AgentBot:
         # attachment already carries the same recording (avoids duplicate audio).
         is_fallback = is_voice_raw_audio_fallback(event.source)
         thread_audio = (
-            await self._fetch_thread_audio(room.room_id, context.thread_id)
+            await self._fetch_thread_audio(
+                room.room_id,
+                context.thread_id,
+                thread_root_event=thread_root_event,
+            )
             if context.thread_id and is_fallback and not attachment_audio
             else []
         )
