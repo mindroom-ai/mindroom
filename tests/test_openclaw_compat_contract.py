@@ -934,8 +934,8 @@ async def test_list_sessions_empty_when_no_sessions(tmp_path: Path) -> None:
     assert payload["total"] == 0
 
 
-def test_load_registry_falls_back_to_legacy_openclaw_path(tmp_path: Path) -> None:
-    """Verify _load_registry reads legacy openclaw/session_registry.json when needed."""
+def test_load_registry_does_not_fallback_to_legacy_openclaw_path(tmp_path: Path) -> None:
+    """Verify _load_registry only reads subagents/session_registry.json."""
     config = MagicMock()
     ctx = OpenClawToolContext(
         agent_name="openclaw",
@@ -959,12 +959,11 @@ def test_load_registry_falls_back_to_legacy_openclaw_path(tmp_path: Path) -> Non
     (legacy_dir / "session_registry.json").write_text(json.dumps(legacy_data))
 
     registry = subagents_module._load_registry(ctx)
-    assert "!room:localhost:$thread:localhost" in registry
-    assert registry["!room:localhost:$thread:localhost"]["label"] == "legacy-session"
+    assert registry == {}
 
 
-def test_load_registry_migrates_old_format(tmp_path: Path) -> None:
-    """Verify _load_registry extracts sessions from old {sessions: {}, runs: {}} format."""
+def test_load_registry_does_not_migrate_old_format(tmp_path: Path) -> None:
+    """Verify _load_registry returns file contents as-is without migration."""
     config = MagicMock()
     ctx = OpenClawToolContext(
         agent_name="openclaw",
@@ -989,10 +988,7 @@ def test_load_registry_migrates_old_format(tmp_path: Path) -> None:
     (registry_dir / "session_registry.json").write_text(json.dumps(old_data))
 
     registry = subagents_module._load_registry(ctx)
-    assert "!room:localhost:$thread:localhost" in registry
-    assert registry["!room:localhost:$thread:localhost"]["label"] == "old-session"
-    # Runs are discarded during migration
-    assert "runs" not in registry
+    assert registry == old_data
 
 
 def test_record_session_updates_existing(tmp_path: Path) -> None:

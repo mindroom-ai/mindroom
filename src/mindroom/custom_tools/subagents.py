@@ -52,31 +52,16 @@ def _registry_path(context: SessionToolsContext) -> Path:
     return context.storage_path / "subagents" / "session_registry.json"
 
 
-def _legacy_registry_path(context: SessionToolsContext) -> Path:
-    return context.storage_path / "openclaw" / "session_registry.json"
-
-
 def _normalize_registry(loaded: object) -> dict[str, Any]:
     if not isinstance(loaded, dict):
         return {}
-
-    loaded_dict = cast("dict[str, Any]", loaded)
-
-    # Migration: old format had {"sessions": {...}, "runs": {...}}
-    sessions = loaded_dict.get("sessions")
-    if isinstance(sessions, dict):
-        return cast("dict[str, Any]", sessions)
-
-    return loaded_dict
+    return cast("dict[str, Any]", loaded)
 
 
 def _load_registry(context: SessionToolsContext) -> dict[str, Any]:
     path = _registry_path(context)
     if not path.is_file():
-        legacy_path = _legacy_registry_path(context)
-        if not legacy_path.is_file():
-            return {}
-        path = legacy_path
+        return {}
 
     raw = path.read_text(encoding="utf-8").strip()
     if not raw:
