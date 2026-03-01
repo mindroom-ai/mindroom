@@ -96,6 +96,7 @@ memory:
 ```
 
 `memory_file_path` points the file-memory scope directly at the workspace root, so `MEMORY.md` is loaded automatically by the file backend as the entrypoint — no need to list it in `context_files`.
+`memory_file_path` is ignored unless the effective backend is `file`; if you switch this agent to `mem0`, re-add `MEMORY.md` to `context_files` when you still want it preloaded.
 The `openclaw_compat` toolkit already bundles shell, file operations, web search, web fetch, browser, and scheduler aliases, so listing those tools individually is not necessary.
 
 ## Recommended workspace layout
