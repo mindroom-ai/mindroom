@@ -335,3 +335,4 @@ async def test_matrix_message_cross_room_context_does_not_leak_thread() -> None:
 
     assert payload["status"] == "ok"
     assert payload["thread_id"] is None
+    assert payload["reply_to_event_id"] is None

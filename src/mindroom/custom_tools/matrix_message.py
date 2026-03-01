@@ -284,12 +284,13 @@ class MatrixMessageTools(Toolkit):
                 room_id=resolved_room_id,
                 message="Not authorized to access the target room.",
             )
+        reply_to = context.reply_to_event_id if resolved_room_id == context.room_id else None
         return self._payload(
             "ok",
             action="context",
             room_id=resolved_room_id,
             thread_id=resolved_thread_id,
-            reply_to_event_id=context.reply_to_event_id,
+            reply_to_event_id=reply_to,
             requester_id=context.requester_id,
             agent_name=context.agent_name,
         )
@@ -334,7 +335,7 @@ class MatrixMessageTools(Toolkit):
         return self._payload(
             "error",
             action=action,
-            message="Unsupported action. Use send, thread-reply, react, read, or context.",
+            message="Unsupported action. Use send, reply, thread-reply, react, read, or context.",
         )
 
     async def matrix_message(
@@ -375,7 +376,7 @@ class MatrixMessageTools(Toolkit):
             return self._payload(
                 "error",
                 action=normalized_action,
-                message="Unsupported action. Use send, thread-reply, react, read, or context.",
+                message="Unsupported action. Use send, reply, thread-reply, react, read, or context.",
             )
 
         if not self._room_access_allowed(context, resolved_room_id):
