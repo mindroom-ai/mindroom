@@ -995,6 +995,7 @@ class AgentBot:
             dispatch,
             message_for_decision=event.body,
             router_message=caption,
+            extra_content={ORIGINAL_SENDER_KEY: event.sender},
         )
         if action is None:
             return

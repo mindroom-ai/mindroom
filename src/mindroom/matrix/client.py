@@ -566,7 +566,10 @@ async def _upload_file_as_mxc(
 
     info: dict[str, Any] = {"size": len(file_bytes), "mimetype": mimetype}
     room = client.rooms.get(room_id)
-    room_encrypted = bool(room and room.encrypted)
+    if room is None:
+        logger.error("Cannot determine encryption state for unknown room", room_id=room_id)
+        return None, None
+    room_encrypted = bool(room.encrypted)
     upload_bytes = file_bytes
     encrypted_file_payload: dict[str, Any] | None = None
     upload_mimetype = mimetype
@@ -607,11 +610,8 @@ async def _upload_file_as_mxc(
 
     upload_result = upload_response[0] if isinstance(upload_response, tuple) else upload_response
 
-    if not isinstance(upload_result, nio.UploadResponse):
+    if not isinstance(upload_result, nio.UploadResponse) or not upload_result.content_uri:
         logger.error("Failed file upload response", path=str(file_path), response=str(upload_result))
-        return None, None
-    if not upload_result.content_uri:
-        logger.error("File upload missing MXC URI", path=str(file_path))
         return None, None
 
     mxc_uri = str(upload_result.content_uri)

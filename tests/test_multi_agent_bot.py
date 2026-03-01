@@ -1403,7 +1403,7 @@ class TestAgentBot:
             None,
             message="[Attached image]",
             requester_user_id="@user:localhost",
-            extra_content=None,
+            extra_content={"com.mindroom.original_sender": "@user:localhost"},
         )
 
     @pytest.mark.asyncio

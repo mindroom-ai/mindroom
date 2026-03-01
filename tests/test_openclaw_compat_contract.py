@@ -516,7 +516,7 @@ async def test_openclaw_compat_message_attachments_lists_context_ids(tmp_path: P
     assert payload["attachment_ids"] == [attachment.attachment_id]
     assert payload["attachments"][0]["attachment_id"] == attachment.attachment_id
     assert payload["attachments"][0]["available"] is True
-    assert payload["attachments"][0]["local_path"] == str(sample_file.resolve())
+    assert "local_path" not in payload["attachments"][0]
 
 
 @pytest.mark.asyncio

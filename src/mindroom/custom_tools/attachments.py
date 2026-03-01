@@ -119,7 +119,7 @@ def get_attachment_listing(
     ]
     return (
         requested_attachment_ids,
-        attachments_for_tool_payload(attachment_records),
+        attachments_for_tool_payload(attachment_records, include_local_path=False),
         missing_attachment_ids,
         None,
     )

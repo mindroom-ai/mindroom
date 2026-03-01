@@ -420,10 +420,15 @@ async def resolve_thread_attachment_ids(
     if event_attachment_ids:
         return event_attachment_ids
 
-    if not isinstance(
+    # Check for an existing attachment record for any media root (file, video,
+    # or audio).  Audio roots are registered by the voice fallback handler
+    # and can be looked up but not re-downloaded here.
+    is_file_or_video = isinstance(
         event,
         nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
-    ):
+    )
+    is_audio = isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio)
+    if not is_file_or_video and not is_audio:
         return []
 
     existing_attachment_id = attachment_id_for_event(event.event_id)
@@ -436,6 +441,11 @@ async def resolve_thread_attachment_ids(
     ):
         return [existing_record.attachment_id]
 
+    # Audio roots cannot be re-registered here (the voice handler owns that
+    # lifecycle).  Only file/video roots can be lazily downloaded and stored.
+    if not is_file_or_video:
+        return []
+
     record = await register_file_or_video_attachment(
         client,
         storage_path,
@@ -443,9 +453,7 @@ async def resolve_thread_attachment_ids(
         thread_id=thread_id,
         event=event,
     )
-    if record is None:
-        return []
-    return [record.attachment_id]
+    return [record.attachment_id] if record is not None else []
 
 
 def attachments_for_tool_payload(
