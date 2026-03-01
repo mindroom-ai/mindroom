@@ -10,19 +10,15 @@ import subprocess
 from threading import Lock
 from typing import Any
 
-import nio
 from agno.tools import Toolkit
 from agno.tools.duckduckgo import DuckDuckGoTools
 from agno.tools.website import WebsiteTools
 
-from mindroom.custom_tools import subagents as _subagents_mod
 from mindroom.custom_tools.coding import CodingTools
 from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.custom_tools.subagents import SubAgentsTools
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import fetch_thread_history
-from mindroom.matrix.message_content import extract_and_resolve_message
-from mindroom.openclaw_context import OpenClawToolContext, get_openclaw_tool_context
+from mindroom.tool_runtime_context import ToolRuntimeContext, get_tool_runtime_context
 from mindroom.tools_metadata import get_tool_by_name
 
 logger = get_logger(__name__)
@@ -54,7 +50,6 @@ class OpenClawCompatTools(Toolkit):
                 self._subagents_tools.sessions_send,
                 self._subagents_tools.sessions_spawn,
                 self._subagents_tools.list_sessions,
-                self.message,
                 self.cron,
                 self.web_search,
                 self.web_fetch,
@@ -94,6 +89,13 @@ class OpenClawCompatTools(Toolkit):
             "error",
             message="OpenClaw tool context is unavailable in this runtime path.",
         )
+
+    @staticmethod
+    def _context() -> ToolRuntimeContext | None:
+        context = get_tool_runtime_context()
+        if context is None or context.storage_path is None:
+            return None
+        return context
 
     @classmethod
     def _coding_status(cls, result: str) -> str:
@@ -174,182 +176,6 @@ class OpenClawCompatTools(Toolkit):
             if merged:
                 os.environ["PATH"] = merged
             cls._login_shell_path_applied = True
-
-    async def _message_send_or_reply(
-        self,
-        context: OpenClawToolContext,
-        *,
-        action: str,
-        message: str | None,
-        room_id: str,
-        effective_thread_id: str | None,
-    ) -> str:
-        if message is None or not message.strip():
-            return self._payload("message", "error", action=action, message="Message cannot be empty.")
-        if action in {"thread-reply", "reply"} and effective_thread_id is None:
-            return self._payload("message", "error", action=action, message="thread_id is required for replies.")
-
-        event_id = await _subagents_mod.send_matrix_text(
-            context,
-            room_id=room_id,
-            text=message.strip(),
-            thread_id=effective_thread_id,
-        )
-        if event_id is None:
-            return self._payload(
-                "message",
-                "error",
-                action=action,
-                room_id=room_id,
-                message="Failed to send message to Matrix.",
-            )
-        return self._payload(
-            "message",
-            "ok",
-            action=action,
-            room_id=room_id,
-            thread_id=effective_thread_id,
-            event_id=event_id,
-        )
-
-    async def _message_react(
-        self,
-        context: OpenClawToolContext,
-        *,
-        message: str | None,
-        room_id: str,
-        target: str | None,
-    ) -> str:
-        if target is None:
-            return self._payload("message", "error", action="react", message="target event_id is required.")
-
-        reaction = message.strip() if message and message.strip() else "👍"
-        content = {
-            "m.relates_to": {
-                "rel_type": "m.annotation",
-                "event_id": target,
-                "key": reaction,
-            },
-        }
-        response = await context.client.room_send(
-            room_id=room_id,
-            message_type="m.reaction",
-            content=content,
-        )
-        if isinstance(response, nio.RoomSendResponse):
-            return self._payload(
-                "message",
-                "ok",
-                action="react",
-                room_id=room_id,
-                target=target,
-                reaction=reaction,
-                event_id=response.event_id,
-            )
-        return self._payload(
-            "message",
-            "error",
-            action="react",
-            room_id=room_id,
-            target=target,
-            reaction=reaction,
-            response=str(response),
-        )
-
-    async def _message_read(
-        self,
-        context: OpenClawToolContext,
-        *,
-        room_id: str,
-        effective_thread_id: str | None,
-    ) -> str:
-        read_limit = 20
-        if effective_thread_id is not None:
-            thread_messages = await fetch_thread_history(context.client, room_id, effective_thread_id)
-            return self._payload(
-                "message",
-                "ok",
-                action="read",
-                room_id=room_id,
-                thread_id=effective_thread_id,
-                messages=thread_messages[-read_limit:],
-            )
-
-        response = await context.client.room_messages(
-            room_id,
-            limit=read_limit,
-            direction=nio.MessageDirection.back,
-            message_filter={"types": ["m.room.message"]},
-        )
-        if not isinstance(response, nio.RoomMessagesResponse):
-            return self._payload(
-                "message",
-                "error",
-                action="read",
-                room_id=room_id,
-                response=str(response),
-            )
-
-        resolved = [
-            await extract_and_resolve_message(event, context.client)
-            for event in reversed(response.chunk)
-            if isinstance(event, nio.RoomMessageText)
-        ]
-        return self._payload(
-            "message",
-            "ok",
-            action="read",
-            room_id=room_id,
-            messages=resolved,
-        )
-
-    async def message(
-        self,
-        action: str = "send",
-        message: str | None = None,
-        channel: str | None = None,
-        target: str | None = None,
-        thread_id: str | None = None,
-    ) -> str:
-        """Send or manage cross-channel messages."""
-        context = get_openclaw_tool_context()
-        if context is None:
-            return self._context_error("message")
-
-        normalized_action = action.strip().lower()
-        room_id = channel or context.room_id
-
-        if normalized_action in {"send", "thread-reply", "reply"}:
-            effective_thread_id = thread_id
-            if normalized_action in {"thread-reply", "reply"} and effective_thread_id is None:
-                effective_thread_id = context.thread_id
-            return await self._message_send_or_reply(
-                context,
-                action=normalized_action,
-                message=message,
-                room_id=room_id,
-                effective_thread_id=effective_thread_id,
-            )
-        if normalized_action == "react":
-            return await self._message_react(
-                context,
-                message=message,
-                room_id=room_id,
-                target=target,
-            )
-        if normalized_action == "read":
-            return await self._message_read(
-                context,
-                room_id=room_id,
-                effective_thread_id=thread_id or context.thread_id,
-            )
-
-        return self._payload(
-            "message",
-            "error",
-            action=action,
-            message="Unsupported action. Use send, thread-reply, react, or read.",
-        )
 
     async def cron(self, request: str) -> str:
         """Schedule a task using the scheduler tool."""
@@ -544,27 +370,20 @@ class OpenClawCompatTools(Toolkit):
         glob: str | None = None,
         ignore_case: bool = False,
         literal: bool = False,
-        context: int = 0,
-        limit: int = 100,
     ) -> str:
-        """Search file contents for a pattern."""
-        result = self._coding.grep(pattern, path, glob, ignore_case, literal, context, limit)
+        """Search for text patterns in the working tree."""
+        result = self._coding.grep(pattern, path=path, glob=glob, ignore_case=ignore_case, literal=literal)
         status = self._coding_status(result)
         return self._payload("grep", status, result=result)
 
-    def find_files(
-        self,
-        pattern: str,
-        path: str | None = None,
-        limit: int = 1000,
-    ) -> str:
+    def find_files(self, pattern: str, path: str | None = None) -> str:
         """Find files matching a glob pattern."""
-        result = self._coding.find_files(pattern, path, limit)
+        result = self._coding.find_files(pattern, path=path)
         status = self._coding_status(result)
         return self._payload("find_files", status, result=result)
 
-    def ls(self, path: str | None = None, limit: int = 500) -> str:
+    def ls(self, path: str | None = None) -> str:
         """List directory contents."""
-        result = self._coding.ls(path, limit)
+        result = self._coding.ls(path)
         status = self._coding_status(result)
         return self._payload("ls", status, result=result)

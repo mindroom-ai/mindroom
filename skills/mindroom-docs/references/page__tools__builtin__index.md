@@ -83,20 +83,21 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 
 ## Communication & Social
 
-| Icon                    | Tool       | Description                                 | Config Required                            |
-| ----------------------- | ---------- | ------------------------------------------- | ------------------------------------------ |
-| :lucide-message-square: | `gmail`    | Read, search, and manage Gmail emails       | Google OAuth                               |
-| :lucide-message-square: | `slack`    | Send messages and manage channels           | `token`                                    |
-| :lucide-message-square: | `discord`  | Interact with Discord channels and servers  | `bot_token`                                |
-| :lucide-message-square: | `telegram` | Send messages via Telegram bot              | `token`, `chat_id`                         |
-| :lucide-message-square: | `whatsapp` | WhatsApp Business API messaging             | `access_token`, `phone_number_id`          |
-| :lucide-message-square: | `twilio`   | SMS and voice                               | `account_sid`, `auth_token`                |
-| :lucide-message-square: | `webex`    | Webex Teams messaging                       | `access_token`                             |
-| :lucide-message-square: | `resend`   | Transactional email                         | `api_key`                                  |
-| :lucide-message-square: | `email`    | Generic SMTP email                          | SMTP config                                |
-| :lucide-message-square: | `x`        | Post tweets, send DMs, and search X/Twitter | `bearer_token` or OAuth credentials        |
-| :lucide-message-square: | `reddit`   | Reddit browsing and interaction             | `client_id`, `client_secret`               |
-| :lucide-message-square: | `zoom`     | Video conferencing and meetings             | `account_id`, `client_id`, `client_secret` |
+| Icon                    | Tool             | Description                                                                                   | Config Required                            |
+| ----------------------- | ---------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| :lucide-message-square: | `matrix_message` | Native Matrix messaging actions (`send`, `reply`, `thread-reply`, `react`, `read`, `context`) | -                                          |
+| :lucide-message-square: | `gmail`          | Read, search, and manage Gmail emails                                                         | Google OAuth                               |
+| :lucide-message-square: | `slack`          | Send messages and manage channels                                                             | `token`                                    |
+| :lucide-message-square: | `discord`        | Interact with Discord channels and servers                                                    | `bot_token`                                |
+| :lucide-message-square: | `telegram`       | Send messages via Telegram bot                                                                | `token`, `chat_id`                         |
+| :lucide-message-square: | `whatsapp`       | WhatsApp Business API messaging                                                               | `access_token`, `phone_number_id`          |
+| :lucide-message-square: | `twilio`         | SMS and voice                                                                                 | `account_sid`, `auth_token`                |
+| :lucide-message-square: | `webex`          | Webex Teams messaging                                                                         | `access_token`                             |
+| :lucide-message-square: | `resend`         | Transactional email                                                                           | `api_key`                                  |
+| :lucide-message-square: | `email`          | Generic SMTP email                                                                            | SMTP config                                |
+| :lucide-message-square: | `x`              | Post tweets, send DMs, and search X/Twitter                                                   | `bearer_token` or OAuth credentials        |
+| :lucide-message-square: | `reddit`         | Reddit browsing and interaction                                                               | `client_id`, `client_secret`               |
+| :lucide-message-square: | `zoom`           | Video conferencing and meetings                                                               | `account_id`, `client_id`, `client_secret` |
 
 ## Project Management
 

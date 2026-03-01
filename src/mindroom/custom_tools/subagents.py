@@ -13,8 +13,8 @@ from agno.tools import Toolkit
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.matrix.client import send_message
 from mindroom.matrix.mentions import format_message_with_mentions
-from mindroom.session_tools_context import SessionToolsContext, get_session_tools_context
 from mindroom.thread_utils import create_session_id
+from mindroom.tool_runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -44,11 +44,19 @@ def _context_error(tool_name: str) -> str:
     return _payload(
         tool_name,
         "error",
-        message="Session tools context is unavailable in this runtime path.",
+        message="Tool runtime context is unavailable in this runtime path.",
     )
 
 
-def _registry_path(context: SessionToolsContext) -> Path:
+def _get_context() -> ToolRuntimeContext | None:
+    context = get_tool_runtime_context()
+    if context is None or context.storage_path is None:
+        return None
+    return context
+
+
+def _registry_path(context: ToolRuntimeContext) -> Path:
+    assert context.storage_path is not None
     return context.storage_path / "subagents" / "session_registry.json"
 
 
@@ -58,7 +66,7 @@ def _normalize_registry(loaded: object) -> dict[str, Any]:
     return cast("dict[str, Any]", loaded)
 
 
-def _load_registry(context: SessionToolsContext) -> dict[str, Any]:
+def _load_registry(context: ToolRuntimeContext) -> dict[str, Any]:
     path = _registry_path(context)
     if not path.is_file():
         return {}
@@ -71,7 +79,7 @@ def _load_registry(context: SessionToolsContext) -> dict[str, Any]:
     return _normalize_registry(loaded)
 
 
-def _save_registry(context: SessionToolsContext, registry: dict[str, Any]) -> None:
+def _save_registry(context: ToolRuntimeContext, registry: dict[str, Any]) -> None:
     path = _registry_path(context)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(".tmp")
@@ -134,7 +142,7 @@ def _session_key_to_room_thread(session_key: str) -> tuple[str, str | None]:
     return session_key, None
 
 
-def _agent_thread_mode(context: SessionToolsContext, agent_name: str) -> str:
+def _agent_thread_mode(context: ToolRuntimeContext, agent_name: str) -> str:
     resolver = getattr(context.config, "get_entity_thread_mode", None)
     if not callable(resolver):
         return "thread"
@@ -144,7 +152,7 @@ def _agent_thread_mode(context: SessionToolsContext, agent_name: str) -> str:
 
 
 def _threaded_dispatch_error(
-    context: SessionToolsContext,
+    context: ToolRuntimeContext,
     *,
     session_key: str,
     thread_id: str | None,
@@ -165,7 +173,7 @@ def _threaded_dispatch_error(
 
 
 async def send_matrix_text(
-    context: SessionToolsContext,
+    context: ToolRuntimeContext,
     *,
     room_id: str,
     text: str,
@@ -185,7 +193,7 @@ async def send_matrix_text(
 
 
 def _record_session(
-    context: SessionToolsContext,
+    context: ToolRuntimeContext,
     *,
     session_key: str,
     label: str | None = None,
@@ -230,7 +238,7 @@ def _record_session(
         _save_registry(context, registry)
 
 
-def _in_scope(entry: dict[str, Any], context: SessionToolsContext) -> bool:
+def _in_scope(entry: dict[str, Any], context: ToolRuntimeContext) -> bool:
     """Check whether a registry entry belongs to the active context scope."""
     return (
         entry.get("agent_name") == context.agent_name
@@ -239,7 +247,7 @@ def _in_scope(entry: dict[str, Any], context: SessionToolsContext) -> bool:
     )
 
 
-def _resolve_by_label(context: SessionToolsContext, label: str) -> str | None:
+def _resolve_by_label(context: ToolRuntimeContext, label: str) -> str | None:
     with _REGISTRY_LOCK:
         registry = _load_registry(context)
 
@@ -255,7 +263,7 @@ def _resolve_by_label(context: SessionToolsContext, label: str) -> str | None:
     return candidates[0][0]
 
 
-def _lookup_target_agent(context: SessionToolsContext, session_key: str) -> str | None:
+def _lookup_target_agent(context: ToolRuntimeContext, session_key: str) -> str | None:
     with _REGISTRY_LOCK:
         registry = _load_registry(context)
     entry = registry.get(session_key)
@@ -282,7 +290,7 @@ class SubAgentsTools(Toolkit):
 
     async def agents_list(self) -> str:
         """List agent ids available for `sessions_spawn` targeting."""
-        context = get_session_tools_context()
+        context = _get_context()
         if context is None:
             return _context_error("agents_list")
 
@@ -301,7 +309,7 @@ class SubAgentsTools(Toolkit):
         agent_id: str | None = None,
     ) -> str:
         """Send a message to another session."""
-        context = get_session_tools_context()
+        context = _get_context()
         if context is None:
             return _context_error("sessions_send")
 
@@ -371,7 +379,7 @@ class SubAgentsTools(Toolkit):
         agent_id: str | None = None,
     ) -> str:
         """Spawn an isolated background session."""
-        context = get_session_tools_context()
+        context = _get_context()
         if context is None:
             return _context_error("sessions_spawn")
 
@@ -429,7 +437,7 @@ class SubAgentsTools(Toolkit):
         offset: int | None = None,
     ) -> str:
         """List tracked sub-agent sessions."""
-        context = get_session_tools_context()
+        context = _get_context()
         if context is None:
             return _context_error("list_sessions")
 
