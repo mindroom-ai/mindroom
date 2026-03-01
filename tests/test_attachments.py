@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from mindroom.attachment_media import attachment_records_to_media, resolve_attachment_media
+from mindroom.attachment_media import resolve_attachment_media
 from mindroom.attachments import (
     attachment_id_for_event,
     filter_attachments_for_context,
@@ -73,7 +73,8 @@ def test_register_resolve_and_convert_attachment(tmp_path: Path) -> None:
     resolved = resolve_attachments(tmp_path, ["att_payload", "att_missing"])
     assert [record.attachment_id for record in resolved] == ["att_payload"]
 
-    _, files, videos = attachment_records_to_media(resolved)
+    resolved_ids, _, files, videos = resolve_attachment_media(tmp_path, ["att_payload"])
+    assert resolved_ids == ["att_payload"]
     assert len(files) == 1
     assert files[0].filename == "payload.zip"
     assert str(files[0].filepath) == str(file_path.resolve())

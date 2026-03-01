@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from mindroom.attachments_context import AttachmentToolContext
 
 
-class ResolvedAttachmentReference(NamedTuple):
+class _ResolvedAttachmentReference(NamedTuple):
     """Result of resolving an attachment reference string."""
 
     path: Path | None
@@ -25,7 +25,7 @@ class ResolvedAttachmentReference(NamedTuple):
     error: str | None
 
 
-def attachment_tool_payload(status: str, **kwargs: object) -> str:
+def _attachment_tool_payload(status: str, **kwargs: object) -> str:
     """Return a structured payload for the attachments tool."""
     payload: dict[str, object] = {
         "status": status,
@@ -53,16 +53,16 @@ def _resolve_context_attachment_path(
 def _resolve_attachment_reference(
     context: AttachmentToolContext,
     raw_reference: object,
-) -> ResolvedAttachmentReference:
+) -> _ResolvedAttachmentReference:
     if not isinstance(raw_reference, str):
-        return ResolvedAttachmentReference(None, None, "attachments entries must be strings.")
+        return _ResolvedAttachmentReference(None, None, "attachments entries must be strings.")
 
     reference = raw_reference.strip()
     if not reference:
-        return ResolvedAttachmentReference(None, None, None)
+        return _ResolvedAttachmentReference(None, None, None)
 
     if not reference.startswith("att_"):
-        return ResolvedAttachmentReference(
+        return _ResolvedAttachmentReference(
             None,
             None,
             "attachments entries must be context attachment IDs (att_*).",
@@ -70,8 +70,8 @@ def _resolve_attachment_reference(
 
     attachment_path, error = _resolve_context_attachment_path(context, reference)
     if error is not None:
-        return ResolvedAttachmentReference(None, None, error)
-    return ResolvedAttachmentReference(attachment_path, reference, None)
+        return _ResolvedAttachmentReference(None, None, error)
+    return _ResolvedAttachmentReference(attachment_path, reference, None)
 
 
 def resolve_attachment_references(
@@ -163,16 +163,16 @@ class AttachmentTools(Toolkit):
         """List attachment metadata for current tool context."""
         context = get_attachment_tool_context()
         if context is None:
-            return attachment_tool_payload(
+            return _attachment_tool_payload(
                 "error",
                 message="Attachment tool context is unavailable in this runtime path.",
             )
 
         requested_attachment_ids, attachments, missing_attachment_ids, error = get_attachment_listing(context, target)
         if error is not None:
-            return attachment_tool_payload("error", message=error)
+            return _attachment_tool_payload("error", message=error)
 
-        return attachment_tool_payload(
+        return _attachment_tool_payload(
             "ok",
             attachment_ids=requested_attachment_ids,
             attachments=attachments,
@@ -188,7 +188,7 @@ class AttachmentTools(Toolkit):
         """Send context attachment IDs to a Matrix room/thread."""
         context = get_attachment_tool_context()
         if context is None:
-            return attachment_tool_payload(
+            return _attachment_tool_payload(
                 "error",
                 message="Attachment tool context is unavailable in this runtime path.",
             )
@@ -198,13 +198,13 @@ class AttachmentTools(Toolkit):
             attachments,
         )
         if attachment_error is not None:
-            return attachment_tool_payload("error", message=attachment_error)
+            return _attachment_tool_payload("error", message=attachment_error)
         if not attachment_paths:
-            return attachment_tool_payload("error", message="attachments cannot be empty.")
+            return _attachment_tool_payload("error", message="attachments cannot be empty.")
 
         effective_room_id = room_id or context.room_id
         if effective_room_id not in context.client.rooms:
-            return attachment_tool_payload(
+            return _attachment_tool_payload(
                 "error",
                 message=f"Cannot send to room {effective_room_id}: bot has not joined this room.",
             )
@@ -221,7 +221,7 @@ class AttachmentTools(Toolkit):
             attachment_paths=attachment_paths,
         )
         if send_error is not None:
-            return attachment_tool_payload(
+            return _attachment_tool_payload(
                 "error",
                 room_id=effective_room_id,
                 thread_id=effective_thread_id,
@@ -230,7 +230,7 @@ class AttachmentTools(Toolkit):
                 message=send_error,
             )
 
-        return attachment_tool_payload(
+        return _attachment_tool_payload(
             "ok",
             room_id=effective_room_id,
             thread_id=effective_thread_id,

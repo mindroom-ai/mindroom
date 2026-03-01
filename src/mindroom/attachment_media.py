@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def attachment_records_to_media(
+def _attachment_records_to_media(
     attachment_records: list[AttachmentRecord],
 ) -> tuple[list[Audio], list[File], list[Video]]:
     """Convert persisted attachments into Agno media objects."""
@@ -87,5 +87,5 @@ def resolve_attachment_media(
                 thread_id=thread_id,
             )
     resolved_attachment_ids = [record.attachment_id for record in attachment_records]
-    attachment_audio, attachment_files, attachment_videos = attachment_records_to_media(attachment_records)
+    attachment_audio, attachment_files, attachment_videos = _attachment_records_to_media(attachment_records)
     return resolved_attachment_ids, attachment_audio, attachment_files, attachment_videos

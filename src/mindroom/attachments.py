@@ -30,7 +30,7 @@ _CLEANUP_INTERVAL = timedelta(hours=1)
 _last_cleanup_time: datetime | None = None
 
 
-def normalize_attachment_id(raw_attachment_id: str) -> str | None:
+def _normalize_attachment_id(raw_attachment_id: str) -> str | None:
     """Normalize attachment IDs and reject unsafe values."""
     attachment_id = raw_attachment_id.strip()
     if not attachment_id or not _ATTACHMENT_ID_PATTERN.fullmatch(attachment_id):
@@ -85,7 +85,7 @@ def parse_attachment_ids_from_event_source(event_source: dict[str, Any] | None) 
     for raw_attachment_id in raw_attachment_ids:
         if not isinstance(raw_attachment_id, str):
             continue
-        attachment_id = normalize_attachment_id(raw_attachment_id)
+        attachment_id = _normalize_attachment_id(raw_attachment_id)
         if attachment_id and attachment_id not in normalized:
             normalized.append(attachment_id)
     return normalized
@@ -143,7 +143,7 @@ def _extension_from_mime_type(mime_type: str | None) -> str:
     return ".bin"
 
 
-def store_media_bytes_locally(
+def _store_media_bytes_locally(
     storage_path: Path,
     event_id: str,
     media_bytes: bytes | None,
@@ -165,7 +165,7 @@ def store_media_bytes_locally(
     return media_path
 
 
-async def store_media_bytes_locally_async(
+async def _store_media_bytes_locally_async(
     storage_path: Path,
     event_id: str,
     media_bytes: bytes | None,
@@ -173,7 +173,7 @@ async def store_media_bytes_locally_async(
 ) -> Path | None:
     """Persist media bytes without blocking the event loop."""
     return await asyncio.to_thread(
-        store_media_bytes_locally,
+        _store_media_bytes_locally,
         storage_path,
         event_id,
         media_bytes,
@@ -195,14 +195,14 @@ def extract_file_or_video_caption(
     return "[Attached file]"
 
 
-async def store_file_or_video_locally(
+async def _store_file_or_video_locally(
     client: nio.AsyncClient,
     storage_path: Path,
     event: FileOrVideoEvent,
 ) -> Path | None:
     """Download and persist file/video media to local storage."""
     media_bytes = await download_media_bytes(client, event)
-    return await store_media_bytes_locally_async(
+    return await _store_media_bytes_locally_async(
         storage_path,
         event.event_id,
         media_bytes,
@@ -412,7 +412,7 @@ def register_local_attachment(
         return None
 
     resolved_attachment_id = attachment_id or f"att_{uuid4().hex[:16]}"
-    normalized_attachment_id = normalize_attachment_id(resolved_attachment_id)
+    normalized_attachment_id = _normalize_attachment_id(resolved_attachment_id)
     if normalized_attachment_id is None:
         logger.warning("Invalid attachment ID", attachment_id=resolved_attachment_id)
         return None
@@ -457,7 +457,7 @@ async def register_file_or_video_attachment(
     event: FileOrVideoEvent,
 ) -> AttachmentRecord | None:
     """Persist a file/video event and register it as an attachment record."""
-    local_media_path = await store_file_or_video_locally(client, storage_path, event)
+    local_media_path = await _store_file_or_video_locally(client, storage_path, event)
     if local_media_path is None:
         return None
 
@@ -493,7 +493,7 @@ async def register_audio_attachment(
     filename: str | None = None,
 ) -> AttachmentRecord | None:
     """Persist raw audio bytes and register them as an attachment record."""
-    local_audio_path = await store_media_bytes_locally_async(
+    local_audio_path = await _store_media_bytes_locally_async(
         storage_path,
         event_id,
         audio_bytes,
@@ -517,7 +517,7 @@ async def register_audio_attachment(
 
 def load_attachment(storage_path: Path, attachment_id: str) -> AttachmentRecord | None:
     """Load attachment metadata by ID."""
-    normalized_attachment_id = normalize_attachment_id(attachment_id)
+    normalized_attachment_id = _normalize_attachment_id(attachment_id)
     if normalized_attachment_id is None:
         return None
     record_path = _attachment_record_path(storage_path, normalized_attachment_id)
@@ -567,7 +567,7 @@ def resolve_attachments(storage_path: Path, attachment_ids: list[str]) -> list[A
     resolved: list[AttachmentRecord] = []
     seen_ids: set[str] = set()
     for attachment_id in attachment_ids:
-        normalized_attachment_id = normalize_attachment_id(attachment_id)
+        normalized_attachment_id = _normalize_attachment_id(attachment_id)
         if normalized_attachment_id is None or normalized_attachment_id in seen_ids:
             continue
         seen_ids.add(normalized_attachment_id)
