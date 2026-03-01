@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import mimetypes
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -23,6 +24,7 @@ logger = get_logger(__name__)
 AttachmentKind = Literal["audio", "file", "video", "image"]
 FileOrVideoEvent = nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo
 _ATTACHMENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$")
+_ATTACHMENT_RETENTION_DAYS = 30
 
 
 def normalize_attachment_id(raw_attachment_id: str) -> str | None:
@@ -119,6 +121,10 @@ def _attachments_dir(storage_path: Path) -> Path:
     return storage_path / "attachments"
 
 
+def _incoming_media_dir(storage_path: Path) -> Path:
+    return storage_path / "incoming_media"
+
+
 def _attachment_record_path(storage_path: Path, attachment_id: str) -> Path:
     return _attachments_dir(storage_path) / f"{attachment_id}.json"
 
@@ -143,7 +149,7 @@ def store_media_bytes_locally(
     """Persist media bytes to storage so agents can access them as files."""
     if media_bytes is None:
         return None
-    incoming_media_dir = storage_path / "incoming_media"
+    incoming_media_dir = _incoming_media_dir(storage_path)
     safe_event_id = "".join(ch if ch.isalnum() else "_" for ch in event_id).strip("_") or "media_event"
     extension = _extension_from_mime_type(mime_type)
     media_path = incoming_media_dir / f"{safe_event_id}{extension}"
@@ -181,11 +187,149 @@ async def store_file_or_video_locally(
 
 
 def attachment_id_for_event(event_id: str) -> str:
-    """Create a stable attachment ID from a Matrix event ID."""
-    normalized = "".join(ch for ch in event_id if ch.isalnum())
-    if not normalized:
-        normalized = uuid4().hex
-    return f"att_{normalized[:32]}"
+    """Create a stable low-collision attachment ID from a Matrix event ID."""
+    digest = hashlib.sha256(event_id.encode("utf-8")).hexdigest()
+    return f"att_{digest[:24]}"
+
+
+def _record_mtime(path: Path) -> datetime | None:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, UTC)
+    except OSError:
+        return None
+
+
+def _record_created_at(record: AttachmentRecord, record_path: Path) -> datetime | None:
+    if isinstance(record.created_at, str) and record.created_at:
+        with contextlib.suppress(ValueError):
+            parsed = datetime.fromisoformat(record.created_at)
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=UTC)
+            return parsed.astimezone(UTC)
+    return _record_mtime(record_path)
+
+
+def _is_managed_media_path(storage_path: Path, local_path: Path) -> bool:
+    """Return whether *local_path* lives under this storage's incoming media dir."""
+    incoming_media_dir = _incoming_media_dir(storage_path).resolve()
+    with contextlib.suppress(OSError):
+        return local_path.resolve().is_relative_to(incoming_media_dir)
+    return False
+
+
+def _collect_attachment_cleanup_state(
+    storage_path: Path,
+    *,
+    cutoff: datetime,
+) -> tuple[
+    set[Path],
+    dict[Path, int],
+    list[tuple[AttachmentRecord, Path]],
+    list[Path],
+]:
+    """Collect active/expired attachment metadata needed for cleanup."""
+    active_media_paths: set[Path] = set()
+    active_media_ref_counts: dict[Path, int] = {}
+    expired_records: list[tuple[AttachmentRecord, Path]] = []
+    stale_record_paths: list[Path] = []
+
+    for record_path in _attachments_dir(storage_path).glob("*.json"):
+        record = load_attachment(storage_path, record_path.stem)
+        if record is None:
+            record_mtime = _record_mtime(record_path)
+            if record_mtime is not None and record_mtime < cutoff:
+                stale_record_paths.append(record_path)
+            continue
+
+        created_at = _record_created_at(record, record_path)
+        if created_at is not None and created_at < cutoff:
+            expired_records.append((record, record_path))
+            continue
+
+        resolved_media_path = record.local_path.resolve()
+        active_media_paths.add(resolved_media_path)
+        active_media_ref_counts[resolved_media_path] = active_media_ref_counts.get(resolved_media_path, 0) + 1
+
+    return active_media_paths, active_media_ref_counts, expired_records, stale_record_paths
+
+
+def _remove_paths(paths: list[Path]) -> None:
+    """Delete filesystem paths, ignoring filesystem errors."""
+    for path in paths:
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
+
+
+def _collect_removable_media_paths(
+    storage_path: Path,
+    *,
+    expired_records: list[tuple[AttachmentRecord, Path]],
+    active_media_ref_counts: dict[Path, int],
+) -> set[Path]:
+    """Return expired managed media files that are no longer referenced."""
+    removable_media_paths: set[Path] = set()
+    for record, record_path in expired_records:
+        with contextlib.suppress(OSError):
+            record_path.unlink(missing_ok=True)
+
+        resolved_media_path = record.local_path.resolve()
+        if not _is_managed_media_path(storage_path, resolved_media_path):
+            continue
+        if active_media_ref_counts.get(resolved_media_path, 0) == 0:
+            removable_media_paths.add(resolved_media_path)
+    return removable_media_paths
+
+
+def _prune_orphan_incoming_media(
+    storage_path: Path,
+    *,
+    cutoff: datetime,
+    active_media_paths: set[Path],
+) -> None:
+    """Delete old incoming-media files that are no longer referenced."""
+    incoming_media_dir = _incoming_media_dir(storage_path)
+    if not incoming_media_dir.is_dir():
+        return
+
+    for media_path in incoming_media_dir.iterdir():
+        if not media_path.is_file():
+            continue
+        resolved_media_path = media_path.resolve()
+        if resolved_media_path in active_media_paths:
+            continue
+        media_mtime = _record_mtime(media_path)
+        if media_mtime is None or media_mtime >= cutoff:
+            continue
+        with contextlib.suppress(OSError):
+            media_path.unlink(missing_ok=True)
+
+
+def _cleanup_attachment_storage(storage_path: Path) -> None:
+    """Prune expired attachment metadata and managed media files."""
+    attachments_dir = _attachments_dir(storage_path)
+    if not attachments_dir.is_dir():
+        return
+
+    cutoff = datetime.now(UTC) - timedelta(days=_ATTACHMENT_RETENTION_DAYS)
+    active_media_paths, active_media_ref_counts, expired_records, stale_record_paths = (
+        _collect_attachment_cleanup_state(
+            storage_path,
+            cutoff=cutoff,
+        )
+    )
+    _remove_paths(stale_record_paths)
+
+    removable_media_paths = _collect_removable_media_paths(
+        storage_path,
+        expired_records=expired_records,
+        active_media_ref_counts=active_media_ref_counts,
+    )
+    _remove_paths(list(removable_media_paths))
+    _prune_orphan_incoming_media(
+        storage_path,
+        cutoff=cutoff,
+        active_media_paths=active_media_paths,
+    )
 
 
 def register_local_attachment(
@@ -243,6 +387,12 @@ def register_local_attachment(
         with contextlib.suppress(OSError):
             tmp_path.unlink(missing_ok=True)
         return None
+
+    try:
+        _cleanup_attachment_storage(storage_path)
+    except Exception:
+        logger.exception("Failed to prune expired attachment storage")
+
     return record
 
 

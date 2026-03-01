@@ -95,6 +95,11 @@ Encrypted media is decrypted transparently using the key material from the Matri
 
 AI response caching is automatically skipped when files, videos, or audio are present, since media payloads are large and unlikely to repeat.
 
+## Retention
+
+MindRoom automatically prunes attachment metadata and managed `incoming_media/` files older than 30 days.
+Pruning runs opportunistically during new attachment registration.
+
 ## Limitations
 
 - **Routing in multi-agent rooms** -- in multi-agent rooms without an `@mention`, the router selects the best agent based on the file caption.

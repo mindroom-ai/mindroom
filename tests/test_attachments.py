@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,8 +22,17 @@ from mindroom.attachments import (
 
 def test_attachment_id_for_event_is_stable() -> None:
     """Event IDs should map to deterministic attachment IDs."""
-    assert attachment_id_for_event("$file_event") == "att_fileevent"
-    assert attachment_id_for_event("$file_event") == "att_fileevent"
+    event_id = "$file_event"
+    attachment_id = attachment_id_for_event(event_id)
+
+    assert attachment_id == attachment_id_for_event(event_id)
+    assert attachment_id.startswith("att_")
+    assert len(attachment_id) == 28
+
+
+def test_attachment_id_for_event_distinguishes_similar_strings() -> None:
+    """Attachment IDs should differ for event IDs that only vary by punctuation."""
+    assert attachment_id_for_event("$abc-123:localhost") != attachment_id_for_event("$abc_123:localhost")
 
 
 def test_parse_attachment_ids_from_event_source_dedupes() -> None:
@@ -251,3 +263,85 @@ def test_resolve_attachment_media_drops_cross_thread_ids(tmp_path: Path) -> None
     assert resolved_ids == ["att_ok"]
     assert len(files) == 1
     assert str(files[0].filepath) == str(file_path.resolve())
+
+
+def test_register_local_attachment_prunes_expired_managed_media(tmp_path: Path) -> None:
+    """Registering a new attachment should prune expired managed media records/files."""
+    old_media_path = tmp_path / "incoming_media" / "old.bin"
+    old_media_path.parent.mkdir(parents=True, exist_ok=True)
+    old_media_path.write_bytes(b"old")
+
+    old_record = register_local_attachment(
+        tmp_path,
+        old_media_path,
+        kind="file",
+        attachment_id="att_old",
+        room_id="!room:localhost",
+    )
+    assert old_record is not None
+
+    old_record_path = tmp_path / "attachments" / "att_old.json"
+    old_payload = json.loads(old_record_path.read_text(encoding="utf-8"))
+    old_payload["created_at"] = (datetime.now(UTC) - timedelta(days=45)).isoformat()
+    old_record_path.write_text(json.dumps(old_payload), encoding="utf-8")
+
+    orphan_media_path = tmp_path / "incoming_media" / "orphan.bin"
+    orphan_media_path.write_bytes(b"orphan")
+    stale_timestamp = (datetime.now(UTC) - timedelta(days=45)).timestamp()
+    orphan_media_path.touch()
+    old_media_path.touch()
+
+    os.utime(orphan_media_path, (stale_timestamp, stale_timestamp))
+    os.utime(old_media_path, (stale_timestamp, stale_timestamp))
+
+    fresh_media_path = tmp_path / "incoming_media" / "fresh.bin"
+    fresh_media_path.write_bytes(b"fresh")
+    fresh_record = register_local_attachment(
+        tmp_path,
+        fresh_media_path,
+        kind="file",
+        attachment_id="att_fresh",
+        room_id="!room:localhost",
+    )
+    assert fresh_record is not None
+
+    assert load_attachment(tmp_path, "att_old") is None
+    assert load_attachment(tmp_path, "att_fresh") is not None
+    assert not old_media_path.exists()
+    assert not orphan_media_path.exists()
+    assert fresh_media_path.exists()
+
+
+def test_register_local_attachment_prunes_expired_metadata_without_deleting_unmanaged_files(tmp_path: Path) -> None:
+    """Cleanup should not delete files outside managed incoming_media storage."""
+    external_file_path = tmp_path / "external.txt"
+    external_file_path.write_text("external", encoding="utf-8")
+
+    old_record = register_local_attachment(
+        tmp_path,
+        external_file_path,
+        kind="file",
+        attachment_id="att_external",
+        room_id="!room:localhost",
+    )
+    assert old_record is not None
+
+    old_record_path = tmp_path / "attachments" / "att_external.json"
+    old_payload = json.loads(old_record_path.read_text(encoding="utf-8"))
+    old_payload["created_at"] = (datetime.now(UTC) - timedelta(days=45)).isoformat()
+    old_record_path.write_text(json.dumps(old_payload), encoding="utf-8")
+
+    fresh_media_path = tmp_path / "incoming_media" / "fresh.bin"
+    fresh_media_path.parent.mkdir(parents=True, exist_ok=True)
+    fresh_media_path.write_bytes(b"fresh")
+    fresh_record = register_local_attachment(
+        tmp_path,
+        fresh_media_path,
+        kind="file",
+        attachment_id="att_fresh2",
+        room_id="!room:localhost",
+    )
+    assert fresh_record is not None
+
+    assert load_attachment(tmp_path, "att_external") is None
+    assert external_file_path.exists()
