@@ -393,6 +393,38 @@ def test_config_reports_mixed_memory_backend_usage() -> None:
     assert config.uses_mem0_memory() is True
 
 
+def test_config_rejects_memory_file_path_when_effective_backend_is_mem0() -> None:
+    """memory_file_path should fail fast unless effective backend resolves to file."""
+    with pytest.raises(
+        ValidationError,
+        match=re.escape(
+            "agents.<name>.memory_file_path requires effective file memory backend; invalid agents: general",
+        ),
+    ):
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General", memory_file_path="./openclaw_data"),
+            },
+            memory={"backend": "mem0"},
+        )
+
+
+def test_config_accepts_memory_file_path_with_file_backend_override() -> None:
+    """memory_file_path is valid when effective backend resolves to file."""
+    config = Config(
+        agents={
+            "general": AgentConfig(
+                display_name="General",
+                memory_backend="file",
+                memory_file_path="./openclaw_data",
+            ),
+        },
+        memory={"backend": "mem0"},
+    )
+
+    assert config.agents["general"].memory_file_path == "./openclaw_data"
+
+
 def test_config_accepts_valid_agent_knowledge_base_assignment() -> None:
     """Agent knowledge base assignment is valid when the base is configured."""
     config = Config(

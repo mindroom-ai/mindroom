@@ -454,6 +454,52 @@ describe('AgentEditor', () => {
     );
   });
 
+  it('disables memory file path when effective backend is not file', () => {
+    render(<AgentEditor />);
+    expect(screen.getByLabelText('Memory File Path')).toBeDisabled();
+  });
+
+  it('updates memory file path when changed', () => {
+    render(<AgentEditor />);
+
+    const memoryBackendSelect = screen.getByLabelText('Memory Backend');
+    fireEvent.click(memoryBackendSelect);
+    const fileOption = screen.getByRole('option', { name: 'File (markdown memory)' });
+    fireEvent.click(fileOption);
+
+    const memoryPathInput = screen.getByLabelText('Memory File Path');
+    expect(memoryPathInput).not.toBeDisabled();
+    fireEvent.change(memoryPathInput, { target: { value: './openclaw_data' } });
+
+    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+      'test_agent',
+      expect.objectContaining({
+        memory_file_path: './openclaw_data',
+      })
+    );
+  });
+
+  it('clears memory file path when input is emptied', () => {
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [{ ...mockAgent, memory_backend: 'file', memory_file_path: './openclaw_data' }],
+      rooms: mockStore.rooms,
+    });
+
+    render(<AgentEditor />);
+
+    const memoryPathInput = screen.getByLabelText('Memory File Path');
+    expect(memoryPathInput).not.toBeDisabled();
+    fireEvent.change(memoryPathInput, { target: { value: '' } });
+
+    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+      'test_agent',
+      expect.objectContaining({
+        memory_file_path: undefined,
+      })
+    );
+  });
+
   it('updates learning mode when selected', () => {
     render(<AgentEditor />);
 
