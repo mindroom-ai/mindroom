@@ -21,6 +21,20 @@ from mindroom.tools_metadata import TOOL_METADATA, ToolCategory, ToolStatus
 logger = get_logger(__name__)
 
 
+def _is_known_tool_entry(tool_name: str) -> bool:
+    """Return whether a tool entry is either a real tool or a tool preset."""
+    return tool_name in TOOL_METADATA or Config.is_tool_preset(tool_name)
+
+
+def _tool_entry_summary(tool_name: str) -> str:
+    """Return a concise summary for a tool or preset entry."""
+    preset = Config.get_tool_preset(tool_name)
+    if preset is not None:
+        return f"Tool preset that expands to: {', '.join(preset)}."
+    metadata = TOOL_METADATA[tool_name]
+    return metadata.description
+
+
 def validate_knowledge_bases(
     knowledge_bases: list[str],
     configured_knowledge_bases: set[str],
@@ -422,33 +436,45 @@ class ConfigManagerTools(Toolkit):
     def _list_available_tools(self) -> str:
         """List all available tools that can be used by agents."""
         tools_by_category: dict[str, list[tuple[str, str]]] = {}
+        preset_entries: list[tuple[str, str]] = []
 
         for tool_name in sorted(TOOL_METADATA.keys()):
-            if tool_name in TOOL_METADATA:
-                metadata = TOOL_METADATA[tool_name]
-                category = metadata.category.value
-                description = metadata.description
+            metadata = TOOL_METADATA[tool_name]
+            category = metadata.category.value
+            description = metadata.description
+            if category not in tools_by_category:
+                tools_by_category[category] = []
+            tools_by_category[category].append((tool_name, description))
 
-                if category not in tools_by_category:
-                    tools_by_category[category] = []
-                tools_by_category[category].append((tool_name, description))
-            else:
-                if "uncategorized" not in tools_by_category:
-                    tools_by_category["uncategorized"] = []
-                tools_by_category["uncategorized"].append((tool_name, "No description available"))
+        preset_entries = [
+            (preset_name, _tool_entry_summary(preset_name)) for preset_name in sorted(Config.TOOL_PRESETS)
+        ]
 
         output = ["## Available Tools by Category:\n"]
         for category in sorted(tools_by_category.keys()):
             output.append(f"\n### {category.title()}:")
             for tool_name, description in tools_by_category[category]:
                 output.append(f"- **{tool_name}**: {description}")
+        if preset_entries:
+            output.append("\n### Tool Presets:")
+            for preset_name, description in preset_entries:
+                output.append(f"- **{preset_name}**: {description}")
 
         return "\n".join(output)
 
     def _get_tool_details(self, tool_name: str) -> str:
         """Get detailed information about a specific tool."""
+        preset = Config.get_tool_preset(tool_name)
+        if preset is not None:
+            return (
+                f"## Tool Preset: {tool_name}\n\n"
+                "**Type**: Config-only preset macro\n"
+                f"**Expands To**: {', '.join(preset)}\n"
+                "**Notes**: Presets are expanded by Config.get_agent_tools and are not runtime toolkits."
+            )
+
         if tool_name not in TOOL_METADATA:
-            available = ", ".join(sorted(TOOL_METADATA.keys()))
+            available = ", ".join(sorted([*TOOL_METADATA.keys(), *Config.TOOL_PRESETS.keys()]))
             return f"Unknown tool: {tool_name}\n\nAvailable tools: {available}"
 
         output = [f"## Tool: {tool_name}\n"]
@@ -500,7 +526,7 @@ class ConfigManagerTools(Toolkit):
             return "Error: Agent name must be lowercase alphanumeric with underscores only"
 
         # Validate tools
-        invalid_tools = [t for t in tools if t not in TOOL_METADATA]
+        invalid_tools = [t for t in tools if not _is_known_tool_entry(t)]
         if invalid_tools:
             return f"Error: Unknown tools: {', '.join(invalid_tools)}\n\nUse get_info with info_type='available_tools' to see valid tools."
 
@@ -578,7 +604,7 @@ class ConfigManagerTools(Toolkit):
 
             # Validate tools if provided
             if tools is not None:
-                invalid_tools = [t for t in tools if t not in TOOL_METADATA]
+                invalid_tools = [t for t in tools if not _is_known_tool_entry(t)]
                 if invalid_tools:
                     return f"Error: Unknown tools: {', '.join(invalid_tools)}"
 
@@ -701,7 +727,7 @@ class ConfigManagerTools(Toolkit):
             if not agent.tools:
                 warnings.append("No tools configured")
             else:
-                invalid_tools = [t for t in agent.tools if t not in TOOL_METADATA]
+                invalid_tools = [t for t in agent.tools if not _is_known_tool_entry(t)]
                 if invalid_tools:
                     issues.append(f"Invalid tools: {', '.join(invalid_tools)}")
 

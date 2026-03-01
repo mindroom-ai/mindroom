@@ -108,6 +108,56 @@ def test_agent_include_default_tools_false_skips_config_defaults(mock_storage: M
     assert "calculator" not in tool_names
 
 
+def test_openclaw_compat_preset_expands_to_native_tools() -> None:
+    """openclaw_compat should expand into native tool names in effective resolution."""
+    config = Config.from_yaml()
+    config.agents["summary"].tools = ["openclaw_compat"]
+    config.agents["summary"].include_default_tools = False
+
+    assert config.get_agent_tools("summary") == list(Config.TOOL_PRESETS["openclaw_compat"])
+
+
+def test_openclaw_compat_preset_expansion_dedupes_preserving_order() -> None:
+    """Preset expansion should preserve first-seen order while deduping entries."""
+    config = Config.from_yaml()
+    config.agents["summary"].tools = [
+        "browser",
+        "openclaw_compat",
+        "shell",
+        "coding",
+        "browser",
+    ]
+    config.defaults.tools = ["openclaw_compat", "python", "scheduler"]
+
+    assert config.get_agent_tools("summary") == [
+        "browser",
+        "shell",
+        "coding",
+        "duckduckgo",
+        "website",
+        "scheduler",
+        "python",
+    ]
+
+
+@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.agents.SqliteDb")
+def test_create_agent_uses_native_tool_lookups_for_openclaw_preset(
+    mock_storage: MagicMock,  # noqa: ARG001
+    mock_get_tool_by_name: MagicMock,
+) -> None:
+    """Agent construction should resolve preset entries to native tool lookups."""
+    mock_get_tool_by_name.return_value = MagicMock()
+    config = Config.from_yaml()
+    config.agents["summary"].tools = ["openclaw_compat"]
+    config.agents["summary"].include_default_tools = False
+
+    create_agent("summary", config=config)
+
+    looked_up_tools = [call.args[0] for call in mock_get_tool_by_name.call_args_list]
+    assert looked_up_tools == list(Config.TOOL_PRESETS["openclaw_compat"])
+
+
 @patch("mindroom.agents.SqliteDb")
 def test_get_agent_code(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the code agent is created correctly."""

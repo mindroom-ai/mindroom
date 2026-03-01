@@ -58,6 +58,8 @@ async def get_registered_tools() -> ToolsResponse:
     config, config_path = load_runtime_config()
     ensure_tool_registry_loaded(config, config_path=config_path)
     tools = export_tools_metadata()
+    # TODO: expose Config.TOOL_PRESETS (e.g. openclaw_compat) so the
+    # dashboard tool picker can offer preset entries alongside registry tools.
 
     # Get credentials manager to check if tools are configured
     manager = get_credentials_manager()

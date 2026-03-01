@@ -77,7 +77,6 @@ from .newspaper4k import newspaper4k_tools
 from .notion import notion_tools
 from .openai import openai_tools
 from .openbb import openbb_tools
-from .openclaw_compat import openclaw_compat_tools
 from .openweather import openweather_tools
 from .oxylabs import oxylabs_tools
 from .pandas import pandas_tools
@@ -190,7 +189,6 @@ __all__ = [
     "notion_tools",
     "openai_tools",
     "openbb_tools",
-    "openclaw_compat_tools",
     "openweather_tools",
     "oxylabs_tools",
     "pandas_tools",

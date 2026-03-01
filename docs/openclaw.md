@@ -7,7 +7,7 @@ icon: lucide/folder-input
 MindRoom supports a practical OpenClaw-compatible workflow focused on workspace portability:
 
 - Reuse your OpenClaw markdown files (`SOUL.md`, `AGENTS.md`, `USER.md`, `MEMORY.md`, etc.)
-- Use `openclaw_compat` tool names where supported
+- Use the `openclaw_compat` preset to enable a native MindRoom tool bundle
 - Use MindRoom's unified memory backend (`memory.backend`) for persistence
 - Optionally add semantic recall over workspace files via knowledge bases
 
@@ -19,29 +19,32 @@ Works well:
 
 - File-based identity and memory documents
 - OpenClaw-inspired behavior and instructions
-- `sessions_*`, `message`, `subagents`, `web_*`, `exec/process`, `cron`, `browser` compatibility surface
+- Native MindRoom tool bundle via the `openclaw_compat` preset
 
 Not included:
 
 - OpenClaw gateway control plane
 - Device nodes and canvas platform tools
-- `tts` and `image` tool aliases (use MindRoom's native TTS/image tools directly)
+- OpenClaw alias-name wrapper APIs like `exec`, `process`, `web_search`, and `web_fetch`
+- `tts` and `image` aliases (use MindRoom's native TTS/image tools directly)
 - Heartbeat runtime - schedule heartbeats via `cron`/`scheduler` instead
 
-## The `openclaw_compat` toolkit
+## The `openclaw_compat` preset
 
-The `openclaw_compat` tool provides OpenClaw-named aliases so prompts and skills written for OpenClaw work without rewriting tool calls:
+`openclaw_compat` is a config macro, not a runtime toolkit.
+`Config.get_agent_tools` expands it into native MindRoom tools and dedupes while preserving order.
 
-| OpenClaw tool | MindRoom backend |
-|---------------|------------------|
-| `exec`, `process` | `ShellTools` |
-| `web_search`, `web_fetch` | `DuckDuckGoTools`, `WebsiteTools` |
-| `cron` | `SchedulerTools` |
-| `message`, `sessions_*` | Matrix client calls |
-| `subagents`, `agents_list` | Agent registry lookup |
-| `browser` | `BrowserTools` (Playwright, host target only) |
+Preset expansion:
 
-Memory is not a separate OpenClaw subsystem in MindRoom. It uses the normal MindRoom memory backend.
+- `shell`
+- `coding`
+- `duckduckgo`
+- `website`
+- `browser`
+- `scheduler`
+
+Memory is not a separate OpenClaw subsystem in MindRoom.
+It uses the normal MindRoom memory backend.
 
 ## Drop-in config
 
@@ -97,7 +100,7 @@ memory:
 
 `memory_file_path` points the file-memory scope directly at the workspace root, so `MEMORY.md` is loaded automatically by the file backend as the entrypoint — no need to list it in `context_files`.
 `memory_file_path` is ignored unless the effective backend is `file`; if you switch this agent to `mem0`, re-add `MEMORY.md` to `context_files` when you still want it preloaded.
-The `openclaw_compat` toolkit already bundles shell, file operations, web search, web fetch, browser, and scheduler aliases, so listing those tools individually is not necessary.
+The `openclaw_compat` preset already expands to the native shell, coding, search/fetch, browser, and scheduler tools, so listing those tools individually is not necessary.
 
 ## Recommended workspace layout
 

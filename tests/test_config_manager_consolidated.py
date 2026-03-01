@@ -89,6 +89,14 @@ class TestConsolidatedConfigManager:
         result = cm.get_info(info_type="tool_details", name="googlesearch")
         assert "Tool: googlesearch" in result
 
+    def test_get_info_tool_details_for_openclaw_preset(self) -> None:
+        """Tool details should describe config-only tool presets."""
+        cm = ConfigManagerTools()
+        result = cm.get_info(info_type="tool_details", name="openclaw_compat")
+        assert "Tool Preset: openclaw_compat" in result
+        assert "Expands To" in result
+        assert "shell, coding, duckduckgo, website, browser, scheduler" in result
+
     def test_get_info_invalid_type(self) -> None:
         """Test get_info with invalid info type."""
         cm = ConfigManagerTools()
@@ -120,6 +128,59 @@ class TestConsolidatedConfigManager:
             config = Config.from_yaml(config_path)
             assert "test_agent" in config.agents
             assert config.agents["test_agent"].display_name == "Test Agent"
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_manage_agent_create_accepts_openclaw_preset_tool(self) -> None:
+        """Agent create should accept preset entries in tools."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            config_path = Path(f.name)
+            config = Config(agents={})
+            config.save_to_yaml(config_path)
+
+        try:
+            cm = ConfigManagerTools(config_path)
+            result = cm.manage_agent(
+                operation="create",
+                agent_name="test_agent",
+                display_name="Test Agent",
+                role="Test role",
+                tools=["openclaw_compat"],
+            )
+            assert "Successfully created" in result
+
+            config = Config.from_yaml(config_path)
+            assert config.agents["test_agent"].tools == ["openclaw_compat"]
+            assert config.get_agent_tools("test_agent")[:6] == [
+                "shell",
+                "coding",
+                "duckduckgo",
+                "website",
+                "browser",
+                "scheduler",
+            ]
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_manage_agent_validate_accepts_openclaw_preset_tool(self) -> None:
+        """Validate should not flag preset entries as invalid tools."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            config_path = Path(f.name)
+            config = Config(
+                agents={
+                    "test_agent": AgentConfig(
+                        display_name="Test Agent",
+                        role="Test role",
+                        tools=["openclaw_compat", "python"],
+                    ),
+                },
+            )
+            config.save_to_yaml(config_path)
+
+        try:
+            cm = ConfigManagerTools(config_path)
+            result = cm.manage_agent(operation="validate", agent_name="test_agent")
+            assert "Invalid tools" not in result
         finally:
             config_path.unlink(missing_ok=True)
 

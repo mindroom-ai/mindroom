@@ -708,7 +708,6 @@ class TestAgentBot:
         bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._build_scheduling_tool_context = MagicMock(return_value=None)
-        bot._build_openclaw_context = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response")
 
         async def fake_ai_response(*_args: object, **kwargs: object) -> str:
@@ -776,7 +775,6 @@ class TestAgentBot:
         bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._build_scheduling_tool_context = MagicMock(return_value=None)
-        bot._build_openclaw_context = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response")
 
         with (
