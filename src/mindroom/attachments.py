@@ -21,7 +21,7 @@ from .matrix.media import download_media_bytes, media_mime_type
 
 logger = get_logger(__name__)
 
-AttachmentKind = Literal["audio", "file", "video", "image"]
+AttachmentKind = Literal["audio", "file", "video"]
 FileOrVideoEvent = nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo
 _ATTACHMENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$")
 _ATTACHMENT_RETENTION_DAYS = 30
@@ -483,7 +483,7 @@ def load_attachment(storage_path: Path, attachment_id: str) -> AttachmentRecord 
 
     kind = raw_payload.get("kind")
     local_path = raw_payload.get("local_path")
-    if kind not in {"audio", "file", "video", "image"} or not isinstance(local_path, str) or not local_path:
+    if kind not in {"audio", "file", "video"} or not isinstance(local_path, str) or not local_path:
         return None
 
     filename = raw_payload.get("filename")
