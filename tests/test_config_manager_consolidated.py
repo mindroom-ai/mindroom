@@ -623,3 +623,44 @@ class TestGetAgentSandboxTools:
             },
         )
         assert config.get_agent_sandbox_tools("code") == []
+
+    def test_agent_override_expands_sandbox_tool_presets(self) -> None:
+        """Agent-level sandbox presets should expand and dedupe in order."""
+        config = Config(
+            defaults=DefaultsConfig(sandbox_tools=["file"]),
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    sandbox_tools=["openclaw_compat", "python", "shell"],
+                ),
+            },
+        )
+
+        assert config.get_agent_sandbox_tools("code") == [
+            "shell",
+            "coding",
+            "duckduckgo",
+            "website",
+            "browser",
+            "scheduler",
+            "python",
+        ]
+
+    def test_defaults_expand_sandbox_tool_presets(self) -> None:
+        """Default sandbox presets should expand for agents that inherit defaults."""
+        config = Config(
+            defaults=DefaultsConfig(sandbox_tools=["openclaw_compat", "python", "shell"]),
+            agents={
+                "code": AgentConfig(display_name="Code"),
+            },
+        )
+
+        assert config.get_agent_sandbox_tools("code") == [
+            "shell",
+            "coding",
+            "duckduckgo",
+            "website",
+            "browser",
+            "scheduler",
+            "python",
+        ]

@@ -298,16 +298,19 @@ class Config(BaseModel):
         return self.agents[agent_name]
 
     def get_agent_sandbox_tools(self, agent_name: str) -> list[str] | None:
-        """Get the sandbox tool list for an agent, falling back to defaults.
+        """Get effective sandbox tools for an agent, including preset expansion.
 
         Returns:
-            List of tool names to sandbox, or None to defer to env var globals.
+            Ordered tool names with duplicates removed, or None to defer to env var globals.
 
         """
         agent_config = self.get_agent(agent_name)
-        if agent_config.sandbox_tools is not None:
-            return agent_config.sandbox_tools
-        return self.defaults.sandbox_tools
+        configured = agent_config.sandbox_tools
+        if configured is None:
+            configured = self.defaults.sandbox_tools
+        if configured is None:
+            return None
+        return self.expand_tool_names(list(configured))
 
     def get_agent_tools(self, agent_name: str) -> list[str]:
         """Get effective tools for an agent.
