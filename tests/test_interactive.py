@@ -55,6 +55,41 @@ class TestInteractiveFunctions:
 
         assert not interactive.should_create_interactive_question("```python\nprint('hello')\n```")
 
+    def test_parse_interactive_with_prior_fenced_blocks(self) -> None:
+        """Interactive parsing should not be confused by earlier fenced blocks."""
+        response_text = """Here is code:
+
+```python
+print("hello")
+```
+
+And sample JSON:
+
+```json
+{"ok": true}
+```
+
+```interactive
+{
+    "question": "Choose one:",
+    "options": [
+        {"emoji": "1️⃣", "label": "One", "value": "one"}
+    ]
+}
+```
+"""
+
+        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+        formatted_text, option_map, options = response.formatted_text, response.option_map, response.options_list
+
+        assert "Choose one:" in formatted_text
+        assert "1. 1️⃣ One" in formatted_text
+        assert "```interactive" not in formatted_text
+        assert option_map is not None
+        assert options is not None
+        assert option_map["1"] == "one"
+        assert option_map["1️⃣"] == "one"
+
     @pytest.mark.asyncio
     async def test_handle_interactive_response_valid_json(self, mock_client: AsyncMock) -> None:
         """Test creating interactive question from valid JSON."""

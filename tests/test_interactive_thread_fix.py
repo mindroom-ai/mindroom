@@ -10,6 +10,7 @@ threads instead of continuing the existing conversation.
 """
 
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -286,4 +287,90 @@ async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> 
         assert registered_thread_id is not None, (
             "When not in a thread, thread_id should not be None. "
             "It should be the agent's message ID for proper thread creation."
+        )
+
+
+@pytest.mark.asyncio
+async def test_interactive_question_with_existing_event_in_non_streaming(tmp_path: Path) -> None:
+    """Non-streaming edits should still format/register interactive questions."""
+
+    @asynccontextmanager
+    async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
+        yield
+
+    with (
+        patch("mindroom.bot.ai_response") as mock_ai_response,
+        patch("mindroom.bot.typing_indicator", noop_typing_indicator),
+        patch("mindroom.bot.interactive.parse_and_format_interactive") as mock_parse,
+        patch("mindroom.bot.interactive.register_interactive_question") as mock_register,
+        patch("mindroom.bot.interactive.add_reaction_buttons") as mock_add_reactions,
+    ):
+        mock_ai_response.return_value = "Raw response with interactive block"
+
+        mock_response = MagicMock()
+        mock_response.formatted_text = "Formatted response with options"
+        mock_response.option_map = {"1": "ore_walkthrough", "🔄": "ore_walkthrough"}
+        mock_response.options_list = [
+            {
+                "emoji": "🔄",
+                "label": "Convert this circuit to Ore and walk through it",
+                "value": "ore_walkthrough",
+            },
+        ]
+        mock_parse.return_value = mock_response
+
+        config = Config.from_yaml()
+        agent_user = AgentMatrixUser(
+            agent_name="test",
+            user_id="@mindroom_test:localhost",
+            display_name="TestAgent",
+            password="test_password",  # noqa: S106
+        )
+        bot = AgentBot(
+            agent_user=agent_user,
+            storage_path=tmp_path,
+            config=config,
+            rooms=["!test:localhost"],
+        )
+
+        bot.client = AsyncMock()
+        bot.client.user_id = "@mindroom_test:localhost"
+        bot._edit_message = AsyncMock(return_value=True)
+
+        room_id = "!test:localhost"
+        user_message_id = "$user_thread_start"
+        thinking_message_id = "$thinking_message"
+        thread_id = user_message_id
+
+        event_id = await bot._process_and_respond(
+            room_id=room_id,
+            prompt="Test prompt",
+            reply_to_event_id=user_message_id,
+            thread_id=thread_id,
+            thread_history=[],
+            existing_event_id=thinking_message_id,
+        )
+
+        assert event_id == thinking_message_id
+        mock_parse.assert_called_once_with("Raw response with interactive block", extract_mapping=True)
+
+        assert bot._edit_message.await_count == 1
+        edit_call = bot._edit_message.await_args
+        assert edit_call.args[0] == room_id
+        assert edit_call.args[1] == thinking_message_id
+        assert edit_call.args[2] == "Formatted response with options"
+        assert edit_call.args[3] == thread_id
+
+        mock_register.assert_called_once_with(
+            thinking_message_id,
+            room_id,
+            user_message_id,
+            mock_response.option_map,
+            "test",
+        )
+        mock_add_reactions.assert_awaited_once_with(
+            bot.client,
+            room_id,
+            thinking_message_id,
+            mock_response.options_list,
         )

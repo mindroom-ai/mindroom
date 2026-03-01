@@ -195,7 +195,7 @@ async def test_prepare_edit_message() -> None:
     # Should be processed due to edit limit
     # For edits, the structure is different - check for m.new_content
     assert "m.new_content" in result
-    assert result["m.new_content"]["msgtype"] == "m.file"
+    assert result["m.new_content"]["msgtype"] == "m.text"
     assert "io.mindroom.long_text" in result["m.new_content"]
 
     # Body should have preview
