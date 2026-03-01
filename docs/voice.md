@@ -152,10 +152,22 @@ MindRoom also supports text-to-speech (TTS) through agent tools. These are separ
 
 See the [Tools documentation](tools/index.md) for configuration details.
 
+## Voice Fallback (No STT Configured)
+
+When voice is enabled but no STT provider is configured (or transcription fails), MindRoom falls back to raw audio passthrough:
+
+1. The voice message audio is downloaded and saved locally as an attachment
+2. A text fallback `🎤 [Attached voice message]` is sent to the room
+3. The raw audio is registered as an attachment ID available to agents in the thread
+4. When an agent responds in the thread, it automatically receives the raw audio as an Agno `Audio` object
+
+This means voice messages still reach agents even without STT -- agents with audio-capable models can process the raw audio directly.
+
 ## Limitations
 
 - Only OpenAI-compatible STT APIs are supported
 - Audio quality and background noise affect transcription accuracy
+- Without STT, agents receive raw audio instead of transcription -- the model must support audio inputs to process it
 
 ## Tips
 

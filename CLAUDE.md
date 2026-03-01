@@ -50,6 +50,10 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 | `streaming.py` | Response streaming via progressive message edits |
 | `agent_prompts.py` | Rich built-in prompts for named agents (code, research, etc.) |
 | `image_handler.py` | Image message download, decryption, and AI processing |
+| `attachments.py` | Attachment persistence, registration, and context-scoped resolution |
+| `attachment_media.py` | Convert attachment records to Agno media objects |
+| `attachments_context.py` | Runtime ContextVar for attachment tool scope |
+| `matrix/media.py` | Shared Matrix media download and decryption helpers |
 | `api/` | FastAPI REST API (dashboard, credentials, OpenAI-compatible endpoint) |
 | `custom_tools/` | Built-in custom tool implementations (gmail, calendar, scheduler, etc.) |
 | `background_tasks.py` | Background task management for non-blocking operations |
@@ -559,4 +563,3 @@ Write release notes manually describing what changed. Group by features and bug 
 Do what has been asked; nothing more, nothing less.
 NEVER create files unless they're absolutely necessary for achieving your goal.
 ALWAYS prefer editing an existing file to creating a new one.
-NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.

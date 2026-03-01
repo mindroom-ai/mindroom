@@ -98,22 +98,23 @@ mindroom run
 
 ## Features
 
-| Feature                   | Description                                                       |
-| ------------------------- | ----------------------------------------------------------------- |
-| **Agents**                | Single-specialty actors with specific tools and instructions      |
-| **Teams**                 | Collaborative bundles of agents (coordinate or collaborate modes) |
-| **Router**                | Built-in traffic director that routes messages to the right agent |
-| **Memory**                | Mem0-inspired memory system with agent, room, and team scopes     |
-| **Knowledge Bases**       | File-backed RAG indexing with per-agent base assignment           |
-| **Tools**                 | 100+ integrations for external services                           |
-| **Skills**                | OpenClaw-compatible skills system for extended agent capabilities |
-| **Scheduling**            | Schedule tasks with cron expressions or natural language          |
-| **Voice**                 | Speech-to-text transcription for voice messages                   |
-| **Images**                | Pass user-sent images to vision-capable AI models                 |
-| **Cultures**              | Shared evolving principles across groups of agents                |
-| **Authorization**         | Fine-grained user and room access control                         |
-| **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client       |
-| **Hot Reload**            | Config changes are detected and agents restart automatically      |
+| Feature                      | Description                                                       |
+| ---------------------------- | ----------------------------------------------------------------- |
+| **Agents**                   | Single-specialty actors with specific tools and instructions      |
+| **Teams**                    | Collaborative bundles of agents (coordinate or collaborate modes) |
+| **Router**                   | Built-in traffic director that routes messages to the right agent |
+| **Memory**                   | Mem0-inspired memory system with agent, room, and team scopes     |
+| **Knowledge Bases**          | File-backed RAG indexing with per-agent base assignment           |
+| **Tools**                    | 100+ integrations for external services                           |
+| **Skills**                   | OpenClaw-compatible skills system for extended agent capabilities |
+| **Scheduling**               | Schedule tasks with cron expressions or natural language          |
+| **Voice**                    | Speech-to-text transcription for voice messages                   |
+| **Images**                   | Pass user-sent images to vision-capable AI models                 |
+| **File & Video Attachments** | Context-scoped file and video handling with attachment IDs        |
+| **Cultures**                 | Shared evolving principles across groups of agents                |
+| **Authorization**            | Fine-grained user and room access control                         |
+| **OpenAI-Compatible API**    | Use agents from LibreChat, Open WebUI, or any OpenAI client       |
+| **Hot Reload**               | Config changes are detected and agents restart automatically      |
 
 ## Architecture
 
@@ -148,6 +149,7 @@ mindroom run
 - [Scheduling](https://docs.mindroom.chat/scheduling/index.md) - Schedule tasks with cron or natural language
 - [Voice Messages](https://docs.mindroom.chat/voice/index.md) - Voice message transcription
 - [Image Messages](https://docs.mindroom.chat/images/index.md) - Image analysis with vision models
+- [File & Video Attachments](https://docs.mindroom.chat/attachments/index.md) - Context-scoped file and video handling
 - [Authorization](https://docs.mindroom.chat/authorization/index.md) - User and room access control
 - [Architecture](https://docs.mindroom.chat/architecture/index.md) - How it works under the hood
 - [Deployment](https://docs.mindroom.chat/deployment/index.md) - Docker and Kubernetes deployment
