@@ -15,7 +15,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.openclaw_context import OpenClawToolContext, get_openclaw_tool_context
+from mindroom.tool_runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -39,11 +39,12 @@ class TestUserIdPassthrough:
         bot.config = config
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response_id")
-        bot._build_openclaw_context = MagicMock(
-            return_value=OpenClawToolContext(
+        bot._build_tool_runtime_context = MagicMock(
+            return_value=ToolRuntimeContext(
                 agent_name="general",
                 room_id="!test:localhost",
                 thread_id=None,
+                resolved_thread_id=None,
                 requester_id="@alice:localhost",
                 client=bot.client,
                 config=config,
@@ -56,7 +57,7 @@ class TestUserIdPassthrough:
         with patch("mindroom.bot.ai_response") as mock_ai:
 
             async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
-                context = get_openclaw_tool_context()
+                context = get_tool_runtime_context()
                 assert context is not None
                 assert context.room_id == "!test:localhost"
                 assert context.thread_id is None
@@ -94,11 +95,12 @@ class TestUserIdPassthrough:
         bot.storage_path = tmp_path
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._handle_interactive_question = AsyncMock()
-        bot._build_openclaw_context = MagicMock(
-            return_value=OpenClawToolContext(
+        bot._build_tool_runtime_context = MagicMock(
+            return_value=ToolRuntimeContext(
                 agent_name="general",
                 room_id="!test:localhost",
                 thread_id=None,
+                resolved_thread_id=None,
                 requester_id="@bob:localhost",
                 client=bot.client,
                 config=config,
@@ -111,7 +113,7 @@ class TestUserIdPassthrough:
         with patch("mindroom.bot.stream_agent_response") as mock_stream:
 
             def fake_stream_agent_response(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
-                context = get_openclaw_tool_context()
+                context = get_tool_runtime_context()
                 assert context is not None
                 assert context.room_id == "!test:localhost"
                 assert context.thread_id is None

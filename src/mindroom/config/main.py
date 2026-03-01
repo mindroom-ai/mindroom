@@ -316,6 +316,8 @@ class Config(BaseModel):
             for default_tool_name in self.defaults.tools:
                 if default_tool_name not in tool_names:
                     tool_names.append(default_tool_name)
+        if "openclaw_compat" in tool_names and "matrix_message" not in tool_names:
+            tool_names.append("matrix_message")
         return tool_names
 
     def get_agent_memory_backend(self, agent_name: str) -> MemoryBackend:
