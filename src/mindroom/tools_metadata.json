@@ -4312,7 +4312,7 @@
       "dependencies": [
         "agno"
       ],
-      "description": "Spawn, steer, and inspect Matrix session and sub-agent runs across agents",
+      "description": "Spawn and communicate with sub-agent sessions",
       "display_name": "Sub-Agents",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
       "helper_text": null,

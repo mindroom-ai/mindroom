@@ -162,11 +162,20 @@ def _record_session(
         _save_registry(context, registry)
 
 
+def _in_scope(entry: dict[str, Any], context: SessionToolsContext) -> bool:
+    """Check whether a registry entry belongs to the active context scope."""
+    return (
+        entry.get("agent_name") == context.agent_name
+        and entry.get("room_id") == context.room_id
+        and entry.get("requester_id") == context.requester_id
+    )
+
+
 def _resolve_by_label(context: SessionToolsContext, label: str) -> str | None:
     with _REGISTRY_LOCK:
         registry = _load_registry(context)
     for key, entry in registry.items():
-        if isinstance(entry, dict) and entry.get("label") == label:
+        if isinstance(entry, dict) and entry.get("label") == label and _in_scope(entry, context):
             return key
     return None
 
@@ -175,7 +184,7 @@ def _lookup_target_agent(context: SessionToolsContext, session_key: str) -> str 
     with _REGISTRY_LOCK:
         registry = _load_registry(context)
     entry = registry.get(session_key)
-    if isinstance(entry, dict):
+    if isinstance(entry, dict) and _in_scope(entry, context):
         agent = entry.get("target_agent")
         if isinstance(agent, str) and agent:
             return agent
@@ -346,7 +355,11 @@ class SubAgentsTools(Toolkit):
             return _context_error("list_sessions")
 
         registry = await asyncio.to_thread(_load_registry, context)
-        sessions = [{"session_key": key, **entry} for key, entry in registry.items() if isinstance(entry, dict)]
+        sessions = [
+            {"session_key": key, **entry}
+            for key, entry in registry.items()
+            if isinstance(entry, dict) and _in_scope(entry, context)
+        ]
 
         return _payload(
             "list_sessions",

@@ -15,13 +15,12 @@ from agno.tools import Toolkit
 from agno.tools.duckduckgo import DuckDuckGoTools
 from agno.tools.website import WebsiteTools
 
-from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.custom_tools import subagents as _subagents_mod
 from mindroom.custom_tools.coding import CodingTools
 from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.custom_tools.subagents import SubAgentsTools
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import fetch_thread_history, send_message
-from mindroom.matrix.mentions import format_message_with_mentions
+from mindroom.matrix.client import fetch_thread_history
 from mindroom.matrix.message_content import extract_and_resolve_message
 from mindroom.openclaw_context import OpenClawToolContext, get_openclaw_tool_context
 from mindroom.tools_metadata import get_tool_by_name
@@ -176,34 +175,6 @@ class OpenClawCompatTools(Toolkit):
                 os.environ["PATH"] = merged
             cls._login_shell_path_applied = True
 
-    @staticmethod
-    def _tool_enabled_for_agent(context: OpenClawToolContext, tool_name: str) -> bool:
-        agents = getattr(context.config, "agents", None)
-        if not isinstance(agents, dict):
-            return False
-        agent_config = agents.get(context.agent_name)
-        agent_tools = getattr(agent_config, "tools", None)
-        return isinstance(agent_tools, list) and tool_name in agent_tools
-
-    async def _send_matrix_text(
-        self,
-        context: OpenClawToolContext,
-        *,
-        room_id: str,
-        text: str,
-        thread_id: str | None,
-        original_sender: str | None = None,
-    ) -> str | None:
-        content = format_message_with_mentions(
-            context.config,
-            text,
-            sender_domain=context.config.domain,
-            thread_event_id=thread_id,
-        )
-        if original_sender:
-            content[ORIGINAL_SENDER_KEY] = original_sender
-        return await send_message(context.client, room_id, content)
-
     async def _message_send_or_reply(
         self,
         context: OpenClawToolContext,
@@ -218,7 +189,7 @@ class OpenClawCompatTools(Toolkit):
         if action in {"thread-reply", "reply"} and effective_thread_id is None:
             return self._payload("message", "error", action=action, message="thread_id is required for replies.")
 
-        event_id = await self._send_matrix_text(
+        event_id = await _subagents_mod._send_matrix_text(
             context,
             room_id=room_id,
             text=message.strip(),

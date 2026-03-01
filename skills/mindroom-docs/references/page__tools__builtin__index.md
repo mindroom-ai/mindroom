@@ -183,6 +183,7 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | :lucide-sliders-horizontal: | `custom_api`      | Custom API calls                                                                                | Varies          |
 | :lucide-sliders-horizontal: | `config_manager`  | MindRoom configuration management                                                               | -               |
 | :lucide-sliders-horizontal: | `openclaw_compat` | OpenClaw-compatible tool aliases (see [OpenClaw](https://docs.mindroom.chat/openclaw/index.md)) | -               |
+| :lucide-workflow:           | `subagents`       | Spawn and communicate with sub-agent sessions                                                   | -               |
 
 ## Claude Agent Sessions
 

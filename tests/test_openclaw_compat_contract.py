@@ -460,10 +460,14 @@ async def test_openclaw_compat_agents_list_with_runtime_context(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_openclaw_compat_message_send_does_not_force_current_thread(tmp_path: Path) -> None:
+async def test_openclaw_compat_message_send_does_not_force_current_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Verify message send stays room-level unless thread_id is explicitly provided."""
     tool = OpenClawCompatTools()
-    tool._send_matrix_text = AsyncMock(return_value="$evt")
+    send_mock = AsyncMock(return_value="$evt")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
     config = MagicMock()
     config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
     ctx = OpenClawToolContext(
@@ -482,7 +486,7 @@ async def test_openclaw_compat_message_send_does_not_force_current_thread(tmp_pa
     assert payload["status"] == "ok"
     assert payload["tool"] == "message"
     assert payload["thread_id"] is None
-    tool._send_matrix_text.assert_awaited_once_with(
+    send_mock.assert_awaited_once_with(
         ctx,
         room_id="!room:localhost",
         text="hello",
@@ -491,10 +495,14 @@ async def test_openclaw_compat_message_send_does_not_force_current_thread(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_openclaw_compat_message_reply_uses_context_thread(tmp_path: Path) -> None:
+async def test_openclaw_compat_message_reply_uses_context_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Verify replies default to the active context thread when none is passed."""
     tool = OpenClawCompatTools()
-    tool._send_matrix_text = AsyncMock(return_value="$evt")
+    send_mock = AsyncMock(return_value="$evt")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
     config = MagicMock()
     config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
     ctx = OpenClawToolContext(
@@ -513,7 +521,7 @@ async def test_openclaw_compat_message_reply_uses_context_thread(tmp_path: Path)
     assert payload["status"] == "ok"
     assert payload["tool"] == "message"
     assert payload["thread_id"] == "$ctx-thread:localhost"
-    tool._send_matrix_text.assert_awaited_once_with(
+    send_mock.assert_awaited_once_with(
         ctx,
         room_id="!room:localhost",
         text="hello",
@@ -763,10 +771,13 @@ async def test_openclaw_compat_sessions_spawn_rejects_room_mode_target_agent(
 
 
 @pytest.mark.asyncio
-async def test_openclaw_compat_message_send_returns_error_when_matrix_send_fails(tmp_path: Path) -> None:
+async def test_openclaw_compat_message_send_returns_error_when_matrix_send_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Verify message send returns an error payload when Matrix send fails."""
     tool = OpenClawCompatTools()
-    tool._send_matrix_text = AsyncMock(return_value=None)
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", AsyncMock(return_value=None))
     config = MagicMock()
     config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
     ctx = OpenClawToolContext(
@@ -923,3 +934,85 @@ def test_record_session_updates_existing(tmp_path: Path) -> None:
     registry = subagents_module._load_registry(ctx)
     assert registry[session_key]["label"] == "second"
     assert registry[session_key]["target_agent"] == "code"
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_scoped_by_context(tmp_path: Path) -> None:
+    """Verify list_sessions only returns sessions belonging to the active context scope."""
+    tool = OpenClawCompatTools()
+    config = MagicMock()
+    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
+    ctx_a = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room-a:localhost",
+        thread_id="$thread-a:localhost",
+        requester_id="@alice:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+    ctx_b = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room-b:localhost",
+        thread_id="$thread-b:localhost",
+        requester_id="@bob:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+    session_a = create_session_id(ctx_a.room_id, "$child-a:localhost")
+    session_b = create_session_id(ctx_b.room_id, "$child-b:localhost")
+    subagents_module._record_session(ctx_a, session_key=session_a, label="alpha", target_agent="code")
+    subagents_module._record_session(ctx_b, session_key=session_b, label="beta", target_agent="code")
+
+    with openclaw_tool_context(ctx_a):
+        payload_a = json.loads(await call_openclaw_subagent_tool(tool, "list_sessions"))
+    with openclaw_tool_context(ctx_b):
+        payload_b = json.loads(await call_openclaw_subagent_tool(tool, "list_sessions"))
+
+    assert [s["session_key"] for s in payload_a["sessions"]] == [session_a]
+    assert [s["session_key"] for s in payload_b["sessions"]] == [session_b]
+
+
+@pytest.mark.asyncio
+async def test_resolve_by_label_scoped_by_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify label lookup only resolves sessions from the active context scope."""
+    tool = OpenClawCompatTools()
+    send_mock = AsyncMock(return_value="$evt")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    config = MagicMock()
+    config.agents = {"openclaw": SimpleNamespace(tools=["shell"])}
+    ctx_owner = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room-owner:localhost",
+        thread_id="$thread-owner:localhost",
+        requester_id="@alice:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+    ctx_other = OpenClawToolContext(
+        agent_name="openclaw",
+        room_id="!room-other:localhost",
+        thread_id="$thread-other:localhost",
+        requester_id="@bob:localhost",
+        client=MagicMock(),
+        config=config,
+        storage_path=tmp_path,
+    )
+    # Record session under the other context
+    foreign_session = create_session_id(ctx_other.room_id, "$foreign:localhost")
+    subagents_module._record_session(ctx_other, session_key=foreign_session, label="work", target_agent="code")
+
+    # Try to resolve label "work" from the owner context — should NOT find the foreign session
+    with openclaw_tool_context(ctx_owner):
+        payload = json.loads(
+            await call_openclaw_subagent_tool(tool, "sessions_send", message="hello", label="work"),
+        )
+
+    # Should fall back to current session, not the foreign one
+    assert payload["status"] == "ok"
+    assert payload["session_key"] != foreign_session
