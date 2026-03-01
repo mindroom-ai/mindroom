@@ -370,20 +370,30 @@ class OpenClawCompatTools(Toolkit):
         glob: str | None = None,
         ignore_case: bool = False,
         literal: bool = False,
+        context: int = 0,
+        limit: int = 100,
     ) -> str:
         """Search for text patterns in the working tree."""
-        result = self._coding.grep(pattern, path=path, glob=glob, ignore_case=ignore_case, literal=literal)
+        result = self._coding.grep(
+            pattern,
+            path=path,
+            glob=glob,
+            ignore_case=ignore_case,
+            literal=literal,
+            context=context,
+            limit=limit,
+        )
         status = self._coding_status(result)
         return self._payload("grep", status, result=result)
 
-    def find_files(self, pattern: str, path: str | None = None) -> str:
+    def find_files(self, pattern: str, path: str | None = None, limit: int = 1000) -> str:
         """Find files matching a glob pattern."""
-        result = self._coding.find_files(pattern, path=path)
+        result = self._coding.find_files(pattern, path=path, limit=limit)
         status = self._coding_status(result)
         return self._payload("find_files", status, result=result)
 
-    def ls(self, path: str | None = None) -> str:
+    def ls(self, path: str | None = None, limit: int = 500) -> str:
         """List directory contents."""
-        result = self._coding.ls(path)
+        result = self._coding.ls(path, limit=limit)
         status = self._coding_status(result)
         return self._payload("ls", status, result=result)
