@@ -694,6 +694,173 @@ class TestAgentBot:
             assert bot.client.room_send.call_count >= 2
 
     @pytest.mark.asyncio
+    async def test_process_and_respond_includes_matrix_metadata_when_tool_enabled(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Agents with matrix_message should receive room/thread/event ids in the model prompt."""
+
+        @asynccontextmanager
+        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
+            yield
+
+        config = Config(
+            agents={
+                "calculator": AgentConfig(
+                    display_name="CalculatorAgent",
+                    rooms=["!test:localhost"],
+                    tools=["matrix_message"],
+                ),
+            },
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot.client = AsyncMock()
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._send_response = AsyncMock(return_value="$response")
+
+        with (
+            patch("mindroom.bot.typing_indicator", noop_typing_indicator),
+            patch("mindroom.bot.ai_response", new_callable=AsyncMock) as mock_ai,
+        ):
+            mock_ai.return_value = "Handled"
+            event_id = await bot._process_and_respond(
+                room_id="!test:localhost",
+                prompt="Please send an update",
+                reply_to_event_id="$event123",
+                thread_id=None,
+                thread_history=[],
+                user_id="@user:localhost",
+            )
+
+        assert event_id == "$response"
+        model_prompt = mock_ai.call_args.kwargs["prompt"]
+        assert "[Matrix metadata for tool calls]" in model_prompt
+        assert "room_id: !test:localhost" in model_prompt
+        assert "thread_id: $event123" in model_prompt
+        assert "reply_to_event_id: $event123" in model_prompt
+
+    @pytest.mark.asyncio
+    async def test_process_and_respond_includes_matrix_metadata_when_openclaw_compat_enabled(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """openclaw_compat agents should receive room/thread/event ids in the model prompt."""
+
+        @asynccontextmanager
+        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
+            yield
+
+        config = Config(
+            agents={
+                "calculator": AgentConfig(
+                    display_name="CalculatorAgent",
+                    rooms=["!test:localhost"],
+                    tools=["openclaw_compat"],
+                    include_default_tools=False,
+                ),
+            },
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot.client = AsyncMock()
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._send_response = AsyncMock(return_value="$response")
+
+        with (
+            patch("mindroom.bot.typing_indicator", noop_typing_indicator),
+            patch("mindroom.bot.ai_response", new_callable=AsyncMock) as mock_ai,
+        ):
+            mock_ai.return_value = "Handled"
+            event_id = await bot._process_and_respond(
+                room_id="!test:localhost",
+                prompt="Please send an update",
+                reply_to_event_id="$event123",
+                thread_id=None,
+                thread_history=[],
+                user_id="@user:localhost",
+            )
+
+        assert event_id == "$response"
+        model_prompt = mock_ai.call_args.kwargs["prompt"]
+        assert "[Matrix metadata for tool calls]" in model_prompt
+        assert "room_id: !test:localhost" in model_prompt
+        assert "thread_id: $event123" in model_prompt
+        assert "reply_to_event_id: $event123" in model_prompt
+
+    @pytest.mark.asyncio
+    async def test_process_and_respond_streaming_includes_matrix_metadata_when_tool_enabled(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Streaming path should inject Matrix ids for agents with matrix messaging tools."""
+
+        @asynccontextmanager
+        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
+            yield
+
+        async def mock_streaming_response() -> AsyncGenerator[str, None]:
+            yield "chunk"
+
+        config = Config(
+            agents={
+                "calculator": AgentConfig(
+                    display_name="CalculatorAgent",
+                    rooms=["!test:localhost"],
+                    tools=["matrix_message"],
+                ),
+            },
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot.client = AsyncMock()
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._handle_interactive_question = AsyncMock()
+
+        with (
+            patch("mindroom.bot.typing_indicator", noop_typing_indicator),
+            patch("mindroom.bot.stream_agent_response", new_callable=AsyncMock) as mock_stream_agent_response,
+            patch("mindroom.bot.send_streaming_response", new_callable=AsyncMock) as mock_send_streaming_response,
+        ):
+            mock_stream_agent_response.return_value = mock_streaming_response()
+            mock_send_streaming_response.return_value = ("$response", "chunk")
+            event_id = await bot._process_and_respond_streaming(
+                room_id="!test:localhost",
+                prompt="Please reply in thread",
+                reply_to_event_id="$event456",
+                thread_id=None,
+                thread_history=[],
+                user_id="@user:localhost",
+            )
+
+        assert event_id == "$response"
+        model_prompt = mock_stream_agent_response.call_args.kwargs["prompt"]
+        assert "[Matrix metadata for tool calls]" in model_prompt
+        assert "room_id: !test:localhost" in model_prompt
+        assert "thread_id: $event456" in model_prompt
+        assert "reply_to_event_id: $event456" in model_prompt
+
+    def test_agent_has_matrix_messaging_tool_when_openclaw_compat_enabled(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """openclaw_compat should imply matrix_message availability without explicit config."""
+        config = Config(
+            agents={
+                "calculator": AgentConfig(
+                    display_name="CalculatorAgent",
+                    rooms=["!test:localhost"],
+                    tools=["openclaw_compat"],
+                    include_default_tools=False,
+                ),
+            },
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+
+        assert bot._agent_has_matrix_messaging_tool("calculator") is True
+
+    @pytest.mark.asyncio
     async def test_non_streaming_hidden_tool_calls_do_not_send_tool_trace(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -717,8 +884,6 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
-        bot._build_scheduling_tool_context = MagicMock(return_value=None)
-        bot._build_openclaw_context = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response")
 
         async def fake_ai_response(*_args: object, **kwargs: object) -> str:
@@ -785,8 +950,6 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
-        bot._build_scheduling_tool_context = MagicMock(return_value=None)
-        bot._build_openclaw_context = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response")
 
         with (
@@ -827,12 +990,12 @@ class TestAgentBot:
         # Should not send any response
         bot.client.room_send.assert_not_called()
 
-    def test_build_scheduling_tool_context_uses_active_client_when_room_cached(
+    def test_build_tool_runtime_context_populates_room_when_cached(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Scheduler context should use the active bot client when room cache is present."""
+        """Runtime context should include the room object when the client cache has it."""
         config = Config(
             agents={
                 "calculator": AgentConfig(
@@ -848,7 +1011,7 @@ class TestAgentBot:
         bot.client = MagicMock(rooms={room_id: local_room})
         bot.orchestrator = MagicMock()
 
-        context = bot._build_scheduling_tool_context(
+        context = bot._build_tool_runtime_context(
             room_id=room_id,
             thread_id="$thread",
             reply_to_event_id="$event",
@@ -861,12 +1024,12 @@ class TestAgentBot:
         assert context.thread_id == "$thread"
         assert context.requester_id == "@user:localhost"
 
-    def test_build_scheduling_tool_context_returns_none_when_room_not_cached(
+    def test_build_tool_runtime_context_room_none_when_not_cached(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Scheduler context should be skipped when active client has no room cache entry."""
+        """Runtime context should have room=None when the client has no cache entry."""
         config = Config(
             agents={
                 "calculator": AgentConfig(
@@ -880,21 +1043,22 @@ class TestAgentBot:
         bot.client = MagicMock(rooms={})
         bot.orchestrator = MagicMock()
 
-        context = bot._build_scheduling_tool_context(
+        context = bot._build_tool_runtime_context(
             room_id=room_id,
             thread_id="$thread",
             reply_to_event_id="$event",
             user_id="@user:localhost",
         )
 
-        assert context is None
+        assert context is not None
+        assert context.room is None
 
-    def test_build_scheduling_tool_context_returns_none_when_client_unavailable(
+    def test_build_tool_runtime_context_returns_none_when_client_unavailable(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Scheduler context should be skipped when no Matrix client is available."""
+        """Runtime context should be None when no Matrix client is available."""
         config = Config(
             agents={
                 "calculator": AgentConfig(
@@ -906,7 +1070,7 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = None
 
-        context = bot._build_scheduling_tool_context(
+        context = bot._build_tool_runtime_context(
             room_id="!test:localhost",
             thread_id="$thread",
             reply_to_event_id="$event",

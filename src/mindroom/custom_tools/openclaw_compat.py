@@ -14,7 +14,6 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-import nio
 from agno.tools import Toolkit
 from agno.tools.duckduckgo import DuckDuckGoTools
 from agno.tools.website import WebsiteTools
@@ -24,9 +23,8 @@ from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import fetch_thread_history, send_message
 from mindroom.matrix.mentions import format_message_with_mentions
-from mindroom.matrix.message_content import extract_and_resolve_message
-from mindroom.openclaw_context import OpenClawToolContext, get_openclaw_tool_context
 from mindroom.thread_utils import create_session_id
+from mindroom.tool_runtime_context import ToolRuntimeContext, get_tool_runtime_context
 from mindroom.tools_metadata import get_tool_by_name
 
 if TYPE_CHECKING:
@@ -64,7 +62,6 @@ class OpenClawCompatTools(Toolkit):
                 self.sessions_send,
                 self.sessions_spawn,
                 self.subagents,
-                self.message,
                 self.cron,
                 self.web_search,
                 self.web_fetch,
@@ -104,6 +101,19 @@ class OpenClawCompatTools(Toolkit):
             "error",
             message="OpenClaw tool context is unavailable in this runtime path.",
         )
+
+    @staticmethod
+    def _context() -> ToolRuntimeContext | None:
+        context = get_tool_runtime_context()
+        if context is None or context.storage_path is None:
+            return None
+        return context
+
+    @staticmethod
+    def _storage_path(context: ToolRuntimeContext) -> Path:
+        storage_path = context.storage_path
+        assert storage_path is not None
+        return storage_path
 
     @classmethod
     def _coding_status(cls, result: str) -> str:
@@ -194,11 +204,11 @@ class OpenClawCompatTools(Toolkit):
             cls._login_shell_path_applied = True
 
     @staticmethod
-    def _registry_path(context: OpenClawToolContext) -> Path:
-        return context.storage_path / "openclaw" / "session_registry.json"
+    def _registry_path(context: ToolRuntimeContext) -> Path:
+        return OpenClawCompatTools._storage_path(context) / "openclaw" / "session_registry.json"
 
     @classmethod
-    def _load_registry(cls, context: OpenClawToolContext) -> dict[str, Any]:
+    def _load_registry(cls, context: ToolRuntimeContext) -> dict[str, Any]:
         path = cls._registry_path(context)
         if not path.is_file():
             return {"sessions": {}, "runs": {}}
@@ -220,7 +230,7 @@ class OpenClawCompatTools(Toolkit):
         return {"sessions": sessions, "runs": runs}
 
     @classmethod
-    def _save_registry(cls, context: OpenClawToolContext, registry: dict[str, Any]) -> None:
+    def _save_registry(cls, context: ToolRuntimeContext, registry: dict[str, Any]) -> None:
         path = cls._registry_path(context)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_suffix(".tmp")
@@ -230,7 +240,7 @@ class OpenClawCompatTools(Toolkit):
     @classmethod
     def _touch_session(
         cls,
-        context: OpenClawToolContext,
+        context: ToolRuntimeContext,
         *,
         session_key: str,
         kind: str,
@@ -288,7 +298,7 @@ class OpenClawCompatTools(Toolkit):
     @classmethod
     def _track_run(
         cls,
-        context: OpenClawToolContext,
+        context: ToolRuntimeContext,
         *,
         run_id: str,
         session_key: str,
@@ -325,7 +335,7 @@ class OpenClawCompatTools(Toolkit):
             return run_payload
 
     @classmethod
-    def _update_run_status(cls, context: OpenClawToolContext, run_id: str, status: str) -> dict[str, Any] | None:
+    def _update_run_status(cls, context: ToolRuntimeContext, run_id: str, status: str) -> dict[str, Any] | None:
         with cls._registry_lock:
             registry = cls._load_registry(context)
             run = registry["runs"].get(run_id)
@@ -340,7 +350,7 @@ class OpenClawCompatTools(Toolkit):
             return run
 
     @classmethod
-    def _update_all_runs_status(cls, context: OpenClawToolContext, status: str) -> list[str]:
+    def _update_all_runs_status(cls, context: ToolRuntimeContext, status: str) -> list[str]:
         with cls._registry_lock:
             registry = cls._load_registry(context)
             runs = registry.get("runs")
@@ -367,7 +377,7 @@ class OpenClawCompatTools(Toolkit):
             return updated
 
     @classmethod
-    def _list_runs(cls, context: OpenClawToolContext) -> list[dict[str, Any]]:
+    def _list_runs(cls, context: ToolRuntimeContext) -> list[dict[str, Any]]:
         with cls._registry_lock:
             registry = cls._load_registry(context)
             runs = registry.get("runs", {})
@@ -448,7 +458,7 @@ class OpenClawCompatTools(Toolkit):
         return numeric / 1000.0 if numeric > 1_000_000_000_000 else numeric
 
     @staticmethod
-    def _session_in_scope(session: dict[str, Any], context: OpenClawToolContext) -> bool:
+    def _session_in_scope(session: dict[str, Any], context: ToolRuntimeContext) -> bool:
         return (
             session.get("agent_name") == context.agent_name
             and session.get("room_id") == context.room_id
@@ -456,7 +466,7 @@ class OpenClawCompatTools(Toolkit):
         )
 
     @staticmethod
-    def _run_in_scope(run: dict[str, Any], context: OpenClawToolContext) -> bool:
+    def _run_in_scope(run: dict[str, Any], context: ToolRuntimeContext) -> bool:
         return (
             run.get("agent_name") == context.agent_name
             and run.get("room_id") == context.room_id
@@ -464,7 +474,7 @@ class OpenClawCompatTools(Toolkit):
         )
 
     @classmethod
-    def _registry_sessions(cls, context: OpenClawToolContext) -> list[dict[str, Any]]:
+    def _registry_sessions(cls, context: ToolRuntimeContext) -> list[dict[str, Any]]:
         with cls._registry_lock:
             registry = cls._load_registry(context)
         sessions = registry.get("sessions", {})
@@ -520,8 +530,8 @@ class OpenClawCompatTools(Toolkit):
             for session in sessions
         ]
 
-    def _read_agent_sessions(self, context: OpenClawToolContext) -> list[dict[str, Any]]:
-        db_path = context.storage_path / "sessions" / f"{context.agent_name}.db"
+    def _read_agent_sessions(self, context: ToolRuntimeContext) -> list[dict[str, Any]]:
+        db_path = self._storage_path(context) / "sessions" / f"{context.agent_name}.db"
         if not db_path.is_file():
             return []
 
@@ -560,7 +570,7 @@ class OpenClawCompatTools(Toolkit):
 
     async def _send_matrix_text(
         self,
-        context: OpenClawToolContext,
+        context: ToolRuntimeContext,
         *,
         room_id: str,
         text: str,
@@ -576,7 +586,7 @@ class OpenClawCompatTools(Toolkit):
 
     async def agents_list(self) -> str:
         """List agent ids available for `sessions_spawn` targeting."""
-        context = get_openclaw_tool_context()
+        context = self._context()
         if context is None:
             return self._context_error("agents_list")
 
@@ -593,7 +603,7 @@ class OpenClawCompatTools(Toolkit):
         model: str | None = None,
     ) -> str:
         """Show status information for a session and optional model override."""
-        context = get_openclaw_tool_context()
+        context = self._context()
         if context is None:
             return self._context_error("session_status")
 
@@ -628,7 +638,7 @@ class OpenClawCompatTools(Toolkit):
         message_limit: int | None = None,
     ) -> str:
         """List sessions with optional filters and message previews."""
-        context = get_openclaw_tool_context()
+        context = self._context()
         if context is None:
             return self._context_error("sessions_list")
 
@@ -659,7 +669,7 @@ class OpenClawCompatTools(Toolkit):
         include_tools: bool = False,
     ) -> str:
         """Fetch transcript history for one session."""
-        context = get_openclaw_tool_context()
+        context = self._context()
         if context is None:
             return self._context_error("sessions_history")
 
@@ -671,7 +681,7 @@ class OpenClawCompatTools(Toolkit):
             if not matching:
                 return []
 
-            db_path = context.storage_path / "sessions" / f"{context.agent_name}.db"
+            db_path = self._storage_path(context) / "sessions" / f"{context.agent_name}.db"
             with sqlite3.connect(db_path) as conn:
                 try:
                     row = conn.execute(self._session_runs_query(context.agent_name), (session_key,)).fetchone()
@@ -740,10 +750,10 @@ class OpenClawCompatTools(Toolkit):
         timeout_seconds: int | None = None,
     ) -> str:
         """Send a message to another session."""
-        context = get_openclaw_tool_context()
+        context = self._context()
         if context is None:
             return self._context_error("sessions_send")
-        active_context: OpenClawToolContext = context
+        active_context: ToolRuntimeContext = context
 
         if not message.strip():
             return self._payload("sessions_send", "error", message="Message cannot be empty.")
@@ -828,7 +838,7 @@ class OpenClawCompatTools(Toolkit):
         cleanup: str | None = None,
     ) -> str:
         """Spawn an isolated background session."""
-        context = get_openclaw_tool_context()
+        context = self._context()
         if context is None:
             return self._context_error("sessions_spawn")
 
@@ -891,14 +901,14 @@ class OpenClawCompatTools(Toolkit):
             run=run_info,
         )
 
-    async def _subagents_list_payload(self, context: OpenClawToolContext, recent_minutes: int | None) -> str:
+    async def _subagents_list_payload(self, context: ToolRuntimeContext, recent_minutes: int | None) -> str:
         runs = await asyncio.to_thread(self._list_runs, context)
         cutoff_epoch = self._minutes_cutoff(recent_minutes)
         if cutoff_epoch is not None:
             runs = [run for run in runs if int(run.get("updated_at_epoch", 0)) >= cutoff_epoch]
         return self._payload("subagents", "ok", action="list", runs=runs)
 
-    async def _subagents_kill_payload(self, context: OpenClawToolContext, target: str | None) -> str:
+    async def _subagents_kill_payload(self, context: ToolRuntimeContext, target: str | None) -> str:
         if target is None:
             return self._payload("subagents", "error", action="kill", message="Target run_id is required.")
 
@@ -913,7 +923,7 @@ class OpenClawCompatTools(Toolkit):
 
     async def _subagents_steer_payload(
         self,
-        context: OpenClawToolContext,
+        context: ToolRuntimeContext,
         target: str | None,
         message: str | None,
     ) -> str:
@@ -967,7 +977,7 @@ class OpenClawCompatTools(Toolkit):
         recent_minutes: int | None = None,
     ) -> str:
         """Inspect or control spawned sub-agent runs."""
-        context = get_openclaw_tool_context()
+        context = self._context()
         if context is None:
             return self._context_error("subagents")
 
@@ -984,201 +994,6 @@ class OpenClawCompatTools(Toolkit):
             "error",
             action=action,
             message="Unsupported action. Use list, kill, or steer.",
-        )
-
-    async def _message_send_or_reply(
-        self,
-        context: OpenClawToolContext,
-        *,
-        action: str,
-        message: str | None,
-        room_id: str,
-        effective_thread_id: str | None,
-    ) -> str:
-        text_body = message.strip() if isinstance(message, str) else ""
-        if not text_body:
-            return self._payload(
-                "message",
-                "error",
-                action=action,
-                message="Message cannot be empty.",
-            )
-        if action in {"thread-reply", "reply"} and effective_thread_id is None:
-            return self._payload("message", "error", action=action, message="thread_id is required for replies.")
-
-        text_event_id: str | None = None
-        if text_body:
-            text_event_id = await self._send_matrix_text(
-                context,
-                room_id=room_id,
-                text=text_body,
-                thread_id=effective_thread_id,
-            )
-            if text_event_id is None:
-                return self._payload(
-                    "message",
-                    "error",
-                    action=action,
-                    room_id=room_id,
-                    message="Failed to send message to Matrix.",
-                )
-
-        return self._payload(
-            "message",
-            "ok",
-            action=action,
-            room_id=room_id,
-            thread_id=effective_thread_id,
-            event_id=text_event_id,
-        )
-
-    async def _message_react(
-        self,
-        context: OpenClawToolContext,
-        *,
-        message: str | None,
-        room_id: str,
-        target: str | None,
-    ) -> str:
-        if target is None:
-            return self._payload("message", "error", action="react", message="target event_id is required.")
-
-        reaction = message.strip() if message and message.strip() else "👍"
-        content = {
-            "m.relates_to": {
-                "rel_type": "m.annotation",
-                "event_id": target,
-                "key": reaction,
-            },
-        }
-        response = await context.client.room_send(
-            room_id=room_id,
-            message_type="m.reaction",
-            content=content,
-        )
-        if isinstance(response, nio.RoomSendResponse):
-            return self._payload(
-                "message",
-                "ok",
-                action="react",
-                room_id=room_id,
-                target=target,
-                reaction=reaction,
-                event_id=response.event_id,
-            )
-        return self._payload(
-            "message",
-            "error",
-            action="react",
-            room_id=room_id,
-            target=target,
-            reaction=reaction,
-            response=str(response),
-        )
-
-    async def _message_read(
-        self,
-        context: OpenClawToolContext,
-        *,
-        room_id: str,
-        effective_thread_id: str | None,
-    ) -> str:
-        read_limit = 20
-        if effective_thread_id is not None:
-            thread_messages = await fetch_thread_history(context.client, room_id, effective_thread_id)
-            return self._payload(
-                "message",
-                "ok",
-                action="read",
-                room_id=room_id,
-                thread_id=effective_thread_id,
-                messages=thread_messages[-read_limit:],
-            )
-
-        response = await context.client.room_messages(
-            room_id,
-            limit=read_limit,
-            direction=nio.MessageDirection.back,
-            message_filter={"types": ["m.room.message"]},
-        )
-        if not isinstance(response, nio.RoomMessagesResponse):
-            return self._payload(
-                "message",
-                "error",
-                action="read",
-                room_id=room_id,
-                response=str(response),
-            )
-
-        resolved = [
-            await extract_and_resolve_message(event, context.client)
-            for event in reversed(response.chunk)
-            if isinstance(event, nio.RoomMessageText)
-        ]
-        return self._payload(
-            "message",
-            "ok",
-            action="read",
-            room_id=room_id,
-            messages=resolved,
-        )
-
-    async def message(
-        self,
-        action: str = "send",
-        message: str | None = None,
-        attachments: list[str] | None = None,
-        channel: str | None = None,
-        target: str | None = None,
-        thread_id: str | None = None,
-    ) -> str:
-        """Send or manage cross-channel messages."""
-        context = get_openclaw_tool_context()
-        if context is None:
-            return self._context_error("message")
-
-        normalized_action = action.strip().lower()
-        room_id = channel or context.room_id
-
-        if normalized_action in {"send", "thread-reply", "reply"}:
-            if attachments:
-                return self._payload(
-                    "message",
-                    "error",
-                    action=normalized_action,
-                    message=(
-                        "Attachments are not supported via openclaw_compat message. Use the attachments tool directly."
-                    ),
-                )
-            effective_thread_id = thread_id
-            if normalized_action in {"thread-reply", "reply"} and effective_thread_id is None:
-                effective_thread_id = context.thread_id
-            return await self._message_send_or_reply(
-                context,
-                action=normalized_action,
-                message=message,
-                room_id=room_id,
-                effective_thread_id=effective_thread_id,
-            )
-        if normalized_action == "react":
-            return await self._message_react(
-                context,
-                message=message,
-                room_id=room_id,
-                target=target,
-            )
-        if normalized_action == "read":
-            return await self._message_read(
-                context,
-                room_id=room_id,
-                effective_thread_id=thread_id or context.thread_id,
-            )
-
-        return self._payload(
-            "message",
-            "error",
-            action=action,
-            message="Unsupported action. Use send, thread-reply, react, or read.",
         )
 
     async def cron(self, request: str) -> str:

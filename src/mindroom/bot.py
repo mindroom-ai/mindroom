@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
@@ -81,14 +82,12 @@ from .memory.auto_flush import (
     mark_auto_flush_dirty_session,
     reprioritize_auto_flush_sessions,
 )
-from .openclaw_context import OpenClawToolContext, openclaw_tool_context
 from .response_tracker import ResponseTracker
 from .room_cleanup import cleanup_all_orphaned_bots
 from .routing import suggest_agent_for_message
 from .scheduling import (
     restore_scheduled_tasks,
 )
-from .scheduling_context import SchedulingToolContext, scheduling_tool_context
 from .stop import StopManager
 from .streaming import (
     IN_PROGRESS_MARKER,
@@ -115,6 +114,7 @@ from .thread_utils import (
     has_user_responded_after_message,
     should_agent_respond,
 )
+from .tool_runtime_context import ToolRuntimeContext, tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -287,6 +287,8 @@ class _DispatchPayload:
 @dataclass
 class AgentBot:
     """Represents a single agent bot with its own Matrix account."""
+
+    _MATRIX_PROMPT_CONTEXT_MARKER = "[Matrix metadata for tool calls]"
 
     agent_user: AgentMatrixUser
     storage_path: Path
@@ -1449,54 +1451,38 @@ class AgentBot:
             has_non_agent_mentions=has_non_agent_mentions,
         )
 
-    def _build_scheduling_tool_context(
-        self,
-        room_id: str,
-        thread_id: str | None,
-        reply_to_event_id: str,
-        user_id: str | None,
-    ) -> SchedulingToolContext | None:
-        """Build runtime context for scheduler tool calls during response generation."""
+    def _cached_room(self, room_id: str) -> nio.MatrixRoom | None:
+        """Return room from client cache when available."""
         client = self.client
         if client is None:
-            self.logger.warning("No Matrix client available for scheduling tool context")
             return None
-
-        room = client.rooms.get(room_id)
-        if room is None:
-            self.logger.warning(
-                "Skipping scheduler tool context because room is not cached",
-                room_id=room_id,
-            )
+        rooms = getattr(client, "rooms", None)
+        if not isinstance(rooms, Mapping):
             return None
+        return rooms.get(room_id)
 
-        return SchedulingToolContext(
-            client=client,
-            room=room,
-            room_id=room_id,
-            thread_id=self._resolve_reply_thread_id(thread_id, reply_to_event_id),
-            requester_id=user_id or self.matrix_id.full_id,
-            config=self.config,
-        )
-
-    def _build_openclaw_context(
+    def _build_tool_runtime_context(
         self,
         room_id: str,
         thread_id: str | None,
+        reply_to_event_id: str | None,
         user_id: str | None,
         *,
         agent_name: str | None = None,
-    ) -> OpenClawToolContext | None:
-        """Build runtime context for OpenClaw-compatible tool calls."""
+    ) -> ToolRuntimeContext | None:
+        """Build shared runtime context for all tool calls."""
         if self.client is None:
             return None
-        return OpenClawToolContext(
+        return ToolRuntimeContext(
             agent_name=agent_name or self.agent_name,
             room_id=room_id,
             thread_id=thread_id,
+            resolved_thread_id=self._resolve_reply_thread_id(thread_id, reply_to_event_id),
             requester_id=user_id or self.matrix_id.full_id,
             client=self.client,
             config=self.config,
+            room=self._cached_room(room_id),
+            reply_to_event_id=reply_to_event_id,
             storage_path=self.storage_path,
         )
 
@@ -1521,31 +1507,42 @@ class AgentBot:
             attachment_ids=tuple(attachment_ids or []),
         )
 
-    def _build_runtime_tool_contexts(
+    def _agent_has_matrix_messaging_tool(self, agent_name: str) -> bool:
+        """Return whether an agent can issue Matrix message actions."""
+        try:
+            tool_names = self.config.get_agent_tools(agent_name)
+        except ValueError:
+            return False
+        if not isinstance(tool_names, list | tuple | set):
+            return False
+        return "matrix_message" in tool_names
+
+    def _append_matrix_prompt_context(
         self,
+        prompt: str,
+        *,
         room_id: str,
         thread_id: str | None,
-        user_id: str | None,
-        *,
-        reply_to_event_id: str | None = None,
-        agent_name: str | None = None,
-        attachment_ids: list[str] | None = None,
-    ) -> tuple[OpenClawToolContext | None, AttachmentToolContext | None]:
-        """Build OpenClaw and attachment tool contexts from the same message inputs."""
-        openclaw_context = self._build_openclaw_context(
-            room_id,
-            thread_id,
-            user_id,
-            agent_name=agent_name,
+        reply_to_event_id: str | None,
+        include_context: bool,
+    ) -> str:
+        """Append room/thread/event ids to the LLM prompt when messaging tools are available."""
+        if not include_context:
+            return prompt
+        if self._MATRIX_PROMPT_CONTEXT_MARKER in prompt:
+            return prompt
+
+        effective_thread_id = self._resolve_reply_thread_id(thread_id, reply_to_event_id)
+        metadata_block = "\n".join(
+            (
+                self._MATRIX_PROMPT_CONTEXT_MARKER,
+                f"room_id: {room_id}",
+                f"thread_id: {effective_thread_id or 'none'}",
+                f"reply_to_event_id: {reply_to_event_id or 'none'}",
+                "Use these IDs when calling matrix_message.",
+            ),
         )
-        attachment_context = self._build_attachment_tool_context(
-            room_id,
-            thread_id,
-            user_id,
-            reply_to_event_id=reply_to_event_id,
-            attachment_ids=attachment_ids,
-        )
-        return openclaw_context, attachment_context
+        return f"{prompt.rstrip()}\n\n{metadata_block}"
 
     async def _generate_team_response_helper(
         self,
@@ -1582,18 +1579,25 @@ class AgentBot:
 
         # Convert MatrixID list to agent names for non-streaming APIs
         agent_names = [mid.agent_name(self.config) or mid.username for mid in team_agents]
-        scheduler_context = self._build_scheduling_tool_context(
+        include_matrix_prompt_context = any(self._agent_has_matrix_messaging_tool(name) for name in agent_names)
+        model_message = self._append_matrix_prompt_context(
+            payload.prompt,
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+            include_context=include_matrix_prompt_context,
+        )
+        tool_context = self._build_tool_runtime_context(
             room_id=room_id,
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             user_id=requester_user_id,
         )
-        openclaw_context, attachment_context = self._build_runtime_tool_contexts(
-            room_id,
-            thread_id,
-            requester_user_id,
+        attachment_context = self._build_attachment_tool_context(
+            room_id=room_id,
+            thread_id=thread_id,
+            user_id=requester_user_id,
             reply_to_event_id=reply_to_event_id,
-            agent_name=self.agent_name,
             attachment_ids=payload.attachment_ids,
         )
         orchestrator = self.orchestrator
@@ -1608,14 +1612,10 @@ class AgentBot:
             if use_streaming and not existing_event_id:
                 # Show typing indicator while team generates streaming response
                 async with typing_indicator(client, room_id):
-                    with (
-                        scheduling_tool_context(scheduler_context),
-                        openclaw_tool_context(openclaw_context),
-                        attachment_tool_context(attachment_context),
-                    ):
+                    with tool_runtime_context(tool_context), attachment_tool_context(attachment_context):
                         response_stream = team_response_stream(
                             agent_ids=team_agents,
-                            message=payload.prompt,
+                            message=model_message,
                             orchestrator=orchestrator,
                             mode=mode,
                             thread_history=thread_history,
@@ -1651,15 +1651,11 @@ class AgentBot:
             else:
                 # Show typing indicator while team generates non-streaming response
                 async with typing_indicator(client, room_id):
-                    with (
-                        scheduling_tool_context(scheduler_context),
-                        openclaw_tool_context(openclaw_context),
-                        attachment_tool_context(attachment_context),
-                    ):
+                    with tool_runtime_context(tool_context), attachment_tool_context(attachment_context):
                         response_text = await team_response(
                             agent_names=agent_names,
                             mode=mode,
-                            message=payload.prompt,
+                            message=model_message,
                             orchestrator=orchestrator,
                             thread_history=thread_history,
                             model_name=model_name,
@@ -1825,18 +1821,24 @@ class AgentBot:
         media_inputs = media or MediaInputs()
         session_id = create_session_id(room_id, thread_id)
         knowledge = self._knowledge_for_agent(self.agent_name)
-        scheduler_context = self._build_scheduling_tool_context(
+        model_prompt = self._append_matrix_prompt_context(
+            prompt,
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+            include_context=self._agent_has_matrix_messaging_tool(self.agent_name),
+        )
+        tool_context = self._build_tool_runtime_context(
             room_id=room_id,
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
         )
-        openclaw_context, attachment_context = self._build_runtime_tool_contexts(
-            room_id,
-            thread_id,
-            user_id,
+        attachment_context = self._build_attachment_tool_context(
+            room_id=room_id,
+            thread_id=thread_id,
+            user_id=user_id,
             reply_to_event_id=reply_to_event_id,
-            agent_name=self.agent_name,
             attachment_ids=attachment_ids,
         )
         tool_trace: list[ToolTraceEntry] = []
@@ -1845,14 +1847,10 @@ class AgentBot:
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
-                with (
-                    scheduling_tool_context(scheduler_context),
-                    openclaw_tool_context(openclaw_context),
-                    attachment_tool_context(attachment_context),
-                ):
+                with tool_runtime_context(tool_context), attachment_tool_context(attachment_context):
                     response_text = await ai_response(
                         agent_name=self.agent_name,
-                        prompt=prompt,
+                        prompt=model_prompt,
                         session_id=session_id,
                         storage_path=self.storage_path,
                         config=self.config,
@@ -1940,32 +1938,35 @@ class AgentBot:
             active_session_id=session_id,
         )
         knowledge = self._knowledge_for_agent(agent_name)
-        scheduler_context = self._build_scheduling_tool_context(
+        model_prompt = self._append_matrix_prompt_context(
+            prompt,
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+            include_context=self._agent_has_matrix_messaging_tool(agent_name),
+        )
+        tool_context = self._build_tool_runtime_context(
             room_id=room_id,
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
-        )
-        openclaw_context, attachment_context = self._build_runtime_tool_contexts(
-            room_id,
-            thread_id,
-            user_id,
-            reply_to_event_id=reply_to_event_id,
             agent_name=agent_name,
+        )
+        attachment_context = self._build_attachment_tool_context(
+            room_id=room_id,
+            thread_id=thread_id,
+            user_id=user_id,
+            reply_to_event_id=reply_to_event_id,
         )
         show_tool_calls = self._show_tool_calls_for_agent(agent_name)
         tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
 
         async with typing_indicator(self.client, room_id):
-            with (
-                scheduling_tool_context(scheduler_context),
-                openclaw_tool_context(openclaw_context),
-                attachment_tool_context(attachment_context),
-            ):
+            with tool_runtime_context(tool_context), attachment_tool_context(attachment_context):
                 response_text = await ai_response(
                     agent_name=agent_name,
-                    prompt=prompt,
+                    prompt=model_prompt,
                     session_id=session_id,
                     storage_path=self.storage_path,
                     config=self.config,
@@ -2095,18 +2096,24 @@ class AgentBot:
         media_inputs = media or MediaInputs()
         session_id = create_session_id(room_id, thread_id)
         knowledge = self._knowledge_for_agent(self.agent_name)
-        scheduler_context = self._build_scheduling_tool_context(
+        model_prompt = self._append_matrix_prompt_context(
+            prompt,
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+            include_context=self._agent_has_matrix_messaging_tool(self.agent_name),
+        )
+        tool_context = self._build_tool_runtime_context(
             room_id=room_id,
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             user_id=user_id,
         )
-        openclaw_context, attachment_context = self._build_runtime_tool_contexts(
-            room_id,
-            thread_id,
-            user_id,
+        attachment_context = self._build_attachment_tool_context(
+            room_id=room_id,
+            thread_id=thread_id,
+            user_id=user_id,
             reply_to_event_id=reply_to_event_id,
-            agent_name=self.agent_name,
             attachment_ids=attachment_ids,
         )
         run_metadata_content: dict[str, Any] = {}
@@ -2114,14 +2121,10 @@ class AgentBot:
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
-                with (
-                    scheduling_tool_context(scheduler_context),
-                    openclaw_tool_context(openclaw_context),
-                    attachment_tool_context(attachment_context),
-                ):
+                with tool_runtime_context(tool_context), attachment_tool_context(attachment_context):
                     response_stream = stream_agent_response(
                         agent_name=self.agent_name,
-                        prompt=prompt,
+                        prompt=model_prompt,
                         session_id=session_id,
                         storage_path=self.storage_path,
                         config=self.config,

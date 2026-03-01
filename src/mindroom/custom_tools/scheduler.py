@@ -10,7 +10,7 @@ from mindroom.scheduling import (
     list_scheduled_tasks,
     schedule_task,
 )
-from mindroom.scheduling_context import get_scheduling_tool_context
+from mindroom.tool_runtime_context import get_tool_runtime_context
 
 
 class SchedulerTools(Toolkit):
@@ -34,14 +34,14 @@ class SchedulerTools(Toolkit):
             The scheduling result message.
 
         """
-        context = get_scheduling_tool_context()
-        if context is None:
+        context = get_tool_runtime_context()
+        if context is None or context.room is None:
             return "❌ Scheduler tool is unavailable in this context."
 
         _, response_text = await schedule_task(
             client=context.client,
             room_id=context.room_id,
-            thread_id=context.thread_id,
+            thread_id=context.resolved_thread_id,
             scheduled_by=context.requester_id,
             full_text=request,
             config=context.config,
@@ -60,8 +60,8 @@ class SchedulerTools(Toolkit):
             The edit result message.
 
         """
-        context = get_scheduling_tool_context()
-        if context is None:
+        context = get_tool_runtime_context()
+        if context is None or context.room is None:
             return "❌ Scheduler tool is unavailable in this context."
 
         return await edit_scheduled_task(
@@ -72,7 +72,7 @@ class SchedulerTools(Toolkit):
             scheduled_by=context.requester_id,
             config=context.config,
             room=context.room,
-            thread_id=context.thread_id,
+            thread_id=context.resolved_thread_id,
         )
 
     async def list_schedules(self) -> str:
@@ -82,14 +82,14 @@ class SchedulerTools(Toolkit):
             A formatted list of scheduled tasks with their IDs.
 
         """
-        context = get_scheduling_tool_context()
+        context = get_tool_runtime_context()
         if context is None:
             return "❌ Scheduler tool is unavailable in this context."
 
         return await list_scheduled_tasks(
             client=context.client,
             room_id=context.room_id,
-            thread_id=context.thread_id,
+            thread_id=context.resolved_thread_id,
             config=context.config,
         )
 
@@ -103,7 +103,7 @@ class SchedulerTools(Toolkit):
             The cancellation result message.
 
         """
-        context = get_scheduling_tool_context()
+        context = get_tool_runtime_context()
         if context is None:
             return "❌ Scheduler tool is unavailable in this context."
 

@@ -109,6 +109,33 @@ def test_agent_include_default_tools_false_skips_config_defaults(mock_storage: M
 
 
 @patch("mindroom.agents.SqliteDb")
+def test_openclaw_compat_auto_includes_matrix_message_tool(mock_storage: MagicMock) -> None:  # noqa: ARG001
+    """openclaw_compat should implicitly include matrix_message for the agent."""
+    config = Config.from_yaml()
+    config.agents["summary"].tools = ["openclaw_compat"]
+    config.agents["summary"].include_default_tools = False
+
+    effective_tools = config.get_agent_tools("summary")
+    assert "openclaw_compat" in effective_tools
+    assert "matrix_message" in effective_tools
+
+    agent = create_agent("summary", config=config)
+    tool_names = [tool.name for tool in agent.tools]
+    assert "openclaw_compat" in tool_names
+    assert "matrix_message" in tool_names
+
+
+def test_openclaw_compat_auto_matrix_message_does_not_duplicate() -> None:
+    """Implicit matrix_message inclusion should not duplicate explicit configuration."""
+    config = Config.from_yaml()
+    config.agents["summary"].tools = ["openclaw_compat", "matrix_message"]
+    config.agents["summary"].include_default_tools = False
+
+    effective_tools = config.get_agent_tools("summary")
+    assert effective_tools.count("matrix_message") == 1
+
+
+@patch("mindroom.agents.SqliteDb")
 def test_get_agent_code(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the code agent is created correctly."""
     config = Config.from_yaml()
