@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import mimetypes
 import re
@@ -232,10 +233,16 @@ def register_local_attachment(
     )
 
     record_path = _attachment_record_path(storage_path, normalized_attachment_id)
-    record_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = record_path.with_suffix(f".{uuid4().hex[:8]}.tmp")
-    tmp_path.write_text(json.dumps(record.to_payload(), sort_keys=True), encoding="utf-8")
-    tmp_path.replace(record_path)
+    try:
+        record_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path.write_text(json.dumps(record.to_payload(), sort_keys=True), encoding="utf-8")
+        tmp_path.replace(record_path)
+    except OSError:
+        logger.exception("Failed to persist attachment metadata", attachment_id=normalized_attachment_id)
+        with contextlib.suppress(OSError):
+            tmp_path.unlink(missing_ok=True)
+        return None
     return record
 
 

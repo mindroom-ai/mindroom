@@ -104,6 +104,26 @@ def test_register_local_attachment_uses_unique_temp_metadata_paths(tmp_path: Pat
     assert replace_sources[1].endswith(".tmp")
 
 
+def test_register_local_attachment_returns_none_on_metadata_write_failure(tmp_path: Path) -> None:
+    """Metadata write failures should return None instead of raising."""
+    file_path = tmp_path / "payload.txt"
+    file_path.write_text("payload", encoding="utf-8")
+
+    with patch.object(Path, "write_text", side_effect=OSError("disk full")):
+        result = register_local_attachment(
+            tmp_path,
+            file_path,
+            kind="file",
+            attachment_id="att_write_fail",
+            room_id="!room:localhost",
+        )
+
+    assert result is None
+    # Metadata file should not exist
+    metadata_path = tmp_path / "attachments" / "att_write_fail.json"
+    assert not metadata_path.exists()
+
+
 def test_merge_attachment_ids_preserves_order() -> None:
     """Merge should preserve first-seen ordering across sources."""
     merged = merge_attachment_ids(["att_1", "att_2"], ["att_2", "att_3"], ["att_1"])
