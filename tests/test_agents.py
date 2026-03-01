@@ -136,6 +136,7 @@ def test_openclaw_compat_preset_expansion_dedupes_preserving_order() -> None:
         "duckduckgo",
         "website",
         "scheduler",
+        "matrix_message",
         "python",
     ]
 
@@ -177,6 +178,33 @@ def test_create_agent_expands_openclaw_preset_for_sandbox_tool_overrides(
     sandbox_overrides = [call.kwargs["sandbox_tools_override"] for call in mock_get_tool_by_name.call_args_list]
     assert sandbox_overrides
     assert all(override == expected_sandbox for override in sandbox_overrides)
+
+
+@patch("mindroom.agents.SqliteDb")
+def test_openclaw_compat_auto_includes_matrix_message_tool(mock_storage: MagicMock) -> None:  # noqa: ARG001
+    """openclaw_compat should implicitly include matrix_message for the agent."""
+    config = Config.from_yaml()
+    config.agents["summary"].tools = ["openclaw_compat"]
+    config.agents["summary"].include_default_tools = False
+
+    effective_tools = config.get_agent_tools("summary")
+    assert "openclaw_compat" not in effective_tools
+    assert "matrix_message" in effective_tools
+
+    agent = create_agent("summary", config=config)
+    tool_names = [tool.name for tool in agent.tools]
+    assert "openclaw_compat" not in tool_names
+    assert "matrix_message" in tool_names
+
+
+def test_openclaw_compat_auto_matrix_message_does_not_duplicate() -> None:
+    """Implicit matrix_message inclusion should not duplicate explicit configuration."""
+    config = Config.from_yaml()
+    config.agents["summary"].tools = ["openclaw_compat", "matrix_message"]
+    config.agents["summary"].include_default_tools = False
+
+    effective_tools = config.get_agent_tools("summary")
+    assert effective_tools.count("matrix_message") == 1
 
 
 @patch("mindroom.agents.SqliteDb")

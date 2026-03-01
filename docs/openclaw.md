@@ -20,6 +20,7 @@ Works well:
 - File-based identity and memory documents
 - OpenClaw-inspired behavior and instructions
 - Native MindRoom tool bundle via the `openclaw_compat` preset
+- Native Matrix messaging via the `matrix_message` tool in the preset bundle
 
 Not included:
 
@@ -42,6 +43,7 @@ Preset expansion:
 - `website`
 - `browser`
 - `scheduler`
+- `matrix_message`
 
 Memory is not a separate OpenClaw subsystem in MindRoom.
 It uses the normal MindRoom memory backend.
@@ -101,6 +103,7 @@ memory:
 `memory_file_path` points the file-memory scope directly at the workspace root, so `MEMORY.md` is loaded automatically by the file backend as the entrypoint — no need to list it in `context_files`.
 `memory_file_path` is ignored unless the effective backend is `file`; if you switch this agent to `mem0`, re-add `MEMORY.md` to `context_files` when you still want it preloaded.
 The `openclaw_compat` preset already expands to the native shell, coding, search/fetch, browser, and scheduler tools, so listing those tools individually is not necessary.
+The `openclaw_compat` preset already expands to native shell, coding, search/fetch, browser, scheduler, and `matrix_message` tools, so listing those tools individually is not necessary.
 
 ## Recommended workspace layout
 

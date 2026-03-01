@@ -643,6 +643,7 @@ class TestGetAgentSandboxTools:
             "website",
             "browser",
             "scheduler",
+            "matrix_message",
             "python",
         ]
 
@@ -662,5 +663,6 @@ class TestGetAgentSandboxTools:
             "website",
             "browser",
             "scheduler",
+            "matrix_message",
             "python",
         ]
