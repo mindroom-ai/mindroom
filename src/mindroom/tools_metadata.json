@@ -98,6 +98,23 @@
     {
       "auth_provider": null,
       "category": "communication",
+      "config_fields": null,
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Send, reply, react, and read Matrix messages with room/thread context defaults",
+      "display_name": "Matrix Message",
+      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "helper_text": null,
+      "icon": "MessageSquare",
+      "icon_color": "text-green-500",
+      "name": "matrix_message",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "auth_provider": null,
+      "category": "communication",
       "config_fields": [
         {
           "default": null,

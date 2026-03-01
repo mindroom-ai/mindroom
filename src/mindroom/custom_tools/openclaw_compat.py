@@ -14,17 +14,17 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-import nio
 from agno.tools import Toolkit
 from agno.tools.duckduckgo import DuckDuckGoTools
 from agno.tools.website import WebsiteTools
 
 from mindroom.custom_tools.coding import CodingTools
+from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import fetch_thread_history, send_message
 from mindroom.matrix.mentions import format_message_with_mentions
-from mindroom.matrix.message_content import extract_and_resolve_message
+from mindroom.matrix_tool_context import MatrixMessageToolContext, matrix_message_tool_context
 from mindroom.openclaw_context import OpenClawToolContext, get_openclaw_tool_context
 from mindroom.thread_utils import create_session_id
 from mindroom.tools_metadata import get_tool_by_name
@@ -85,6 +85,7 @@ class OpenClawCompatTools(Toolkit):
         self._shell = get_tool_by_name("shell")
         self._browser_tool: Toolkit | None = None
         self._coding = CodingTools()
+        self._matrix_message = MatrixMessageTools()
 
     @staticmethod
     def _payload(tool_name: str, status: str, **kwargs: object) -> str:
@@ -574,6 +575,18 @@ class OpenClawCompatTools(Toolkit):
         )
         return await send_message(context.client, room_id, content)
 
+    @staticmethod
+    def _to_matrix_message_context(context: OpenClawToolContext) -> MatrixMessageToolContext:
+        return MatrixMessageToolContext(
+            agent_name=context.agent_name,
+            room_id=context.room_id,
+            thread_id=context.thread_id,
+            requester_id=context.requester_id,
+            client=context.client,
+            config=context.config,
+            reply_to_event_id=None,
+        )
+
     async def agents_list(self) -> str:
         """List agent ids available for `sessions_spawn` targeting."""
         context = get_openclaw_tool_context()
@@ -986,134 +999,6 @@ class OpenClawCompatTools(Toolkit):
             message="Unsupported action. Use list, kill, or steer.",
         )
 
-    async def _message_send_or_reply(
-        self,
-        context: OpenClawToolContext,
-        *,
-        action: str,
-        message: str | None,
-        room_id: str,
-        effective_thread_id: str | None,
-    ) -> str:
-        if message is None or not message.strip():
-            return self._payload("message", "error", action=action, message="Message cannot be empty.")
-        if action in {"thread-reply", "reply"} and effective_thread_id is None:
-            return self._payload("message", "error", action=action, message="thread_id is required for replies.")
-
-        event_id = await self._send_matrix_text(
-            context,
-            room_id=room_id,
-            text=message.strip(),
-            thread_id=effective_thread_id,
-        )
-        if event_id is None:
-            return self._payload(
-                "message",
-                "error",
-                action=action,
-                room_id=room_id,
-                message="Failed to send message to Matrix.",
-            )
-        return self._payload(
-            "message",
-            "ok",
-            action=action,
-            room_id=room_id,
-            thread_id=effective_thread_id,
-            event_id=event_id,
-        )
-
-    async def _message_react(
-        self,
-        context: OpenClawToolContext,
-        *,
-        message: str | None,
-        room_id: str,
-        target: str | None,
-    ) -> str:
-        if target is None:
-            return self._payload("message", "error", action="react", message="target event_id is required.")
-
-        reaction = message.strip() if message and message.strip() else "👍"
-        content = {
-            "m.relates_to": {
-                "rel_type": "m.annotation",
-                "event_id": target,
-                "key": reaction,
-            },
-        }
-        response = await context.client.room_send(
-            room_id=room_id,
-            message_type="m.reaction",
-            content=content,
-        )
-        if isinstance(response, nio.RoomSendResponse):
-            return self._payload(
-                "message",
-                "ok",
-                action="react",
-                room_id=room_id,
-                target=target,
-                reaction=reaction,
-                event_id=response.event_id,
-            )
-        return self._payload(
-            "message",
-            "error",
-            action="react",
-            room_id=room_id,
-            target=target,
-            reaction=reaction,
-            response=str(response),
-        )
-
-    async def _message_read(
-        self,
-        context: OpenClawToolContext,
-        *,
-        room_id: str,
-        effective_thread_id: str | None,
-    ) -> str:
-        read_limit = 20
-        if effective_thread_id is not None:
-            thread_messages = await fetch_thread_history(context.client, room_id, effective_thread_id)
-            return self._payload(
-                "message",
-                "ok",
-                action="read",
-                room_id=room_id,
-                thread_id=effective_thread_id,
-                messages=thread_messages[-read_limit:],
-            )
-
-        response = await context.client.room_messages(
-            room_id,
-            limit=read_limit,
-            direction=nio.MessageDirection.back,
-            message_filter={"types": ["m.room.message"]},
-        )
-        if not isinstance(response, nio.RoomMessagesResponse):
-            return self._payload(
-                "message",
-                "error",
-                action="read",
-                room_id=room_id,
-                response=str(response),
-            )
-
-        resolved = [
-            await extract_and_resolve_message(event, context.client)
-            for event in reversed(response.chunk)
-            if isinstance(event, nio.RoomMessageText)
-        ]
-        return self._payload(
-            "message",
-            "ok",
-            action="read",
-            room_id=room_id,
-            messages=resolved,
-        )
-
     async def message(
         self,
         action: str = "send",
@@ -1121,46 +1006,34 @@ class OpenClawCompatTools(Toolkit):
         channel: str | None = None,
         target: str | None = None,
         thread_id: str | None = None,
+        limit: int | None = None,
     ) -> str:
-        """Send or manage cross-channel messages."""
+        """Compatibility wrapper over the native matrix_message tool."""
         context = get_openclaw_tool_context()
         if context is None:
             return self._context_error("message")
 
-        normalized_action = action.strip().lower()
-        room_id = channel or context.room_id
-
-        if normalized_action in {"send", "thread-reply", "reply"}:
-            effective_thread_id = thread_id
-            if normalized_action in {"thread-reply", "reply"} and effective_thread_id is None:
-                effective_thread_id = context.thread_id
-            return await self._message_send_or_reply(
-                context,
-                action=normalized_action,
+        matrix_context = self._to_matrix_message_context(context)
+        with matrix_message_tool_context(matrix_context):
+            native_payload_raw = await self._matrix_message.matrix_message(
+                action=action,
                 message=message,
-                room_id=room_id,
-                effective_thread_id=effective_thread_id,
-            )
-        if normalized_action == "react":
-            return await self._message_react(
-                context,
-                message=message,
-                room_id=room_id,
+                room_id=channel,
                 target=target,
-            )
-        if normalized_action == "read":
-            return await self._message_read(
-                context,
-                room_id=room_id,
-                effective_thread_id=thread_id or context.thread_id,
+                thread_id=thread_id,
+                limit=limit,
             )
 
-        return self._payload(
-            "message",
-            "error",
-            action=action,
-            message="Unsupported action. Use send, thread-reply, react, or read.",
-        )
+        try:
+            native_payload = json.loads(native_payload_raw)
+        except json.JSONDecodeError:
+            return native_payload_raw
+
+        if not isinstance(native_payload, dict):
+            return native_payload_raw
+
+        native_payload["tool"] = "message"
+        return json.dumps(native_payload, sort_keys=True)
 
     async def cron(self, request: str) -> str:
         """Schedule a task using the scheduler tool."""

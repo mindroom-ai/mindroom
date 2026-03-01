@@ -684,6 +684,111 @@ class TestAgentBot:
             assert bot.client.room_send.call_count >= 2
 
     @pytest.mark.asyncio
+    async def test_process_and_respond_includes_matrix_metadata_when_tool_enabled(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Agents with matrix_message should receive room/thread/event ids in the model prompt."""
+
+        @asynccontextmanager
+        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
+            yield
+
+        config = Config(
+            agents={
+                "calculator": AgentConfig(
+                    display_name="CalculatorAgent",
+                    rooms=["!test:localhost"],
+                    tools=["matrix_message"],
+                ),
+            },
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot.client = AsyncMock()
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._build_scheduling_tool_context = MagicMock(return_value=None)
+        bot._build_openclaw_context = MagicMock(return_value=None)
+        bot._build_matrix_message_tool_context = MagicMock(return_value=None)
+        bot._send_response = AsyncMock(return_value="$response")
+
+        with (
+            patch("mindroom.bot.typing_indicator", noop_typing_indicator),
+            patch("mindroom.bot.ai_response", new_callable=AsyncMock) as mock_ai,
+        ):
+            mock_ai.return_value = "Handled"
+            event_id = await bot._process_and_respond(
+                room_id="!test:localhost",
+                prompt="Please send an update",
+                reply_to_event_id="$event123",
+                thread_id=None,
+                thread_history=[],
+                user_id="@user:localhost",
+            )
+
+        assert event_id == "$response"
+        model_prompt = mock_ai.call_args.kwargs["prompt"]
+        assert "[Matrix metadata for tool calls]" in model_prompt
+        assert "room_id: !test:localhost" in model_prompt
+        assert "thread_id: $event123" in model_prompt
+        assert "reply_to_event_id: $event123" in model_prompt
+
+    @pytest.mark.asyncio
+    async def test_process_and_respond_streaming_includes_matrix_metadata_when_tool_enabled(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Streaming path should inject Matrix ids for agents with matrix messaging tools."""
+
+        @asynccontextmanager
+        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
+            yield
+
+        async def mock_streaming_response() -> AsyncGenerator[str, None]:
+            yield "chunk"
+
+        config = Config(
+            agents={
+                "calculator": AgentConfig(
+                    display_name="CalculatorAgent",
+                    rooms=["!test:localhost"],
+                    tools=["matrix_message"],
+                ),
+            },
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot.client = AsyncMock()
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._build_scheduling_tool_context = MagicMock(return_value=None)
+        bot._build_openclaw_context = MagicMock(return_value=None)
+        bot._build_matrix_message_tool_context = MagicMock(return_value=None)
+        bot._handle_interactive_question = AsyncMock()
+
+        with (
+            patch("mindroom.bot.typing_indicator", noop_typing_indicator),
+            patch("mindroom.bot.stream_agent_response", new_callable=AsyncMock) as mock_stream_agent_response,
+            patch("mindroom.bot.send_streaming_response", new_callable=AsyncMock) as mock_send_streaming_response,
+        ):
+            mock_stream_agent_response.return_value = mock_streaming_response()
+            mock_send_streaming_response.return_value = ("$response", "chunk")
+            event_id = await bot._process_and_respond_streaming(
+                room_id="!test:localhost",
+                prompt="Please reply in thread",
+                reply_to_event_id="$event456",
+                thread_id=None,
+                thread_history=[],
+                user_id="@user:localhost",
+            )
+
+        assert event_id == "$response"
+        model_prompt = mock_stream_agent_response.call_args.kwargs["prompt"]
+        assert "[Matrix metadata for tool calls]" in model_prompt
+        assert "room_id: !test:localhost" in model_prompt
+        assert "thread_id: $event456" in model_prompt
+        assert "reply_to_event_id: $event456" in model_prompt
+
+    @pytest.mark.asyncio
     async def test_non_streaming_hidden_tool_calls_do_not_send_tool_trace(
         self,
         mock_agent_user: AgentMatrixUser,

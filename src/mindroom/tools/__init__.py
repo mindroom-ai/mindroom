@@ -69,6 +69,7 @@ from .jira import jira_tools
 from .linear import linear_tools
 from .linkup import linkup_tools
 from .lumalabs import lumalabs_tools
+from .matrix_message import matrix_message_tools
 from .mem0 import mem0_tools
 from .modelslabs import modelslabs_tools
 from .moviepy_video_tools import moviepy_video_tools
@@ -182,6 +183,7 @@ __all__ = [
     "linear_tools",
     "linkup_tools",
     "lumalabs_tools",
+    "matrix_message_tools",
     "mem0_tools",
     "modelslabs_tools",
     "moviepy_video_tools",
