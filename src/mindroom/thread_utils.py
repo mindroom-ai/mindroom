@@ -140,23 +140,6 @@ def has_user_responded_after_message(
     return False
 
 
-def get_available_agents_in_room(room: nio.MatrixRoom, config: Config) -> list[MatrixID]:
-    """Get list of available agent MatrixIDs in a room.
-
-    Note: Router agent is excluded as it's not a regular conversation participant.
-    """
-    agents: list[MatrixID] = []
-
-    for member_id in room.users:
-        mid = MatrixID.parse(member_id)
-        agent_name = mid.agent_name(config)
-        # Exclude router agent
-        if agent_name and agent_name != ROUTER_AGENT_NAME:
-            agents.append(mid)
-
-    return sorted(agents, key=lambda x: x.full_id)
-
-
 def has_multiple_non_agent_users_in_thread(thread_history: list[dict[str, Any]], config: Config) -> bool:
     """Return True when more than one non-agent user has posted in the thread.
 

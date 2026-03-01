@@ -6,9 +6,8 @@ from collections.abc import Mapping
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any
 
-from . import thread_utils
 from .constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
-from .matrix.identity import extract_agent_name, managed_room_key_from_alias_localpart, room_alias_localpart
+from .matrix.identity import MatrixID, extract_agent_name, managed_room_key_from_alias_localpart, room_alias_localpart
 from .matrix.state import MatrixState
 
 if TYPE_CHECKING:
@@ -17,7 +16,6 @@ if TYPE_CHECKING:
     import nio
 
     from .config.main import Config
-    from .matrix.identity import MatrixID
 
 
 def _room_permission_lookup_keys(
@@ -172,6 +170,23 @@ def filter_agents_by_sender_permissions(
     return result
 
 
+def get_available_agents_in_room(room: nio.MatrixRoom, config: Config) -> list[MatrixID]:
+    """Get list of available agent MatrixIDs in a room.
+
+    Note: Router agent is excluded as it's not a regular conversation participant.
+    """
+    agents: list[MatrixID] = []
+
+    for member_id in room.users:
+        mid = MatrixID.parse(member_id)
+        agent_name = mid.agent_name(config)
+        # Exclude router agent
+        if agent_name and agent_name != ROUTER_AGENT_NAME:
+            agents.append(mid)
+
+    return sorted(agents, key=lambda x: x.full_id)
+
+
 def get_available_agents_for_sender(
     room: nio.MatrixRoom,
     sender_id: str,
@@ -179,7 +194,7 @@ def get_available_agents_for_sender(
 ) -> list[MatrixID]:
     """Return room agents that may reply to *sender_id*."""
     return filter_agents_by_sender_permissions(
-        thread_utils.get_available_agents_in_room(room, config),
+        get_available_agents_in_room(room, config),
         sender_id,
         config,
     )
