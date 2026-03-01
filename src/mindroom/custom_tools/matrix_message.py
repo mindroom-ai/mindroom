@@ -27,6 +27,9 @@ class MatrixMessageTools(Toolkit):
     _RATE_LIMIT_MAX_ACTIONS: ClassVar[int] = 12
     _DEFAULT_READ_LIMIT: ClassVar[int] = 20
     _MAX_READ_LIMIT: ClassVar[int] = 50
+    _VALID_ACTIONS: ClassVar[frozenset[str]] = frozenset(
+        {"send", "thread-reply", "reply", "react", "read", "context"},
+    )
 
     def __init__(self) -> None:
         super().__init__(
@@ -81,6 +84,11 @@ class MatrixMessageTools(Toolkit):
                     f"({cls._RATE_LIMIT_MAX_ACTIONS} per {int(cls._RATE_LIMIT_WINDOW_SECONDS)}s)."
                 )
             history.append(now)
+
+            # Prune keys whose deques are empty to avoid unbounded dict growth
+            stale_keys = [k for k, v in cls._recent_actions.items() if not v]
+            for k in stale_keys:
+                del cls._recent_actions[k]
 
         return None
 
@@ -332,6 +340,13 @@ class MatrixMessageTools(Toolkit):
                 normalized_action=normalized_action,
             )
 
+        if normalized_action not in self._VALID_ACTIONS:
+            return self._payload(
+                "error",
+                action=normalized_action,
+                message="Unsupported action. Use send, thread-reply, react, read, or context.",
+            )
+
         if not self._room_access_allowed(context, resolved_room_id):
             return self._payload(
                 "error",
@@ -350,7 +365,7 @@ class MatrixMessageTools(Toolkit):
 
         return await self._dispatch_action(
             context,
-            action=action,
+            action=normalized_action,
             message=message,
             room_id=resolved_room_id,
             target=target,

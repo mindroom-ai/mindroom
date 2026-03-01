@@ -577,6 +577,12 @@ class OpenClawCompatTools(Toolkit):
 
     @staticmethod
     def _to_matrix_message_context(context: OpenClawToolContext) -> MatrixMessageToolContext:
+        """Convert OpenClaw context to native Matrix messaging context.
+
+        ``reply_to_event_id`` is not available in ``OpenClawToolContext``, so the
+        compat wrapper's ``context`` action will not surface it.  Native agents
+        should use ``MatrixMessageTools`` directly to get full metadata.
+        """
         return MatrixMessageToolContext(
             agent_name=context.agent_name,
             room_id=context.room_id,
