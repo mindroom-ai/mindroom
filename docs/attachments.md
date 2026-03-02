@@ -75,13 +75,13 @@ agents:
 
 | Operation | Description |
 |-----------|-------------|
-| `list_attachments(target?)` | List metadata for attachments in the current context (ID, filename, MIME type, size) |
+| `list_attachments(target?)` | List metadata for attachments in the current context (ID, local_path, filename, MIME type, size) |
+| `get_attachment(attachment_id)` | Return one context attachment record, including its local file path |
 | `register_attachment(file_path)` | Register a local file path as a context attachment ID (`att_*`) |
-| `send_attachments(attachment_ids?, attachment_file_paths?, room_id?, thread_id?)` | Send context attachment IDs and/or local file paths to a Matrix room or thread |
 
 `attachment_ids` accepts only context attachment IDs (`att_*`).
 `attachment_file_paths` accepts local file paths and auto-registers them in the current context before sending.
-At least one of `attachment_ids` or `attachment_file_paths` is required.
+Use `matrix_message(action="send"|"reply"|"thread-reply", attachment_ids=..., attachment_file_paths=...)` to send attachments.
 
 ### Why use this tool?
 

@@ -32,6 +32,14 @@ def _tool_context(tmp_path: Path, *, attachment_ids: tuple[str, ...] = ()) -> To
     )
 
 
+def test_attachments_tool_hides_send_method_from_exposed_tools() -> None:
+    """send_attachments remains internal and is not exposed as a tool call."""
+    tool = AttachmentTools()
+    exposed = {method.__name__ for method in tool.tools}
+    assert exposed == {"list_attachments", "get_attachment", "register_attachment"}
+    assert "send_attachments" not in exposed
+
+
 @pytest.mark.asyncio
 async def test_attachments_tool_lists_context_attachments(tmp_path: Path) -> None:
     """Tool should list attachment metadata scoped to current runtime context."""
@@ -54,6 +62,53 @@ async def test_attachments_tool_lists_context_attachments(tmp_path: Path) -> Non
     assert payload["attachment_ids"] == ["att_sample"]
     assert payload["attachments"][0]["attachment_id"] == "att_sample"
     assert payload["attachments"][0]["available"] is True
+    assert payload["attachments"][0]["local_path"] == str(sample_file.resolve())
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_get_attachment_returns_local_path(tmp_path: Path) -> None:
+    """Tool should resolve one context attachment by ID with local_path included."""
+    tool = AttachmentTools()
+    sample_file = tmp_path / "sample.txt"
+    sample_file.write_text("hello", encoding="utf-8")
+    attachment = register_local_attachment(
+        tmp_path,
+        sample_file,
+        kind="file",
+        attachment_id="att_sample",
+    )
+    assert attachment is not None
+
+    with tool_runtime_context(_tool_context(tmp_path, attachment_ids=(attachment.attachment_id,))):
+        payload = json.loads(await tool.get_attachment("att_sample"))
+
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "attachments"
+    assert payload["attachment_id"] == "att_sample"
+    assert payload["attachment"]["attachment_id"] == "att_sample"
+    assert payload["attachment"]["local_path"] == str(sample_file.resolve())
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_get_attachment_rejects_out_of_context_ids(tmp_path: Path) -> None:
+    """Tool should reject attachment IDs not present in runtime context."""
+    tool = AttachmentTools()
+    sample_file = tmp_path / "sample.txt"
+    sample_file.write_text("hello", encoding="utf-8")
+    attachment = register_local_attachment(
+        tmp_path,
+        sample_file,
+        kind="file",
+        attachment_id="att_sample",
+    )
+    assert attachment is not None
+
+    with tool_runtime_context(_tool_context(tmp_path, attachment_ids=())):
+        payload = json.loads(await tool.get_attachment("att_sample"))
+
+    assert payload["status"] == "error"
+    assert payload["tool"] == "attachments"
+    assert "not available in this context" in payload["message"]
 
 
 @pytest.mark.asyncio
@@ -222,6 +277,7 @@ async def test_attachments_tool_registers_file_and_updates_runtime_context(tmp_p
     assert register_payload["status"] == "ok"
     assert register_payload["tool"] == "attachments"
     assert register_payload["attachment_id"].startswith("att_")
+    assert register_payload["attachment"]["local_path"] == str(generated_file.resolve())
     assert attachment_id in current_context.attachment_ids
     assert send_payload["status"] == "ok"
     assert send_payload["resolved_attachment_ids"] == [attachment_id]

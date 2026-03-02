@@ -6,7 +6,9 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from agno.media import File
 from agno.models.metrics import Metrics
+from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.run.agent import ModelRequestCompletedEvent, RunCompletedEvent, RunContentEvent
 from agno.run.base import RunStatus
 
@@ -15,6 +17,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.media_inputs import MediaInputs
 from mindroom.tool_runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -208,6 +211,77 @@ class TestUserIdPassthrough:
 
             mock_agent.arun.assert_called_once()
             assert mock_agent.arun.call_args.kwargs["user_id"] == "@user:localhost"
+
+    @pytest.mark.asyncio
+    async def test_ai_response_filters_non_pdf_files_for_vertex_claude(self, tmp_path: Path) -> None:
+        """Vertex Claude should only receive PDF file media."""
+        mock_agent = MagicMock()
+        mock_agent.model = VertexAIClaude(id="claude-sonnet-4@20250514")
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        mock_run_output = MagicMock()
+        mock_run_output.content = "Response"
+        mock_run_output.tools = None
+        mock_agent.arun = AsyncMock(return_value=mock_run_output)
+
+        pdf_file = File(filepath=str(tmp_path / "report.pdf"), filename="report.pdf", mime_type="application/pdf")
+        zip_file = File(filepath=str(tmp_path / "archive.zip"), filename="archive.zip")
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai.get_cache", return_value=None),
+        ):
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
+            await ai_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                storage_path=tmp_path,
+                config=Config.from_yaml(),
+                media=MediaInputs(files=[pdf_file, zip_file]),
+            )
+
+        mock_agent.arun.assert_called_once()
+        sent_files = list(mock_agent.arun.call_args.kwargs["files"])
+        assert sent_files == [pdf_file]
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_filters_non_pdf_files_for_vertex_claude(self, tmp_path: Path) -> None:
+        """Streaming path should filter non-PDF files for Vertex Claude."""
+        mock_agent = MagicMock()
+        mock_agent.model = VertexAIClaude(id="claude-sonnet-4@20250514")
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[RunContentEvent]:
+            yield RunContentEvent(content="chunk")
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+
+        pdf_file = File(filepath=str(tmp_path / "report.pdf"), filename="report.pdf", mime_type="application/pdf")
+        zip_file = File(filepath=str(tmp_path / "archive.zip"), filename="archive.zip")
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai.get_cache", return_value=None),
+        ):
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
+            _chunks = [
+                _chunk
+                async for _chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    storage_path=tmp_path,
+                    config=Config.from_yaml(),
+                    media=MediaInputs(files=[pdf_file, zip_file]),
+                )
+            ]
+
+        mock_agent.arun.assert_called_once()
+        sent_files = list(mock_agent.arun.call_args.kwargs["files"])
+        assert sent_files == [pdf_file]
 
     @pytest.mark.asyncio
     async def test_user_id_none_when_not_provided(self, tmp_path: Path) -> None:

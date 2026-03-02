@@ -13,14 +13,12 @@ from agno.tools import Toolkit
 
 from mindroom.custom_tools.attachment_helpers import (
     normalize_str_list,
-    resolve_attachment_file_paths,
-    resolve_attachment_ids,
     room_access_allowed,
 )
+from mindroom.custom_tools.attachments import send_context_attachments
 from mindroom.matrix.client import (
     fetch_thread_history,
     get_latest_thread_event_id_if_needed,
-    send_file_message,
     send_message,
 )
 from mindroom.matrix.mentions import format_message_with_mentions
@@ -173,7 +171,7 @@ class MatrixMessageTools(Toolkit):
         )
         return await send_message(context.client, room_id, content)
 
-    async def _message_send_or_reply(  # noqa: PLR0911
+    async def _message_send_or_reply(
         self,
         context: ToolRuntimeContext,
         *,
@@ -188,22 +186,7 @@ class MatrixMessageTools(Toolkit):
             return self._payload("error", action=action, message="thread_id is required for replies.")
 
         text = message.strip() if isinstance(message, str) and message.strip() else None
-        attachment_paths, resolved_attachment_ids, attachment_error = resolve_attachment_ids(
-            context,
-            attachment_ids,
-        )
-        if attachment_error is not None:
-            return self._payload("error", action=action, room_id=room_id, message=attachment_error)
-        file_path_attachments, newly_registered_attachment_ids, file_path_error = resolve_attachment_file_paths(
-            context,
-            attachment_file_paths,
-        )
-        if file_path_error is not None:
-            return self._payload("error", action=action, room_id=room_id, message=file_path_error)
-        attachment_paths.extend(file_path_attachments)
-        resolved_attachment_ids.extend(newly_registered_attachment_ids)
-
-        if text is None and not attachment_paths:
+        if text is None and not attachment_ids and not attachment_file_paths:
             return self._payload(
                 "error",
                 action=action,
@@ -228,26 +211,43 @@ class MatrixMessageTools(Toolkit):
             )
 
         attachment_event_ids: list[str] = []
-        for attachment_path in attachment_paths:
-            attachment_event_id = await send_file_message(
-                context.client,
-                room_id,
-                attachment_path,
+        resolved_attachment_ids: list[str] = []
+        newly_registered_attachment_ids: list[str] = []
+        if attachment_ids or attachment_file_paths:
+            send_result, send_error = await send_context_attachments(
+                context,
+                attachment_ids=attachment_ids,
+                attachment_file_paths=attachment_file_paths,
+                room_id=room_id,
                 thread_id=effective_thread_id,
+                require_joined_room=False,
+                inherit_context_thread=False,
             )
-            if attachment_event_id is None:
+            if send_error is not None:
+                if send_result is None:
+                    return self._payload(
+                        "error",
+                        action=action,
+                        room_id=room_id,
+                        thread_id=effective_thread_id,
+                        event_id=event_id,
+                        message=send_error,
+                    )
                 return self._payload(
                     "error",
                     action=action,
-                    room_id=room_id,
-                    thread_id=effective_thread_id,
+                    room_id=send_result.room_id,
+                    thread_id=send_result.thread_id,
                     event_id=event_id,
-                    attachment_event_ids=attachment_event_ids,
-                    resolved_attachment_ids=resolved_attachment_ids,
-                    newly_registered_attachment_ids=newly_registered_attachment_ids,
-                    message=f"Failed to send attachment: {attachment_path}",
+                    attachment_event_ids=send_result.attachment_event_ids,
+                    resolved_attachment_ids=send_result.resolved_attachment_ids,
+                    newly_registered_attachment_ids=send_result.newly_registered_attachment_ids,
+                    message=send_error,
                 )
-            attachment_event_ids.append(attachment_event_id)
+            assert send_result is not None
+            attachment_event_ids = send_result.attachment_event_ids
+            resolved_attachment_ids = send_result.resolved_attachment_ids
+            newly_registered_attachment_ids = send_result.newly_registered_attachment_ids
 
         return self._payload(
             "ok",

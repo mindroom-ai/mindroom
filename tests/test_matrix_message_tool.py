@@ -106,7 +106,7 @@ async def test_matrix_message_send_supports_context_attachments(tmp_path: Path) 
     with (
         patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
         patch(
-            "mindroom.custom_tools.matrix_message.send_file_message",
+            "mindroom.custom_tools.attachments.send_file_message",
             new=AsyncMock(return_value="$file_evt"),
         ) as mock_send_file,
         tool_runtime_context(ctx),
@@ -150,7 +150,7 @@ async def test_matrix_message_send_allows_attachment_only(tmp_path: Path) -> Non
     with (
         patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
         patch(
-            "mindroom.custom_tools.matrix_message.send_file_message",
+            "mindroom.custom_tools.attachments.send_file_message",
             new=AsyncMock(return_value="$file_evt"),
         ) as mock_send_file,
         tool_runtime_context(ctx),
@@ -181,7 +181,7 @@ async def test_matrix_message_send_supports_attachment_file_paths(tmp_path: Path
     with (
         patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
         patch(
-            "mindroom.custom_tools.matrix_message.send_file_message",
+            "mindroom.custom_tools.attachments.send_file_message",
             new=AsyncMock(return_value="$file_evt"),
         ) as mock_send_file,
         tool_runtime_context(ctx),
@@ -495,7 +495,7 @@ async def test_matrix_message_rate_limit_counts_attachments_weight(tmp_path: Pat
     with (
         patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")),
         patch(
-            "mindroom.custom_tools.matrix_message.send_file_message",
+            "mindroom.custom_tools.attachments.send_file_message",
             new=AsyncMock(return_value="$file_evt"),
         ),
         patch.object(MatrixMessageTools, "_RATE_LIMIT_MAX_ACTIONS", 2),
