@@ -2220,7 +2220,7 @@ class TestKnowledgeIntegration:
         knowledge_arg = mock_ai.call_args.kwargs["knowledge"]
         assert knowledge_arg is not None
         # Should be a merged Knowledge with MultiKnowledgeVectorDb
-        from mindroom.knowledge_utils import MultiKnowledgeVectorDb  # noqa: PLC0415
+        from mindroom.knowledge.utils import MultiKnowledgeVectorDb  # noqa: PLC0415
 
         assert isinstance(knowledge_arg.vector_db, MultiKnowledgeVectorDb)
         assert knowledge_arg.max_results == 10  # max(5, 10)

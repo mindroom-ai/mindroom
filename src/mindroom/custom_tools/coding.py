@@ -24,17 +24,17 @@ from pathlib import Path
 
 from agno.tools import Toolkit
 
-MAX_LINES = 2000
-MAX_BYTES = 50 * 1024  # 50KB
-MAX_LINE_CHARS = 500  # Per-line truncation for grep output
-DEFAULT_GREP_LIMIT = 100
-DEFAULT_FIND_LIMIT = 1000
-DEFAULT_LS_LIMIT = 500
-DIFF_CONTEXT_LINES = 4
+_MAX_LINES = 2000
+_MAX_BYTES = 50 * 1024  # 50KB
+_MAX_LINE_CHARS = 500  # Per-line truncation for grep output
+_DEFAULT_GREP_LIMIT = 100
+_DEFAULT_FIND_LIMIT = 1000
+_DEFAULT_LS_LIMIT = 500
+_DIFF_CONTEXT_LINES = 4
 
 
 @dataclass
-class TruncateResult:
+class _TruncateResult:
     """Result of a truncation operation."""
 
     content: str
@@ -45,9 +45,9 @@ class TruncateResult:
 
 def _truncate_head(
     content: str,
-    max_lines: int = MAX_LINES,
-    max_bytes: int = MAX_BYTES,
-) -> TruncateResult:
+    max_lines: int = _MAX_LINES,
+    max_bytes: int = _MAX_BYTES,
+) -> _TruncateResult:
     """Keep the first N lines / max_bytes of content."""
     lines = content.splitlines(keepends=True)
     total = len(lines)
@@ -60,7 +60,7 @@ def _truncate_head(
         kept.append(line)
         byte_count += line_bytes
     result = "".join(kept)
-    return TruncateResult(
+    return _TruncateResult(
         content=result,
         was_truncated=len(kept) < total,
         total_lines=total,
@@ -135,7 +135,7 @@ def _normalize_for_fuzzy(text: str) -> str:
 
 
 @dataclass
-class MatchResult:
+class _MatchResult:
     """Result of a fuzzy find operation."""
 
     start: int
@@ -233,7 +233,7 @@ def _build_normalized_line_maps(orig_lines: list[str]) -> list[_NormalizedLineMa
     return line_maps
 
 
-def _find_all_matches(content: str, old_text: str) -> list[MatchResult]:
+def _find_all_matches(content: str, old_text: str) -> list[_MatchResult]:
     """Find all non-overlapping occurrences, trying exact match first then fuzzy.
 
     Unified function: both counting and locating use the same code path,
@@ -243,13 +243,13 @@ def _find_all_matches(content: str, old_text: str) -> list[MatchResult]:
         return []
 
     # Try exact matches first
-    matches: list[MatchResult] = []
+    matches: list[_MatchResult] = []
     pos = 0
     while True:
         idx = content.find(old_text, pos)
         if idx == -1:
             break
-        matches.append(MatchResult(start=idx, end=idx + len(old_text), matched_text=old_text, was_fuzzy=False))
+        matches.append(_MatchResult(start=idx, end=idx + len(old_text), matched_text=old_text, was_fuzzy=False))
         pos = idx + len(old_text)
     if matches:
         return matches
@@ -275,7 +275,7 @@ def _find_all_matches(content: str, old_text: str) -> list[MatchResult]:
         orig_start = _norm_to_orig_offset(idx, norm_offsets, orig_offsets, line_maps, len(content))
         orig_end = _norm_to_orig_offset(norm_end, norm_offsets, orig_offsets, line_maps, len(content))
         matches.append(
-            MatchResult(
+            _MatchResult(
                 start=orig_start,
                 end=orig_end,
                 matched_text=content[orig_start:orig_end],
@@ -324,7 +324,7 @@ def _norm_to_orig_offset(
 def _make_diff(
     old_content: str,
     new_content: str,
-    context: int = DIFF_CONTEXT_LINES,
+    context: int = _DIFF_CONTEXT_LINES,
 ) -> str:
     """Create a unified diff between old and new content."""
     diff_lines = difflib.unified_diff(
@@ -415,7 +415,7 @@ def _format_read_output(content: str, offset: int | None, limit: int | None) -> 
     if start > total_lines:
         return f"Error: offset {start} exceeds file length ({total_lines} lines)."
 
-    max_lines = limit if limit is not None else MAX_LINES
+    max_lines = limit if limit is not None else _MAX_LINES
     end = min(start + max_lines - 1, total_lines)
     selected = all_lines[start - 1 : end]
 
@@ -427,15 +427,15 @@ def _format_read_output(content: str, offset: int | None, limit: int | None) -> 
 
 
 def _apply_byte_limit(selected: list[str], start: int, end: int) -> tuple[list[str], int]:
-    """Re-truncate selected lines if they exceed MAX_BYTES."""
+    """Re-truncate selected lines if they exceed the max byte limit."""
     selected_text = "\n".join(selected)
-    if len(selected_text.encode("utf-8", errors="replace")) <= MAX_BYTES:
+    if len(selected_text.encode("utf-8", errors="replace")) <= _MAX_BYTES:
         return selected, end
 
-    trunc = _truncate_head(selected_text, max_lines=len(selected), max_bytes=MAX_BYTES)
+    trunc = _truncate_head(selected_text, max_lines=len(selected), max_bytes=_MAX_BYTES)
     selected = trunc.content.splitlines()
     if not selected and selected_text:
-        partial = _truncate_to_max_bytes(selected_text, MAX_BYTES).rstrip("\n")
+        partial = _truncate_to_max_bytes(selected_text, _MAX_BYTES).rstrip("\n")
         selected = [f"{partial} [truncated]"]
     return selected, start + len(selected) - 1
 
@@ -646,7 +646,7 @@ class CodingTools(Toolkit):
         ignore_case: bool = False,
         literal: bool = False,
         context: int = 0,
-        limit: int = DEFAULT_GREP_LIMIT,
+        limit: int = _DEFAULT_GREP_LIMIT,
     ) -> str:
         """Search file contents for a pattern. Uses ripgrep if available, falls back to Python re.
 
@@ -695,7 +695,7 @@ class CodingTools(Toolkit):
         self,
         pattern: str,
         path: str | None = None,
-        limit: int = DEFAULT_FIND_LIMIT,
+        limit: int = _DEFAULT_FIND_LIMIT,
     ) -> str:
         """Find files matching a glob pattern.
 
@@ -722,7 +722,7 @@ class CodingTools(Toolkit):
 
         return _find_files_in(search_path, self.base_dir, pattern, limit)
 
-    def ls(self, path: str | None = None, limit: int = DEFAULT_LS_LIMIT) -> str:
+    def ls(self, path: str | None = None, limit: int = _DEFAULT_LS_LIMIT) -> str:
         """List directory contents with directory indicators.
 
         Args:
@@ -752,7 +752,7 @@ class CodingTools(Toolkit):
 # ── Grep helpers ────────────────────────────────────────────────────
 
 
-def _truncate_line(line: str, max_chars: int = MAX_LINE_CHARS) -> str:
+def _truncate_line(line: str, max_chars: int = _MAX_LINE_CHARS) -> str:
     """Truncate a single line if it exceeds max_chars."""
     if len(line) <= max_chars:
         return line

@@ -48,9 +48,9 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # Message length limits for team context and logging
-MAX_CONTEXT_MESSAGE_LENGTH = 200  # Maximum length for messages to include in thread context
-MAX_LOG_MESSAGE_LENGTH = 500  # Maximum length for messages in team response logs
-TeamStreamChunk = str | StructuredStreamChunk
+_MAX_CONTEXT_MESSAGE_LENGTH = 200  # Maximum length for messages to include in thread context
+_MAX_LOG_MESSAGE_LENGTH = 500  # Maximum length for messages in team response logs
+_TeamStreamChunk = str | StructuredStreamChunk
 
 
 class TeamMode(str, Enum):
@@ -401,7 +401,7 @@ def _build_prompt_with_context(
     for msg in recent_messages:
         sender = msg.get("sender", "Unknown")
         body = msg.get("content", {}).get("body", "")
-        if body and len(body) < MAX_CONTEXT_MESSAGE_LENGTH:
+        if body and len(body) < _MAX_CONTEXT_MESSAGE_LENGTH:
             context_parts.append(f"{sender}: {body}")
 
     if context_parts:
@@ -519,7 +519,7 @@ def select_model_for_team(team_name: str, room_id: str, config: Config) -> str:
     return "default"
 
 
-NO_AGENTS_RESPONSE = "Sorry, no agents available for team collaboration."
+_NO_AGENTS_RESPONSE = "Sorry, no agents available for team collaboration."
 
 
 async def team_response(
@@ -535,7 +535,7 @@ async def team_response(
     agents = _get_agents_from_orchestrator(agent_names, orchestrator)
 
     if not agents:
-        return NO_AGENTS_RESPONSE
+        return _NO_AGENTS_RESPONSE
 
     media_inputs = media or MediaInputs()
     prompt = _build_prompt_with_context(message, thread_history)
@@ -572,8 +572,8 @@ async def team_response(
         logger.warning(f"Unexpected response type: {type(response)}", response=response)
         team_response = str(response)
 
-    logger.info(f"TEAM RESPONSE ({agent_list}): {team_response[:MAX_LOG_MESSAGE_LENGTH]}")
-    if len(team_response) > MAX_LOG_MESSAGE_LENGTH:
+    logger.info(f"TEAM RESPONSE ({agent_list}): {team_response[:_MAX_LOG_MESSAGE_LENGTH]}")
+    if len(team_response) > _MAX_LOG_MESSAGE_LENGTH:
         logger.debug(f"TEAM RESPONSE (full): {team_response}")
 
     # Don't use @ mentions as that would trigger the agents again
@@ -604,7 +604,7 @@ async def _team_response_stream_raw(
     if not agents:
 
         async def _empty() -> AsyncIterator[RunOutput]:
-            yield RunOutput(content=NO_AGENTS_RESPONSE)
+            yield RunOutput(content=_NO_AGENTS_RESPONSE)
 
         return _empty()
 
@@ -647,7 +647,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     model_name: str | None = None,
     media: MediaInputs | None = None,
     show_tool_calls: bool = True,
-) -> AsyncIterator[TeamStreamChunk]:
+) -> AsyncIterator[_TeamStreamChunk]:
     """Aggregate team streaming into a non-stream-style document, live.
 
     Renders a header and per-member sections, optionally adding a team
@@ -781,7 +781,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         # Handle error case
         if isinstance(event, RunOutput):
             content = _get_response_content(event)
-            if NO_AGENTS_RESPONSE in content:
+            if _NO_AGENTS_RESPONSE in content:
                 yield content
                 return
             logger.warning(f"Unexpected RunOutput in team stream: {content[:100]}")

@@ -253,7 +253,7 @@ def test_install_tool_extras_skips_uv_sync_outside_virtualenv(monkeypatch: pytes
         calls["env"] += 1
         return True
 
-    monkeypatch.setattr("mindroom.tool_dependencies.is_uv_tool_install", lambda: False)
+    monkeypatch.setattr("mindroom.tool_dependencies._is_uv_tool_install", lambda: False)
     monkeypatch.setattr("mindroom.tool_dependencies._has_lockfile", lambda: True)
     monkeypatch.setattr("mindroom.tool_dependencies._in_virtualenv", lambda: False)
     monkeypatch.setattr("mindroom.tool_dependencies.shutil.which", lambda _binary: "/usr/bin/uv")

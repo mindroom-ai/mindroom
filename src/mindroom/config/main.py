@@ -10,40 +10,42 @@ from typing import TYPE_CHECKING, ClassVar, Literal
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
+from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig  # noqa: TC001
+from mindroom.config.auth import AuthorizationConfig
+from mindroom.config.knowledge import KnowledgeBaseConfig  # noqa: TC001
+from mindroom.config.matrix import MatrixRoomAccessConfig, MindRoomUserConfig
+from mindroom.config.memory import MemoryBackend, MemoryConfig
+from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig
+from mindroom.config.voice import VoiceConfig
 from mindroom.constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, safe_replace
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import agent_username_localpart
 
-from .agent import AgentConfig, CultureConfig, TeamConfig  # noqa: TC001
-from .auth import AuthorizationConfig
-from .knowledge import KnowledgeBaseConfig  # noqa: TC001
-from .matrix import MatrixRoomAccessConfig, MindRoomUserConfig
-from .memory import MemoryBackend, MemoryConfig
-from .models import DefaultsConfig, ModelConfig, RouterConfig
-from .voice import VoiceConfig
-
 if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
 
-AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
+_AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
+_OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
+    "shell",
+    "coding",
+    "duckduckgo",
+    "website",
+    "browser",
+    "scheduler",
+    "subagents",
+    "matrix_message",
+)
 logger = get_logger(__name__)
 
 
 class Config(BaseModel):
     """Complete configuration from YAML."""
 
+    TOOL_PRESETS: ClassVar[dict[str, tuple[str, ...]]] = {
+        "openclaw_compat": _OPENCLAW_COMPAT_PRESET_TOOLS,
+    }
     IMPLIED_TOOLS: ClassVar[dict[str, tuple[str, ...]]] = {
         "matrix_message": ("attachments",),
-        "openclaw_compat": (
-            "shell",
-            "coding",
-            "duckduckgo",
-            "website",
-            "browser",
-            "scheduler",
-            "subagents",
-            "matrix_message",
-        ),
     }
 
     agents: dict[str, AgentConfig] = Field(default_factory=dict, description="Agent configurations")
@@ -84,8 +86,8 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def validate_entity_names(self) -> Config:
         """Ensure agent and team names contain only alphanumeric characters and underscores."""
-        invalid_agents = [name for name in self.agents if not AGENT_NAME_PATTERN.fullmatch(name)]
-        invalid_teams = [name for name in self.teams if not AGENT_NAME_PATTERN.fullmatch(name)]
+        invalid_agents = [name for name in self.agents if not _AGENT_NAME_PATTERN.fullmatch(name)]
+        invalid_teams = [name for name in self.teams if not _AGENT_NAME_PATTERN.fullmatch(name)]
         invalid = sorted(invalid_agents + invalid_teams)
         if invalid:
             msg = f"Agent/team names must be alphanumeric/underscore only, got: {', '.join(invalid)}"
@@ -334,8 +336,18 @@ class Config(BaseModel):
         return self.expand_tool_names(tool_names)
 
     @classmethod
+    def get_tool_preset(cls, tool_name: str) -> tuple[str, ...] | None:
+        """Return the tool expansion for a preset name."""
+        return cls.TOOL_PRESETS.get(tool_name)
+
+    @classmethod
+    def is_tool_preset(cls, tool_name: str) -> bool:
+        """Return whether a tool name is a known config preset."""
+        return tool_name in cls.TOOL_PRESETS
+
+    @classmethod
     def expand_tool_names(cls, tool_names: list[str]) -> list[str]:
-        """Expand implied tools and dedupe while preserving order."""
+        """Expand tool presets and implied tools, deduping while preserving order."""
         expanded: list[str] = []
         seen: set[str] = set()
         queue = list(tool_names)
@@ -345,9 +357,9 @@ class Config(BaseModel):
                 continue
             seen.add(tool_name)
             expanded.append(tool_name)
-            queue.extend(
-                implied_tool for implied_tool in cls.IMPLIED_TOOLS.get(tool_name, ()) if implied_tool not in seen
-            )
+            next_tools = list(cls.get_tool_preset(tool_name) or ())
+            next_tools.extend(cls.IMPLIED_TOOLS.get(tool_name, ()))
+            queue.extend(implied_tool for implied_tool in next_tools if implied_tool not in seen)
         return expanded
 
     def get_agent_memory_backend(self, agent_name: str) -> MemoryBackend:

@@ -382,7 +382,7 @@ optional-dependencies.zoom = [
 urls.documentation = "https://github.com/mindroom-ai/mindroom"
 urls.homepage = "https://github.com/mindroom-ai/mindroom"
 urls.repository = "https://github.com/mindroom-ai/mindroom"
-scripts.mindroom = "mindroom.cli:main"
+scripts.mindroom = "mindroom.cli.main:main"
 
 [dependency-groups]
 dev = [

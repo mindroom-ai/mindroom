@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-class RoomTopic(BaseModel):
+class _RoomTopic(BaseModel):
     """Structured room topic response."""
 
     topic: str = Field(description="The room topic - concise, informative, with emoji")
@@ -85,7 +85,7 @@ Generate the topic:"""
         name="TopicGenerator",
         role="Generate contextual room topics",
         model=model,
-        output_schema=RoomTopic,
+        output_schema=_RoomTopic,
     )
 
     session_id = f"topic_{room_key}"
@@ -101,7 +101,7 @@ Generate the topic:"""
         logger.exception(f"Error generating topic for room {room_key}")
         return None
     content = response.content
-    if not isinstance(content, RoomTopic):
+    if not isinstance(content, _RoomTopic):
         logger.warning(f"Topic generation returned unexpected type: {type(content)}")
         return str(content) if content else None
     return content.topic

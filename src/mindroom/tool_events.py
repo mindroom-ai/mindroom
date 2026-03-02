@@ -13,17 +13,17 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 TOOL_TRACE_KEY = "io.mindroom.tool_trace"
-TOOL_TRACE_VERSION = 2
+_TOOL_TRACE_VERSION = 2
 
-MAX_TOOL_ARGS_PREVIEW_CHARS = 1200
-MAX_TOOL_ARG_VALUE_PREVIEW_CHARS = 250
-MAX_TOOL_RESULT_DISPLAY_CHARS = 500
+_MAX_TOOL_ARGS_PREVIEW_CHARS = 1200
+_MAX_TOOL_ARG_VALUE_PREVIEW_CHARS = 250
+_MAX_TOOL_RESULT_DISPLAY_CHARS = 500
 # Keep v2 trace indexing stable (`events[N-1]`) by not truncating event slots.
 # Large-message handling is responsible for payload size fallbacks.
 MAX_TOOL_TRACE_EVENTS = 120
-TOOL_REF_ICON = "🔧"
-TOOL_PENDING_MARKER = " ⏳"
-TOOL_MARKER_PATTERN = re.compile(r"🔧 `([^`]+)` \[(\d+)\]( ⏳)?")
+_TOOL_REF_ICON = "🔧"
+_TOOL_PENDING_MARKER = " ⏳"
+_TOOL_MARKER_PATTERN = re.compile(r"🔧 `([^`]+)` \[(\d+)\]( ⏳)?")
 
 
 @dataclass(slots=True)
@@ -70,8 +70,8 @@ def _neutralize_mentions(text: str) -> str:
 def _tool_marker_line(tool_name: str, tool_index: int | None, *, pending: bool) -> str:
     safe_tool_name = _neutralize_mentions(tool_name).replace("`", r"\`")
     suffix = f" [{tool_index}]" if tool_index is not None else ""
-    pending_suffix = TOOL_PENDING_MARKER if pending else ""
-    return f"{TOOL_REF_ICON} `{safe_tool_name}`{suffix}{pending_suffix}"
+    pending_suffix = _TOOL_PENDING_MARKER if pending else ""
+    return f"{_TOOL_REF_ICON} `{safe_tool_name}`{suffix}{pending_suffix}"
 
 
 def _format_tool_marker(tool_name: str, tool_index: int | None, *, pending: bool) -> str:
@@ -86,12 +86,12 @@ def _format_tool_args(tool_args: dict[str, object]) -> tuple[str, bool]:
         value_text = _to_compact_text(value)
         # Collapse newlines so previews stay single-line.
         value_text = value_text.replace("\n", " ")
-        value_preview, value_truncated = _truncate(value_text, MAX_TOOL_ARG_VALUE_PREVIEW_CHARS)
+        value_preview, value_truncated = _truncate(value_text, _MAX_TOOL_ARG_VALUE_PREVIEW_CHARS)
         if value_truncated:
             truncated = True
         parts.append(f"{key}={value_preview}")
 
-    args_preview, args_truncated = _truncate(", ".join(parts), MAX_TOOL_ARGS_PREVIEW_CHARS)
+    args_preview, args_truncated = _truncate(", ".join(parts), _MAX_TOOL_ARGS_PREVIEW_CHARS)
     return args_preview, truncated or args_truncated
 
 
@@ -130,7 +130,7 @@ def format_tool_combined(
     result_display = ""
     if result is not None and result != "":
         result_text = _to_compact_text(result)
-        result_display, result_truncated = _truncate(result_text, MAX_TOOL_RESULT_DISPLAY_CHARS)
+        result_display, result_truncated = _truncate(result_text, _MAX_TOOL_RESULT_DISPLAY_CHARS)
         truncated = truncated or result_truncated
 
     block = _format_tool_marker(tool_name, tool_index, pending=False)
@@ -164,7 +164,7 @@ def complete_pending_tool_block(
     truncated = False
     if result is not None and result != "":
         result_text = _to_compact_text(result)
-        result_display, truncated = _truncate(result_text, MAX_TOOL_RESULT_DISPLAY_CHARS)
+        result_display, truncated = _truncate(result_text, _MAX_TOOL_RESULT_DISPLAY_CHARS)
 
     updated = accumulated_text
     pending_line = _tool_marker_line(tool_name, tool_index, pending=True)
@@ -248,7 +248,7 @@ def build_tool_trace_content(tool_trace: Sequence[ToolTraceEntry] | None) -> dic
         events.append(event)
 
     payload: dict[str, object] = {
-        "version": TOOL_TRACE_VERSION,
+        "version": _TOOL_TRACE_VERSION,
         "events": events,
     }
     if has_truncated_content:

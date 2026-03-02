@@ -7,14 +7,14 @@ from typing import Any, Literal, Self
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 AgentLearningMode = Literal["always", "agentic"]
-DEFAULT_DEFAULT_TOOLS = ("scheduler",)
+_DEFAULT_DEFAULT_TOOLS = ("scheduler",)
 
 
 class DefaultsConfig(BaseModel):
     """Default configuration values for agents."""
 
     tools: list[str] = Field(
-        default_factory=lambda: list(DEFAULT_DEFAULT_TOOLS),
+        default_factory=lambda: list(_DEFAULT_DEFAULT_TOOLS),
         description="Tool names automatically added to every agent",
     )
     markdown: bool = Field(default=True, description="Default markdown setting")

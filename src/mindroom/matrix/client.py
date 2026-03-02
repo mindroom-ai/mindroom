@@ -228,7 +228,7 @@ def _describe_matrix_response_error(response: object) -> str:
     return str(response)
 
 
-async def get_room_join_rule(client: nio.AsyncClient, room_id: str) -> str | None:
+async def _get_room_join_rule(client: nio.AsyncClient, room_id: str) -> str | None:
     """Read the current join rule from room state."""
     response = await client.room_get_state_event(room_id, "m.room.join_rules")
     if isinstance(response, nio.RoomGetStateEventResponse):
@@ -250,7 +250,7 @@ async def get_room_join_rule(client: nio.AsyncClient, room_id: str) -> str | Non
     return None
 
 
-async def set_room_join_rule(
+async def _set_room_join_rule(
     client: nio.AsyncClient,
     room_id: str,
     join_rule: RoomJoinRule,
@@ -284,14 +284,14 @@ async def ensure_room_join_rule(
     target_join_rule: RoomJoinRule,
 ) -> bool:
     """Ensure a room has the desired join rule."""
-    current_join_rule = await get_room_join_rule(client, room_id)
+    current_join_rule = await _get_room_join_rule(client, room_id)
     if current_join_rule == target_join_rule:
         logger.debug("Room join rule already configured", room_id=room_id, join_rule=target_join_rule)
         return True
-    return await set_room_join_rule(client, room_id, target_join_rule)
+    return await _set_room_join_rule(client, room_id, target_join_rule)
 
 
-async def get_room_directory_visibility(client: nio.AsyncClient, room_id: str) -> str | None:
+async def _get_room_directory_visibility(client: nio.AsyncClient, room_id: str) -> str | None:
     """Read the current room directory visibility."""
     response = await client.room_get_visibility(room_id)
     if isinstance(response, nio.RoomGetVisibilityResponse):
@@ -305,7 +305,7 @@ async def get_room_directory_visibility(client: nio.AsyncClient, room_id: str) -
     return None
 
 
-async def set_room_directory_visibility(
+async def _set_room_directory_visibility(
     client: nio.AsyncClient,
     room_id: str,
     visibility: RoomDirectoryVisibility,
@@ -359,11 +359,11 @@ async def ensure_room_directory_visibility(
     target_visibility: RoomDirectoryVisibility,
 ) -> bool:
     """Ensure a room has the desired directory visibility."""
-    current_visibility = await get_room_directory_visibility(client, room_id)
+    current_visibility = await _get_room_directory_visibility(client, room_id)
     if current_visibility == target_visibility:
         logger.debug("Room directory visibility already configured", room_id=room_id, visibility=target_visibility)
         return True
-    return await set_room_directory_visibility(client, room_id, target_visibility)
+    return await _set_room_directory_visibility(client, room_id, target_visibility)
 
 
 async def create_dm_room(

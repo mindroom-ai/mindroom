@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING
 
 from agno.media import Image
 
-from .logging_config import get_logger
-from .matrix.media import download_media_bytes, extract_media_caption, media_mime_type
+from mindroom.logging_config import get_logger
+from mindroom.matrix.media import download_media_bytes, extract_media_caption, media_mime_type
 
 if TYPE_CHECKING:
     import nio

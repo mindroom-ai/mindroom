@@ -23,7 +23,7 @@ def registration_token_from_env() -> str | None:
     return token or None
 
 
-def local_provisioning_client_credentials_from_env() -> tuple[str, str] | None:
+def _local_provisioning_client_credentials_from_env() -> tuple[str, str] | None:
     """Get local provisioning client credentials from environment if configured."""
     client_id = os.getenv("MINDROOM_LOCAL_CLIENT_ID", "").strip()
     client_secret = os.getenv("MINDROOM_LOCAL_CLIENT_SECRET", "").strip()
@@ -48,7 +48,7 @@ def required_local_provisioning_client_credentials_for_registration(
     if registration_token or not provisioning_url:
         return None
 
-    creds = local_provisioning_client_credentials_from_env()
+    creds = _local_provisioning_client_credentials_from_env()
     if creds is None:
         msg = (
             "MINDROOM_PROVISIONING_URL is set but local client credentials are missing. "
@@ -59,7 +59,7 @@ def required_local_provisioning_client_credentials_for_registration(
 
 
 @dataclass(frozen=True)
-class ProvisioningRegisterResult:
+class _ProvisioningRegisterResult:
     """Result returned by the provisioning register-agent endpoint."""
 
     status: Literal["created", "user_in_use"]
@@ -75,7 +75,7 @@ async def register_user_via_provisioning_service(
     username: str,
     password: str,
     display_name: str,
-) -> ProvisioningRegisterResult:
+) -> _ProvisioningRegisterResult:
     """Register an agent account via provisioning service server-side flow."""
     url = f"{provisioning_url}/v1/local-mindroom/register-agent"
     headers = {
@@ -128,4 +128,4 @@ async def register_user_via_provisioning_service(
         msg = "Provisioning service response missing user_id for register-agent."
         raise ValueError(msg)
 
-    return ProvisioningRegisterResult(status=status, user_id=user_id.strip())
+    return _ProvisioningRegisterResult(status=status, user_id=user_id.strip())

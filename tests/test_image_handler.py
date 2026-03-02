@@ -8,7 +8,7 @@ import nio
 import pytest
 from agno.media import Image
 
-from mindroom import image_handler
+from mindroom.matrix import image_handler
 
 
 class TestExtractCaption:

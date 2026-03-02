@@ -12,7 +12,10 @@ from typing import TYPE_CHECKING, Any, Literal
 import nio
 from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
 
-from . import config_confirmation, image_handler, interactive, voice_handler
+from mindroom.matrix import image_handler
+from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
+
+from . import config_confirmation, interactive, voice_handler
 from .agents import create_agent, create_session_storage, remove_run_by_event_id
 from .ai import ai_response, stream_agent_response
 from .attachment_media import resolve_attachment_media
@@ -44,7 +47,7 @@ from .constants import (
     VOICE_PREFIX,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
-from .knowledge_utils import MultiKnowledgeVectorDb, resolve_agent_knowledge
+from .knowledge.utils import MultiKnowledgeVectorDb, resolve_agent_knowledge
 from .logging_config import emoji, get_logger
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client import (
@@ -82,7 +85,6 @@ from .memory.auto_flush import (
     reprioritize_auto_flush_sessions,
 )
 from .response_tracker import ResponseTracker
-from .room_cleanup import cleanup_all_orphaned_bots
 from .routing import suggest_agent_for_message
 from .scheduling import (
     restore_scheduled_tasks,
@@ -132,7 +134,7 @@ __all__ = ["AgentBot", "MultiKnowledgeVectorDb"]
 
 
 # Constants
-SYNC_TIMEOUT_MS = 30000
+_SYNC_TIMEOUT_MS = 30000
 
 
 def _create_task_wrapper(
@@ -660,7 +662,7 @@ class AgentBot:
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
         assert self.client is not None
-        await self.client.sync_forever(timeout=SYNC_TIMEOUT_MS, full_state=True)
+        await self.client.sync_forever(timeout=_SYNC_TIMEOUT_MS, full_state=True)
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         assert self.client is not None

@@ -12,8 +12,8 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.matrix.room_cleanup import _cleanup_orphaned_bots_in_room, cleanup_all_orphaned_bots
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.room_cleanup import _cleanup_orphaned_bots_in_room, cleanup_all_orphaned_bots
 from tests.conftest import TEST_PASSWORD
 
 
@@ -167,11 +167,11 @@ class TestDMPreservationDuringCleanup:
 
         with (
             patch(
-                "mindroom.room_cleanup.get_room_members",
+                "mindroom.matrix.room_cleanup.get_room_members",
                 return_value=members,
             ),
             patch(
-                "mindroom.room_cleanup._get_all_known_bot_usernames",
+                "mindroom.matrix.room_cleanup._get_all_known_bot_usernames",
                 return_value={"mindroom_orphaned", "mindroom_configured_agent"},
             ),
             patch(
@@ -221,20 +221,20 @@ class TestDMPreservationDuringCleanup:
             return room_id in ["!dm:server", "!another_dm:server"]
 
         with (
-            patch("mindroom.room_cleanup.get_joined_rooms", return_value=joined_rooms),
+            patch("mindroom.matrix.room_cleanup.get_joined_rooms", return_value=joined_rooms),
             patch(
-                "mindroom.room_cleanup.get_room_members",
+                "mindroom.matrix.room_cleanup.get_room_members",
                 return_value=["@user:server", "@mindroom_orphaned:server"],
             ),
             patch(
-                "mindroom.room_cleanup._get_all_known_bot_usernames",
+                "mindroom.matrix.room_cleanup._get_all_known_bot_usernames",
                 return_value={"mindroom_orphaned", "mindroom_agent"},
             ),
             patch(
                 "mindroom.config.main.Config.get_configured_bots_for_room",
                 side_effect=mock_get_configured_bots,
             ),
-            patch("mindroom.room_cleanup.is_dm_room", side_effect=mock_is_dm_room),
+            patch("mindroom.matrix.room_cleanup.is_dm_room", side_effect=mock_is_dm_room),
         ):
             client.room_kick = AsyncMock(return_value=nio.RoomKickResponse())
             result = await cleanup_all_orphaned_bots(client, config)

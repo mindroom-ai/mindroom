@@ -67,7 +67,7 @@ def test_bundled_mindroom_docs_skill_is_discoverable() -> None:
     """Ensure the bundled mindroom-docs skill is discoverable."""
     listing = skills_module.resolve_skill_listing(
         "mindroom-docs",
-        roots=[skills_module.get_bundled_skills_dir()],
+        roots=[skills_module._get_bundled_skills_dir()],
     )
     assert listing is not None
     assert listing.origin == "bundled"
@@ -85,7 +85,7 @@ def test_get_bundled_skills_dir_uses_package_fallback(
     monkeypatch.setattr(skills_module, "_BUNDLED_SKILLS_DEV_DIR", tmp_path / "missing-repo-skills")
     monkeypatch.setattr(skills_module, "_BUNDLED_SKILLS_PACKAGE_DIR", package_dir)
 
-    assert skills_module.get_bundled_skills_dir() == package_dir
+    assert skills_module._get_bundled_skills_dir() == package_dir
 
 
 def test_parse_skill_with_json5_metadata(tmp_path: Path) -> None:
