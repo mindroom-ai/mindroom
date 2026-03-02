@@ -40,6 +40,8 @@ knowledge_bases:
   docs:
     path: ./knowledge_docs
     watch: true
+    chunk_size: 1500
+    chunk_overlap: 100
 
 agents:
   assistant:
@@ -59,13 +61,20 @@ knowledge_bases:
   my_docs:
     path: ./knowledge_docs/my_docs   # Folder containing documents
     watch: true                       # Auto-reindex on file changes
+    chunk_size: 1500                  # Max characters per chunk
+    chunk_overlap: 100                # Overlap between adjacent chunks
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `path` | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute) |
 | `watch` | bool | `true` | Watch for filesystem changes and reindex automatically |
+| `chunk_size` | int | `1500` | Maximum characters per chunk for text-like files (minimum: `128`) |
+| `chunk_overlap` | int | `100` | Overlap characters between adjacent chunks (must be `< chunk_size`) |
 | `git` | object | `null` | Optional Git repository sync settings |
+
+Use smaller `chunk_size` values when your embedding server has lower token or batch limits.
+If chunking is too large, indexing retries will fail with embedder 500 errors.
 
 ### Multiple Knowledge Bases
 
@@ -76,12 +85,18 @@ knowledge_bases:
   engineering:
     path: ./knowledge_docs/engineering
     watch: true
+    chunk_size: 1500
+    chunk_overlap: 100
   product:
     path: ./knowledge_docs/product
     watch: true
+    chunk_size: 1500
+    chunk_overlap: 100
   legal:
     path: ./knowledge_docs/legal
     watch: false
+    chunk_size: 1000
+    chunk_overlap: 100
 
 agents:
   developer:
@@ -111,6 +126,8 @@ knowledge_bases:
   pipefunc_docs:
     path: ./knowledge_docs/pipefunc
     watch: false
+    chunk_size: 1200
+    chunk_overlap: 120
     git:
       repo_url: https://github.com/pipefunc/pipefunc
       branch: main
@@ -223,12 +240,12 @@ The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can
 The web dashboard provides a Knowledge tab for managing knowledge bases without editing YAML:
 
 - Create, edit, and delete knowledge bases
+- Configure chunk size and overlap per knowledge base
+- Configure Git sync settings
 - Upload and remove files
 - Trigger a full reindex on demand
 - Monitor indexing status (file count vs. indexed count)
 - Assign knowledge bases to agents from the Agents tab
-
-Git settings are currently configured only in `config.yaml` — the dashboard preserves existing `git` settings when you edit `path` or `watch`.
 
 ## API Endpoints
 
@@ -240,6 +257,6 @@ Knowledge base configuration supports hot reload. When you change `config.yaml`:
 
 - New knowledge bases are created and indexed
 - Removed knowledge bases are stopped and cleaned up
-- Changed settings (path, embedder, git config) trigger a re-initialization
+- Changed settings (path, chunking, embedder, git config) trigger a re-initialization
 - Unchanged knowledge bases continue running without interruption
 - File watchers are preserved across reloads

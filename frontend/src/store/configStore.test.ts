@@ -656,6 +656,8 @@ describe('configStore', () => {
             docs: {
               path: './docs',
               watch: true,
+              chunk_size: 1500,
+              chunk_overlap: 100,
               git: {
                 repo_url: 'https://github.com/pipefunc/pipefunc',
                 branch: 'main',
@@ -679,6 +681,8 @@ describe('configStore', () => {
       expect(state.config?.knowledge_bases?.docs).toEqual({
         path: './docs-sync',
         watch: false,
+        chunk_size: 1500,
+        chunk_overlap: 100,
         git: {
           repo_url: 'https://github.com/pipefunc/pipefunc',
           branch: 'main',

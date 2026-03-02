@@ -261,6 +261,8 @@ describe('Knowledge', () => {
         expect.objectContaining({
           path: './knowledge_docs/docs_git',
           watch: true,
+          chunk_size: 1500,
+          chunk_overlap: 100,
           git: expect.objectContaining({
             repo_url: 'https://github.com/org/repo',
             branch: 'develop',
@@ -355,6 +357,8 @@ describe('Knowledge', () => {
         docs: {
           path: './knowledge_docs/docs',
           watch: true,
+          chunk_size: 1500,
+          chunk_overlap: 100,
           git: {
             repo_url: 'https://github.com/org/repo',
             branch: 'main',
@@ -393,6 +397,12 @@ describe('Knowledge', () => {
     fireEvent.change(screen.getByLabelText('Poll Interval (seconds)'), {
       target: { value: '45' },
     });
+    fireEvent.change(screen.getByLabelText('Chunk Size (characters)'), {
+      target: { value: '2048' },
+    });
+    fireEvent.change(screen.getByLabelText('Chunk Overlap (characters)'), {
+      target: { value: '256' },
+    });
     fireEvent.change(screen.getByLabelText('Credentials Service (optional)'), {
       target: { value: '  github-private  ' },
     });
@@ -410,6 +420,8 @@ describe('Knowledge', () => {
       expect(mockUpdateKnowledgeBase).toHaveBeenLastCalledWith(
         'docs',
         expect.objectContaining({
+          chunk_size: 2048,
+          chunk_overlap: 256,
           git: {
             repo_url: 'https://github.com/org/repo-updated',
             branch: 'release',
