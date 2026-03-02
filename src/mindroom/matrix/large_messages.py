@@ -19,9 +19,9 @@ from mindroom.logging_config import get_logger
 logger = get_logger(__name__)
 
 # Conservative limits accounting for Matrix overhead
-NORMAL_MESSAGE_LIMIT = 55000  # ~55KB for regular messages
-EDIT_MESSAGE_LIMIT = 27000  # ~27KB for edits (they roughly double in size)
-PASSTHROUGH_CONTENT_KEYS = ("m.mentions", "com.mindroom.skip_mentions", AI_RUN_METADATA_KEY)
+_NORMAL_MESSAGE_LIMIT = 55000  # ~55KB for regular messages
+_EDIT_MESSAGE_LIMIT = 27000  # ~27KB for edits (they roughly double in size)
+_PASSTHROUGH_CONTENT_KEYS = ("m.mentions", "com.mindroom.skip_mentions", AI_RUN_METADATA_KEY)
 
 
 def _calculate_event_size(content: dict[str, Any]) -> int:
@@ -230,7 +230,7 @@ async def prepare_large_message(
 
     """
     is_edit = _is_edit_message(content)
-    size_limit = EDIT_MESSAGE_LIMIT if is_edit else NORMAL_MESSAGE_LIMIT
+    size_limit = _EDIT_MESSAGE_LIMIT if is_edit else _NORMAL_MESSAGE_LIMIT
 
     current_size = _calculate_event_size(content)
     if current_size <= size_limit:
@@ -248,7 +248,7 @@ async def prepare_large_message(
         size_limit,
     )
 
-    for key in PASSTHROUGH_CONTENT_KEYS:
+    for key in _PASSTHROUGH_CONTENT_KEYS:
         if key in source_content:
             modified_content[key] = source_content[key]
 
