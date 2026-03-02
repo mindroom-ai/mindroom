@@ -10,7 +10,7 @@ import pytest
 
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
-from mindroom.knowledge import (
+from mindroom.knowledge.manager import (
     KnowledgeManager,
     get_knowledge_manager,
     initialize_knowledge_managers,
@@ -129,8 +129,8 @@ def _make_git_config(
 def dummy_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> KnowledgeManager:
     """Build a KnowledgeManager with lightweight fakes for vector operations."""
     _DummyChromaDb.metadatas = []
-    monkeypatch.setattr("mindroom.knowledge.ChromaDb", _DummyChromaDb)
-    monkeypatch.setattr("mindroom.knowledge.Knowledge", _DummyKnowledge)
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
     config = _make_config(tmp_path / "knowledge")
     return KnowledgeManager(base_id="research", config=config, storage_path=tmp_path / "storage")
@@ -142,8 +142,8 @@ def test_knowledge_base_relative_path_resolves_from_config_dir(
 ) -> None:
     """Knowledge base relative paths should resolve from the config directory."""
     _DummyChromaDb.metadatas = []
-    monkeypatch.setattr("mindroom.knowledge.ChromaDb", _DummyChromaDb)
-    monkeypatch.setattr("mindroom.knowledge.Knowledge", _DummyKnowledge)
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml")
@@ -207,8 +207,8 @@ async def test_initialize_knowledge_managers_maintains_registry(
 ) -> None:
     """Registry should track configured bases and remove stale managers."""
     _DummyChromaDb.metadatas = []
-    monkeypatch.setattr("mindroom.knowledge.ChromaDb", _DummyChromaDb)
-    monkeypatch.setattr("mindroom.knowledge.Knowledge", _DummyKnowledge)
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
     config = Config(
         agents={},
@@ -245,8 +245,8 @@ async def test_sync_git_repository_updates_index_for_changed_and_deleted_files(
 ) -> None:
     """Git sync should remove deleted files and upsert changed files."""
     _DummyChromaDb.metadatas = []
-    monkeypatch.setattr("mindroom.knowledge.ChromaDb", _DummyChromaDb)
-    monkeypatch.setattr("mindroom.knowledge.Knowledge", _DummyKnowledge)
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
     manager = KnowledgeManager(
         base_id="research",
@@ -366,8 +366,8 @@ def test_list_files_skips_hidden_paths_when_git_skip_hidden_enabled(
 ) -> None:
     """Hidden files and folders are ignored for git-backed knowledge bases by default."""
     _DummyChromaDb.metadatas = []
-    monkeypatch.setattr("mindroom.knowledge.ChromaDb", _DummyChromaDb)
-    monkeypatch.setattr("mindroom.knowledge.Knowledge", _DummyKnowledge)
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
     manager = KnowledgeManager(
         base_id="research",
@@ -391,8 +391,8 @@ def test_list_files_respects_include_and_exclude_patterns(
 ) -> None:
     """Pattern filters should include only requested files and allow explicit exclusions."""
     _DummyChromaDb.metadatas = []
-    monkeypatch.setattr("mindroom.knowledge.ChromaDb", _DummyChromaDb)
-    monkeypatch.setattr("mindroom.knowledge.Knowledge", _DummyKnowledge)
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
     manager = KnowledgeManager(
         base_id="research",
@@ -432,8 +432,8 @@ async def test_start_watcher_starts_git_sync_even_when_file_watch_disabled(
 ) -> None:
     """Git polling should run even when filesystem watch is disabled."""
     _DummyChromaDb.metadatas = []
-    monkeypatch.setattr("mindroom.knowledge.ChromaDb", _DummyChromaDb)
-    monkeypatch.setattr("mindroom.knowledge.Knowledge", _DummyKnowledge)
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
     manager = KnowledgeManager(
         base_id="research",

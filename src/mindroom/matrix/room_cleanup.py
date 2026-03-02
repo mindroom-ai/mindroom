@@ -12,15 +12,15 @@ from typing import TYPE_CHECKING
 
 import nio
 
-from .logging_config import get_logger
-from .matrix.client import get_joined_rooms, get_room_members
-from .matrix.identity import MatrixID
-from .matrix.rooms import is_dm_room
-from .matrix.state import MatrixState
-from .matrix.users import INTERNAL_USER_ACCOUNT_KEY
+from mindroom.logging_config import get_logger
+from mindroom.matrix.client import get_joined_rooms, get_room_members
+from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.rooms import is_dm_room
+from mindroom.matrix.state import MatrixState
+from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 
 if TYPE_CHECKING:
-    from .config.main import Config
+    from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 

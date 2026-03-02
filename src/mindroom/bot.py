@@ -12,7 +12,10 @@ from typing import TYPE_CHECKING, Any, Literal
 import nio
 from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
 
-from . import config_confirmation, image_handler, interactive, voice_handler
+from mindroom.matrix import image_handler
+from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
+
+from . import config_confirmation, interactive, voice_handler
 from .agents import create_agent, create_session_storage, remove_run_by_event_id
 from .ai import ai_response, stream_agent_response
 from .authorization import (
@@ -26,7 +29,7 @@ from .background_tasks import create_background_task, wait_for_background_tasks
 from .command_handler import CommandHandlerContext, _generate_welcome_message, handle_command
 from .commands import Command, command_parser
 from .constants import MATRIX_HOMESERVER, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
-from .knowledge_utils import MultiKnowledgeVectorDb, resolve_agent_knowledge
+from .knowledge.utils import MultiKnowledgeVectorDb, resolve_agent_knowledge
 from .logging_config import emoji, get_logger
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client import (
@@ -63,7 +66,6 @@ from .memory.auto_flush import (
     reprioritize_auto_flush_sessions,
 )
 from .response_tracker import ResponseTracker
-from .room_cleanup import cleanup_all_orphaned_bots
 from .routing import suggest_agent_for_message
 from .scheduling import (
     restore_scheduled_tasks,
