@@ -14,12 +14,12 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import (
     INTERNAL_USER_AGENT_NAME,
     AgentMatrixUser,
+    _ensure_all_agent_users,
+    _get_agent_credentials,
+    _register_user,
+    _save_agent_credentials,
     create_agent_user,
-    ensure_all_agent_users,
-    get_agent_credentials,
     login_agent_user,
-    register_user,
-    save_agent_credentials,
 )
 from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
@@ -128,13 +128,13 @@ class TestMatrixUserManagement:
         mock_state.add_account("agent_calculator", "mindroom_calculator", "calc_pass")
         mock_load.return_value = mock_state
 
-        creds = get_agent_credentials("calculator")
+        creds = _get_agent_credentials("calculator")
         assert creds is not None
         assert creds["username"] == "mindroom_calculator"
         assert creds["password"] == "calc_pass"  # noqa: S105
 
         # Test non-existent agent
-        creds = get_agent_credentials("nonexistent")
+        creds = _get_agent_credentials("nonexistent")
         assert creds is None
 
     @patch("mindroom.matrix.state.MatrixState.save")
@@ -145,7 +145,7 @@ class TestMatrixUserManagement:
         mock_state.add_account("bot", "bot", "pass")
         mock_load.return_value = mock_state
 
-        save_agent_credentials("calculator", "mindroom_calculator", "calc_pass")
+        _save_agent_credentials("calculator", "mindroom_calculator", "calc_pass")
 
         # Verify the account was added
         assert "agent_calculator" in mock_state.accounts
@@ -174,7 +174,7 @@ class TestMatrixRegistration:
         with patch("mindroom.matrix.users.matrix_client") as mock_matrix_client:
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
-            user_id = await register_user("http://localhost:8008", "test_user", "test_pass", "Test User")
+            user_id = await _register_user("http://localhost:8008", "test_user", "test_pass", "Test User")
 
             assert user_id == "@test_user:localhost"
             mock_client.register.assert_called_once()
@@ -195,7 +195,7 @@ class TestMatrixRegistration:
         with patch("mindroom.matrix.users.matrix_client") as mock_matrix_client:
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
-            user_id = await register_user("http://localhost:8008", "existing_user", "test_pass", "Existing User")
+            user_id = await _register_user("http://localhost:8008", "existing_user", "test_pass", "Existing User")
 
             assert user_id == "@existing_user:localhost"
             mock_matrix_client.assert_called_once()
@@ -215,7 +215,7 @@ class TestMatrixRegistration:
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
             with pytest.raises(ValueError, match="Matrix account collision"):
-                await register_user("http://localhost:8008", "existing_user", "wrong_pass", "Existing User")
+                await _register_user("http://localhost:8008", "existing_user", "wrong_pass", "Existing User")
 
     @pytest.mark.asyncio
     async def test_register_user_failure(self) -> None:
@@ -230,7 +230,7 @@ class TestMatrixRegistration:
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
             with pytest.raises(ValueError, match="Failed to register user"):
-                await register_user("http://localhost:8008", "test_user", "test_pass", "Test User")
+                await _register_user("http://localhost:8008", "test_user", "test_pass", "Test User")
 
             mock_matrix_client.assert_called_once()
 
@@ -255,7 +255,7 @@ class TestMatrixRegistration:
         with patch("mindroom.matrix.users.matrix_client") as mock_matrix_client:
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
-            user_id = await register_user("http://localhost:8008", "test_user", test_pass, "Test User")
+            user_id = await _register_user("http://localhost:8008", "test_user", test_pass, "Test User")
 
             assert user_id == "@test_user:localhost"
             mock_client.register_with_token.assert_called_once_with(
@@ -295,7 +295,7 @@ class TestMatrixRegistration:
                 user_id="@test_user:localhost",
             )
 
-            user_id = await register_user("http://localhost:8008", "test_user", test_pass, "Test User")
+            user_id = await _register_user("http://localhost:8008", "test_user", test_pass, "Test User")
 
             assert user_id == "@test_user:localhost"
             mock_register.assert_called_once_with(
@@ -345,7 +345,7 @@ class TestMatrixRegistration:
             )
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
-            user_id = await register_user("http://localhost:8008", "test_user", test_pass, "Test User")
+            user_id = await _register_user("http://localhost:8008", "test_user", test_pass, "Test User")
 
             assert user_id == "@test_user:localhost"
             mock_client.login.assert_called_once_with(test_pass)
@@ -391,7 +391,7 @@ class TestMatrixRegistration:
             )
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
-            user_id = await register_user("https://internal-matrix:8448", "test_user", test_pass, "Test User")
+            user_id = await _register_user("https://internal-matrix:8448", "test_user", test_pass, "Test User")
 
             assert user_id == "@test_user:mindroom.chat"
             mock_matrix_client.assert_called_once_with(
@@ -410,7 +410,7 @@ class TestMatrixRegistration:
         monkeypatch.delenv("MINDROOM_LOCAL_CLIENT_SECRET", raising=False)
 
         with pytest.raises(ValueError, match="mindroom connect --pair-code"):
-            await register_user("http://localhost:8008", "test_user", "test_pass", "Test User")
+            await _register_user("http://localhost:8008", "test_user", "test_pass", "Test User")
 
     @pytest.mark.asyncio
     async def test_register_user_missing_token_error_is_explicit(
@@ -431,16 +431,16 @@ class TestMatrixRegistration:
             mock_req.return_value = True
 
             with pytest.raises(ValueError, match="Set MATRIX_REGISTRATION_TOKEN"):
-                await register_user("http://localhost:8008", "test_user", "test_pass", "Test User")
+                await _register_user("http://localhost:8008", "test_user", "test_pass", "Test User")
 
 
 class TestAgentUserCreation:
     """Test agent user creation functions."""
 
     @pytest.mark.asyncio
-    @patch("mindroom.matrix.users.register_user")
-    @patch("mindroom.matrix.users.save_agent_credentials")
-    @patch("mindroom.matrix.users.get_agent_credentials")
+    @patch("mindroom.matrix.users._register_user")
+    @patch("mindroom.matrix.users._save_agent_credentials")
+    @patch("mindroom.matrix.users._get_agent_credentials")
     async def test_create_agent_user_new(
         self,
         mock_get_creds: MagicMock,
@@ -462,9 +462,9 @@ class TestAgentUserCreation:
         mock_register.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("mindroom.matrix.users.register_user")
-    @patch("mindroom.matrix.users.save_agent_credentials")
-    @patch("mindroom.matrix.users.get_agent_credentials")
+    @patch("mindroom.matrix.users._register_user")
+    @patch("mindroom.matrix.users._save_agent_credentials")
+    @patch("mindroom.matrix.users._get_agent_credentials")
     async def test_create_agent_user_existing(
         self,
         mock_get_creds: MagicMock,
@@ -485,8 +485,8 @@ class TestAgentUserCreation:
         mock_register.assert_called_once()  # Still tries to register/verify
 
     @pytest.mark.asyncio
-    @patch("mindroom.matrix.users.register_user")
-    @patch("mindroom.matrix.users.get_agent_credentials")
+    @patch("mindroom.matrix.users._register_user")
+    @patch("mindroom.matrix.users._get_agent_credentials")
     async def test_create_internal_user_rejects_username_change(
         self,
         mock_get_creds: MagicMock,
@@ -581,7 +581,7 @@ class TestEnsureAllAgentUsers:
 
         mock_create_user.side_effect = mock_users
 
-        agent_users = await ensure_all_agent_users("http://localhost:8008", config)
+        agent_users = await _ensure_all_agent_users("http://localhost:8008", config)
 
         # Should have router + all configured agents + all configured teams
         expected_count = 1 + len(config.agents) + len(config.teams)
@@ -615,7 +615,7 @@ class TestEnsureAllAgentUsers:
                 mock_create_user.side_effect = [*mock_results, mock_error]
                 break
 
-        agent_users = await ensure_all_agent_users("http://localhost:8008", config)
+        agent_users = await _ensure_all_agent_users("http://localhost:8008", config)
 
         # Should still return the successful ones (router + first agent)
         assert len(agent_users) >= 2  # At least router + one agent

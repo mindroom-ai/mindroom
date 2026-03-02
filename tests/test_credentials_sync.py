@@ -7,7 +7,7 @@ import pytest
 
 from mindroom.credentials import CredentialsManager
 from mindroom.credentials_sync import (
-    ENV_TO_SERVICE_MAP,
+    _ENV_TO_SERVICE_MAP,
     get_api_key_for_provider,
     get_ollama_host,
     sync_env_to_credentials,
@@ -236,7 +236,7 @@ class TestCredentialsSync:
             "OLLAMA_HOST": "ollama",
         }
 
-        assert expected_services == ENV_TO_SERVICE_MAP
+        assert expected_services == _ENV_TO_SERVICE_MAP
 
     def test_sync_idempotent(self, temp_credentials_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test that running sync multiple times doesn't cause issues."""

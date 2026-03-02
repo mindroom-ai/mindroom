@@ -11,7 +11,7 @@ from agno.media import Audio
 from mindroom import voice_handler
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.voice import VoiceConfig, VoiceLLMConfig, VoiceSTTConfig
+from mindroom.config.voice import VoiceConfig, _VoiceLLMConfig, _VoiceSTTConfig
 
 
 class TestVoiceHandler:
@@ -27,8 +27,8 @@ class TestVoiceHandler:
         config = Config(
             voice=VoiceConfig(
                 enabled=True,
-                stt=VoiceSTTConfig(provider="openai", model="whisper-1"),
-                intelligence=VoiceLLMConfig(model="default"),
+                stt=_VoiceSTTConfig(provider="openai", model="whisper-1"),
+                intelligence=_VoiceLLMConfig(model="default"),
             ),
         )
         assert config.voice.enabled

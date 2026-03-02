@@ -225,7 +225,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
     with (
         patch("mindroom.bot.login_agent_user") as mock_login,
         patch("mindroom.config.main.Config.from_yaml", return_value=mock_config),
-        patch("mindroom.teams.select_team_mode", new=AsyncMock()) as mock_select_mode,
+        patch("mindroom.teams._select_team_mode", new=AsyncMock()) as mock_select_mode,
     ):
         mock_client = AsyncMock()
         mock_client.add_event_callback = MagicMock()
@@ -445,7 +445,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
 async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
     """Test that the orchestrator manages multiple agents correctly."""
-    with patch("mindroom.matrix.users.ensure_all_agent_users") as mock_ensure:
+    with patch("mindroom.matrix.users._ensure_all_agent_users") as mock_ensure:
         # Mock agent users
         mock_agents = {
             "calculator": AgentMatrixUser(

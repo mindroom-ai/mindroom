@@ -60,7 +60,7 @@ class TeamMode(str, Enum):
     COLLABORATE = "collaborate"  # All members work on same task in parallel
 
 
-class TeamModeDecision(BaseModel):
+class _TeamModeDecision(BaseModel):
     """AI decision for team collaboration mode."""
 
     mode: Literal["coordinate", "collaborate"] = Field(
@@ -235,7 +235,7 @@ class TeamFormationDecision(NamedTuple):
     mode: TeamMode
 
 
-async def select_team_mode(
+async def _select_team_mode(
     message: str,
     agent_names: list[str],
     config: Config,
@@ -280,13 +280,13 @@ Return the mode and a one-sentence reason why."""
         name="TeamModeDecider",
         role="Determine team mode",
         model=model,
-        output_schema=TeamModeDecision,
+        output_schema=_TeamModeDecision,
     )
 
     try:
         response = await agent.arun(prompt, session_id="team_mode_decision")
         decision = response.content
-        if isinstance(decision, TeamModeDecision):
+        if isinstance(decision, _TeamModeDecision):
             logger.info(f"Team mode: {decision.mode} - {decision.reasoning}")
             return TeamMode.COORDINATE if decision.mode == "coordinate" else TeamMode.COLLABORATE
         # Fallback if response is unexpected
@@ -368,7 +368,7 @@ async def decide_team_formation(
     # Only do this AI call for the first agent to avoid duplication
     if use_ai_decision and message and config and is_first_agent:
         agent_names = [mid.agent_name(config) or mid.username for mid in team_agents]
-        mode = await select_team_mode(message, agent_names, config)
+        mode = await _select_team_mode(message, agent_names, config)
     else:
         # Fallback to hardcoded logic when AI decision is disabled or unavailable
         # Use COORDINATE when agents are explicitly tagged (they likely have different roles)

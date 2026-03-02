@@ -11,7 +11,7 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.matrix.client import create_dm_room
+from mindroom.matrix.client import _create_dm_room
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
@@ -29,7 +29,7 @@ class TestDMRoomCreation:
         client = AsyncMock()
         client.room_create = AsyncMock(return_value=nio.RoomCreateResponse(room_id="!test_dm:localhost"))
 
-        room_id = await create_dm_room(
+        room_id = await _create_dm_room(
             client,
             invite_user_ids=["@user:localhost", "@agent:localhost"],
             name="DM with agent",
@@ -50,7 +50,7 @@ class TestDMRoomCreation:
         client = AsyncMock()
         client.room_create = AsyncMock(return_value=nio.RoomCreateResponse(room_id="!group_dm:localhost"))
 
-        room_id = await create_dm_room(
+        room_id = await _create_dm_room(
             client,
             invite_user_ids=["@user:localhost", "@agent1:localhost", "@agent2:localhost"],
             name="Group DM",
@@ -64,7 +64,7 @@ class TestDMRoomCreation:
         client = AsyncMock()
         client.room_create = AsyncMock(return_value=nio.RoomCreateError(message="Failed"))
 
-        room_id = await create_dm_room(client, ["@user:localhost"], "Test DM")
+        room_id = await _create_dm_room(client, ["@user:localhost"], "Test DM")
         assert room_id is None
 
 

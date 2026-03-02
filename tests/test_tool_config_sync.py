@@ -7,17 +7,17 @@ import pytest
 
 # Import tools to ensure they're registered
 import mindroom.tools  # noqa: F401
-from mindroom.tools_metadata import TOOL_METADATA, TOOL_REGISTRY
+from mindroom.tools_metadata import _TOOL_REGISTRY, TOOL_METADATA
 
-SKIP_CUSTOM = {"homeassistant", "imdb", "gmail", "google_calendar", "google_sheets", "openclaw_compat"}
+SKIP_CUSTOM = {"homeassistant", "gmail", "google_calendar", "google_sheets", "openclaw_compat"}
 
 
-@pytest.mark.parametrize("tool_name", list(TOOL_REGISTRY.keys()))
+@pytest.mark.parametrize("tool_name", list(_TOOL_REGISTRY.keys()))
 def test_all(tool_name: str) -> None:
     """Test that all tools have matching ConfigFields and agno parameters."""
     if tool_name in SKIP_CUSTOM:
         pytest.skip(f"{tool_name} is a custom tool, skipping test")
-    tool_factory = TOOL_REGISTRY[tool_name]
+    tool_factory = _TOOL_REGISTRY[tool_name]
     try:
         tool_class = tool_factory()
     except NotImplementedError:

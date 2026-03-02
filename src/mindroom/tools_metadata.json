@@ -4926,33 +4926,6 @@
       "config_fields": [
         {
           "default": null,
-          "description": "Your OMDb API key for movie and TV show information",
-          "label": "OMDb API Key",
-          "name": "OMDB_API_KEY",
-          "options": null,
-          "placeholder": "Enter your OMDb API key",
-          "required": true,
-          "type": "password",
-          "validation": null
-        }
-      ],
-      "dependencies": null,
-      "description": "Movie and TV show information",
-      "display_name": "IMDb",
-      "docs_url": "http://www.omdbapi.com/",
-      "helper_text": "Get a free API key from [OMDb API website](http://www.omdbapi.com/apikey.aspx)",
-      "icon": "Film",
-      "icon_color": "text-yellow-500",
-      "name": "imdb",
-      "setup_type": "api_key",
-      "status": "requires_config"
-    },
-    {
-      "auth_provider": null,
-      "category": "entertainment",
-      "config_fields": [
-        {
-          "default": null,
           "description": "OAuth access token with required scopes (user-read-private, playlist-modify-public, playlist-modify-private)",
           "label": "Access Token",
           "name": "access_token",

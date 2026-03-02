@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-class AgentSuggestion(BaseModel):
+class _AgentSuggestion(BaseModel):
     """Structured output for agent routing decisions."""
 
     agent_name: str = Field(description="The name of the agent that should respond")
@@ -83,14 +83,14 @@ Choose the most appropriate agent based on their role, tools, and instructions."
             name="Router",
             role="Route messages to appropriate agents",
             model=model,
-            output_schema=AgentSuggestion,
+            output_schema=_AgentSuggestion,
         )
 
         response = await agent.arun(prompt, session_id="routing")
         suggestion = response.content
 
         # With output_schema, we should always get the correct type
-        if not isinstance(suggestion, AgentSuggestion):
+        if not isinstance(suggestion, _AgentSuggestion):
             logger.error(
                 "Unexpected response type from AI routing",
                 expected="AgentSuggestion",

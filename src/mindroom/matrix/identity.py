@@ -131,14 +131,14 @@ class MatrixID:
 
 
 @dataclass(frozen=True)
-class ThreadStateKey:
+class _ThreadStateKey:
     """Represents a thread state key like 'thread_id:agent_name'."""
 
     thread_id: str
     agent_name: str
 
     @classmethod
-    def parse(cls, state_key: str) -> ThreadStateKey:
+    def parse(cls, state_key: str) -> _ThreadStateKey:
         """Parse a state key."""
         parts = state_key.split(":", 1)
         if len(parts) != 2:

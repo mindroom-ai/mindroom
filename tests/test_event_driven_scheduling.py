@@ -11,7 +11,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling import (
     CronSchedule,
     ScheduledWorkflow,
-    parse_workflow_schedule,
+    _parse_workflow_schedule,
 )
 
 
@@ -71,7 +71,7 @@ class TestEventDrivenScheduling:
         mock_agent.arun.return_value = mock_response
 
         # Execute
-        result = await parse_workflow_schedule(
+        result = await _parse_workflow_schedule(
             "If I get an email about 'urgent', call me",
             mock_config,
             available_agents=[_mid("email_assistant"), _mid("phone_agent")],
@@ -113,7 +113,7 @@ class TestEventDrivenScheduling:
         mock_agent.arun.return_value = mock_response
 
         # Execute
-        result = await parse_workflow_schedule(
+        result = await _parse_workflow_schedule(
             "When Bitcoin drops below $40k, notify me",
             mock_config,
             available_agents=[_mid("crypto_agent"), _mid("notification_agent")],
@@ -148,7 +148,7 @@ class TestEventDrivenScheduling:
         mock_agent.arun.return_value = mock_response
 
         # Execute
-        result = await parse_workflow_schedule(
+        result = await _parse_workflow_schedule(
             "If server CPU goes above 80%, scale up",
             mock_config,
             available_agents=[_mid("monitoring_agent"), _mid("ops_agent")],
@@ -183,7 +183,7 @@ class TestEventDrivenScheduling:
         mock_agent.arun.return_value = mock_response
 
         # Execute
-        result = await parse_workflow_schedule(
+        result = await _parse_workflow_schedule(
             "When the build fails, create a ticket",
             mock_config,
             available_agents=[_mid("ci_agent"), _mid("ticket_agent")],
@@ -218,7 +218,7 @@ class TestEventDrivenScheduling:
         mock_agent.arun.return_value = mock_response
 
         # Execute
-        result = await parse_workflow_schedule(
+        result = await _parse_workflow_schedule(
             "When someone mentions our product on Reddit, analyze it",
             mock_config,
             available_agents=[_mid("reddit_agent"), _mid("analyst")],
@@ -253,7 +253,7 @@ class TestEventDrivenScheduling:
         mock_agent.arun.return_value = mock_response
 
         # Execute
-        result = await parse_workflow_schedule(
+        result = await _parse_workflow_schedule(
             "Whenever I get an email from my boss, notify me immediately",
             mock_config,
             available_agents=[_mid("email_assistant"), _mid("notification_agent")],
@@ -289,7 +289,7 @@ class TestEventDrivenScheduling:
         mock_agent.arun.return_value = mock_response
 
         # Execute
-        await parse_workflow_schedule(
+        await _parse_workflow_schedule(
             "Test request",
             mock_config,
             available_agents=[_mid("test_agent")],

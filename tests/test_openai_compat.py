@@ -15,7 +15,7 @@ from fastapi import Request
 from fastapi.testclient import TestClient
 
 from mindroom.api.openai_compat import (
-    ChatMessage,
+    _ChatMessage,
     _convert_messages,
     _derive_session_id,
     _extract_content_text,
@@ -821,7 +821,7 @@ class TestMessageConversion:
 
     def test_simple_user_message(self) -> None:
         """Single user message becomes prompt with no history."""
-        messages = [ChatMessage(role="user", content="Hello")]
+        messages = [_ChatMessage(role="user", content="Hello")]
         prompt, history = _convert_messages(messages)
         assert prompt == "Hello"
         assert history is None
@@ -829,9 +829,9 @@ class TestMessageConversion:
     def test_multi_turn_conversation(self) -> None:
         """Multi-turn conversation splits into history + prompt."""
         messages = [
-            ChatMessage(role="user", content="Hi"),
-            ChatMessage(role="assistant", content="Hello!"),
-            ChatMessage(role="user", content="How are you?"),
+            _ChatMessage(role="user", content="Hi"),
+            _ChatMessage(role="assistant", content="Hello!"),
+            _ChatMessage(role="user", content="How are you?"),
         ]
         prompt, history = _convert_messages(messages)
         assert prompt == "How are you?"
@@ -843,8 +843,8 @@ class TestMessageConversion:
     def test_system_message_prepended(self) -> None:
         """System message is prepended to prompt."""
         messages = [
-            ChatMessage(role="system", content="You are helpful."),
-            ChatMessage(role="user", content="Hello"),
+            _ChatMessage(role="system", content="You are helpful."),
+            _ChatMessage(role="user", content="Hello"),
         ]
         prompt, history = _convert_messages(messages)
         assert "You are helpful." in prompt
@@ -854,8 +854,8 @@ class TestMessageConversion:
     def test_developer_role_treated_as_system(self) -> None:
         """Developer role is treated same as system."""
         messages = [
-            ChatMessage(role="developer", content="Be concise."),
-            ChatMessage(role="user", content="Hello"),
+            _ChatMessage(role="developer", content="Be concise."),
+            _ChatMessage(role="user", content="Hello"),
         ]
         prompt, _ = _convert_messages(messages)
         assert "Be concise." in prompt
@@ -864,10 +864,10 @@ class TestMessageConversion:
     def test_tool_messages_skipped(self) -> None:
         """Tool role messages are skipped."""
         messages = [
-            ChatMessage(role="user", content="Run search"),
-            ChatMessage(role="assistant", content="I'll search for that."),
-            ChatMessage(role="tool", content="Search results: ..."),
-            ChatMessage(role="user", content="Thanks"),
+            _ChatMessage(role="user", content="Run search"),
+            _ChatMessage(role="assistant", content="I'll search for that."),
+            _ChatMessage(role="tool", content="Search results: ..."),
+            _ChatMessage(role="user", content="Thanks"),
         ]
         prompt, history = _convert_messages(messages)
         assert prompt == "Thanks"
@@ -878,7 +878,7 @@ class TestMessageConversion:
     def test_multimodal_content(self) -> None:
         """Multimodal content extracts text parts."""
         messages = [
-            ChatMessage(
+            _ChatMessage(
                 role="user",
                 content=[
                     {"type": "text", "text": "What is this?"},
@@ -894,8 +894,8 @@ class TestMessageConversion:
     def test_none_content_skipped(self) -> None:
         """Messages with None content are skipped."""
         messages = [
-            ChatMessage(role="assistant", content=None),
-            ChatMessage(role="user", content="Hello"),
+            _ChatMessage(role="assistant", content=None),
+            _ChatMessage(role="user", content="Hello"),
         ]
         prompt, history = _convert_messages(messages)
         assert prompt == "Hello"
@@ -904,7 +904,7 @@ class TestMessageConversion:
     def test_only_system_messages(self) -> None:
         """Only system messages become the prompt."""
         messages = [
-            ChatMessage(role="system", content="Be helpful."),
+            _ChatMessage(role="system", content="Be helpful."),
         ]
         prompt, history = _convert_messages(messages)
         assert prompt == "Be helpful."
@@ -913,8 +913,8 @@ class TestMessageConversion:
     def test_conversation_ending_with_assistant(self) -> None:
         """Prompt uses last user message even when conversation ends with assistant."""
         messages = [
-            ChatMessage(role="user", content="Hi"),
-            ChatMessage(role="assistant", content="Hello! How can I help?"),
+            _ChatMessage(role="user", content="Hi"),
+            _ChatMessage(role="assistant", content="Hello! How can I help?"),
         ]
         prompt, history = _convert_messages(messages)
         # Last user message is "Hi", not the trailing assistant message

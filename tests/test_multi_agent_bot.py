@@ -19,7 +19,7 @@ from agno.run.team import TeamRunOutput
 
 from mindroom.attachments import attachment_id_for_event, register_local_attachment
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
-from mindroom.bot import AgentBot, MessageContext, MultiKnowledgeVectorDb
+from mindroom.bot import AgentBot, MultiKnowledgeVectorDb, _MessageContext
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -1188,7 +1188,7 @@ class TestAgentBot:
 
         if handler_name == "image":
             bot._extract_message_context = AsyncMock(
-                return_value=MessageContext(
+                return_value=_MessageContext(
                     am_i_mentioned=False,
                     is_thread=False,
                     thread_id=None,
@@ -1226,7 +1226,7 @@ class TestAgentBot:
         bot.__dict__["response_tracker"] = tracker
 
         bot._extract_message_context = AsyncMock(
-            return_value=MessageContext(
+            return_value=_MessageContext(
                 am_i_mentioned=False,
                 is_thread=False,
                 thread_id=None,
@@ -1308,7 +1308,7 @@ class TestAgentBot:
         bot.__dict__["response_tracker"] = tracker
 
         bot._extract_message_context = AsyncMock(
-            return_value=MessageContext(
+            return_value=_MessageContext(
                 am_i_mentioned=False,
                 is_thread=False,
                 thread_id=None,
@@ -1364,7 +1364,7 @@ class TestAgentBot:
         bot.__dict__["response_tracker"] = tracker
 
         bot._extract_message_context = AsyncMock(
-            return_value=MessageContext(
+            return_value=_MessageContext(
                 am_i_mentioned=False,
                 is_thread=False,
                 thread_id=None,
@@ -1456,7 +1456,7 @@ class TestAgentBot:
         bot.__dict__["response_tracker"] = tracker
 
         bot._extract_message_context = AsyncMock(
-            return_value=MessageContext(
+            return_value=_MessageContext(
                 am_i_mentioned=False,
                 is_thread=False,
                 thread_id=None,
@@ -1880,7 +1880,7 @@ class TestAgentBot:
         router_bot._send_response = AsyncMock(return_value="$route")
         general_bot._generate_response = AsyncMock()
 
-        message_context = MessageContext(
+        message_context = _MessageContext(
             am_i_mentioned=False,
             is_thread=False,
             thread_id=None,
@@ -1983,7 +1983,7 @@ class TestAgentBot:
         bot.response_tracker = MagicMock()
         bot.response_tracker.has_responded.return_value = False
         bot._extract_message_context = AsyncMock(
-            return_value=MessageContext(
+            return_value=_MessageContext(
                 am_i_mentioned=False,
                 is_thread=False,
                 thread_id=None,
@@ -2055,7 +2055,7 @@ class TestAgentBot:
         bot.response_tracker = MagicMock()
         bot.response_tracker.has_responded.return_value = False
         bot._extract_message_context = AsyncMock(
-            return_value=MessageContext(
+            return_value=_MessageContext(
                 am_i_mentioned=False,
                 is_thread=False,
                 thread_id=None,
@@ -2192,7 +2192,7 @@ class TestAgentBot:
         )
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
-        context = MessageContext(
+        context = _MessageContext(
             am_i_mentioned=False,
             is_thread=False,
             thread_id=None,

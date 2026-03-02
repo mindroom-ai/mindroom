@@ -9,16 +9,16 @@ import nio
 import pytest
 
 from mindroom.scheduling import (
-    SCHEDULED_TASK_EVENT_TYPE,
+    _SCHEDULED_TASK_EVENT_TYPE,
     CronSchedule,
     ScheduledTaskRecord,
     ScheduledWorkflow,
+    _run_cron_task,
+    _run_once_task,
     cancel_all_scheduled_tasks,
     edit_scheduled_task,
     get_scheduled_tasks_for_room,
     list_scheduled_tasks,
-    run_cron_task,
-    run_once_task,
     save_edited_scheduled_task,
 )
 
@@ -315,10 +315,10 @@ async def test_run_once_task_stops_when_cancelled_via_matrix_state() -> None:
 
     with (
         patch("mindroom.scheduling.get_scheduled_task", side_effect=_fetch_task),
-        patch("mindroom.scheduling.execute_scheduled_workflow", new=AsyncMock()) as execute_mock,
+        patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock()) as execute_mock,
         patch("mindroom.scheduling.asyncio.sleep", new=AsyncMock()),
     ):
-        await run_once_task(client, "task_once_cancelled", workflow, config)
+        await _run_once_task(client, "task_once_cancelled", workflow, config)
 
     execute_mock.assert_not_awaited()
 
@@ -350,9 +350,9 @@ async def test_run_once_task_executes_latest_state_workflow() -> None:
 
     with (
         patch("mindroom.scheduling.get_scheduled_task", side_effect=_fetch_task),
-        patch("mindroom.scheduling.execute_scheduled_workflow", new=AsyncMock()) as execute_mock,
+        patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock()) as execute_mock,
     ):
-        await run_once_task(client, "task_once_updated", initial_workflow, config)
+        await _run_once_task(client, "task_once_updated", initial_workflow, config)
 
     execute_mock.assert_awaited_once()
     executed_workflow = execute_mock.await_args.args[1]
@@ -391,10 +391,10 @@ async def test_run_cron_task_executes_latest_state_workflow() -> None:
 
     with (
         patch("mindroom.scheduling.get_scheduled_task", side_effect=_fetch_task),
-        patch("mindroom.scheduling.execute_scheduled_workflow", new=AsyncMock()) as execute_mock,
+        patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock()) as execute_mock,
         patch("mindroom.scheduling.croniter", return_value=_ImmediateCron()),
     ):
-        await run_cron_task(client, "task_cron_updated", initial_workflow, {}, config)
+        await _run_cron_task(client, "task_cron_updated", initial_workflow, {}, config)
 
     execute_mock.assert_awaited_once()
     executed_workflow = execute_mock.await_args.args[1]
@@ -421,9 +421,9 @@ async def test_run_cron_task_stops_when_cancelled_via_matrix_state() -> None:
 
     with (
         patch("mindroom.scheduling.get_scheduled_task", side_effect=_fetch_task),
-        patch("mindroom.scheduling.execute_scheduled_workflow", new=AsyncMock()) as execute_mock,
+        patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock()) as execute_mock,
     ):
-        await run_cron_task(client, "task_cron_cancelled", workflow, {}, config)
+        await _run_cron_task(client, "task_cron_cancelled", workflow, {}, config)
 
     execute_mock.assert_not_awaited()
 
@@ -598,7 +598,7 @@ async def test_edit_scheduled_task_reuses_existing_thread() -> None:
     )
     state_response = nio.RoomGetStateEventResponse(
         content={"status": "pending", "workflow": workflow.model_dump_json()},
-        event_type=SCHEDULED_TASK_EVENT_TYPE,
+        event_type=_SCHEDULED_TASK_EVENT_TYPE,
         state_key="task123",
         room_id="!test:server",
     )
@@ -642,7 +642,7 @@ async def test_edit_scheduled_task_rejects_non_pending() -> None:
     room = MagicMock()
     state_response = nio.RoomGetStateEventResponse(
         content={"status": "cancelled"},
-        event_type=SCHEDULED_TASK_EVENT_TYPE,
+        event_type=_SCHEDULED_TASK_EVENT_TYPE,
         state_key="task123",
         room_id="!test:server",
     )

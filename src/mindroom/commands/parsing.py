@@ -31,7 +31,7 @@ class CommandType(Enum):
 
 
 # Command documentation for each command type
-COMMAND_DOCS = {
+_COMMAND_DOCS = {
     CommandType.SCHEDULE: ("!schedule <task>", "Schedule a task"),
     CommandType.LIST_SCHEDULES: ("!list_schedules", "List scheduled tasks"),
     CommandType.CANCEL_SCHEDULE: ("!cancel_schedule <id>", "Cancel a scheduled task"),
@@ -56,8 +56,8 @@ def _get_command_entries(format_code: bool = False) -> list[str]:
     """
     entries = []
     for cmd_type in CommandType:
-        if cmd_type in COMMAND_DOCS and cmd_type != CommandType.UNKNOWN:
-            syntax, description = COMMAND_DOCS[cmd_type]
+        if cmd_type in _COMMAND_DOCS and cmd_type != CommandType.UNKNOWN:
+            syntax, description = _COMMAND_DOCS[cmd_type]
             if format_code:
                 entries.append(f"- `{syntax}` - {description}")
             else:
@@ -85,7 +85,7 @@ class Command:
     raw_text: str
 
 
-class CommandParser:
+class _CommandParser:
     """Parser for user commands in messages."""
 
     # Command patterns
@@ -440,4 +440,4 @@ async def handle_widget_command(
 
 
 # Global parser instance
-command_parser = CommandParser()
+command_parser = _CommandParser()
