@@ -64,10 +64,12 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 | `stop.py` | StopManager for cancelling in-progress responses |
 | `room_cleanup.py` | Orphaned bot cleanup from rooms |
 | `topic_generator.py` | AI-generated room topics |
-| `cli.py` | Main CLI entry point (Typer app) |
-| `cli_banner.py` | CLI startup banner |
-| `cli_config.py` | Config subcommand logic |
-| `cli_connect.py` | `mindroom connect` pairing helpers and owner placeholder replacement |
+| `cli/main.py` | Main CLI entry point (Typer app) |
+| `cli/banner.py` | CLI startup banner |
+| `cli/config.py` | Config subcommand logic |
+| `cli/connect.py` | `mindroom connect` pairing helpers and owner placeholder replacement |
+| `cli/doctor.py` | Doctor command implementation |
+| `cli/local_stack.py` | Local stack setup command |
 | `config_commands.py` | Chat-based config commands (`!config`) |
 | `credentials_sync.py` | `.env` to credentials vault sync |
 | `logging_config.py` | Structured logging setup |

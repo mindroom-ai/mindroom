@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import httpx
 import pytest
 
-from mindroom import cli_connect
+import mindroom.cli.connect as cli_connect
 from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
 
 if TYPE_CHECKING:
