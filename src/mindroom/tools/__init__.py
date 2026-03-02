@@ -249,7 +249,7 @@ __all__ = [
     helper_text="Implies: shell, coding, duckduckgo, website, browser, scheduler, subagents, matrix_message, attachments.",
 )
 def _openclaw_compat_tools() -> type[Toolkit]:
-    """Return an empty toolkit — the real tools are loaded via IMPLIED_TOOLS."""
+    """Return an empty toolkit — the real tools are loaded via tool preset expansion."""
     from agno.tools import Toolkit
 
     return Toolkit

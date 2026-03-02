@@ -292,7 +292,6 @@ agents:
     - duckduckgo
     - website
     - openclaw_compat
-    - attachments
     - python
     - calculator
   research:
