@@ -50,7 +50,7 @@ class AgentMatrixUser:
         return MatrixID.parse(self.user_id)
 
 
-def get_agent_credentials(agent_name: str) -> dict[str, str] | None:
+def _get_agent_credentials(agent_name: str) -> dict[str, str] | None:
     """Get credentials for a specific agent from matrix_state.yaml.
 
     Args:
@@ -68,7 +68,7 @@ def get_agent_credentials(agent_name: str) -> dict[str, str] | None:
     return None
 
 
-def save_agent_credentials(agent_name: str, username: str, password: str) -> None:
+def _save_agent_credentials(agent_name: str, username: str, password: str) -> None:
     """Save credentials for a specific agent to matrix_state.yaml.
 
     Args:
@@ -156,7 +156,7 @@ async def _login_and_sync_display_name(
     raise ValueError(msg)
 
 
-async def register_user(
+async def _register_user(
     homeserver: str,
     username: str,
     password: str,
@@ -286,7 +286,7 @@ async def create_agent_user(
 
     """
     # Check if credentials already exist in matrix_state.yaml
-    existing_creds = get_agent_credentials(agent_name)
+    existing_creds = _get_agent_credentials(agent_name)
     preferred_username = username
 
     if (
@@ -318,7 +318,7 @@ async def create_agent_user(
     server_name = extract_server_name_from_homeserver(homeserver)
     user_id = MatrixID.from_username(matrix_username, server_name).full_id
 
-    await register_user(
+    await _register_user(
         homeserver=homeserver,
         username=matrix_username,
         password=password,
@@ -327,7 +327,7 @@ async def create_agent_user(
 
     # Save credentials only after registration/verification succeeds.
     if registration_needed:
-        save_agent_credentials(agent_name, matrix_username, password)
+        _save_agent_credentials(agent_name, matrix_username, password)
         logger.info(f"Saved credentials for agent {agent_name} after successful registration")
 
     return AgentMatrixUser(
@@ -358,7 +358,7 @@ async def login_agent_user(homeserver: str, agent_user: AgentMatrixUser) -> nio.
 
 
 # TODO: Check, this seems unused!
-async def ensure_all_agent_users(homeserver: str, config: Config) -> dict[str, AgentMatrixUser]:
+async def _ensure_all_agent_users(homeserver: str, config: Config) -> dict[str, AgentMatrixUser]:
     """Ensure all configured agents and teams have Matrix user accounts.
 
     This includes user-configured agents, teams, and the built-in router agent.

@@ -61,7 +61,7 @@ async def test_schedule_validates_agents_in_room() -> None:
         description="Calculate something",
     )
 
-    with patch("mindroom.scheduling.parse_workflow_schedule") as mock_parse:
+    with patch("mindroom.scheduling._parse_workflow_schedule") as mock_parse:
         mock_parse.return_value = mock_workflow
 
         # Try to schedule a task mentioning calculator in test_room (where it's not configured)
@@ -118,7 +118,7 @@ async def test_schedule_validates_agents_in_thread() -> None:
         description="Calculate something",
     )
 
-    with patch("mindroom.scheduling.parse_workflow_schedule") as mock_parse:
+    with patch("mindroom.scheduling._parse_workflow_schedule") as mock_parse:
         mock_parse.return_value = mock_workflow
 
         # Try to schedule in a thread
@@ -183,7 +183,7 @@ async def test_schedule_allows_agents_in_room() -> None:
     )
 
     with (
-        patch("mindroom.scheduling.parse_workflow_schedule") as mock_parse,
+        patch("mindroom.scheduling._parse_workflow_schedule") as mock_parse,
         patch("mindroom.scheduling.fetch_thread_history") as mock_fetch_history,
     ):
         mock_parse.return_value = mock_workflow
@@ -251,7 +251,7 @@ async def test_schedule_with_multiple_agents_validation() -> None:
         description="Research and calculate",
     )
 
-    with patch("mindroom.scheduling.parse_workflow_schedule") as mock_parse:
+    with patch("mindroom.scheduling._parse_workflow_schedule") as mock_parse:
         mock_parse.return_value = mock_workflow
 
         task_id, response = await schedule_task(
@@ -303,7 +303,7 @@ async def test_schedule_with_no_agent_mentions() -> None:
         description="Deployment reminder",
     )
 
-    with patch("mindroom.scheduling.parse_workflow_schedule") as mock_parse:
+    with patch("mindroom.scheduling._parse_workflow_schedule") as mock_parse:
         mock_parse.return_value = mock_workflow
 
         task_id, response = await schedule_task(
@@ -348,7 +348,7 @@ async def test_schedule_with_nonexistent_agent() -> None:
         description="Imaginary task",
     )
 
-    with patch("mindroom.scheduling.parse_workflow_schedule") as mock_parse:
+    with patch("mindroom.scheduling._parse_workflow_schedule") as mock_parse:
         mock_parse.return_value = mock_workflow
 
         task_id, response = await schedule_task(

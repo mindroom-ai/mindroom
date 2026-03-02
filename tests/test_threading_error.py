@@ -19,7 +19,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.matrix.reply_chain import merge_thread_and_chain_history
+from mindroom.matrix.reply_chain import _merge_thread_and_chain_history
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import TEST_PASSWORD
 
@@ -920,7 +920,7 @@ class TestThreadingBehavior:
             {"event_id": "$p2:localhost", "body": "Second plain reply"},
         ]
 
-        merged = merge_thread_and_chain_history(thread_history, chain_history)
+        merged = _merge_thread_and_chain_history(thread_history, chain_history)
 
         assert [msg["event_id"] for msg in merged] == [
             "$root:localhost",

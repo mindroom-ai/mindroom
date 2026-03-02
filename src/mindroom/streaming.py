@@ -35,9 +35,9 @@ logger = get_logger(__name__)
 
 # Global constant for the in-progress marker
 IN_PROGRESS_MARKER = " ⋯"
-PROGRESS_PLACEHOLDER = "Thinking..."
-CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
-StreamInputChunk = str | StructuredStreamChunk | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+_PROGRESS_PLACEHOLDER = "Thinking..."
+_CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
+_StreamInputChunk = str | StructuredStreamChunk | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
 _IN_PROGRESS_MESSAGE_PATTERN = re.compile(rf"{re.escape(IN_PROGRESS_MARKER)}\.*$")
 
 
@@ -184,7 +184,7 @@ class StreamingResponse:
         if cancelled:
             stripped_text = self.accumulated_text.rstrip()
             self.accumulated_text = (
-                f"{stripped_text}\n\n{CANCELLED_RESPONSE_NOTE}" if stripped_text else CANCELLED_RESPONSE_NOTE
+                f"{stripped_text}\n\n{_CANCELLED_RESPONSE_NOTE}" if stripped_text else _CANCELLED_RESPONSE_NOTE
             )
 
         # When a placeholder message exists but no real text arrived,
@@ -208,7 +208,7 @@ class StreamingResponse:
         effective_thread_id = None if self.room_mode else self.thread_id if self.thread_id else self.reply_to_event_id
 
         # Add in-progress marker during streaming (not on final update)
-        text_to_send = self.accumulated_text if self.accumulated_text.strip() else PROGRESS_PLACEHOLDER
+        text_to_send = self.accumulated_text if self.accumulated_text.strip() else _PROGRESS_PLACEHOLDER
         if not is_final:
             marker_suffix = "." * (self.in_progress_update_count % 3)
             text_to_send += f"{IN_PROGRESS_MARKER}{marker_suffix}"
@@ -274,7 +274,7 @@ class ReplacementStreamingResponse(StreamingResponse):
 
 async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
     client: nio.AsyncClient,
-    response_stream: AsyncIterator[StreamInputChunk],
+    response_stream: AsyncIterator[_StreamInputChunk],
     streaming: StreamingResponse,
 ) -> None:
     """Consume stream chunks and apply incremental message updates."""
@@ -358,7 +358,7 @@ async def send_streaming_response(
     thread_id: str | None,
     sender_domain: str,
     config: Config,
-    response_stream: AsyncIterator[StreamInputChunk],
+    response_stream: AsyncIterator[_StreamInputChunk],
     streaming_cls: type[StreamingResponse] = StreamingResponse,
     header: str | None = None,
     existing_event_id: str | None = None,

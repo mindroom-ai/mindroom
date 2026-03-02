@@ -11,14 +11,14 @@ from mindroom.config.models import EmbedderConfig
 MemoryBackend = Literal["mem0", "file"]
 
 
-class MemoryEmbedderConfig(BaseModel):
+class _MemoryEmbedderConfig(BaseModel):
     """Memory embedder configuration."""
 
     provider: str = Field(default="openai", description="Embedder provider (openai, huggingface, etc)")
     config: EmbedderConfig = Field(default_factory=EmbedderConfig, description="Provider-specific config")
 
 
-class MemoryLLMConfig(BaseModel):
+class _MemoryLLMConfig(BaseModel):
     """Memory LLM configuration."""
 
     provider: str = Field(default="ollama", description="LLM provider (ollama, openai, anthropic)")
@@ -162,11 +162,11 @@ class MemoryConfig(BaseModel):
             "When true, team-context memory reads can access member agent memories in addition to the shared team scope"
         ),
     )
-    embedder: MemoryEmbedderConfig = Field(
-        default_factory=MemoryEmbedderConfig,
+    embedder: _MemoryEmbedderConfig = Field(
+        default_factory=_MemoryEmbedderConfig,
         description="Embedder configuration for memory",
     )
-    llm: MemoryLLMConfig | None = Field(default=None, description="LLM configuration for memory")
+    llm: _MemoryLLMConfig | None = Field(default=None, description="LLM configuration for memory")
     file: _MemoryFileConfig = Field(default_factory=_MemoryFileConfig, description="File-backed memory configuration")
     auto_flush: MemoryAutoFlushConfig = Field(
         default_factory=MemoryAutoFlushConfig,

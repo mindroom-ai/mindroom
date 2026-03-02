@@ -23,7 +23,7 @@ from mindroom.constants import STORAGE_PATH_OBJ
 
 _DEFAULT_PROFILE = "openclaw"
 _DEFAULT_SNAPSHOT_LIMIT = 200
-DEFAULT_AI_SNAPSHOT_MAX_CHARS = 12_000
+_DEFAULT_AI_SNAPSHOT_MAX_CHARS = 12_000
 _DEFAULT_TIMEOUT_MS = 30_000
 _MAX_CONSOLE_ENTRIES = 200
 _VIEWPORT_WIDTH = 1280
@@ -153,7 +153,7 @@ _SNAPSHOT_JS = """
 
 
 @dataclass
-class BrowserTabState:
+class _BrowserTabState:
     """State for one browser tab."""
 
     target_id: str
@@ -170,7 +170,7 @@ class _BrowserProfileState:
     playwright: Playwright
     browser: Browser
     context: BrowserContext
-    tabs: dict[str, BrowserTabState] = field(default_factory=dict)
+    tabs: dict[str, _BrowserTabState] = field(default_factory=dict)
     active_target_id: str | None = None
 
 
@@ -764,7 +764,7 @@ class BrowserTools(Toolkit):
             return max_chars if max_chars > 0 else None
         if mode == "efficient":
             return None
-        return DEFAULT_AI_SNAPSHOT_MAX_CHARS
+        return _DEFAULT_AI_SNAPSHOT_MAX_CHARS
 
     async def _act(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
@@ -960,7 +960,7 @@ class BrowserTools(Toolkit):
         self,
         state: _BrowserProfileState,
         target_id: str | None,
-    ) -> tuple[str, BrowserTabState]:
+    ) -> tuple[str, _BrowserTabState]:
         resolved_target_id = target_id or state.active_target_id
         if resolved_target_id is not None:
             tab = state.tabs.get(resolved_target_id)
@@ -978,7 +978,7 @@ class BrowserTools(Toolkit):
 
     def _register_tab(self, state: _BrowserProfileState, page: Page) -> str:
         target_id = uuid4().hex[:8]
-        tab = BrowserTabState(target_id=target_id, page=page)
+        tab = _BrowserTabState(target_id=target_id, page=page)
         state.tabs[target_id] = tab
         page.on("console", lambda message: self._record_console(tab, message))
         page.on("dialog", lambda dialog: asyncio.create_task(self._handle_dialog(tab, dialog)))
@@ -986,7 +986,7 @@ class BrowserTools(Toolkit):
         return target_id
 
     @staticmethod
-    def _record_console(tab: BrowserTabState, message: ConsoleMessage) -> None:
+    def _record_console(tab: _BrowserTabState, message: ConsoleMessage) -> None:
         entry = {
             "level": message.type,
             "location": message.location,
@@ -996,7 +996,7 @@ class BrowserTools(Toolkit):
         if len(tab.console) > _MAX_CONSOLE_ENTRIES:
             del tab.console[:-_MAX_CONSOLE_ENTRIES]
 
-    async def _handle_dialog(self, tab: BrowserTabState, dialog: Dialog) -> None:
+    async def _handle_dialog(self, tab: _BrowserTabState, dialog: Dialog) -> None:
         behavior = tab.pending_dialog
         if behavior is None:
             await dialog.dismiss()
@@ -1008,7 +1008,7 @@ class BrowserTools(Toolkit):
         await dialog.dismiss()
 
     @staticmethod
-    def _resolve_selector(tab: BrowserTabState, ref_or_selector: str | None) -> str | None:
+    def _resolve_selector(tab: _BrowserTabState, ref_or_selector: str | None) -> str | None:
         if ref_or_selector is None:
             return None
         return tab.refs.get(ref_or_selector, ref_or_selector)

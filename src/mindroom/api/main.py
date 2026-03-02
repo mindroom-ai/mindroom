@@ -45,7 +45,7 @@ async def _watch_config(stop_event: asyncio.Event) -> None:
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown."""
     print(f"Loading config from: {CONFIG_PATH}")
     print(f"Config exists: {CONFIG_PATH.exists()}")
@@ -65,7 +65,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await watch_task
 
 
-app = FastAPI(title="MindRoom Widget Backend", lifespan=lifespan)
+app = FastAPI(title="MindRoom Widget Backend", _lifespan=_lifespan)
 
 # Configure CORS for widget - allow multiple origins including port forwarding
 app.add_middleware(

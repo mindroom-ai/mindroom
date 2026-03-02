@@ -11,14 +11,14 @@ from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.matrix.client import edit_message, send_message
-from mindroom.matrix.large_messages import NORMAL_MESSAGE_LIMIT, prepare_large_message
+from mindroom.matrix.large_messages import _NORMAL_MESSAGE_LIMIT, prepare_large_message
 from mindroom.streaming import (
     ReplacementStreamingResponse,
     StreamingResponse,
-    StreamInputChunk,
+    _StreamInputChunk,
     send_streaming_response,
 )
-from mindroom.tool_system.events import TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry
+from mindroom.tool_system.events import _TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry
 
 
 class MockClient:
@@ -333,7 +333,7 @@ async def test_message_exactly_at_limit() -> None:
 
     # Create message exactly at normal limit
     # Account for JSON overhead (~2KB) in the calculation
-    text_size = NORMAL_MESSAGE_LIMIT - 2500
+    text_size = _NORMAL_MESSAGE_LIMIT - 2500
     text = "e" * text_size
     content = {"body": text, "msgtype": "m.text"}
 
@@ -392,7 +392,7 @@ async def test_large_message_with_plain_tool_markers_uploads_full_content_json()
         "formatted_body": formatted_body,
         "msgtype": "m.text",
         "format": "org.matrix.custom.html",
-        TOOL_TRACE_KEY: {"version": 2, "events": [{"type": "tool_call_started", "tool_name": "web_search"}]},
+        _TOOL_TRACE_KEY: {"version": 2, "events": [{"type": "tool_call_started", "tool_name": "web_search"}]},
     }
 
     result = await prepare_large_message(client, "!room:server", content)
@@ -401,13 +401,13 @@ async def test_large_message_with_plain_tool_markers_uploads_full_content_json()
     assert result["info"]["mimetype"] == "application/json"
     assert "format" not in result
     assert "formatted_body" not in result
-    assert TOOL_TRACE_KEY not in result
+    assert _TOOL_TRACE_KEY not in result
 
     # Uploaded sidecar should preserve full original content.
     uploaded_data = client.uploads[0]["data"]
     uploaded_payload = json.loads(uploaded_data.read().decode("utf-8"))
     assert uploaded_payload["formatted_body"] == formatted_body
-    assert uploaded_payload[TOOL_TRACE_KEY]["events"][0]["tool_name"] == "web_search"
+    assert uploaded_payload[_TOOL_TRACE_KEY]["events"][0]["tool_name"] == "web_search"
 
 
 @pytest.mark.asyncio
@@ -475,7 +475,7 @@ async def test_structured_stream_chunk_adds_tool_trace_metadata() -> None:
     client = MockClient()
     config = MockConfig()
 
-    async def stream() -> AsyncIterator[StreamInputChunk]:
+    async def stream() -> AsyncIterator[_StreamInputChunk]:
         trace = [ToolTraceEntry(type="tool_call_started", tool_name="save_file", args_preview="file_name=a.py")]
         yield StructuredStreamChunk(content="🔧 `save_file` [1] ⏳", tool_trace=trace)
 
@@ -494,8 +494,8 @@ async def test_structured_stream_chunk_adds_tool_trace_metadata() -> None:
     assert len(client.messages_sent) >= 1
     last_content = client.messages_sent[-1][2]
     target_content = last_content.get("m.new_content", last_content)
-    assert TOOL_TRACE_KEY in target_content
-    assert target_content[TOOL_TRACE_KEY]["events"][0]["tool_name"] == "save_file"
+    assert _TOOL_TRACE_KEY in target_content
+    assert target_content[_TOOL_TRACE_KEY]["events"][0]["tool_name"] == "save_file"
 
 
 @pytest.mark.asyncio
@@ -505,7 +505,7 @@ async def test_streaming_with_extra_content_metadata() -> None:
     config = MockConfig()
     extra_content: dict[str, object] = {}
 
-    async def stream() -> AsyncIterator[StreamInputChunk]:
+    async def stream() -> AsyncIterator[_StreamInputChunk]:
         yield "hello"
         extra_content[AI_RUN_METADATA_KEY] = {"version": 1, "usage": {"total_tokens": 10}}
 
@@ -538,7 +538,7 @@ async def test_structured_stream_chunk_does_not_drop_trace_on_stale_snapshot() -
     ]
     trace_stale = [ToolTraceEntry(type="tool_call_started", tool_name="save_file")]
 
-    async def stream() -> AsyncIterator[StreamInputChunk]:
+    async def stream() -> AsyncIterator[_StreamInputChunk]:
         yield StructuredStreamChunk(content="🔧 `save_file` [1]", tool_trace=trace_full)
         yield StructuredStreamChunk(content="🔧 `save_file` [1]", tool_trace=trace_stale)
 
@@ -555,8 +555,8 @@ async def test_structured_stream_chunk_does_not_drop_trace_on_stale_snapshot() -
 
     assert event_id is not None
     target_content = client.messages_sent[-1][2].get("m.new_content", client.messages_sent[-1][2])
-    assert TOOL_TRACE_KEY in target_content
-    assert len(target_content[TOOL_TRACE_KEY]["events"]) == 2
+    assert _TOOL_TRACE_KEY in target_content
+    assert len(target_content[_TOOL_TRACE_KEY]["events"]) == 2
 
 
 @pytest.mark.asyncio
@@ -567,7 +567,7 @@ async def test_replacement_streaming_preserves_text_on_tool_completion() -> None
 
     tool = ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}, result="ok")
 
-    async def stream() -> AsyncIterator[StreamInputChunk]:
+    async def stream() -> AsyncIterator[_StreamInputChunk]:
         yield ToolCallStartedEvent(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
         yield ToolCallCompletedEvent(tool=tool, content="ok")
 
@@ -594,7 +594,7 @@ async def test_hidden_tool_calls_coalesce_placeholder_spacing() -> None:
     client = MockClient()
     config = MockConfig()
 
-    async def stream() -> AsyncIterator[StreamInputChunk]:
+    async def stream() -> AsyncIterator[_StreamInputChunk]:
         yield ToolCallStartedEvent(tool=ToolExecution(tool_name="first_tool", tool_args={}))
         yield ToolCallStartedEvent(tool=ToolExecution(tool_name="second_tool", tool_args={}))
         yield "Done"

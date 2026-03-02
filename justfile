@@ -206,6 +206,10 @@ test-front:
 test-backend *args:
     uv run pytest {{args}}
 
+# Check for public symbols that should be private
+check-module-privacy:
+    python3 scripts/check_module_privacy.py .
+
 #############################
 # Developer-friendly aliases
 #############################

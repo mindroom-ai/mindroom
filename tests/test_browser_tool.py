@@ -10,9 +10,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from mindroom.custom_tools.browser import (
-    DEFAULT_AI_SNAPSHOT_MAX_CHARS,
-    BrowserTabState,
+    _DEFAULT_AI_SNAPSHOT_MAX_CHARS,
     BrowserTools,
+    _BrowserTabState,
     _clean_str,
 )
 
@@ -56,7 +56,7 @@ def test_validate_target_rejects_invalid_node_and_non_host_targets() -> None:
 
 def test_resolve_selector_prefers_ref_mapping() -> None:
     """Refs resolve to selectors and missing refs pass through."""
-    tab = BrowserTabState(target_id="t1", page=SimpleNamespace(), refs={"e1": "#submit"})
+    tab = _BrowserTabState(target_id="t1", page=SimpleNamespace(), refs={"e1": "#submit"})
 
     assert BrowserTools._resolve_selector(tab, None) is None
     assert BrowserTools._resolve_selector(tab, "e1") == "#submit"
@@ -68,7 +68,7 @@ def test_resolve_max_chars_behavior() -> None:
     assert BrowserTools._resolve_max_chars(max_chars=128, mode=None) == 128
     assert BrowserTools._resolve_max_chars(max_chars=0, mode=None) is None
     assert BrowserTools._resolve_max_chars(max_chars=None, mode="efficient") is None
-    assert BrowserTools._resolve_max_chars(max_chars=None, mode=None) == DEFAULT_AI_SNAPSHOT_MAX_CHARS
+    assert BrowserTools._resolve_max_chars(max_chars=None, mode=None) == _DEFAULT_AI_SNAPSHOT_MAX_CHARS
 
 
 @pytest.mark.asyncio
@@ -134,7 +134,7 @@ async def test_act_unknown_kind_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """Unknown act kind is rejected."""
     tool = BrowserTools()
     mock_state = object()
-    tab = BrowserTabState(target_id="tab-1", page=SimpleNamespace())
+    tab = _BrowserTabState(target_id="tab-1", page=SimpleNamespace())
 
     monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=mock_state))
     monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
@@ -158,7 +158,7 @@ async def test_act_click_uses_resolved_selector(monkeypatch: pytest.MonkeyPatch)
     locator_result = SimpleNamespace(first=first)
     locator = MagicMock(return_value=locator_result)
     page: Any = SimpleNamespace(locator=locator)
-    tab = BrowserTabState(target_id="tab-1", page=page, refs={"e1": "#submit"})
+    tab = _BrowserTabState(target_id="tab-1", page=page, refs={"e1": "#submit"})
 
     ensure_profile = AsyncMock(return_value=mock_state)
     resolve_tab = AsyncMock(return_value=("tab-1", tab))
@@ -193,7 +193,7 @@ async def test_act_fill_requires_at_least_one_valid_field(monkeypatch: pytest.Mo
     tool = BrowserTools()
     mock_state = object()
     page: Any = SimpleNamespace(locator=MagicMock())
-    tab = BrowserTabState(target_id="tab-1", page=page, refs={})
+    tab = _BrowserTabState(target_id="tab-1", page=page, refs={})
 
     monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=mock_state))
     monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))

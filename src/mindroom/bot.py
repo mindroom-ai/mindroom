@@ -231,7 +231,7 @@ def create_bot_for_entity(
 
 
 @dataclass
-class MessageContext:
+class _MessageContext:
     """Context extracted from a Matrix message event."""
 
     am_i_mentioned: bool
@@ -1018,7 +1018,7 @@ class AgentBot:
         self,
         room: nio.MatrixRoom,
         event: nio.RoomMessageText | nio.RoomMessageImage | nio.RoomEncryptedImage,
-        context: MessageContext,
+        context: _MessageContext,
         requester_user_id: str,
         *,
         message: str | None = None,
@@ -1054,7 +1054,7 @@ class AgentBot:
 
     async def _resolve_response_action(
         self,
-        context: MessageContext,
+        context: _MessageContext,
         room: nio.MatrixRoom,
         requester_user_id: str,
         message: str,
@@ -1099,7 +1099,7 @@ class AgentBot:
     async def _decide_team_for_sender(
         self,
         agents_in_thread: list[MatrixID],
-        context: MessageContext,
+        context: _MessageContext,
         room: nio.MatrixRoom,
         requester_user_id: str,
         message: str,
@@ -1123,7 +1123,7 @@ class AgentBot:
             available_agents_in_room=available_agents_in_room,
         )
 
-    async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessage) -> MessageContext:
+    async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessage) -> _MessageContext:
         assert self.client is not None
 
         # Check if mentions should be ignored for this message
@@ -1155,7 +1155,7 @@ class AgentBot:
                 event_info,
             )
 
-        return MessageContext(
+        return _MessageContext(
             am_i_mentioned=am_i_mentioned,
             is_thread=is_thread,
             thread_id=thread_id,

@@ -159,7 +159,7 @@ def _install_in_environment(extras: list[str], *, quiet: bool) -> bool:
     return result.returncode == 0
 
 
-def install_tool_extras(extras: list[str], *, quiet: bool = False) -> bool:
+def _install_tool_extras(extras: list[str], *, quiet: bool = False) -> bool:
     """Install one or more tool extras into the current environment.
 
     Prefers ``uv sync --locked`` when uv.lock is available (exact pinned versions).
@@ -182,7 +182,7 @@ def auto_install_tool_extra(tool_name: str) -> bool:
         return False
     if tool_name not in _available_tool_extras():
         return False
-    return install_tool_extras([tool_name], quiet=True)
+    return _install_tool_extras([tool_name], quiet=True)
 
 
 def ensure_tool_deps(dependencies: list[str], tool_extra: str) -> None:

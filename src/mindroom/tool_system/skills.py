@@ -226,7 +226,7 @@ def set_plugin_skill_roots(roots: Sequence[Path]) -> None:
     clear_skill_cache()
 
 
-def get_plugin_skill_roots() -> list[Path]:
+def _get_plugin_skill_roots() -> list[Path]:
     """Return the current plugin-provided skill roots."""
     return list(_PLUGIN_SKILL_ROOTS)
 
@@ -255,7 +255,7 @@ def list_skill_listings(roots: Sequence[Path] | None = None) -> list[_SkillListi
     roots = list(roots or _get_default_skill_roots())
     bundled_root = _get_bundled_skills_dir().expanduser().resolve()
     user_root = get_user_skills_dir().expanduser().resolve()
-    plugin_roots = {root.expanduser().resolve() for root in get_plugin_skill_roots()}
+    plugin_roots = {root.expanduser().resolve() for root in _get_plugin_skill_roots()}
 
     skills_by_name: dict[str, _SkillListing] = {}
     for root in _unique_paths(roots):

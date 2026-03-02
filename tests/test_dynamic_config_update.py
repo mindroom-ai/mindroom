@@ -12,7 +12,7 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.identity import MatrixID
 from mindroom.orchestrator import MultiAgentOrchestrator
-from mindroom.scheduling import CronSchedule, ScheduledWorkflow, parse_workflow_schedule
+from mindroom.scheduling import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -150,7 +150,7 @@ class TestDynamicConfigUpdate:
                 mock_agent_class.return_value = mock_agent
 
                 # Parse with the updated config
-                result = await parse_workflow_schedule(
+                result = await _parse_workflow_schedule(
                     request,
                     updated_config,
                     available_agents=[

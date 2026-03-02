@@ -13,7 +13,7 @@ import mindroom.tool_system.skills as skills_module
 from mindroom.commands.handler import _run_skill_command_tool
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory, register_tool_with_metadata
+from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, ToolCategory, register_tool_with_metadata
 from mindroom.tool_system.skills import build_agent_skills, resolve_skill_command_spec
 
 if TYPE_CHECKING:
@@ -328,7 +328,7 @@ async def test_skill_command_tool_dispatch() -> None:
         def demo(self, command: str, commandName: str, skillName: str) -> str:  # noqa: N803
             return f"{commandName}:{skillName}:{command}"
 
-    original_registry = TOOL_REGISTRY.copy()
+    original_registry = _TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
     try:
 
@@ -352,8 +352,8 @@ async def test_skill_command_tool_dispatch() -> None:
             args_text="hello",
         )
     finally:
-        TOOL_REGISTRY.clear()
-        TOOL_REGISTRY.update(original_registry)
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
 
@@ -371,7 +371,7 @@ async def test_skill_command_tool_dispatch_uses_default_tools() -> None:
         def demo(self, command: str, commandName: str, skillName: str) -> str:  # noqa: N803
             return f"{commandName}:{skillName}:{command}"
 
-    original_registry = TOOL_REGISTRY.copy()
+    original_registry = _TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
     try:
 
@@ -396,8 +396,8 @@ async def test_skill_command_tool_dispatch_uses_default_tools() -> None:
             args_text="hello",
         )
     finally:
-        TOOL_REGISTRY.clear()
-        TOOL_REGISTRY.update(original_registry)
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
 

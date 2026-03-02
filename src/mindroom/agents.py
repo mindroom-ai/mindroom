@@ -68,7 +68,7 @@ class _AdditionalContextChunk:
 _CULTURE_MANAGER_CACHE: dict[tuple[str, str], _CachedCultureManager] = {}
 
 
-def get_datetime_context(timezone_str: str) -> str:
+def _get_datetime_context(timezone_str: str) -> str:
     """Generate current date and time context for the agent.
 
     Args:
@@ -529,7 +529,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     )
 
     # Add current date and time context with user's configured timezone
-    datetime_context = get_datetime_context(config.timezone)
+    datetime_context = _get_datetime_context(config.timezone)
 
     # Combine identity and datetime contexts
     full_context = identity_context + datetime_context

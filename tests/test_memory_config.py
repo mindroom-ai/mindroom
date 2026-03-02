@@ -12,9 +12,9 @@ from mindroom.orchestrator import MultiAgentOrchestrator
 if TYPE_CHECKING:
     import pytest
 from mindroom.config.main import Config
-from mindroom.config.memory import MemoryConfig, MemoryEmbedderConfig, MemoryLLMConfig
+from mindroom.config.memory import MemoryConfig, _MemoryEmbedderConfig, _MemoryLLMConfig
 from mindroom.config.models import EmbedderConfig, RouterConfig
-from mindroom.memory.config import get_memory_config
+from mindroom.memory.config import _get_memory_config
 
 
 class TestMemoryConfig:
@@ -33,14 +33,14 @@ class TestMemoryConfig:
         mock_get_creds_manager.return_value = mock_creds_manager
 
         # Create config with Ollama embedder
-        embedder_config = MemoryEmbedderConfig(
+        embedder_config = _MemoryEmbedderConfig(
             provider="ollama",
             config=EmbedderConfig(
                 model="nomic-embed-text",
                 host="http://localhost:11434",
             ),
         )
-        llm_config = MemoryLLMConfig(
+        llm_config = _MemoryLLMConfig(
             provider="ollama",
             config={
                 "model": "llama3.2",
@@ -54,7 +54,7 @@ class TestMemoryConfig:
 
         # Test config generation
         storage_path = tmp_path / "memory"
-        result = get_memory_config(storage_path, config)
+        result = _get_memory_config(storage_path, config)
 
         # Verify embedder config
         assert result["embedder"]["provider"] == "ollama"
@@ -85,11 +85,11 @@ class TestMemoryConfig:
         mock_get_creds_manager.return_value = mock_creds_manager
 
         # Create config with OpenAI embedder
-        embedder_config = MemoryEmbedderConfig(
+        embedder_config = _MemoryEmbedderConfig(
             provider="openai",
             config=EmbedderConfig(model="text-embedding-ada-002"),
         )
-        llm_config = MemoryLLMConfig(
+        llm_config = _MemoryLLMConfig(
             provider="openai",
             config={"model": "gpt-4", "temperature": 0.1, "top_p": 1},
         )
@@ -98,7 +98,7 @@ class TestMemoryConfig:
 
         # Test config generation
         storage_path = tmp_path / "memory"
-        result = get_memory_config(storage_path, config)
+        result = _get_memory_config(storage_path, config)
 
         # Verify embedder config
         assert result["embedder"]["provider"] == "openai"
@@ -127,7 +127,7 @@ class TestMemoryConfig:
         mock_get_creds_manager.return_value = mock_creds_manager
 
         # Create config with no models
-        embedder_config = MemoryEmbedderConfig(
+        embedder_config = _MemoryEmbedderConfig(
             provider="ollama",
             config=EmbedderConfig(model="nomic-embed-text", host=None),
         )
@@ -137,7 +137,7 @@ class TestMemoryConfig:
 
         # Test config generation
         storage_path = tmp_path / "memory"
-        result = get_memory_config(storage_path, config)
+        result = _get_memory_config(storage_path, config)
 
         # Verify LLM fallback config
         assert result["llm"]["provider"] == "ollama"
@@ -157,7 +157,7 @@ class TestMemoryConfig:
         mock_get_creds_manager.return_value = mock_creds_manager
 
         # Create minimal config
-        embedder_config = MemoryEmbedderConfig(
+        embedder_config = _MemoryEmbedderConfig(
             provider="ollama",
             config=EmbedderConfig(model="test", host=None),
         )
@@ -165,7 +165,7 @@ class TestMemoryConfig:
         config = Config(memory=memory, router=RouterConfig(model="default"))
 
         # Get config
-        result = get_memory_config(tmp_path, config)
+        result = _get_memory_config(tmp_path, config)
 
         # Verify chroma path in config
         chroma_path = tmp_path / "chroma"
@@ -197,14 +197,14 @@ class TestMemoryConfig:
         other_cwd.mkdir(parents=True, exist_ok=True)
         monkeypatch.chdir(other_cwd)
 
-        embedder_config = MemoryEmbedderConfig(
+        embedder_config = _MemoryEmbedderConfig(
             provider="ollama",
             config=EmbedderConfig(model="test", host=None),
         )
         memory = MemoryConfig(embedder=embedder_config, llm=None)
         config = Config(memory=memory, router=RouterConfig(model="default"))
 
-        result = get_memory_config(orchestrator.storage_path, config)
+        result = _get_memory_config(orchestrator.storage_path, config)
 
         expected_storage = (project_root / "mindroom_data").resolve()
         expected_chroma = (expected_storage / "chroma").resolve()

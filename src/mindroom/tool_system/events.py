@@ -12,7 +12,7 @@ from agno.models.response import ToolExecution  # noqa: TC002 - used in isinstan
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-TOOL_TRACE_KEY = "io.mindroom.tool_trace"
+_TOOL_TRACE_KEY = "io.mindroom.tool_trace"
 _TOOL_TRACE_VERSION = 2
 
 _MAX_TOOL_ARGS_PREVIEW_CHARS = 1200
@@ -20,7 +20,7 @@ _MAX_TOOL_ARG_VALUE_PREVIEW_CHARS = 250
 _MAX_TOOL_RESULT_DISPLAY_CHARS = 500
 # Keep v2 trace indexing stable (`events[N-1]`) by not truncating event slots.
 # Large-message handling is responsible for payload size fallbacks.
-MAX_TOOL_TRACE_EVENTS = 120
+_MAX_TOOL_TRACE_EVENTS = 120
 _TOOL_REF_ICON = "🔧"
 _TOOL_PENDING_MARKER = " ⏳"
 _TOOL_MARKER_PATTERN = re.compile(r"🔧 `([^`]+)` \[(\d+)\]( ⏳)?")
@@ -95,7 +95,7 @@ def _format_tool_args(tool_args: dict[str, object]) -> tuple[str, bool]:
     return args_preview, truncated or args_truncated
 
 
-def format_tool_started(
+def _format_tool_started(
     tool_name: str,
     tool_args: dict[str, object],
     tool_index: int | None = None,
@@ -194,7 +194,7 @@ def format_tool_started_event(
         return "", None
     tool_name = tool.tool_name or "tool"
     tool_args = {str(k): v for k, v in tool.tool_args.items()} if isinstance(tool.tool_args, dict) else {}
-    text, trace = format_tool_started(tool_name, tool_args, tool_index=tool_index)
+    text, trace = _format_tool_started(tool_name, tool_args, tool_index=tool_index)
     return text, trace
 
 
@@ -254,4 +254,4 @@ def build_tool_trace_content(tool_trace: Sequence[ToolTraceEntry] | None) -> dic
     if has_truncated_content:
         payload["content_truncated"] = True
 
-    return {TOOL_TRACE_KEY: payload}
+    return {_TOOL_TRACE_KEY: payload}

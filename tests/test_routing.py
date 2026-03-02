@@ -14,11 +14,11 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.routing import AgentSuggestion, suggest_agent_for_message
+from mindroom.routing import _AgentSuggestion, suggest_agent_for_message
 from mindroom.thread_utils import (
+    _has_any_agent_mentions_in_thread,
     check_agent_mentioned,
     extract_agent_name,
-    has_any_agent_mentions_in_thread,
     has_multiple_non_agent_users_in_thread,
 )
 from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
@@ -43,7 +43,7 @@ class TestAIRouting:
             # Mock the Agent and response
             mock_agent = AsyncMock()
             mock_response = MagicMock()
-            mock_response.content = AgentSuggestion(
+            mock_response.content = _AgentSuggestion(
                 agent_name="calculator",
                 reasoning="User is asking about math calculation",
             )
@@ -81,7 +81,7 @@ class TestAIRouting:
         with patch("mindroom.routing.get_model_instance"):
             mock_agent = AsyncMock()
             mock_response = MagicMock()
-            mock_response.content = AgentSuggestion(agent_name="finance", reasoning="Continuing financial discussion")
+            mock_response.content = _AgentSuggestion(agent_name="finance", reasoning="Continuing financial discussion")
             mock_agent.arun.return_value = mock_response
 
             with patch("mindroom.routing.Agent", return_value=mock_agent):
@@ -120,7 +120,7 @@ class TestAIRouting:
             mock_agent = AsyncMock()
             mock_response = MagicMock()
             # AI suggests an agent not in available list
-            mock_response.content = AgentSuggestion(
+            mock_response.content = _AgentSuggestion(
                 agent_name="code",  # Not available
                 reasoning="User asking about programming",
             )
@@ -225,7 +225,7 @@ class TestThreadUtils:
             },
         ]
 
-        assert has_any_agent_mentions_in_thread(thread_history, self.config) is True
+        assert _has_any_agent_mentions_in_thread(thread_history, self.config) is True
 
     def test_has_any_agent_mentions_in_thread_no_mentions(self) -> None:
         """Test thread with no agent mentions."""
@@ -242,7 +242,7 @@ class TestThreadUtils:
             },
         ]
 
-        assert has_any_agent_mentions_in_thread(thread_history, self.config) is False
+        assert _has_any_agent_mentions_in_thread(thread_history, self.config) is False
 
     def test_has_any_agent_mentions_in_thread_user_mentions(self) -> None:
         """Test thread with only user mentions (not agents)."""
@@ -254,7 +254,7 @@ class TestThreadUtils:
             },
         ]
 
-        assert has_any_agent_mentions_in_thread(thread_history, self.config) is False
+        assert _has_any_agent_mentions_in_thread(thread_history, self.config) is False
 
     def test_extract_agent_name_rejects_unconfigured(self) -> None:
         """Test that unconfigured agents are not recognized."""
@@ -444,7 +444,7 @@ class TestBridgeMentionFallback:
                 },
             },
         ]
-        assert has_any_agent_mentions_in_thread(thread_history, self.config) is True
+        assert _has_any_agent_mentions_in_thread(thread_history, self.config) is True
 
     def test_no_pills_no_mentions(self) -> None:
         """No m.mentions and no pills means no mentions detected."""

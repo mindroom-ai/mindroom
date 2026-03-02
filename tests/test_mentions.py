@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import mindroom.matrix.identity as matrix_identity
 from mindroom.config.main import Config
 from mindroom.matrix.mentions import format_message_with_mentions, parse_mentions_in_text
-from mindroom.tool_system.events import TOOL_TRACE_KEY, ToolTraceEntry
+from mindroom.tool_system.events import _TOOL_TRACE_KEY, ToolTraceEntry
 
 if TYPE_CHECKING:
     from _pytest.monkeypatch import MonkeyPatch
@@ -144,9 +144,9 @@ class TestMentionParsing:
             tool_trace=trace,
         )
 
-        assert TOOL_TRACE_KEY in content
-        assert content[TOOL_TRACE_KEY]["version"] == 2
-        assert content[TOOL_TRACE_KEY]["events"][0]["tool_name"] == "save_file"
+        assert _TOOL_TRACE_KEY in content
+        assert content[_TOOL_TRACE_KEY]["version"] == 2
+        assert content[_TOOL_TRACE_KEY]["events"][0]["tool_name"] == "save_file"
 
     def test_format_message_with_mentions_merges_extra_content(self) -> None:
         """Custom metadata should be merged with structured tool trace content."""
@@ -161,7 +161,7 @@ class TestMentionParsing:
             extra_content={"io.mindroom.ai_run": {"version": 1, "usage": {"total_tokens": 42}}},
         )
 
-        assert TOOL_TRACE_KEY in content
+        assert _TOOL_TRACE_KEY in content
         assert content["io.mindroom.ai_run"]["version"] == 1
         assert content["io.mindroom.ai_run"]["usage"]["total_tokens"] == 42
 

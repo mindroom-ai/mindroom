@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # Event type for scheduled tasks in Matrix state
-SCHEDULED_TASK_EVENT_TYPE = "com.mindroom.scheduled.task"
+_SCHEDULED_TASK_EVENT_TYPE = "com.mindroom.scheduled.task"
 
 # Maximum length for message preview in task listings
 _MESSAGE_PREVIEW_LENGTH = 50
@@ -99,7 +99,7 @@ class ScheduledWorkflow(BaseModel):
     room_id: str | None = None
 
 
-class WorkflowParseError(BaseModel):
+class _WorkflowParseError(BaseModel):
     """Error response when workflow parsing fails."""
 
     error: str
@@ -210,11 +210,11 @@ def _start_scheduled_task(
     """Start the asyncio task for a scheduled workflow and track it globally."""
     if workflow.schedule_type == "once":
         task = asyncio.create_task(
-            run_once_task(client, task_id, workflow, config),
+            _run_once_task(client, task_id, workflow, config),
         )
     else:
         task = asyncio.create_task(
-            run_cron_task(client, task_id, workflow, _running_tasks, config),
+            _run_cron_task(client, task_id, workflow, _running_tasks, config),
         )
     _running_tasks[task_id] = task
 
@@ -246,7 +246,7 @@ def _parse_task_records_from_state(
     """Parse scheduled task records from a room state response."""
     tasks: list[ScheduledTaskRecord] = []
     for event in state_response.events:
-        if event.get("type") != SCHEDULED_TASK_EVENT_TYPE:
+        if event.get("type") != _SCHEDULED_TASK_EVENT_TYPE:
             continue
 
         state_key = event.get("state_key")
@@ -286,7 +286,7 @@ async def get_scheduled_task(
     """Fetch and parse a single scheduled task from Matrix state."""
     response = await client.room_get_state_event(
         room_id=room_id,
-        event_type=SCHEDULED_TASK_EVENT_TYPE,
+        event_type=_SCHEDULED_TASK_EVENT_TYPE,
         state_key=task_id,
     )
     if not isinstance(response, nio.RoomGetStateEventResponse):
@@ -334,7 +334,7 @@ async def _save_scheduled_task(
 
     await client.room_put_state(
         room_id=room_id,
-        event_type=SCHEDULED_TASK_EVENT_TYPE,
+        event_type=_SCHEDULED_TASK_EVENT_TYPE,
         content={
             "task_id": task_id,
             "workflow": workflow.model_dump_json(),
@@ -386,12 +386,12 @@ async def save_edited_scheduled_task(
     )
 
 
-async def parse_workflow_schedule(
+async def _parse_workflow_schedule(
     request: str,
     config: Config,
     available_agents: typing.Sequence[MatrixID],
     current_time: datetime | None = None,
-) -> ScheduledWorkflow | WorkflowParseError:
+) -> ScheduledWorkflow | _WorkflowParseError:
     """Parse natural language into structured workflow using AI."""
     if current_time is None:
         current_time = datetime.now(UTC)
@@ -456,20 +456,20 @@ Examples of event/condition phrasing to include in the message (do not include t
             return result
 
         logger.error("Unexpected response type from AI", response_type=type(result).__name__)
-        return WorkflowParseError(
+        return _WorkflowParseError(
             error="Failed to parse the schedule request",
             suggestion="Try being more specific about the timing and what you want to happen",
         )
 
     except Exception as e:
         logger.exception("Error parsing workflow schedule", error=str(e), request=request)
-        return WorkflowParseError(
+        return _WorkflowParseError(
             error=f"Error parsing schedule: {e!s}",
             suggestion="Try a simpler format like 'Daily at 9am, check my email'",
         )
 
 
-async def execute_scheduled_workflow(
+async def _execute_scheduled_workflow(
     client: nio.AsyncClient,
     workflow: ScheduledWorkflow,
     config: Config,
@@ -511,7 +511,7 @@ async def execute_scheduled_workflow(
             await send_message(client, workflow.room_id, error_content)
 
 
-async def run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
+async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     client: nio.AsyncClient,
     task_id: str,
     workflow: ScheduledWorkflow,
@@ -587,7 +587,7 @@ async def run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 workflow = latest_workflow
                 continue
 
-            await execute_scheduled_workflow(client, workflow, config)
+            await _execute_scheduled_workflow(client, workflow, config)
             if task_id not in running_tasks:
                 logger.info(f"Task {task_id} no longer in running tasks, stopping")
                 return
@@ -608,7 +608,7 @@ async def run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
         _cleanup_task_if_current(task_id, running_tasks)
 
 
-async def run_once_task(  # noqa: C901
+async def _run_once_task(  # noqa: C901
     client: nio.AsyncClient,
     task_id: str,
     workflow: ScheduledWorkflow,
@@ -653,7 +653,7 @@ async def run_once_task(  # noqa: C901
             logger.error("No execution time provided for one-time task", task_id=task_id)
             return
 
-        await execute_scheduled_workflow(client, latest_workflow, config)
+        await _execute_scheduled_workflow(client, latest_workflow, config)
     except asyncio.CancelledError:
         logger.info(f"One-time task {task_id} was cancelled")
         raise
@@ -785,9 +785,9 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         available_agents = get_available_agents_in_room(room, config)
 
     # Parse the workflow request with available agents
-    workflow_result = await parse_workflow_schedule(full_text, config, available_agents)
+    workflow_result = await _parse_workflow_schedule(full_text, config, available_agents)
 
-    if isinstance(workflow_result, WorkflowParseError):
+    if isinstance(workflow_result, _WorkflowParseError):
         error_msg = f"❌ {workflow_result.error}"
         if workflow_result.suggestion:
             error_msg += f"\n\n💡 {workflow_result.suggestion}"
@@ -995,7 +995,7 @@ async def cancel_scheduled_task(
     # First check if task exists
     response = await client.room_get_state_event(
         room_id=room_id,
-        event_type=SCHEDULED_TASK_EVENT_TYPE,
+        event_type=_SCHEDULED_TASK_EVENT_TYPE,
         state_key=task_id,
     )
 
@@ -1006,7 +1006,7 @@ async def cancel_scheduled_task(
     existing_content = response.content if isinstance(response.content, dict) else None
     await client.room_put_state(
         room_id=room_id,
-        event_type=SCHEDULED_TASK_EVENT_TYPE,
+        event_type=_SCHEDULED_TASK_EVENT_TYPE,
         content=_cancelled_task_content(task_id, existing_content),
         state_key=task_id,
     )
@@ -1030,7 +1030,7 @@ async def cancel_all_scheduled_tasks(
     failed_count = 0
 
     for event in response.events:
-        if event["type"] == SCHEDULED_TASK_EVENT_TYPE:
+        if event["type"] == _SCHEDULED_TASK_EVENT_TYPE:
             content = event["content"]
             if content.get("status") == "pending":
                 task_id = event["state_key"]
@@ -1043,7 +1043,7 @@ async def cancel_all_scheduled_tasks(
                     existing_content = content if isinstance(content, dict) else None
                     await client.room_put_state(
                         room_id=room_id,
-                        event_type=SCHEDULED_TASK_EVENT_TYPE,
+                        event_type=_SCHEDULED_TASK_EVENT_TYPE,
                         content=_cancelled_task_content(task_id, existing_content),
                         state_key=task_id,
                     )
@@ -1076,7 +1076,7 @@ async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str, config:
 
     restored_count = 0
     for event in response.events:
-        if event["type"] != SCHEDULED_TASK_EVENT_TYPE:
+        if event["type"] != _SCHEDULED_TASK_EVENT_TYPE:
             continue
 
         content = event["content"]
