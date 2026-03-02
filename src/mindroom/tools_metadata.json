@@ -3614,23 +3614,6 @@
     {
       "auth_provider": null,
       "category": "development",
-      "config_fields": null,
-      "dependencies": [
-        "agno"
-      ],
-      "description": "OpenClaw-style tool surface for session and orchestration compatibility",
-      "display_name": "OpenClaw Compat",
-      "docs_url": "https://github.com/mindroom-ai/mindroom",
-      "helper_text": null,
-      "icon": "Workflow",
-      "icon_color": "text-orange-500",
-      "name": "openclaw_compat",
-      "setup_type": "none",
-      "status": "available"
-    },
-    {
-      "auth_provider": null,
-      "category": "development",
       "config_fields": [
         {
           "default": null,

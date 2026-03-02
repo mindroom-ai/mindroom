@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
@@ -26,11 +26,25 @@ if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
 
 AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
+OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
+    "shell",
+    "coding",
+    "duckduckgo",
+    "website",
+    "browser",
+    "scheduler",
+    "subagents",
+    "matrix_message",
+)
 logger = get_logger(__name__)
 
 
 class Config(BaseModel):
     """Complete configuration from YAML."""
+
+    TOOL_PRESETS: ClassVar[dict[str, tuple[str, ...]]] = {
+        "openclaw_compat": OPENCLAW_COMPAT_PRESET_TOOLS,
+    }
 
     agents: dict[str, AgentConfig] = Field(default_factory=dict, description="Agent configurations")
     teams: dict[str, TeamConfig] = Field(default_factory=dict, description="Team configurations")
@@ -286,16 +300,19 @@ class Config(BaseModel):
         return self.agents[agent_name]
 
     def get_agent_sandbox_tools(self, agent_name: str) -> list[str] | None:
-        """Get the sandbox tool list for an agent, falling back to defaults.
+        """Get effective sandbox tools for an agent, including preset expansion.
 
         Returns:
-            List of tool names to sandbox, or None to defer to env var globals.
+            Ordered tool names with duplicates removed, or None to defer to env var globals.
 
         """
         agent_config = self.get_agent(agent_name)
-        if agent_config.sandbox_tools is not None:
-            return agent_config.sandbox_tools
-        return self.defaults.sandbox_tools
+        configured = agent_config.sandbox_tools
+        if configured is None:
+            configured = self.defaults.sandbox_tools
+        if configured is None:
+            return None
+        return self.expand_tool_names(list(configured))
 
     def get_agent_tools(self, agent_name: str) -> list[str]:
         """Get effective tools for an agent.
@@ -313,12 +330,32 @@ class Config(BaseModel):
         agent_config = self.get_agent(agent_name)
         tool_names = list(agent_config.tools)
         if agent_config.include_default_tools:
-            for default_tool_name in self.defaults.tools:
-                if default_tool_name not in tool_names:
-                    tool_names.append(default_tool_name)
-        if "openclaw_compat" in tool_names and "matrix_message" not in tool_names:
-            tool_names.append("matrix_message")
-        return tool_names
+            tool_names.extend(self.defaults.tools)
+        return self.expand_tool_names(tool_names)
+
+    @classmethod
+    def get_tool_preset(cls, tool_name: str) -> tuple[str, ...] | None:
+        """Return the tool expansion for a preset name."""
+        return cls.TOOL_PRESETS.get(tool_name)
+
+    @classmethod
+    def is_tool_preset(cls, tool_name: str) -> bool:
+        """Return whether a tool name is a known config preset."""
+        return tool_name in cls.TOOL_PRESETS
+
+    @classmethod
+    def expand_tool_names(cls, tool_names: list[str]) -> list[str]:
+        """Expand configured tool presets and dedupe while preserving order."""
+        expanded: list[str] = []
+        seen: set[str] = set()
+        for tool_name in tool_names:
+            entries = cls.get_tool_preset(tool_name) or (tool_name,)
+            for entry in entries:
+                if entry in seen:
+                    continue
+                seen.add(entry)
+                expanded.append(entry)
+        return expanded
 
     def get_agent_memory_backend(self, agent_name: str) -> MemoryBackend:
         """Get effective memory backend for one agent."""
