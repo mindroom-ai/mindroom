@@ -63,6 +63,8 @@ export interface KnowledgeGitConfig {
 export interface KnowledgeBaseConfig {
   path: string;
   watch: boolean;
+  chunk_size?: number;
+  chunk_overlap?: number;
   git?: KnowledgeGitConfig;
 }
 

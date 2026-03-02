@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class KnowledgeGitConfig(BaseModel):
@@ -38,7 +38,25 @@ class KnowledgeBaseConfig(BaseModel):
 
     path: str = Field(default="./knowledge_docs", description="Path to knowledge documents folder")
     watch: bool = Field(default=True, description="Watch folder for changes")
+    chunk_size: int = Field(
+        default=5000,
+        ge=128,
+        description="Maximum number of characters per indexed chunk for text-like knowledge files",
+    )
+    chunk_overlap: int = Field(
+        default=0,
+        ge=0,
+        description="Number of overlapping characters between adjacent chunks",
+    )
     git: KnowledgeGitConfig | None = Field(
         default=None,
         description="Optional Git sync configuration for this knowledge base",
     )
+
+    @model_validator(mode="after")
+    def validate_chunking(self) -> KnowledgeBaseConfig:
+        """Ensure chunk overlap is always smaller than chunk size."""
+        if self.chunk_overlap >= self.chunk_size:
+            msg = "chunk_overlap must be smaller than chunk_size"
+            raise ValueError(msg)
+        return self
