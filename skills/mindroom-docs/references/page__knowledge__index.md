@@ -36,8 +36,8 @@ knowledge_bases:
   docs:
     path: ./knowledge_docs
     watch: true
-    chunk_size: 1500
-    chunk_overlap: 100
+    chunk_size: 5000
+    chunk_overlap: 0
 
 agents:
   assistant:
@@ -57,16 +57,16 @@ knowledge_bases:
   my_docs:
     path: ./knowledge_docs/my_docs   # Folder containing documents
     watch: true                       # Auto-reindex on file changes
-    chunk_size: 1500                  # Max characters per chunk
-    chunk_overlap: 100                # Overlap between adjacent chunks
+    chunk_size: 5000                  # Max characters per chunk
+    chunk_overlap: 0                  # Overlap between adjacent chunks
 ```
 
 | Field           | Type   | Default            | Description                                                         |
 | --------------- | ------ | ------------------ | ------------------------------------------------------------------- |
 | `path`          | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute)     |
 | `watch`         | bool   | `true`             | Watch for filesystem changes and reindex automatically              |
-| `chunk_size`    | int    | `1500`             | Maximum characters per chunk for text-like files (minimum: `128`)   |
-| `chunk_overlap` | int    | `100`              | Overlap characters between adjacent chunks (must be `< chunk_size`) |
+| `chunk_size`    | int    | `5000`             | Maximum characters per chunk for text-like files (minimum: `128`)   |
+| `chunk_overlap` | int    | `0`                | Overlap characters between adjacent chunks (must be `< chunk_size`) |
 | `git`           | object | `null`             | Optional Git repository sync settings                               |
 
 Use smaller `chunk_size` values when your embedding server has lower token or batch limits. If chunking is too large, indexing retries will fail with embedder 500 errors.
@@ -80,13 +80,13 @@ knowledge_bases:
   engineering:
     path: ./knowledge_docs/engineering
     watch: true
-    chunk_size: 1500
-    chunk_overlap: 100
+    chunk_size: 5000
+    chunk_overlap: 0
   product:
     path: ./knowledge_docs/product
     watch: true
-    chunk_size: 1500
-    chunk_overlap: 100
+    chunk_size: 5000
+    chunk_overlap: 0
   legal:
     path: ./knowledge_docs/legal
     watch: false

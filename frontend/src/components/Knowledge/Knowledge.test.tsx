@@ -261,8 +261,8 @@ describe('Knowledge', () => {
         expect.objectContaining({
           path: './knowledge_docs/docs_git',
           watch: true,
-          chunk_size: 1500,
-          chunk_overlap: 100,
+          chunk_size: 5000,
+          chunk_overlap: 0,
           git: expect.objectContaining({
             repo_url: 'https://github.com/org/repo',
             branch: 'develop',
@@ -357,8 +357,8 @@ describe('Knowledge', () => {
         docs: {
           path: './knowledge_docs/docs',
           watch: true,
-          chunk_size: 1500,
-          chunk_overlap: 100,
+          chunk_size: 5000,
+          chunk_overlap: 0,
           git: {
             repo_url: 'https://github.com/org/repo',
             branch: 'main',

@@ -191,7 +191,7 @@ async def test_index_file_upsert_removes_existing_vectors(dummy_manager: Knowled
     reader = knowledge.insert_calls[0]["reader"]
     assert reader is not None
     assert getattr(reader, "chunk", None) is True
-    assert getattr(reader, "chunk_size", None) == 1500
+    assert getattr(reader, "chunk_size", None) == 5000
 
 
 @pytest.mark.asyncio

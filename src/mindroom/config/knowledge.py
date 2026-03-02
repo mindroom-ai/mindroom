@@ -39,12 +39,12 @@ class KnowledgeBaseConfig(BaseModel):
     path: str = Field(default="./knowledge_docs", description="Path to knowledge documents folder")
     watch: bool = Field(default=True, description="Watch folder for changes")
     chunk_size: int = Field(
-        default=1500,
+        default=5000,
         ge=128,
         description="Maximum number of characters per indexed chunk for text-like knowledge files",
     )
     chunk_overlap: int = Field(
-        default=100,
+        default=0,
         ge=0,
         description="Number of overlapping characters between adjacent chunks",
     )

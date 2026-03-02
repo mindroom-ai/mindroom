@@ -47,8 +47,8 @@ interface KnowledgeFilesResponse {
 }
 
 const MIN_CHUNK_SIZE = 128;
-const DEFAULT_CHUNK_SIZE = 1500;
-const DEFAULT_CHUNK_OVERLAP = 100;
+const DEFAULT_CHUNK_SIZE = 5000;
+const DEFAULT_CHUNK_OVERLAP = 0;
 
 const DEFAULT_BASE_SETTINGS: KnowledgeBaseConfig = {
   path: './knowledge_docs/default',
