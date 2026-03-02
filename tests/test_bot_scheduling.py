@@ -18,23 +18,7 @@ from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, VOICE_PRE
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_utils import should_agent_respond
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
-
-
-def create_mock_room(
-    room_id: str = "!test:localhost",
-    agents: list[str] | None = None,
-    config: Config | None = None,
-) -> MagicMock:
-    """Create a mock room with specified agents."""
-    room = MagicMock()
-    room.room_id = room_id
-    if agents:
-        domain = config.domain if config else "localhost"
-        room.users = {f"@mindroom_{agent}:{domain}": None for agent in agents}
-    else:
-        room.users = {}
-    return room
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, create_mock_room
 
 
 @pytest.fixture

@@ -2,13 +2,22 @@
 
 import os
 from collections.abc import AsyncGenerator, Generator
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import pytest_asyncio
 from aioresponses import aioresponses
 
-__all__ = ["TEST_ACCESS_TOKEN", "TEST_PASSWORD", "FakeCredentialsManager", "aioresponse", "bypass_authorization"]
+from mindroom.config.main import Config
+
+__all__ = [
+    "TEST_ACCESS_TOKEN",
+    "TEST_PASSWORD",
+    "FakeCredentialsManager",
+    "aioresponse",
+    "bypass_authorization",
+    "create_mock_room",
+]
 
 
 class FakeCredentialsManager:
@@ -37,6 +46,22 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
 # Test credentials constants - not real credentials, safe for testing
 TEST_PASSWORD = "mock_test_password"  # noqa: S105
 TEST_ACCESS_TOKEN = "mock_test_token"  # noqa: S105
+
+
+def create_mock_room(
+    room_id: str = "!test:localhost",
+    agents: list[str] | None = None,
+    config: Config | None = None,
+) -> MagicMock:
+    """Create a mock room with specified agents."""
+    room = MagicMock()
+    room.room_id = room_id
+    if agents:
+        domain = config.domain if config else "localhost"
+        room.users = {f"@mindroom_{agent}:{domain}": None for agent in agents}
+    else:
+        room.users = {}
+    return room
 
 
 @pytest_asyncio.fixture

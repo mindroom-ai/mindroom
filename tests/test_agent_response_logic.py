@@ -13,29 +13,12 @@ These tests ensure no regressions in the core response logic.
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.thread_utils import should_agent_respond
-
-
-def create_mock_room(
-    room_id: str = "#test:example.org",
-    agents: list[str] | None = None,
-    config: Config | None = None,
-) -> MagicMock:
-    """Create a mock room with specified agents."""
-    room = MagicMock()
-    room.room_id = room_id
-    if agents:
-        # Use the domain from config if provided, otherwise default to localhost
-        domain = config.domain if config else "localhost"
-        room.users = {f"@mindroom_{agent}:{domain}": None for agent in agents}
-    else:
-        room.users = {}
-    return room
+from tests.conftest import create_mock_room
 
 
 class TestAgentResponseLogic:
