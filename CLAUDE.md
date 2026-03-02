@@ -32,7 +32,7 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 | `routing.py` | Intelligent agent selection when no agent is mentioned |
 | `teams.py` | Multi-agent collaboration (coordinate vs collaborate modes) |
 | `memory/` | Mem0 memory: agent, room, and team-scoped |
-| `knowledge.py` | Knowledge base / RAG file indexing with watcher |
+| `knowledge/` | Knowledge base / RAG file indexing with watcher |
 | `skills.py` | Skill integration system (OpenClaw-compatible) |
 | `plugins.py` | Plugin loading and tool/skill extension |
 | `scheduling.py` | Cron and natural-language task scheduling |
@@ -74,7 +74,7 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 | `response_tracker.py` | Duplicate response prevention |
 | `scheduling_context.py` | Scheduling tool context management |
 | `tools_metadata.py` | Tool registry metadata and registration decorators |
-| `knowledge_utils.py` | Multi-knowledge-base vector DB utilities |
+| `knowledge/utils.py` | Multi-knowledge-base vector DB utilities |
 
 **Persistent state** lives under `mindroom_data/` (next to `config.yaml`, overridable via `MINDROOM_STORAGE_PATH`):
 - `sessions/` – Per-agent SQLite event history for Agno conversations
