@@ -16,6 +16,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import (
     MatrixID,
     extract_agent_name,
+    is_agent_id,
 )
 from mindroom.matrix.media import extract_media_caption
 from mindroom.matrix.mentions import format_message_with_mentions
@@ -941,6 +942,11 @@ class AgentBot:
             return
 
         if self._precheck_event(room, event) is None:
+            return
+
+        if is_agent_id(event.sender, self.config):
+            self.logger.debug("Ignoring voice message from other agent", event_id=event.event_id, sender=event.sender)
+            self.response_tracker.mark_responded(event.event_id)
             return
 
         self.logger.info("Processing voice message", event_id=event.event_id, sender=event.sender)
