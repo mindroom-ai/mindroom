@@ -18,6 +18,8 @@ from agno.knowledge.embedder.ollama import OllamaEmbedder
 from agno.knowledge.embedder.openai import OpenAIEmbedder
 from agno.knowledge.knowledge import Knowledge
 from agno.knowledge.reader import ReaderFactory
+from agno.knowledge.reader.markdown_reader import MarkdownReader
+from agno.knowledge.reader.text_reader import TextReader
 from agno.vectordb.chroma import ChromaDb
 from watchfiles import Change, awatch
 
@@ -420,7 +422,7 @@ class KnowledgeManager:
         reader = ReaderFactory.get_reader_for_extension(file_path.suffix.lower())
 
         # Large markdown/plain-text files are the common source of oversized embed requests.
-        if reader.__class__.__name__ not in {"TextReader", "MarkdownReader"}:
+        if not isinstance(reader, (TextReader, MarkdownReader)):
             return reader
 
         configured_reader = deepcopy(reader)
