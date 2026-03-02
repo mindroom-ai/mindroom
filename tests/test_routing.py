@@ -21,8 +21,7 @@ from mindroom.thread_utils import (
     has_any_agent_mentions_in_thread,
     has_multiple_non_agent_users_in_thread,
 )
-
-from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
 
 class TestAIRouting:

@@ -15,8 +15,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import MultiAgentOrchestrator
-
-from .conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD
 
 
 @pytest.fixture

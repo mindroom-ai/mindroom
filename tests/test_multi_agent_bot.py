@@ -30,8 +30,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.teams import TeamFormationDecision, TeamMode
 from mindroom.tool_system.events import ToolTraceEntry
-
-from .conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator

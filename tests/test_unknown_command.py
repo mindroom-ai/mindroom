@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mindroom.commands import CommandType, command_parser
+from mindroom.commands.parsing import CommandType, command_parser
 
 
 def test_unknown_command_parsing() -> None:

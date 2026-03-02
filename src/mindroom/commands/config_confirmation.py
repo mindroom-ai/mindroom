@@ -8,10 +8,10 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
-from .logging_config import get_logger
+from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from .bot import AgentBot
+    from mindroom.bot import AgentBot
 
 logger = get_logger(__name__)
 
@@ -380,7 +380,7 @@ async def handle_confirmation_reaction(
 
     if reaction_key == "✅":
         # User confirmed - apply the change
-        from .config_commands import apply_config_change  # noqa: PLC0415
+        from mindroom.commands.config_commands import apply_config_change  # noqa: PLC0415
 
         response_text = await apply_config_change(
             pending_change.config_path,

@@ -10,7 +10,7 @@ import pytest
 from agno.tools import Toolkit
 
 import mindroom.tool_system.skills as skills_module
-from mindroom.command_handler import _run_skill_command_tool
+from mindroom.commands.handler import _run_skill_command_tool
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory, register_tool_with_metadata

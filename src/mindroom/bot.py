@@ -13,9 +13,65 @@ import nio
 from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
 
 from mindroom.matrix import image_handler
+from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.identity import (
+    MatrixID,
+    extract_agent_name,
+)
+from mindroom.matrix.mentions import format_message_with_mentions
+from mindroom.matrix.presence import (
+    build_agent_status_message,
+    is_user_online,
+    set_presence_status,
+    should_use_streaming,
+)
+from mindroom.matrix.reply_chain import ReplyChainCaches, derive_conversation_context
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
+from mindroom.matrix.rooms import (
+    is_dm_room,
+    leave_non_dm_rooms,
+    resolve_room_aliases,
+)
+from mindroom.matrix.typing import typing_indicator
+from mindroom.matrix.users import (
+    AgentMatrixUser,
+    create_agent_user,
+    login_agent_user,
+)
+from mindroom.memory import store_conversation_memory
+from mindroom.memory.auto_flush import (
+    mark_auto_flush_dirty_session,
+    reprioritize_auto_flush_sessions,
+)
+from mindroom.stop import StopManager
+from mindroom.streaming import (
+    IN_PROGRESS_MARKER,
+    ReplacementStreamingResponse,
+    StreamingResponse,
+    is_in_progress_message,
+    send_streaming_response,
+)
+from mindroom.teams import (
+    TeamFormationDecision,
+    TeamMode,
+    decide_team_formation,
+    select_model_for_team,
+    team_response,
+    team_response_stream,
+)
+from mindroom.thread_utils import (
+    check_agent_mentioned,
+    create_session_id,
+    get_agents_in_thread,
+    get_all_mentioned_agents_in_thread,
+    get_configured_agents_for_room,
+    has_multiple_non_agent_users_in_thread,
+    has_user_responded_after_message,
+    should_agent_respond,
+)
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 
-from . import config_confirmation, interactive, voice_handler
+from . import interactive, voice_handler
 from .agents import create_agent, create_session_storage, remove_run_by_event_id
 from .ai import ai_response, stream_agent_response
 from .authorization import (
@@ -26,8 +82,9 @@ from .authorization import (
     is_sender_allowed_for_agent_reply,
 )
 from .background_tasks import create_background_task, wait_for_background_tasks
-from .command_handler import CommandHandlerContext, _generate_welcome_message, handle_command
-from .commands import Command, command_parser
+from .commands import config_confirmation
+from .commands.handler import CommandHandlerContext, _generate_welcome_message, handle_command
+from .commands.parsing import Command, command_parser
 from .constants import MATRIX_HOMESERVER, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from .knowledge.utils import MultiKnowledgeVectorDb, resolve_agent_knowledge
 from .logging_config import emoji, get_logger
@@ -41,62 +98,11 @@ from .matrix.client import (
     join_room,
     send_message,
 )
-from .matrix.event_info import EventInfo
-from .matrix.identity import (
-    MatrixID,
-    extract_agent_name,
-)
-from .matrix.mentions import format_message_with_mentions
-from .matrix.presence import build_agent_status_message, is_user_online, set_presence_status, should_use_streaming
-from .matrix.reply_chain import ReplyChainCaches, derive_conversation_context
-from .matrix.rooms import (
-    is_dm_room,
-    leave_non_dm_rooms,
-    resolve_room_aliases,
-)
-from .matrix.typing import typing_indicator
-from .matrix.users import (
-    AgentMatrixUser,
-    create_agent_user,
-    login_agent_user,
-)
-from .memory import store_conversation_memory
-from .memory.auto_flush import (
-    mark_auto_flush_dirty_session,
-    reprioritize_auto_flush_sessions,
-)
 from .response_tracker import ResponseTracker
 from .routing import suggest_agent_for_message
 from .scheduling import (
     restore_scheduled_tasks,
 )
-from .stop import StopManager
-from .streaming import (
-    IN_PROGRESS_MARKER,
-    ReplacementStreamingResponse,
-    StreamingResponse,
-    is_in_progress_message,
-    send_streaming_response,
-)
-from .teams import (
-    TeamFormationDecision,
-    TeamMode,
-    decide_team_formation,
-    select_model_for_team,
-    team_response,
-    team_response_stream,
-)
-from .thread_utils import (
-    check_agent_mentioned,
-    create_session_id,
-    get_agents_in_thread,
-    get_all_mentioned_agents_in_thread,
-    get_configured_agents_for_room,
-    has_multiple_non_agent_users_in_thread,
-    has_user_responded_after_message,
-    should_agent_respond,
-)
-from .tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -106,9 +112,9 @@ if TYPE_CHECKING:
     from agno.knowledge.knowledge import Knowledge
     from agno.media import Image
 
-    from .config.main import Config
-    from .orchestrator import MultiAgentOrchestrator
-    from .tool_system.events import ToolTraceEntry
+    from mindroom.config.main import Config
+    from mindroom.orchestrator import MultiAgentOrchestrator
+    from mindroom.tool_system.events import ToolTraceEntry
 
 logger = get_logger(__name__)
 

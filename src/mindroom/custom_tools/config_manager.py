@@ -10,7 +10,7 @@ from typing import Literal
 import yaml
 from agno.tools import Toolkit
 
-from mindroom.commands import get_command_help
+from mindroom.commands.parsing import get_command_help
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import AgentLearningMode  # noqa: TC001

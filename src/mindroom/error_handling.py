@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .logging_config import get_logger
+from mindroom.logging_config import get_logger
 
 logger = get_logger(__name__)
 

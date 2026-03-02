@@ -21,8 +21,7 @@ from mindroom.matrix.users import (
     register_user,
     save_agent_credentials,
 )
-
-from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
 if TYPE_CHECKING:
     from pathlib import Path
