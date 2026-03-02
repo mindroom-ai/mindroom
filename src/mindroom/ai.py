@@ -61,7 +61,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 AIStreamChunk = str | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
-AI_RUN_METADATA_VERSION = 1
+_AI_RUN_METADATA_VERSION = 1
 
 
 def _canonical_provider(provider: str) -> str:
@@ -417,7 +417,7 @@ def _build_ai_run_metadata_content(  # noqa: C901, PLR0912
     if not isinstance(input_tokens, int):
         input_tokens = None
 
-    payload: dict[str, Any] = {"version": AI_RUN_METADATA_VERSION}
+    payload: dict[str, Any] = {"version": _AI_RUN_METADATA_VERSION}
     if run_id is not None:
         payload["run_id"] = run_id
     if session_id is not None:
@@ -452,7 +452,7 @@ def _build_ai_run_metadata_content(  # noqa: C901, PLR0912
 
 
 @functools.cache
-def get_cache(storage_path: Path) -> diskcache.Cache | None:
+def _get_cache(storage_path: Path) -> diskcache.Cache | None:
     """Get or create a cache instance for the given storage path."""
     return diskcache.Cache(storage_path / ".ai_cache") if ENABLE_AI_CACHE else None
 
@@ -686,7 +686,7 @@ async def _cached_agent_run(
     """Cached wrapper for agent.arun() calls."""
     # Skip cache when images are present (large bytes, unlikely to repeat)
     # or when Agno history is enabled (prompt can be identical but replayed history differs)
-    cache = None if (images or agent.add_history_to_context) else get_cache(storage_path)
+    cache = None if (images or agent.add_history_to_context) else _get_cache(storage_path)
     if cache is None:
         return await agent.arun(
             full_prompt,
@@ -945,7 +945,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     metadata = _build_run_metadata(reply_to_event_id, unseen_event_ids)
 
     # Check cache (skip when images are present or history is enabled)
-    cache = None if (images or agent.add_history_to_context) else get_cache(storage_path)
+    cache = None if (images or agent.add_history_to_context) else _get_cache(storage_path)
     if cache is not None:
         model = agent.model
         assert model is not None

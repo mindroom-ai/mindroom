@@ -503,8 +503,8 @@ def test_update_room_models(test_client: TestClient, temp_config_file: Path) -> 
 def api_key_client(temp_config_file: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """Create a test client with MINDROOM_API_KEY enabled."""
     monkeypatch.setattr(main, "CONFIG_PATH", temp_config_file)
-    monkeypatch.setattr(main, "MINDROOM_API_KEY", "test-key")
-    main.load_config_from_file()
+    monkeypatch.setattr(main, "_MINDROOM_API_KEY", "test-key")
+    main._load_config_from_file()
     return TestClient(main.app)
 
 

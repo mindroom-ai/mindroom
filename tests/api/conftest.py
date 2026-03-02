@@ -46,7 +46,7 @@ def test_client(temp_config_file: Path, monkeypatch: pytest.MonkeyPatch) -> Test
     monkeypatch.setattr(main, "CONFIG_PATH", temp_config_file)
 
     # Force reload of config
-    main.load_config_from_file()
+    main._load_config_from_file()
 
     # Create test client
     return TestClient(main.app)

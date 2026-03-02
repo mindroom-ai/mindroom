@@ -17,7 +17,7 @@ logger = structlog.get_logger(__name__)
 
 
 @dataclass
-class TrackedMessage:
+class _TrackedMessage:
     """Track a message with stop button."""
 
     message_id: str
@@ -32,7 +32,7 @@ class StopManager:
     def __init__(self) -> None:
         """Initialize the stop manager."""
         # Track multiple concurrent messages by message_id
-        self.tracked_messages: dict[str, TrackedMessage] = {}
+        self.tracked_messages: dict[str, _TrackedMessage] = {}
         # Keep references to cleanup tasks
         self.cleanup_tasks: list[asyncio.Task] = []
         logger.info("StopManager initialized")
@@ -45,7 +45,7 @@ class StopManager:
         reaction_event_id: str | None = None,
     ) -> None:
         """Track a message generation."""
-        self.tracked_messages[message_id] = TrackedMessage(
+        self.tracked_messages[message_id] = _TrackedMessage(
             message_id=message_id,
             room_id=room_id,
             task=task,

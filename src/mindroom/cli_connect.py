@@ -22,7 +22,7 @@ _LEGACY_OWNER_PLACEHOLDER = "__PLACEHOLDER__"
 
 
 @dataclass(frozen=True)
-class PairCompleteResult:
+class _PairCompleteResult:
     """Credentials returned by the provisioning pair-complete endpoint."""
 
     client_id: str
@@ -46,7 +46,7 @@ def complete_local_pairing(
     client_fingerprint: str,
     matrix_ssl_verify: bool,
     post_request: Callable[..., httpx.Response] = httpx.post,
-) -> PairCompleteResult:
+) -> _PairCompleteResult:
     """Call the provisioning API and return local client credentials."""
     payload = {
         "pair_code": pair_code,
@@ -87,7 +87,7 @@ def complete_local_pairing(
     if parsed_namespace is None:
         parsed_namespace = _derive_namespace(client_id)
 
-    return PairCompleteResult(
+    return _PairCompleteResult(
         client_id=client_id,
         client_secret=_required_non_empty_string(data, "client_secret"),
         namespace=parsed_namespace,
