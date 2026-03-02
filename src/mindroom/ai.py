@@ -37,7 +37,7 @@ from .credentials_sync import get_api_key_for_provider, get_ollama_host
 from .error_handling import get_user_friendly_error_message
 from .logging_config import get_logger
 from .memory import build_memory_enhanced_prompt
-from .tool_events import (
+from .tool_system.events import (
     complete_pending_tool_block,
     extract_tool_completed_info,
     format_tool_combined,
@@ -56,7 +56,7 @@ if TYPE_CHECKING:
 
     from .config.main import Config
     from .config.models import ModelConfig
-    from .tool_events import ToolTraceEntry
+    from .tool_system.events import ToolTraceEntry
 
 logger = get_logger(__name__)
 

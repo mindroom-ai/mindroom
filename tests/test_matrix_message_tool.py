@@ -12,8 +12,8 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
-from mindroom.tool_runtime_context import ToolRuntimeContext, tool_runtime_context
-from mindroom.tools_metadata import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 
 
 @pytest.fixture(autouse=True)

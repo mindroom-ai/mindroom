@@ -13,7 +13,7 @@ from mindroom.matrix.large_messages import (
     _is_edit_message,
     prepare_large_message,
 )
-from mindroom.tool_events import TOOL_TRACE_KEY
+from mindroom.tool_system.events import TOOL_TRACE_KEY
 
 
 def test_calculate_event_size() -> None:

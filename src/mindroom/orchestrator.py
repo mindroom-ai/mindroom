@@ -30,8 +30,8 @@ from .matrix.users import (
     create_agent_user,
 )
 from .memory.auto_flush import MemoryAutoFlushWorker, auto_flush_enabled
-from .plugins import load_plugins
-from .skills import clear_skill_cache, get_skill_snapshot
+from .tool_system.plugins import load_plugins
+from .tool_system.skills import clear_skill_cache, get_skill_snapshot
 
 if TYPE_CHECKING:
     from .knowledge import KnowledgeManager

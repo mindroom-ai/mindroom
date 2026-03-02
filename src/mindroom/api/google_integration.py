@@ -21,7 +21,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from mindroom.credentials import CredentialsManager
-from mindroom.tool_dependencies import ensure_tool_deps
+from mindroom.tool_system.dependencies import ensure_tool_deps
 
 if TYPE_CHECKING:
     from google.auth.transport.requests import Request as GoogleRequest

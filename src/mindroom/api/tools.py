@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from mindroom.config.main import Config
 from mindroom.credentials import CredentialsManager, get_credentials_manager
-from mindroom.tools_metadata import ensure_tool_registry_loaded, export_tools_metadata
+from mindroom.tool_system.metadata import ensure_tool_registry_loaded, export_tools_metadata
 
 from .google_tools_helper import check_google_tool_configured
 

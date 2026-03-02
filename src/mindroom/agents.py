@@ -19,9 +19,9 @@ from . import agent_prompts
 from . import tools as _tools_module  # noqa: F401
 from .constants import ROUTER_AGENT_NAME, STORAGE_PATH_OBJ, resolve_config_relative_path
 from .logging_config import get_logger
-from .plugins import load_plugins
-from .skills import build_agent_skills
-from .tools_metadata import get_tool_by_name
+from .tool_system.metadata import get_tool_by_name
+from .tool_system.plugins import load_plugins
+from .tool_system.skills import build_agent_skills
 
 if TYPE_CHECKING:
     from pathlib import Path

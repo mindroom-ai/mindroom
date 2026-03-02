@@ -29,7 +29,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.teams import TeamFormationDecision, TeamMode
-from mindroom.tool_events import ToolTraceEntry
+from mindroom.tool_system.events import ToolTraceEntry
 
 from .conftest import TEST_PASSWORD
 

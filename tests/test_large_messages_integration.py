@@ -18,7 +18,7 @@ from mindroom.streaming import (
     StreamInputChunk,
     send_streaming_response,
 )
-from mindroom.tool_events import TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry
+from mindroom.tool_system.events import TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry
 
 
 class MockClient:

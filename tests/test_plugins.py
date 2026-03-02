@@ -7,11 +7,11 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import mindroom.plugins as plugin_module
+import mindroom.tool_system.plugins as plugin_module
 from mindroom.config.main import Config
-from mindroom.plugins import load_plugins
-from mindroom.skills import get_plugin_skill_roots, set_plugin_skill_roots
-from mindroom.tools_metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name
+from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name
+from mindroom.tool_system.plugins import load_plugins
+from mindroom.tool_system.skills import get_plugin_skill_roots, set_plugin_skill_roots
 
 if TYPE_CHECKING:
     import pytest
@@ -32,7 +32,7 @@ def test_load_plugins_registers_tools_and_skills(tmp_path: Path) -> None:
     tools_path = plugin_root / "tools.py"
     tools_path.write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tools_metadata import ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -102,7 +102,7 @@ def test_load_plugins_from_python_package(tmp_path: Path, monkeypatch: pytest.Mo
     tools_path = plugin_root / "tools.py"
     tools_path.write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tools_metadata import ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"

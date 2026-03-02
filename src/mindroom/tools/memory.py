@@ -6,7 +6,7 @@ agent context and is instantiated directly in ``create_agent()``, so it
 is NOT added to ``TOOL_REGISTRY`` (no generic factory).
 """
 
-from mindroom.tools_metadata import (
+from mindroom.tool_system.metadata import (
     TOOL_METADATA,
     SetupType,
     ToolCategory,

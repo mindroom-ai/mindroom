@@ -9,12 +9,12 @@ from typing import TYPE_CHECKING
 import pytest
 from agno.tools import Toolkit
 
-import mindroom.skills as skills_module
+import mindroom.tool_system.skills as skills_module
 from mindroom.command_handler import _run_skill_command_tool
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.skills import build_agent_skills, resolve_skill_command_spec
-from mindroom.tools_metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory, register_tool_with_metadata
+from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory, register_tool_with_metadata
+from mindroom.tool_system.skills import build_agent_skills, resolve_skill_command_spec
 
 if TYPE_CHECKING:
     from pathlib import Path

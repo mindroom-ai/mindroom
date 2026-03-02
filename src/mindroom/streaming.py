@@ -14,7 +14,7 @@ from . import interactive
 from .logging_config import get_logger
 from .matrix.client import edit_message, send_message
 from .matrix.mentions import format_message_with_mentions
-from .tool_events import (
+from .tool_system.events import (
     StructuredStreamChunk,
     ToolTraceEntry,
     complete_pending_tool_block,

@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from mindroom.constants import safe_replace
-from mindroom.skills import (
+from mindroom.tool_system.skills import (
     get_user_skills_dir,
     list_skill_listings,
     resolve_skill_listing,

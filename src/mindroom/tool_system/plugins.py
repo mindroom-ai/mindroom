@@ -10,17 +10,18 @@ from importlib import util
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .constants import resolve_config_relative_path
-from .logging_config import get_logger
+from mindroom.constants import resolve_config_relative_path
+from mindroom.logging_config import get_logger
+
 from .skills import set_plugin_skill_roots
 
 if TYPE_CHECKING:
-    from .config.main import Config
+    from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 
 PLUGIN_MANIFEST = "mindroom.plugin.json"
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 @dataclass(frozen=True)

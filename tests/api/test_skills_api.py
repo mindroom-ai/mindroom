@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from mindroom import skills as skills_module
+import mindroom.tool_system.skills as skills_module
 from mindroom.api import skills as skills_api_module
 
 

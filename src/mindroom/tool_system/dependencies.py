@@ -14,7 +14,7 @@ from pathlib import Path
 
 _PACKAGE_NAME = "mindroom"
 _RECEIPT_NAME = "uv-receipt.toml"
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 # Packages where the pip install name differs from the Python import name.
 # Only includes cases where replacing dashes with underscores is insufficient.

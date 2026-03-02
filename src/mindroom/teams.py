@@ -25,7 +25,7 @@ from .constants import ROUTER_AGENT_NAME
 from .error_handling import get_user_friendly_error_message
 from .logging_config import get_logger
 from .matrix.rooms import get_room_alias_from_id
-from .tool_events import (
+from .tool_system.events import (
     StructuredStreamChunk,
     ToolTraceEntry,
     complete_pending_tool_block,

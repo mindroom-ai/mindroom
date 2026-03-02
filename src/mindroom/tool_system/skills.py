@@ -17,11 +17,11 @@ from agno.skills import LocalSkills, Skills
 from agno.skills.loaders import SkillLoader
 from agno.skills.skill import Skill
 
-from .credentials import get_credentials_manager
-from .logging_config import get_logger
+from mindroom.credentials import get_credentials_manager
+from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from .config.main import Config
+    from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 
@@ -38,8 +38,8 @@ _PLUGIN_SKILL_ROOTS: list[Path] = []
 SkillSnapshot = tuple[tuple[str, int, int], ...]
 _SKILL_CACHE: dict[Path, tuple[SkillSnapshot, list[Skill]]] = {}
 _THIS_DIR = Path(__file__).resolve().parent
-_BUNDLED_SKILLS_DEV_DIR = _THIS_DIR.parents[1] / "skills"
-_BUNDLED_SKILLS_PACKAGE_DIR = _THIS_DIR / "_bundled_skills"
+_BUNDLED_SKILLS_DEV_DIR = _THIS_DIR.parents[2] / "skills"
+_BUNDLED_SKILLS_PACKAGE_DIR = _THIS_DIR.parent / "_bundled_skills"
 
 
 @dataclass

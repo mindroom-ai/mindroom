@@ -7,7 +7,7 @@ import pytest
 
 # Import tools to ensure they're registered
 import mindroom.tools  # noqa: F401
-from mindroom.tools_metadata import TOOL_METADATA, TOOL_REGISTRY
+from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY
 
 SKIP_CUSTOM = {"homeassistant", "imdb", "gmail", "google_calendar", "google_sheets"}
 

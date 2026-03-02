@@ -11,9 +11,10 @@ from typing import TYPE_CHECKING, Any, Literal
 from loguru import logger
 
 from mindroom.config.main import Config
-from mindroom.plugins import load_plugins
-from mindroom.sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy
-from mindroom.tool_dependencies import auto_install_tool_extra, check_deps_installed
+
+from .dependencies import auto_install_tool_extra, check_deps_installed
+from .plugins import load_plugins
+from .sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy
 
 if TYPE_CHECKING:
     from collections.abc import Callable

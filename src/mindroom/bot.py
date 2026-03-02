@@ -94,7 +94,7 @@ from .thread_utils import (
     has_user_responded_after_message,
     should_agent_respond,
 )
-from .tool_runtime_context import ToolRuntimeContext, tool_runtime_context
+from .tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -106,7 +106,7 @@ if TYPE_CHECKING:
 
     from .config.main import Config
     from .orchestrator import MultiAgentOrchestrator
-    from .tool_events import ToolTraceEntry
+    from .tool_system.events import ToolTraceEntry
 
 logger = get_logger(__name__)
 

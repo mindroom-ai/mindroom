@@ -42,7 +42,7 @@ from mindroom.knowledge_utils import resolve_agent_knowledge
 from mindroom.logging_config import get_logger
 from mindroom.routing import suggest_agent
 from mindroom.teams import TeamMode, format_team_response
-from mindroom.tool_events import format_tool_completed_event, format_tool_started_event
+from mindroom.tool_system.events import format_tool_completed_event, format_tool_started_event
 
 AUTO_MODEL_NAME = "auto"
 TEAM_MODEL_PREFIX = "team/"
