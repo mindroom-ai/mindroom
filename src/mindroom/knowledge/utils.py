@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from agno.knowledge.knowledge import Knowledge
 
@@ -20,6 +20,18 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+class _KnowledgeVectorDb(Protocol):
+    """Subset of vector DB interface this module requires."""
+
+    def search(
+        self,
+        *,
+        query: str,
+        limit: int,
+        filters: dict[str, Any] | list[Any] | None = None,
+    ) -> list[Document]: ...
+
+
 @dataclass
 class MultiKnowledgeVectorDb:
     """Thin vector DB wrapper that queries multiple vector DBs and merges results.
@@ -30,7 +42,7 @@ class MultiKnowledgeVectorDb:
     If agno changes the ``__post_init__`` protocol, this adapter will need updating.
     """
 
-    vector_dbs: list[Any]
+    vector_dbs: list[_KnowledgeVectorDb]
 
     def exists(self) -> bool:
         """Present as already-initialized to satisfy Knowledge.__post_init__."""
@@ -71,15 +83,14 @@ class MultiKnowledgeVectorDb:
     ) -> list[Document]:
         """Async variant of ``search`` that searches DBs concurrently."""
 
-        async def _search_one(vdb: Any) -> list[Document]:  # noqa: ANN401
+        async def _search_one(vdb: _KnowledgeVectorDb) -> list[Document]:
             results: list[Document]
-            async_search = getattr(vdb, "async_search", None)
             try:
-                if async_search is None:
+                if not hasattr(vdb, "async_search"):
                     results = vdb.search(query=query, limit=limit, filters=filters)
                 else:
                     try:
-                        results = await async_search(query=query, limit=limit, filters=filters)
+                        results = await cast("Any", vdb).async_search(query=query, limit=limit, filters=filters)
                     except NotImplementedError:
                         results = vdb.search(query=query, limit=limit, filters=filters)
             except Exception:
@@ -122,9 +133,12 @@ def _merge_knowledge(agent_name: str, knowledges: list[Knowledge]) -> Knowledge 
         return None
     if len(knowledges) == 1:
         return knowledges[0]
+    vector_dbs = [knowledge.vector_db for knowledge in knowledges if knowledge.vector_db is not None]
+    if not vector_dbs:
+        return None
     return Knowledge(
         name=f"{agent_name}_multi_knowledge",
-        vector_db=MultiKnowledgeVectorDb(vector_dbs=[knowledge.vector_db for knowledge in knowledges]),
+        vector_db=MultiKnowledgeVectorDb(vector_dbs=[cast("_KnowledgeVectorDb", vdb) for vdb in vector_dbs]),
         max_results=max(knowledge.max_results for knowledge in knowledges),
     )
 

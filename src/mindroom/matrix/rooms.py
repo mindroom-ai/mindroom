@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -433,8 +434,10 @@ def _is_two_member_group_room(client: nio.AsyncClient, room_id: str) -> bool:
     Rooms with an explicit topic are excluded because DMs almost never have one,
     while small project rooms often do.
     """
-    room_lookup = getattr(client, "rooms", None)
-    if not isinstance(room_lookup, dict):
+    if not hasattr(client, "rooms"):
+        return False
+    room_lookup = client.rooms
+    if not isinstance(room_lookup, Mapping):
         return False
 
     room = room_lookup.get(room_id)
