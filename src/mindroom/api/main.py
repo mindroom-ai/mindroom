@@ -171,10 +171,10 @@ def _resolve_unique_entity_id(base_id: str, entities: dict[str, Any]) -> str:
 # =========================
 # Supabase JWT verification
 # =========================
-_SUPABASE_URL = os.getenv("_SUPABASE_URL")
-_SUPABASE_ANON_KEY = os.getenv("_SUPABASE_ANON_KEY")
-_ACCOUNT_ID = os.getenv("_ACCOUNT_ID")  # optional: enforce instance ownership
-_MINDROOM_API_KEY = os.getenv("_MINDROOM_API_KEY")  # optional: dashboard auth for standalone mode
+_SUPABASE_URL = os.getenv("SUPABASE_URL")
+_SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+_ACCOUNT_ID = os.getenv("ACCOUNT_ID")  # optional: enforce instance ownership
+_MINDROOM_API_KEY = os.getenv("MINDROOM_API_KEY")  # optional: dashboard auth for standalone mode
 
 _STANDALONE_PUBLIC_PATHS = frozenset(
     {
@@ -198,7 +198,7 @@ def _init_supabase_auth(supabase_url: str | None, supabase_anon_key: str | None)
             disabled_hint = " Auto-install is disabled by MINDROOM_NO_AUTO_INSTALL_TOOLS."
         if not auto_install_tool_extra("supabase"):
             msg = (
-                "_SUPABASE_URL and _SUPABASE_ANON_KEY are set but the 'supabase' package is not available."
+                "SUPABASE_URL and SUPABASE_ANON_KEY are set but the 'supabase' package is not available."
                 f"{disabled_hint} Install it with: pip install 'mindroom[supabase]'"
             )
             raise ImportError(msg) from None
@@ -211,7 +211,7 @@ _supabase_auth: "SupabaseClient | None" = _init_supabase_auth(_SUPABASE_URL, _SU
 
 
 async def verify_user(request: Request, authorization: str | None = Header(None)) -> dict:
-    """Validate Supabase JWT from Authorization header; enforce owner if _ACCOUNT_ID set.
+    """Validate Supabase JWT from Authorization header; enforce owner if ACCOUNT_ID set.
 
     In standalone mode (no Supabase), returns a default user to allow access.
     """

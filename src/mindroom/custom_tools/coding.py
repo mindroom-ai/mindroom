@@ -427,7 +427,7 @@ def _format_read_output(content: str, offset: int | None, limit: int | None) -> 
 
 
 def _apply_byte_limit(selected: list[str], start: int, end: int) -> tuple[list[str], int]:
-    """Re-truncate selected lines if they exceed _MAX_BYTES."""
+    """Re-truncate selected lines if they exceed the max byte limit."""
     selected_text = "\n".join(selected)
     if len(selected_text.encode("utf-8", errors="replace")) <= _MAX_BYTES:
         return selected, end

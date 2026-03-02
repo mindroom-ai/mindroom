@@ -31,8 +31,8 @@ _creds_manager = CredentialsManager()
 _SCOPES: list[str] = []
 
 # Get configuration from environment
-_BACKEND_PORT = os.getenv("_BACKEND_PORT", "8765")
-_FRONTEND_URL = os.getenv("_FRONTEND_URL", "http://localhost:5173")
+_BACKEND_PORT = os.getenv("BACKEND_PORT", "8765")
+_FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
 
 class HomeAssistantStatus(BaseModel):

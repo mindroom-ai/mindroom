@@ -1,4 +1,4 @@
-"""Claude _Agent SDK-backed tools for persistent coding sessions."""
+"""Claude Agent SDK-backed tools for persistent coding sessions."""
 
 from __future__ import annotations
 
@@ -44,14 +44,14 @@ class _Agent(Protocol):
 
 @runtime_checkable
 class _AgentWithId(Protocol):
-    """_Agent protocol that exposes a stable id field."""
+    """Agent protocol that exposes a stable id field."""
 
     id: str | None
 
 
 @runtime_checkable
 class _AgentWithModel(Protocol):
-    """_Agent protocol that exposes a model object."""
+    """Agent protocol that exposes a model object."""
 
     model: Any | None
 
