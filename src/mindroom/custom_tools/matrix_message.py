@@ -12,6 +12,7 @@ import nio
 from agno.tools import Toolkit
 
 from mindroom.custom_tools.attachment_helpers import (
+    normalize_str_list,
     resolve_attachment_file_paths,
     resolve_attachment_ids,
     room_access_allowed,
@@ -68,20 +69,6 @@ class MatrixMessageTools(Toolkit):
         if limit is None:
             return cls._DEFAULT_READ_LIMIT
         return max(1, min(limit, cls._MAX_READ_LIMIT))
-
-    @staticmethod
-    def _normalize_str_list(values: list[str] | None, *, field_name: str) -> tuple[list[str], str | None]:
-        if values is None:
-            return [], None
-
-        normalized: list[str] = []
-        for raw_value in values:
-            if not isinstance(raw_value, str):
-                return [], f"{field_name} entries must be strings."
-            value = raw_value.strip()
-            if value:
-                normalized.append(value)
-        return normalized, None
 
     @staticmethod
     def _action_supports_attachments(action: str) -> bool:
@@ -495,7 +482,7 @@ class MatrixMessageTools(Toolkit):
             return self._context_error()
 
         normalized_action = action.strip().lower()
-        normalized_attachment_ids, attachment_ids_error = self._normalize_str_list(
+        normalized_attachment_ids, attachment_ids_error = normalize_str_list(
             attachment_ids,
             field_name="attachment_ids",
         )
@@ -505,7 +492,7 @@ class MatrixMessageTools(Toolkit):
                 action=normalized_action or action,
                 message=attachment_ids_error,
             )
-        normalized_attachment_file_paths, attachment_file_paths_error = self._normalize_str_list(
+        normalized_attachment_file_paths, attachment_file_paths_error = normalize_str_list(
             attachment_file_paths,
             field_name="attachment_file_paths",
         )

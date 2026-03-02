@@ -12,6 +12,7 @@ from mindroom.attachments import (
     resolve_attachments,
 )
 from mindroom.custom_tools.attachment_helpers import (
+    normalize_str_list,
     register_attachment_file_path,
     resolve_attachment_file_paths,
     resolve_attachment_ids,
@@ -34,24 +35,6 @@ def _attachment_tool_payload(status: str, **kwargs: object) -> str:
     }
     payload.update(kwargs)
     return json.dumps(payload, sort_keys=True)
-
-
-def _normalize_tool_str_list(
-    values: list[str] | None,
-    *,
-    field_name: str,
-) -> tuple[list[str], str | None]:
-    if values is None:
-        return [], None
-
-    normalized: list[str] = []
-    for raw_value in values:
-        if not isinstance(raw_value, str):
-            return [], f"{field_name} entries must be strings."
-        value = raw_value.strip()
-        if value:
-            normalized.append(value)
-    return normalized, None
 
 
 def get_attachment_listing(
@@ -195,13 +178,13 @@ class AttachmentTools(Toolkit):
                 message="Tool runtime context is unavailable in this runtime path.",
             )
 
-        normalized_attachment_ids, attachment_ids_error = _normalize_tool_str_list(
+        normalized_attachment_ids, attachment_ids_error = normalize_str_list(
             attachment_ids,
             field_name="attachment_ids",
         )
         if attachment_ids_error is not None:
             return _attachment_tool_payload("error", message=attachment_ids_error)
-        normalized_attachment_file_paths, attachment_file_paths_error = _normalize_tool_str_list(
+        normalized_attachment_file_paths, attachment_file_paths_error = normalize_str_list(
             attachment_file_paths,
             field_name="attachment_file_paths",
         )
