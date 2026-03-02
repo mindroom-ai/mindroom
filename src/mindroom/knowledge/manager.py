@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import re
 from contextlib import suppress
 from copy import deepcopy
@@ -39,6 +40,9 @@ logger = get_logger(__name__)
 
 _COLLECTION_PREFIX = "mindroom_knowledge"
 _URL_PATTERN = re.compile(r"https?://[^\s'\"<>]+")
+_SOURCE_PATH_KEY = "source_path"
+_SOURCE_MTIME_NS_KEY = "source_mtime_ns"
+_SOURCE_SIZE_KEY = "source_size"
 
 
 def _resolve_knowledge_path(path: str) -> Path:
@@ -108,6 +112,20 @@ def _create_embedder(config: Config) -> Embedder:
 
     msg = f"Unsupported knowledge embedder provider: {provider}. Supported providers: openai, ollama"
     raise ValueError(msg)
+
+
+def _coerce_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped and stripped.lstrip("-").isdigit():
+            return int(stripped)
+    return None
 
 
 def _authenticated_repo_url(repo_url: str, credentials_service: str | None) -> str:
@@ -222,8 +240,11 @@ class KnowledgeManager:
 
     knowledge_path: Path = field(init=False)
     _settings: tuple[str, ...] = field(init=False)
+    _base_storage_path: Path = field(init=False)
+    _index_failures_path: Path = field(init=False)
     _knowledge: Knowledge = field(init=False)
     _indexed_files: set[str] = field(default_factory=set, init=False)
+    _indexed_signatures: dict[str, tuple[int, int] | None] = field(default_factory=dict, init=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _watch_task: asyncio.Task[None] | None = field(default=None, init=False)
     _watch_stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
@@ -237,10 +258,13 @@ class KnowledgeManager:
         self.knowledge_path = _resolve_knowledge_path(base_config.path)
         self.knowledge_path.mkdir(parents=True, exist_ok=True)
         self._settings = _settings_key(self.config, self.storage_path, self.base_id)
+        self._base_storage_path = (self.storage_path / "knowledge_db" / _base_storage_key(self.base_id)).resolve()
+        self._base_storage_path.mkdir(parents=True, exist_ok=True)
+        self._index_failures_path = self._base_storage_path / "index_failures.json"
 
         vector_db = ChromaDb(
             collection=_collection_name(self.base_id),
-            path=str((self.storage_path / "knowledge_db" / _base_storage_key(self.base_id)).resolve()),
+            path=str(self._base_storage_path),
             persistent_client=True,
             embedder=_create_embedder(self.config),
         )
@@ -416,6 +440,55 @@ class KnowledgeManager:
     def _relative_path(self, file_path: Path) -> str:
         return file_path.relative_to(self.knowledge_path).as_posix()
 
+    def _file_signature(self, file_path: Path) -> tuple[int, int]:
+        stat = file_path.stat()
+        return stat.st_mtime_ns, stat.st_size
+
+    def _load_failed_signatures(self) -> dict[str, tuple[int, int]]:
+        if not self._index_failures_path.exists():
+            return {}
+
+        try:
+            payload = json.loads(self._index_failures_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+        if not isinstance(payload, dict):
+            return {}
+
+        failed_signatures: dict[str, tuple[int, int]] = {}
+        for path, value in payload.items():
+            if not isinstance(path, str):
+                continue
+            if not isinstance(value, list | tuple) or len(value) != 2:
+                continue
+            mtime_ns = _coerce_int(value[0])
+            size = _coerce_int(value[1])
+            if mtime_ns is None or size is None:
+                continue
+            failed_signatures[path] = (mtime_ns, size)
+        return failed_signatures
+
+    def _save_failed_signatures(self, failed_signatures: dict[str, tuple[int, int]]) -> None:
+        payload = {path: [signature[0], signature[1]] for path, signature in failed_signatures.items()}
+        self._index_failures_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+    def _has_vectors_for_source_path(self, relative_path: str) -> bool:
+        vector_db = self._knowledge.vector_db
+        if not isinstance(vector_db, ChromaDb):
+            return True
+        if not vector_db.exists():
+            return False
+
+        collection = vector_db.client.get_collection(name=vector_db.collection_name)
+        result = collection.get(
+            where={_SOURCE_PATH_KEY: relative_path},
+            limit=1,
+            include=[],
+        )
+        ids = result.get("ids", []) or []
+        return bool(ids)
+
     def _build_reader(self, file_path: Path) -> Reader:
         """Build a per-file reader with conservative chunking for text-like content."""
         base_config = _knowledge_base_config(self.config, self.base_id)
@@ -440,20 +513,20 @@ class KnowledgeManager:
         self._knowledge.vector_db.delete()
         self._knowledge.vector_db.create()
 
-    def _load_indexed_files_from_vector_db(self) -> set[str]:
-        """Load unique source paths currently present in the vector collection."""
+    def _load_indexed_files_from_vector_db(self) -> dict[str, tuple[int, int] | None]:
+        """Load indexed source paths and optional file signatures from the vector collection."""
         vector_db = self._knowledge.vector_db
         if not isinstance(vector_db, ChromaDb):
-            return set()
+            return {}
         if not vector_db.exists():
-            return set()
+            return {}
 
         collection = vector_db.client.get_collection(name=vector_db.collection_name)
         total_count = collection.count()
         if total_count == 0:
-            return set()
+            return {}
 
-        indexed_files: set[str] = set()
+        indexed_files: dict[str, tuple[int, int] | None] = {}
         offset = 0
         batch_size = 1_000
 
@@ -468,9 +541,17 @@ class KnowledgeManager:
             for metadata in metadatas:
                 if not isinstance(metadata, dict):
                     continue
-                source_path = metadata.get("source_path")
-                if isinstance(source_path, str) and source_path:
-                    indexed_files.add(source_path)
+                source_path = metadata.get(_SOURCE_PATH_KEY)
+                if not isinstance(source_path, str) or not source_path:
+                    continue
+
+                source_mtime_ns = _coerce_int(metadata.get(_SOURCE_MTIME_NS_KEY))
+                source_size = _coerce_int(metadata.get(_SOURCE_SIZE_KEY))
+                signature = (
+                    (source_mtime_ns, source_size) if source_mtime_ns is not None and source_size is not None else None
+                )
+                if source_path not in indexed_files or (indexed_files[source_path] is None and signature is not None):
+                    indexed_files[source_path] = signature
 
             ids = result.get("ids", []) or []
             fetched_count = len(ids)
@@ -497,8 +578,57 @@ class KnowledgeManager:
         """Load in-memory indexed file state from the existing vector DB collection."""
         indexed_files = await asyncio.to_thread(self._load_indexed_files_from_vector_db)
         async with self._lock:
-            self._indexed_files = indexed_files
+            self._indexed_signatures = indexed_files
+            self._indexed_files = set(indexed_files)
         return len(indexed_files)
+
+    async def sync_indexed_files(self) -> dict[str, int]:
+        """Incrementally align index with files on disk."""
+        await self.load_indexed_files()
+        files = self.list_files()
+        current_signatures = {self._relative_path(path): self._file_signature(path) for path in files}
+        failed_signatures = await asyncio.to_thread(self._load_failed_signatures)
+
+        async with self._lock:
+            indexed_files = set(self._indexed_files)
+            indexed_signatures = dict(self._indexed_signatures)
+
+        removed_paths = sorted(indexed_files - set(current_signatures))
+        changed_or_missing_paths: list[str] = []
+        for path, signature in current_signatures.items():
+            if path not in indexed_files:
+                if failed_signatures.get(path) == signature:
+                    continue
+                changed_or_missing_paths.append(path)
+                continue
+
+            indexed_signature = indexed_signatures.get(path)
+            if indexed_signature is not None and indexed_signature != signature:
+                changed_or_missing_paths.append(path)
+        changed_or_missing_paths.sort()
+
+        removed_count = 0
+        for relative_path in removed_paths:
+            removed = await self.remove_file(relative_path)
+            removed_count += int(removed)
+            failed_signatures.pop(relative_path, None)
+
+        indexed_count = 0
+        for relative_path in changed_or_missing_paths:
+            indexed = await self.index_file(relative_path, upsert=True)
+            indexed_count += int(indexed)
+            if indexed:
+                failed_signatures.pop(relative_path, None)
+            else:
+                failed_signatures[relative_path] = current_signatures[relative_path]
+
+        await asyncio.to_thread(self._save_failed_signatures, failed_signatures)
+
+        return {
+            "loaded_count": len(indexed_files),
+            "indexed_count": indexed_count,
+            "removed_count": removed_count,
+        }
 
     async def sync_git_repository(self) -> dict[str, Any]:
         """Fetch and force-align one configured Git repository, then update the index."""
@@ -614,16 +744,20 @@ class KnowledgeManager:
     async def _index_file_locked(self, resolved_path: Path, *, upsert: bool) -> bool:
         """Index one file while holding the manager lock."""
         relative_path = self._relative_path(resolved_path)
-        metadata = {"source_path": relative_path}
+        source_mtime_ns, source_size = self._file_signature(resolved_path)
+        metadata = {
+            _SOURCE_PATH_KEY: relative_path,
+            _SOURCE_MTIME_NS_KEY: source_mtime_ns,
+            _SOURCE_SIZE_KEY: source_size,
+        }
         reader = self._build_reader(resolved_path)
 
         try:
             if upsert:
                 # Agno/Chroma upsert keys by content hash, so stale chunks from an older
                 # version of the same file can remain unless we clear by source metadata first.
-                await asyncio.to_thread(self._knowledge.remove_vectors_by_metadata, metadata)
-            await asyncio.to_thread(
-                self._knowledge.insert,
+                await asyncio.to_thread(self._knowledge.remove_vectors_by_metadata, {_SOURCE_PATH_KEY: relative_path})
+            await self._knowledge.ainsert(
                 path=str(resolved_path),
                 metadata=metadata,
                 upsert=upsert,
@@ -633,7 +767,15 @@ class KnowledgeManager:
             logger.exception("Failed to index knowledge file", base_id=self.base_id, path=str(resolved_path))
             return False
 
+        has_vectors = await asyncio.to_thread(self._has_vectors_for_source_path, relative_path)
+        if not has_vectors:
+            logger.warning("Indexing produced no vectors for file", base_id=self.base_id, path=relative_path)
+            self._indexed_files.discard(relative_path)
+            self._indexed_signatures.pop(relative_path, None)
+            return False
+
         self._indexed_files.add(relative_path)
+        self._indexed_signatures[relative_path] = (source_mtime_ns, source_size)
         logger.info("Indexed knowledge file", base_id=self.base_id, path=relative_path)
         return True
 
@@ -644,6 +786,7 @@ class KnowledgeManager:
         async with self._lock:
             await asyncio.to_thread(self._reset_collection)
             self._indexed_files.clear()
+            self._indexed_signatures.clear()
             for file_path in files:
                 await self._index_file_locked(file_path, upsert=True)
             return len(self._indexed_files)
@@ -669,9 +812,10 @@ class KnowledgeManager:
         async with self._lock:
             removed = await asyncio.to_thread(
                 self._knowledge.remove_vectors_by_metadata,
-                {"source_path": relative_path},
+                {_SOURCE_PATH_KEY: relative_path},
             )
             self._indexed_files.discard(relative_path)
+            self._indexed_signatures.pop(relative_path, None)
 
         logger.info("Removed knowledge file from index", base_id=self.base_id, path=relative_path, removed=removed)
         return removed
@@ -744,12 +888,14 @@ async def initialize_knowledge_managers(
         if reindex_on_create:
             await manager.initialize()
         else:
-            indexed_count = await manager.load_indexed_files()
+            sync_result = await manager.sync_indexed_files()
             logger.info(
                 "Knowledge manager initialized without full reindex",
                 base_id=base_id,
                 path=str(manager.knowledge_path),
-                indexed_count=indexed_count,
+                loaded_count=sync_result["loaded_count"],
+                indexed_count=sync_result["indexed_count"],
+                removed_count=sync_result["removed_count"],
             )
 
         if start_watchers:
