@@ -185,6 +185,67 @@ async def test_voice_transcription_permissions_use_original_sender(mock_home_bot
 
 
 @pytest.mark.asyncio
+async def test_voice_transcription_does_not_inline_attachment_audio_by_default(mock_home_bot: AgentBot) -> None:
+    """Successful voice relays should keep attachment IDs without auto-inlining audio."""
+    bot = mock_home_bot
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!test:server"
+    room.canonical_alias = None
+
+    voice_transcription_event = MagicMock(spec=nio.RoomMessageText)
+    voice_transcription_event.event_id = "$transcription_attached"
+    voice_transcription_event.sender = f"@mindroom_{ROUTER_AGENT_NAME}:localhost"
+    voice_transcription_event.body = f"{VOICE_PREFIX}turn on the guest room lights"
+    voice_transcription_event.source = {
+        "content": {
+            "body": f"{VOICE_PREFIX}turn on the guest room lights",
+            ORIGINAL_SENDER_KEY: "@user:example.com",
+            ATTACHMENT_IDS_KEY: ["att_voice"],
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": "$thread_root",
+            },
+        },
+    }
+
+    thread_history = [
+        {
+            "event_id": "$thread_root",
+            "sender": "@user:example.com",
+            "content": {"body": "@home what lights are on?"},
+        },
+        {
+            "event_id": "$home_response",
+            "sender": "@mindroom_home:localhost",
+            "content": {"body": "The living room and kitchen lights are currently on."},
+        },
+    ]
+    attachment_audio = [Audio(content=b"voice-bytes", mime_type="audio/ogg")]
+
+    with (
+        patch("mindroom.bot.fetch_thread_history", return_value=thread_history),
+        patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
+        patch("mindroom.bot.get_agents_in_thread", return_value=[MatrixID.parse("@mindroom_home:localhost")]),
+        patch("mindroom.bot.should_agent_respond", return_value=True),
+        patch("mindroom.bot.resolve_thread_attachment_ids", new_callable=AsyncMock, return_value=[]),
+        patch(
+            "mindroom.bot.resolve_attachment_media",
+            return_value=(["att_voice"], attachment_audio, [], [], []),
+        ),
+    ):
+        mock_extract_agent.side_effect = _extract_agent_side_effect
+
+        await bot._on_message(room, voice_transcription_event)
+
+    bot._generate_response.assert_called_once()
+    call_kwargs = bot._generate_response.call_args.kwargs
+    assert call_kwargs["prompt"] == f"{VOICE_PREFIX}turn on the guest room lights"
+    assert "Available attachment IDs" not in call_kwargs["prompt"]
+    assert list(call_kwargs["media"].audio) == []
+    assert call_kwargs["attachment_ids"] == ["att_voice"]
+
+
+@pytest.mark.asyncio
 async def test_agent_ignores_non_voice_router_messages(mock_home_bot: AgentBot) -> None:
     """Test that agents still ignore regular router messages (not voice)."""
     bot = mock_home_bot
