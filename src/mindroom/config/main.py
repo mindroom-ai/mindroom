@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections import deque
 from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Literal
@@ -350,9 +351,9 @@ class Config(BaseModel):
         """Expand tool presets and implied tools, deduping while preserving order."""
         expanded: list[str] = []
         seen: set[str] = set()
-        queue = list(tool_names)
+        queue = deque(tool_names)
         while queue:
-            tool_name = queue.pop(0)
+            tool_name = queue.popleft()
             if tool_name in seen:
                 continue
             seen.add(tool_name)

@@ -48,7 +48,7 @@ from mindroom.tool_system.events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Sequence
     from pathlib import Path
 
     from agno.agent import Agent
@@ -1077,7 +1077,7 @@ async def _process_stream_events(  # noqa: C901
     agent_name: str,
     media_inputs: MediaInputs,
     retried_without_inline_media: bool,
-) -> AsyncIterator[AIStreamChunk]:
+) -> AsyncGenerator[AIStreamChunk, None]:
     """Consume one streaming attempt, yielding chunks and mutating *state*."""
     try:
         async for event in stream_generator:
