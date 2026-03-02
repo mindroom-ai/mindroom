@@ -273,31 +273,3 @@ def _homeassistant_tools() -> type[Toolkit]:
     from mindroom.custom_tools.homeassistant import HomeAssistantTools
 
     return HomeAssistantTools
-
-
-@register_tool_with_metadata(
-    name="imdb",
-    display_name="IMDb",
-    description="Movie and TV show information",
-    category=ToolCategory.ENTERTAINMENT,
-    status=ToolStatus.REQUIRES_CONFIG,
-    setup_type=SetupType.API_KEY,
-    icon="Film",
-    icon_color="text-yellow-500",
-    config_fields=[
-        ConfigField(
-            name="OMDB_API_KEY",
-            label="OMDb API Key",
-            type="password",
-            required=True,
-            placeholder="Enter your OMDb API key",
-            description="Your OMDb API key for movie and TV show information",
-        ),
-    ],
-    helper_text="Get a free API key from [OMDb API website](http://www.omdbapi.com/apikey.aspx)",
-    docs_url="http://www.omdbapi.com/",
-)
-def _imdb_tools() -> type[Toolkit]:
-    """IMDb integration - coming soon."""
-    msg = "IMDb integration is coming soon"
-    raise NotImplementedError(msg)
