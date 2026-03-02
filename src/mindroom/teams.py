@@ -48,9 +48,9 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # Message length limits for team context and logging
-MAX_CONTEXT_MESSAGE_LENGTH = 200  # Maximum length for messages to include in thread context
-MAX_LOG_MESSAGE_LENGTH = 500  # Maximum length for messages in team response logs
-TeamStreamChunk = str | StructuredStreamChunk
+_MAX_CONTEXT_MESSAGE_LENGTH = 200  # Maximum length for messages to include in thread context
+_MAX_LOG_MESSAGE_LENGTH = 500  # Maximum length for messages in team response logs
+_TeamStreamChunk = str | StructuredStreamChunk
 
 
 class TeamMode(str, Enum):
@@ -60,7 +60,7 @@ class TeamMode(str, Enum):
     COLLABORATE = "collaborate"  # All members work on same task in parallel
 
 
-class TeamModeDecision(BaseModel):
+class _TeamModeDecision(BaseModel):
     """AI decision for team collaboration mode."""
 
     mode: Literal["coordinate", "collaborate"] = Field(
@@ -69,7 +69,7 @@ class TeamModeDecision(BaseModel):
     reasoning: str = Field(description="Brief explanation of why this mode was chosen")
 
 
-def format_team_header(agent_names: list[str]) -> str:
+def _format_team_header(agent_names: list[str]) -> str:
     """Format the team response header.
 
     Args:
@@ -82,7 +82,7 @@ def format_team_header(agent_names: list[str]) -> str:
     return f"🤝 **Team Response** ({', '.join(agent_names)}):\n\n"
 
 
-def format_member_contribution(agent_name: str, content: str, indent: int = 0) -> str:
+def _format_member_contribution(agent_name: str, content: str, indent: int = 0) -> str:
     """Format a single team member's contribution.
 
     Args:
@@ -98,7 +98,7 @@ def format_member_contribution(agent_name: str, content: str, indent: int = 0) -
     return f"{indent_str}**{agent_name}**: {content}"
 
 
-def format_team_consensus(consensus: str, indent: int = 0) -> list[str]:
+def _format_team_consensus(consensus: str, indent: int = 0) -> list[str]:
     """Format the team consensus section.
 
     Args:
@@ -117,7 +117,7 @@ def format_team_consensus(consensus: str, indent: int = 0) -> list[str]:
     return parts
 
 
-def format_no_consensus_note(indent: int = 0) -> str:
+def _format_no_consensus_note(indent: int = 0) -> str:
     """Format the note when there's no team consensus.
 
     Args:
@@ -181,19 +181,19 @@ def _format_contributions_recursive(  # noqa: C901
                     agent_name = member_resp.agent_name or "Team Member"
                     content = _get_response_content(member_resp)
                     if content:
-                        parts.append(format_member_contribution(agent_name, content, indent))
+                        parts.append(_format_member_contribution(agent_name, content, indent))
 
         if include_consensus:
             if response.content:
-                parts.extend(format_team_consensus(response.content, indent))
+                parts.extend(_format_team_consensus(response.content, indent))
             elif parts:
-                parts.append(format_no_consensus_note(indent))
+                parts.append(_format_no_consensus_note(indent))
 
     elif isinstance(response, RunOutput):
         agent_name = response.agent_name or "Agent"
         content = _get_response_content(response)
         if content:
-            parts.append(format_member_contribution(agent_name, content, indent))
+            parts.append(_format_member_contribution(agent_name, content, indent))
 
     return parts
 
@@ -235,7 +235,7 @@ class TeamFormationDecision(NamedTuple):
     mode: TeamMode
 
 
-async def select_team_mode(
+async def _select_team_mode(
     message: str,
     agent_names: list[str],
     config: Config,
@@ -280,13 +280,13 @@ Return the mode and a one-sentence reason why."""
         name="TeamModeDecider",
         role="Determine team mode",
         model=model,
-        output_schema=TeamModeDecision,
+        output_schema=_TeamModeDecision,
     )
 
     try:
         response = await agent.arun(prompt, session_id="team_mode_decision")
         decision = response.content
-        if isinstance(decision, TeamModeDecision):
+        if isinstance(decision, _TeamModeDecision):
             logger.info(f"Team mode: {decision.mode} - {decision.reasoning}")
             return TeamMode.COORDINATE if decision.mode == "coordinate" else TeamMode.COLLABORATE
         # Fallback if response is unexpected
@@ -368,7 +368,7 @@ async def decide_team_formation(
     # Only do this AI call for the first agent to avoid duplication
     if use_ai_decision and message and config and is_first_agent:
         agent_names = [mid.agent_name(config) or mid.username for mid in team_agents]
-        mode = await select_team_mode(message, agent_names, config)
+        mode = await _select_team_mode(message, agent_names, config)
     else:
         # Fallback to hardcoded logic when AI decision is disabled or unavailable
         # Use COORDINATE when agents are explicitly tagged (they likely have different roles)
@@ -401,7 +401,7 @@ def _build_prompt_with_context(
     for msg in recent_messages:
         sender = msg.get("sender", "Unknown")
         body = msg.get("content", {}).get("body", "")
-        if body and len(body) < MAX_CONTEXT_MESSAGE_LENGTH:
+        if body and len(body) < _MAX_CONTEXT_MESSAGE_LENGTH:
             context_parts.append(f"{sender}: {body}")
 
     if context_parts:
@@ -519,7 +519,7 @@ def select_model_for_team(team_name: str, room_id: str, config: Config) -> str:
     return "default"
 
 
-NO_AGENTS_RESPONSE = "Sorry, no agents available for team collaboration."
+_NO_AGENTS_RESPONSE = "Sorry, no agents available for team collaboration."
 
 
 async def team_response(
@@ -535,7 +535,7 @@ async def team_response(
     agents = _get_agents_from_orchestrator(agent_names, orchestrator)
 
     if not agents:
-        return NO_AGENTS_RESPONSE
+        return _NO_AGENTS_RESPONSE
 
     prompt = _build_prompt_with_context(message, thread_history)
     team = _create_team_instance(agents, agent_names, mode, orchestrator, model_name)
@@ -564,18 +564,18 @@ async def team_response(
         logger.warning(f"Unexpected response type: {type(response)}", response=response)
         team_response = str(response)
 
-    logger.info(f"TEAM RESPONSE ({agent_list}): {team_response[:MAX_LOG_MESSAGE_LENGTH]}")
-    if len(team_response) > MAX_LOG_MESSAGE_LENGTH:
+    logger.info(f"TEAM RESPONSE ({agent_list}): {team_response[:_MAX_LOG_MESSAGE_LENGTH]}")
+    if len(team_response) > _MAX_LOG_MESSAGE_LENGTH:
         logger.debug(f"TEAM RESPONSE (full): {team_response}")
 
     # Don't use @ mentions as that would trigger the agents again
     agent_names = [str(a.name) for a in agents if a.name]
-    team_header = format_team_header(agent_names)
+    team_header = _format_team_header(agent_names)
 
     return team_header + team_response
 
 
-async def team_response_stream_raw(
+async def _team_response_stream_raw(
     agent_ids: list[MatrixID],
     mode: TeamMode,
     message: str,
@@ -596,7 +596,7 @@ async def team_response_stream_raw(
     if not agents:
 
         async def _empty() -> AsyncIterator[RunOutput]:
-            yield RunOutput(content=NO_AGENTS_RESPONSE)
+            yield RunOutput(content=_NO_AGENTS_RESPONSE)
 
         return _empty()
 
@@ -629,7 +629,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     model_name: str | None = None,
     images: Sequence[Image] | None = None,
     show_tool_calls: bool = True,
-) -> AsyncIterator[TeamStreamChunk]:
+) -> AsyncIterator[_TeamStreamChunk]:
     """Aggregate team streaming into a non-stream-style document, live.
 
     Renders a header and per-member sections, optionally adding a team
@@ -659,7 +659,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     logger.info(f"Team streaming setup - agents: {agent_names}, display names: {display_names}")
 
     # Acquire raw event stream
-    raw_stream = await team_response_stream_raw(
+    raw_stream = await _team_response_stream_raw(
         agent_ids=agent_ids,
         mode=mode,
         message=message,
@@ -763,7 +763,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         # Handle error case
         if isinstance(event, RunOutput):
             content = _get_response_content(event)
-            if NO_AGENTS_RESPONSE in content:
+            if _NO_AGENTS_RESPONSE in content:
                 yield content
                 return
             logger.warning(f"Unexpected RunOutput in team stream: {content[:100]}")
@@ -842,19 +842,19 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         for display in display_names:
             body = per_member.get(display, "").strip()
             if body:
-                parts.append(format_member_contribution(display, body))
+                parts.append(_format_member_contribution(display, body))
         # Then render any late/unknown agents that appeared during stream
         for display, body in per_member.items():
             if display not in display_names and body.strip():
-                parts.append(format_member_contribution(display, body.strip()))
+                parts.append(_format_member_contribution(display, body.strip()))
 
         if consensus.strip():
-            parts.extend(format_team_consensus(consensus.strip()))
+            parts.extend(_format_team_consensus(consensus.strip()))
         elif parts:
-            parts.append(format_no_consensus_note())
+            parts.append(_format_no_consensus_note())
 
         if parts:
-            header = format_team_header(agent_names)
+            header = _format_team_header(agent_names)
             full_text = "\n\n".join(parts)
             chunk_tool_trace = tool_trace.copy() if show_tool_calls and tool_trace else None
             yield StructuredStreamChunk(content=header + full_text, tool_trace=chunk_tool_trace)
