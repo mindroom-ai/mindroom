@@ -860,6 +860,21 @@ class AgentBot:
             # Mark the original interactive question as responded
             self.response_tracker.mark_responded(event.reacts_to, response_event_id)
 
+    @staticmethod
+    def _build_voice_extra_content(
+        *,
+        sender: str,
+        attachment_id: str | None,
+        voice_raw_audio_fallback: bool = False,
+    ) -> dict[str, str | bool | list[str]]:
+        """Build metadata payload for router voice relay messages."""
+        extra_content: dict[str, str | bool | list[str]] = {ORIGINAL_SENDER_KEY: sender}
+        if voice_raw_audio_fallback:
+            extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
+        if attachment_id is not None:
+            extra_content[ATTACHMENT_IDS_KEY] = [attachment_id]
+        return extra_content
+
     async def _on_voice_message(
         self,
         room: nio.MatrixRoom,
@@ -902,17 +917,15 @@ class AgentBot:
                 sender=event.sender,
                 filename=event.body if isinstance(event.body, str) else None,
             )
+        attachment_id = attachment_record.attachment_id if attachment_record is not None else None
 
         if transcribed_message:
-            transcribed_extra_content: dict[str, str | list[str]] = {ORIGINAL_SENDER_KEY: event.sender}
-            if attachment_record is not None:
-                transcribed_extra_content[ATTACHMENT_IDS_KEY] = [attachment_record.attachment_id]
             response_event_id = await self._send_response(
                 room_id=room.room_id,
                 reply_to_event_id=event.event_id,
                 response_text=transcribed_message,
                 thread_id=effective_thread_id,
-                extra_content=transcribed_extra_content,
+                extra_content=self._build_voice_extra_content(sender=event.sender, attachment_id=attachment_id),
             )
             self.response_tracker.mark_responded(event.event_id, response_event_id)
             return
@@ -928,18 +941,16 @@ class AgentBot:
             sender=event.sender,
         )
         fallback_message = f"{VOICE_PREFIX}{voice_handler.extract_caption(event)}"
-        fallback_extra_content: dict[str, str | bool | list[str]] = {
-            ORIGINAL_SENDER_KEY: event.sender,
-            VOICE_RAW_AUDIO_FALLBACK_KEY: True,
-        }
-        if attachment_record is not None:
-            fallback_extra_content[ATTACHMENT_IDS_KEY] = [attachment_record.attachment_id]
         response_event_id = await self._send_response(
             room_id=room.room_id,
             reply_to_event_id=event.event_id,
             response_text=fallback_message,
             thread_id=effective_thread_id,
-            extra_content=fallback_extra_content,
+            extra_content=self._build_voice_extra_content(
+                sender=event.sender,
+                attachment_id=attachment_id,
+                voice_raw_audio_fallback=True,
+            ),
         )
         self.response_tracker.mark_responded(event.event_id, response_event_id)
 

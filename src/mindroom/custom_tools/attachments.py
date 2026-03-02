@@ -13,7 +13,6 @@ from mindroom.attachments import (
     resolve_attachments,
 )
 from mindroom.custom_tools.attachment_helpers import (
-    normalize_str_list,
     register_attachment_file_path,
     resolve_attachment_file_paths,
     resolve_attachment_ids,
@@ -52,8 +51,6 @@ def _attachment_tool_payload(status: str, **kwargs: object) -> str:
 def get_attachment_listing(
     context: ToolRuntimeContext,
     target: str | None,
-    *,
-    include_local_path: bool = True,
 ) -> tuple[list[str], list[dict[str, object]], list[str], str | None]:
     """List requested context attachments and report missing metadata records."""
     if context.storage_path is None:
@@ -73,7 +70,7 @@ def get_attachment_listing(
     ]
     return (
         requested_attachment_ids,
-        attachments_for_tool_payload(attachment_records, include_local_path=include_local_path),
+        attachments_for_tool_payload(attachment_records),
         missing_attachment_ids,
         None,
     )
@@ -254,7 +251,6 @@ class AttachmentTools(Toolkit):
         requested_attachment_ids, attachments, missing_attachment_ids, error = get_attachment_listing(
             context,
             requested_attachment_id,
-            include_local_path=True,
         )
         if error is not None:
             return _attachment_tool_payload("error", message=error)
@@ -298,64 +294,5 @@ class AttachmentTools(Toolkit):
         return _attachment_tool_payload(
             "ok",
             attachment_id=attachment_record.attachment_id,
-            attachment=attachments_for_tool_payload([attachment_record], include_local_path=True)[0],
-        )
-
-    async def send_attachments(
-        self,
-        attachment_ids: list[str] | None = None,
-        attachment_file_paths: list[str] | None = None,
-        room_id: str | None = None,
-        thread_id: str | None = None,
-    ) -> str:
-        """Internal helper for sending attachment IDs and/or local file paths."""
-        context = get_tool_runtime_context()
-        if context is None:
-            return _attachment_tool_payload(
-                "error",
-                message="Tool runtime context is unavailable in this runtime path.",
-            )
-
-        normalized_attachment_ids, attachment_ids_error = normalize_str_list(
-            attachment_ids,
-            field_name="attachment_ids",
-        )
-        if attachment_ids_error is not None:
-            return _attachment_tool_payload("error", message=attachment_ids_error)
-        normalized_attachment_file_paths, attachment_file_paths_error = normalize_str_list(
-            attachment_file_paths,
-            field_name="attachment_file_paths",
-        )
-        if attachment_file_paths_error is not None:
-            return _attachment_tool_payload("error", message=attachment_file_paths_error)
-
-        result, send_error = await send_context_attachments(
-            context,
-            attachment_ids=normalized_attachment_ids,
-            attachment_file_paths=normalized_attachment_file_paths,
-            room_id=room_id,
-            thread_id=thread_id,
-        )
-        if send_error is not None:
-            if result is None:
-                return _attachment_tool_payload("error", message=send_error)
-            return _attachment_tool_payload(
-                "error",
-                room_id=result.room_id,
-                thread_id=result.thread_id,
-                attachment_event_ids=result.attachment_event_ids,
-                resolved_attachment_ids=result.resolved_attachment_ids,
-                newly_registered_attachment_ids=result.newly_registered_attachment_ids,
-                message=send_error,
-            )
-        assert result is not None
-
-        return _attachment_tool_payload(
-            "ok",
-            room_id=result.room_id,
-            thread_id=result.thread_id,
-            event_id=result.attachment_event_ids[-1] if result.attachment_event_ids else None,
-            attachment_event_ids=result.attachment_event_ids,
-            resolved_attachment_ids=result.resolved_attachment_ids,
-            newly_registered_attachment_ids=result.newly_registered_attachment_ids,
+            attachment=attachments_for_tool_payload([attachment_record])[0],
         )

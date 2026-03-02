@@ -276,13 +276,13 @@ def _remove_paths(paths: list[Path]) -> int:
     return removed
 
 
-def _collect_removable_media_paths(
+def _prune_expired_records_and_collect_removable_media_paths(
     storage_path: Path,
     *,
     expired_records: list[tuple[AttachmentRecord, Path]],
     active_media_ref_counts: dict[Path, int],
 ) -> set[Path]:
-    """Return expired managed media files that are no longer referenced."""
+    """Delete expired metadata records and collect removable managed media files."""
     removable_media_paths: set[Path] = set()
     for record, record_path in expired_records:
         with contextlib.suppress(OSError):
@@ -340,7 +340,7 @@ def _cleanup_attachment_storage(storage_path: Path) -> None:
     )
     stale_records_removed = _remove_paths(stale_record_paths)
 
-    removable_media_paths = _collect_removable_media_paths(
+    removable_media_paths = _prune_expired_records_and_collect_removable_media_paths(
         storage_path,
         expired_records=expired_records,
         active_media_ref_counts=active_media_ref_counts,
@@ -717,11 +717,7 @@ async def resolve_thread_attachment_ids(
     return [record.attachment_id] if record is not None else []
 
 
-def attachments_for_tool_payload(
-    attachment_records: list[AttachmentRecord],
-    *,
-    include_local_path: bool = True,
-) -> list[dict[str, Any]]:
+def attachments_for_tool_payload(attachment_records: list[AttachmentRecord]) -> list[dict[str, Any]]:
     """Render attachment records for tool JSON responses."""
     payloads: list[dict[str, Any]] = []
     for record in attachment_records:
@@ -735,8 +731,7 @@ def attachments_for_tool_payload(
             "thread_id": record.thread_id,
             "source_event_id": record.source_event_id,
             "available": record.local_path.is_file(),
+            "local_path": str(record.local_path),
         }
-        if include_local_path:
-            payload["local_path"] = str(record.local_path)
         payloads.append(payload)
     return payloads

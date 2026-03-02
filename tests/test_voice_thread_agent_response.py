@@ -25,6 +25,14 @@ from mindroom.teams import TeamFormationDecision, TeamMode
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
 
+def _extract_agent_side_effect(user_id: str, config: Config) -> str | None:  # noqa: ARG001
+    if user_id == f"@mindroom_{ROUTER_AGENT_NAME}:localhost":
+        return ROUTER_AGENT_NAME
+    if user_id == "@mindroom_home:localhost":
+        return "home"
+    return None
+
+
 @pytest.fixture
 def mock_home_bot() -> AgentBot:
     """Create a mock home assistant bot for testing."""
@@ -99,15 +107,7 @@ async def test_agent_responds_to_voice_transcription_in_thread(mock_home_bot: Ag
         patch("mindroom.bot.get_agents_in_thread", return_value=[MatrixID.parse("@mindroom_home:localhost")]),
         patch("mindroom.bot.should_agent_respond", return_value=True),  # HomeAssistant should respond
     ):
-        # Set up extract_agent_name to return correct values
-        def extract_agent_side_effect(user_id: str, config: Config) -> str | None:  # noqa: ARG001
-            if user_id == f"@mindroom_{ROUTER_AGENT_NAME}:localhost":
-                return ROUTER_AGENT_NAME
-            if user_id == "@mindroom_home:localhost":
-                return "home"
-            return None
-
-        mock_extract_agent.side_effect = extract_agent_side_effect
+        mock_extract_agent.side_effect = _extract_agent_side_effect
 
         # Process the voice transcription
         await bot._on_message(room, voice_transcription_event)
@@ -177,14 +177,7 @@ async def test_voice_transcription_permissions_use_original_sender(mock_home_bot
             mode=TeamMode.COLLABORATE,
         )
 
-        def extract_agent_side_effect(user_id: str, config: Config) -> str | None:  # noqa: ARG001
-            if user_id == f"@mindroom_{ROUTER_AGENT_NAME}:localhost":
-                return ROUTER_AGENT_NAME
-            if user_id == "@mindroom_home:localhost":
-                return "home"
-            return None
-
-        mock_extract_agent.side_effect = extract_agent_side_effect
+        mock_extract_agent.side_effect = _extract_agent_side_effect
 
         await bot._on_message(room, voice_transcription_event)
 
@@ -220,15 +213,7 @@ async def test_agent_ignores_non_voice_router_messages(mock_home_bot: AgentBot) 
         patch("mindroom.bot.fetch_thread_history", return_value=[]),
         patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
     ):
-
-        def extract_agent_side_effect(user_id: str, config: Config) -> str | None:  # noqa: ARG001
-            if user_id == f"@mindroom_{ROUTER_AGENT_NAME}:localhost":
-                return ROUTER_AGENT_NAME
-            if user_id == "@mindroom_home:localhost":
-                return "home"
-            return None
-
-        mock_extract_agent.side_effect = extract_agent_side_effect
+        mock_extract_agent.side_effect = _extract_agent_side_effect
 
         # Process the regular router message
         await bot._on_message(room, router_message)
@@ -290,15 +275,7 @@ async def test_agent_receives_thread_audio_on_voice_raw_fallback(mock_home_bot: 
         ),
         patch("mindroom.bot.should_agent_respond", return_value=True),
     ):
-
-        def extract_agent_side_effect(user_id: str, config: Config) -> str | None:  # noqa: ARG001
-            if user_id == f"@mindroom_{ROUTER_AGENT_NAME}:localhost":
-                return ROUTER_AGENT_NAME
-            if user_id == "@mindroom_home:localhost":
-                return "home"
-            return None
-
-        mock_extract_agent.side_effect = extract_agent_side_effect
+        mock_extract_agent.side_effect = _extract_agent_side_effect
 
         await bot._on_message(room, fallback_event)
 
@@ -355,15 +332,7 @@ async def test_agent_voice_fallback_uses_attachment_audio_without_refetch(mock_h
         patch("mindroom.bot.resolve_thread_attachment_ids", new_callable=AsyncMock, return_value=[]),
         patch("mindroom.bot.should_agent_respond", return_value=True),
     ):
-
-        def extract_agent_side_effect(user_id: str, config: Config) -> str | None:  # noqa: ARG001
-            if user_id == f"@mindroom_{ROUTER_AGENT_NAME}:localhost":
-                return ROUTER_AGENT_NAME
-            if user_id == "@mindroom_home:localhost":
-                return "home"
-            return None
-
-        mock_extract_agent.side_effect = extract_agent_side_effect
+        mock_extract_agent.side_effect = _extract_agent_side_effect
 
         await bot._on_message(room, fallback_event)
 
@@ -433,15 +402,7 @@ async def test_followup_text_in_voice_thread_recovers_audio(mock_home_bot: Agent
         ),
         patch("mindroom.bot.should_agent_respond", return_value=True),
     ):
-
-        def extract_agent_side_effect(user_id: str, config: Config) -> str | None:  # noqa: ARG001
-            if user_id == f"@mindroom_{ROUTER_AGENT_NAME}:localhost":
-                return ROUTER_AGENT_NAME
-            if user_id == "@mindroom_home:localhost":
-                return "home"
-            return None
-
-        mock_extract_agent.side_effect = extract_agent_side_effect
+        mock_extract_agent.side_effect = _extract_agent_side_effect
 
         await bot._on_message(room, followup_event)
 
