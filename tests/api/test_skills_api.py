@@ -36,7 +36,7 @@ def test_list_skills(
 ) -> None:
     """List skills with metadata."""
     _write_skill(tmp_path)
-    monkeypatch.setattr(skills_module, "get_default_skill_roots", lambda: [tmp_path])
+    monkeypatch.setattr(skills_module, "_get_default_skill_roots", lambda: [tmp_path])
     monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: tmp_path)
 
     response = test_client.get("/api/skills")
@@ -56,7 +56,7 @@ def test_get_skill(
 ) -> None:
     """Fetch skill content."""
     _write_skill(tmp_path)
-    monkeypatch.setattr(skills_module, "get_default_skill_roots", lambda: [tmp_path])
+    monkeypatch.setattr(skills_module, "_get_default_skill_roots", lambda: [tmp_path])
     monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: tmp_path)
 
     response = test_client.get("/api/skills/test-skill")
@@ -73,7 +73,7 @@ def test_update_skill(
 ) -> None:
     """Update skill content when editable."""
     skill_file = _write_skill(tmp_path)
-    monkeypatch.setattr(skills_module, "get_default_skill_roots", lambda: [tmp_path])
+    monkeypatch.setattr(skills_module, "_get_default_skill_roots", lambda: [tmp_path])
     monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: tmp_path)
 
     updated_content = "---\nname: test-skill\ndescription: Test skill\n---\n\n# Updated"
@@ -90,7 +90,7 @@ def test_update_skill_forbidden(
 ) -> None:
     """Block updates for read-only skills."""
     _write_skill(tmp_path)
-    monkeypatch.setattr(skills_module, "get_default_skill_roots", lambda: [tmp_path])
+    monkeypatch.setattr(skills_module, "_get_default_skill_roots", lambda: [tmp_path])
     monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: tmp_path / "other")
 
     response = test_client.put("/api/skills/test-skill", json={"content": "---"})
@@ -110,7 +110,7 @@ def test_create_skill(
 ) -> None:
     """Create a new skill via POST."""
     user_dir = tmp_path / "user-skills"
-    monkeypatch.setattr(skills_module, "get_default_skill_roots", lambda: [user_dir])
+    monkeypatch.setattr(skills_module, "_get_default_skill_roots", lambda: [user_dir])
     monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: user_dir)
     monkeypatch.setattr(skills_api_module, "get_user_skills_dir", lambda: user_dir)
 
@@ -136,7 +136,7 @@ def test_create_skill_conflict(
 ) -> None:
     """POST with an existing name returns 409."""
     _write_skill(tmp_path)
-    monkeypatch.setattr(skills_module, "get_default_skill_roots", lambda: [tmp_path])
+    monkeypatch.setattr(skills_module, "_get_default_skill_roots", lambda: [tmp_path])
     monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: tmp_path)
 
     response = test_client.post("/api/skills", json={"name": "test-skill", "description": "Dup"})
@@ -149,7 +149,7 @@ def test_create_skill_invalid_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """POST with an invalid name returns 422."""
-    monkeypatch.setattr(skills_module, "get_default_skill_roots", lambda: [tmp_path])
+    monkeypatch.setattr(skills_module, "_get_default_skill_roots", lambda: [tmp_path])
     monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: tmp_path)
 
     response = test_client.post("/api/skills", json={"name": "Bad Name!", "description": "Nope"})
@@ -163,7 +163,7 @@ def test_delete_skill(
 ) -> None:
     """DELETE removes a user skill."""
     _write_skill(tmp_path)
-    monkeypatch.setattr(skills_module, "get_default_skill_roots", lambda: [tmp_path])
+    monkeypatch.setattr(skills_module, "_get_default_skill_roots", lambda: [tmp_path])
     monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: tmp_path)
     monkeypatch.setattr(skills_api_module, "get_user_skills_dir", lambda: tmp_path)
 
@@ -185,7 +185,7 @@ def test_delete_skill_root_level_blocked(
         "---\nname: root-skill\ndescription: Root skill\n---\n\n# root-skill",
         encoding="utf-8",
     )
-    monkeypatch.setattr(skills_module, "get_default_skill_roots", lambda: [tmp_path])
+    monkeypatch.setattr(skills_module, "_get_default_skill_roots", lambda: [tmp_path])
     monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: tmp_path)
     monkeypatch.setattr(skills_api_module, "get_user_skills_dir", lambda: tmp_path)
 
@@ -203,7 +203,7 @@ def test_delete_skill_forbidden(
 ) -> None:
     """DELETE on a read-only skill returns 403."""
     _write_skill(tmp_path)
-    monkeypatch.setattr(skills_module, "get_default_skill_roots", lambda: [tmp_path])
+    monkeypatch.setattr(skills_module, "_get_default_skill_roots", lambda: [tmp_path])
     monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: tmp_path / "other")
 
     response = test_client.delete("/api/skills/test-skill")

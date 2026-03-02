@@ -12,7 +12,7 @@ from typing import Any
 from mindroom.constants import CREDENTIALS_DIR
 from mindroom.logging_config import get_logger
 
-SERVICE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9:_-]+$")
+_SERVICE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9:_-]+$")
 logger = get_logger(__name__)
 
 
@@ -22,7 +22,7 @@ def validate_service_name(service: str) -> str:
     if not normalized:
         msg = "Service name is required"
         raise ValueError(msg)
-    if not SERVICE_NAME_PATTERN.fullmatch(normalized):
+    if not _SERVICE_NAME_PATTERN.fullmatch(normalized):
         msg = "Service name can only include letters, numbers, colon, underscore, and hyphen"
         raise ValueError(msg)
     return normalized
@@ -119,7 +119,7 @@ class CredentialsManager:
         if self.base_path.exists():
             for path in self.base_path.glob("*_credentials.json"):
                 service = path.stem.replace("_credentials", "")
-                if SERVICE_NAME_PATTERN.fullmatch(service):
+                if _SERVICE_NAME_PATTERN.fullmatch(service):
                     services.append(service)
         return sorted(services)
 

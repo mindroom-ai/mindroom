@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-async def set_typing(
+async def _set_typing(
     client: nio.AsyncClient,
     room_id: str,
     typing: bool = True,
@@ -65,7 +65,7 @@ async def typing_indicator(
 
     """
     # Start typing
-    await set_typing(client, room_id, True, timeout_seconds)
+    await _set_typing(client, room_id, True, timeout_seconds)
 
     # Create a task to periodically refresh the typing indicator
     # Matrix typing indicators expire, so we need to refresh them
@@ -75,7 +75,7 @@ async def typing_indicator(
         """Refresh typing indicator periodically."""
         while True:
             await asyncio.sleep(refresh_interval)
-            await set_typing(client, room_id, True, timeout_seconds)
+            await _set_typing(client, room_id, True, timeout_seconds)
 
     refresh_task = asyncio.create_task(refresh_typing())
 
@@ -88,4 +88,4 @@ async def typing_indicator(
             await refresh_task
 
         # Stop typing
-        await set_typing(client, room_id, False)
+        await _set_typing(client, room_id, False)

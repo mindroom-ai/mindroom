@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-async def configure_managed_room_access(
+async def _configure_managed_room_access(
     client: nio.AsyncClient,
     room_key: str,
     room_id: str,
@@ -84,7 +84,7 @@ async def configure_managed_room_access(
     return False
 
 
-def room_key_to_name(room_key: str) -> str:
+def _room_key_to_name(room_key: str) -> str:
     """Convert a room key to a human-readable room name.
 
     Args:
@@ -109,7 +109,7 @@ def get_room_aliases() -> dict[str, str]:
     return state.get_room_aliases()
 
 
-def get_room_id(room_key: str) -> str | None:
+def _get_room_id(room_key: str) -> str | None:
     """Get room ID for a given room key/alias."""
     state = MatrixState.load()
     room = state.get_room(room_key)
@@ -123,7 +123,7 @@ def add_room(room_key: str, room_id: str, alias: str, name: str) -> None:
     state.save()
 
 
-def remove_room(room_key: str) -> bool:
+def _remove_room(room_key: str) -> bool:
     """Remove a room from the state."""
     state = MatrixState.load()
     if room_key in state.rooms:
@@ -164,7 +164,7 @@ def get_room_alias_from_id(room_id: str) -> str | None:
     return None
 
 
-async def ensure_room_exists(  # noqa: C901, PLR0912
+async def _ensure_room_exists(  # noqa: C901, PLR0912
     client: nio.AsyncClient,
     room_key: str,
     config: Config,
@@ -200,7 +200,7 @@ async def ensure_room_exists(  # noqa: C901, PLR0912
         # Update our state if needed
         if room_key not in existing_rooms or existing_rooms[room_key].room_id != room_id:
             if room_name is None:
-                room_name = room_key_to_name(room_key)
+                room_name = _room_key_to_name(room_key)
             add_room(room_key, room_id, full_alias, room_name)
             logger.info(f"Updated state with existing room {room_key} (ID: {room_id})")
 
@@ -209,11 +209,11 @@ async def ensure_room_exists(  # noqa: C901, PLR0912
         if joined_room:
             # For existing rooms, ensure they have a topic set
             if room_name is None:
-                room_name = room_key_to_name(room_key)
+                room_name = _room_key_to_name(room_key)
             await ensure_room_has_topic(client, room_id, room_key, room_name, config)
 
             if config.matrix_room_access.is_multi_user_mode() and config.matrix_room_access.reconcile_existing_rooms:
-                await configure_managed_room_access(
+                await _configure_managed_room_access(
                     client=client,
                     room_key=room_key,
                     room_id=str(room_id),
@@ -241,11 +241,11 @@ async def ensure_room_exists(  # noqa: C901, PLR0912
     if room_key in existing_rooms:
         # Remove stale entry from state
         logger.debug(f"Removing stale room {room_key} from state")
-        remove_room(room_key)
+        _remove_room(room_key)
 
     # Create the room
     if room_name is None:
-        room_name = room_key_to_name(room_key)
+        room_name = _room_key_to_name(room_key)
 
     # Generate a contextual topic for the room using AI
     topic = await generate_room_topic_ai(room_key, room_name, config)
@@ -265,7 +265,7 @@ async def ensure_room_exists(  # noqa: C901, PLR0912
         logger.info(f"Created room {room_key} with ID {created_room_id}")
 
         if config.matrix_room_access.is_multi_user_mode():
-            await configure_managed_room_access(
+            await _configure_managed_room_access(
                 client=client,
                 room_key=room_key,
                 room_id=created_room_id,
@@ -329,7 +329,7 @@ async def ensure_all_rooms_exist(
 
         # Ensure room exists
         try:
-            room_id = await ensure_room_exists(
+            room_id = await _ensure_room_exists(
                 client=client,
                 room_key=room_key,
                 config=config,
@@ -384,8 +384,8 @@ async def ensure_user_in_rooms(homeserver: str, room_ids: dict[str, str]) -> Non
                 logger.warning(f"User {user_id} failed to join room {room_key} - may need invitation")
 
 
-DM_ROOM_CACHE: dict[tuple[str, str], tuple[float, bool]] = {}
-DIRECT_ROOMS_CACHE: dict[str, tuple[float, set[str]]] = {}
+_DM_ROOM_CACHE: dict[tuple[str, str], tuple[float, bool]] = {}
+_DIRECT_ROOMS_CACHE: dict[str, tuple[float, set[str]]] = {}
 _DM_ROOM_TTL: float = 300  # seconds
 _DIRECT_ROOMS_TTL: float = 300  # seconds
 
@@ -409,7 +409,7 @@ async def _get_direct_room_ids(client: nio.AsyncClient) -> set[str]:
     if not user_id:
         return set()
 
-    cached = DIRECT_ROOMS_CACHE.get(user_id)
+    cached = _DIRECT_ROOMS_CACHE.get(user_id)
     if cached is not None:
         ts, room_ids = cached
         if time.monotonic() - ts < _DIRECT_ROOMS_TTL:
@@ -418,11 +418,11 @@ async def _get_direct_room_ids(client: nio.AsyncClient) -> set[str]:
     response = await client.list_direct_rooms()
     if isinstance(response, nio.DirectRoomsResponse):
         direct_room_ids = {room_id for room_ids in response.rooms.values() for room_id in room_ids}
-        DIRECT_ROOMS_CACHE[user_id] = (time.monotonic(), direct_room_ids)
+        _DIRECT_ROOMS_CACHE[user_id] = (time.monotonic(), direct_room_ids)
         return direct_room_ids
     if isinstance(response, nio.DirectRoomsErrorResponse) and response.status_code == "M_NOT_FOUND":
         # No m.direct account data is a stable empty state for this user.
-        DIRECT_ROOMS_CACHE[user_id] = (time.monotonic(), set())
+        _DIRECT_ROOMS_CACHE[user_id] = (time.monotonic(), set())
 
     return set()
 
@@ -473,7 +473,7 @@ async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool:
 
     """
     cache_key = _dm_cache_key(client, room_id)
-    cached = DM_ROOM_CACHE.get(cache_key)
+    cached = _DM_ROOM_CACHE.get(cache_key)
     if cached is not None:
         ts, is_dm = cached
         if time.monotonic() - ts < _DM_ROOM_TTL:
@@ -481,12 +481,12 @@ async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool:
 
     direct_room_ids = await _get_direct_room_ids(client)
     if room_id in direct_room_ids:
-        DM_ROOM_CACHE[cache_key] = (time.monotonic(), True)
+        _DM_ROOM_CACHE[cache_key] = (time.monotonic(), True)
         return True
 
     # Preserve DM-like rooms even when servers don't expose `is_direct` in state.
     if _is_two_member_group_room(client, room_id):
-        DM_ROOM_CACHE[cache_key] = (time.monotonic(), True)
+        _DM_ROOM_CACHE[cache_key] = (time.monotonic(), True)
         return True
 
     # Get the room state events, specifically member events.
@@ -495,7 +495,7 @@ async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool:
         return False
 
     is_dm = _has_is_direct_marker(response.events)
-    DM_ROOM_CACHE[cache_key] = (time.monotonic(), is_dm)
+    _DM_ROOM_CACHE[cache_key] = (time.monotonic(), is_dm)
     return is_dm
 
 

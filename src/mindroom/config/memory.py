@@ -25,7 +25,7 @@ class MemoryLLMConfig(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict, description="Provider-specific LLM config")
 
 
-class MemoryFileConfig(BaseModel):
+class _MemoryFileConfig(BaseModel):
     """File-backed memory configuration."""
 
     path: str | None = Field(
@@ -42,7 +42,7 @@ class MemoryFileConfig(BaseModel):
     )
 
 
-class MemoryAutoFlushBatchConfig(BaseModel):
+class _MemoryAutoFlushBatchConfig(BaseModel):
     """Batching controls for background memory auto-flush."""
 
     max_sessions_per_cycle: int = Field(
@@ -57,7 +57,7 @@ class MemoryAutoFlushBatchConfig(BaseModel):
     )
 
 
-class MemoryAutoFlushContextConfig(BaseModel):
+class _MemoryAutoFlushContextConfig(BaseModel):
     """Existing-memory context limits injected into extraction runs."""
 
     memory_snippets: int = Field(
@@ -72,7 +72,7 @@ class MemoryAutoFlushContextConfig(BaseModel):
     )
 
 
-class MemoryAutoFlushExtractorConfig(BaseModel):
+class _MemoryAutoFlushExtractorConfig(BaseModel):
     """Extraction limits for one background memory flush job."""
 
     no_reply_token: str = Field(
@@ -94,8 +94,8 @@ class MemoryAutoFlushExtractorConfig(BaseModel):
         ge=1,
         description="Timeout for one extraction job before retrying in a later cycle",
     )
-    include_memory_context: MemoryAutoFlushContextConfig = Field(
-        default_factory=MemoryAutoFlushContextConfig,
+    include_memory_context: _MemoryAutoFlushContextConfig = Field(
+        default_factory=_MemoryAutoFlushContextConfig,
         description="Bounds for existing memory context included during extraction",
     )
 
@@ -139,12 +139,12 @@ class MemoryAutoFlushConfig(BaseModel):
         ge=1,
         description="Upper bound for retry cooldown backoff",
     )
-    batch: MemoryAutoFlushBatchConfig = Field(
-        default_factory=MemoryAutoFlushBatchConfig,
+    batch: _MemoryAutoFlushBatchConfig = Field(
+        default_factory=_MemoryAutoFlushBatchConfig,
         description="Batch sizing controls for each auto-flush cycle",
     )
-    extractor: MemoryAutoFlushExtractorConfig = Field(
-        default_factory=MemoryAutoFlushExtractorConfig,
+    extractor: _MemoryAutoFlushExtractorConfig = Field(
+        default_factory=_MemoryAutoFlushExtractorConfig,
         description="Extraction-window and timeout controls for auto-flush",
     )
 
@@ -167,7 +167,7 @@ class MemoryConfig(BaseModel):
         description="Embedder configuration for memory",
     )
     llm: MemoryLLMConfig | None = Field(default=None, description="LLM configuration for memory")
-    file: MemoryFileConfig = Field(default_factory=MemoryFileConfig, description="File-backed memory configuration")
+    file: _MemoryFileConfig = Field(default_factory=_MemoryFileConfig, description="File-backed memory configuration")
     auto_flush: MemoryAutoFlushConfig = Field(
         default_factory=MemoryAutoFlushConfig,
         description="Background auto-flush behavior for file-backed memory",

@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-class InteractiveQuestion(NamedTuple):
+class _InteractiveQuestion(NamedTuple):
     """Represents an active interactive question."""
 
     room_id: str
@@ -28,7 +28,7 @@ class InteractiveQuestion(NamedTuple):
     creator_agent: str
 
 
-class InteractiveResponse(NamedTuple):
+class _InteractiveResponse(NamedTuple):
     """Result of parsing and formatting an interactive response."""
 
     formatted_text: str
@@ -37,14 +37,14 @@ class InteractiveResponse(NamedTuple):
 
 
 # Track active interactive questions by event_id
-_active_questions: dict[str, InteractiveQuestion] = {}
+_active_questions: dict[str, _InteractiveQuestion] = {}
 
 # Constants
 # Match interactive code blocks
-INTERACTIVE_PATTERN = r"```(?:interactive\s*)?\n(?:interactive\s*\n)?(.*?)\n```"
-MAX_OPTIONS = 5
-DEFAULT_QUESTION = "Please choose an option:"
-INSTRUCTION_TEXT = "React with an emoji or type the number to respond."
+_INTERACTIVE_PATTERN = r"```(?:interactive\s*)?\n(?:interactive\s*\n)?(.*?)\n```"
+_MAX_OPTIONS = 5
+_DEFAULT_QUESTION = "Please choose an option:"
+_INSTRUCTION_TEXT = "React with an emoji or type the number to respond."
 
 
 def should_create_interactive_question(response_text: str) -> bool:
@@ -57,7 +57,7 @@ def should_create_interactive_question(response_text: str) -> bool:
         True if an interactive code block is found
 
     """
-    return bool(re.search(INTERACTIVE_PATTERN, response_text, re.DOTALL))
+    return bool(re.search(_INTERACTIVE_PATTERN, response_text, re.DOTALL))
 
 
 async def handle_reaction(
@@ -190,7 +190,7 @@ async def handle_text_response(
     return None
 
 
-def parse_and_format_interactive(response_text: str, extract_mapping: bool = False) -> InteractiveResponse:
+def parse_and_format_interactive(response_text: str, extract_mapping: bool = False) -> _InteractiveResponse:
     """Parse and format interactive content from response text.
 
     Args:
@@ -198,27 +198,27 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
         extract_mapping: Whether to extract option mapping and return options list
 
     Returns:
-        InteractiveResponse with formatted_text, option_map, and options_list
+        _InteractiveResponse with formatted_text, option_map, and options_list
 
     """
     # Find the first interactive block for processing
-    first_match = re.search(INTERACTIVE_PATTERN, response_text, re.DOTALL)
+    first_match = re.search(_INTERACTIVE_PATTERN, response_text, re.DOTALL)
 
     if not first_match:
-        return InteractiveResponse(response_text, None, None)
+        return _InteractiveResponse(response_text, None, None)
 
     try:
         interactive_data = json.loads(first_match.group(1))
     except json.JSONDecodeError:
-        return InteractiveResponse(response_text, None, None)
+        return _InteractiveResponse(response_text, None, None)
 
-    question = interactive_data.get("question", DEFAULT_QUESTION)
+    question = interactive_data.get("question", _DEFAULT_QUESTION)
     options = interactive_data.get("options", [])
 
     if not options:
-        return InteractiveResponse(response_text, None, None)
+        return _InteractiveResponse(response_text, None, None)
 
-    options = options[:MAX_OPTIONS]
+    options = options[:_MAX_OPTIONS]
     clean_response = response_text.replace(first_match.group(0), "").strip()
 
     option_lines = []
@@ -243,11 +243,11 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
     message_parts.append("")  # Empty line
     message_parts.extend(option_lines)
     message_parts.append("")  # Empty line
-    message_parts.append(INSTRUCTION_TEXT)
+    message_parts.append(_INSTRUCTION_TEXT)
 
     final_text = "\n".join(message_parts)
 
-    return InteractiveResponse(final_text, option_map, options if extract_mapping else None)
+    return _InteractiveResponse(final_text, option_map, options if extract_mapping else None)
 
 
 def register_interactive_question(
@@ -267,7 +267,7 @@ def register_interactive_question(
         agent_name: The agent that created the question
 
     """
-    _active_questions[event_id] = InteractiveQuestion(
+    _active_questions[event_id] = _InteractiveQuestion(
         room_id=room_id,
         thread_id=thread_id,
         options=option_map,
@@ -308,6 +308,6 @@ async def add_reaction_buttons(
             logger.warning("Failed to add reaction", emoji=emoji_char, error=str(reaction_response))
 
 
-def cleanup() -> None:
+def _cleanup() -> None:
     """Clean up when shutting down."""
     _active_questions.clear()

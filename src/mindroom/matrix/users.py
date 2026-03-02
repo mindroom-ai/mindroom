@@ -18,16 +18,16 @@ from mindroom.matrix.state import MatrixState
 logger = get_logger(__name__)
 
 
-def account_key_for_agent(agent_name: str) -> str:
+def _account_key_for_agent(agent_name: str) -> str:
     """Build the Matrix state account key for an agent-like entity."""
     return f"agent_{agent_name}"
 
 
 INTERNAL_USER_AGENT_NAME = "user"
-INTERNAL_USER_ACCOUNT_KEY = account_key_for_agent(INTERNAL_USER_AGENT_NAME)
+INTERNAL_USER_ACCOUNT_KEY = _account_key_for_agent(INTERNAL_USER_AGENT_NAME)
 
 
-def extract_domain_from_user_id(user_id: str) -> str:
+def _extract_domain_from_user_id(user_id: str) -> str:
     """Extract domain from a Matrix user ID like "@user:example.com"."""
     if not user_id.startswith("@") or ":" not in user_id:
         return "localhost"
@@ -61,7 +61,7 @@ def get_agent_credentials(agent_name: str) -> dict[str, str] | None:
 
     """
     state = MatrixState.load()
-    agent_key = account_key_for_agent(agent_name)
+    agent_key = _account_key_for_agent(agent_name)
     account = state.get_account(agent_key)
     if account:
         return {"username": account.username, "password": account.password}
@@ -78,7 +78,7 @@ def save_agent_credentials(agent_name: str, username: str, password: str) -> Non
 
     """
     state = MatrixState.load()
-    agent_key = account_key_for_agent(agent_name)
+    agent_key = _account_key_for_agent(agent_name)
     state.add_account(agent_key, username, password)
     state.save()
     logger.info(f"Saved credentials for agent {agent_name}")

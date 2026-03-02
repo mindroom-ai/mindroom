@@ -34,14 +34,14 @@ class MemoryResult(TypedDict, total=False):
 logger = get_logger(__name__)
 
 
-class ScopedMemoryReader(Protocol):
+class _ScopedMemoryReader(Protocol):
     """Minimal protocol for reading a memory by ID."""
 
     async def get(self, memory_id: str) -> dict[str, Any] | None:
         """Return the memory payload for a given memory ID."""
 
 
-class MemoryNotFoundError(ValueError):
+class _MemoryNotFoundError(ValueError):
     """Raised when a memory ID does not exist in the caller's allowed scope."""
 
     def __init__(self, memory_id: str) -> None:
@@ -419,7 +419,7 @@ def _get_allowed_memory_user_ids(caller_context: str | list[str], config: Config
 
 
 async def _get_scoped_memory_by_id(
-    memory: ScopedMemoryReader,
+    memory: _ScopedMemoryReader,
     memory_id: str,
     caller_context: str | list[str],
     config: Config,
@@ -666,12 +666,12 @@ async def update_agent_memory(
             if _replace_scope_memory_entry(scope_user_id, memory_id, content, storage_path, config):
                 logger.info("File memory updated", memory_id=memory_id, scope=scope_user_id)
                 return
-        raise MemoryNotFoundError(memory_id)
+        raise _MemoryNotFoundError(memory_id)
 
     memory = await create_memory_instance(storage_path, config)
     scoped_memory = await _get_scoped_memory_by_id(memory, memory_id, caller_context, config)
     if scoped_memory is None:
-        raise MemoryNotFoundError(memory_id)
+        raise _MemoryNotFoundError(memory_id)
     await memory.update(memory_id, content)
     logger.info("Memory updated", memory_id=memory_id)
 
@@ -696,12 +696,12 @@ async def delete_agent_memory(
             if _replace_scope_memory_entry(scope_user_id, memory_id, None, storage_path, config):
                 logger.info("File memory deleted", memory_id=memory_id, scope=scope_user_id)
                 return
-        raise MemoryNotFoundError(memory_id)
+        raise _MemoryNotFoundError(memory_id)
 
     memory = await create_memory_instance(storage_path, config)
     scoped_memory = await _get_scoped_memory_by_id(memory, memory_id, caller_context, config)
     if scoped_memory is None:
-        raise MemoryNotFoundError(memory_id)
+        raise _MemoryNotFoundError(memory_id)
     await memory.delete(memory_id)
     logger.info("Memory deleted", memory_id=memory_id)
 

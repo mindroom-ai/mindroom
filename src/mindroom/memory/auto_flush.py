@@ -33,7 +33,7 @@ _STATE_LOCK = threading.Lock()
 _WAKE_EVENTS: set[asyncio.Event] = set()
 
 
-class FlushSessionEntry(TypedDict, total=False):
+class _FlushSessionEntry(TypedDict, total=False):
     """Persistent flush metadata per (agent, session)."""
 
     agent_name: str
@@ -54,11 +54,11 @@ class FlushSessionEntry(TypedDict, total=False):
     flush_started_dirty_revision: int | None
 
 
-class FlushState(TypedDict):
+class _FlushState(TypedDict):
     """On-disk auto-flush state payload."""
 
     version: int
-    sessions: dict[str, FlushSessionEntry]
+    sessions: dict[str, _FlushSessionEntry]
 
 
 def _state_path(storage_path: Path) -> Path:
@@ -71,7 +71,7 @@ def _now_ts() -> int:
     return int(datetime.now(UTC).timestamp())
 
 
-def _empty_state() -> FlushState:
+def _empty_state() -> _FlushState:
     return {"version": 1, "sessions": {}}
 
 
@@ -79,7 +79,7 @@ def _session_key(agent_name: str, session_id: str) -> str:
     return f"{agent_name}:{session_id}"
 
 
-def _read_state_unlocked(storage_path: Path) -> FlushState:
+def _read_state_unlocked(storage_path: Path) -> _FlushState:
     path = _state_path(storage_path)
     if not path.exists():
         return _empty_state()
@@ -100,7 +100,7 @@ def _read_state_unlocked(storage_path: Path) -> FlushState:
     return {"version": 1, "sessions": sessions}
 
 
-def _write_state_unlocked(storage_path: Path, state: FlushState) -> None:
+def _write_state_unlocked(storage_path: Path, state: _FlushState) -> None:
     path = _state_path(storage_path)
     tmp_path = path.with_name(f"{path.name}.tmp")
     tmp_path.write_text(f"{json.dumps(state, ensure_ascii=True, indent=2)}\n", encoding="utf-8")
@@ -219,7 +219,7 @@ def _load_agent_session(storage_path: Path, agent_name: str, session_id: str) ->
     return _coerce_agent_session(raw_session)
 
 
-def _entry_priority_key(entry: FlushSessionEntry, now: int) -> tuple[int, int]:
+def _entry_priority_key(entry: _FlushSessionEntry, now: int) -> tuple[int, int]:
     boosted = entry.get("priority_boost_at")
     priority_rank = 0 if isinstance(boosted, int) and boosted > 0 else 1
     return (priority_rank, entry.get("first_dirty_at", now))

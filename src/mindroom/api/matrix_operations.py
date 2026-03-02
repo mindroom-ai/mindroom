@@ -24,7 +24,7 @@ class RoomLeaveRequest(BaseModel):
     room_id: str
 
 
-class RoomInfo(BaseModel):
+class _RoomInfo(BaseModel):
     """Information about a room."""
 
     room_id: str
@@ -39,7 +39,7 @@ class AgentRoomsResponse(BaseModel):
     configured_rooms: list[str]
     joined_rooms: list[str]
     unconfigured_rooms: list[str]
-    unconfigured_room_details: list[RoomInfo] = []
+    unconfigured_room_details: list[_RoomInfo] = []
 
 
 class AllAgentsRoomsResponse(BaseModel):
@@ -48,7 +48,7 @@ class AllAgentsRoomsResponse(BaseModel):
     agents: list[AgentRoomsResponse]
 
 
-async def get_agent_matrix_rooms(agent_id: str, agent_data: dict[str, Any]) -> AgentRoomsResponse:
+async def _get_agent_matrix_rooms(agent_id: str, agent_data: dict[str, Any]) -> AgentRoomsResponse:
     """Get Matrix rooms for a specific agent.
 
     Args:
@@ -85,7 +85,7 @@ async def get_agent_matrix_rooms(agent_id: str, agent_data: dict[str, Any]) -> A
     unconfigured_room_details = []
     for room_id in unconfigured_rooms:
         room_name = await get_room_name(client, room_id)
-        unconfigured_room_details.append(RoomInfo(room_id=room_id, name=room_name))
+        unconfigured_room_details.append(_RoomInfo(room_id=room_id, name=room_name))
 
     await client.close()
 
@@ -114,7 +114,7 @@ async def get_all_agents_rooms() -> AllAgentsRoomsResponse:
         agents = config.get("agents", {})
 
     # Gather room information for all agents concurrently
-    tasks = [get_agent_matrix_rooms(agent_id, agent_data) for agent_id, agent_data in agents.items()]
+    tasks = [_get_agent_matrix_rooms(agent_id, agent_data) for agent_id, agent_data in agents.items()]
     agents_rooms = await asyncio.gather(*tasks)
 
     return AllAgentsRoomsResponse(agents=agents_rooms)
@@ -142,7 +142,7 @@ async def get_agent_rooms(agent_id: str) -> AgentRoomsResponse:
             raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
         agent_data = agents[agent_id]
 
-    return await get_agent_matrix_rooms(agent_id, agent_data)
+    return await _get_agent_matrix_rooms(agent_id, agent_data)
 
 
 @router.post("/rooms/leave")

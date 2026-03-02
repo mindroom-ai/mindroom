@@ -667,7 +667,7 @@ async def test_config_confirmation_blocked_by_reply_permissions(tmp_path: Path) 
     )
 
     # Register a pending config change
-    config_confirmation._pending_changes["$config_msg:example.com"] = config_confirmation.PendingConfigChange(
+    config_confirmation._pending_changes["$config_msg:example.com"] = config_confirmation._PendingConfigChange(
         requester="@bob:example.com",
         room_id=room.room_id,
         thread_id=None,

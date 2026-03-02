@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, field_serializer
 from mindroom.constants import MATRIX_STATE_FILE
 
 
-class MatrixAccount(BaseModel):
+class _MatrixAccount(BaseModel):
     """Represents a Matrix account (user or agent)."""
 
     username: str
@@ -33,7 +33,7 @@ class MatrixRoom(BaseModel):
 class MatrixState(BaseModel):
     """Complete Matrix state including accounts and rooms."""
 
-    accounts: dict[str, MatrixAccount] = Field(default_factory=dict)
+    accounts: dict[str, _MatrixAccount] = Field(default_factory=dict)
     rooms: dict[str, MatrixRoom] = Field(default_factory=dict)
 
     @classmethod
@@ -56,13 +56,13 @@ class MatrixState(BaseModel):
         with MATRIX_STATE_FILE.open("w") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
-    def get_account(self, key: str) -> MatrixAccount | None:
+    def get_account(self, key: str) -> _MatrixAccount | None:
         """Get an account by key."""
         return self.accounts.get(key)
 
     def add_account(self, key: str, username: str, password: str) -> None:
         """Add or update an account."""
-        self.accounts[key] = MatrixAccount(username=username, password=password)
+        self.accounts[key] = _MatrixAccount(username=username, password=password)
 
     def get_room(self, key: str) -> MatrixRoom | None:
         """Get a room by key."""

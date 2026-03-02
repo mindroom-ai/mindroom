@@ -12,33 +12,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import nio
 from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
 
-from mindroom import image_handler, interactive, voice_handler
-from mindroom.agents import create_agent, create_session_storage, remove_run_by_event_id
-from mindroom.ai import ai_response, stream_agent_response
-from mindroom.authorization import (
-    filter_agents_by_sender_permissions,
-    get_available_agents_for_sender,
-    get_effective_sender_id_for_reply_permissions,
-    is_authorized_sender,
-    is_sender_allowed_for_agent_reply,
-)
-from mindroom.background_tasks import create_background_task, wait_for_background_tasks
-from mindroom.commands import config_confirmation
-from mindroom.commands.handler import CommandHandlerContext, _generate_welcome_message, handle_command
-from mindroom.commands.parsing import Command, command_parser
-from mindroom.constants import MATRIX_HOMESERVER, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
-from mindroom.knowledge_utils import MultiKnowledgeVectorDb, resolve_agent_knowledge
-from mindroom.logging_config import emoji, get_logger
-from mindroom.matrix.avatar import check_and_set_avatar
-from mindroom.matrix.client import (
-    _latest_thread_event_id,
-    edit_message,
-    fetch_thread_history,
-    get_joined_rooms,
-    get_latest_thread_event_id_if_needed,
-    join_room,
-    send_message,
-)
+from mindroom.matrix import image_handler
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import (
     MatrixID,
@@ -52,6 +26,7 @@ from mindroom.matrix.presence import (
     should_use_streaming,
 )
 from mindroom.matrix.reply_chain import ReplyChainCaches, derive_conversation_context
+from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.rooms import (
     is_dm_room,
     leave_non_dm_rooms,
@@ -67,12 +42,6 @@ from mindroom.memory import store_conversation_memory
 from mindroom.memory.auto_flush import (
     mark_auto_flush_dirty_session,
     reprioritize_auto_flush_sessions,
-)
-from mindroom.response_tracker import ResponseTracker
-from mindroom.room_cleanup import cleanup_all_orphaned_bots
-from mindroom.routing import suggest_agent_for_message
-from mindroom.scheduling import (
-    restore_scheduled_tasks,
 )
 from mindroom.stop import StopManager
 from mindroom.streaming import (
@@ -102,6 +71,39 @@ from mindroom.thread_utils import (
 )
 from mindroom.tool_runtime_context import ToolRuntimeContext, tool_runtime_context
 
+from . import interactive, voice_handler
+from .agents import create_agent, create_session_storage, remove_run_by_event_id
+from .ai import ai_response, stream_agent_response
+from .authorization import (
+    filter_agents_by_sender_permissions,
+    get_available_agents_for_sender,
+    get_effective_sender_id_for_reply_permissions,
+    is_authorized_sender,
+    is_sender_allowed_for_agent_reply,
+)
+from .background_tasks import create_background_task, wait_for_background_tasks
+from .commands import config_confirmation
+from .commands.handler import CommandHandlerContext, _generate_welcome_message, handle_command
+from .commands.parsing import Command, command_parser
+from .constants import MATRIX_HOMESERVER, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
+from .knowledge.utils import MultiKnowledgeVectorDb, resolve_agent_knowledge
+from .logging_config import emoji, get_logger
+from .matrix.avatar import check_and_set_avatar
+from .matrix.client import (
+    _latest_thread_event_id,
+    edit_message,
+    fetch_thread_history,
+    get_joined_rooms,
+    get_latest_thread_event_id_if_needed,
+    join_room,
+    send_message,
+)
+from .response_tracker import ResponseTracker
+from .routing import suggest_agent_for_message
+from .scheduling import (
+    restore_scheduled_tasks,
+)
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
@@ -120,7 +122,7 @@ __all__ = ["AgentBot", "MultiKnowledgeVectorDb"]
 
 
 # Constants
-SYNC_TIMEOUT_MS = 30000
+_SYNC_TIMEOUT_MS = 30000
 
 
 def _create_task_wrapper(
@@ -626,7 +628,7 @@ class AgentBot:
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
         assert self.client is not None
-        await self.client.sync_forever(timeout=SYNC_TIMEOUT_MS, full_state=True)
+        await self.client.sync_forever(timeout=_SYNC_TIMEOUT_MS, full_state=True)
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         assert self.client is not None
