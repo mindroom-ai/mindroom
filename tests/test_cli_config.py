@@ -705,6 +705,82 @@ class TestDoctor:
         assert result.exit_code == 0
         assert "Memory LLM (openai): OPENAI_API_KEY not set" in result.output
 
+    def test_memory_openai_embedder_host_runs_embeddings_smoke_test(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor validates custom OpenAI embedder hosts using /embeddings."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "memory:\n"
+            "  embedder:\n"
+            "    provider: openai\n"
+            "    config:\n"
+            "      model: embeddinggemma:300m\n"
+            "      host: http://llama.local/v1\n",
+        )
+        storage = tmp_path / "storage"
+        monkeypatch.setattr("mindroom.cli.doctor.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mindroom.cli.doctor.STORAGE_PATH", str(storage))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        called_urls: list[str] = []
+
+        def _mock_post(url: str, **_kwargs: object) -> httpx.Response:
+            called_urls.append(str(url))
+            return httpx.Response(200, json={"data": [{"embedding": [0.1, 0.2, 0.3]}]})
+
+        monkeypatch.setattr("mindroom.cli.doctor.httpx.post", _mock_post)
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0
+        assert "embeddings endpoint reachable" in result.output
+        assert any(url.endswith("/embeddings") for url in called_urls)
+
+    def test_memory_openai_embedder_local_host_error_has_hint(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor adds a local-network hint for .local routing failures."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "memory:\n"
+            "  embedder:\n"
+            "    provider: openai\n"
+            "    config:\n"
+            "      model: embeddinggemma:300m\n"
+            "      host: http://llama.local/v1\n",
+        )
+        storage = tmp_path / "storage"
+        monkeypatch.setattr("mindroom.cli.doctor.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mindroom.cli.doctor.STORAGE_PATH", str(storage))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        def _mock_post(*_args: object, **_kwargs: object) -> httpx.Response:
+            msg = "[Errno 65] No route to host"
+            raise httpx.ConnectError(msg)
+
+        monkeypatch.setattr("mindroom.cli.doctor.httpx.post", _mock_post)
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0
+        assert "could not reach embeddings" in result.output
+        assert "endpoint (http://llama.local/v1)" in result.output
+        assert "reachable LAN" in result.output
+        assert "instead of .local" in result.output
+
 
 # ---------------------------------------------------------------------------
 # mindroom connect
