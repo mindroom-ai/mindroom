@@ -114,7 +114,7 @@ __all__ = ["AgentBot", "MultiKnowledgeVectorDb"]
 
 
 # Constants
-SYNC_TIMEOUT_MS = 30000
+_SYNC_TIMEOUT_MS = 30000
 
 
 def _create_task_wrapper(
@@ -223,7 +223,7 @@ def create_bot_for_entity(
 
 
 @dataclass
-class MessageContext:
+class _MessageContext:
     """Context extracted from a Matrix message event."""
 
     am_i_mentioned: bool
@@ -620,7 +620,7 @@ class AgentBot:
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
         assert self.client is not None
-        await self.client.sync_forever(timeout=SYNC_TIMEOUT_MS, full_state=True)
+        await self.client.sync_forever(timeout=_SYNC_TIMEOUT_MS, full_state=True)
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         assert self.client is not None
@@ -1010,7 +1010,7 @@ class AgentBot:
         self,
         room: nio.MatrixRoom,
         event: nio.RoomMessageText | nio.RoomMessageImage | nio.RoomEncryptedImage,
-        context: MessageContext,
+        context: _MessageContext,
         requester_user_id: str,
         *,
         message: str | None = None,
@@ -1046,7 +1046,7 @@ class AgentBot:
 
     async def _resolve_response_action(
         self,
-        context: MessageContext,
+        context: _MessageContext,
         room: nio.MatrixRoom,
         requester_user_id: str,
         message: str,
@@ -1091,7 +1091,7 @@ class AgentBot:
     async def _decide_team_for_sender(
         self,
         agents_in_thread: list[MatrixID],
-        context: MessageContext,
+        context: _MessageContext,
         room: nio.MatrixRoom,
         requester_user_id: str,
         message: str,
@@ -1115,7 +1115,7 @@ class AgentBot:
             available_agents_in_room=available_agents_in_room,
         )
 
-    async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessage) -> MessageContext:
+    async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessage) -> _MessageContext:
         assert self.client is not None
 
         # Check if mentions should be ignored for this message
@@ -1147,7 +1147,7 @@ class AgentBot:
                 event_info,
             )
 
-        return MessageContext(
+        return _MessageContext(
             am_i_mentioned=am_i_mentioned,
             is_thread=is_thread,
             thread_id=thread_id,
