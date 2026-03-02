@@ -839,6 +839,93 @@ class TestAgentBot:
         assert "thread_id: $event456" in model_prompt
         assert "reply_to_event_id: $event456" in model_prompt
 
+    @pytest.mark.asyncio
+    async def test_process_and_respond_includes_attachment_ids_in_response_metadata(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Non-streaming responses should persist attachment IDs in message metadata."""
+
+        @asynccontextmanager
+        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
+            yield
+
+        config = Config.from_yaml()
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot.client = AsyncMock()
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._send_response = AsyncMock(return_value="$response")
+
+        async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+            kwargs["run_metadata_collector"]["io.mindroom.ai_run"] = {"version": 1}
+            return "Handled"
+
+        attachment_ids = ["att_image", "att_zip"]
+        with (
+            patch("mindroom.bot.typing_indicator", noop_typing_indicator),
+            patch("mindroom.bot.ai_response", new_callable=AsyncMock, side_effect=fake_ai_response),
+        ):
+            await bot._process_and_respond(
+                room_id="!test:localhost",
+                prompt="Please inspect attachments",
+                reply_to_event_id="$event123",
+                thread_id=None,
+                thread_history=[],
+                user_id="@user:localhost",
+                attachment_ids=attachment_ids,
+            )
+
+        sent_extra_content = bot._send_response.await_args.kwargs["extra_content"]
+        assert sent_extra_content[ATTACHMENT_IDS_KEY] == attachment_ids
+        assert sent_extra_content["io.mindroom.ai_run"]["version"] == 1
+
+    @pytest.mark.asyncio
+    async def test_process_and_respond_streaming_includes_attachment_ids_in_response_metadata(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Streaming responses should persist attachment IDs in message metadata."""
+
+        @asynccontextmanager
+        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
+            yield
+
+        async def mock_streaming_response() -> AsyncGenerator[str, None]:
+            yield "chunk"
+
+        config = Config.from_yaml()
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot.client = AsyncMock()
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._handle_interactive_question = AsyncMock()
+
+        def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncGenerator[str, None]:
+            kwargs["run_metadata_collector"]["io.mindroom.ai_run"] = {"version": 1}
+            return mock_streaming_response()
+
+        attachment_ids = ["att_image", "att_zip"]
+        with (
+            patch("mindroom.bot.typing_indicator", noop_typing_indicator),
+            patch("mindroom.bot.stream_agent_response", side_effect=fake_stream_agent_response),
+            patch("mindroom.bot.send_streaming_response", new_callable=AsyncMock) as mock_send_streaming_response,
+        ):
+            mock_send_streaming_response.return_value = ("$response", "chunk")
+            await bot._process_and_respond_streaming(
+                room_id="!test:localhost",
+                prompt="Please inspect attachments",
+                reply_to_event_id="$event456",
+                thread_id=None,
+                thread_history=[],
+                user_id="@user:localhost",
+                attachment_ids=attachment_ids,
+            )
+
+        sent_extra_content = mock_send_streaming_response.await_args.kwargs["extra_content"]
+        assert sent_extra_content[ATTACHMENT_IDS_KEY] == attachment_ids
+        assert sent_extra_content["io.mindroom.ai_run"]["version"] == 1
+
     def test_agent_has_matrix_messaging_tool_when_openclaw_compat_enabled(
         self,
         mock_agent_user: AgentMatrixUser,

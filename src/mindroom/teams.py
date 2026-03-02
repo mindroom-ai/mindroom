@@ -19,7 +19,7 @@ from agno.team import Team
 from pydantic import BaseModel, Field
 
 from mindroom import agent_prompts
-from mindroom.ai import get_model_instance, sanitize_media_for_model
+from mindroom.ai import get_model_instance
 from mindroom.authorization import get_available_agents_in_room
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.error_handling import get_user_friendly_error_message
@@ -540,7 +540,6 @@ async def team_response(
     media_inputs = media or MediaInputs()
     prompt = _build_prompt_with_context(message, thread_history)
     team = _create_team_instance(agents, agent_names, mode, orchestrator, model_name)
-    media_inputs = sanitize_media_for_model(team.model, media_inputs)
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
 
     logger.info(f"Executing team response with {len(agents)} agents in {mode.value} mode")
@@ -611,8 +610,6 @@ async def _team_response_stream_raw(
     media_inputs = media or MediaInputs()
     prompt = _build_prompt_with_context(message, thread_history)
     team = _create_team_instance(agents, agent_names, mode, orchestrator, model_name)
-    media_inputs = sanitize_media_for_model(team.model, media_inputs)
-
     logger.info(f"Created team with {len(agents)} agents in {mode.value} mode")
     for agent in agents:
         logger.debug(f"Team member: {agent.name}")

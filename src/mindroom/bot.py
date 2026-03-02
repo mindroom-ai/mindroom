@@ -300,6 +300,17 @@ class _DispatchPayload:
     attachment_ids: list[str] | None = None
 
 
+def _merge_response_extra_content(
+    extra_content: dict[str, Any] | None,
+    attachment_ids: list[str] | None,
+) -> dict[str, Any] | None:
+    """Merge optional attachment IDs into response metadata."""
+    merged_extra_content = extra_content if extra_content is not None else {}
+    if attachment_ids:
+        merged_extra_content[ATTACHMENT_IDS_KEY] = attachment_ids
+    return merged_extra_content or None
+
+
 @dataclass
 class AgentBot:
     """Represents a single agent bot with its own Matrix account."""
@@ -740,46 +751,19 @@ class AgentBot:
             return
 
         context = dispatch.context
-        thread_attachment_ids = (
-            await resolve_thread_attachment_ids(
-                self.client,
-                self.storage_path,
-                room_id=room.room_id,
-                thread_id=context.thread_id,
-            )
-            if context.thread_id
-            else []
+        payload = await self._build_dispatch_payload_with_attachments(
+            room_id=room.room_id,
+            context=context,
+            prompt=event.body,
+            current_attachment_ids=message_attachment_ids,
+            media_thread_id=context.thread_id,
         )
-        history_attachment_ids = parse_attachment_ids_from_thread_history(context.thread_history)
-        attachment_ids = merge_attachment_ids(
-            message_attachment_ids,
-            thread_attachment_ids,
-            history_attachment_ids,
-        )
-        resolved_attachment_ids, attachment_audio, attachment_images, attachment_files, attachment_videos = (
-            resolve_attachment_media(
-                self.storage_path,
-                attachment_ids,
-                room_id=room.room_id,
-                thread_id=context.thread_id,
-            )
-        )
-        prompt_text = append_attachment_ids_prompt(event.body, resolved_attachment_ids)
         await self._execute_dispatch_action(
             room,
             event,
             dispatch,
             action,
-            _DispatchPayload(
-                prompt=prompt_text,
-                media=MediaInputs.from_optional(
-                    audio=attachment_audio,
-                    images=attachment_images,
-                    files=attachment_files,
-                    videos=attachment_videos,
-                ),
-                attachment_ids=resolved_attachment_ids or None,
-            ),
+            payload,
             processing_log="Processing",
         )
 
@@ -897,6 +881,55 @@ class AgentBot:
         if attachment_id is not None:
             extra_content[ATTACHMENT_IDS_KEY] = [attachment_id]
         return extra_content
+
+    async def _build_dispatch_payload_with_attachments(
+        self,
+        *,
+        room_id: str,
+        context: _MessageContext,
+        prompt: str,
+        current_attachment_ids: list[str],
+        media_thread_id: str | None,
+        fallback_images: list[Any] | None = None,
+    ) -> _DispatchPayload:
+        """Build dispatch payload by merging thread/history attachment media."""
+        assert self.client is not None
+        thread_attachment_ids = (
+            await resolve_thread_attachment_ids(
+                self.client,
+                self.storage_path,
+                room_id=room_id,
+                thread_id=context.thread_id,
+            )
+            if context.thread_id
+            else []
+        )
+        history_attachment_ids = parse_attachment_ids_from_thread_history(context.thread_history)
+        attachment_ids = merge_attachment_ids(
+            current_attachment_ids,
+            thread_attachment_ids,
+            history_attachment_ids,
+        )
+        resolved_attachment_ids, attachment_audio, attachment_images, attachment_files, attachment_videos = (
+            resolve_attachment_media(
+                self.storage_path,
+                attachment_ids,
+                room_id=room_id,
+                thread_id=media_thread_id,
+            )
+        )
+        if fallback_images is not None and not attachment_images:
+            attachment_images = fallback_images
+        return _DispatchPayload(
+            prompt=append_attachment_ids_prompt(prompt, resolved_attachment_ids),
+            media=MediaInputs.from_optional(
+                audio=attachment_audio,
+                images=attachment_images,
+                files=attachment_files,
+                videos=attachment_videos,
+            ),
+            attachment_ids=resolved_attachment_ids or None,
+        )
 
     async def _on_voice_message(
         self,
@@ -1022,20 +1055,8 @@ class AgentBot:
             event.event_id,
             event_source=event.source,
         )
-        thread_attachment_ids = (
-            await resolve_thread_attachment_ids(
-                self.client,
-                self.storage_path,
-                room_id=room.room_id,
-                thread_id=context.thread_id,
-            )
-            if context.thread_id
-            else []
-        )
-        history_attachment_ids = parse_attachment_ids_from_thread_history(context.thread_history)
-        media = MediaInputs()
-        current_attachment_ids: list[str] = []
-        resolved_attachment_ids: list[str] = []
+        current_attachment_ids: list[str]
+        fallback_images: list[Any] | None = None
         if is_image_event:
             assert isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage)
             # Download image only after confirming we should respond.
@@ -1054,31 +1075,7 @@ class AgentBot:
             )
             # Keep processing even without attachment registration; image bytes are already available to the model.
             current_attachment_ids = [attachment_record.attachment_id] if attachment_record is not None else []
-            attachment_ids = merge_attachment_ids(
-                current_attachment_ids,
-                thread_attachment_ids,
-                history_attachment_ids,
-            )
-            (
-                resolved_attachment_ids,
-                attachment_audio,
-                attachment_images,
-                attachment_files,
-                attachment_videos,
-            ) = resolve_attachment_media(
-                self.storage_path,
-                attachment_ids,
-                room_id=room.room_id,
-                thread_id=effective_thread_id,
-            )
-            if not attachment_images:
-                attachment_images = [image]
-            media = MediaInputs.from_optional(
-                audio=attachment_audio,
-                images=attachment_images,
-                files=attachment_files,
-                videos=attachment_videos,
-            )
+            fallback_images = [image]
         else:
             assert isinstance(
                 event,
@@ -1097,37 +1094,20 @@ class AgentBot:
                 self.response_tracker.mark_responded(event.event_id)
                 return
             current_attachment_ids = [attachment_record.attachment_id]
-            attachment_ids = merge_attachment_ids(
-                current_attachment_ids,
-                thread_attachment_ids,
-                history_attachment_ids,
-            )
-            resolved_attachment_ids, attachment_audio, attachment_images, attachment_files, attachment_videos = (
-                resolve_attachment_media(
-                    self.storage_path,
-                    attachment_ids,
-                    room_id=room.room_id,
-                    thread_id=effective_thread_id,
-                )
-            )
-            media = MediaInputs.from_optional(
-                audio=attachment_audio,
-                images=attachment_images,
-                files=attachment_files,
-                videos=attachment_videos,
-            )
-
-        prompt_text = append_attachment_ids_prompt(caption, resolved_attachment_ids)
+        payload = await self._build_dispatch_payload_with_attachments(
+            room_id=room.room_id,
+            context=context,
+            prompt=caption,
+            current_attachment_ids=current_attachment_ids,
+            media_thread_id=effective_thread_id,
+            fallback_images=fallback_images,
+        )
         await self._execute_dispatch_action(
             room,
             event,
             dispatch,
             action,
-            _DispatchPayload(
-                prompt=prompt_text,
-                media=media,
-                attachment_ids=resolved_attachment_ids or None,
-            ),
+            payload,
             processing_log="Processing image" if is_image_event else "Processing media message",
         )
 
@@ -1886,6 +1866,7 @@ class AgentBot:
             self.logger.exception("Error in non-streaming response", error=str(e))
             raise
 
+        response_extra_content = _merge_response_extra_content(run_metadata_content, attachment_ids)
         if existing_event_id:
             # Edit the existing message
             await self._edit_message(
@@ -1894,7 +1875,7 @@ class AgentBot:
                 response_text,
                 thread_id,
                 tool_trace=tool_trace if self.show_tool_calls else None,
-                extra_content=run_metadata_content or None,
+                extra_content=response_extra_content,
             )
             return existing_event_id
 
@@ -1905,7 +1886,7 @@ class AgentBot:
             response.formatted_text,
             thread_id,
             tool_trace=tool_trace if self.show_tool_calls else None,
-            extra_content=run_metadata_content or None,
+            extra_content=response_extra_content,
         )
         if event_id and response.option_map and response.options_list:
             # For interactive questions, use the same thread root that _send_response uses:
@@ -2136,6 +2117,7 @@ class AgentBot:
                         show_tool_calls=self.show_tool_calls,
                         run_metadata_collector=run_metadata_content,
                     )
+                    response_extra_content = _merge_response_extra_content(run_metadata_content, attachment_ids)
 
                     event_id, accumulated = await send_streaming_response(
                         self.client,
@@ -2149,7 +2131,7 @@ class AgentBot:
                         existing_event_id=existing_event_id,
                         room_mode=self.thread_mode == "room",
                         show_tool_calls=self.show_tool_calls,
-                        extra_content=run_metadata_content,
+                        extra_content=response_extra_content,
                     )
 
             # Handle interactive questions if present
