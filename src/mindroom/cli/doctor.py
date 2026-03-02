@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 import httpx
 import typer
@@ -166,6 +168,86 @@ def _http_check(
     if resp.is_success:
         return True, ""
     return False, f"HTTP {resp.status_code}"
+
+
+def _is_local_network_host(host: str) -> bool:
+    """Return True for .local, loopback, and private-link hosts."""
+    normalized_host = host.strip().strip("[]").lower()
+    if normalized_host in {"localhost", "127.0.0.1", "::1"} or normalized_host.endswith(".local"):
+        return True
+    try:
+        ip = ipaddress.ip_address(normalized_host)
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_loopback or ip.is_link_local
+
+
+def _with_local_network_hint(detail: str, base_url: str | None) -> str:
+    """Append a targeted hint for local host routing failures."""
+    if not detail or not base_url:
+        return detail
+
+    parsed = urlparse(base_url)
+    host = parsed.hostname
+    if host is None or not _is_local_network_host(host):
+        return detail
+
+    lowered = detail.lower()
+    route_signals = (
+        "no route to host",
+        "connection refused",
+        "name or service not known",
+        "nodename nor servname provided",
+    )
+    if not any(signal in lowered for signal in route_signals):
+        return detail
+
+    return (
+        f"{detail}; local host '{host}' may be unreachable from this Python runtime"
+        " (try a reachable LAN IP instead of .local)"
+    )
+
+
+def _validate_openai_embeddings_endpoint(
+    api_key: str,
+    base_url: str,
+    model: str,
+) -> tuple[bool | None, str]:
+    """Validate a custom OpenAI-compatible embeddings endpoint with a tiny request."""
+    url = f"{base_url.rstrip('/')}/embeddings"
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    payload = {"model": model, "input": "mindroom doctor embedder check"}
+
+    try:
+        resp = httpx.post(url, headers=headers, json=payload, timeout=10)
+    except httpx.HTTPError as exc:
+        return None, str(exc)
+
+    if not resp.is_success:
+        return False, f"HTTP {resp.status_code}"
+
+    error_detail: str | None = None
+    try:
+        body = resp.json()
+    except ValueError:
+        error_detail = "invalid JSON response"
+    else:
+        data = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(data, list) or not data:
+            error_detail = "missing embeddings data"
+        else:
+            first_item = data[0]
+            if not isinstance(first_item, dict):
+                error_detail = "invalid embeddings payload"
+            else:
+                embedding = first_item.get("embedding")
+                if not isinstance(embedding, list) or not embedding:
+                    error_detail = "empty embedding vector"
+
+    if error_detail is not None:
+        return False, error_detail
+
+    return True, ""
 
 
 def _validate_provider_key(
@@ -383,6 +465,17 @@ def _check_memory_embedder(config: Config) -> tuple[int, int, int]:
             f"[yellow]![/yellow] Memory embedder ({emb.provider}): {env_key} not set",
         )
         return 0, 0, 1
+
+    if emb.provider == "openai" and emb.config.host:
+        valid, detail = _validate_openai_embeddings_endpoint(api_key or "", emb.config.host, emb.config.model)
+        return _print_validation(
+            valid,
+            _with_local_network_hint(detail, emb.config.host),
+            f"Memory embedder: openai/{emb.config.model} embeddings endpoint reachable ({emb.config.host})",
+            f"Memory embedder: openai/{emb.config.model} embeddings endpoint failed ({emb.config.host})",
+            f"Memory embedder: openai/{emb.config.model} could not reach embeddings endpoint ({emb.config.host})",
+        )
+
     base_url = emb.config.host
     valid, detail = _validate_provider_key(emb.provider, api_key or "", base_url)
     return _print_validation(
