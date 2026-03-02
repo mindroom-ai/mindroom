@@ -826,6 +826,98 @@ class TestEditRemovesStaleRun:
             assert call_args[0][1] == "!test:example.com"  # session_id (room_id:thread_id, no thread)
             assert call_args[0][2] == "$original:example.com"  # event_id
 
+    @pytest.mark.asyncio
+    async def test_edit_checks_thread_and_room_sessions_for_stale_run(self, tmp_path: object) -> None:
+        """Verify edit cleanup checks both thread and room sessions when thread context exists."""
+        agent_user = AgentMatrixUser(
+            agent_name="test_agent",
+            user_id="@test_agent:example.com",
+            display_name="Test Agent",
+            password="test_password",  # noqa: S106
+        )
+
+        config = Mock()
+        config.agents = {"test_agent": Mock(knowledge_bases=[])}
+        config.domain = "example.com"
+        config.ids = {}
+        config.get_mindroom_user_id.return_value = "@mindroom:example.com"
+        config.authorization.agent_reply_permissions = {}
+
+        bot = AgentBot(
+            agent_user=agent_user,
+            storage_path=tmp_path,
+            config=config,
+            rooms=["!test:example.com"],
+        )
+        bot.client = AsyncMock(spec=nio.AsyncClient)
+        bot.client.rooms = {}
+        bot.client.user_id = "@test_agent:example.com"
+        bot.response_tracker = ResponseTracker(agent_name="test_agent", base_path=tmp_path)
+        bot.logger = MagicMock()
+
+        room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
+        bot.response_tracker.mark_responded("$original:example.com", "$response:example.com")
+
+        edit_event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "* @test_agent what is 3+3?",
+                    "msgtype": "m.text",
+                    "m.new_content": {"body": "@test_agent what is 3+3?", "msgtype": "m.text"},
+                    "m.relates_to": {"event_id": "$original:example.com", "rel_type": "m.replace"},
+                },
+                "event_id": "$edit:example.com",
+                "sender": "@user:example.com",
+                "origin_server_ts": 1000001,
+                "type": "m.room.message",
+                "room_id": "!test:example.com",
+            },
+        )
+        edit_event.source = {
+            "content": {
+                "body": "* @test_agent what is 3+3?",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "@test_agent what is 3+3?", "msgtype": "m.text"},
+                "m.relates_to": {"event_id": "$original:example.com", "rel_type": "m.replace"},
+            },
+            "event_id": "$edit:example.com",
+            "sender": "@user:example.com",
+        }
+
+        with (
+            patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
+            patch.object(bot, "_edit_message", new_callable=AsyncMock),
+            patch("mindroom.bot.should_agent_respond") as mock_should_respond,
+            patch("mindroom.bot.should_use_streaming", new_callable=AsyncMock) as mock_streaming,
+            patch("mindroom.bot.ai_response", new_callable=AsyncMock) as mock_ai_response,
+            patch("mindroom.bot.remove_run_by_event_id") as mock_remove_run,
+            patch("mindroom.bot.create_session_storage") as mock_create_storage,
+        ):
+            mock_context.return_value = MagicMock(
+                am_i_mentioned=True,
+                is_thread=True,
+                thread_id="$thread_root:example.com",
+                thread_history=[],
+                mentioned_agents=["test_agent"],
+                has_non_agent_mentions=False,
+            )
+            mock_should_respond.return_value = True
+            mock_streaming.return_value = False
+            mock_ai_response.return_value = "The answer is 6"
+            mock_remove_run.side_effect = [False, True]
+            mock_create_storage.return_value = MagicMock(spec=SqliteDb)
+
+            await bot._on_message(room, edit_event)
+
+            assert mock_remove_run.call_count == 2
+            called_session_ids = [call.args[1] for call in mock_remove_run.call_args_list]
+            assert called_session_ids == [
+                "!test:example.com:$thread_root:example.com",
+                "!test:example.com",
+            ]
+            for call in mock_remove_run.call_args_list:
+                assert call.args[2] == "$original:example.com"
+
 
 # ---------------------------------------------------------------------------
 # Full scenario test
