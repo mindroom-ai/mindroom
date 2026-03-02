@@ -12,8 +12,8 @@ from mindroom.config.main import Config
 from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling import _extract_mentioned_agents_from_text
-from mindroom.tool_runtime_context import ToolRuntimeContext, tool_runtime_context
-from mindroom.tools_metadata import TOOL_METADATA
+from mindroom.tool_system.metadata import TOOL_METADATA
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 
 
 def _make_context(config: Config) -> ToolRuntimeContext:

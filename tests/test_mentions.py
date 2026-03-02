@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import mindroom.matrix.identity as matrix_identity
 from mindroom.config.main import Config
 from mindroom.matrix.mentions import format_message_with_mentions, parse_mentions_in_text
-from mindroom.tool_events import _TOOL_TRACE_KEY, ToolTraceEntry
+from mindroom.tool_system.events import _TOOL_TRACE_KEY, ToolTraceEntry
 
 if TYPE_CHECKING:
     from _pytest.monkeypatch import MonkeyPatch

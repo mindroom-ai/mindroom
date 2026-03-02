@@ -10,7 +10,7 @@ import pytest
 
 from mindroom.attachments import register_local_attachment
 from mindroom.custom_tools.attachments import AttachmentTools, send_context_attachments
-from mindroom.tool_runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
 
 if TYPE_CHECKING:
     from pathlib import Path

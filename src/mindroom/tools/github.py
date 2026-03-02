@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tools_metadata import (
+from mindroom.tool_system.metadata import (
     ConfigField,
     SetupType,
     ToolCategory,

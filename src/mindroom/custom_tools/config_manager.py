@@ -16,7 +16,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import AgentLearningMode  # noqa: TC001
 from mindroom.constants import CONFIG_PATH
 from mindroom.logging_config import get_logger
-from mindroom.tools_metadata import TOOL_METADATA, ToolCategory, ToolStatus
+from mindroom.tool_system.metadata import TOOL_METADATA, ToolCategory, ToolStatus
 
 logger = get_logger(__name__)
 

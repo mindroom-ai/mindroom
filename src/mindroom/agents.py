@@ -19,9 +19,9 @@ from mindroom import agent_prompts
 from mindroom import tools as _tools_module  # noqa: F401
 from mindroom.constants import ROUTER_AGENT_NAME, STORAGE_PATH_OBJ, resolve_config_relative_path
 from mindroom.logging_config import get_logger
-from mindroom.plugins import load_plugins
-from mindroom.skills import build_agent_skills
-from mindroom.tools_metadata import get_tool_by_name
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.plugins import load_plugins
+from mindroom.tool_system.skills import build_agent_skills
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -10,8 +10,8 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from mindroom.credentials import CredentialsManager
-from mindroom.tool_dependencies import ensure_tool_deps
-from mindroom.tools_metadata import ensure_tool_registry_loaded, export_tools_metadata
+from mindroom.tool_system.dependencies import ensure_tool_deps
+from mindroom.tool_system.metadata import ensure_tool_registry_loaded, export_tools_metadata
 
 if TYPE_CHECKING:
     from spotipy import Spotify, SpotifyOAuth

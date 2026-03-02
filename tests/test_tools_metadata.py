@@ -5,7 +5,7 @@ from pathlib import Path
 
 # Import tools to trigger tool registration
 import mindroom.tools  # noqa: F401
-from mindroom.tools_metadata import TOOL_METADATA, export_tools_metadata
+from mindroom.tool_system.metadata import TOOL_METADATA, export_tools_metadata
 
 
 def test_export_tools_metadata_json() -> None:

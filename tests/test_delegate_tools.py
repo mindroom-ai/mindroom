@@ -13,7 +13,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH, DelegateTools
-from mindroom.tools_metadata import TOOL_METADATA
+from mindroom.tool_system.metadata import TOOL_METADATA
 
 if TYPE_CHECKING:
     from pathlib import Path

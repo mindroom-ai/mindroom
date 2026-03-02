@@ -75,7 +75,7 @@ MindRoom does not yet support direct MCP server configuration in `config.yaml`. 
 
 ```
 from agno.tools.mcp import MCPTools
-from mindroom.tools_metadata import (
+from mindroom.tool_system.metadata import (
     SetupType,
     ToolCategory,
     ToolStatus,
@@ -124,7 +124,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tools_metadata import (
+from mindroom.tool_system.metadata import (
     SetupType,
     ToolCategory,
     ToolStatus,

@@ -12,7 +12,7 @@ from agno.tools.googlecalendar import GoogleCalendarTools as AgnoGoogleCalendarT
 from loguru import logger
 
 from mindroom.credentials import get_credentials_manager
-from mindroom.tool_dependencies import ensure_tool_deps
+from mindroom.tool_system.dependencies import ensure_tool_deps
 
 _GOOGLE_DEPS = ["google-auth", "google-auth-oauthlib"]
 

@@ -6,9 +6,9 @@ from typing import Any, Self
 
 import pytest
 
-import mindroom.sandbox_proxy as sandbox_proxy_module
+import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 import mindroom.tools  # noqa: F401
-from mindroom.tools_metadata import get_tool_by_name
+from mindroom.tool_system.metadata import get_tool_by_name
 from tests.conftest import FakeCredentialsManager
 
 
@@ -45,7 +45,7 @@ def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOOLS", {"calculator"})
     monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
     monkeypatch.setattr(sandbox_proxy_module, "_CREDENTIAL_POLICY", {})
-    monkeypatch.setattr("mindroom.sandbox_proxy.httpx.Client", _FakeClient)
+    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeClient)
 
     tool = get_tool_by_name("calculator")
     entrypoint = tool.functions["add"].entrypoint
@@ -74,7 +74,7 @@ def test_proxy_disabled_in_runner_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox-runner:8765")
     monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "all")
     monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", True)
-    monkeypatch.setattr("mindroom.sandbox_proxy.httpx.Client", _ForbiddenClient)
+    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _ForbiddenClient)
 
     tool = get_tool_by_name("calculator")
     entrypoint = tool.functions["add"].entrypoint
@@ -121,8 +121,8 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest
     monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "all")
     monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
     monkeypatch.setattr(sandbox_proxy_module, "_CREDENTIAL_POLICY", {"calculator.add": ("openai",)})
-    monkeypatch.setattr("mindroom.sandbox_proxy.get_credentials_manager", lambda: fake_credentials)
-    monkeypatch.setattr("mindroom.sandbox_proxy.httpx.Client", _FakeClient)
+    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.get_credentials_manager", lambda: fake_credentials)
+    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeClient)
 
     tool = get_tool_by_name("calculator")
     entrypoint = tool.functions["add"].entrypoint
@@ -162,7 +162,7 @@ def test_proxy_requires_shared_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", None)
     monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "all")
     monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
-    monkeypatch.setattr("mindroom.sandbox_proxy.httpx.Client", _FakeClient)
+    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeClient)
 
     tool = get_tool_by_name("calculator")
     entrypoint = tool.functions["add"].entrypoint
@@ -258,7 +258,7 @@ class TestSandboxToolsOverride:
         monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "off")  # env says off
         monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
         monkeypatch.setattr(sandbox_proxy_module, "_CREDENTIAL_POLICY", {})
-        monkeypatch.setattr("mindroom.sandbox_proxy.httpx.Client", _FakeClient)
+        monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeClient)
 
         # Override says sandbox calculator
         tool = get_tool_by_name("calculator", sandbox_tools_override=["calculator"])

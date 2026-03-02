@@ -32,7 +32,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.teams import TeamFormationDecision, TeamMode
-from mindroom.tool_events import ToolTraceEntry
+from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import TEST_PASSWORD
 
 if TYPE_CHECKING:

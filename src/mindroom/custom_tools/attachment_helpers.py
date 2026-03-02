@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from mindroom.authorization import is_authorized_sender
 
 if TYPE_CHECKING:
-    from mindroom.tool_runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
 def normalize_str_list(values: list[str] | None, *, field_name: str) -> tuple[list[str], str | None]:

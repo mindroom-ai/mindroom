@@ -14,8 +14,8 @@ from mindroom.attachments import register_local_attachment
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
-from mindroom.tool_runtime_context import ToolRuntimeContext, tool_runtime_context
-from mindroom.tools_metadata import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 
 if TYPE_CHECKING:
     from pathlib import Path

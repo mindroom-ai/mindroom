@@ -7,7 +7,7 @@ import pytest
 
 # Import tools to ensure they're registered
 import mindroom.tools  # noqa: F401
-from mindroom.tools_metadata import _TOOL_REGISTRY, TOOL_METADATA
+from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA
 
 SKIP_CUSTOM = {"homeassistant", "gmail", "google_calendar", "google_sheets", "openclaw_compat"}
 

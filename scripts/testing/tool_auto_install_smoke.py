@@ -21,8 +21,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from mindroom.tool_dependencies import _pip_name_to_import, check_deps_installed
-from mindroom.tools_metadata import (
+from mindroom.tool_system.dependencies import _pip_name_to_import, check_deps_installed
+from mindroom.tool_system.metadata import (
     TOOL_METADATA,
     TOOL_REGISTRY,
     ToolStatus,

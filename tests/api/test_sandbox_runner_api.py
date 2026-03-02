@@ -5,9 +5,9 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-import mindroom.sandbox_proxy as sandbox_proxy_module
+import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
-from mindroom.tools_metadata import ensure_tool_registry_loaded
+from mindroom.tool_system.metadata import ensure_tool_registry_loaded
 
 SANDBOX_TOKEN = "secret-token"  # noqa: S105
 SANDBOX_HEADERS = {"x-mindroom-sandbox-token": SANDBOX_TOKEN}

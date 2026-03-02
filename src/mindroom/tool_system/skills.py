@@ -38,8 +38,8 @@ _PLUGIN_SKILL_ROOTS: list[Path] = []
 _SkillSnapshot = tuple[tuple[str, int, int], ...]
 _SKILL_CACHE: dict[Path, tuple[_SkillSnapshot, list[Skill]]] = {}
 _THIS_DIR = Path(__file__).resolve().parent
-_BUNDLED_SKILLS_DEV_DIR = _THIS_DIR.parents[1] / "skills"
-_BUNDLED_SKILLS_PACKAGE_DIR = _THIS_DIR / "_bundled_skills"
+_BUNDLED_SKILLS_DEV_DIR = _THIS_DIR.parents[2] / "skills"
+_BUNDLED_SKILLS_PACKAGE_DIR = _THIS_DIR.parent / "_bundled_skills"
 
 
 @dataclass

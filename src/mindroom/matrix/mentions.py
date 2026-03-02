@@ -6,10 +6,10 @@ from typing import TYPE_CHECKING, Any
 from mindroom.config.main import Config
 from mindroom.matrix.identity import MatrixID, mindroom_namespace
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
-from mindroom.tool_events import build_tool_trace_content
+from mindroom.tool_system.events import build_tool_trace_content
 
 if TYPE_CHECKING:
-    from mindroom.tool_events import ToolTraceEntry
+    from mindroom.tool_system.events import ToolTraceEntry
 
 
 def parse_mentions_in_text(text: str, sender_domain: str, config: Config) -> tuple[str, list[str], str]:
