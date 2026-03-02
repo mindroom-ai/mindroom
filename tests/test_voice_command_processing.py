@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from agno.media import Audio
 
-from mindroom.attachments import attachment_id_for_event, load_attachment
+from mindroom.attachments import _attachment_id_for_event, load_attachment
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import (
@@ -155,7 +155,7 @@ async def test_router_voice_transcription_includes_original_sender_metadata(tmp_
         await bot._on_voice_message(room, event)
 
     bot._send_response.assert_called_once()
-    expected_attachment_id = attachment_id_for_event("$voice_event")
+    expected_attachment_id = _attachment_id_for_event("$voice_event")
     assert bot._send_response.call_args.kwargs["extra_content"] == {
         ORIGINAL_SENDER_KEY: "@alice:example.com",
         ATTACHMENT_IDS_KEY: [expected_attachment_id],
@@ -250,7 +250,7 @@ async def test_router_voice_transcription_falls_back_to_raw_audio(tmp_path) -> N
     bot._send_response.assert_called_once()
     assert bot._send_response.call_args.kwargs["response_text"] == f"{VOICE_PREFIX}[Attached voice message]"
     extra_content = bot._send_response.call_args.kwargs["extra_content"]
-    expected_attachment_id = attachment_id_for_event("$voice_event")
+    expected_attachment_id = _attachment_id_for_event("$voice_event")
     assert extra_content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
     assert extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] is True
     assert extra_content[ATTACHMENT_IDS_KEY] == [expected_attachment_id]

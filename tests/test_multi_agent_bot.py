@@ -17,7 +17,7 @@ from agno.models.ollama import Ollama
 from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
 
-from mindroom.attachments import attachment_id_for_event, register_local_attachment
+from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
 from mindroom.bot import AgentBot, MultiKnowledgeVectorDb, _MessageContext
 from mindroom.config.agent import AgentConfig
@@ -1336,7 +1336,7 @@ class TestAgentBot:
         image = MagicMock()
         image.content = b"image-bytes"
         image.mime_type = "image/jpeg"
-        attachment_id = attachment_id_for_event("$img_event")
+        attachment_id = _attachment_id_for_event("$img_event")
         attachment_record = MagicMock()
         attachment_record.attachment_id = attachment_id
 
@@ -1399,7 +1399,7 @@ class TestAgentBot:
         bot.__dict__["response_tracker"] = tracker
 
         history_attachment_id = "att_prev_image"
-        current_attachment_id = attachment_id_for_event("$img_event_history")
+        current_attachment_id = _attachment_id_for_event("$img_event_history")
 
         bot._extract_message_context = AsyncMock(
             return_value=_MessageContext(
@@ -1581,7 +1581,7 @@ class TestAgentBot:
             tmp_path,
             local_media_path,
             kind="file",
-            attachment_id=attachment_id_for_event("$file_event"),
+            attachment_id=_attachment_id_for_event("$file_event"),
             filename="report.pdf",
             mime_type="application/pdf",
             room_id=room.room_id,
@@ -1614,7 +1614,7 @@ class TestAgentBot:
 
         bot._generate_response.assert_awaited_once()
         generate_kwargs = bot._generate_response.await_args.kwargs
-        attachment_id = attachment_id_for_event("$file_event")
+        attachment_id = _attachment_id_for_event("$file_event")
         assert generate_kwargs["room_id"] == "!test:localhost"
         assert generate_kwargs["reply_to_event_id"] == "$file_event"
         assert generate_kwargs["thread_id"] is None
@@ -1831,7 +1831,7 @@ class TestAgentBot:
             tmp_path,
             local_media_path,
             kind="file",
-            attachment_id=attachment_id_for_event("$file_route"),
+            attachment_id=_attachment_id_for_event("$file_route"),
             filename="report.pdf",
             mime_type="application/pdf",
             room_id=room.room_id,
@@ -1914,7 +1914,7 @@ class TestAgentBot:
             tmp_path,
             media_path,
             kind="file",
-            attachment_id=attachment_id_for_event("$file_route"),
+            attachment_id=_attachment_id_for_event("$file_route"),
             filename="report.pdf",
             mime_type="application/pdf",
             room_id=room.room_id,
@@ -1994,7 +1994,7 @@ class TestAgentBot:
         )
 
         attachment_record = MagicMock()
-        attachment_record.attachment_id = attachment_id_for_event("$image_route")
+        attachment_record.attachment_id = _attachment_id_for_event("$image_route")
 
         with (
             patch("mindroom.bot.filter_agents_by_sender_permissions", return_value=[config.ids["general"]]),
@@ -2112,7 +2112,7 @@ class TestAgentBot:
             tmp_path,
             media_path,
             kind="file",
-            attachment_id=attachment_id_for_event("$file_once"),
+            attachment_id=_attachment_id_for_event("$file_once"),
             filename="report.pdf",
             mime_type="application/pdf",
             room_id=router_room.room_id,

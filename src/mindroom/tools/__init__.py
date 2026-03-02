@@ -248,7 +248,7 @@ __all__ = [
     icon_color="text-orange-500",
     helper_text="Implies: shell, coding, duckduckgo, website, browser, scheduler, subagents, matrix_message, attachments.",
 )
-def openclaw_compat_tools() -> type[Toolkit]:
+def _openclaw_compat_tools() -> type[Toolkit]:
     """Return an empty toolkit — the real tools are loaded via IMPLIED_TOOLS."""
     from agno.tools import Toolkit
 

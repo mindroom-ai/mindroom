@@ -13,7 +13,7 @@ import pytest
 
 from mindroom.attachment_media import resolve_attachment_media
 from mindroom.attachments import (
-    attachment_id_for_event,
+    _attachment_id_for_event,
     filter_attachments_for_context,
     load_attachment,
     merge_attachment_ids,
@@ -28,16 +28,16 @@ from mindroom.attachments import (
 def test_attachment_id_for_event_is_stable() -> None:
     """Event IDs should map to deterministic attachment IDs."""
     event_id = "$file_event"
-    attachment_id = attachment_id_for_event(event_id)
+    attachment_id = _attachment_id_for_event(event_id)
 
-    assert attachment_id == attachment_id_for_event(event_id)
+    assert attachment_id == _attachment_id_for_event(event_id)
     assert attachment_id.startswith("att_")
     assert len(attachment_id) == 28
 
 
 def test_attachment_id_for_event_distinguishes_similar_strings() -> None:
     """Attachment IDs should differ for event IDs that only vary by punctuation."""
-    assert attachment_id_for_event("$abc-123:localhost") != attachment_id_for_event("$abc_123:localhost")
+    assert _attachment_id_for_event("$abc-123:localhost") != _attachment_id_for_event("$abc_123:localhost")
 
 
 def test_parse_attachment_ids_from_event_source_dedupes() -> None:

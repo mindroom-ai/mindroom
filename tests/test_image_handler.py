@@ -9,7 +9,7 @@ import pytest
 from agno.media import Image
 
 from mindroom.matrix import image_handler
-from mindroom.matrix.media import extract_media_caption, resolve_image_mime_type, sniff_image_mime_type
+from mindroom.matrix.media import _sniff_image_mime_type, extract_media_caption, resolve_image_mime_type
 
 
 class TestExtractCaption:
@@ -280,14 +280,14 @@ class TestSniffImageMimeType:
 
     def test_sniff_known_formats(self) -> None:
         """Known image signatures should map to expected MIME types."""
-        assert sniff_image_mime_type(b"\x89PNG\r\n\x1a\nrest") == "image/png"
-        assert sniff_image_mime_type(b"\xff\xd8\xff\xe0rest") == "image/jpeg"
-        assert sniff_image_mime_type(b"GIF89arest") == "image/gif"
-        assert sniff_image_mime_type(b"RIFF\x00\x00\x00\x00WEBPrest") == "image/webp"
+        assert _sniff_image_mime_type(b"\x89PNG\r\n\x1a\nrest") == "image/png"
+        assert _sniff_image_mime_type(b"\xff\xd8\xff\xe0rest") == "image/jpeg"
+        assert _sniff_image_mime_type(b"GIF89arest") == "image/gif"
+        assert _sniff_image_mime_type(b"RIFF\x00\x00\x00\x00WEBPrest") == "image/webp"
 
     def test_sniff_unknown_returns_none(self) -> None:
         """Unknown byte prefixes should not be misclassified as images."""
-        assert sniff_image_mime_type(b"not-an-image") is None
+        assert _sniff_image_mime_type(b"not-an-image") is None
 
 
 class TestResolveImageMimeType:

@@ -13,7 +13,7 @@ logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
-class ImageMimeResolution:
+class _ImageMimeResolution:
     """Resolved MIME metadata for image payload bytes."""
 
     effective_mime_type: str | None
@@ -41,7 +41,7 @@ def media_mime_type(event: nio.RoomMessageMedia | nio.RoomEncryptedMedia) -> str
     return mimetype if isinstance(mimetype, str) and mimetype else None
 
 
-def sniff_image_mime_type(media_bytes: bytes | None) -> str | None:
+def _sniff_image_mime_type(media_bytes: bytes | None) -> str | None:
     """Best-effort image MIME detection from file signatures."""
     if not media_bytes:
         return None
@@ -68,14 +68,14 @@ def _normalize_mime_type(mime_type: str | None) -> str | None:
     return normalized or None
 
 
-def resolve_image_mime_type(media_bytes: bytes | None, declared_mime_type: str | None) -> ImageMimeResolution:
+def resolve_image_mime_type(media_bytes: bytes | None, declared_mime_type: str | None) -> _ImageMimeResolution:
     """Resolve effective image MIME type with byte-signature fallback."""
     normalized_declared = _normalize_mime_type(declared_mime_type)
-    detected_mime_type = sniff_image_mime_type(media_bytes)
+    detected_mime_type = _sniff_image_mime_type(media_bytes)
     is_mismatch = (
         detected_mime_type is not None and normalized_declared is not None and detected_mime_type != normalized_declared
     )
-    return ImageMimeResolution(
+    return _ImageMimeResolution(
         effective_mime_type=detected_mime_type or normalized_declared,
         declared_mime_type=normalized_declared,
         detected_mime_type=detected_mime_type,

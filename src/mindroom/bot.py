@@ -262,7 +262,7 @@ class _MessageContext:
     has_non_agent_mentions: bool
 
 
-type DispatchEvent = (
+type _DispatchEvent = (
     nio.RoomMessageText
     | nio.RoomMessageImage
     | nio.RoomEncryptedImage
@@ -272,7 +272,7 @@ type DispatchEvent = (
     | nio.RoomEncryptedVideo
 )
 
-type MediaDispatchEvent = (
+type _MediaDispatchEvent = (
     nio.RoomMessageImage
     | nio.RoomEncryptedImage
     | nio.RoomMessageFile
@@ -281,7 +281,7 @@ type MediaDispatchEvent = (
     | nio.RoomEncryptedVideo
 )
 
-type DispatchOrVoiceEvent = DispatchEvent | nio.RoomMessageAudio | nio.RoomEncryptedAudio
+type _DispatchOrVoiceEvent = _DispatchEvent | nio.RoomMessageAudio | nio.RoomEncryptedAudio
 
 
 @dataclass(frozen=True)
@@ -1014,7 +1014,7 @@ class AgentBot:
     async def _on_media_message(
         self,
         room: nio.MatrixRoom,
-        event: MediaDispatchEvent,
+        event: _MediaDispatchEvent,
     ) -> None:
         """Handle image/file/video events and dispatch media-aware responses."""
         assert self.client is not None
@@ -1117,7 +1117,7 @@ class AgentBot:
         *,
         room_id: str,
         thread_id: str | None,
-        event: DispatchEvent,
+        event: _DispatchEvent,
     ) -> str | None:
         """Register a routed media event and return its attachment ID when available."""
         if isinstance(
@@ -1171,7 +1171,7 @@ class AgentBot:
 
     def _requester_user_id_for_event(
         self,
-        event: DispatchOrVoiceEvent,
+        event: _DispatchOrVoiceEvent,
     ) -> str:
         """Return the effective requester for per-user reply checks."""
         return get_effective_sender_id_for_reply_permissions(event.sender, event.source, self.config)
@@ -1179,7 +1179,7 @@ class AgentBot:
     def _precheck_event(
         self,
         room: nio.MatrixRoom,
-        event: DispatchOrVoiceEvent,
+        event: _DispatchOrVoiceEvent,
         *,
         is_edit: bool = False,
     ) -> str | None:
@@ -1220,7 +1220,7 @@ class AgentBot:
     async def _prepare_dispatch(
         self,
         room: nio.MatrixRoom,
-        event: DispatchEvent,
+        event: _DispatchEvent,
         *,
         requester_user_id: str | None = None,
         event_label: str,
@@ -1244,7 +1244,7 @@ class AgentBot:
     async def _resolve_dispatch_action(
         self,
         room: nio.MatrixRoom,
-        event: DispatchEvent,
+        event: _DispatchEvent,
         dispatch: _PreparedDispatch,
         *,
         message_for_decision: str,
@@ -1278,7 +1278,7 @@ class AgentBot:
     async def _execute_dispatch_action(
         self,
         room: nio.MatrixRoom,
-        event: DispatchEvent,
+        event: _DispatchEvent,
         dispatch: _PreparedDispatch,
         action: _ResponseAction,
         payload: _DispatchPayload,
@@ -1325,7 +1325,7 @@ class AgentBot:
     async def _handle_router_dispatch(
         self,
         room: nio.MatrixRoom,
-        event: DispatchEvent,
+        event: _DispatchEvent,
         context: _MessageContext,
         requester_user_id: str,
         *,
@@ -2427,7 +2427,7 @@ class AgentBot:
     async def _handle_ai_routing(
         self,
         room: nio.MatrixRoom,
-        event: DispatchEvent,
+        event: _DispatchEvent,
         thread_history: list[dict],
         thread_id: str | None = None,
         message: str | None = None,

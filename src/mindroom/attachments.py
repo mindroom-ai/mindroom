@@ -22,10 +22,10 @@ from .matrix.media import download_media_bytes, media_mime_type, resolve_image_m
 
 logger = get_logger(__name__)
 
-AttachmentKind = Literal["audio", "file", "image", "video"]
-FileOrVideoEvent = nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo
-ImageEvent = nio.RoomMessageImage | nio.RoomEncryptedImage
-AudioEvent = nio.RoomMessageAudio | nio.RoomEncryptedAudio
+_AttachmentKind = Literal["audio", "file", "image", "video"]
+_FileOrVideoEvent = nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo
+_ImageEvent = nio.RoomMessageImage | nio.RoomEncryptedImage
+_AudioEvent = nio.RoomMessageAudio | nio.RoomEncryptedAudio
 _ATTACHMENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$")
 _ATTACHMENT_RETENTION_DAYS = 30
 _CLEANUP_INTERVAL = timedelta(hours=1)
@@ -46,7 +46,7 @@ class AttachmentRecord:
 
     attachment_id: str
     local_path: Path
-    kind: AttachmentKind
+    kind: _AttachmentKind
     filename: str | None = None
     mime_type: str | None = None
     room_id: str | None = None
@@ -158,7 +158,7 @@ def _store_media_bytes_locally(
     if media_bytes is None:
         return None
     incoming_media_dir = _incoming_media_dir(storage_path)
-    safe_name = attachment_id_for_event(event_id)
+    safe_name = _attachment_id_for_event(event_id)
     extension = _extension_from_mime_type(mime_type)
     media_path = incoming_media_dir / f"{safe_name}{extension}"
     try:
@@ -186,7 +186,7 @@ async def _store_media_bytes_locally_async(
     )
 
 
-def attachment_id_for_event(event_id: str) -> str:
+def _attachment_id_for_event(event_id: str) -> str:
     """Create a stable low-collision attachment ID from a Matrix event ID."""
     digest = hashlib.sha256(event_id.encode("utf-8")).hexdigest()
     return f"att_{digest[:24]}"
@@ -368,7 +368,7 @@ def register_local_attachment(
     storage_path: Path,
     local_path: Path,
     *,
-    kind: AttachmentKind,
+    kind: _AttachmentKind,
     attachment_id: str | None = None,
     filename: str | None = None,
     mime_type: str | None = None,
@@ -425,7 +425,7 @@ def register_local_attachment(
     return record
 
 
-def _filename_for_media_event(event: FileOrVideoEvent | ImageEvent | AudioEvent) -> str | None:
+def _filename_for_media_event(event: _FileOrVideoEvent | _ImageEvent | _AudioEvent) -> str | None:
     """Extract best-effort filename from Matrix media event content."""
     content = event.source.get("content", {})
     filename = content.get("filename")
@@ -444,7 +444,7 @@ async def _register_media_attachment(
     thread_id: str | None,
     sender: str,
     filename: str | None,
-    kind: AttachmentKind,
+    kind: _AttachmentKind,
 ) -> AttachmentRecord | None:
     """Persist media bytes and register a scoped attachment record."""
     local_media_path = await _store_media_bytes_locally_async(
@@ -459,7 +459,7 @@ async def _register_media_attachment(
         storage_path,
         local_media_path,
         kind=kind,
-        attachment_id=attachment_id_for_event(event_id),
+        attachment_id=_attachment_id_for_event(event_id),
         filename=filename,
         mime_type=mime_type,
         room_id=room_id,
@@ -475,11 +475,11 @@ async def register_file_or_video_attachment(
     *,
     room_id: str,
     thread_id: str | None,
-    event: FileOrVideoEvent,
+    event: _FileOrVideoEvent,
 ) -> AttachmentRecord | None:
     """Persist a file/video event and register it as an attachment record."""
     media_bytes = await download_media_bytes(client, event)
-    kind: AttachmentKind = "video" if isinstance(event, nio.RoomMessageVideo | nio.RoomEncryptedVideo) else "file"
+    kind: _AttachmentKind = "video" if isinstance(event, nio.RoomMessageVideo | nio.RoomEncryptedVideo) else "file"
     return await _register_media_attachment(
         storage_path=storage_path,
         event_id=event.event_id,
@@ -499,7 +499,7 @@ async def register_image_attachment(
     *,
     room_id: str,
     thread_id: str | None,
-    event: ImageEvent,
+    event: _ImageEvent,
     image_bytes: bytes | None = None,
 ) -> AttachmentRecord | None:
     """Persist an image event and register it as an attachment record."""
@@ -677,7 +677,7 @@ async def resolve_thread_attachment_ids(
     if not is_file_or_video and not is_image and not is_audio:
         return []
 
-    existing_attachment_id = attachment_id_for_event(event.event_id)
+    existing_attachment_id = _attachment_id_for_event(event.event_id)
     existing_record = load_attachment(storage_path, existing_attachment_id)
     if (
         existing_record is not None

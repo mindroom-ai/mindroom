@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class AttachmentSendResult:
+class _AttachmentSendResult:
     """Result payload for internal attachment send operations."""
 
     room_id: str
@@ -52,7 +52,7 @@ def _attachment_tool_payload(status: str, **kwargs: object) -> str:
     return json.dumps(payload, sort_keys=True)
 
 
-def get_attachment_listing(
+def _get_attachment_listing(
     context: ToolRuntimeContext,
     target: str | None,
 ) -> tuple[list[str], list[dict[str, object]], list[str], str | None]:
@@ -169,7 +169,7 @@ def _resolve_attachment_file_paths(
     return resolved_paths, newly_registered_attachment_ids, None
 
 
-def resolve_send_attachments(
+def _resolve_send_attachments(
     context: ToolRuntimeContext,
     *,
     attachment_ids: list[str],
@@ -195,7 +195,7 @@ def resolve_send_attachments(
     return attachment_paths, resolved_attachment_ids, newly_registered_attachment_ids, None
 
 
-async def send_attachment_paths(
+async def _send_attachment_paths(
     context: ToolRuntimeContext,
     *,
     room_id: str,
@@ -226,10 +226,10 @@ async def send_context_attachments(
     thread_id: str | None = None,
     require_joined_room: bool = True,
     inherit_context_thread: bool = True,
-) -> tuple[AttachmentSendResult | None, str | None]:
+) -> tuple[_AttachmentSendResult | None, str | None]:
     """Resolve and send context-scoped attachments to Matrix."""
     attachment_paths, resolved_attachment_ids, newly_registered_attachment_ids, resolve_error = (
-        resolve_send_attachments(
+        _resolve_send_attachments(
             context,
             attachment_ids=attachment_ids,
             attachment_file_paths=attachment_file_paths,
@@ -238,7 +238,7 @@ async def send_context_attachments(
     if resolve_error is not None:
         return None, resolve_error
 
-    effective_room_id, effective_thread_id, destination_error = resolve_send_target(
+    effective_room_id, effective_thread_id, destination_error = _resolve_send_target(
         context,
         room_id=room_id,
         thread_id=thread_id,
@@ -247,7 +247,7 @@ async def send_context_attachments(
     )
     if destination_error is not None:
         return (
-            AttachmentSendResult(
+            _AttachmentSendResult(
                 room_id=effective_room_id,
                 thread_id=effective_thread_id,
                 attachment_event_ids=[],
@@ -257,13 +257,13 @@ async def send_context_attachments(
             destination_error,
         )
 
-    attachment_event_ids, send_error = await send_attachment_paths(
+    attachment_event_ids, send_error = await _send_attachment_paths(
         context,
         room_id=effective_room_id,
         thread_id=effective_thread_id,
         attachment_paths=attachment_paths,
     )
-    result = AttachmentSendResult(
+    result = _AttachmentSendResult(
         room_id=effective_room_id,
         thread_id=effective_thread_id,
         attachment_event_ids=attachment_event_ids,
@@ -275,7 +275,7 @@ async def send_context_attachments(
     return result, None
 
 
-def resolve_send_target(
+def _resolve_send_target(
     context: ToolRuntimeContext,
     *,
     room_id: str | None,
@@ -318,7 +318,7 @@ class AttachmentTools(Toolkit):
                 message="Tool runtime context is unavailable in this runtime path.",
             )
 
-        requested_attachment_ids, attachments, missing_attachment_ids, error = get_attachment_listing(context, target)
+        requested_attachment_ids, attachments, missing_attachment_ids, error = _get_attachment_listing(context, target)
         if error is not None:
             return _attachment_tool_payload("error", message=error)
 
@@ -341,7 +341,7 @@ class AttachmentTools(Toolkit):
             return _attachment_tool_payload("error", message="attachment_id must be a non-empty string.")
 
         requested_attachment_id = attachment_id.strip()
-        requested_attachment_ids, attachments, missing_attachment_ids, error = get_attachment_listing(
+        requested_attachment_ids, attachments, missing_attachment_ids, error = _get_attachment_listing(
             context,
             requested_attachment_id,
         )
