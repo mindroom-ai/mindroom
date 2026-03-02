@@ -1,4 +1,3 @@
-# ruff: noqa: INP001
 """Doctor command implementation for MindRoom CLI."""
 
 from __future__ import annotations

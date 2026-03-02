@@ -1,4 +1,3 @@
-# ruff: noqa: INP001
 """Mindroom CLI - Simplified multi-agent Matrix bot system."""
 
 from __future__ import annotations

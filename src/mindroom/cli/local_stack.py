@@ -1,4 +1,3 @@
-# ruff: noqa: INP001
 """Local stack setup command implementation for MindRoom CLI."""
 
 from __future__ import annotations
