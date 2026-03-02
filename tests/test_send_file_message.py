@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.matrix.client import _upload_file_as_mxc, send_file_message
+from mindroom.matrix.client import _msgtype_for_mimetype, _upload_file_as_mxc, send_file_message
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -277,3 +277,75 @@ class TestSendFileMessage:
         assert sent_content is not None
         assert sent_content["body"] == "Q4 Report"
         assert sent_content["filename"] == "report.pdf"
+
+
+class TestMsgtypeForMimetype:
+    """Tests for _msgtype_for_mimetype."""
+
+    @pytest.mark.parametrize(
+        ("mimetype", "expected"),
+        [
+            ("image/png", "m.image"),
+            ("image/jpeg", "m.image"),
+            ("video/mp4", "m.video"),
+            ("audio/ogg", "m.audio"),
+            ("application/pdf", "m.file"),
+            ("text/plain", "m.file"),
+        ],
+    )
+    def test_mimetype_mapping(self, mimetype: str, expected: str) -> None:
+        """Verify MIME type to Matrix msgtype mapping."""
+        assert _msgtype_for_mimetype(mimetype) == expected
+
+
+class TestSendFileMessageMsgtype:
+    """Tests for send_file_message msgtype selection."""
+
+    @pytest.mark.asyncio
+    async def test_image_uses_m_image_msgtype(self, tmp_path: Path) -> None:
+        """Image files should be sent as m.image without filename field."""
+        client = _mock_client(encrypted=False)
+        client.upload.return_value = (_upload_response("mxc://localhost/img1"), {})
+
+        sent_content: dict | None = None
+
+        async def capture_send(_client: object, _room: str, content: dict) -> str:
+            nonlocal sent_content
+            sent_content = content
+            return "$evt:localhost"
+
+        file = tmp_path / "photo.png"
+        file.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+        with patch("mindroom.matrix.client.send_message", side_effect=capture_send):
+            event_id = await send_file_message(client, "!room:localhost", file)
+
+        assert event_id == "$evt:localhost"
+        assert sent_content is not None
+        assert sent_content["msgtype"] == "m.image"
+        assert sent_content["body"] == "photo.png"
+        assert "filename" not in sent_content
+        assert sent_content["url"] == "mxc://localhost/img1"
+
+    @pytest.mark.asyncio
+    async def test_video_uses_m_video_msgtype(self, tmp_path: Path) -> None:
+        """Video files should be sent as m.video."""
+        client = _mock_client(encrypted=False)
+        client.upload.return_value = (_upload_response("mxc://localhost/vid1"), {})
+
+        sent_content: dict | None = None
+
+        async def capture_send(_client: object, _room: str, content: dict) -> str:
+            nonlocal sent_content
+            sent_content = content
+            return "$evt:localhost"
+
+        file = tmp_path / "clip.mp4"
+        file.write_bytes(b"\x00\x00\x00\x1cftyp")
+
+        with patch("mindroom.matrix.client.send_message", side_effect=capture_send):
+            event_id = await send_file_message(client, "!room:localhost", file)
+
+        assert event_id == "$evt:localhost"
+        assert sent_content is not None
+        assert sent_content["msgtype"] == "m.video"

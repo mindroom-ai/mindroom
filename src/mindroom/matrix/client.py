@@ -625,6 +625,18 @@ async def _upload_file_as_mxc(
     return mxc_uri, upload_payload
 
 
+def _msgtype_for_mimetype(mimetype: str) -> str:
+    """Return the Matrix msgtype appropriate for the given MIME type."""
+    major = mimetype.split("/", 1)[0]
+    if major == "image":
+        return "m.image"
+    if major == "video":
+        return "m.video"
+    if major == "audio":
+        return "m.audio"
+    return "m.file"
+
+
 async def send_file_message(
     client: nio.AsyncClient,
     room_id: str,
@@ -633,7 +645,7 @@ async def send_file_message(
     thread_id: str | None = None,
     caption: str | None = None,
 ) -> str | None:
-    """Upload a file and send it as an ``m.file`` message."""
+    """Upload a file and send it with the appropriate Matrix message type."""
     resolved_path = Path(file_path).expanduser().resolve()
     if not resolved_path.is_file():
         logger.error("Cannot send non-file attachment", path=str(resolved_path))
@@ -648,12 +660,14 @@ async def send_file_message(
     if not isinstance(info, dict):
         info = {"size": resolved_path.stat().st_size, "mimetype": mimetype}
 
+    msgtype = _msgtype_for_mimetype(mimetype)
     content: dict[str, Any] = {
-        "msgtype": "m.file",
+        "msgtype": msgtype,
         "body": caption or resolved_path.name,
-        "filename": resolved_path.name,
         "info": info,
     }
+    if msgtype == "m.file":
+        content["filename"] = resolved_path.name
     encrypted_file_payload = upload_payload.get("file")
     if isinstance(encrypted_file_payload, dict):
         content["file"] = encrypted_file_payload
