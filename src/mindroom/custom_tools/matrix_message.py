@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import time
 from collections import defaultdict, deque
+from pathlib import Path
 from threading import Lock
-from typing import TYPE_CHECKING, ClassVar
+from typing import ClassVar
 
 import nio
 from agno.tools import Toolkit
 
+from mindroom.attachments import register_local_attachment
 from mindroom.custom_tools.attachments import resolve_context_attachment_path, room_access_allowed
 from mindroom.matrix.client import (
     fetch_thread_history,
@@ -20,10 +22,11 @@ from mindroom.matrix.client import (
 )
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_content import extract_and_resolve_message
-from mindroom.tool_runtime_context import ToolRuntimeContext, get_tool_runtime_context
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from mindroom.tool_runtime_context import (
+    ToolRuntimeContext,
+    append_tool_runtime_attachment_id,
+    get_tool_runtime_context,
+)
 
 
 class MatrixMessageTools(Toolkit):
@@ -66,41 +69,87 @@ class MatrixMessageTools(Toolkit):
         return max(1, min(limit, cls._MAX_READ_LIMIT))
 
     @staticmethod
-    def _normalize_attachment_references(attachments: list[str] | None) -> tuple[list[str], str | None]:
-        if attachments is None:
+    def _normalize_str_list(values: list[str] | None, *, field_name: str) -> tuple[list[str], str | None]:
+        if values is None:
             return [], None
 
         normalized: list[str] = []
-        for raw_reference in attachments:
-            if not isinstance(raw_reference, str):
-                return [], "attachments entries must be strings."
-            reference = raw_reference.strip()
-            if not reference:
-                continue
-            normalized.append(reference)
+        for raw_value in values:
+            if not isinstance(raw_value, str):
+                return [], f"{field_name} entries must be strings."
+            value = raw_value.strip()
+            if value:
+                normalized.append(value)
         return normalized, None
 
     @staticmethod
-    def _resolve_attachment_paths(
+    def _resolve_attachment_id_paths(
         context: ToolRuntimeContext,
-        attachments: list[str],
+        attachment_ids: list[str],
     ) -> tuple[list[Path], list[str], str | None]:
-        if not attachments:
+        if not attachment_ids:
             return [], [], None
 
         attachment_paths: list[Path] = []
         resolved_attachment_ids: list[str] = []
-        for reference in attachments:
-            if not reference.startswith("att_"):
-                return [], [], "attachments entries must be context attachment IDs (att_*)."
-            attachment_path, error = resolve_context_attachment_path(context, reference)
+        for attachment_id in attachment_ids:
+            if not attachment_id.startswith("att_"):
+                return [], [], "attachment_ids entries must be context attachment IDs (att_*)."
+            attachment_path, error = resolve_context_attachment_path(context, attachment_id)
             if error is not None:
                 return [], [], error
             if attachment_path is None:
                 continue
             attachment_paths.append(attachment_path)
-            resolved_attachment_ids.append(reference)
+            resolved_attachment_ids.append(attachment_id)
         return attachment_paths, resolved_attachment_ids, None
+
+    @staticmethod
+    def _register_attachment_file_path(
+        context: ToolRuntimeContext,
+        attachment_file_path: str,
+    ) -> tuple[str | None, Path | None, str | None]:
+        if context.storage_path is None:
+            return None, None, "Attachment storage path is unavailable in this runtime path."
+
+        resolved_path = Path(attachment_file_path).expanduser().resolve()
+        attachment_record = register_local_attachment(
+            context.storage_path,
+            resolved_path,
+            kind="file",
+            room_id=context.room_id,
+            thread_id=context.thread_id,
+            sender=context.requester_id,
+        )
+        if attachment_record is None:
+            return None, None, f"Failed to register attachment file: {resolved_path}"
+
+        append_tool_runtime_attachment_id(attachment_record.attachment_id)
+        return attachment_record.attachment_id, attachment_record.local_path, None
+
+    @classmethod
+    def _resolve_attachment_file_paths(
+        cls,
+        context: ToolRuntimeContext,
+        attachment_file_paths: list[str],
+    ) -> tuple[list[Path], list[str], str | None]:
+        if not attachment_file_paths:
+            return [], [], None
+
+        attachment_paths: list[Path] = []
+        newly_registered_attachment_ids: list[str] = []
+        for attachment_file_path in attachment_file_paths:
+            attachment_id, attachment_path, register_error = cls._register_attachment_file_path(
+                context,
+                attachment_file_path,
+            )
+            if register_error is not None:
+                return [], [], register_error
+            if attachment_path is None or attachment_id is None:
+                continue
+            attachment_paths.append(attachment_path)
+            newly_registered_attachment_ids.append(attachment_id)
+        return attachment_paths, newly_registered_attachment_ids, None
 
     @staticmethod
     def _action_supports_attachments(action: str) -> bool:
@@ -112,7 +161,7 @@ class MatrixMessageTools(Toolkit):
         *,
         action: str,
         room_id: str,
-        attachments: list[str],
+        attachment_count: int,
     ) -> str | None:
         supports_attachments = self._action_supports_attachments(action)
         if action not in self._VALID_ACTIONS:
@@ -121,17 +170,20 @@ class MatrixMessageTools(Toolkit):
                 action=action,
                 message="Unsupported action. Use send, reply, thread-reply, react, read, or context.",
             )
-        if attachments and not supports_attachments:
+        if attachment_count and not supports_attachments:
             return self._payload(
                 "error",
                 action=action,
-                message="attachments are only supported for send, reply, and thread-reply actions.",
+                message="attachment_ids and attachment_file_paths are only supported for send, reply, and thread-reply actions.",
             )
-        if supports_attachments and len(attachments) > self._MAX_ATTACHMENTS_PER_CALL:
+        if supports_attachments and attachment_count > self._MAX_ATTACHMENTS_PER_CALL:
             return self._payload(
                 "error",
                 action=action,
-                message=f"attachments cannot exceed {self._MAX_ATTACHMENTS_PER_CALL} per call.",
+                message=(
+                    f"attachment_ids plus attachment_file_paths cannot exceed "
+                    f"{self._MAX_ATTACHMENTS_PER_CALL} per call."
+                ),
             )
         if action != "context" and not room_access_allowed(context, room_id):
             return self._payload(
@@ -202,13 +254,14 @@ class MatrixMessageTools(Toolkit):
         )
         return await send_message(context.client, room_id, content)
 
-    async def _message_send_or_reply(
+    async def _message_send_or_reply(  # noqa: PLR0911
         self,
         context: ToolRuntimeContext,
         *,
         action: str,
         message: str | None,
-        attachments: list[str],
+        attachment_ids: list[str],
+        attachment_file_paths: list[str],
         room_id: str,
         effective_thread_id: str | None,
     ) -> str:
@@ -216,19 +269,27 @@ class MatrixMessageTools(Toolkit):
             return self._payload("error", action=action, message="thread_id is required for replies.")
 
         text = message.strip() if isinstance(message, str) and message.strip() else None
-        attachment_paths, resolved_attachment_ids, attachment_error = self._resolve_attachment_paths(
+        attachment_paths, resolved_attachment_ids, attachment_error = self._resolve_attachment_id_paths(
             context,
-            attachments,
+            attachment_ids,
         )
         if attachment_error is not None:
             return self._payload("error", action=action, room_id=room_id, message=attachment_error)
+        file_path_attachments, newly_registered_attachment_ids, file_path_error = self._resolve_attachment_file_paths(
+            context,
+            attachment_file_paths,
+        )
+        if file_path_error is not None:
+            return self._payload("error", action=action, room_id=room_id, message=file_path_error)
+        attachment_paths.extend(file_path_attachments)
+        resolved_attachment_ids.extend(newly_registered_attachment_ids)
 
         if text is None and not attachment_paths:
             return self._payload(
                 "error",
                 action=action,
                 room_id=room_id,
-                message="At least one of message or attachments must be provided.",
+                message="At least one of message, attachment_ids, or attachment_file_paths must be provided.",
             )
 
         event_id: str | None = None
@@ -264,6 +325,7 @@ class MatrixMessageTools(Toolkit):
                     event_id=event_id,
                     attachment_event_ids=attachment_event_ids,
                     resolved_attachment_ids=resolved_attachment_ids,
+                    newly_registered_attachment_ids=newly_registered_attachment_ids,
                     message=f"Failed to send attachment: {attachment_path}",
                 )
             attachment_event_ids.append(attachment_event_id)
@@ -276,6 +338,7 @@ class MatrixMessageTools(Toolkit):
             event_id=event_id,
             attachment_event_ids=attachment_event_ids,
             resolved_attachment_ids=resolved_attachment_ids,
+            newly_registered_attachment_ids=newly_registered_attachment_ids,
         )
 
     async def _message_react(
@@ -423,7 +486,8 @@ class MatrixMessageTools(Toolkit):
         *,
         action: str,
         message: str | None,
-        attachments: list[str],
+        attachment_ids: list[str],
+        attachment_file_paths: list[str],
         room_id: str,
         target: str | None,
         thread_id: str | None,
@@ -434,7 +498,8 @@ class MatrixMessageTools(Toolkit):
                 context,
                 action=action,
                 message=message,
-                attachments=attachments,
+                attachment_ids=attachment_ids,
+                attachment_file_paths=attachment_file_paths,
                 room_id=room_id,
                 effective_thread_id=thread_id,
             )
@@ -444,7 +509,8 @@ class MatrixMessageTools(Toolkit):
                 context,
                 action=action,
                 message=message,
-                attachments=attachments,
+                attachment_ids=attachment_ids,
+                attachment_file_paths=attachment_file_paths,
                 room_id=room_id,
                 effective_thread_id=effective_thread_id,
             )
@@ -469,11 +535,12 @@ class MatrixMessageTools(Toolkit):
             message="Unsupported action. Use send, reply, thread-reply, react, read, or context.",
         )
 
-    async def matrix_message(
+    async def matrix_message(  # noqa: PLR0911
         self,
         action: str = "send",
         message: str | None = None,
-        attachments: list[str] | None = None,
+        attachment_ids: list[str] | None = None,
+        attachment_file_paths: list[str] | None = None,
         room_id: str | None = None,
         target: str | None = None,
         thread_id: str | None = None,
@@ -484,7 +551,8 @@ class MatrixMessageTools(Toolkit):
         Actions:
         - send: Send message text. Defaults to current room and room-level scope.
         - reply/thread-reply: Send message text in a thread. Defaults to current thread.
-          Optional attachments accept context-scoped IDs (att_*).
+          Optional attachments accept context-scoped IDs (`attachment_ids`) and/or
+          local file paths (`attachment_file_paths`).
         - react: React to target event ID with message text as emoji (defaults to 👍).
         - read: Read latest messages from room or current thread.
         - context: Return runtime room/thread/event metadata for tool targeting.
@@ -495,19 +563,33 @@ class MatrixMessageTools(Toolkit):
             return self._context_error()
 
         normalized_action = action.strip().lower()
-        normalized_attachments, attachment_error = self._normalize_attachment_references(attachments)
-        if attachment_error is not None:
+        normalized_attachment_ids, attachment_ids_error = self._normalize_str_list(
+            attachment_ids,
+            field_name="attachment_ids",
+        )
+        if attachment_ids_error is not None:
             return self._payload(
                 "error",
                 action=normalized_action or action,
-                message=attachment_error,
+                message=attachment_ids_error,
+            )
+        normalized_attachment_file_paths, attachment_file_paths_error = self._normalize_str_list(
+            attachment_file_paths,
+            field_name="attachment_file_paths",
+        )
+        if attachment_file_paths_error is not None:
+            return self._payload(
+                "error",
+                action=normalized_action or action,
+                message=attachment_file_paths_error,
             )
         resolved_room_id = room_id or context.room_id
+        attachment_count = len(normalized_attachment_ids) + len(normalized_attachment_file_paths)
         validation_error = self._validate_matrix_message_request(
             context,
             action=normalized_action,
             room_id=resolved_room_id,
-            attachments=normalized_attachments,
+            attachment_count=attachment_count,
         )
         if validation_error is not None:
             return validation_error
@@ -520,7 +602,7 @@ class MatrixMessageTools(Toolkit):
                 normalized_action=normalized_action,
             )
 
-        action_weight = 1 + len(normalized_attachments) if self._action_supports_attachments(normalized_action) else 1
+        action_weight = 1 + attachment_count if self._action_supports_attachments(normalized_action) else 1
         if (limit_error := self._check_rate_limit(context, resolved_room_id, weight=action_weight)) is not None:
             return self._payload(
                 "error",
@@ -533,7 +615,8 @@ class MatrixMessageTools(Toolkit):
             context,
             action=normalized_action,
             message=message,
-            attachments=normalized_attachments,
+            attachment_ids=normalized_attachment_ids,
+            attachment_file_paths=normalized_attachment_file_paths,
             room_id=resolved_room_id,
             target=target,
             thread_id=thread_id,

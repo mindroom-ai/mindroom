@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 
 from mindroom.attachments import (
+    AttachmentRecord,
     attachments_for_tool_payload,
     load_attachment,
     register_local_attachment,
@@ -20,14 +21,6 @@ from mindroom.tool_runtime_context import append_tool_runtime_attachment_id, get
 
 if TYPE_CHECKING:
     from mindroom.tool_runtime_context import ToolRuntimeContext
-
-
-class _ResolvedAttachmentReference(NamedTuple):
-    """Result of resolving an attachment reference string."""
-
-    path: Path | None
-    attachment_id: str | None
-    error: str | None
 
 
 def _attachment_tool_payload(status: str, **kwargs: object) -> str:
@@ -71,54 +64,93 @@ def resolve_context_attachment_path(
     return attachment.local_path, None
 
 
-def _resolve_attachment_reference(
+def _normalize_tool_str_list(
+    values: list[str] | None,
+    *,
+    field_name: str,
+) -> tuple[list[str], str | None]:
+    if values is None:
+        return [], None
+
+    normalized: list[str] = []
+    for raw_value in values:
+        if not isinstance(raw_value, str):
+            return [], f"{field_name} entries must be strings."
+        value = raw_value.strip()
+        if value:
+            normalized.append(value)
+    return normalized, None
+
+
+def resolve_attachment_ids(
     context: ToolRuntimeContext,
-    raw_reference: object,
-) -> _ResolvedAttachmentReference:
-    if not isinstance(raw_reference, str):
-        return _ResolvedAttachmentReference(None, None, "attachments entries must be strings.")
-
-    reference = raw_reference.strip()
-    if not reference:
-        return _ResolvedAttachmentReference(None, None, None)
-
-    if not reference.startswith("att_"):
-        return _ResolvedAttachmentReference(
-            None,
-            None,
-            "attachments entries must be context attachment IDs (att_*).",
-        )
-
-    attachment_path, error = resolve_context_attachment_path(context, reference)
-    if error is not None:
-        return _ResolvedAttachmentReference(None, None, error)
-    return _ResolvedAttachmentReference(attachment_path, reference, None)
-
-
-def resolve_attachment_references(
-    context: ToolRuntimeContext,
-    attachments: list[str] | None,
+    attachment_ids: list[str],
 ) -> tuple[list[Path], list[str], str | None]:
     """Resolve context attachment IDs into local files."""
-    if not attachments:
+    if not attachment_ids:
         return [], [], None
 
     resolved_paths: list[Path] = []
     resolved_attachment_ids: list[str] = []
-    for raw_reference in attachments:
-        resolved = _resolve_attachment_reference(
-            context,
-            raw_reference,
-        )
-        if resolved.error is not None:
-            return [], [], resolved.error
-        if resolved.path is None:
+    for attachment_id in attachment_ids:
+        if not attachment_id.startswith("att_"):
+            return [], [], "attachment_ids entries must be context attachment IDs (att_*)."
+
+        attachment_path, error = resolve_context_attachment_path(context, attachment_id)
+        if error is not None:
+            return [], [], error
+        if attachment_path is None:
             continue
 
-        resolved_paths.append(resolved.path)
-        if resolved.attachment_id is not None:
-            resolved_attachment_ids.append(resolved.attachment_id)
+        resolved_paths.append(attachment_path)
+        resolved_attachment_ids.append(attachment_id)
     return resolved_paths, resolved_attachment_ids, None
+
+
+def register_attachment_file_path(
+    context: ToolRuntimeContext,
+    file_path: str,
+) -> tuple[AttachmentRecord | None, str | None]:
+    """Register a local file path in the current tool context."""
+    if context.storage_path is None:
+        return None, "Attachment storage path is unavailable in this runtime path."
+
+    resolved_path = Path(file_path).expanduser().resolve()
+    attachment_record = register_local_attachment(
+        context.storage_path,
+        resolved_path,
+        kind="file",
+        room_id=context.room_id,
+        thread_id=context.thread_id,
+        sender=context.requester_id,
+    )
+    if attachment_record is None:
+        return None, f"Failed to register attachment file: {resolved_path}"
+
+    append_tool_runtime_attachment_id(attachment_record.attachment_id)
+    return attachment_record, None
+
+
+def resolve_attachment_file_paths(
+    context: ToolRuntimeContext,
+    attachment_file_paths: list[str],
+) -> tuple[list[Path], list[str], str | None]:
+    """Register file paths and return local paths plus generated attachment IDs."""
+    if not attachment_file_paths:
+        return [], [], None
+
+    resolved_paths: list[Path] = []
+    newly_registered_attachment_ids: list[str] = []
+    for attachment_file_path in attachment_file_paths:
+        attachment_record, register_error = register_attachment_file_path(context, attachment_file_path)
+        if register_error is not None:
+            return [], [], register_error
+        if attachment_record is None:
+            continue
+        resolved_paths.append(attachment_record.local_path)
+        newly_registered_attachment_ids.append(attachment_record.attachment_id)
+
+    return resolved_paths, newly_registered_attachment_ids, None
 
 
 def get_attachment_listing(
@@ -231,43 +263,30 @@ class AttachmentTools(Toolkit):
                 "error",
                 message="Tool runtime context is unavailable in this runtime path.",
             )
-        if context.storage_path is None:
-            return _attachment_tool_payload(
-                "error",
-                message="Attachment storage path is unavailable in this runtime path.",
-            )
         if not isinstance(file_path, str) or not file_path.strip():
             return _attachment_tool_payload("error", message="file_path must be a non-empty string.")
 
-        resolved_path = Path(file_path).expanduser().resolve()
-        attachment_record = register_local_attachment(
-            context.storage_path,
-            resolved_path,
-            kind="file",
-            room_id=context.room_id,
-            thread_id=context.thread_id,
-            sender=context.requester_id,
-        )
-        if attachment_record is None:
+        attachment_record, register_error = register_attachment_file_path(context, file_path.strip())
+        if register_error is not None or attachment_record is None:
             return _attachment_tool_payload(
                 "error",
-                message=f"Failed to register attachment file: {resolved_path}",
+                message=register_error or "Failed to register attachment file.",
             )
 
-        append_tool_runtime_attachment_id(attachment_record.attachment_id)
         return _attachment_tool_payload(
             "ok",
             attachment_id=attachment_record.attachment_id,
             attachment=attachments_for_tool_payload([attachment_record], include_local_path=False)[0],
         )
 
-    async def send_attachments(
+    async def send_attachments(  # noqa: PLR0911
         self,
-        attachments: list[str] | None = None,
+        attachment_ids: list[str] | None = None,
+        attachment_file_paths: list[str] | None = None,
         room_id: str | None = None,
         thread_id: str | None = None,
     ) -> str:
-        """Send context attachment IDs to a Matrix room/thread."""
+        """Send attachment IDs and/or local file paths to a Matrix room/thread."""
         context = get_tool_runtime_context()
         if context is None:
             return _attachment_tool_payload(
@@ -275,14 +294,38 @@ class AttachmentTools(Toolkit):
                 message="Tool runtime context is unavailable in this runtime path.",
             )
 
-        attachment_paths, resolved_attachment_ids, attachment_error = resolve_attachment_references(
+        normalized_attachment_ids, attachment_ids_error = _normalize_tool_str_list(
+            attachment_ids,
+            field_name="attachment_ids",
+        )
+        if attachment_ids_error is not None:
+            return _attachment_tool_payload("error", message=attachment_ids_error)
+        normalized_attachment_file_paths, attachment_file_paths_error = _normalize_tool_str_list(
+            attachment_file_paths,
+            field_name="attachment_file_paths",
+        )
+        if attachment_file_paths_error is not None:
+            return _attachment_tool_payload("error", message=attachment_file_paths_error)
+
+        attachment_paths, resolved_attachment_ids, attachment_error = resolve_attachment_ids(
             context,
-            attachments,
+            normalized_attachment_ids,
         )
         if attachment_error is not None:
             return _attachment_tool_payload("error", message=attachment_error)
+        file_paths, newly_registered_attachment_ids, file_path_error = resolve_attachment_file_paths(
+            context,
+            normalized_attachment_file_paths,
+        )
+        if file_path_error is not None:
+            return _attachment_tool_payload("error", message=file_path_error)
+        attachment_paths.extend(file_paths)
+        resolved_attachment_ids.extend(newly_registered_attachment_ids)
         if not attachment_paths:
-            return _attachment_tool_payload("error", message="attachments cannot be empty.")
+            return _attachment_tool_payload(
+                "error",
+                message="At least one of attachment_ids or attachment_file_paths must be provided.",
+            )
 
         effective_room_id, effective_thread_id, destination_error = resolve_send_target(
             context,
@@ -308,6 +351,7 @@ class AttachmentTools(Toolkit):
                 thread_id=effective_thread_id,
                 attachment_event_ids=attachment_event_ids,
                 resolved_attachment_ids=resolved_attachment_ids,
+                newly_registered_attachment_ids=newly_registered_attachment_ids,
                 message=send_error,
             )
 
@@ -318,4 +362,5 @@ class AttachmentTools(Toolkit):
             event_id=attachment_event_ids[-1] if attachment_event_ids else None,
             attachment_event_ids=attachment_event_ids,
             resolved_attachment_ids=resolved_attachment_ids,
+            newly_registered_attachment_ids=newly_registered_attachment_ids,
         )

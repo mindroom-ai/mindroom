@@ -180,7 +180,7 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | :lucide-database: | `memory` | Explicitly store and search agent memories on demand | - |
 | :lucide-database: | `mem0` | Persistent memory system | `api_key` (optional for cloud) |
 | :lucide-database: | `zep` | Conversation memory | `api_key` |
-| :lucide-paperclip: | `attachments` | List and send context-scoped file attachments (see [Attachments](../attachments.md)) | - |
+| :lucide-paperclip: | `attachments` | List, register, and send context-scoped file attachments (see [Attachments](../attachments.md)) | - |
 
 ## Custom & Config
 

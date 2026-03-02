@@ -115,7 +115,7 @@ async def test_matrix_message_send_supports_context_attachments(tmp_path: Path) 
             await tool.matrix_message(
                 action="send",
                 message="hello",
-                attachments=["att_upload"],
+                attachment_ids=["att_upload"],
             ),
         )
 
@@ -158,7 +158,7 @@ async def test_matrix_message_send_allows_attachment_only(tmp_path: Path) -> Non
         payload = json.loads(
             await tool.matrix_message(
                 action="send",
-                attachments=["att_only"],
+                attachment_ids=["att_only"],
             ),
         )
 
@@ -167,6 +167,39 @@ async def test_matrix_message_send_allows_attachment_only(tmp_path: Path) -> Non
     assert payload["attachment_event_ids"] == ["$file_evt"]
     assert payload["resolved_attachment_ids"] == ["att_only"]
     mock_send.assert_not_awaited()
+    mock_send_file.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_send_supports_attachment_file_paths(tmp_path: Path) -> None:
+    """Send should auto-register local file paths and upload them."""
+    tool = MatrixMessageTools()
+    generated_file = tmp_path / "generated.txt"
+    generated_file.write_text("artifact", encoding="utf-8")
+    ctx = _make_context(storage_path=tmp_path)
+
+    with (
+        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
+        patch(
+            "mindroom.custom_tools.matrix_message.send_file_message",
+            new=AsyncMock(return_value="$file_evt"),
+        ) as mock_send_file,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="send",
+                message="hello",
+                attachment_file_paths=[str(generated_file)],
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["event_id"] == "$evt"
+    assert payload["attachment_event_ids"] == ["$file_evt"]
+    assert payload["resolved_attachment_ids"][0].startswith("att_")
+    assert payload["newly_registered_attachment_ids"] == payload["resolved_attachment_ids"]
+    mock_send.assert_awaited_once()
     mock_send_file.assert_awaited_once()
 
 
@@ -312,7 +345,7 @@ async def test_matrix_message_send_validates_non_empty_message() -> None:
         payload = json.loads(await tool.matrix_message(action="send", message="  "))
 
     assert payload["status"] == "error"
-    assert "At least one of message or attachments" in payload["message"]
+    assert "At least one of message, attachment_ids, or attachment_file_paths" in payload["message"]
 
 
 @pytest.mark.asyncio
@@ -326,7 +359,7 @@ async def test_matrix_message_rejects_attachments_for_non_send_actions(tmp_path:
             await tool.matrix_message(
                 action="react",
                 target="$target",
-                attachments=["att_upload"],
+                attachment_ids=["att_upload"],
             ),
         )
 
@@ -344,7 +377,7 @@ async def test_matrix_message_rejects_non_att_attachment_references(tmp_path: Pa
         payload = json.loads(
             await tool.matrix_message(
                 action="send",
-                attachments=["output.txt"],
+                attachment_ids=["output.txt"],
             ),
         )
 
@@ -362,7 +395,7 @@ async def test_matrix_message_rejects_attachment_count_over_limit(tmp_path: Path
         payload = json.loads(
             await tool.matrix_message(
                 action="send",
-                attachments=["att_over"] * 6,
+                attachment_ids=["att_over"] * 6,
             ),
         )
 
@@ -473,7 +506,7 @@ async def test_matrix_message_rate_limit_counts_attachments_weight(tmp_path: Pat
             await tool.matrix_message(
                 action="send",
                 message="first",
-                attachments=["att_weighted"],
+                attachment_ids=["att_weighted"],
             ),
         )
         second = json.loads(await tool.matrix_message(action="send", message="second"))

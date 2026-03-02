@@ -74,7 +74,7 @@ async def test_attachments_tool_sends_attachment_ids(tmp_path: Path) -> None:
         tool_runtime_context(_tool_context(tmp_path, attachment_ids=("att_upload",))),
         patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
     ):
-        payload = json.loads(await tool.send_attachments(attachments=["att_upload"]))
+        payload = json.loads(await tool.send_attachments(attachment_ids=["att_upload"]))
 
     assert payload["status"] == "ok"
     assert payload["tool"] == "attachments"
@@ -85,7 +85,7 @@ async def test_attachments_tool_sends_attachment_ids(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_attachments_tool_rejects_non_attachment_id_references(tmp_path: Path) -> None:
-    """Tool should require context attachment IDs and reject raw filesystem paths."""
+    """Tool should require att_* values for attachment_ids."""
     tool = AttachmentTools()
     sample_file = tmp_path / "upload.txt"
     sample_file.write_text("payload", encoding="utf-8")
@@ -94,7 +94,7 @@ async def test_attachments_tool_rejects_non_attachment_id_references(tmp_path: P
         tool_runtime_context(_tool_context(tmp_path)),
         patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
     ):
-        payload = json.loads(await tool.send_attachments(attachments=[str(sample_file)]))
+        payload = json.loads(await tool.send_attachments(attachment_ids=[str(sample_file)]))
 
     assert payload["status"] == "error"
     assert payload["tool"] == "attachments"
@@ -104,14 +104,14 @@ async def test_attachments_tool_rejects_non_attachment_id_references(tmp_path: P
 
 @pytest.mark.asyncio
 async def test_attachments_tool_rejects_non_att_prefix_references(tmp_path: Path) -> None:
-    """Tool should reject references that do not use the att_ attachment-id format."""
+    """Tool should reject attachment_ids values without the att_ prefix."""
     tool = AttachmentTools()
 
     with (
         tool_runtime_context(_tool_context(tmp_path)),
         patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
     ):
-        payload = json.loads(await tool.send_attachments(attachments=["upload.txt"]))
+        payload = json.loads(await tool.send_attachments(attachment_ids=["upload.txt"]))
 
     assert payload["status"] == "error"
     assert payload["tool"] == "attachments"
@@ -156,7 +156,7 @@ async def test_attachments_tool_cross_room_send_does_not_inherit_source_thread(t
     ):
         payload = json.loads(
             await tool.send_attachments(
-                attachments=["att_cross"],
+                attachment_ids=["att_cross"],
                 room_id="!other:localhost",  # different room
                 # thread_id intentionally omitted
             ),
@@ -191,7 +191,7 @@ async def test_attachments_tool_rejects_send_to_unjoined_room(tmp_path: Path) ->
     ):
         payload = json.loads(
             await tool.send_attachments(
-                attachments=["att_unjoin"],
+                attachment_ids=["att_unjoin"],
                 room_id="!other:localhost",
             ),
         )
@@ -217,7 +217,7 @@ async def test_attachments_tool_registers_file_and_updates_runtime_context(tmp_p
         current_context = get_tool_runtime_context()
         assert current_context is not None
         attachment_id = register_payload["attachment_id"]
-        send_payload = json.loads(await tool.send_attachments(attachments=[attachment_id]))
+        send_payload = json.loads(await tool.send_attachments(attachment_ids=[attachment_id]))
 
     assert register_payload["status"] == "ok"
     assert register_payload["tool"] == "attachments"
@@ -252,7 +252,7 @@ async def test_attachments_tool_cross_room_send_requires_authorization(tmp_path:
     ):
         payload = json.loads(
             await tool.send_attachments(
-                attachments=["att_authz"],
+                attachment_ids=["att_authz"],
                 room_id="!other:localhost",
             ),
         )
@@ -260,6 +260,30 @@ async def test_attachments_tool_cross_room_send_requires_authorization(tmp_path:
     assert payload["status"] == "error"
     assert "Not authorized" in payload["message"]
     mocked.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_sends_local_file_paths_by_auto_registering(tmp_path: Path) -> None:
+    """Tool should auto-register local file paths and send them in the same call."""
+    tool = AttachmentTools()
+    generated_file = tmp_path / "generated.txt"
+    generated_file.write_text("artifact", encoding="utf-8")
+    ctx = _tool_context(tmp_path)
+
+    with (
+        tool_runtime_context(ctx),
+        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
+    ):
+        payload = json.loads(await tool.send_attachments(attachment_file_paths=[str(generated_file)]))
+        current_context = get_tool_runtime_context()
+        assert current_context is not None
+
+    assert payload["status"] == "ok"
+    assert payload["tool"] == "attachments"
+    assert payload["resolved_attachment_ids"][0].startswith("att_")
+    assert payload["newly_registered_attachment_ids"] == payload["resolved_attachment_ids"]
+    assert payload["newly_registered_attachment_ids"][0] in current_context.attachment_ids
+    mocked.assert_awaited_once()
 
 
 def test_tool_runtime_context_none_temporarily_clears_nested_scope(tmp_path: Path) -> None:
