@@ -32,7 +32,7 @@ SCOPES: list[str] = []
 
 # Get configuration from environment
 BACKEND_PORT = os.getenv("BACKEND_PORT", "8765")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+_FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
 
 class HomeAssistantStatus(BaseModel):
@@ -61,7 +61,7 @@ class HomeAssistantConfig(BaseModel):
     long_lived_token: str | None = None
 
 
-def get_stored_config() -> dict[str, Any] | None:
+def _get_stored_config() -> dict[str, Any] | None:
     """Get stored Home Assistant configuration."""
     return creds_manager.load_credentials("homeassistant")
 
@@ -71,7 +71,7 @@ def save_config(config: dict[str, Any]) -> None:
     creds_manager.save_credentials("homeassistant", config)
 
 
-async def test_connection(instance_url: str, token: str) -> dict[str, Any]:
+async def _test_connection(instance_url: str, token: str) -> dict[str, Any]:
     """Test connection to Home Assistant."""
     async with httpx.AsyncClient() as client:
         try:
@@ -132,7 +132,7 @@ async def test_connection(instance_url: str, token: str) -> dict[str, Any]:
 @router.get("/status")
 async def get_status() -> HomeAssistantStatus:
     """Check Home Assistant integration status."""
-    config = get_stored_config()
+    config = _get_stored_config()
 
     if not config:
         return HomeAssistantStatus(
@@ -152,7 +152,7 @@ async def get_status() -> HomeAssistantStatus:
                 error="Missing instance URL or token",
             )
 
-        info = await test_connection(instance_url, token)
+        info = await _test_connection(instance_url, token)
 
         return HomeAssistantStatus(
             connected=True,
@@ -194,7 +194,7 @@ async def connect_oauth(config: HomeAssistantConfig) -> HomeAssistantAuthUrl:
 
     # Build OAuth authorization URL
     # Home Assistant OAuth2 flow: https://developers.home-assistant.io/docs/auth_api/
-    redirect_uri = f"{FRONTEND_URL}/homeassistant-callback"
+    redirect_uri = f"{_FRONTEND_URL}/homeassistant-callback"
 
     auth_params = {
         "client_id": config.client_id,
@@ -239,7 +239,7 @@ async def connect_token(config: HomeAssistantConfig) -> dict[str, str]:
 
     # Test the connection
     try:
-        await test_connection(instance_url, config.long_lived_token)
+        await _test_connection(instance_url, config.long_lived_token)
     except HTTPException:
         raise
     except Exception as e:
@@ -268,7 +268,7 @@ async def callback(request: Request) -> RedirectResponse:
         raise HTTPException(status_code=400, detail="No authorization code received")
 
     # Get stored config
-    config = get_stored_config()
+    config = _get_stored_config()
     if not config:
         raise HTTPException(status_code=503, detail="No configuration found")
 
@@ -311,7 +311,7 @@ async def callback(request: Request) -> RedirectResponse:
             )
 
             # Redirect back to widget with success message
-            return RedirectResponse(url=f"{FRONTEND_URL}/?homeassistant=connected")
+            return RedirectResponse(url=f"{_FRONTEND_URL}/?homeassistant=connected")
 
     except httpx.RequestError as e:
         raise HTTPException(status_code=503, detail=f"Failed to exchange code: {e!s}") from e
@@ -332,7 +332,7 @@ async def disconnect() -> dict[str, str]:
 @router.get("/entities")
 async def get_entities(domain: str | None = None) -> list[dict[str, Any]]:
     """Get Home Assistant entities."""
-    config = get_stored_config()
+    config = _get_stored_config()
     if not config:
         raise HTTPException(status_code=401, detail="Not connected to Home Assistant")
 
@@ -385,7 +385,7 @@ async def call_service(
     data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Call a Home Assistant service."""
-    config = get_stored_config()
+    config = _get_stored_config()
     if not config:
         raise HTTPException(status_code=401, detail="Not connected to Home Assistant")
 
