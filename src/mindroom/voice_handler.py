@@ -12,15 +12,15 @@ import nio
 from agno.agent import Agent
 from nio import crypto
 
-from .ai import get_model_instance
-from .authorization import get_available_agents_for_sender
-from .commands import get_command_list
-from .constants import VOICE_PREFIX
-from .logging_config import get_logger
-from .matrix.identity import agent_username_localpart
+from mindroom.ai import get_model_instance
+from mindroom.authorization import get_available_agents_for_sender
+from mindroom.commands.parsing import get_command_list
+from mindroom.constants import VOICE_PREFIX
+from mindroom.logging_config import get_logger
+from mindroom.matrix.identity import agent_username_localpart
 
 if TYPE_CHECKING:
-    from .config.main import Config
+    from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 _VOICE_MENTION_PATTERN = re.compile(
@@ -288,7 +288,7 @@ Output the formatted message only, no explanation:"""
     except Exception as e:
         logger.exception("Error processing transcription")
         # Return error message so user knows what happened
-        from .error_handling import get_user_friendly_error_message  # noqa: PLC0415
+        from mindroom.error_handling import get_user_friendly_error_message  # noqa: PLC0415
 
         return get_user_friendly_error_message(e, "VoiceProcessor")
     else:

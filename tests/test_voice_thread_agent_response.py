@@ -15,8 +15,7 @@ from mindroom.constants import ORIGINAL_SENDER_KEY, VOICE_PREFIX
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.teams import TeamFormationDecision, TeamMode
-
-from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
 
 @pytest.fixture

@@ -17,8 +17,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.teams import TeamMode
-
-from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator

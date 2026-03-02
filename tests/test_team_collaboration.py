@@ -13,8 +13,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_utils import get_agents_in_thread
-
-from .conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator

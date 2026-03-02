@@ -18,8 +18,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
-
-from .conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD
 
 
 @pytest.fixture

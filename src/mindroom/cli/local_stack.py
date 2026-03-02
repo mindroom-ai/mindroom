@@ -14,8 +14,9 @@ from urllib.parse import urlparse
 import httpx
 import typer
 
-from mindroom.cli_config import console
 from mindroom.constants import CONFIG_PATH, STORAGE_PATH
+
+from .config import console
 
 _CINNY_DEFAULT_IMAGE = "ghcr.io/mindroom-ai/mindroom-cinny:latest"
 _CINNY_DEFAULT_CONTAINER = "mindroom-cinny-local"

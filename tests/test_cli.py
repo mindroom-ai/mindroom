@@ -12,8 +12,7 @@ from mindroom.config.main import Config
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, _register_user
 from mindroom.orchestrator import MultiAgentOrchestrator
-
-from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
 if TYPE_CHECKING:
     from pathlib import Path

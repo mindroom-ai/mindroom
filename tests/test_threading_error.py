@@ -21,8 +21,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.reply_chain import _merge_thread_and_chain_history
 from mindroom.matrix.users import AgentMatrixUser
-
-from .conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator

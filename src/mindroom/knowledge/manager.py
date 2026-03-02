@@ -18,16 +18,16 @@ from agno.knowledge.knowledge import Knowledge
 from agno.vectordb.chroma import ChromaDb
 from watchfiles import Change, awatch
 
-from .constants import resolve_config_relative_path
-from .credentials import get_credentials_manager
-from .credentials_sync import get_api_key_for_provider, get_ollama_host
-from .logging_config import get_logger
+from mindroom.constants import resolve_config_relative_path
+from mindroom.credentials import get_credentials_manager
+from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
+from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from agno.knowledge.embedder.base import Embedder
 
-    from .config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
-    from .config.main import Config
+    from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
+    from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 

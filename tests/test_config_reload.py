@@ -15,8 +15,7 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import MultiAgentOrchestrator, _get_changed_agents
-
-from .conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD
 
 
 def setup_test_bot(bot: AgentBot, mock_client: AsyncMock) -> None:

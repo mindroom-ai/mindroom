@@ -15,7 +15,7 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 ## Commands
 
 <!-- CODE:START -->
-<!-- from mindroom.cli import app -->
+<!-- from mindroom.cli.main import app -->
 <!-- from typer.testing import CliRunner -->
 <!-- runner = CliRunner() -->
 <!-- result = runner.invoke(app, ["--help"]) -->
@@ -61,7 +61,7 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 Show the current MindRoom version.
 
 <!-- CODE:START -->
-<!-- from mindroom.cli import app -->
+<!-- from mindroom.cli.main import app -->
 <!-- from typer.testing import CliRunner -->
 <!-- runner = CliRunner() -->
 <!-- result = runner.invoke(app, ["version", "--help"]) -->
@@ -92,7 +92,7 @@ Show the current MindRoom version.
 Start MindRoom with your configuration.
 
 <!-- CODE:START -->
-<!-- from mindroom.cli import app -->
+<!-- from mindroom.cli.main import app -->
 <!-- from typer.testing import CliRunner -->
 <!-- runner = CliRunner() -->
 <!-- result = runner.invoke(app, ["run", "--help"]) -->
@@ -178,7 +178,7 @@ By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, a
 `mindroom run` works without inline env exports.
 
 <!-- CODE:START -->
-<!-- from mindroom.cli import app -->
+<!-- from mindroom.cli.main import app -->
 <!-- from typer.testing import CliRunner -->
 <!-- runner = CliRunner() -->
 <!-- result = runner.invoke(app, ["local-stack-setup", "--help"]) -->

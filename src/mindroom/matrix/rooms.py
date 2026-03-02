@@ -9,10 +9,8 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.logging_config import get_logger
-from mindroom.topic_generator import ensure_room_has_topic, generate_room_topic_ai
-
-from .avatar import check_and_set_avatar
-from .client import (
+from mindroom.matrix.avatar import check_and_set_avatar
+from mindroom.matrix.client import (
     create_room,
     ensure_room_directory_visibility,
     ensure_room_join_rule,
@@ -20,9 +18,10 @@ from .client import (
     leave_room,
     matrix_client,
 )
-from .identity import MatrixID, extract_server_name_from_homeserver, managed_room_alias_localpart
-from .state import MatrixRoom, MatrixState
-from .users import INTERNAL_USER_ACCOUNT_KEY
+from mindroom.matrix.identity import MatrixID, extract_server_name_from_homeserver, managed_room_alias_localpart
+from mindroom.matrix.state import MatrixRoom, MatrixState
+from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
+from mindroom.topic_generator import ensure_room_has_topic, generate_room_topic_ai
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config

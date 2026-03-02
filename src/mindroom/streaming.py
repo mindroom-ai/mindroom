@@ -10,11 +10,11 @@ from typing import TYPE_CHECKING, Any
 
 from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
-from . import interactive
-from .logging_config import get_logger
-from .matrix.client import edit_message, send_message
-from .matrix.mentions import format_message_with_mentions
-from .tool_events import (
+from mindroom import interactive
+from mindroom.logging_config import get_logger
+from mindroom.matrix.client import edit_message, send_message
+from mindroom.matrix.mentions import format_message_with_mentions
+from mindroom.tool_events import (
     StructuredStreamChunk,
     ToolTraceEntry,
     complete_pending_tool_block,
@@ -27,9 +27,9 @@ if TYPE_CHECKING:
 
     import nio
 
-    from .config.main import Config
+    from mindroom.config.main import Config
 
-from .matrix.client import get_latest_thread_event_id_if_needed
+from mindroom.matrix.client import get_latest_thread_event_id_if_needed
 
 logger = get_logger(__name__)
 

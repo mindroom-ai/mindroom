@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING
 from agno.tools import Toolkit
 
 from mindroom.agents import create_agent, describe_agent
-from mindroom.knowledge import get_knowledge_manager
-from mindroom.knowledge_utils import resolve_agent_knowledge
+from mindroom.knowledge.manager import get_knowledge_manager
+from mindroom.knowledge.utils import resolve_agent_knowledge
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:

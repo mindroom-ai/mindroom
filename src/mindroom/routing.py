@@ -7,13 +7,13 @@ from typing import TYPE_CHECKING, Any
 from agno.agent import Agent
 from pydantic import BaseModel, Field
 
-from .agents import describe_agent
-from .ai import get_model_instance
-from .logging_config import get_logger
-from .matrix.identity import MatrixID
+from mindroom.agents import describe_agent
+from mindroom.ai import get_model_instance
+from mindroom.logging_config import get_logger
+from mindroom.matrix.identity import MatrixID
 
 if TYPE_CHECKING:
-    from .config.main import Config
+    from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 

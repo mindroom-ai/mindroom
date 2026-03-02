@@ -25,8 +25,7 @@ from mindroom.streaming import (
     is_in_progress_message,
     send_streaming_response,
 )
-
-from .conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator

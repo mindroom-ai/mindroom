@@ -8,8 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from mindroom.commands import CommandType, _CommandParser
-from mindroom.config_commands import (
+from mindroom.commands.config_commands import (
     _format_value,
     _get_nested_value,
     _parse_config_args,
@@ -17,6 +16,7 @@ from mindroom.config_commands import (
     _set_nested_value,
     handle_config_command,
 )
+from mindroom.commands.parsing import CommandType, _CommandParser
 
 
 class TestCommandParser:

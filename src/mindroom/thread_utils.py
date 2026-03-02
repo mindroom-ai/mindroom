@@ -5,15 +5,15 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any
 
-from . import authorization
-from .constants import ROUTER_AGENT_NAME
-from .matrix.identity import MatrixID, extract_agent_name
-from .matrix.rooms import resolve_room_aliases
+from mindroom import authorization
+from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.matrix.identity import MatrixID, extract_agent_name
+from mindroom.matrix.rooms import resolve_room_aliases
 
 if TYPE_CHECKING:
     import nio
 
-    from .config.main import Config
+    from mindroom.config.main import Config
 
 # Matches <a href="https://matrix.to/#/@user:domain">...</a> pills used by bridges.
 # Accepts both single and double quotes (mautrix bridges use single quotes).

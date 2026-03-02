@@ -239,7 +239,7 @@ async def list_schedules(
     include_cancelled: IncludeCancelled = False,
 ) -> ListSchedulesResponse:
     """List scheduled tasks from one room or all configured rooms."""
-    from .main import load_runtime_config  # noqa: PLC0415
+    from mindroom.api.main import load_runtime_config  # noqa: PLC0415
 
     runtime_config, _ = load_runtime_config()
     room_ids = [_resolve_room_id(room_id)] if room_id else _configured_room_ids(runtime_config)
@@ -270,7 +270,7 @@ async def update_schedule(
     request: UpdateScheduleRequest,
 ) -> ScheduledTaskResponse:
     """Update prompt text and schedule fields for an existing task."""
-    from .main import load_runtime_config  # noqa: PLC0415
+    from mindroom.api.main import load_runtime_config  # noqa: PLC0415
 
     runtime_config, _ = load_runtime_config()
     resolved_room_id = _resolve_room_id(request.room_id)

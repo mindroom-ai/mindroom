@@ -10,6 +10,10 @@ from typing import TYPE_CHECKING, Any
 
 import uvicorn
 
+from mindroom.memory.auto_flush import MemoryAutoFlushWorker, auto_flush_enabled
+from mindroom.plugins import load_plugins
+from mindroom.skills import clear_skill_cache, get_skill_snapshot
+
 from .agents import get_rooms_for_entity
 from .authorization import is_authorized_sender
 from .bot import AgentBot, TeamBot, create_bot_for_entity
@@ -17,7 +21,7 @@ from .config.main import Config
 from .constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME
 from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
-from .knowledge import initialize_knowledge_managers, shutdown_knowledge_managers
+from .knowledge.manager import initialize_knowledge_managers, shutdown_knowledge_managers
 from .logging_config import get_logger, setup_logging
 from .matrix.client import get_joined_rooms, get_room_members, invite_to_room
 from .matrix.identity import MatrixID, extract_server_name_from_homeserver
@@ -29,12 +33,9 @@ from .matrix.users import (
     AgentMatrixUser,
     create_agent_user,
 )
-from .memory.auto_flush import MemoryAutoFlushWorker, auto_flush_enabled
-from .plugins import load_plugins
-from .skills import clear_skill_cache, get_skill_snapshot
 
 if TYPE_CHECKING:
-    from .knowledge import KnowledgeManager
+    from .knowledge.manager import KnowledgeManager
 
 logger = get_logger(__name__)
 
