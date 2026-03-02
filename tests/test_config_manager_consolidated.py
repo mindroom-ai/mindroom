@@ -89,13 +89,12 @@ class TestConsolidatedConfigManager:
         result = cm.get_info(info_type="tool_details", name="googlesearch")
         assert "Tool: googlesearch" in result
 
-    def test_get_info_tool_details_for_openclaw_preset(self) -> None:
-        """Tool details should describe config-only tool presets."""
+    def test_get_info_tool_details_for_openclaw_compat(self) -> None:
+        """Tool details should describe openclaw_compat as a registered tool."""
         cm = ConfigManagerTools()
         result = cm.get_info(info_type="tool_details", name="openclaw_compat")
-        assert "Tool Preset: openclaw_compat" in result
-        assert "Expands To" in result
-        assert "shell, coding, duckduckgo, website, browser, scheduler" in result
+        assert "Tool: openclaw_compat" in result
+        assert "OpenClaw Compat" in result
 
     def test_get_info_invalid_type(self) -> None:
         """Test get_info with invalid info type."""
@@ -151,14 +150,10 @@ class TestConsolidatedConfigManager:
 
             config = Config.from_yaml(config_path)
             assert config.agents["test_agent"].tools == ["openclaw_compat"]
-            assert config.get_agent_tools("test_agent")[:6] == [
-                "shell",
-                "coding",
-                "duckduckgo",
-                "website",
-                "browser",
-                "scheduler",
-            ]
+            effective = config.get_agent_tools("test_agent")
+            assert effective[0] == "openclaw_compat"
+            assert "shell" in effective
+            assert "matrix_message" in effective
         finally:
             config_path.unlink(missing_ok=True)
 
@@ -624,8 +619,8 @@ class TestGetAgentSandboxTools:
         )
         assert config.get_agent_sandbox_tools("code") == []
 
-    def test_agent_override_expands_sandbox_tool_presets(self) -> None:
-        """Agent-level sandbox presets should expand and dedupe in order."""
+    def test_agent_override_expands_sandbox_implied_tools(self) -> None:
+        """Agent-level sandbox tools should expand implied tools and dedupe in order."""
         config = Config(
             defaults=DefaultsConfig(sandbox_tools=["file"]),
             agents={
@@ -637,6 +632,8 @@ class TestGetAgentSandboxTools:
         )
 
         assert config.get_agent_sandbox_tools("code") == [
+            "openclaw_compat",
+            "python",
             "shell",
             "coding",
             "duckduckgo",
@@ -646,11 +643,10 @@ class TestGetAgentSandboxTools:
             "subagents",
             "matrix_message",
             "attachments",
-            "python",
         ]
 
-    def test_defaults_expand_sandbox_tool_presets(self) -> None:
-        """Default sandbox presets should expand for agents that inherit defaults."""
+    def test_defaults_expand_sandbox_implied_tools(self) -> None:
+        """Default sandbox tools should expand implied tools for agents that inherit defaults."""
         config = Config(
             defaults=DefaultsConfig(sandbox_tools=["openclaw_compat", "python", "shell"]),
             agents={
@@ -659,6 +655,8 @@ class TestGetAgentSandboxTools:
         )
 
         assert config.get_agent_sandbox_tools("code") == [
+            "openclaw_compat",
+            "python",
             "shell",
             "coding",
             "duckduckgo",
@@ -668,5 +666,4 @@ class TestGetAgentSandboxTools:
             "subagents",
             "matrix_message",
             "attachments",
-            "python",
         ]

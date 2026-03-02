@@ -184,21 +184,21 @@ def test_get_tools(test_client: TestClient) -> None:
     assert "icon_color" in first_tool  # New field we added
 
 
-def test_get_tools_includes_preset_metadata(test_client: TestClient) -> None:
-    """Preset tool entries should appear in the tools response with expected shape."""
+def test_get_tools_includes_openclaw_compat_metadata(test_client: TestClient) -> None:
+    """openclaw_compat should appear as a registered tool in the tools response."""
     response = test_client.get("/api/tools/")
     assert response.status_code == 200
 
     tools_by_name = {tool["name"]: tool for tool in response.json()["tools"]}
     assert "openclaw_compat" in tools_by_name
 
-    preset = tools_by_name["openclaw_compat"]
-    assert preset["category"] == "preset"
-    assert preset["status"] == "available"
-    assert preset["setup_type"] == "none"
-    assert preset["helper_text"] is not None
-    assert "shell" in preset["helper_text"]
-    assert preset["display_name"] == "Openclaw Compat"
+    tool = tools_by_name["openclaw_compat"]
+    assert tool["category"] == "development"
+    assert tool["status"] == "available"
+    assert tool["setup_type"] == "none"
+    assert tool["helper_text"] is not None
+    assert "shell" in tool["helper_text"]
+    assert tool["display_name"] == "OpenClaw Compat"
 
 
 def test_get_rooms(test_client: TestClient) -> None:

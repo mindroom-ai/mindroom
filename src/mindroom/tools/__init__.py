@@ -241,6 +241,22 @@ __all__ = [
 
 
 @register_tool_with_metadata(
+    name="openclaw_compat",
+    display_name="OpenClaw Compat",
+    description="Convenience bundle that implies shell, coding, browser, and other common tools",
+    category=ToolCategory.DEVELOPMENT,
+    icon="Workflow",
+    icon_color="text-orange-500",
+    helper_text="Implies: shell, coding, duckduckgo, website, browser, scheduler, subagents, matrix_message, attachments.",
+)
+def openclaw_compat_tools() -> type[Toolkit]:
+    """Return an empty toolkit — the real tools are loaded via IMPLIED_TOOLS."""
+    from agno.tools import Toolkit
+
+    return Toolkit
+
+
+@register_tool_with_metadata(
     name="homeassistant",
     display_name="Home Assistant",
     description="Control and monitor smart home devices",

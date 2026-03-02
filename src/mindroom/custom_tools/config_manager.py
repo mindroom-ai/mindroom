@@ -22,17 +22,8 @@ logger = get_logger(__name__)
 
 
 def _is_known_tool_entry(tool_name: str) -> bool:
-    """Return whether a tool entry is either a real tool or a tool preset."""
-    return tool_name in TOOL_METADATA or Config.is_tool_preset(tool_name)
-
-
-def _tool_entry_summary(tool_name: str) -> str:
-    """Return a concise summary for a tool or preset entry."""
-    preset = Config.get_tool_preset(tool_name)
-    if preset is not None:
-        return f"Tool preset that expands to: {', '.join(preset)}."
-    metadata = TOOL_METADATA[tool_name]
-    return metadata.description
+    """Return whether a tool entry is a known registered tool."""
+    return tool_name in TOOL_METADATA
 
 
 def validate_knowledge_bases(
@@ -445,35 +436,18 @@ class ConfigManagerTools(Toolkit):
                 tools_by_category[category] = []
             tools_by_category[category].append((tool_name, description))
 
-        preset_entries = [
-            (preset_name, _tool_entry_summary(preset_name)) for preset_name in sorted(Config.TOOL_PRESETS)
-        ]
-
         output = ["## Available Tools by Category:\n"]
         for category in sorted(tools_by_category.keys()):
             output.append(f"\n### {category.title()}:")
             for tool_name, description in tools_by_category[category]:
                 output.append(f"- **{tool_name}**: {description}")
-        if preset_entries:
-            output.append("\n### Tool Presets:")
-            for preset_name, description in preset_entries:
-                output.append(f"- **{preset_name}**: {description}")
 
         return "\n".join(output)
 
     def _get_tool_details(self, tool_name: str) -> str:
         """Get detailed information about a specific tool."""
-        preset = Config.get_tool_preset(tool_name)
-        if preset is not None:
-            return (
-                f"## Tool Preset: {tool_name}\n\n"
-                "**Type**: Config-only preset macro\n"
-                f"**Expands To**: {', '.join(preset)}\n"
-                "**Notes**: Presets are expanded by Config.get_agent_tools and are not runtime toolkits."
-            )
-
         if tool_name not in TOOL_METADATA:
-            available = ", ".join(sorted([*TOOL_METADATA.keys(), *Config.TOOL_PRESETS.keys()]))
+            available = ", ".join(sorted(TOOL_METADATA.keys()))
             return f"Unknown tool: {tool_name}\n\nAvailable tools: {available}"
 
         output = [f"## Tool: {tool_name}\n"]
