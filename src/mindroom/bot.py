@@ -13,6 +13,7 @@ import nio
 from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
 
 from mindroom.matrix import image_handler
+from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 
 from . import config_confirmation, interactive, voice_handler
 from .agents import create_agent, create_session_storage, remove_run_by_event_id
@@ -48,7 +49,6 @@ from .matrix.identity import (
 from .matrix.mentions import format_message_with_mentions
 from .matrix.presence import build_agent_status_message, is_user_online, set_presence_status, should_use_streaming
 from .matrix.reply_chain import ReplyChainCaches, derive_conversation_context
-from .matrix.room_cleanup import cleanup_all_orphaned_bots
 from .matrix.rooms import (
     is_dm_room,
     leave_non_dm_rooms,

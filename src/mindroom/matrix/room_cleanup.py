@@ -13,12 +13,11 @@ from typing import TYPE_CHECKING
 import nio
 
 from mindroom.logging_config import get_logger
-
-from .client import get_joined_rooms, get_room_members
-from .identity import MatrixID
-from .rooms import is_dm_room
-from .state import MatrixState
-from .users import INTERNAL_USER_ACCOUNT_KEY
+from mindroom.matrix.client import get_joined_rooms, get_room_members
+from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.rooms import is_dm_room
+from mindroom.matrix.state import MatrixState
+from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
