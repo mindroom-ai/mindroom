@@ -6,7 +6,10 @@ import json
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import nio
+import pytest
 
 from mindroom.attachment_media import resolve_attachment_media
 from mindroom.attachments import (
@@ -15,6 +18,8 @@ from mindroom.attachments import (
     load_attachment,
     merge_attachment_ids,
     parse_attachment_ids_from_event_source,
+    parse_attachment_ids_from_thread_history,
+    register_image_attachment,
     register_local_attachment,
     resolve_attachments,
 )
@@ -44,6 +49,16 @@ def test_parse_attachment_ids_from_event_source_dedupes() -> None:
     }
     attachment_ids = parse_attachment_ids_from_event_source(event_source)
     assert attachment_ids == ["att_1", "att_2"]
+
+
+def test_parse_attachment_ids_from_thread_history_dedupes_in_order() -> None:
+    """Thread history metadata should produce ordered unique attachment IDs."""
+    thread_history = [
+        {"content": {"com.mindroom.attachment_ids": ["att_a", "att_b"]}},
+        {"content": {"com.mindroom.attachment_ids": ["att_b", "att_c"]}},
+        {"content": {"body": "no attachments"}},
+    ]
+    assert parse_attachment_ids_from_thread_history(thread_history) == ["att_a", "att_b", "att_c"]
 
 
 def test_register_resolve_and_convert_attachment(tmp_path: Path) -> None:
@@ -79,6 +94,34 @@ def test_register_resolve_and_convert_attachment(tmp_path: Path) -> None:
     assert files[0].filename == "payload.zip"
     assert str(files[0].filepath) == str(file_path.resolve())
     assert videos == []
+
+
+@pytest.mark.asyncio
+async def test_register_image_attachment_uses_detected_mime_type(tmp_path: Path) -> None:
+    """Image registration should use byte-detected MIME when metadata is wrong."""
+    event = MagicMock(spec=nio.RoomMessageImage)
+    event.event_id = "$img_mismatch"
+    event.sender = "@user:localhost"
+    event.body = "fibonacci_spiral.png"
+    event.source = {
+        "content": {
+            "body": "fibonacci_spiral.png",
+            "info": {"mimetype": "image/jpeg"},
+        },
+    }
+
+    record = await register_image_attachment(
+        AsyncMock(),
+        tmp_path,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        event=event,
+        image_bytes=b"\x89PNG\r\n\x1a\npayload",
+    )
+
+    assert record is not None
+    assert record.mime_type == "image/png"
+    assert record.local_path.suffix == ".png"
 
 
 def test_resolve_attachment_media_includes_images(tmp_path: Path) -> None:

@@ -9,7 +9,7 @@ import pytest
 from agno.media import Image
 
 from mindroom.matrix import image_handler
-from mindroom.matrix.media import extract_media_caption
+from mindroom.matrix.media import extract_media_caption, sniff_image_mime_type
 
 
 class TestExtractCaption:
@@ -111,6 +111,22 @@ class TestDownloadImage:
                 "test_hash",
                 "test_iv",
             )
+
+    @pytest.mark.asyncio
+    async def test_download_prefers_detected_mime_when_metadata_mismatches(self) -> None:
+        """Payload signature should win when Matrix metadata MIME is incorrect."""
+        client = AsyncMock()
+        event = MagicMock(spec=nio.RoomMessageImage)
+        event.url = "mxc://example.org/mismatch"
+        event.source = {"content": {"info": {"mimetype": "image/jpeg"}}}
+
+        response = MagicMock()
+        response.body = b"\x89PNG\r\n\x1a\nrest"
+        client.download.return_value = response
+
+        result = await image_handler.download_image(client, event)
+        assert isinstance(result, Image)
+        assert result.mime_type == "image/png"
 
     @pytest.mark.asyncio
     async def test_download_returns_none_on_error(self) -> None:
@@ -257,3 +273,18 @@ class TestDownloadImage:
 
         assert isinstance(result, Image)
         assert result.mime_type is None
+
+
+class TestSniffImageMimeType:
+    """Test lightweight image signature detection."""
+
+    def test_sniff_known_formats(self) -> None:
+        """Known image signatures should map to expected MIME types."""
+        assert sniff_image_mime_type(b"\x89PNG\r\n\x1a\nrest") == "image/png"
+        assert sniff_image_mime_type(b"\xff\xd8\xff\xe0rest") == "image/jpeg"
+        assert sniff_image_mime_type(b"GIF89arest") == "image/gif"
+        assert sniff_image_mime_type(b"RIFF\x00\x00\x00\x00WEBPrest") == "image/webp"
+
+    def test_sniff_unknown_returns_none(self) -> None:
+        """Unknown byte prefixes should not be misclassified as images."""
+        assert sniff_image_mime_type(b"not-an-image") is None

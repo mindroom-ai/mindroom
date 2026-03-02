@@ -18,7 +18,7 @@ import nio
 
 from .constants import ATTACHMENT_IDS_KEY
 from .logging_config import get_logger
-from .matrix.media import download_media_bytes, media_mime_type
+from .matrix.media import download_media_bytes, media_mime_type, sniff_image_mime_type
 
 logger = get_logger(__name__)
 
@@ -91,6 +91,19 @@ def parse_attachment_ids_from_event_source(event_source: dict[str, Any] | None) 
         if attachment_id and attachment_id not in normalized:
             normalized.append(attachment_id)
     return normalized
+
+
+def parse_attachment_ids_from_thread_history(thread_history: list[dict[str, Any]]) -> list[str]:
+    """Extract attachment IDs referenced by message metadata in thread history."""
+    attachment_ids: list[str] = []
+    for message in thread_history:
+        if not isinstance(message, dict):
+            continue
+        message_attachment_ids = parse_attachment_ids_from_event_source(message)
+        for attachment_id in message_attachment_ids:
+            if attachment_id not in attachment_ids:
+                attachment_ids.append(attachment_id)
+    return attachment_ids
 
 
 def merge_attachment_ids(*attachment_id_lists: list[str]) -> list[str]:
@@ -491,11 +504,25 @@ async def register_image_attachment(
 ) -> AttachmentRecord | None:
     """Persist an image event and register it as an attachment record."""
     media_bytes = image_bytes if image_bytes is not None else await download_media_bytes(client, event)
+    declared_mime_type = media_mime_type(event)
+    detected_mime_type = sniff_image_mime_type(media_bytes)
+    if (
+        detected_mime_type is not None
+        and isinstance(declared_mime_type, str)
+        and declared_mime_type.strip()
+        and detected_mime_type != declared_mime_type.split(";", 1)[0].strip().lower()
+    ):
+        logger.warning(
+            "Image attachment MIME mismatch between Matrix metadata and payload bytes",
+            event_id=event.event_id,
+            declared_mime_type=declared_mime_type,
+            detected_mime_type=detected_mime_type,
+        )
     return await _register_media_attachment(
         storage_path=storage_path,
         event_id=event.event_id,
         media_bytes=media_bytes,
-        mime_type=media_mime_type(event),
+        mime_type=detected_mime_type or declared_mime_type,
         room_id=room_id,
         thread_id=thread_id,
         sender=event.sender,

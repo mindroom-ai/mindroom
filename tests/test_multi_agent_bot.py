@@ -1272,6 +1272,10 @@ class TestAgentBot:
                 new_callable=AsyncMock,
                 return_value=attachment_record,
             ),
+            patch(
+                "mindroom.bot.resolve_attachment_media",
+                return_value=([attachment_id], [], [image], [], []),
+            ),
         ):
             await bot._on_media_message(room, event)
 
@@ -1291,6 +1295,104 @@ class TestAgentBot:
         assert list(media.videos) == []
         assert generate_kwargs["attachment_ids"] == [attachment_id]
         tracker.mark_responded.assert_called_once_with("$img_event", "$response")
+
+    @pytest.mark.asyncio
+    async def test_media_message_merges_thread_history_attachment_ids(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Media turns should include attachment IDs already referenced in thread history."""
+        config = Config.from_yaml()
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot.client = AsyncMock()
+
+        tracker = MagicMock()
+        tracker.has_responded.return_value = False
+        bot.__dict__["response_tracker"] = tracker
+
+        history_attachment_id = "att_prev_image"
+        current_attachment_id = attachment_id_for_event("$img_event_history")
+
+        bot._extract_message_context = AsyncMock(
+            return_value=_MessageContext(
+                am_i_mentioned=False,
+                is_thread=True,
+                thread_id="$thread_root",
+                thread_history=[
+                    {
+                        "event_id": "$routed_prev",
+                        "content": {ATTACHMENT_IDS_KEY: [history_attachment_id]},
+                    },
+                ],
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+            ),
+        )
+        bot._generate_response = AsyncMock(return_value="$response")
+
+        room = MagicMock()
+        room.room_id = "!test:localhost"
+
+        event = MagicMock(spec=nio.RoomMessageImage)
+        event.sender = "@user:localhost"
+        event.event_id = "$img_event_history"
+        event.body = "photo.png"
+        event.source = {
+            "content": {
+                "body": "photo.png",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        }
+
+        image = MagicMock()
+        image.content = b"\x89PNG\r\n\x1a\npayload"
+        image.mime_type = "image/png"
+        attachment_record = MagicMock()
+        attachment_record.attachment_id = current_attachment_id
+
+        with (
+            patch("mindroom.bot.is_authorized_sender", return_value=True),
+            patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
+            patch(
+                "mindroom.bot.decide_team_formation",
+                new_callable=AsyncMock,
+                return_value=TeamFormationDecision(
+                    should_form_team=False,
+                    agents=[],
+                    mode=TeamMode.COLLABORATE,
+                ),
+            ),
+            patch("mindroom.bot.should_agent_respond", return_value=True),
+            patch("mindroom.bot.image_handler.download_image", new_callable=AsyncMock, return_value=image),
+            patch(
+                "mindroom.bot.register_image_attachment",
+                new_callable=AsyncMock,
+                return_value=attachment_record,
+            ),
+            patch("mindroom.bot.resolve_thread_attachment_ids", new_callable=AsyncMock, return_value=[]),
+            patch(
+                "mindroom.bot.resolve_attachment_media",
+                return_value=(
+                    [current_attachment_id, history_attachment_id],
+                    [],
+                    [image],
+                    [],
+                    [],
+                ),
+            ) as mock_resolve_media,
+        ):
+            await bot._on_media_message(room, event)
+
+        mock_resolve_media.assert_called_once()
+        assert mock_resolve_media.call_args.args[1] == [current_attachment_id, history_attachment_id]
+
+        bot._generate_response.assert_awaited_once()
+        generate_kwargs = bot._generate_response.await_args.kwargs
+        assert generate_kwargs["attachment_ids"] == [current_attachment_id, history_attachment_id]
+        assert current_attachment_id in generate_kwargs["prompt"]
+        assert history_attachment_id in generate_kwargs["prompt"]
+        tracker.mark_responded.assert_called_once_with("$img_event_history", "$response")
 
     @pytest.mark.asyncio
     async def test_agent_bot_on_image_message_marks_responded_when_download_fails(

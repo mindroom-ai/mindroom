@@ -29,6 +29,26 @@ def media_mime_type(event: nio.RoomMessageMedia | nio.RoomEncryptedMedia) -> str
     return mimetype if isinstance(mimetype, str) and mimetype else None
 
 
+def sniff_image_mime_type(media_bytes: bytes | None) -> str | None:
+    """Best-effort image MIME detection from file signatures."""
+    if not media_bytes:
+        return None
+    mime_type: str | None = None
+    if media_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        mime_type = "image/png"
+    elif media_bytes.startswith(b"\xff\xd8\xff"):
+        mime_type = "image/jpeg"
+    elif media_bytes.startswith((b"GIF87a", b"GIF89a")):
+        mime_type = "image/gif"
+    elif len(media_bytes) >= 12 and media_bytes.startswith(b"RIFF") and media_bytes[8:12] == b"WEBP":
+        mime_type = "image/webp"
+    elif media_bytes.startswith(b"BM"):
+        mime_type = "image/bmp"
+    elif media_bytes.startswith((b"II*\x00", b"MM\x00*")):
+        mime_type = "image/tiff"
+    return mime_type
+
+
 def extract_media_caption(
     event: nio.RoomMessageMedia | nio.RoomEncryptedMedia,
     *,

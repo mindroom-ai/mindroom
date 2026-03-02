@@ -80,6 +80,7 @@ from .attachments import (
     append_attachment_ids_prompt,
     merge_attachment_ids,
     parse_attachment_ids_from_event_source,
+    parse_attachment_ids_from_thread_history,
     register_audio_attachment,
     register_file_or_video_attachment,
     register_image_attachment,
@@ -749,7 +750,12 @@ class AgentBot:
             if context.thread_id
             else []
         )
-        attachment_ids = merge_attachment_ids(message_attachment_ids, thread_attachment_ids)
+        history_attachment_ids = parse_attachment_ids_from_thread_history(context.thread_history)
+        attachment_ids = merge_attachment_ids(
+            message_attachment_ids,
+            thread_attachment_ids,
+            history_attachment_ids,
+        )
         resolved_attachment_ids, attachment_audio, attachment_images, attachment_files, attachment_videos = (
             resolve_attachment_media(
                 self.storage_path,
@@ -1016,8 +1022,20 @@ class AgentBot:
             event.event_id,
             event_source=event.source,
         )
+        thread_attachment_ids = (
+            await resolve_thread_attachment_ids(
+                self.client,
+                self.storage_path,
+                room_id=room.room_id,
+                thread_id=context.thread_id,
+            )
+            if context.thread_id
+            else []
+        )
+        history_attachment_ids = parse_attachment_ids_from_thread_history(context.thread_history)
         media = MediaInputs()
-        attachment_ids: list[str] = []
+        current_attachment_ids: list[str] = []
+        resolved_attachment_ids: list[str] = []
         if is_image_event:
             assert isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage)
             # Download image only after confirming we should respond.
@@ -1035,8 +1053,32 @@ class AgentBot:
                 image_bytes=image.content,
             )
             # Keep processing even without attachment registration; image bytes are already available to the model.
-            attachment_ids = [attachment_record.attachment_id] if attachment_record is not None else []
-            media = MediaInputs.from_optional(images=[image])
+            current_attachment_ids = [attachment_record.attachment_id] if attachment_record is not None else []
+            attachment_ids = merge_attachment_ids(
+                current_attachment_ids,
+                thread_attachment_ids,
+                history_attachment_ids,
+            )
+            (
+                resolved_attachment_ids,
+                attachment_audio,
+                attachment_images,
+                attachment_files,
+                attachment_videos,
+            ) = resolve_attachment_media(
+                self.storage_path,
+                attachment_ids,
+                room_id=room.room_id,
+                thread_id=effective_thread_id,
+            )
+            if not attachment_images:
+                attachment_images = [image]
+            media = MediaInputs.from_optional(
+                audio=attachment_audio,
+                images=attachment_images,
+                files=attachment_files,
+                videos=attachment_videos,
+            )
         else:
             assert isinstance(
                 event,
@@ -1054,19 +1096,28 @@ class AgentBot:
                 self.logger.error("Failed to register media attachment", event_id=event.event_id)
                 self.response_tracker.mark_responded(event.event_id)
                 return
-            attachment_ids, attachment_audio, _, attachment_files, attachment_videos = resolve_attachment_media(
-                self.storage_path,
-                [attachment_record.attachment_id],
-                room_id=room.room_id,
-                thread_id=effective_thread_id,
+            current_attachment_ids = [attachment_record.attachment_id]
+            attachment_ids = merge_attachment_ids(
+                current_attachment_ids,
+                thread_attachment_ids,
+                history_attachment_ids,
+            )
+            resolved_attachment_ids, attachment_audio, attachment_images, attachment_files, attachment_videos = (
+                resolve_attachment_media(
+                    self.storage_path,
+                    attachment_ids,
+                    room_id=room.room_id,
+                    thread_id=effective_thread_id,
+                )
             )
             media = MediaInputs.from_optional(
                 audio=attachment_audio,
+                images=attachment_images,
                 files=attachment_files,
                 videos=attachment_videos,
             )
 
-        prompt_text = append_attachment_ids_prompt(caption, attachment_ids)
+        prompt_text = append_attachment_ids_prompt(caption, resolved_attachment_ids)
         await self._execute_dispatch_action(
             room,
             event,
@@ -1075,7 +1126,7 @@ class AgentBot:
             _DispatchPayload(
                 prompt=prompt_text,
                 media=media,
-                attachment_ids=attachment_ids or None,
+                attachment_ids=resolved_attachment_ids or None,
             ),
             processing_log="Processing image" if is_image_event else "Processing media message",
         )
