@@ -101,7 +101,7 @@ def markdown_to_html(text: str) -> str:
     return _escape_unsupported_html_tags(html_text)
 
 
-def build_thread_relation(
+def _build_thread_relation(
     thread_event_id: str,
     reply_to_event_id: str | None = None,
     latest_thread_event_id: str | None = None,
@@ -180,7 +180,7 @@ def build_message_content(
 
     # Add thread/reply relationship if specified
     if thread_event_id:
-        content["m.relates_to"] = build_thread_relation(
+        content["m.relates_to"] = _build_thread_relation(
             thread_event_id=thread_event_id,
             reply_to_event_id=reply_to_event_id,
             latest_thread_event_id=latest_thread_event_id,

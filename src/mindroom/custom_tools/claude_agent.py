@@ -1,4 +1,4 @@
-"""Claude Agent SDK-backed tools for persistent coding sessions."""
+"""Claude _Agent SDK-backed tools for persistent coding sessions."""
 
 from __future__ import annotations
 
@@ -21,49 +21,49 @@ from claude_agent_sdk import (
     ToolUseBlock,
 )
 
-PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
-VALID_PERMISSION_MODES: tuple[PermissionMode, ...] = (
+_PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
+_VALID_PERMISSION_MODES: tuple[_PermissionMode, ...] = (
     "default",
     "acceptEdits",
     "plan",
     "bypassPermissions",
 )
-DEFAULT_PERMISSION_MODE: PermissionMode = "default"
-DEFAULT_SESSION_TTL_MINUTES = 60
-DEFAULT_MAX_SESSIONS = 200
-_DEFAULT_LIMITS = (DEFAULT_SESSION_TTL_MINUTES * 60, DEFAULT_MAX_SESSIONS)
-MAX_STDERR_LINES = 12
+_DEFAULT_PERMISSION_MODE: _PermissionMode = "default"
+_DEFAULT_SESSION_TTL_MINUTES = 60
+_DEFAULT_MAX_SESSIONS = 200
+_DEFAULT_LIMITS = (_DEFAULT_SESSION_TTL_MINUTES * 60, _DEFAULT_MAX_SESSIONS)
+_MAX_STDERR_LINES = 12
 
 
 @runtime_checkable
-class Agent(Protocol):
+class _Agent(Protocol):
     """Minimal agent protocol needed by this tool."""
 
     name: str | None
 
 
 @runtime_checkable
-class AgentWithId(Protocol):
-    """Agent protocol that exposes a stable id field."""
+class _AgentWithId(Protocol):
+    """_Agent protocol that exposes a stable id field."""
 
     id: str | None
 
 
 @runtime_checkable
-class AgentWithModel(Protocol):
-    """Agent protocol that exposes a model object."""
+class _AgentWithModel(Protocol):
+    """_Agent protocol that exposes a model object."""
 
     model: Any | None
 
 
 @runtime_checkable
-class ModelWithId(Protocol):
+class _ModelWithId(Protocol):
     """Model protocol that exposes an id field."""
 
     id: str | None
 
 
-class RunContext(Protocol):
+class _RunContext(Protocol):
     """Minimal run context protocol needed by this tool."""
 
     session_id: str
@@ -75,13 +75,13 @@ def _parse_csv_list(raw_value: str | None) -> list[str]:
     return [item.strip() for item in raw_value.split(",") if item.strip()]
 
 
-def _normalize_permission_mode(permission_mode: str | None) -> PermissionMode:
+def _normalize_permission_mode(permission_mode: str | None) -> _PermissionMode:
     if not permission_mode:
-        return DEFAULT_PERMISSION_MODE
+        return _DEFAULT_PERMISSION_MODE
     normalized = permission_mode.strip()
-    if normalized not in VALID_PERMISSION_MODES:
-        return DEFAULT_PERMISSION_MODE
-    return cast("PermissionMode", normalized)
+    if normalized not in _VALID_PERMISSION_MODES:
+        return _DEFAULT_PERMISSION_MODE
+    return cast("_PermissionMode", normalized)
 
 
 def _parse_int(value: int | None, *, default: int, minimum: int) -> int:
@@ -97,7 +97,7 @@ def _parse_optional_int(value: int | None, *, minimum: int) -> int | None:
 
 
 @dataclass
-class ClaudeSessionState:
+class _ClaudeSessionState:
     """Runtime state for one persistent Claude coding session."""
 
     key: str
@@ -106,18 +106,18 @@ class ClaudeSessionState:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     created_at: float = field(default_factory=monotonic)
     last_used_at: float = field(default_factory=monotonic)
-    ttl_seconds: int = DEFAULT_SESSION_TTL_MINUTES * 60
+    ttl_seconds: int = _DEFAULT_SESSION_TTL_MINUTES * 60
     claude_session_id: str | None = None
     stderr_lines: collections.deque[str] = field(
-        default_factory=lambda: collections.deque(maxlen=MAX_STDERR_LINES),
+        default_factory=lambda: collections.deque(maxlen=_MAX_STDERR_LINES),
     )
 
 
-class ClaudeSessionManager:
+class _ClaudeSessionManager:
     """Process-wide manager for persistent ClaudeSDKClient sessions."""
 
     def __init__(self) -> None:
-        self._sessions: dict[str, ClaudeSessionState] = {}
+        self._sessions: dict[str, _ClaudeSessionState] = {}
         self._lock = asyncio.Lock()
         self._namespace_limits: dict[str, tuple[int, int]] = {}
 
@@ -137,9 +137,9 @@ class ClaudeSessionManager:
         session_key: str,
         namespace: str,
         options: ClaudeAgentOptions,
-    ) -> tuple[ClaudeSessionState, bool]:
+    ) -> tuple[_ClaudeSessionState, bool]:
         """Get an existing session or create a new one for the given key."""
-        stale: list[ClaudeSessionState] = []
+        stale: list[_ClaudeSessionState] = []
         try:
             async with self._lock:
                 stale.extend(self._collect_expired_locked())
@@ -154,7 +154,7 @@ class ClaudeSessionManager:
 
                 client = ClaudeSDKClient(options=options)
                 await client.connect()
-                session = ClaudeSessionState(
+                session = _ClaudeSessionState(
                     key=session_key,
                     namespace=namespace,
                     client=client,
@@ -174,9 +174,9 @@ class ClaudeSessionManager:
         await self._disconnect(session)
         return True
 
-    async def get(self, session_key: str) -> ClaudeSessionState | None:
+    async def get(self, session_key: str) -> _ClaudeSessionState | None:
         """Get a session by key, cleaning up expired sessions first."""
-        stale: list[ClaudeSessionState] = []
+        stale: list[_ClaudeSessionState] = []
         try:
             async with self._lock:
                 stale.extend(self._collect_expired_locked())
@@ -187,7 +187,7 @@ class ClaudeSessionManager:
         finally:
             await self._disconnect_many(stale)
 
-    def _collect_expired_locked(self) -> list[ClaudeSessionState]:
+    def _collect_expired_locked(self) -> list[_ClaudeSessionState]:
         now = monotonic()
         expired_keys = [
             key
@@ -197,8 +197,8 @@ class ClaudeSessionManager:
         ]
         return [self._sessions.pop(key) for key in expired_keys]
 
-    def _evict_if_needed_locked(self, namespace: str) -> list[ClaudeSessionState]:
-        evicted: list[ClaudeSessionState] = []
+    def _evict_if_needed_locked(self, namespace: str) -> list[_ClaudeSessionState]:
+        evicted: list[_ClaudeSessionState] = []
         max_sessions = self._namespace_max_sessions(namespace)
         while True:
             namespace_sessions = [key for key, session in self._sessions.items() if session.namespace == namespace]
@@ -218,12 +218,12 @@ class ClaudeSessionManager:
     def _namespace_max_sessions(self, namespace: str) -> int:
         return self._namespace_limits.get(namespace, _DEFAULT_LIMITS)[1]
 
-    async def _disconnect(self, session: ClaudeSessionState) -> None:
+    async def _disconnect(self, session: _ClaudeSessionState) -> None:
         async with session.lock:
             with suppress(Exception):
                 await session.client.disconnect()
 
-    async def _disconnect_many(self, sessions: list[ClaudeSessionState]) -> None:
+    async def _disconnect_many(self, sessions: list[_ClaudeSessionState]) -> None:
         for session in sessions:
             await self._disconnect(session)
 
@@ -231,7 +231,7 @@ class ClaudeSessionManager:
 class ClaudeAgentTools(Toolkit):
     """Tools that let MindRoom agents run persistent Claude coding sessions."""
 
-    _session_manager: ClassVar[ClaudeSessionManager] = ClaudeSessionManager()
+    _session_manager: ClassVar[_ClaudeSessionManager] = _ClaudeSessionManager()
 
     def __init__(
         self,
@@ -241,15 +241,15 @@ class ClaudeAgentTools(Toolkit):
         disable_experimental_betas: bool = False,
         cwd: str | None = None,
         model: str | None = None,
-        permission_mode: str | None = DEFAULT_PERMISSION_MODE,
+        permission_mode: str | None = _DEFAULT_PERMISSION_MODE,
         continue_conversation: bool = False,
         allowed_tools: str | None = None,
         disallowed_tools: str | None = None,
         max_turns: int | None = None,
         system_prompt: str | None = None,
         cli_path: str | None = None,
-        session_ttl_minutes: int | None = DEFAULT_SESSION_TTL_MINUTES,
-        max_sessions: int | None = DEFAULT_MAX_SESSIONS,
+        session_ttl_minutes: int | None = _DEFAULT_SESSION_TTL_MINUTES,
+        max_sessions: int | None = _DEFAULT_MAX_SESSIONS,
     ) -> None:
         self.api_key = api_key
         self.anthropic_base_url = anthropic_base_url
@@ -266,10 +266,10 @@ class ClaudeAgentTools(Toolkit):
         self.cli_path = cli_path
         self.session_ttl_minutes = _parse_int(
             session_ttl_minutes,
-            default=DEFAULT_SESSION_TTL_MINUTES,
+            default=_DEFAULT_SESSION_TTL_MINUTES,
             minimum=1,
         )
-        self.max_sessions = _parse_int(max_sessions, default=DEFAULT_MAX_SESSIONS, minimum=1)
+        self.max_sessions = _parse_int(max_sessions, default=_DEFAULT_MAX_SESSIONS, minimum=1)
 
         super().__init__(
             name="claude_agent",
@@ -353,12 +353,12 @@ class ClaudeAgentTools(Toolkit):
             details.extend(f"- {line}" for line in list(stderr_lines)[-5:])
         return "\n".join([message, *details])
 
-    def _namespace(self, agent: Agent | None) -> str:
-        if isinstance(agent, AgentWithId):
+    def _namespace(self, agent: _Agent | None) -> str:
+        if isinstance(agent, _AgentWithId):
             agent_id = agent.id
             if agent_id and agent_id.strip():
                 return agent_id.strip()
-        if not isinstance(agent, Agent):
+        if not isinstance(agent, _Agent):
             return "mindroom"
         agent_name = agent.name
         if agent_name and agent_name.strip():
@@ -376,8 +376,8 @@ class ClaudeAgentTools(Toolkit):
         self,
         *,
         session_label: str | None,
-        run_context: RunContext | None,
-        agent: Agent | None,
+        run_context: _RunContext | None,
+        agent: _Agent | None,
     ) -> str:
         agent_name = self._namespace(agent)
         run_session = run_context.session_id if run_context is not None else "default"
@@ -385,14 +385,14 @@ class ClaudeAgentTools(Toolkit):
             return f"{agent_name}:{run_session}:{session_label.strip()}"
         return f"{agent_name}:{run_session}"
 
-    def _resolve_model(self, agent: Agent | None) -> str | None:
+    def _resolve_model(self, agent: _Agent | None) -> str | None:
         if self.model and self.model.strip():
             return self.model.strip()
 
-        if not isinstance(agent, AgentWithModel):
+        if not isinstance(agent, _AgentWithModel):
             return None
         model_obj = agent.model
-        if not isinstance(model_obj, ModelWithId):
+        if not isinstance(model_obj, _ModelWithId):
             return None
         model_id = model_obj.id
         if model_id and model_id.strip():
@@ -405,9 +405,9 @@ class ClaudeAgentTools(Toolkit):
         session_label: str | None,
         resume: str | None,
         fork_session: bool,
-        run_context: RunContext | None,
-        agent: Agent | None,
-    ) -> tuple[ClaudeSessionState, bool, str, str | None] | str:
+        run_context: _RunContext | None,
+        agent: _Agent | None,
+    ) -> tuple[_ClaudeSessionState, bool, str, str | None] | str:
         """Shared session acquisition logic.
 
         Returns ``(session, created, session_key, resolved_model)`` on success,
@@ -422,7 +422,7 @@ class ClaudeAgentTools(Toolkit):
         self._ensure_namespace_config(namespace)
         session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)
 
-        stderr_lines: collections.deque[str] = collections.deque(maxlen=MAX_STDERR_LINES)
+        stderr_lines: collections.deque[str] = collections.deque(maxlen=_MAX_STDERR_LINES)
         stderr_callback = self._build_stderr_callback(stderr_lines)
 
         try:
@@ -459,8 +459,8 @@ class ClaudeAgentTools(Toolkit):
         session_label: str | None = None,
         resume: str | None = None,
         fork_session: bool = False,
-        run_context: RunContext | None = None,
-        agent: Agent | None = None,
+        run_context: _RunContext | None = None,
+        agent: _Agent | None = None,
     ) -> str:
         """Start or reuse a persistent Claude coding session for this conversation."""
         result = await self._get_or_create_session(
@@ -482,8 +482,8 @@ class ClaudeAgentTools(Toolkit):
         session_label: str | None = None,
         resume: str | None = None,
         fork_session: bool = False,
-        run_context: RunContext | None = None,
-        agent: Agent | None = None,
+        run_context: _RunContext | None = None,
+        agent: _Agent | None = None,
     ) -> str:
         """Send a prompt to a persistent Claude session and return Claude's response."""
         trimmed_prompt = prompt.strip()
@@ -530,7 +530,7 @@ class ClaudeAgentTools(Toolkit):
 
     async def _collect_response(
         self,
-        session: ClaudeSessionState,
+        session: _ClaudeSessionState,
     ) -> tuple[str, list[str], ResultMessage | None]:
         text_parts: list[str] = []
         tool_names: list[str] = []
@@ -574,8 +574,8 @@ class ClaudeAgentTools(Toolkit):
     async def claude_session_status(
         self,
         session_label: str | None = None,
-        run_context: RunContext | None = None,
-        agent: Agent | None = None,
+        run_context: _RunContext | None = None,
+        agent: _Agent | None = None,
     ) -> str:
         """Show status information for the current persistent Claude session."""
         session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)
@@ -597,8 +597,8 @@ class ClaudeAgentTools(Toolkit):
     async def claude_interrupt(
         self,
         session_label: str | None = None,
-        run_context: RunContext | None = None,
-        agent: Agent | None = None,
+        run_context: _RunContext | None = None,
+        agent: _Agent | None = None,
     ) -> str:
         """Send an interrupt signal to an active Claude session."""
         session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)
@@ -616,8 +616,8 @@ class ClaudeAgentTools(Toolkit):
     async def claude_end_session(
         self,
         session_label: str | None = None,
-        run_context: RunContext | None = None,
-        agent: Agent | None = None,
+        run_context: _RunContext | None = None,
+        agent: _Agent | None = None,
     ) -> str:
         """Close and remove an active Claude session."""
         session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)

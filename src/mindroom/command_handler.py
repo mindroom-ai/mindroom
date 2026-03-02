@@ -257,7 +257,7 @@ def _resolve_tool_dispatch_target(  # noqa: C901, PLR0911, PLR0912
 
 
 @dataclass(frozen=True)
-class ToolCallArguments:
+class _ToolCallArguments:
     """Prepared arguments for a tool call."""
 
     args: tuple[object, ...]
@@ -268,15 +268,15 @@ class ToolCallArguments:
 def _prepare_tool_call_arguments(  # noqa: PLR0911
     entrypoint: Callable[..., object] | None,
     base_args: Mapping[str, object],
-) -> ToolCallArguments:
+) -> _ToolCallArguments:
     if entrypoint is None:
-        return ToolCallArguments((), {}, "Tool entrypoint is missing.")
+        return _ToolCallArguments((), {}, "Tool entrypoint is missing.")
 
     signature = inspect.signature(entrypoint)
     params = list(signature.parameters.values())
     has_var_kw = any(param.kind == param.VAR_KEYWORD for param in params)
     if has_var_kw:
-        return ToolCallArguments((), dict(base_args), None)
+        return _ToolCallArguments((), dict(base_args), None)
 
     kwargs = {key: value for key, value in base_args.items() if key in signature.parameters}
     if kwargs:
@@ -293,17 +293,17 @@ def _prepare_tool_call_arguments(  # noqa: PLR0911
             and param.name not in kwargs
         ]
         if missing:
-            return ToolCallArguments((), {}, f"Tool requires parameters: {', '.join(missing)}.")
-        return ToolCallArguments((), kwargs, None)
+            return _ToolCallArguments((), {}, f"Tool requires parameters: {', '.join(missing)}.")
+        return _ToolCallArguments((), kwargs, None)
 
     if not params:
-        return ToolCallArguments((), {}, None)
+        return _ToolCallArguments((), {}, None)
 
     if len(params) == 1 and params[0].kind in (
         inspect.Parameter.POSITIONAL_ONLY,
         inspect.Parameter.POSITIONAL_OR_KEYWORD,
     ):
-        return ToolCallArguments((base_args.get("command", ""),), {}, None)
+        return _ToolCallArguments((base_args.get("command", ""),), {}, None)
 
     missing = [
         param.name
@@ -317,8 +317,8 @@ def _prepare_tool_call_arguments(  # noqa: PLR0911
         )
     ]
     if missing:
-        return ToolCallArguments((), {}, f"Tool requires parameters: {', '.join(missing)}.")
-    return ToolCallArguments((), {}, None)
+        return _ToolCallArguments((), {}, f"Tool requires parameters: {', '.join(missing)}.")
+    return _ToolCallArguments((), {}, None)
 
 
 async def _maybe_await(value: object) -> object:

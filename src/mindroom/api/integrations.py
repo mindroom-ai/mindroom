@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
 # Initialize credentials manager
-creds_manager = CredentialsManager()
+_creds_manager = CredentialsManager()
 
 
 def _ensure_spotify_packages() -> tuple[type[Spotify], type[SpotifyOAuth]]:
@@ -33,7 +33,7 @@ def _ensure_spotify_packages() -> tuple[type[Spotify], type[SpotifyOAuth]]:
 
 
 # Load tool metadata from the single source of truth
-def get_tools_metadata() -> dict[str, Any]:
+def _get_tools_metadata() -> dict[str, Any]:
     """Load tool metadata from the in-memory registry."""
     from mindroom.api.main import load_runtime_config  # noqa: PLC0415
 
@@ -57,7 +57,7 @@ class ServiceStatus(BaseModel):
     error: str | None = None
 
 
-class ApiKeyRequest(BaseModel):
+class _ApiKeyRequest(BaseModel):
     """API key configuration request."""
 
     service: str
@@ -65,22 +65,22 @@ class ApiKeyRequest(BaseModel):
     api_secret: str | None = None
 
 
-def get_service_credentials(service: str) -> dict[str, Any]:
+def _get_service_credentials(service: str) -> dict[str, Any]:
     """Get stored credentials for a service."""
-    credentials = creds_manager.load_credentials(service)
+    credentials = _creds_manager.load_credentials(service)
     return credentials if credentials else {}
 
 
-def save_service_credentials(service: str, credentials: dict[str, Any]) -> None:
+def _save_service_credentials(service: str, credentials: dict[str, Any]) -> None:
     """Save service credentials."""
-    creds_manager.save_credentials(service, credentials)
+    _creds_manager.save_credentials(service, credentials)
 
 
 @router.get("/{service}/status")
 async def get_service_status(service: str) -> ServiceStatus:
     """Get connection status for a specific service."""
     # Get tool metadata from single source of truth
-    tools_metadata = get_tools_metadata()
+    tools_metadata = _get_tools_metadata()
 
     if service not in tools_metadata:
         raise HTTPException(status_code=404, detail=f"Unknown service: {service}")
@@ -96,7 +96,7 @@ async def get_service_status(service: str) -> ServiceStatus:
         requires_api_key=tool.get("setup_type") == "api_key",
     )
 
-    creds = get_service_credentials(service)
+    creds = _get_service_credentials(service)
     if creds:
         if service == "spotify":
             status.connected = "access_token" in creds
@@ -175,7 +175,7 @@ async def spotify_callback(code: str) -> RedirectResponse:
             "expires_at": token_info.get("expires_at"),
             "username": user["display_name"],
         }
-        save_service_credentials("spotify", credentials)
+        _save_service_credentials("spotify", credentials)
 
         # Redirect back to widget
         return RedirectResponse(url="http://localhost:5173/?spotify=connected")
@@ -187,12 +187,12 @@ async def spotify_callback(code: str) -> RedirectResponse:
 async def disconnect_service(service: str) -> dict[str, str]:
     """Disconnect a service by removing stored credentials."""
     # Get tool metadata from single source of truth
-    tools_metadata = get_tools_metadata()
+    tools_metadata = _get_tools_metadata()
 
     if service not in tools_metadata:
         raise HTTPException(status_code=404, detail=f"Unknown service: {service}")
 
     # Delete credentials using the manager
-    creds_manager.delete_credentials(service)
+    _creds_manager.delete_credentials(service)
 
     return {"status": "disconnected"}

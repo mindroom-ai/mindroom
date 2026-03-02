@@ -1,4 +1,4 @@
-"""Plugin loader for Mindroom tools and skills."""
+"""_Plugin loader for Mindroom tools and skills."""
 
 from __future__ import annotations
 
@@ -19,12 +19,12 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-PLUGIN_MANIFEST = "mindroom.plugin.json"
-REPO_ROOT = Path(__file__).resolve().parents[2]
+_PLUGIN_MANIFEST = "mindroom.plugin.json"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @dataclass(frozen=True)
-class PluginManifest:
+class _PluginManifest:
     """Validated plugin manifest data."""
 
     name: str
@@ -33,7 +33,7 @@ class PluginManifest:
 
 
 @dataclass(frozen=True)
-class Plugin:
+class _Plugin:
     """Loaded plugin details."""
 
     name: str
@@ -46,21 +46,21 @@ class Plugin:
 @dataclass
 class _PluginCacheEntry:
     manifest_mtime: float
-    plugin: Plugin
+    plugin: _Plugin
 
 
 _PLUGIN_CACHE: dict[Path, _PluginCacheEntry] = {}
 _TOOL_MODULE_CACHE: dict[Path, float] = {}
 
 
-def load_plugins(config: Config, *, config_path: Path | None = None) -> list[Plugin]:
+def load_plugins(config: Config, *, config_path: Path | None = None) -> list[_Plugin]:
     """Load plugins from config and register their tools and skills."""
     plugin_paths = getattr(config, "plugins", None)
     if not plugin_paths:
         set_plugin_skill_roots([])
         return []
 
-    plugins: list[Plugin] = []
+    plugins: list[_Plugin] = []
     skill_roots: list[Path] = []
 
     for plugin_path in plugin_paths:
@@ -99,7 +99,7 @@ def _resolve_python_plugin_root(plugin_path: str) -> Path | None:
     spec = util.find_spec(module_name)
     if spec is None:
         if explicit:
-            logger.warning("Plugin module not found", module=module_name, spec=plugin_path)
+            logger.warning("_Plugin module not found", module=module_name, spec=plugin_path)
         return None
 
     if spec.submodule_search_locations:
@@ -108,13 +108,13 @@ def _resolve_python_plugin_root(plugin_path: str) -> Path | None:
         root = Path(spec.origin).parent
     else:
         if explicit:
-            logger.warning("Plugin module has no filesystem location", module=module_name)
+            logger.warning("_Plugin module has no filesystem location", module=module_name)
         return None
 
     resolved_root = (root / subpath).resolve() if subpath else root.resolve()
     if not resolved_root.exists() or not resolved_root.is_dir():
         if explicit:
-            logger.warning("Plugin module path is not a directory", module=module_name, path=str(resolved_root))
+            logger.warning("_Plugin module path is not a directory", module=module_name, path=str(resolved_root))
         return None
 
     return resolved_root
@@ -143,17 +143,17 @@ def _parse_python_plugin_spec(plugin_path: str) -> tuple[str, str | None, bool] 
     return module_name, subpath, explicit
 
 
-def _load_plugin(root: Path) -> Plugin | None:
+def _load_plugin(root: Path) -> _Plugin | None:
     if not root.exists() or not root.is_dir():
-        logger.warning("Plugin path does not exist", path=str(root))
+        logger.warning("_Plugin path does not exist", path=str(root))
         return None
 
-    manifest_path = root / PLUGIN_MANIFEST
+    manifest_path = root / _PLUGIN_MANIFEST
     if not manifest_path.exists():
-        logger.warning("Plugin manifest missing", path=str(manifest_path))
+        logger.warning("_Plugin manifest missing", path=str(manifest_path))
         return None
 
-    if not root.is_relative_to(REPO_ROOT):
+    if not root.is_relative_to(_REPO_ROOT):
         logger.warning("Loading non-bundled plugin", path=str(root))
 
     try:
@@ -174,7 +174,7 @@ def _load_plugin(root: Path) -> Plugin | None:
     tools_module_path = _resolve_tools_module(root, manifest.tools_module)
     skill_dirs = _resolve_skill_dirs(root, manifest.skills)
 
-    plugin = Plugin(
+    plugin = _Plugin(
         name=manifest.name,
         root=root,
         manifest_path=manifest_path,
@@ -188,7 +188,7 @@ def _load_plugin(root: Path) -> Plugin | None:
     return plugin
 
 
-def _parse_manifest(path: Path) -> PluginManifest | None:
+def _parse_manifest(path: Path) -> _PluginManifest | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -196,27 +196,27 @@ def _parse_manifest(path: Path) -> PluginManifest | None:
         return None
 
     if not isinstance(data, dict):
-        logger.warning("Plugin manifest must be a JSON object", path=str(path))
+        logger.warning("_Plugin manifest must be a JSON object", path=str(path))
         return None
 
     name = data.get("name")
     if not isinstance(name, str) or not name.strip():
-        logger.warning("Plugin manifest missing name", path=str(path))
+        logger.warning("_Plugin manifest missing name", path=str(path))
         return None
 
     tools_module = data.get("tools_module")
     if tools_module is not None and not isinstance(tools_module, str):
-        logger.warning("Plugin tools_module must be a string", path=str(path))
+        logger.warning("_Plugin tools_module must be a string", path=str(path))
         return None
 
     raw_skills = data.get("skills", [])
     if raw_skills is None:
         raw_skills = []
     if not isinstance(raw_skills, list) or any(not isinstance(item, str) for item in raw_skills):
-        logger.warning("Plugin skills must be a list of strings", path=str(path))
+        logger.warning("_Plugin skills must be a list of strings", path=str(path))
         return None
 
-    return PluginManifest(name=name.strip(), tools_module=tools_module, skills=raw_skills)
+    return _PluginManifest(name=name.strip(), tools_module=tools_module, skills=raw_skills)
 
 
 def _resolve_tools_module(root: Path, tools_module: str | None) -> Path | None:
@@ -224,7 +224,7 @@ def _resolve_tools_module(root: Path, tools_module: str | None) -> Path | None:
         return None
     module_path = (root / tools_module).resolve()
     if not module_path.exists():
-        logger.warning("Plugin tools module not found", path=str(module_path))
+        logger.warning("_Plugin tools module not found", path=str(module_path))
         return None
     return module_path
 
@@ -234,13 +234,13 @@ def _resolve_skill_dirs(root: Path, skills: list[str]) -> list[Path]:
     for relative_path in skills:
         path = (root / relative_path).resolve()
         if not path.exists() or not path.is_dir():
-            logger.warning("Plugin skill path is not a directory", path=str(path))
+            logger.warning("_Plugin skill path is not a directory", path=str(path))
             continue
         skill_dirs.append(path)
     return skill_dirs
 
 
-def _load_tools_module(plugin: Plugin) -> None:
+def _load_tools_module(plugin: _Plugin) -> None:
     if plugin.tools_module_path is None:
         return
 
@@ -266,7 +266,7 @@ def _load_tools_module(plugin: Plugin) -> None:
     try:
         spec.loader.exec_module(module)
     except Exception as exc:
-        logger.warning("Plugin tools module execution failed", path=str(module_path), error=str(exc))
+        logger.warning("_Plugin tools module execution failed", path=str(module_path), error=str(exc))
         return
 
     _TOOL_MODULE_CACHE[module_path] = mtime

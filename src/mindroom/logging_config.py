@@ -15,7 +15,7 @@ from mindroom.constants import STORAGE_PATH
 __all__ = ["emoji", "get_logger", "setup_logging"]
 
 
-class NioValidationFilter(logging.Filter):
+class _NioValidationFilter(logging.Filter):
     """Filter out harmless nio validation warnings that confuse AI agents."""
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -129,7 +129,7 @@ def setup_logging(level: str = "INFO") -> None:
             },
             "filters": {
                 "nio_validation": {  # ty: ignore[missing-typed-dict-key]
-                    "()": NioValidationFilter,  # ty: ignore[invalid-key]
+                    "()": _NioValidationFilter,  # ty: ignore[invalid-key]
                 },
             },
             "handlers": {
