@@ -1,6 +1,6 @@
 """Memory management for mindroom agents and rooms."""
 
-from .functions import (
+from mindroom.memory.functions import (
     add_agent_memory,
     add_room_memory,
     build_memory_enhanced_prompt,

@@ -9,9 +9,9 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
-from .config.main import Config
-from .constants import CONFIG_PATH
-from .logging_config import get_logger
+from mindroom.config.main import Config
+from mindroom.constants import CONFIG_PATH
+from mindroom.logging_config import get_logger
 
 logger = get_logger(__name__)
 

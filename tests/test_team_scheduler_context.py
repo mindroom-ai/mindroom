@@ -15,8 +15,7 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.tool_runtime_context import get_tool_runtime_context
-
-from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator

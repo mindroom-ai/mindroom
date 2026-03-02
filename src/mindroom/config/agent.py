@@ -6,8 +6,8 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from .memory import MemoryBackend  # noqa: TC001
-from .models import AgentLearningMode  # noqa: TC001
+from mindroom.config.memory import MemoryBackend  # noqa: TC001
+from mindroom.config.models import AgentLearningMode  # noqa: TC001
 
 CultureMode = Literal["automatic", "agentic", "manual"]
 

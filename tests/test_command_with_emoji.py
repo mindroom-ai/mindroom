@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mindroom.commands import CommandType, command_parser
+from mindroom.commands.parsing import CommandType, command_parser
 
 
 def test_command_parser_with_voice_emoji() -> None:

@@ -17,11 +17,11 @@ from agno.skills import LocalSkills, Skills
 from agno.skills.loaders import SkillLoader
 from agno.skills.skill import Skill
 
-from .credentials import get_credentials_manager
-from .logging_config import get_logger
+from mindroom.credentials import get_credentials_manager
+from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from .config.main import Config
+    from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 

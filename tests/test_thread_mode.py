@@ -10,7 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from mindroom.bot import AgentBot
-from mindroom.commands import Command, CommandType
+from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
-from .conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD
 
 
 @pytest.fixture
@@ -531,9 +531,9 @@ class TestCommandThreadContextRoomMode:
         )
 
         with (
-            patch("mindroom.command_handler.check_agent_mentioned", return_value=([], False, False)),
+            patch("mindroom.commands.handler.check_agent_mentioned", return_value=([], False, False)),
             patch(
-                "mindroom.command_handler.schedule_task",
+                "mindroom.commands.handler.schedule_task",
                 new_callable=AsyncMock,
                 return_value=("task123", "scheduled"),
             ) as mock_schedule,

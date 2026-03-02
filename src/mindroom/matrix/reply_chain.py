@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
-from .event_info import EventInfo
+from mindroom.matrix.event_info import EventInfo
 
 if TYPE_CHECKING:
     import structlog

@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
     import nio
 
-    from .config.main import Config
+    from mindroom.config.main import Config
 
 
 @dataclass(frozen=True)
