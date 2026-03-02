@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
 
 
-class MemoryResult(TypedDict, total=False):
+class _MemoryResult(TypedDict, total=False):
     """Type for memory search results from Mem0."""
 
     id: str
@@ -35,14 +35,14 @@ class MemoryResult(TypedDict, total=False):
 logger = get_logger(__name__)
 
 
-class ScopedMemoryReader(Protocol):
+class _ScopedMemoryReader(Protocol):
     """Minimal protocol for reading a memory by ID."""
 
     async def get(self, memory_id: str) -> dict[str, Any] | None:
         """Return the memory payload for a given memory ID."""
 
 
-class MemoryNotFoundError(ValueError):
+class _MemoryNotFoundError(ValueError):
     """Raised when a memory ID does not exist in the caller's allowed scope."""
 
     def __init__(self, memory_id: str) -> None:
@@ -137,7 +137,7 @@ def _load_scope_id_entries(
     scope_user_id: str,
     storage_path: Path,
     config: Config,
-) -> tuple[list[MemoryResult], dict[str, Path]]:
+) -> tuple[list[_MemoryResult], dict[str, Path]]:
     scope_path = _scope_dir(scope_user_id, storage_path, config, create=False)
     if not scope_path.exists():
         return [], {}
@@ -148,7 +148,7 @@ def _load_scope_id_entries(
         p for p in markdown_files if p != entrypoint_path
     ]
 
-    results: list[MemoryResult] = []
+    results: list[_MemoryResult] = []
     id_to_file: dict[str, Path] = {}
     for file_path in ordered_files:
         relative_path = file_path.relative_to(scope_path).as_posix()
@@ -160,7 +160,7 @@ def _load_scope_id_entries(
             memory_text = match.group("memory").strip()
             if not memory_id or not memory_text:
                 continue
-            result: MemoryResult = {
+            result: _MemoryResult = {
                 "id": memory_id,
                 "memory": memory_text,
                 "user_id": scope_user_id,
@@ -203,7 +203,7 @@ def _append_scope_memory_entry(
     config: Config,
     *,
     target_relative_path: str | None = None,
-) -> MemoryResult:
+) -> _MemoryResult:
     scope_path = _scope_dir(scope_user_id, storage_path, config, create=True)
     if target_relative_path is None:
         target_path = scope_path / _FILE_MEMORY_ENTRYPOINT
@@ -242,11 +242,11 @@ def _search_scope_memory_entries(  # noqa: C901
     config: Config,
     *,
     limit: int,
-) -> list[MemoryResult]:
+) -> list[_MemoryResult]:
     id_entries, _ = _load_scope_id_entries(scope_user_id, storage_path, config)
     query_tokens = _extract_query_tokens(query)
 
-    scored_entries: list[MemoryResult] = []
+    scored_entries: list[_MemoryResult] = []
     seen_scored_text: set[str] = set()
     for entry in id_entries:
         text = entry.get("memory", "")
@@ -272,7 +272,7 @@ def _search_scope_memory_entries(  # noqa: C901
     remaining_limit = limit - len(scored_entries)
     entrypoint_path = scope_path / _FILE_MEMORY_ENTRYPOINT
     query_tokens = _extract_query_tokens(query)
-    snippet_results: list[MemoryResult] = []
+    snippet_results: list[_MemoryResult] = []
     existing_memory_text = {
         memory_text for entry in scored_entries if (memory_text := entry.get("memory", "").strip().lower())
     }
@@ -313,7 +313,7 @@ def _get_scope_memory_by_path_id(
     memory_id: str,
     storage_path: Path,
     config: Config,
-) -> MemoryResult | None:
+) -> _MemoryResult | None:
     scope_path = _scope_dir(scope_user_id, storage_path, config, create=False)
     match = _FILE_MEMORY_PATH_ID_PATTERN.match(memory_id)
     if not scope_path.exists() or match is None:
@@ -345,7 +345,7 @@ def _get_scope_memory_by_id(
     memory_id: str,
     storage_path: Path,
     config: Config,
-) -> MemoryResult | None:
+) -> _MemoryResult | None:
     if _FILE_MEMORY_PATH_ID_PATTERN.match(memory_id):
         return _get_scope_memory_by_path_id(scope_user_id, memory_id, storage_path, config)
 
@@ -415,16 +415,16 @@ def _get_allowed_memory_user_ids(caller_context: str | list[str], config: Config
         return allowed_user_ids
 
     allowed_user_ids = {f"agent_{caller_context}"}
-    allowed_user_ids.update(get_team_ids_for_agent(caller_context, config))
+    allowed_user_ids.update(_get_team_ids_for_agent(caller_context, config))
     return allowed_user_ids
 
 
 async def _get_scoped_memory_by_id(
-    memory: ScopedMemoryReader,
+    memory: _ScopedMemoryReader,
     memory_id: str,
     caller_context: str | list[str],
     config: Config,
-) -> MemoryResult | None:
+) -> _MemoryResult | None:
     """Fetch a memory and ensure it belongs to the caller's allowed scopes."""
     result = await memory.get(memory_id)
     if not isinstance(result, dict):
@@ -488,7 +488,7 @@ def append_agent_daily_memory(
     agent_name: str,
     storage_path: Path,
     config: Config,
-) -> MemoryResult:
+) -> _MemoryResult:
     """Append one memory entry to today's per-agent daily memory file."""
     current_date = datetime.now(ZoneInfo(config.timezone)).date().isoformat()
     daily_relative_path = f"{_FILE_MEMORY_DAILY_DIR}/{current_date}.md"
@@ -503,7 +503,7 @@ def append_agent_daily_memory(
     return result
 
 
-def get_team_ids_for_agent(agent_name: str, config: Config) -> list[str]:
+def _get_team_ids_for_agent(agent_name: str, config: Config) -> list[str]:
     """Get all team IDs that include the specified agent.
 
     Args:
@@ -535,7 +535,7 @@ async def search_agent_memories(
     storage_path: Path,
     config: Config,
     limit: int = 3,
-) -> list[MemoryResult]:
+) -> list[_MemoryResult]:
     """Search agent memories including team memories.
 
     Args:
@@ -552,7 +552,7 @@ async def search_agent_memories(
     if _use_file_memory_backend(config, agent_name=agent_name):
         results = _search_scope_memory_entries(f"agent_{agent_name}", query, storage_path, config, limit=limit)
         existing_memories = {r.get("memory", "") for r in results}
-        for team_id in get_team_ids_for_agent(agent_name, config):
+        for team_id in _get_team_ids_for_agent(agent_name, config):
             team_results = _search_scope_memory_entries(team_id, query, storage_path, config, limit=limit)
             for mem in team_results:
                 memory_text = mem.get("memory", "")
@@ -570,7 +570,7 @@ async def search_agent_memories(
     results = search_result["results"] if isinstance(search_result, dict) and "results" in search_result else []
 
     # Also search team memories
-    team_ids = get_team_ids_for_agent(agent_name, config)
+    team_ids = _get_team_ids_for_agent(agent_name, config)
     for team_id in team_ids:
         team_result = await memory.search(query, user_id=team_id, limit=limit)
         team_memories = team_result["results"] if isinstance(team_result, dict) and "results" in team_result else []
@@ -594,7 +594,7 @@ async def list_all_agent_memories(
     storage_path: Path,
     config: Config,
     limit: int = 100,
-) -> list[MemoryResult]:
+) -> list[_MemoryResult]:
     """List all memories for an agent.
 
     Args:
@@ -621,7 +621,7 @@ async def get_agent_memory(
     caller_context: str | list[str],
     storage_path: Path,
     config: Config,
-) -> MemoryResult | None:
+) -> _MemoryResult | None:
     """Get a single memory by ID.
 
     Args:
@@ -667,12 +667,12 @@ async def update_agent_memory(
             if _replace_scope_memory_entry(scope_user_id, memory_id, content, storage_path, config):
                 logger.info("File memory updated", memory_id=memory_id, scope=scope_user_id)
                 return
-        raise MemoryNotFoundError(memory_id)
+        raise _MemoryNotFoundError(memory_id)
 
     memory = await create_memory_instance(storage_path, config)
     scoped_memory = await _get_scoped_memory_by_id(memory, memory_id, caller_context, config)
     if scoped_memory is None:
-        raise MemoryNotFoundError(memory_id)
+        raise _MemoryNotFoundError(memory_id)
     await memory.update(memory_id, content)
     logger.info("Memory updated", memory_id=memory_id)
 
@@ -697,12 +697,12 @@ async def delete_agent_memory(
             if _replace_scope_memory_entry(scope_user_id, memory_id, None, storage_path, config):
                 logger.info("File memory deleted", memory_id=memory_id, scope=scope_user_id)
                 return
-        raise MemoryNotFoundError(memory_id)
+        raise _MemoryNotFoundError(memory_id)
 
     memory = await create_memory_instance(storage_path, config)
     scoped_memory = await _get_scoped_memory_by_id(memory, memory_id, caller_context, config)
     if scoped_memory is None:
-        raise MemoryNotFoundError(memory_id)
+        raise _MemoryNotFoundError(memory_id)
     await memory.delete(memory_id)
     logger.info("Memory deleted", memory_id=memory_id)
 
@@ -753,7 +753,7 @@ async def search_room_memories(
     config: Config,
     agent_name: str | None = None,
     limit: int = 3,
-) -> list[MemoryResult]:
+) -> list[_MemoryResult]:
     """Search room memories.
 
     Args:
@@ -781,7 +781,7 @@ async def search_room_memories(
     return results
 
 
-def format_memories_as_context(memories: list[MemoryResult], context_type: str = "agent") -> str:
+def format_memories_as_context(memories: list[_MemoryResult], context_type: str = "agent") -> str:
     """Format memories into a context string.
 
     Args:
