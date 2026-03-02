@@ -213,8 +213,8 @@ class TestUserIdPassthrough:
             assert mock_agent.arun.call_args.kwargs["user_id"] == "@user:localhost"
 
     @pytest.mark.asyncio
-    async def test_ai_response_filters_non_pdf_files_for_vertex_claude(self, tmp_path: Path) -> None:
-        """Vertex Claude should only receive PDF file media."""
+    async def test_ai_response_passes_all_files_for_vertex_claude(self, tmp_path: Path) -> None:
+        """Vertex Claude path should not silently drop non-PDF file media."""
         mock_agent = MagicMock()
         mock_agent.model = VertexAIClaude(id="claude-sonnet-4@20250514")
         mock_agent.name = "GeneralAgent"
@@ -244,11 +244,11 @@ class TestUserIdPassthrough:
 
         mock_agent.arun.assert_called_once()
         sent_files = list(mock_agent.arun.call_args.kwargs["files"])
-        assert sent_files == [pdf_file]
+        assert sent_files == [pdf_file, zip_file]
 
     @pytest.mark.asyncio
-    async def test_stream_agent_response_filters_non_pdf_files_for_vertex_claude(self, tmp_path: Path) -> None:
-        """Streaming path should filter non-PDF files for Vertex Claude."""
+    async def test_stream_agent_response_passes_all_files_for_vertex_claude(self, tmp_path: Path) -> None:
+        """Streaming path should not silently drop non-PDF files for Vertex Claude."""
         mock_agent = MagicMock()
         mock_agent.model = VertexAIClaude(id="claude-sonnet-4@20250514")
         mock_agent.name = "GeneralAgent"
@@ -281,7 +281,7 @@ class TestUserIdPassthrough:
 
         mock_agent.arun.assert_called_once()
         sent_files = list(mock_agent.arun.call_args.kwargs["files"])
-        assert sent_files == [pdf_file]
+        assert sent_files == [pdf_file, zip_file]
 
     @pytest.mark.asyncio
     async def test_user_id_none_when_not_provided(self, tmp_path: Path) -> None:

@@ -9,7 +9,7 @@ import pytest
 from agno.media import Image
 
 from mindroom.matrix import image_handler
-from mindroom.matrix.media import extract_media_caption, sniff_image_mime_type
+from mindroom.matrix.media import extract_media_caption, resolve_image_mime_type, sniff_image_mime_type
 
 
 class TestExtractCaption:
@@ -288,3 +288,23 @@ class TestSniffImageMimeType:
     def test_sniff_unknown_returns_none(self) -> None:
         """Unknown byte prefixes should not be misclassified as images."""
         assert sniff_image_mime_type(b"not-an-image") is None
+
+
+class TestResolveImageMimeType:
+    """Test effective image MIME resolution semantics."""
+
+    def test_detected_type_takes_precedence_on_mismatch(self) -> None:
+        """Signature-detected MIME should win when declared metadata is wrong."""
+        result = resolve_image_mime_type(b"\x89PNG\r\n\x1a\npayload", "image/jpeg")
+        assert result.effective_mime_type == "image/png"
+        assert result.declared_mime_type == "image/jpeg"
+        assert result.detected_mime_type == "image/png"
+        assert result.is_mismatch is True
+
+    def test_declared_type_used_when_detection_unavailable(self) -> None:
+        """Declared MIME should be used when bytes do not match known signatures."""
+        result = resolve_image_mime_type(b"unknown", "image/webp")
+        assert result.effective_mime_type == "image/webp"
+        assert result.declared_mime_type == "image/webp"
+        assert result.detected_mime_type is None
+        assert result.is_mismatch is False

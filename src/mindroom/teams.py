@@ -540,7 +540,7 @@ async def team_response(
     media_inputs = media or MediaInputs()
     prompt = _build_prompt_with_context(message, thread_history)
     team = _create_team_instance(agents, agent_names, mode, orchestrator, model_name)
-    media_inputs = sanitize_media_for_model(team.model, media_inputs, agent_name=team.name or "team")
+    media_inputs = sanitize_media_for_model(team.model, media_inputs)
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
 
     logger.info(f"Executing team response with {len(agents)} agents in {mode.value} mode")
@@ -611,7 +611,7 @@ async def _team_response_stream_raw(
     media_inputs = media or MediaInputs()
     prompt = _build_prompt_with_context(message, thread_history)
     team = _create_team_instance(agents, agent_names, mode, orchestrator, model_name)
-    media_inputs = sanitize_media_for_model(team.model, media_inputs, agent_name=team.name or "team")
+    media_inputs = sanitize_media_for_model(team.model, media_inputs)
 
     logger.info(f"Created team with {len(agents)} agents in {mode.value} mode")
     for agent in agents:

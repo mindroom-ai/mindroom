@@ -2,12 +2,24 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import nio
 from nio import crypto
 
 from mindroom.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class ImageMimeResolution:
+    """Resolved MIME metadata for image payload bytes."""
+
+    effective_mime_type: str | None
+    declared_mime_type: str | None
+    detected_mime_type: str | None
+    is_mismatch: bool
 
 
 def _event_id_for_log(event: nio.RoomMessageMedia | nio.RoomEncryptedMedia) -> str | None:
@@ -47,6 +59,28 @@ def sniff_image_mime_type(media_bytes: bytes | None) -> str | None:
     elif media_bytes.startswith((b"II*\x00", b"MM\x00*")):
         mime_type = "image/tiff"
     return mime_type
+
+
+def _normalize_mime_type(mime_type: str | None) -> str | None:
+    if not isinstance(mime_type, str):
+        return None
+    normalized = mime_type.split(";", 1)[0].strip().lower()
+    return normalized or None
+
+
+def resolve_image_mime_type(media_bytes: bytes | None, declared_mime_type: str | None) -> ImageMimeResolution:
+    """Resolve effective image MIME type with byte-signature fallback."""
+    normalized_declared = _normalize_mime_type(declared_mime_type)
+    detected_mime_type = sniff_image_mime_type(media_bytes)
+    is_mismatch = (
+        detected_mime_type is not None and normalized_declared is not None and detected_mime_type != normalized_declared
+    )
+    return ImageMimeResolution(
+        effective_mime_type=detected_mime_type or normalized_declared,
+        declared_mime_type=normalized_declared,
+        detected_mime_type=detected_mime_type,
+        is_mismatch=is_mismatch,
+    )
 
 
 def extract_media_caption(

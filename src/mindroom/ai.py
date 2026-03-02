@@ -673,48 +673,15 @@ def _build_cache_key(
     return f"{key}:tool_calls={visibility}"
 
 
-def _is_pdf_media_file(file_media: object) -> bool:
-    """Return whether an Agno File appears to be a PDF."""
-    mime_type = getattr(file_media, "mime_type", None)
-    if isinstance(mime_type, str) and mime_type.split(";", 1)[0].strip().lower() == "application/pdf":
-        return True
-
-    filename = getattr(file_media, "filename", None)
-    if isinstance(filename, str) and filename.lower().endswith(".pdf"):
-        return True
-
-    filepath = getattr(file_media, "filepath", None)
-    return isinstance(filepath, str) and filepath.lower().endswith(".pdf")
+def sanitize_media_for_model(model: object, media_inputs: MediaInputs) -> MediaInputs:
+    """Return media inputs without model-specific filtering."""
+    _ = model
+    return media_inputs
 
 
-def sanitize_media_for_model(model: object, media_inputs: MediaInputs, *, agent_name: str) -> MediaInputs:
-    """Drop media combinations unsupported by the active model backend."""
-    if model is None or not isinstance(model, VertexAIClaude):
-        return media_inputs
-
-    # Vertex Claude currently accepts only PDF document media.
-    allowed_files = tuple(file_media for file_media in media_inputs.files if _is_pdf_media_file(file_media))
-    dropped_count = len(media_inputs.files) - len(allowed_files)
-    if dropped_count <= 0:
-        return media_inputs
-
-    logger.warning(
-        "Dropping non-PDF file media for vertexai_claude model",
-        agent=agent_name,
-        dropped_files=dropped_count,
-        kept_files=len(allowed_files),
-    )
-    return MediaInputs(
-        audio=media_inputs.audio,
-        images=media_inputs.images,
-        files=allowed_files,
-        videos=media_inputs.videos,
-    )
-
-
-def _sanitize_media_for_model(agent: Agent, media_inputs: MediaInputs, *, agent_name: str) -> MediaInputs:
-    """Drop media combinations unsupported by the active model backend."""
-    return sanitize_media_for_model(agent.model, media_inputs, agent_name=agent_name)
+def _sanitize_media_for_model(agent: Agent, media_inputs: MediaInputs) -> MediaInputs:
+    """Return media inputs without model-specific filtering."""
+    return sanitize_media_for_model(agent.model, media_inputs)
 
 
 async def _cached_agent_run(
@@ -728,7 +695,7 @@ async def _cached_agent_run(
     metadata: dict[str, Any] | None = None,
 ) -> RunOutput:
     """Cached wrapper for agent.arun() calls."""
-    media_inputs = _sanitize_media_for_model(agent, media or MediaInputs(), agent_name=agent_name)
+    media_inputs = _sanitize_media_for_model(agent, media or MediaInputs())
     # Skip cache when media is present (large bytes, unlikely to repeat)
     # or when Agno history is enabled (prompt can be identical but replayed history differs)
     cache = None if (media_inputs.has_any() or agent.add_history_to_context) else _get_cache(storage_path)
@@ -993,7 +960,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         return
 
     metadata = _build_run_metadata(reply_to_event_id, unseen_event_ids)
-    media_inputs = _sanitize_media_for_model(agent, media_inputs, agent_name=agent_name)
+    media_inputs = _sanitize_media_for_model(agent, media_inputs)
 
     # Check cache (skip when media is present or history is enabled)
     cache = None if (media_inputs.has_any() or agent.add_history_to_context) else _get_cache(storage_path)

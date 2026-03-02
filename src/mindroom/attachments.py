@@ -18,7 +18,7 @@ import nio
 
 from .constants import ATTACHMENT_IDS_KEY
 from .logging_config import get_logger
-from .matrix.media import download_media_bytes, media_mime_type, sniff_image_mime_type
+from .matrix.media import download_media_bytes, media_mime_type, resolve_image_mime_type
 
 logger = get_logger(__name__)
 
@@ -504,25 +504,19 @@ async def register_image_attachment(
 ) -> AttachmentRecord | None:
     """Persist an image event and register it as an attachment record."""
     media_bytes = image_bytes if image_bytes is not None else await download_media_bytes(client, event)
-    declared_mime_type = media_mime_type(event)
-    detected_mime_type = sniff_image_mime_type(media_bytes)
-    if (
-        detected_mime_type is not None
-        and isinstance(declared_mime_type, str)
-        and declared_mime_type.strip()
-        and detected_mime_type != declared_mime_type.split(";", 1)[0].strip().lower()
-    ):
+    mime_resolution = resolve_image_mime_type(media_bytes, media_mime_type(event))
+    if mime_resolution.is_mismatch:
         logger.warning(
             "Image attachment MIME mismatch between Matrix metadata and payload bytes",
             event_id=event.event_id,
-            declared_mime_type=declared_mime_type,
-            detected_mime_type=detected_mime_type,
+            declared_mime_type=mime_resolution.declared_mime_type,
+            detected_mime_type=mime_resolution.detected_mime_type,
         )
     return await _register_media_attachment(
         storage_path=storage_path,
         event_id=event.event_id,
         media_bytes=media_bytes,
-        mime_type=detected_mime_type or declared_mime_type,
+        mime_type=mime_resolution.effective_mime_type,
         room_id=room_id,
         thread_id=thread_id,
         sender=event.sender,
