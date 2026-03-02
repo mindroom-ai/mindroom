@@ -150,7 +150,7 @@ async def test_existing_room_reconciliation_respects_flag(
     )
 
     monkeypatch.setattr(matrix_rooms, "load_rooms", dict)
-    monkeypatch.setattr(matrix_rooms, "add_room", MagicMock())
+    monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
     monkeypatch.setattr(matrix_rooms, "join_room", AsyncMock(return_value=True))
     monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", AsyncMock())
     configure_access = AsyncMock(return_value=True)
@@ -185,7 +185,7 @@ async def test_new_room_creation_applies_access_policy_in_multi_user_mode(monkey
     monkeypatch.setattr(matrix_rooms, "load_rooms", dict)
     monkeypatch.setattr(matrix_rooms, "generate_room_topic_ai", AsyncMock(return_value="topic"))
     monkeypatch.setattr(matrix_rooms, "create_room", AsyncMock(return_value="!lobby:example.com"))
-    monkeypatch.setattr(matrix_rooms, "add_room", MagicMock())
+    monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
     configure_access = AsyncMock(return_value=True)
     monkeypatch.setattr(matrix_rooms, "_configure_managed_room_access", configure_access)
 
@@ -309,7 +309,7 @@ async def test_existing_room_reconciliation_skipped_when_not_joined(monkeypatch:
     )
 
     monkeypatch.setattr(matrix_rooms, "load_rooms", dict)
-    monkeypatch.setattr(matrix_rooms, "add_room", MagicMock())
+    monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
     monkeypatch.setattr(matrix_rooms, "join_room", AsyncMock(return_value=False))
     configure_access = AsyncMock(return_value=True)
     monkeypatch.setattr(matrix_rooms, "_configure_managed_room_access", configure_access)

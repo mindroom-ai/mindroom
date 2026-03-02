@@ -12,7 +12,9 @@ Only cross-imports within ``src/`` count. Test imports are ignored.
 from __future__ import annotations
 
 import ast
+import re
 import sys
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -37,6 +39,27 @@ class Module:
     package_parts: tuple[str, ...]
     symbols: list[Symbol] = field(default_factory=list)
     tree: ast.Module | None = None
+
+
+_ROUTE_DECORATORS = {
+    "api_route",
+    "delete",
+    "get",
+    "head",
+    "options",
+    "patch",
+    "post",
+    "put",
+    "trace",
+    "websocket",
+    "websocket_route",
+}
+_CLI_DECORATORS = {"callback", "command"}
+_FRAMEWORK_CONSTRUCTORS = {"APIRouter", "FastAPI", "Typer"}
+_FRAMEWORK_REGISTRATION_CALLS = {"add_api_route", "add_api_websocket_route", "include_router"}
+_ALLOWED_PUBLIC_NAMES = {"logger"}
+_ENTRYPOINT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_\\.]*:[A-Za-z_][A-Za-z0-9_]*$")
+_UVICORN_RE = re.compile(r"\buvicorn\s+([A-Za-z_][A-Za-z0-9_\.]*):([A-Za-z_][A-Za-z0-9_]*)\b")
 
 
 def _find_src_dir(project_root: Path) -> Path | None:
@@ -83,6 +106,8 @@ def collect_modules(src_dir: Path) -> dict[str, Module]:  # noqa: C901, PLR0912
 
         # Detect __all__ to skip explicitly exported names
         explicit_exports = _extract_all(tree)
+        framework_related_names = _collect_framework_related_names(tree)
+        pydantic_model_names: set[str] = set()
 
         mod = Module(
             name=mod_name,
@@ -93,19 +118,63 @@ def collect_modules(src_dir: Path) -> dict[str, Module]:  # noqa: C901, PLR0912
 
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                _maybe_add(mod, node.name, "function", node.lineno, explicit_exports)
+                if _is_framework_callback(node):
+                    continue
+                _maybe_add(
+                    mod,
+                    node.name,
+                    "function",
+                    node.lineno,
+                    explicit_exports,
+                    ignored_names=framework_related_names,
+                )
             elif isinstance(node, ast.ClassDef):
-                _maybe_add(mod, node.name, "class", node.lineno, explicit_exports)
+                if _is_pydantic_model(node, pydantic_model_names):
+                    pydantic_model_names.add(node.name)
+                    continue
+                _maybe_add(
+                    mod,
+                    node.name,
+                    "class",
+                    node.lineno,
+                    explicit_exports,
+                    ignored_names=framework_related_names,
+                )
             elif isinstance(node, ast.Assign):
+                if _is_framework_constructor_call(node.value):
+                    continue
                 for target in node.targets:
                     for name in _names_from_target(target):
-                        _maybe_add(mod, name, "variable", node.lineno, explicit_exports)
+                        _maybe_add(
+                            mod,
+                            name,
+                            "variable",
+                            node.lineno,
+                            explicit_exports,
+                            ignored_names=framework_related_names,
+                        )
             elif isinstance(node, ast.AnnAssign) and node.target:
+                if node.value is not None and _is_framework_constructor_call(node.value):
+                    continue
                 for name in _names_from_target(node.target):
-                    _maybe_add(mod, name, "variable", node.lineno, explicit_exports)
+                    _maybe_add(
+                        mod,
+                        name,
+                        "variable",
+                        node.lineno,
+                        explicit_exports,
+                        ignored_names=framework_related_names,
+                    )
             elif hasattr(ast, "TypeAlias") and isinstance(node, ast.TypeAlias):
                 for name in _names_from_target(node.name):
-                    _maybe_add(mod, name, "variable", node.lineno, explicit_exports)
+                    _maybe_add(
+                        mod,
+                        name,
+                        "variable",
+                        node.lineno,
+                        explicit_exports,
+                        ignored_names=framework_related_names,
+                    )
 
         modules[mod_name] = mod
 
@@ -120,6 +189,114 @@ def _extract_all(tree: ast.Module) -> set[str] | None:
                 if isinstance(target, ast.Name) and target.id == "__all__":
                     return _strings_from_node(node.value)
     return None
+
+
+def _dotted_name(node: ast.expr) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _dotted_name(node.value)
+        if parent is None:
+            return None
+        return f"{parent}.{node.attr}"
+    return None
+
+
+def _decorator_attr_name(decorator: ast.expr) -> str | None:
+    target = decorator.func if isinstance(decorator, ast.Call) else decorator
+    if isinstance(target, ast.Attribute):
+        return target.attr
+    return None
+
+
+def _is_framework_callback(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    for decorator in node.decorator_list:
+        attr_name = _decorator_attr_name(decorator)
+        if attr_name in _ROUTE_DECORATORS or attr_name in _CLI_DECORATORS:
+            return True
+    return False
+
+
+def _framework_callback_names(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    names: set[str] = set()
+    expressions: list[ast.expr] = [*node.decorator_list]
+
+    if node.returns is not None:
+        expressions.append(node.returns)
+
+    arg_annotations = [
+        arg.annotation
+        for arg in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
+        if arg.annotation is not None
+    ]
+    expressions.extend(arg_annotations)
+    if node.args.vararg and node.args.vararg.annotation is not None:
+        expressions.append(node.args.vararg.annotation)
+    if node.args.kwarg and node.args.kwarg.annotation is not None:
+        expressions.append(node.args.kwarg.annotation)
+
+    defaults = [*node.args.defaults, *(d for d in node.args.kw_defaults if d is not None)]
+    expressions.extend(defaults)
+
+    for expr in expressions:
+        names.update(_names_in_expr(expr))
+
+    return names
+
+
+def _names_in_expr(node: ast.AST | None) -> set[str]:
+    if node is None:
+        return set()
+    return {child.id for child in ast.walk(node) if isinstance(child, ast.Name)}
+
+
+def _is_framework_registration_call(node: ast.expr) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    if not isinstance(node.func, ast.Attribute):
+        return False
+    return node.func.attr in _FRAMEWORK_REGISTRATION_CALLS
+
+
+def _collect_framework_related_names(tree: ast.Module) -> set[str]:
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if _is_framework_callback(node):
+                names.update(_framework_callback_names(node))
+            continue
+
+        expr: ast.expr | None = None
+        if isinstance(node, (ast.Expr, ast.Assign, ast.AnnAssign)):
+            expr = node.value
+
+        if expr is not None and _is_framework_registration_call(expr):
+            names.update(_names_in_expr(expr))
+
+    return names
+
+
+def _is_pydantic_model(node: ast.ClassDef, known_models: set[str]) -> bool:
+    for base in node.bases:
+        base_name = _dotted_name(base)
+        if base_name is None:
+            continue
+        if base_name == "BaseModel" or base_name.endswith(".BaseModel"):
+            return True
+        short = base_name.rsplit(".", 1)[-1]
+        if short in known_models:
+            return True
+    return False
+
+
+def _is_framework_constructor_call(node: ast.expr) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    callee = _dotted_name(node.func)
+    if callee is None:
+        return False
+    short = callee.rsplit(".", 1)[-1]
+    return short in _FRAMEWORK_CONSTRUCTORS
 
 
 def _strings_from_node(node: ast.expr) -> set[str] | None:
@@ -151,10 +328,16 @@ def _maybe_add(
     kind: str,
     lineno: int,
     explicit_exports: set[str] | None,
+    *,
+    ignored_names: set[str] | None = None,
 ) -> None:
     if name.startswith("_"):
         return
+    if name in _ALLOWED_PUBLIC_NAMES:
+        return
     if explicit_exports is not None and name in explicit_exports:
+        return
+    if ignored_names is not None and name in ignored_names:
         return
     mod.symbols.append(Symbol(name=name, kind=kind, lineno=lineno, module=mod.name, path=mod.path))
 
@@ -244,6 +427,75 @@ def find_cross_imports(modules: dict[str, Module]) -> set[tuple[str, str]]:  # n
     return used
 
 
+def _load_pyproject_entrypoints(project_root: Path) -> set[tuple[str, str]]:
+    pyproject_path = project_root / "pyproject.toml"
+    if not pyproject_path.exists():
+        return set()
+
+    data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    project_table = data.get("project", {})
+
+    pairs: set[tuple[str, str]] = set()
+    for table_key in ("scripts", "gui-scripts"):
+        table = project_table.get(table_key, {})
+        if not isinstance(table, dict):
+            continue
+        for raw in table.values():
+            if not isinstance(raw, str):
+                continue
+            if not _ENTRYPOINT_RE.fullmatch(raw):
+                continue
+            module_name, symbol_name = raw.split(":", 1)
+            pairs.add((module_name, symbol_name))
+    return pairs
+
+
+def _entrypoint_shell_files(project_root: Path) -> list[Path]:
+    files: list[Path] = []
+    files.extend(project_root.glob("*.sh"))
+    files.extend(project_root.glob("Dockerfile*"))
+    scripts_dir = project_root / "scripts"
+    if scripts_dir.exists():
+        files.extend(scripts_dir.rglob("*.sh"))
+    return sorted(set(files))
+
+
+def _load_shell_uvicorn_entrypoints(project_root: Path) -> set[tuple[str, str]]:
+    pairs: set[tuple[str, str]] = set()
+    for path in _entrypoint_shell_files(project_root):
+        text = path.read_text(encoding="utf-8")
+        for module_name, symbol_name in _UVICORN_RE.findall(text):
+            pairs.add((module_name, symbol_name))
+    return pairs
+
+
+def _collect_external_entrypoints(project_root: Path) -> set[tuple[str, str]]:
+    pairs = _load_pyproject_entrypoints(project_root)
+    pairs.update(_load_shell_uvicorn_entrypoints(project_root))
+    return pairs
+
+
+def find_private_candidates(project_root: Path) -> list[Symbol]:
+    """Find symbols that appear module-local and should be private."""
+    src_dir = _find_src_dir(project_root)
+    if src_dir is None:
+        msg = f"No src/ directory found in {project_root}"
+        raise FileNotFoundError(msg)
+
+    modules = collect_modules(src_dir)
+    cross_imports = find_cross_imports(modules)
+    external_entrypoints = _collect_external_entrypoints(project_root)
+
+    candidates = [
+        sym
+        for mod in modules.values()
+        for sym in mod.symbols
+        if (sym.module, sym.name) not in cross_imports and (sym.module, sym.name) not in external_entrypoints
+    ]
+    candidates.sort(key=lambda s: (str(s.path), s.lineno))
+    return candidates
+
+
 def main() -> int:
     """Entry point: scan project and report module-local public symbols."""
     if len(sys.argv) < 2:
@@ -251,19 +503,11 @@ def main() -> int:
         return 2
 
     project_root = Path(sys.argv[1]).resolve()
-    src_dir = _find_src_dir(project_root)
-    if src_dir is None:
-        print(f"No src/ directory found in {project_root}", file=sys.stderr)
+    try:
+        candidates = find_private_candidates(project_root)
+    except FileNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
         return 1
-
-    modules = collect_modules(src_dir)
-    cross_imports = find_cross_imports(modules)
-
-    candidates: list[Symbol] = [
-        sym for mod in modules.values() for sym in mod.symbols if (sym.module, sym.name) not in cross_imports
-    ]
-
-    candidates.sort(key=lambda s: (str(s.path), s.lineno))
 
     if not candidates:
         print("All public symbols are used across modules.")
