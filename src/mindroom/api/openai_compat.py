@@ -44,9 +44,9 @@ from mindroom.routing import suggest_agent
 from mindroom.teams import TeamMode, format_team_response
 from mindroom.tool_events import format_tool_completed_event, format_tool_started_event
 
-AUTO_MODEL_NAME = "auto"
-TEAM_MODEL_PREFIX = "team/"
-RESERVED_MODEL_NAMES = {AUTO_MODEL_NAME}
+_AUTO_MODEL_NAME = "auto"
+_TEAM_MODEL_PREFIX = "team/"
+_RESERVED_MODEL_NAMES = {_AUTO_MODEL_NAME}
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -85,20 +85,20 @@ def _load_config() -> tuple[Config, Path]:
 # ---------------------------------------------------------------------------
 
 
-class ChatMessage(BaseModel):
+class _ChatMessage(BaseModel):
     """A single message in the chat conversation."""
 
     role: Literal["system", "developer", "user", "assistant", "tool"]
     content: str | list[dict] | None = None
 
 
-class ChatCompletionRequest(BaseModel):
+class _ChatCompletionRequest(BaseModel):
     """OpenAI-compatible chat completion request."""
 
     model_config = ConfigDict(extra="ignore")
 
     model: str
-    messages: list[ChatMessage]
+    messages: list[_ChatMessage]
     stream: bool = False
     user: str | None = None
     # Accepted but ignored — agent's model config controls these:
@@ -122,15 +122,15 @@ class ChatCompletionRequest(BaseModel):
 # --- Non-streaming response models ---
 
 
-class ChatCompletionChoice(BaseModel):
+class _ChatCompletionChoice(BaseModel):
     """A single choice in a chat completion response."""
 
     index: int = 0
-    message: ChatMessage
+    message: _ChatMessage
     finish_reason: str = "stop"
 
 
-class UsageInfo(BaseModel):
+class _UsageInfo(BaseModel):
     """Token usage information (always zeros — Agno doesn't expose counts)."""
 
     prompt_tokens: int = 0
@@ -138,22 +138,22 @@ class UsageInfo(BaseModel):
     total_tokens: int = 0
 
 
-class ChatCompletionResponse(BaseModel):
+class _ChatCompletionResponse(BaseModel):
     """Non-streaming chat completion response."""
 
     id: str
     object: str = "chat.completion"
     created: int
     model: str
-    choices: list[ChatCompletionChoice]
-    usage: UsageInfo = Field(default_factory=UsageInfo)
+    choices: list[_ChatCompletionChoice]
+    usage: _UsageInfo = Field(default_factory=_UsageInfo)
     system_fingerprint: str | None = None
 
 
 # --- Streaming response models ---
 
 
-class ChatCompletionChunkChoice(BaseModel):
+class _ChatCompletionChunkChoice(BaseModel):
     """A single choice in a streaming chunk."""
 
     index: int = 0
@@ -161,21 +161,21 @@ class ChatCompletionChunkChoice(BaseModel):
     finish_reason: str | None = None
 
 
-class ChatCompletionChunk(BaseModel):
+class _ChatCompletionChunk(BaseModel):
     """A single SSE chunk in a streaming response."""
 
     id: str
     object: str = "chat.completion.chunk"
     created: int
     model: str
-    choices: list[ChatCompletionChunkChoice]
+    choices: list[_ChatCompletionChunkChoice]
     system_fingerprint: str | None = None
 
 
 # --- Model listing ---
 
 
-class ModelObject(BaseModel):
+class _ModelObject(BaseModel):
     """A model (agent) entry for the /v1/models response."""
 
     id: str
@@ -186,17 +186,17 @@ class ModelObject(BaseModel):
     description: str | None = None
 
 
-class ModelListResponse(BaseModel):
+class _ModelListResponse(BaseModel):
     """Response for GET /v1/models."""
 
     object: str = "list"
-    data: list[ModelObject]
+    data: list[_ModelObject]
 
 
 # --- Error response ---
 
 
-class OpenAIError(BaseModel):
+class _OpenAIError(BaseModel):
     """OpenAI-compatible error detail."""
 
     message: str
@@ -205,10 +205,10 @@ class OpenAIError(BaseModel):
     code: str | None = None
 
 
-class OpenAIErrorResponse(BaseModel):
+class _OpenAIErrorResponse(BaseModel):
     """OpenAI-compatible error wrapper."""
 
-    error: OpenAIError
+    error: _OpenAIError
 
 
 # ---------------------------------------------------------------------------
@@ -224,8 +224,8 @@ def _error_response(
     code: str | None = None,
 ) -> JSONResponse:
     """Return an OpenAI-style error response."""
-    body = OpenAIErrorResponse(
-        error=OpenAIError(message=message, type=error_type, param=param, code=code),
+    body = _OpenAIErrorResponse(
+        error=_OpenAIError(message=message, type=error_type, param=param, code=code),
     )
     return JSONResponse(status_code=status_code, content=body.model_dump())
 
@@ -345,7 +345,7 @@ def _find_last_user_message(
 
 
 def _convert_messages(
-    messages: list[ChatMessage],
+    messages: list[_ChatMessage],
 ) -> tuple[str, list[dict[str, Any]] | None]:
     """Convert OpenAI messages to MindRoom's (prompt, thread_history) format.
 
@@ -416,7 +416,7 @@ def _derive_session_id(
 
 
 def _validate_chat_request(
-    req: ChatCompletionRequest,
+    req: _ChatCompletionRequest,
     config: Config,
 ) -> JSONResponse | None:
     """Validate a chat completion request. Returns error response or None if valid."""
@@ -425,8 +425,8 @@ def _validate_chat_request(
 
     agent_name = req.model
 
-    if agent_name.startswith(TEAM_MODEL_PREFIX):
-        team_name = agent_name.removeprefix(TEAM_MODEL_PREFIX)
+    if agent_name.startswith(_TEAM_MODEL_PREFIX):
+        team_name = agent_name.removeprefix(_TEAM_MODEL_PREFIX)
         if not config.teams or team_name not in config.teams:
             return _error_response(
                 404,
@@ -436,10 +436,10 @@ def _validate_chat_request(
             )
         return None  # team execution handled in chat_completions
 
-    if agent_name == AUTO_MODEL_NAME:
+    if agent_name == _AUTO_MODEL_NAME:
         return None  # auto-routing handled in chat_completions
 
-    if agent_name not in config.agents or agent_name == ROUTER_AGENT_NAME or agent_name in RESERVED_MODEL_NAMES:
+    if agent_name not in config.agents or agent_name == ROUTER_AGENT_NAME or agent_name in _RESERVED_MODEL_NAMES:
         return _error_response(
             404,
             f"Model '{agent_name}' not found",
@@ -452,13 +452,13 @@ def _validate_chat_request(
 
 def _parse_chat_request(
     body: bytes,
-) -> tuple[ChatCompletionRequest, Config, str, list[dict[str, Any]] | None] | JSONResponse:
+) -> tuple[_ChatCompletionRequest, Config, str, list[dict[str, Any]] | None] | JSONResponse:
     """Parse and validate a chat completion request body.
 
     Returns (request, config, prompt, thread_history) on success, or a JSONResponse error.
     """
     try:
-        req = ChatCompletionRequest(**json.loads(body))
+        req = _ChatCompletionRequest(**json.loads(body))
     except (json.JSONDecodeError, ValidationError):
         return _error_response(400, "Invalid request body")
 
@@ -551,19 +551,19 @@ async def list_models(
     except OSError:
         created = 0
 
-    models: list[ModelObject] = [
-        ModelObject(
-            id=AUTO_MODEL_NAME,
+    models: list[_ModelObject] = [
+        _ModelObject(
+            id=_AUTO_MODEL_NAME,
             name="Auto",
             description="Automatically routes to the best agent for your message",
             created=created,
         ),
     ]
     for agent_name, agent_config in config.agents.items():
-        if agent_name == ROUTER_AGENT_NAME or agent_name in RESERVED_MODEL_NAMES:
+        if agent_name == ROUTER_AGENT_NAME or agent_name in _RESERVED_MODEL_NAMES:
             continue
         models.append(
-            ModelObject(
+            _ModelObject(
                 id=agent_name,
                 name=agent_config.display_name,
                 description=agent_config.role or None,
@@ -574,15 +574,15 @@ async def list_models(
     # Add teams
     for team_name, team_config in (config.teams or {}).items():
         models.append(
-            ModelObject(
-                id=f"{TEAM_MODEL_PREFIX}{team_name}",
+            _ModelObject(
+                id=f"{_TEAM_MODEL_PREFIX}{team_name}",
                 name=team_config.display_name,
                 description=team_config.role or None,
                 created=created,
             ),
         )
 
-    response = ModelListResponse(data=models)
+    response = _ModelListResponse(data=models)
     return JSONResponse(content=response.model_dump())
 
 
@@ -604,7 +604,7 @@ async def chat_completions(
 
     # Resolve auto-routing if model is "auto"
     agent_name = req.model
-    if agent_name == AUTO_MODEL_NAME:
+    if agent_name == _AUTO_MODEL_NAME:
         result = await _resolve_auto_route(prompt, config, thread_history)
         if isinstance(result, JSONResponse):
             return result
@@ -627,8 +627,8 @@ async def chat_completions(
         logger.warning("Knowledge initialization failed, proceeding without knowledge", exc_info=True)
 
     # Team execution path
-    if agent_name.startswith(TEAM_MODEL_PREFIX):
-        team_name = agent_name.removeprefix(TEAM_MODEL_PREFIX)
+    if agent_name.startswith(_TEAM_MODEL_PREFIX):
+        team_name = agent_name.removeprefix(_TEAM_MODEL_PREFIX)
         if req.stream:
             return await _stream_team_completion(
                 team_name,
@@ -695,13 +695,13 @@ async def _non_stream_completion(
 
     logger.info("Chat completion sent", model=agent_name, stream=False, session_id=session_id)
     completion_id = f"chatcmpl-{uuid4().hex[:12]}"
-    response = ChatCompletionResponse(
+    response = _ChatCompletionResponse(
         id=completion_id,
         created=int(time.time()),
         model=agent_name,
         choices=[
-            ChatCompletionChoice(
-                message=ChatMessage(role="assistant", content=response_text),
+            _ChatCompletionChoice(
+                message=_ChatMessage(role="assistant", content=response_text),
             ),
         ],
     )
@@ -721,12 +721,12 @@ def _chunk_json(
     finish_reason: str | None = None,
 ) -> str:
     """Build a JSON string for a single SSE chunk."""
-    chunk = ChatCompletionChunk(
+    chunk = _ChatCompletionChunk(
         id=completion_id,
         created=created,
         model=model,
         choices=[
-            ChatCompletionChunkChoice(delta=delta, finish_reason=finish_reason),
+            _ChatCompletionChunkChoice(delta=delta, finish_reason=finish_reason),
         ],
     )
     return chunk.model_dump_json()
@@ -991,13 +991,13 @@ async def _non_stream_team_completion(
 
     logger.info("Team completion sent", team=team_name, stream=False)
     completion_id = f"chatcmpl-{uuid4().hex[:12]}"
-    result = ChatCompletionResponse(
+    result = _ChatCompletionResponse(
         id=completion_id,
         created=int(time.time()),
         model=model_id,
         choices=[
-            ChatCompletionChoice(
-                message=ChatMessage(role="assistant", content=response_text),
+            _ChatCompletionChoice(
+                message=_ChatMessage(role="assistant", content=response_text),
             ),
         ],
     )
