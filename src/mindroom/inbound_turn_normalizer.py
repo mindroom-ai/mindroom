@@ -111,6 +111,8 @@ class DispatchPayloadWithAttachmentsRequest:
     media_thread_id: str | None
     thread_history: Sequence[ResolvedVisibleMessage]
     fallback_images: list[Image] | None = None
+    include_attachment_media: bool = True
+    include_attachment_prompt: bool = True
 
 
 @dataclass(frozen=True)
@@ -341,12 +343,22 @@ class InboundTurnNormalizer:
                 thread_id=request.media_thread_id,
             )
         )
-        if request.fallback_images:
+        if not request.include_attachment_media:
+            attachment_audio = []
+            attachment_images = []
+            attachment_files = []
+            attachment_videos = []
+        elif request.fallback_images:
             attachment_images = (
                 [*attachment_images, *request.fallback_images] if attachment_images else list(request.fallback_images)
             )
+        prompt = (
+            append_attachment_ids_prompt(request.prompt, resolved_attachment_ids)
+            if request.include_attachment_prompt
+            else request.prompt
+        )
         return DispatchPayload(
-            prompt=append_attachment_ids_prompt(request.prompt, resolved_attachment_ids),
+            prompt=prompt,
             media=MediaInputs.from_optional(
                 audio=attachment_audio,
                 images=attachment_images,
