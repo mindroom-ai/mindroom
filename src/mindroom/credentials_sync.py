@@ -17,7 +17,7 @@ from .logging_config import get_logger
 logger = get_logger(__name__)
 
 # Reverse view: env-var → provider (derived from the canonical mapping).
-ENV_TO_SERVICE_MAP = {v: k for k, v in PROVIDER_ENV_KEYS.items()}
+_ENV_TO_SERVICE_MAP = {v: k for k, v in PROVIDER_ENV_KEYS.items()}
 
 
 def _get_secret(name: str) -> str | None:
@@ -88,7 +88,7 @@ def sync_env_to_credentials() -> None:
     creds_manager = get_credentials_manager()
     synced_count = 0
 
-    for env_var, service in ENV_TO_SERVICE_MAP.items():
+    for env_var, service in _ENV_TO_SERVICE_MAP.items():
         env_value = _get_secret(env_var)
 
         if not env_value:
