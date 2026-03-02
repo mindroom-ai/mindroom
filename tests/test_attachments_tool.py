@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -10,7 +11,12 @@ import pytest
 
 from mindroom.attachments import register_local_attachment
 from mindroom.custom_tools.attachments import AttachmentTools, send_context_attachments
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    ToolRuntimeContext,
+    get_tool_runtime_context,
+    list_tool_runtime_attachment_ids,
+    tool_runtime_context,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -293,10 +299,40 @@ async def test_attachments_tool_registers_file_and_updates_runtime_context(tmp_p
     assert register_payload["tool"] == "attachments"
     assert register_payload["attachment_id"].startswith("att_")
     assert register_payload["attachment"]["local_path"] == str(generated_file.resolve())
-    assert attachment_id in current_context.attachment_ids
+    assert attachment_id in list_tool_runtime_attachment_ids(current_context)
     assert send_error is None
     assert send_result is not None
     assert send_result.resolved_attachment_ids == [attachment_id]
+    mocked.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_register_attachment_available_after_task_boundary(tmp_path: Path) -> None:
+    """Registered attachments should remain available when a later tool call runs in another task."""
+    tool = AttachmentTools()
+    generated_file = tmp_path / "generated.txt"
+    generated_file.write_text("artifact", encoding="utf-8")
+    ctx = _tool_context(tmp_path)
+
+    with (
+        tool_runtime_context(ctx),
+        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
+    ):
+        register_payload = json.loads(await asyncio.create_task(tool.register_attachment(str(generated_file))))
+        current_context = get_tool_runtime_context()
+        assert current_context is not None
+        attachment_id = register_payload["attachment_id"]
+        send_result, send_error = await send_context_attachments(
+            current_context,
+            attachment_ids=[attachment_id],
+            attachment_file_paths=[],
+        )
+
+    assert register_payload["status"] == "ok"
+    assert send_error is None
+    assert send_result is not None
+    assert send_result.resolved_attachment_ids == [attachment_id]
+    assert attachment_id in list_tool_runtime_attachment_ids(current_context)
     mocked.assert_awaited_once()
 
 
@@ -356,7 +392,7 @@ async def test_send_context_attachments_sends_local_file_paths_by_auto_registeri
     assert result is not None
     assert result.resolved_attachment_ids[0].startswith("att_")
     assert result.newly_registered_attachment_ids == result.resolved_attachment_ids
-    assert result.newly_registered_attachment_ids[0] in current_context.attachment_ids
+    assert result.newly_registered_attachment_ids[0] in list_tool_runtime_attachment_ids(current_context)
     mocked.assert_awaited_once()
 
 

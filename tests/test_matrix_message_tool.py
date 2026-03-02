@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -13,6 +14,7 @@ import mindroom.tools  # noqa: F401
 from mindroom.attachments import register_local_attachment
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -199,6 +201,50 @@ async def test_matrix_message_send_supports_attachment_file_paths(tmp_path: Path
     assert payload["attachment_event_ids"] == ["$file_evt"]
     assert payload["resolved_attachment_ids"][0].startswith("att_")
     assert payload["newly_registered_attachment_ids"] == payload["resolved_attachment_ids"]
+    mock_send.assert_awaited_once()
+    mock_send_file.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_accepts_register_attachment_ids_across_task_boundaries(tmp_path: Path) -> None:
+    """matrix_message should accept attachment IDs registered by a prior tool call in another task."""
+    matrix_tool = MatrixMessageTools()
+    attachment_tool = AttachmentTools()
+    generated_file = tmp_path / "generated.txt"
+    generated_file.write_text("artifact", encoding="utf-8")
+    ctx = _make_context(storage_path=tmp_path)
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_message.get_latest_thread_event_id_if_needed",
+            new=AsyncMock(return_value=ctx.thread_id),
+        ),
+        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
+        patch(
+            "mindroom.custom_tools.attachments.send_file_message",
+            new=AsyncMock(return_value="$file_evt"),
+        ) as mock_send_file,
+        tool_runtime_context(ctx),
+    ):
+        register_payload = json.loads(
+            await asyncio.create_task(attachment_tool.register_attachment(str(generated_file))),
+        )
+        attachment_id = register_payload["attachment_id"]
+        payload = json.loads(
+            await asyncio.create_task(
+                matrix_tool.matrix_message(
+                    action="thread-reply",
+                    message="hello",
+                    attachment_ids=[attachment_id],
+                ),
+            ),
+        )
+
+    assert register_payload["status"] == "ok"
+    assert payload["status"] == "ok"
+    assert payload["event_id"] == "$evt"
+    assert payload["attachment_event_ids"] == ["$file_evt"]
+    assert payload["resolved_attachment_ids"] == [attachment_id]
     mock_send.assert_awaited_once()
     mock_send_file.assert_awaited_once()
 

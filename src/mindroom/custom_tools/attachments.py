@@ -20,7 +20,12 @@ from mindroom.custom_tools.attachment_helpers import (
     room_access_allowed,
 )
 from mindroom.matrix.client import send_file_message
-from mindroom.tool_system.runtime_context import append_tool_runtime_attachment_id, get_tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    append_tool_runtime_attachment_id,
+    attachment_id_available_in_tool_runtime_context,
+    get_tool_runtime_context,
+    list_tool_runtime_attachment_ids,
+)
 
 if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -55,10 +60,10 @@ def get_attachment_listing(
     if context.storage_path is None:
         return [], [], [], "Attachment storage path is unavailable in this runtime path."
 
-    requested_attachment_ids = list(context.attachment_ids)
+    requested_attachment_ids = list_tool_runtime_attachment_ids(context)
     if target and target.strip():
         target_attachment_id = target.strip()
-        if target_attachment_id not in context.attachment_ids:
+        if not attachment_id_available_in_tool_runtime_context(context, target_attachment_id):
             return [], [], [], f"Attachment ID is not available in this context: {target_attachment_id}"
         requested_attachment_ids = [target_attachment_id]
 
@@ -82,7 +87,7 @@ def _resolve_context_attachment_path(
     """Resolve a context attachment ID to a local file path."""
     if context.storage_path is None:
         return None, "Attachment storage path is unavailable in this runtime path."
-    if attachment_id not in context.attachment_ids:
+    if not attachment_id_available_in_tool_runtime_context(context, attachment_id):
         return None, f"Attachment ID is not available in this context: {attachment_id}"
 
     attachment = load_attachment(context.storage_path, attachment_id)
