@@ -69,7 +69,7 @@ from mindroom.thread_utils import (
     has_user_responded_after_message,
     should_agent_respond,
 )
-from mindroom.tool_runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 
 from . import interactive, voice_handler
 from .agents import create_agent, create_session_storage, remove_run_by_event_id
@@ -114,7 +114,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.orchestrator import MultiAgentOrchestrator
-    from mindroom.tool_events import ToolTraceEntry
+    from mindroom.tool_system.events import ToolTraceEntry
 
 logger = get_logger(__name__)
 

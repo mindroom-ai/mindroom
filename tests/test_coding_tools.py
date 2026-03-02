@@ -1010,7 +1010,7 @@ class TestRegistration:
 
     def test_coding_tool_registered(self) -> None:
         """Coding tool is in the metadata registry."""
-        from mindroom.tools_metadata import TOOL_METADATA  # noqa: PLC0415
+        from mindroom.tool_system.metadata import TOOL_METADATA  # noqa: PLC0415
 
         assert "coding" in TOOL_METADATA
 

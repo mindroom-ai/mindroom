@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.tool_system.metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
 from mindroom.tools import delegate as _delegate_registration  # noqa: F401
 from mindroom.tools import memory as _memory_registration  # noqa: F401
 from mindroom.tools import self_config as _self_config_registration  # noqa: F401
@@ -119,7 +120,6 @@ from mindroom.tools.youtube import youtube_tools
 from mindroom.tools.zendesk import zendesk_tools
 from mindroom.tools.zep import zep_tools
 from mindroom.tools.zoom import zoom_tools
-from mindroom.tools_metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
 
 if TYPE_CHECKING:
     from agno.tools import Toolkit

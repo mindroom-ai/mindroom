@@ -10,7 +10,7 @@ import pytest
 import mindroom.tools  # noqa: F401
 from mindroom.config.main import Config
 from mindroom.custom_tools.memory import MemoryTools
-from mindroom.tools_metadata import TOOL_METADATA
+from mindroom.tool_system.metadata import TOOL_METADATA
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -37,7 +37,7 @@ from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.logging_config import get_logger
 from mindroom.memory import build_memory_enhanced_prompt
-from mindroom.tool_events import (
+from mindroom.tool_system.events import (
     complete_pending_tool_block,
     extract_tool_completed_info,
     format_tool_combined,
@@ -56,7 +56,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
-    from mindroom.tool_events import ToolTraceEntry
+    from mindroom.tool_system.events import ToolTraceEntry
 
 logger = get_logger(__name__)
 

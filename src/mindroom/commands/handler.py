@@ -20,9 +20,9 @@ from mindroom.scheduling import (
     list_scheduled_tasks,
     schedule_task,
 )
-from mindroom.skills import resolve_skill_command_spec
 from mindroom.thread_utils import check_agent_mentioned, get_configured_agents_for_room
-from mindroom.tools_metadata import get_tool_by_name
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.skills import resolve_skill_command_spec
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping

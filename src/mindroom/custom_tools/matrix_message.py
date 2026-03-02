@@ -15,7 +15,7 @@ from mindroom.authorization import is_authorized_sender
 from mindroom.matrix.client import fetch_thread_history, get_latest_thread_event_id_if_needed, send_message
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_content import extract_and_resolve_message
-from mindroom.tool_runtime_context import ToolRuntimeContext, get_tool_runtime_context
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 
 class MatrixMessageTools(Toolkit):

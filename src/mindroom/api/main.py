@@ -29,7 +29,7 @@ from mindroom.api.tools import router as tools_router
 from mindroom.config.main import Config
 from mindroom.constants import CONFIG_PATH, CONFIG_TEMPLATE_PATH, safe_replace
 from mindroom.credentials_sync import sync_env_to_credentials
-from mindroom.tool_dependencies import auto_install_enabled, auto_install_tool_extra
+from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_tool_extra
 
 if TYPE_CHECKING:
     from supabase import Client as SupabaseClient

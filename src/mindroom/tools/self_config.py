@@ -6,7 +6,7 @@ requires ``agent_name`` at instantiation and is injected directly in
 ``create_agent()``, so it is NOT added to ``TOOL_REGISTRY``.
 """
 
-from mindroom.tools_metadata import (
+from mindroom.tool_system.metadata import (
     TOOL_METADATA,
     SetupType,
     ToolCategory,

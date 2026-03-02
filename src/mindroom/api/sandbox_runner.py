@@ -19,9 +19,9 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from loguru import logger
 from pydantic import BaseModel, Field, ValidationError
 
-import mindroom.sandbox_proxy as _sandbox_proxy
-from mindroom.sandbox_proxy import sandbox_proxy_token_matches, to_json_compatible
-from mindroom.tools_metadata import ensure_tool_registry_loaded, get_tool_by_name
+import mindroom.tool_system.sandbox_proxy as _sandbox_proxy
+from mindroom.tool_system.metadata import ensure_tool_registry_loaded, get_tool_by_name
+from mindroom.tool_system.sandbox_proxy import sandbox_proxy_token_matches, to_json_compatible
 
 if TYPE_CHECKING:
     from collections.abc import Callable

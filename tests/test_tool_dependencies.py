@@ -9,14 +9,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from mindroom.tool_dependencies import (
+from mindroom.tool_system.dependencies import (
     _PIP_TO_IMPORT,
     _install_tool_extras,
     _install_via_uv_sync,
     _pip_name_to_import,
     check_deps_installed,
 )
-from mindroom.tools_metadata import (
+from mindroom.tool_system.metadata import (
     _TOOL_REGISTRY,
     TOOL_METADATA,
     SetupType,
@@ -120,8 +120,8 @@ def test_get_tool_by_name_retries_after_auto_install(monkeypatch: pytest.MonkeyP
         dependencies=[],
     )
 
-    monkeypatch.setattr("mindroom.tools_metadata.auto_install_tool_extra", lambda name: name == tool_name)
-    monkeypatch.setattr("mindroom.tools_metadata.get_credentials_manager", lambda: DummyCredentialsManager())
+    monkeypatch.setattr("mindroom.tool_system.metadata.auto_install_tool_extra", lambda name: name == tool_name)
+    monkeypatch.setattr("mindroom.tool_system.metadata.get_credentials_manager", lambda: DummyCredentialsManager())
 
     try:
         tool = get_tool_by_name(tool_name)
@@ -156,8 +156,8 @@ def test_get_tool_by_name_raises_when_auto_install_fails(monkeypatch: pytest.Mon
         dependencies=[],
     )
 
-    monkeypatch.setattr("mindroom.tools_metadata.auto_install_tool_extra", lambda _name: False)
-    monkeypatch.setattr("mindroom.tools_metadata.get_credentials_manager", lambda: DummyCredentialsManager())
+    monkeypatch.setattr("mindroom.tool_system.metadata.auto_install_tool_extra", lambda _name: False)
+    monkeypatch.setattr("mindroom.tool_system.metadata.get_credentials_manager", lambda: DummyCredentialsManager())
 
     try:
         with pytest.raises(ImportError, match="dependency missing forever"):
@@ -218,8 +218,8 @@ def test_install_via_uv_sync_targets_active_virtualenv(monkeypatch: pytest.Monke
         captured["env"] = env
         return SimpleNamespace(returncode=0)
 
-    monkeypatch.setattr("mindroom.tool_dependencies._in_virtualenv", lambda: True)
-    monkeypatch.setattr("mindroom.tool_dependencies.subprocess.run", fake_run)
+    monkeypatch.setattr("mindroom.tool_system.dependencies._in_virtualenv", lambda: True)
+    monkeypatch.setattr("mindroom.tool_system.dependencies.subprocess.run", fake_run)
 
     assert _install_via_uv_sync(["wikipedia"], quiet=True)
     assert captured["cmd"] == [
@@ -253,12 +253,12 @@ def test_install_tool_extras_skips_uv_sync_outside_virtualenv(monkeypatch: pytes
         calls["env"] += 1
         return True
 
-    monkeypatch.setattr("mindroom.tool_dependencies._is_uv_tool_install", lambda: False)
-    monkeypatch.setattr("mindroom.tool_dependencies._has_lockfile", lambda: True)
-    monkeypatch.setattr("mindroom.tool_dependencies._in_virtualenv", lambda: False)
-    monkeypatch.setattr("mindroom.tool_dependencies.shutil.which", lambda _binary: "/usr/bin/uv")
-    monkeypatch.setattr("mindroom.tool_dependencies._install_via_uv_sync", fake_install_via_uv_sync)
-    monkeypatch.setattr("mindroom.tool_dependencies._install_in_environment", fake_install_in_environment)
+    monkeypatch.setattr("mindroom.tool_system.dependencies._is_uv_tool_install", lambda: False)
+    monkeypatch.setattr("mindroom.tool_system.dependencies._has_lockfile", lambda: True)
+    monkeypatch.setattr("mindroom.tool_system.dependencies._in_virtualenv", lambda: False)
+    monkeypatch.setattr("mindroom.tool_system.dependencies.shutil.which", lambda _binary: "/usr/bin/uv")
+    monkeypatch.setattr("mindroom.tool_system.dependencies._install_via_uv_sync", fake_install_via_uv_sync)
+    monkeypatch.setattr("mindroom.tool_system.dependencies._install_in_environment", fake_install_in_environment)
 
     assert _install_tool_extras(["wikipedia"], quiet=True)
     assert calls["sync"] == 0

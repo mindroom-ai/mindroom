@@ -25,7 +25,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
-from mindroom.tool_events import (
+from mindroom.tool_system.events import (
     StructuredStreamChunk,
     ToolTraceEntry,
     complete_pending_tool_block,

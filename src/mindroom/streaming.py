@@ -14,7 +14,7 @@ from mindroom import interactive
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import edit_message, send_message
 from mindroom.matrix.mentions import format_message_with_mentions
-from mindroom.tool_events import (
+from mindroom.tool_system.events import (
     StructuredStreamChunk,
     ToolTraceEntry,
     complete_pending_tool_block,

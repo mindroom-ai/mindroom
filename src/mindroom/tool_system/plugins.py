@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.constants import resolve_config_relative_path
 from mindroom.logging_config import get_logger
-from mindroom.skills import set_plugin_skill_roots
+from mindroom.tool_system.skills import set_plugin_skill_roots
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _PLUGIN_MANIFEST = "mindroom.plugin.json"
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 @dataclass(frozen=True)

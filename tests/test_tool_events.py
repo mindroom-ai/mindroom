@@ -4,7 +4,7 @@ import pytest
 from agno.models.response import ToolExecution
 
 from mindroom.matrix.message_builder import markdown_to_html
-from mindroom.tool_events import (
+from mindroom.tool_system.events import (
     _MAX_TOOL_TRACE_EVENTS,
     _TOOL_TRACE_KEY,
     ToolTraceEntry,
