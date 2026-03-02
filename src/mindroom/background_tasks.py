@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
-from .logging_config import get_logger
+from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine

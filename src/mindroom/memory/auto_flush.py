@@ -17,8 +17,7 @@ from agno.session.agent import AgentSession
 from mindroom.agents import create_session_storage
 from mindroom.ai import get_model_instance
 from mindroom.logging_config import get_logger
-
-from .functions import append_agent_daily_memory, list_all_agent_memories
+from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
 
 if TYPE_CHECKING:
     from collections.abc import Callable

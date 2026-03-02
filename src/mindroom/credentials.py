@@ -9,8 +9,8 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .constants import CREDENTIALS_DIR
-from .logging_config import get_logger
+from mindroom.constants import CREDENTIALS_DIR
+from mindroom.logging_config import get_logger
 
 SERVICE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9:_-]+$")
 logger = get_logger(__name__)

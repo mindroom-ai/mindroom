@@ -106,7 +106,7 @@ async def get_all_agents_rooms() -> AllAgentsRoomsResponse:
     Returns information about configured rooms, joined rooms,
     and unconfigured rooms (joined but not in config) for each agent.
     """
-    from .main import config, config_lock  # noqa: PLC0415
+    from mindroom.api.main import config, config_lock  # noqa: PLC0415
 
     agents_rooms = []
 
@@ -134,7 +134,7 @@ async def get_agent_rooms(agent_id: str) -> AgentRoomsResponse:
         HTTPException: If agent not found or error occurs
 
     """
-    from .main import config, config_lock  # noqa: PLC0415
+    from mindroom.api.main import config, config_lock  # noqa: PLC0415
 
     with config_lock:
         agents = config.get("agents", {})
@@ -159,7 +159,7 @@ async def leave_room_endpoint(request: RoomLeaveRequest) -> dict[str, bool]:
         HTTPException: If agent not found or leave operation fails
 
     """
-    from .main import config, config_lock  # noqa: PLC0415
+    from mindroom.api.main import config, config_lock  # noqa: PLC0415
 
     with config_lock:
         agents = config.get("agents", {})

@@ -13,8 +13,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.teams import TeamFormationDecision, TeamMode
-
-from .conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD
 
 
 @pytest.mark.asyncio

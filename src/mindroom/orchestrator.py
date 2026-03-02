@@ -10,31 +10,31 @@ from typing import TYPE_CHECKING, Any
 
 import uvicorn
 
-from .agents import get_rooms_for_entity
-from .authorization import is_authorized_sender
-from .bot import AgentBot, TeamBot, create_bot_for_entity
-from .config.main import Config
-from .constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME
-from .credentials_sync import sync_env_to_credentials
-from .file_watcher import watch_file
-from .knowledge import initialize_knowledge_managers, shutdown_knowledge_managers
-from .logging_config import get_logger, setup_logging
-from .matrix.client import get_joined_rooms, get_room_members, invite_to_room
-from .matrix.identity import MatrixID, extract_server_name_from_homeserver
-from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, load_rooms, resolve_room_aliases
-from .matrix.state import MatrixState
-from .matrix.users import (
+from mindroom.agents import get_rooms_for_entity
+from mindroom.authorization import is_authorized_sender
+from mindroom.bot import AgentBot, TeamBot, create_bot_for_entity
+from mindroom.config.main import Config
+from mindroom.constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME
+from mindroom.credentials_sync import sync_env_to_credentials
+from mindroom.file_watcher import watch_file
+from mindroom.knowledge import initialize_knowledge_managers, shutdown_knowledge_managers
+from mindroom.logging_config import get_logger, setup_logging
+from mindroom.matrix.client import get_joined_rooms, get_room_members, invite_to_room
+from mindroom.matrix.identity import MatrixID, extract_server_name_from_homeserver
+from mindroom.matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, load_rooms, resolve_room_aliases
+from mindroom.matrix.state import MatrixState
+from mindroom.matrix.users import (
     INTERNAL_USER_ACCOUNT_KEY,
     INTERNAL_USER_AGENT_NAME,
     AgentMatrixUser,
     create_agent_user,
 )
-from .memory.auto_flush import MemoryAutoFlushWorker, auto_flush_enabled
-from .plugins import load_plugins
-from .skills import clear_skill_cache, get_skill_snapshot
+from mindroom.memory.auto_flush import MemoryAutoFlushWorker, auto_flush_enabled
+from mindroom.plugins import load_plugins
+from mindroom.skills import clear_skill_cache, get_skill_snapshot
 
 if TYPE_CHECKING:
-    from .knowledge import KnowledgeManager
+    from mindroom.knowledge import KnowledgeManager
 
 logger = get_logger(__name__)
 

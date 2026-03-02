@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from .models import EmbedderConfig
+from mindroom.config.models import EmbedderConfig
 
 MemoryBackend = Literal["mem0", "file"]
 

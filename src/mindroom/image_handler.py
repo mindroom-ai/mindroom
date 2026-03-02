@@ -6,7 +6,7 @@ import nio
 from agno.media import Image
 from nio import crypto
 
-from .logging_config import get_logger
+from mindroom.logging_config import get_logger
 
 logger = get_logger(__name__)
 

@@ -6,16 +6,21 @@ from collections.abc import Mapping
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any
 
-from .constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
-from .matrix.identity import MatrixID, extract_agent_name, managed_room_key_from_alias_localpart, room_alias_localpart
-from .matrix.state import MatrixState
+from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
+from mindroom.matrix.identity import (
+    MatrixID,
+    extract_agent_name,
+    managed_room_key_from_alias_localpart,
+    room_alias_localpart,
+)
+from mindroom.matrix.state import MatrixState
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     import nio
 
-    from .config.main import Config
+    from mindroom.config.main import Config
 
 
 def _room_permission_lookup_keys(

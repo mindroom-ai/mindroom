@@ -18,8 +18,7 @@ from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, VOICE_PRE
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_utils import should_agent_respond
-
-from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
 
 def create_mock_room(

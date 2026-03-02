@@ -18,14 +18,14 @@ from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
 from agno.team import Team
 from pydantic import BaseModel, Field
 
-from . import agent_prompts
-from .ai import get_model_instance
-from .authorization import get_available_agents_in_room
-from .constants import ROUTER_AGENT_NAME
-from .error_handling import get_user_friendly_error_message
-from .logging_config import get_logger
-from .matrix.rooms import get_room_alias_from_id
-from .tool_events import (
+from mindroom import agent_prompts
+from mindroom.ai import get_model_instance
+from mindroom.authorization import get_available_agents_in_room
+from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.error_handling import get_user_friendly_error_message
+from mindroom.logging_config import get_logger
+from mindroom.matrix.rooms import get_room_alias_from_id
+from mindroom.tool_events import (
     StructuredStreamChunk,
     ToolTraceEntry,
     complete_pending_tool_block,
@@ -40,9 +40,9 @@ if TYPE_CHECKING:
     from agno.media import Image
     from agno.models.response import ToolExecution
 
-    from .config.main import Config
-    from .matrix.identity import MatrixID
-    from .orchestrator import MultiAgentOrchestrator
+    from mindroom.config.main import Config
+    from mindroom.matrix.identity import MatrixID
+    from mindroom.orchestrator import MultiAgentOrchestrator
 
 
 logger = get_logger(__name__)

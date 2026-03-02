@@ -9,8 +9,7 @@ from httpx import Response
 
 from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.homeassistant import HomeAssistantTools
-
-from .conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD
 
 
 @pytest.fixture

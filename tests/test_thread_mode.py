@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
-from .conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD
 
 
 @pytest.fixture

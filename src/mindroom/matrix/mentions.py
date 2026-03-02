@@ -4,10 +4,9 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from mindroom.config.main import Config
+from mindroom.matrix.identity import MatrixID, mindroom_namespace
+from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.tool_events import build_tool_trace_content
-
-from .identity import MatrixID, mindroom_namespace
-from .message_builder import build_message_content, markdown_to_html
 
 if TYPE_CHECKING:
     from mindroom.tool_events import ToolTraceEntry
