@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING
 import mindroom.plugins as plugin_module
 from mindroom.config.main import Config
 from mindroom.plugins import load_plugins
-from mindroom.skills import get_plugin_skill_roots, set_plugin_skill_roots
-from mindroom.tools_metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name
+from mindroom.skills import _get_plugin_skill_roots, set_plugin_skill_roots
+from mindroom.tools_metadata import _TOOL_REGISTRY, TOOL_METADATA, get_tool_by_name
 
 if TYPE_CHECKING:
     import pytest
@@ -60,22 +60,22 @@ def test_load_plugins_registers_tools_and_skills(tmp_path: Path) -> None:
     config_path.write_text("agents: {}", encoding="utf-8")
     config = Config(plugins=["./plugins/demo"])
 
-    original_registry = TOOL_REGISTRY.copy()
+    original_registry = _TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
-    original_plugin_roots = get_plugin_skill_roots()
+    original_plugin_roots = _get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_tool_cache = plugin_module._TOOL_MODULE_CACHE.copy()
 
     try:
         plugins = load_plugins(config, config_path=config_path)
         assert [plugin.name for plugin in plugins] == ["demo-plugin"]
-        assert "demo_plugin" in TOOL_REGISTRY
+        assert "demo_plugin" in _TOOL_REGISTRY
         tool = get_tool_by_name("demo_plugin")
         assert tool.name == "demo"
-        assert (plugin_root / "skills").resolve() in get_plugin_skill_roots()
+        assert (plugin_root / "skills").resolve() in _get_plugin_skill_roots()
     finally:
-        TOOL_REGISTRY.clear()
-        TOOL_REGISTRY.update(original_registry)
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
         plugin_module._PLUGIN_CACHE.clear()
@@ -132,9 +132,9 @@ def test_load_plugins_from_python_package(tmp_path: Path, monkeypatch: pytest.Mo
     config_path.write_text("agents: {}", encoding="utf-8")
     config = Config(plugins=["demo_pkg"])
 
-    original_registry = TOOL_REGISTRY.copy()
+    original_registry = _TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
-    original_plugin_roots = get_plugin_skill_roots()
+    original_plugin_roots = _get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_tool_cache = plugin_module._TOOL_MODULE_CACHE.copy()
 
@@ -142,13 +142,13 @@ def test_load_plugins_from_python_package(tmp_path: Path, monkeypatch: pytest.Mo
         plugins = load_plugins(config, config_path=config_path)
         assert [plugin.name for plugin in plugins] == ["demo-pkg"]
         assert plugins[0].root == plugin_root.resolve()
-        assert "demo_pkg_tool" in TOOL_REGISTRY
+        assert "demo_pkg_tool" in _TOOL_REGISTRY
         tool = get_tool_by_name("demo_pkg_tool")
         assert tool.name == "demo_pkg"
-        assert (plugin_root / "skills").resolve() in get_plugin_skill_roots()
+        assert (plugin_root / "skills").resolve() in _get_plugin_skill_roots()
     finally:
-        TOOL_REGISTRY.clear()
-        TOOL_REGISTRY.update(original_registry)
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
         plugin_module._PLUGIN_CACHE.clear()

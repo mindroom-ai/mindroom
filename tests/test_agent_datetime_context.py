@@ -9,13 +9,13 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 
-from mindroom.agents import create_agent, get_datetime_context
+from mindroom.agents import _get_datetime_context, create_agent
 from mindroom.config.main import Config
 
 
 def test_get_datetime_context_format() -> None:
     """Test the datetime context formatting."""
-    context = get_datetime_context("America/New_York")
+    context = _get_datetime_context("America/New_York")
 
     # Should have the header
     assert "## Current Date and Time" in context
@@ -37,7 +37,7 @@ def test_get_datetime_context_format() -> None:
 
 def test_get_datetime_context_utc() -> None:
     """Test datetime context with UTC timezone."""
-    context = get_datetime_context("UTC")
+    context = _get_datetime_context("UTC")
 
     assert "## Current Date and Time" in context
     assert "UTC timezone" in context
@@ -47,7 +47,7 @@ def test_get_datetime_context_utc() -> None:
 def test_get_datetime_context_invalid_timezone() -> None:
     """Test that invalid timezone raises ZoneInfoNotFoundError."""
     with pytest.raises(ZoneInfoNotFoundError):
-        get_datetime_context("Invalid/Timezone")
+        _get_datetime_context("Invalid/Timezone")
 
 
 def test_agent_prompt_includes_datetime() -> None:
@@ -129,7 +129,7 @@ def test_agent_prompt_datetime_changes_with_timezone() -> None:
 
 def test_datetime_context_is_current() -> None:
     """Test that the datetime context shows the current time (within a minute)."""
-    context = get_datetime_context("UTC")
+    context = _get_datetime_context("UTC")
 
     # Extract the time from the context
     # Looking for pattern like "13:30 UTC" (24-hour format)

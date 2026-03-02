@@ -13,9 +13,9 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.teams import (
     TeamMode,
-    TeamModeDecision,
+    _select_team_mode,
+    _TeamModeDecision,
     decide_team_formation,
-    select_team_mode,
 )
 
 
@@ -67,7 +67,7 @@ class TestTeamModeDecision:
 
     def test_team_mode_decision_coordinate(self):
         """Test creating a coordinate mode decision."""
-        decision = TeamModeDecision(
+        decision = _TeamModeDecision(
             mode="coordinate",
             reasoning="Tasks must be done sequentially",
         )
@@ -76,7 +76,7 @@ class TestTeamModeDecision:
 
     def test_team_mode_decision_collaborate(self):
         """Test creating a collaborate mode decision."""
-        decision = TeamModeDecision(
+        decision = _TeamModeDecision(
             mode="collaborate",
             reasoning="Tasks can be done in parallel",
         )
@@ -94,14 +94,14 @@ class TestDetermineTeamMode:
             # Mock the AI agent response
             mock_agent = AsyncMock()
             mock_response = MagicMock()
-            mock_response.content = TeamModeDecision(
+            mock_response.content = _TeamModeDecision(
                 mode="coordinate",
                 reasoning="Different agents handle different subtasks",
             )
             mock_agent.arun.return_value = mock_response
 
             with patch("mindroom.teams.Agent", return_value=mock_agent):
-                result = await select_team_mode(
+                result = await _select_team_mode(
                     "Send me an email then call me",
                     ["email", "phone"],
                     mock_config,
@@ -117,14 +117,14 @@ class TestDetermineTeamMode:
             # Mock the AI agent response
             mock_agent = AsyncMock()
             mock_response = MagicMock()
-            mock_response.content = TeamModeDecision(
+            mock_response.content = _TeamModeDecision(
                 mode="collaborate",
                 reasoning="All agents work on the same brainstorming task",
             )
             mock_agent.arun.return_value = mock_response
 
             with patch("mindroom.teams.Agent", return_value=mock_agent):
-                result = await select_team_mode(
+                result = await _select_team_mode(
                     "What do you think about this idea?",
                     ["research", "analyst"],
                     mock_config,
@@ -142,7 +142,7 @@ class TestDetermineTeamMode:
             mock_agent.arun.side_effect = Exception("AI service unavailable")
 
             with patch("mindroom.teams.Agent", return_value=mock_agent):
-                result = await select_team_mode(
+                result = await _select_team_mode(
                     "Do something",
                     ["email", "phone"],
                     mock_config,
@@ -162,7 +162,7 @@ class TestDetermineTeamMode:
             mock_agent.arun.return_value = mock_response
 
             with patch("mindroom.teams.Agent", return_value=mock_agent):
-                result = await select_team_mode(
+                result = await _select_team_mode(
                     "Do something",
                     ["email", "phone"],
                     mock_config,
@@ -178,7 +178,7 @@ class TestShouldFormTeam:
     @pytest.mark.asyncio
     async def test_decide_team_formation_with_ai_decision(self, mock_config):
         """Test team formation with AI mode decision."""
-        with patch("mindroom.teams.select_team_mode") as mock_determine:
+        with patch("mindroom.teams._select_team_mode") as mock_determine:
             mock_determine.return_value = TeamMode.COORDINATE
 
             result = await decide_team_formation(
@@ -279,7 +279,7 @@ class TestShouldFormTeam:
     @pytest.mark.asyncio
     async def test_decide_team_formation_thread_agents(self, mock_config):
         """Test team formation with agents from thread history."""
-        with patch("mindroom.teams.select_team_mode") as mock_determine:
+        with patch("mindroom.teams._select_team_mode") as mock_determine:
             mock_determine.return_value = TeamMode.COLLABORATE
 
             result = await decide_team_formation(
@@ -300,7 +300,7 @@ class TestShouldFormTeam:
     @pytest.mark.asyncio
     async def test_decide_team_formation_mentioned_agents(self, mock_config):
         """Test team formation with previously mentioned agents."""
-        with patch("mindroom.teams.select_team_mode") as mock_determine:
+        with patch("mindroom.teams._select_team_mode") as mock_determine:
             mock_determine.return_value = TeamMode.COLLABORATE
 
             result = await decide_team_formation(
@@ -333,7 +333,7 @@ class TestIntegrationScenarios:
             # Mock the AI to recognize different subtasks
             mock_agent = AsyncMock()
             mock_response = MagicMock()
-            mock_response.content = TeamModeDecision(
+            mock_response.content = _TeamModeDecision(
                 mode="coordinate",
                 reasoning="Different tasks: email agent sends email, phone agent makes call",
             )
@@ -362,7 +362,7 @@ class TestIntegrationScenarios:
             # Mock the AI to recognize same task for all
             mock_agent = AsyncMock()
             mock_response = MagicMock()
-            mock_response.content = TeamModeDecision(
+            mock_response.content = _TeamModeDecision(
                 mode="collaborate",
                 reasoning="All agents provide their perspective on the same question",
             )

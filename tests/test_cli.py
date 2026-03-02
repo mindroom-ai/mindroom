@@ -10,7 +10,7 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, register_user
+from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, _register_user
 from mindroom.orchestrator import MultiAgentOrchestrator
 
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
@@ -58,7 +58,7 @@ class TestUserAccountManagement:
         mock_client.set_displayname.return_value = AsyncMock()
 
         with patch("mindroom.matrix.users.matrix_client", return_value=mock_context):
-            user_id = await register_user("http://localhost:8008", "test_user", TEST_PASSWORD, "Test User")
+            user_id = await _register_user("http://localhost:8008", "test_user", TEST_PASSWORD, "Test User")
 
             assert user_id == "@test_user:localhost"
 
@@ -90,7 +90,7 @@ class TestUserAccountManagement:
 
         with patch("mindroom.matrix.users.matrix_client", return_value=mock_context):
             # Should return the user_id even when user exists
-            user_id = await register_user("http://localhost:8008", "existing_user", "test_password", "Existing User")
+            user_id = await _register_user("http://localhost:8008", "existing_user", "test_password", "Existing User")
 
             assert user_id == "@existing_user:localhost"
 

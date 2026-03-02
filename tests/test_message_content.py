@@ -6,9 +6,9 @@ import nio
 import pytest
 
 from mindroom.matrix.message_content import (
+    _clear_mxc_cache,
     _download_mxc_text,
     _get_full_message_body,
-    clear_mxc_cache,
 )
 
 
@@ -17,7 +17,7 @@ class TestGetFullMessageBody:
 
     def setup_method(self) -> None:
         """Clear cache before each test."""
-        clear_mxc_cache()
+        _clear_mxc_cache()
 
     @pytest.mark.asyncio
     async def test_regular_message(self) -> None:
@@ -300,7 +300,7 @@ class TestDownloadMxcText:
 
     def setup_method(self) -> None:
         """Clear cache before each test."""
-        clear_mxc_cache()
+        _clear_mxc_cache()
 
     @pytest.mark.asyncio
     async def test_invalid_mxc_url(self) -> None:

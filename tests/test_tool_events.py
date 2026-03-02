@@ -5,22 +5,22 @@ from agno.models.response import ToolExecution
 
 from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.tool_events import (
-    MAX_TOOL_TRACE_EVENTS,
-    TOOL_TRACE_KEY,
+    _MAX_TOOL_TRACE_EVENTS,
+    _TOOL_TRACE_KEY,
     ToolTraceEntry,
+    _format_tool_started,
     build_tool_trace_content,
     complete_pending_tool_block,
     extract_tool_completed_info,
     format_tool_combined,
     format_tool_completed_event,
-    format_tool_started,
 )
 
 
 def test_format_tool_started_uses_plain_marker_and_truncates() -> None:
     """Tool start messages should render as compact plain-text markers."""
     long_contents = "x" * 2000
-    text, trace = format_tool_started(
+    text, trace = _format_tool_started(
         "save_file",
         {
             "file_name": "notes.txt",
@@ -153,19 +153,19 @@ def test_complete_pending_tool_block_no_result_marks_completed() -> None:
 def test_build_tool_trace_content_preserves_all_events_for_v2_indexing() -> None:
     """V2 tool trace keeps all events so `[N] -> events[N-1]` remains valid."""
     entries = [
-        ToolTraceEntry(type="tool_call_started", tool_name=f"tool_{i}") for i in range(MAX_TOOL_TRACE_EVENTS + 5)
+        ToolTraceEntry(type="tool_call_started", tool_name=f"tool_{i}") for i in range(_MAX_TOOL_TRACE_EVENTS + 5)
     ]
     payload = build_tool_trace_content(entries)
     assert payload is not None
-    trace = payload[TOOL_TRACE_KEY]
+    trace = payload[_TOOL_TRACE_KEY]
     assert trace["version"] == 2
-    assert len(trace["events"]) == MAX_TOOL_TRACE_EVENTS + 5
+    assert len(trace["events"]) == _MAX_TOOL_TRACE_EVENTS + 5
     assert "events_truncated" not in trace
 
 
 def test_format_tool_started_with_empty_args() -> None:
     """Tool start formatting should handle empty argument maps."""
-    text, trace = format_tool_started("save_file", {}, tool_index=1)
+    text, trace = _format_tool_started("save_file", {}, tool_index=1)
     assert text == "\n\n🔧 `save_file` [1] ⏳\n"
     assert trace.type == "tool_call_started"
     assert trace.tool_name == "save_file"
@@ -175,7 +175,7 @@ def test_format_tool_started_with_empty_args() -> None:
 
 def test_format_tool_started_preserves_argument_order() -> None:
     """Tool start formatting should preserve input argument ordering."""
-    _text, trace = format_tool_started(
+    _text, trace = _format_tool_started(
         "save_file",
         {
             "file_name": "a.py",
@@ -187,7 +187,7 @@ def test_format_tool_started_preserves_argument_order() -> None:
 
 def test_complete_pending_tool_block_roundtrip_with_marker_id() -> None:
     """Pending marker produced by format_tool_started should be completed in-place by id."""
-    pending_text, _ = format_tool_started(
+    pending_text, _ = _format_tool_started(
         "save_file",
         {"file_name": "a.py", "contents": "print('hello')"},
         tool_index=5,
@@ -204,7 +204,7 @@ def test_complete_pending_tool_block_roundtrip_with_marker_id() -> None:
 
 def test_format_tool_started_collapses_newlines_in_args() -> None:
     """Tool args with newlines should be collapsed to spaces."""
-    text, trace = format_tool_started(
+    text, trace = _format_tool_started(
         "save_file",
         {"contents": "line1\nline2\nline3"},
     )
@@ -217,7 +217,7 @@ def test_format_tool_started_collapses_newlines_in_args() -> None:
 
 def test_complete_pending_tool_block_roundtrip_with_multiline_args() -> None:
     """format_tool_started with multiline args -> complete_pending_tool_block should succeed."""
-    pending_text, _ = format_tool_started(
+    pending_text, _ = _format_tool_started(
         "save_file",
         {"file": "test.py", "contents": "def foo():\n    return 42\n"},
         tool_index=1,
@@ -307,8 +307,8 @@ def test_markdown_to_html_escapes_unknown_tags_including_tool() -> None:
 def test_tool_lifecycle_produces_expected_html() -> None:
     """Full pipeline: started -> completed -> markdown_to_html emits plain marker text with code spans."""
     # 1. Two tool calls start (pending)
-    text1, _ = format_tool_started("save_file", {"file": "a.py"}, tool_index=1)
-    text2, _ = format_tool_started("run_shell", {"cmd": "pwd"}, tool_index=2)
+    text1, _ = _format_tool_started("save_file", {"file": "a.py"}, tool_index=1)
+    text2, _ = _format_tool_started("run_shell", {"cmd": "pwd"}, tool_index=2)
     body = text1 + text2
 
     # 2. Both complete

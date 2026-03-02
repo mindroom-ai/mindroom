@@ -14,7 +14,7 @@ import nio
 import pytest
 from agno.models.ollama import Ollama
 
-from mindroom.bot import AgentBot, MessageContext
+from mindroom.bot import AgentBot, _MessageContext
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -538,7 +538,7 @@ class TestRoutingRegression:
             router_bot,
             "_extract_message_context",
             new=AsyncMock(
-                return_value=MessageContext(
+                return_value=_MessageContext(
                     am_i_mentioned=False,
                     is_thread=True,
                     thread_id="$thread_root",

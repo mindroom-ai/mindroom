@@ -33,7 +33,7 @@ def test_file_watcher_detects_changes(test_client: TestClient, temp_config_file:
     # For testing, we manually trigger a reload
     from mindroom.api import main  # noqa: PLC0415
 
-    main.load_config_from_file()
+    main._load_config_from_file()
 
     # Check that the config was reloaded
     response = test_client.get("/api/config/agents")

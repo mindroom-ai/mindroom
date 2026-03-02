@@ -8,14 +8,14 @@ from pathlib import Path
 import pytest
 import yaml
 
-from mindroom.commands import CommandParser, CommandType
+from mindroom.commands import CommandType, _CommandParser
 from mindroom.config_commands import (
-    format_value,
-    get_nested_value,
+    _format_value,
+    _get_nested_value,
+    _parse_config_args,
+    _parse_value,
+    _set_nested_value,
     handle_config_command,
-    parse_config_args,
-    parse_value,
-    set_nested_value,
 )
 
 
@@ -24,7 +24,7 @@ class TestCommandParser:
 
     def test_parse_config_empty(self) -> None:
         """Test parsing !config with no args."""
-        parser = CommandParser()
+        parser = _CommandParser()
         command = parser.parse("!config")
         assert command is not None
         assert command.type == CommandType.CONFIG
@@ -32,7 +32,7 @@ class TestCommandParser:
 
     def test_parse_config_show(self) -> None:
         """Test parsing !config show command."""
-        parser = CommandParser()
+        parser = _CommandParser()
         command = parser.parse("!config show")
         assert command is not None
         assert command.type == CommandType.CONFIG
@@ -40,7 +40,7 @@ class TestCommandParser:
 
     def test_parse_config_get(self) -> None:
         """Test parsing !config get command."""
-        parser = CommandParser()
+        parser = _CommandParser()
         command = parser.parse("!config get agents.analyst.display_name")
         assert command is not None
         assert command.type == CommandType.CONFIG
@@ -48,7 +48,7 @@ class TestCommandParser:
 
     def test_parse_config_set(self) -> None:
         """Test parsing !config set command."""
-        parser = CommandParser()
+        parser = _CommandParser()
         command = parser.parse('!config set agents.analyst.display_name "New Name"')
         assert command is not None
         assert command.type == CommandType.CONFIG
@@ -60,44 +60,44 @@ class TestConfigArgsParsing:
 
     def test_parse_empty_args(self) -> None:
         """Test parsing empty config args defaults to show."""
-        operation, args = parse_config_args("")
+        operation, args = _parse_config_args("")
         assert operation == "show"
         assert args == []
 
     def test_parse_show_operation(self) -> None:
         """Test parsing show operation."""
-        operation, args = parse_config_args("show")
+        operation, args = _parse_config_args("show")
         assert operation == "show"
         assert args == []
 
     def test_parse_get_operation(self) -> None:
         """Test parsing get operation with path."""
-        operation, args = parse_config_args("get agents.analyst")
+        operation, args = _parse_config_args("get agents.analyst")
         assert operation == "get"
         assert args == ["agents.analyst"]
 
     def test_parse_set_operation_simple(self) -> None:
         """Test parsing set operation with simple value."""
-        operation, args = parse_config_args("set defaults.markdown false")
+        operation, args = _parse_config_args("set defaults.markdown false")
         assert operation == "set"
         assert args == ["defaults.markdown", "false"]
 
     def test_parse_set_operation_quoted(self) -> None:
         """Test parsing set operation with quoted string."""
-        operation, args = parse_config_args('set agents.analyst.display_name "Research Expert"')
+        operation, args = _parse_config_args('set agents.analyst.display_name "Research Expert"')
         assert operation == "set"
         assert args == ["agents.analyst.display_name", "Research Expert"]
 
     def test_parse_unmatched_quotes(self) -> None:
         """Test parsing with unmatched quotes returns parse_error."""
-        operation, args = parse_config_args('set test.value "unmatched')
+        operation, args = _parse_config_args('set test.value "unmatched')
         assert operation == "parse_error"
         assert len(args) == 1
         assert "closing quotation" in args[0].lower()
 
     def test_parse_mismatched_quotes(self) -> None:
         """Test parsing with mismatched quotes returns parse_error."""
-        operation, args = parse_config_args("set test.value 'mismatched\"")
+        operation, args = _parse_config_args("set test.value 'mismatched\"")
         assert operation == "parse_error"
         assert len(args) == 1
         assert "closing quotation" in args[0].lower()
@@ -109,37 +109,37 @@ class TestNestedValueOperations:
     def test_get_nested_simple(self) -> None:
         """Test getting simple nested value."""
         data = {"agents": {"analyst": {"display_name": "Analyst"}}}
-        value = get_nested_value(data, "agents.analyst.display_name")
+        value = _get_nested_value(data, "agents.analyst.display_name")
         assert value == "Analyst"
 
     def test_get_nested_list(self) -> None:
         """Test getting value from list."""
         data = {"tools": ["tool1", "tool2", "tool3"]}
-        value = get_nested_value(data, "tools.1")
+        value = _get_nested_value(data, "tools.1")
         assert value == "tool2"
 
     def test_get_nested_nonexistent(self) -> None:
         """Test getting nonexistent path raises KeyError."""
         data = {"agents": {}}
         with pytest.raises(KeyError):
-            get_nested_value(data, "agents.analyst.display_name")
+            _get_nested_value(data, "agents.analyst.display_name")
 
     def test_set_nested_simple(self) -> None:
         """Test setting simple nested value."""
         data = {"agents": {"analyst": {"display_name": "Old"}}}
-        set_nested_value(data, "agents.analyst.display_name", "New")
+        _set_nested_value(data, "agents.analyst.display_name", "New")
         assert data["agents"]["analyst"]["display_name"] == "New"
 
     def test_set_nested_create_intermediate(self) -> None:
         """Test setting creates intermediate dicts."""
         data = {"agents": {}}
-        set_nested_value(data, "agents.analyst.display_name", "Analyst")
+        _set_nested_value(data, "agents.analyst.display_name", "Analyst")
         assert data["agents"]["analyst"]["display_name"] == "Analyst"
 
     def test_set_nested_list(self) -> None:
         """Test setting value in list."""
         data = {"tools": ["tool1", "tool2", "tool3"]}
-        set_nested_value(data, "tools.1", "new_tool")
+        _set_nested_value(data, "tools.1", "new_tool")
         assert data["tools"][1] == "new_tool"
 
 
@@ -148,41 +148,41 @@ class TestValueParsing:
 
     def test_parse_boolean_true(self) -> None:
         """Test parsing true boolean."""
-        assert parse_value("true") is True
-        assert parse_value("True") is True
+        assert _parse_value("true") is True
+        assert _parse_value("True") is True
 
     def test_parse_boolean_false(self) -> None:
         """Test parsing false boolean."""
-        assert parse_value("false") is False
-        assert parse_value("False") is False
+        assert _parse_value("false") is False
+        assert _parse_value("False") is False
 
     def test_parse_none(self) -> None:
         """Test parsing None/null."""
-        assert parse_value("null") is None
+        assert _parse_value("null") is None
 
     def test_parse_integer(self) -> None:
         """Test parsing integer."""
-        assert parse_value("42") == 42
-        assert parse_value("-10") == -10
+        assert _parse_value("42") == 42
+        assert _parse_value("-10") == -10
 
     def test_parse_float(self) -> None:
         """Test parsing float."""
-        assert parse_value("3.14") == 3.14
-        assert parse_value("-0.5") == -0.5
+        assert _parse_value("3.14") == 3.14
+        assert _parse_value("-0.5") == -0.5
 
     def test_parse_string(self) -> None:
         """Test parsing string."""
-        assert parse_value("hello") == "hello"
-        assert parse_value("hello world") == "hello world"
+        assert _parse_value("hello") == "hello"
+        assert _parse_value("hello world") == "hello world"
 
     def test_parse_json_list(self) -> None:
         """Test parsing JSON list."""
-        assert parse_value('["a", "b", "c"]') == ["a", "b", "c"]
-        assert parse_value("[1, 2, 3]") == [1, 2, 3]
+        assert _parse_value('["a", "b", "c"]') == ["a", "b", "c"]
+        assert _parse_value("[1, 2, 3]") == [1, 2, 3]
 
     def test_parse_json_dict(self) -> None:
         """Test parsing JSON dict."""
-        assert parse_value('{"key": "value"}') == {"key": "value"}
+        assert _parse_value('{"key": "value"}') == {"key": "value"}
 
 
 class TestValueFormatting:
@@ -190,31 +190,31 @@ class TestValueFormatting:
 
     def test_format_simple_values(self) -> None:
         """Test formatting simple values."""
-        assert format_value("string") == "string"
-        assert format_value(42) == "42"
-        assert format_value(True) == "true"
-        assert format_value(False) == "false"
-        assert format_value(None) == "null"  # YAML represents None as null
+        assert _format_value("string") == "string"
+        assert _format_value(42) == "42"
+        assert _format_value(True) == "true"
+        assert _format_value(False) == "false"
+        assert _format_value(None) == "null"  # YAML represents None as null
 
     def test_format_list(self) -> None:
         """Test formatting list."""
-        result = format_value([1, 2, 3])
+        result = _format_value([1, 2, 3])
         assert "- 1" in result
         assert "- 2" in result
         assert "- 3" in result
-        result = format_value(["a", "b"])
+        result = _format_value(["a", "b"])
         assert "- a" in result
         assert "- b" in result
 
     def test_format_dict(self) -> None:
         """Test formatting dict."""
-        result = format_value({"key": "value"})
+        result = _format_value({"key": "value"})
         assert "key: value" in result
 
     def test_format_empty_collections(self) -> None:
         """Test formatting empty collections."""
-        assert format_value({}) == "{}"
-        assert format_value([]) == "[]"
+        assert _format_value({}) == "{}"
+        assert _format_value([]) == "[]"
 
 
 @pytest.mark.asyncio

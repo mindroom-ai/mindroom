@@ -7,13 +7,13 @@ import pytest
 
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.matrix.large_messages import (
-    NORMAL_MESSAGE_LIMIT,
+    _NORMAL_MESSAGE_LIMIT,
     _calculate_event_size,
     _create_preview,
     _is_edit_message,
     prepare_large_message,
 )
-from mindroom.tool_events import TOOL_TRACE_KEY
+from mindroom.tool_events import _TOOL_TRACE_KEY
 
 
 def test_calculate_event_size() -> None:
@@ -98,7 +98,7 @@ async def test_prepare_large_message_passthrough() -> None:
     assert result == small_content
 
     # Message just under limit should pass through
-    text = "x" * (NORMAL_MESSAGE_LIMIT - 3000)
+    text = "x" * (_NORMAL_MESSAGE_LIMIT - 3000)
     content = {"body": text, "msgtype": "m.text"}
     result = await prepare_large_message(client, "!room:server", content)
     assert result == content
@@ -158,7 +158,7 @@ async def test_prepare_large_message_truncation() -> None:
     assert json.loads(client.uploaded_data.decode("utf-8")) == content
 
     # Preview should fit in limit
-    assert _calculate_event_size(result) <= NORMAL_MESSAGE_LIMIT
+    assert _calculate_event_size(result) <= _NORMAL_MESSAGE_LIMIT
 
 
 @pytest.mark.asyncio
@@ -226,14 +226,14 @@ async def test_prepare_large_message_moves_tool_trace_to_json_sidecar_regular() 
     content = {
         "body": "z" * 100000,
         "msgtype": "m.text",
-        TOOL_TRACE_KEY: {"version": 1, "events": [{"type": "tool_call_started", "tool_name": "save_file"}]},
+        _TOOL_TRACE_KEY: {"version": 1, "events": [{"type": "tool_call_started", "tool_name": "save_file"}]},
     }
 
     result = await prepare_large_message(client, "!room:server", content)
-    assert TOOL_TRACE_KEY not in result
+    assert _TOOL_TRACE_KEY not in result
     assert client.uploaded_data is not None
     uploaded_payload = json.loads(client.uploaded_data.decode("utf-8"))
-    assert TOOL_TRACE_KEY in uploaded_payload
+    assert _TOOL_TRACE_KEY in uploaded_payload
 
 
 @pytest.mark.asyncio
@@ -289,7 +289,7 @@ async def test_prepare_large_message_moves_tool_trace_to_json_sidecar_edit() -> 
         "m.new_content": {
             "body": "w" * 50000,
             "msgtype": "m.text",
-            TOOL_TRACE_KEY: {"version": 1, "events": [{"type": "tool_call_completed", "tool_name": "save_file"}]},
+            _TOOL_TRACE_KEY: {"version": 1, "events": [{"type": "tool_call_completed", "tool_name": "save_file"}]},
         },
         "m.relates_to": {"rel_type": "m.replace", "event_id": "$abc"},
         "msgtype": "m.text",
@@ -297,7 +297,7 @@ async def test_prepare_large_message_moves_tool_trace_to_json_sidecar_edit() -> 
 
     result = await prepare_large_message(client, "!room:server", edit_content)
     assert "m.new_content" in result
-    assert TOOL_TRACE_KEY not in result["m.new_content"]
+    assert _TOOL_TRACE_KEY not in result["m.new_content"]
     assert client.uploaded_data is not None
     uploaded_payload = json.loads(client.uploaded_data.decode("utf-8"))
-    assert TOOL_TRACE_KEY in uploaded_payload["m.new_content"]
+    assert _TOOL_TRACE_KEY in uploaded_payload["m.new_content"]

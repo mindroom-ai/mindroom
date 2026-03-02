@@ -14,7 +14,7 @@ from mindroom.command_handler import _run_skill_command_tool
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.skills import build_agent_skills, resolve_skill_command_spec
-from mindroom.tools_metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory, register_tool_with_metadata
+from mindroom.tools_metadata import _TOOL_REGISTRY, TOOL_METADATA, ToolCategory, register_tool_with_metadata
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -67,7 +67,7 @@ def test_bundled_mindroom_docs_skill_is_discoverable() -> None:
     """Ensure the bundled mindroom-docs skill is discoverable."""
     listing = skills_module.resolve_skill_listing(
         "mindroom-docs",
-        roots=[skills_module.get_bundled_skills_dir()],
+        roots=[skills_module._get_bundled_skills_dir()],
     )
     assert listing is not None
     assert listing.origin == "bundled"
@@ -85,7 +85,7 @@ def test_get_bundled_skills_dir_uses_package_fallback(
     monkeypatch.setattr(skills_module, "_BUNDLED_SKILLS_DEV_DIR", tmp_path / "missing-repo-skills")
     monkeypatch.setattr(skills_module, "_BUNDLED_SKILLS_PACKAGE_DIR", package_dir)
 
-    assert skills_module.get_bundled_skills_dir() == package_dir
+    assert skills_module._get_bundled_skills_dir() == package_dir
 
 
 def test_parse_skill_with_json5_metadata(tmp_path: Path) -> None:
@@ -328,7 +328,7 @@ async def test_skill_command_tool_dispatch() -> None:
         def demo(self, command: str, commandName: str, skillName: str) -> str:  # noqa: N803
             return f"{commandName}:{skillName}:{command}"
 
-    original_registry = TOOL_REGISTRY.copy()
+    original_registry = _TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
     try:
 
@@ -352,8 +352,8 @@ async def test_skill_command_tool_dispatch() -> None:
             args_text="hello",
         )
     finally:
-        TOOL_REGISTRY.clear()
-        TOOL_REGISTRY.update(original_registry)
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
 
@@ -371,7 +371,7 @@ async def test_skill_command_tool_dispatch_uses_default_tools() -> None:
         def demo(self, command: str, commandName: str, skillName: str) -> str:  # noqa: N803
             return f"{commandName}:{skillName}:{command}"
 
-    original_registry = TOOL_REGISTRY.copy()
+    original_registry = _TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
     try:
 
@@ -396,8 +396,8 @@ async def test_skill_command_tool_dispatch_uses_default_tools() -> None:
             args_text="hello",
         )
     finally:
-        TOOL_REGISTRY.clear()
-        TOOL_REGISTRY.update(original_registry)
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
 

@@ -11,14 +11,14 @@ import pytest
 
 from mindroom.tool_dependencies import (
     _PIP_TO_IMPORT,
+    _install_tool_extras,
     _install_via_uv_sync,
     _pip_name_to_import,
     check_deps_installed,
-    install_tool_extras,
 )
 from mindroom.tools_metadata import (
+    _TOOL_REGISTRY,
     TOOL_METADATA,
-    TOOL_REGISTRY,
     SetupType,
     ToolCategory,
     ToolMetadata,
@@ -33,7 +33,7 @@ def test_all_tools_can_be_imported() -> None:
     """Test that all registered tools can be imported and instantiated."""
     failed = []
 
-    for tool_name in TOOL_REGISTRY:
+    for tool_name in _TOOL_REGISTRY:
         metadata = TOOL_METADATA.get(tool_name)
         requires_config = metadata and metadata.status == ToolStatus.REQUIRES_CONFIG
 
@@ -108,7 +108,7 @@ def test_get_tool_by_name_retries_after_auto_install(monkeypatch: pytest.MonkeyP
             raise ImportError(msg)
         return DummyToolkit
 
-    TOOL_REGISTRY[tool_name] = flaky_factory
+    _TOOL_REGISTRY[tool_name] = flaky_factory
     TOOL_METADATA[tool_name] = ToolMetadata(
         name=tool_name,
         display_name="Auto Install Test Tool",
@@ -128,7 +128,7 @@ def test_get_tool_by_name_retries_after_auto_install(monkeypatch: pytest.MonkeyP
         assert isinstance(tool, DummyToolkit)
         assert calls["count"] == 2
     finally:
-        TOOL_REGISTRY.pop(tool_name, None)
+        _TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
 
 
@@ -144,7 +144,7 @@ def test_get_tool_by_name_raises_when_auto_install_fails(monkeypatch: pytest.Mon
         msg = "dependency missing forever"
         raise ImportError(msg)
 
-    TOOL_REGISTRY[tool_name] = failing_factory
+    _TOOL_REGISTRY[tool_name] = failing_factory
     TOOL_METADATA[tool_name] = ToolMetadata(
         name=tool_name,
         display_name="Auto Install Failure Tool",
@@ -163,7 +163,7 @@ def test_get_tool_by_name_raises_when_auto_install_fails(monkeypatch: pytest.Mon
         with pytest.raises(ImportError, match="dependency missing forever"):
             get_tool_by_name(tool_name)
     finally:
-        TOOL_REGISTRY.pop(tool_name, None)
+        _TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
 
 
@@ -253,13 +253,13 @@ def test_install_tool_extras_skips_uv_sync_outside_virtualenv(monkeypatch: pytes
         calls["env"] += 1
         return True
 
-    monkeypatch.setattr("mindroom.tool_dependencies.is_uv_tool_install", lambda: False)
+    monkeypatch.setattr("mindroom.tool_dependencies._is_uv_tool_install", lambda: False)
     monkeypatch.setattr("mindroom.tool_dependencies._has_lockfile", lambda: True)
     monkeypatch.setattr("mindroom.tool_dependencies._in_virtualenv", lambda: False)
     monkeypatch.setattr("mindroom.tool_dependencies.shutil.which", lambda _binary: "/usr/bin/uv")
     monkeypatch.setattr("mindroom.tool_dependencies._install_via_uv_sync", fake_install_via_uv_sync)
     monkeypatch.setattr("mindroom.tool_dependencies._install_in_environment", fake_install_in_environment)
 
-    assert install_tool_extras(["wikipedia"], quiet=True)
+    assert _install_tool_extras(["wikipedia"], quiet=True)
     assert calls["sync"] == 0
     assert calls["env"] == 1

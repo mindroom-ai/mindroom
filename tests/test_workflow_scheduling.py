@@ -13,9 +13,9 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling import (
     CronSchedule,
     ScheduledWorkflow,
-    WorkflowParseError,
-    execute_scheduled_workflow,
-    parse_workflow_schedule,
+    _execute_scheduled_workflow,
+    _parse_workflow_schedule,
+    _WorkflowParseError,
     schedule_task,
 )
 
@@ -120,7 +120,7 @@ class TestParseWorkflowSchedule:
         mock_agent_class.return_value = mock_agent
 
         # Parse the request
-        result = await parse_workflow_schedule(
+        result = await _parse_workflow_schedule(
             "Every Monday at 9am, research AI news and email me a summary",
             config=mock_config,
             available_agents=[_mid("research"), _mid("email_assistant")],
@@ -152,7 +152,7 @@ class TestParseWorkflowSchedule:
         mock_agent.arun.return_value = mock_response
         mock_agent_class.return_value = mock_agent
 
-        result = await parse_workflow_schedule(
+        result = await _parse_workflow_schedule(
             "ping me in 5 minutes to check the deployment",
             config=mock_config,
             available_agents=[_mid("general")],
@@ -177,7 +177,7 @@ class TestParseWorkflowSchedule:
         mock_agent.arun.return_value = mock_response
         mock_agent_class.return_value = mock_agent
 
-        result = await parse_workflow_schedule(
+        result = await _parse_workflow_schedule(
             "Daily at 9am, give me a market analysis",
             config=mock_config,
             available_agents=[_mid("finance")],
@@ -201,13 +201,13 @@ class TestParseWorkflowSchedule:
         mock_agent.arun.side_effect = Exception("AI service error")
         mock_agent_class.return_value = mock_agent
 
-        result = await parse_workflow_schedule(
+        result = await _parse_workflow_schedule(
             "Schedule something",
             config=mock_config,
             available_agents=[_mid("general")],
         )
 
-        assert isinstance(result, WorkflowParseError)
+        assert isinstance(result, _WorkflowParseError)
         assert "Error parsing schedule" in result.error
         assert result.suggestion is not None
 
@@ -231,7 +231,7 @@ class TestParseWorkflowSchedule:
         mock_agent.arun.return_value = mock_response
         mock_agent_class.return_value = mock_agent
 
-        await parse_workflow_schedule(
+        await _parse_workflow_schedule(
             "remind me later",
             config=mock_config,
             available_agents=[
@@ -279,12 +279,12 @@ class TestParseWorkflowSchedule:
         mock_agent.arun.side_effect = [resp_once, resp_cron]
         mock_agent_class.return_value = mock_agent
 
-        result_once = await parse_workflow_schedule("remind me later", mock_config, [_mid("general")])
+        result_once = await _parse_workflow_schedule("remind me later", mock_config, [_mid("general")])
         assert isinstance(result_once, ScheduledWorkflow)
         assert result_once.schedule_type == "once"
         assert result_once.execute_at is not None
 
-        result_cron = await parse_workflow_schedule("every day", mock_config, [_mid("general")])
+        result_cron = await _parse_workflow_schedule("every day", mock_config, [_mid("general")])
         assert isinstance(result_cron, ScheduledWorkflow)
         assert result_cron.schedule_type == "cron"
         assert result_cron.cron_schedule is not None
@@ -308,12 +308,12 @@ class TestExecuteScheduledWorkflow:
             created_by="@user:server",
         )
 
-        await execute_scheduled_workflow(client, workflow, config)
+        await _execute_scheduled_workflow(client, workflow, config)
 
         # Verify message was sent
 
         with patch("mindroom.scheduling.send_message", new=AsyncMock()) as mock_send:
-            await execute_scheduled_workflow(client, workflow, config)
+            await _execute_scheduled_workflow(client, workflow, config)
             mock_send.assert_called_once()
 
             # Check the message content
@@ -339,7 +339,7 @@ class TestExecuteScheduledWorkflow:
         )
 
         with patch("mindroom.scheduling.send_message", new=AsyncMock()) as mock_send:
-            await execute_scheduled_workflow(client, workflow, config)
+            await _execute_scheduled_workflow(client, workflow, config)
             mock_send.assert_called_once()
 
             # Check the message content
@@ -367,7 +367,7 @@ class TestExecuteScheduledWorkflow:
 
         with patch("mindroom.scheduling.send_message", new=mock_send):
             # Should not raise, but log error
-            await execute_scheduled_workflow(client, workflow, config)
+            await _execute_scheduled_workflow(client, workflow, config)
 
             # Should have tried to send original and error message
             assert mock_send.call_count == 2
@@ -390,7 +390,7 @@ class TestExecuteScheduledWorkflow:
         )
 
         with patch("mindroom.scheduling.send_message", new=AsyncMock()) as mock_send:
-            await execute_scheduled_workflow(client, workflow, config)
+            await _execute_scheduled_workflow(client, workflow, config)
             mock_send.assert_not_called()
 
 
@@ -427,7 +427,7 @@ class TestWorkflowSerialization:
 class TestIntegrationWithScheduling:
     """Test integration with the main scheduling module."""
 
-    @patch("mindroom.scheduling.parse_workflow_schedule")
+    @patch("mindroom.scheduling._parse_workflow_schedule")
     async def test_schedule_task_workflow_path(self, mock_parse_workflow: AsyncMock) -> None:
         """Test that schedule_task uses workflow parsing for complex requests."""
         client = AsyncMock()
@@ -465,7 +465,7 @@ class TestIntegrationWithScheduling:
             avatar_url=None,
         )
 
-        with patch("mindroom.scheduling.run_cron_task", new=AsyncMock()):
+        with patch("mindroom.scheduling._run_cron_task", new=AsyncMock()):
             task_id, message = await schedule_task(
                 client=client,
                 room_id="!room:server",
