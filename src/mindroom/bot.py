@@ -936,7 +936,7 @@ class AgentBot:
         room: nio.MatrixRoom,
         event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
     ) -> None:
-        """Handle voice message events for transcription and processing."""
+        """Handle user voice message events for transcription and processing."""
         assert self.client is not None
         if not self.config.voice.enabled:
             return
@@ -945,7 +945,11 @@ class AgentBot:
             return
 
         if is_agent_id(event.sender, self.config):
-            self.logger.debug("Ignoring voice message from other agent", event_id=event.event_id, sender=event.sender)
+            self.logger.debug(
+                "Ignoring agent audio event for voice transcription",
+                event_id=event.event_id,
+                sender=event.sender,
+            )
             self.response_tracker.mark_responded(event.event_id)
             return
 
