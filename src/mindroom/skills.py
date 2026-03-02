@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-SKILL_FILENAME = "SKILL.md"
+_SKILL_FILENAME = "SKILL.md"
 _FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 
 _OS_ALIASES = {
@@ -35,15 +35,15 @@ _OS_ALIASES = {
 }
 
 _PLUGIN_SKILL_ROOTS: list[Path] = []
-SkillSnapshot = tuple[tuple[str, int, int], ...]
-_SKILL_CACHE: dict[Path, tuple[SkillSnapshot, list[Skill]]] = {}
+_SkillSnapshot = tuple[tuple[str, int, int], ...]
+_SKILL_CACHE: dict[Path, tuple[_SkillSnapshot, list[Skill]]] = {}
 _THIS_DIR = Path(__file__).resolve().parent
 _BUNDLED_SKILLS_DEV_DIR = _THIS_DIR.parents[1] / "skills"
 _BUNDLED_SKILLS_PACKAGE_DIR = _THIS_DIR / "_bundled_skills"
 
 
 @dataclass
-class MindroomSkillsLoader(SkillLoader):
+class _MindroomSkillsLoader(SkillLoader):
     """Load skills via Agno with OpenClaw compatibility filtering."""
 
     roots: Sequence[Path]
@@ -94,8 +94,8 @@ def build_agent_skills(
     if not agent_config.skills:
         return None
 
-    roots = list(skill_roots or get_default_skill_roots())
-    loader = MindroomSkillsLoader(
+    roots = list(skill_roots or _get_default_skill_roots())
+    loader = _MindroomSkillsLoader(
         roots=roots,
         config=config,
         allowlist=agent_config.skills,
@@ -106,7 +106,7 @@ def build_agent_skills(
 
 
 @dataclass(frozen=True)
-class SkillCommandDispatch:
+class _SkillCommandDispatch:
     """Dispatch configuration for a skill command."""
 
     tool_name: str
@@ -115,7 +115,7 @@ class SkillCommandDispatch:
 
 
 @dataclass(frozen=True)
-class SkillCommandSpec:
+class _SkillCommandSpec:
     """Resolved skill command metadata from SKILL.md."""
 
     name: str
@@ -123,11 +123,11 @@ class SkillCommandSpec:
     source_path: Path
     user_invocable: bool
     disable_model_invocation: bool
-    dispatch: SkillCommandDispatch | None = None
+    dispatch: _SkillCommandDispatch | None = None
 
 
 @dataclass(frozen=True)
-class SkillListing:
+class _SkillListing:
     """Summary information for a discoverable skill."""
 
     name: str
@@ -144,7 +144,7 @@ def resolve_skill_command_spec(  # noqa: C901
     skill_roots: Sequence[Path] | None = None,
     env_vars: Mapping[str, str] | None = None,
     credential_keys: set[str] | None = None,
-) -> SkillCommandSpec | None:
+) -> _SkillCommandSpec | None:
     """Resolve command dispatch metadata for a skill, if enabled for the agent."""
     agent_config = config.get_agent(agent_name)
     requested_name = skill_name.strip()
@@ -159,11 +159,11 @@ def resolve_skill_command_spec(  # noqa: C901
     credential_keys = credential_keys if credential_keys is not None else _collect_credential_keys()
     config_data = config.model_dump()
 
-    resolved: SkillCommandSpec | None = None
-    roots = list(skill_roots or get_default_skill_roots())
+    resolved: _SkillCommandSpec | None = None
+    roots = list(skill_roots or _get_default_skill_roots())
     for root in _unique_paths(roots):
         for skill_dir in _iter_skill_dirs(root):
-            frontmatter = _read_skill_frontmatter(skill_dir / SKILL_FILENAME)
+            frontmatter = _read_skill_frontmatter(skill_dir / _SKILL_FILENAME)
             if frontmatter is None:
                 continue
 
@@ -207,7 +207,7 @@ def resolve_skill_command_spec(  # noqa: C901
                 default=False,
             )
             dispatch = _parse_command_dispatch(frontmatter, name.strip(), skill_dir)
-            resolved = SkillCommandSpec(
+            resolved = _SkillCommandSpec(
                 name=name.strip(),
                 description=description.strip(),
                 source_path=skill_dir,
@@ -226,7 +226,7 @@ def set_plugin_skill_roots(roots: Sequence[Path]) -> None:
     clear_skill_cache()
 
 
-def get_plugin_skill_roots() -> list[Path]:
+def _get_plugin_skill_roots() -> list[Path]:
     """Return the current plugin-provided skill roots."""
     return list(_PLUGIN_SKILL_ROOTS)
 
@@ -236,7 +236,7 @@ def get_user_skills_dir() -> Path:
     return Path.home() / ".mindroom" / "skills"
 
 
-def get_bundled_skills_dir() -> Path:
+def _get_bundled_skills_dir() -> Path:
     """Return the bundled skills directory from repo checkout or installed package."""
     if _BUNDLED_SKILLS_DEV_DIR.exists():
         return _BUNDLED_SKILLS_DEV_DIR
@@ -245,23 +245,23 @@ def get_bundled_skills_dir() -> Path:
     return _BUNDLED_SKILLS_DEV_DIR
 
 
-def get_default_skill_roots() -> list[Path]:
+def _get_default_skill_roots() -> list[Path]:
     """Return the default skill search roots in precedence order."""
-    return _unique_paths([get_bundled_skills_dir(), *_PLUGIN_SKILL_ROOTS, get_user_skills_dir()])
+    return _unique_paths([_get_bundled_skills_dir(), *_PLUGIN_SKILL_ROOTS, get_user_skills_dir()])
 
 
-def list_skill_listings(roots: Sequence[Path] | None = None) -> list[SkillListing]:
+def list_skill_listings(roots: Sequence[Path] | None = None) -> list[_SkillListing]:
     """Return skill listings with precedence rules applied."""
-    roots = list(roots or get_default_skill_roots())
-    bundled_root = get_bundled_skills_dir().expanduser().resolve()
+    roots = list(roots or _get_default_skill_roots())
+    bundled_root = _get_bundled_skills_dir().expanduser().resolve()
     user_root = get_user_skills_dir().expanduser().resolve()
-    plugin_roots = {root.expanduser().resolve() for root in get_plugin_skill_roots()}
+    plugin_roots = {root.expanduser().resolve() for root in _get_plugin_skill_roots()}
 
-    skills_by_name: dict[str, SkillListing] = {}
+    skills_by_name: dict[str, _SkillListing] = {}
     for root in _unique_paths(roots):
         origin = _root_origin(root, bundled_root, user_root, plugin_roots)
         for skill_dir in _iter_skill_dirs(root):
-            frontmatter = _read_skill_frontmatter(skill_dir / SKILL_FILENAME)
+            frontmatter = _read_skill_frontmatter(skill_dir / _SKILL_FILENAME)
             if frontmatter is None:
                 continue
 
@@ -272,10 +272,10 @@ def list_skill_listings(roots: Sequence[Path] | None = None) -> list[SkillListin
             if not isinstance(description, str) or not description.strip():
                 continue
 
-            listing = SkillListing(
+            listing = _SkillListing(
                 name=name.strip(),
                 description=description.strip(),
-                path=skill_dir / SKILL_FILENAME,
+                path=skill_dir / _SKILL_FILENAME,
                 origin=origin,
             )
             skills_by_name[listing.name] = listing
@@ -283,7 +283,7 @@ def list_skill_listings(roots: Sequence[Path] | None = None) -> list[SkillListin
     return sorted(skills_by_name.values(), key=lambda item: item.name.lower())
 
 
-def resolve_skill_listing(skill_name: str, roots: Sequence[Path] | None = None) -> SkillListing | None:
+def resolve_skill_listing(skill_name: str, roots: Sequence[Path] | None = None) -> _SkillListing | None:
     """Resolve a skill listing by name, honoring precedence rules."""
     normalized = skill_name.strip().lower()
     if not normalized:
@@ -311,9 +311,9 @@ def clear_skill_cache() -> None:
     _SKILL_CACHE.clear()
 
 
-def get_skill_snapshot(roots: Sequence[Path] | None = None) -> SkillSnapshot:
+def get_skill_snapshot(roots: Sequence[Path] | None = None) -> _SkillSnapshot:
     """Return a snapshot of SKILL.md files under the provided roots."""
-    roots = list(roots or get_default_skill_roots())
+    roots = list(roots or _get_default_skill_roots())
     entries: list[tuple[str, int, int]] = []
     for root in _unique_paths(roots):
         entries.extend(_snapshot_skill_files(root))
@@ -326,7 +326,7 @@ def _snapshot_skill_files(root: Path) -> list[tuple[str, int, int]]:
         return []
 
     entries: list[tuple[str, int, int]] = []
-    for skill_file in root.rglob(SKILL_FILENAME):
+    for skill_file in root.rglob(_SKILL_FILENAME):
         try:
             stat = skill_file.stat()
         except OSError:
@@ -340,13 +340,13 @@ def _iter_skill_dirs(root: Path) -> list[Path]:
     if not root.exists() or not root.is_dir():
         return []
 
-    if (root / SKILL_FILENAME).exists():
+    if (root / _SKILL_FILENAME).exists():
         return [root]
 
     skill_dirs = [
         path
         for path in root.iterdir()
-        if path.is_dir() and not path.name.startswith(".") and (path / SKILL_FILENAME).exists()
+        if path.is_dir() and not path.name.startswith(".") and (path / _SKILL_FILENAME).exists()
     ]
     return sorted(skill_dirs)
 
@@ -404,7 +404,7 @@ def _parse_command_dispatch(
     frontmatter: Mapping[str, Any],
     skill_name: str,
     skill_dir: Path,
-) -> SkillCommandDispatch | None:
+) -> _SkillCommandDispatch | None:
     dispatch_raw = _get_frontmatter_value(frontmatter, "command-dispatch", "command_dispatch")
     if not isinstance(dispatch_raw, str) or dispatch_raw.strip().lower() != "tool":
         return None
@@ -429,7 +429,7 @@ def _parse_command_dispatch(
                 arg_mode=arg_mode_raw,
                 path=str(skill_dir),
             )
-    return SkillCommandDispatch(tool_name=tool_name.strip(), arg_mode=arg_mode)
+    return _SkillCommandDispatch(tool_name=tool_name.strip(), arg_mode=arg_mode)
 
 
 def _load_root_skills(root: Path) -> list[Skill]:
