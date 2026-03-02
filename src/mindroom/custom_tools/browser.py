@@ -21,15 +21,15 @@ from playwright.async_api import Browser, BrowserContext, ConsoleMessage, Dialog
 
 from mindroom.constants import STORAGE_PATH_OBJ
 
-DEFAULT_PROFILE = "openclaw"
-DEFAULT_SNAPSHOT_LIMIT = 200
-DEFAULT_AI_SNAPSHOT_MAX_CHARS = 12_000
-DEFAULT_TIMEOUT_MS = 30_000
-MAX_CONSOLE_ENTRIES = 200
-VIEWPORT_WIDTH = 1280
-VIEWPORT_HEIGHT = 720
+_DEFAULT_PROFILE = "openclaw"
+_DEFAULT_SNAPSHOT_LIMIT = 200
+_DEFAULT_AI_SNAPSHOT_MAX_CHARS = 12_000
+_DEFAULT_TIMEOUT_MS = 30_000
+_MAX_CONSOLE_ENTRIES = 200
+_VIEWPORT_WIDTH = 1280
+_VIEWPORT_HEIGHT = 720
 
-BROWSER_ACTIONS = {
+_BROWSER_ACTIONS = {
     "status",
     "start",
     "stop",
@@ -153,7 +153,7 @@ _SNAPSHOT_JS = """
 
 
 @dataclass
-class BrowserTabState:
+class _BrowserTabState:
     """State for one browser tab."""
 
     target_id: str
@@ -164,13 +164,13 @@ class BrowserTabState:
 
 
 @dataclass
-class BrowserProfileState:
+class _BrowserProfileState:
     """State for one browser profile."""
 
     playwright: Playwright
     browser: Browser
     context: BrowserContext
-    tabs: dict[str, BrowserTabState] = field(default_factory=dict)
+    tabs: dict[str, _BrowserTabState] = field(default_factory=dict)
     active_target_id: str | None = None
 
 
@@ -187,7 +187,7 @@ class BrowserTools(Toolkit):
 
     def __init__(self) -> None:
         super().__init__(name="browser", tools=[self.browser])
-        self._profiles: dict[str, BrowserProfileState] = {}
+        self._profiles: dict[str, _BrowserProfileState] = {}
         self._lock = asyncio.Lock()
         self._output_dir = STORAGE_PATH_OBJ / "browser"
         self._output_dir.mkdir(parents=True, exist_ok=True)
@@ -275,12 +275,12 @@ class BrowserTools(Toolkit):
 
         """
         normalized_action = action.strip().lower()
-        if normalized_action not in BROWSER_ACTIONS:
+        if normalized_action not in _BROWSER_ACTIONS:
             msg = f"Unknown action: {action}"
             raise ValueError(msg)
 
         self._validate_target(target=target, node=node)
-        profile_name = _clean_str(profile) or DEFAULT_PROFILE
+        profile_name = _clean_str(profile) or _DEFAULT_PROFILE
 
         if normalized_action == "status":
             return json.dumps(await self._status_payload(profile_name), sort_keys=True)
@@ -428,7 +428,7 @@ class BrowserTools(Toolkit):
     async def _profiles_payload(self, selected_profile: str) -> dict[str, Any]:
         async with self._lock:
             running = sorted(self._profiles.keys())
-        advertised = sorted({DEFAULT_PROFILE, "chrome", *running})
+        advertised = sorted({_DEFAULT_PROFILE, "chrome", *running})
         return {
             "action": "profiles",
             "profiles": advertised,
@@ -437,7 +437,7 @@ class BrowserTools(Toolkit):
             "status": "ok",
         }
 
-    async def _profile_status(self, profile_name: str, state: BrowserProfileState) -> dict[str, Any]:
+    async def _profile_status(self, profile_name: str, state: _BrowserProfileState) -> dict[str, Any]:
         tabs = await self._tab_list(state)
         return {
             "action": "status",
@@ -449,7 +449,7 @@ class BrowserTools(Toolkit):
             "tabs": tabs,
         }
 
-    async def _tab_list(self, state: BrowserProfileState) -> list[dict[str, Any]]:
+    async def _tab_list(self, state: _BrowserProfileState) -> list[dict[str, Any]]:
         payload_tabs: list[dict[str, Any]] = []
         stale: list[str] = []
         for target_id, tab in state.tabs.items():
@@ -469,7 +469,7 @@ class BrowserTools(Toolkit):
             self._remove_tab(state, target_id)
         return payload_tabs
 
-    async def _tabs_payload(self, profile_name: str, state: BrowserProfileState) -> dict[str, Any]:
+    async def _tabs_payload(self, profile_name: str, state: _BrowserProfileState) -> dict[str, Any]:
         tabs = await self._tab_list(state)
         return {
             "action": "tabs",
@@ -483,7 +483,7 @@ class BrowserTools(Toolkit):
         state = await self._ensure_profile(profile_name)
         page = await state.context.new_page()
         target_id = self._register_tab(state, page)
-        await page.goto(target_url, wait_until="domcontentloaded", timeout=DEFAULT_TIMEOUT_MS)
+        await page.goto(target_url, wait_until="domcontentloaded", timeout=_DEFAULT_TIMEOUT_MS)
         state.active_target_id = target_id
         return {
             "action": "open",
@@ -525,7 +525,7 @@ class BrowserTools(Toolkit):
     async def _navigate(self, profile_name: str, target_url: str, target_id: str | None) -> dict[str, Any]:
         state = await self._ensure_profile(profile_name)
         resolved_target_id, tab = await self._resolve_tab(state, target_id)
-        await tab.page.goto(target_url, wait_until="domcontentloaded", timeout=DEFAULT_TIMEOUT_MS)
+        await tab.page.goto(target_url, wait_until="domcontentloaded", timeout=_DEFAULT_TIMEOUT_MS)
         state.active_target_id = resolved_target_id
         return {
             "action": "navigate",
@@ -547,7 +547,7 @@ class BrowserTools(Toolkit):
             entries = [entry for entry in entries if entry.get("level") == level]
         return {
             "action": "console",
-            "entries": entries[-MAX_CONSOLE_ENTRIES:],
+            "entries": entries[-_MAX_CONSOLE_ENTRIES:],
             "level": level,
             "profile": profile_name,
             "status": "ok",
@@ -586,7 +586,7 @@ class BrowserTools(Toolkit):
             raise ValueError(msg)
         normalized_paths = [str(Path(path).expanduser()) for path in paths]
         locator = tab.page.locator(selector).first
-        await locator.set_input_files(normalized_paths, timeout=timeout_ms or DEFAULT_TIMEOUT_MS)
+        await locator.set_input_files(normalized_paths, timeout=timeout_ms or _DEFAULT_TIMEOUT_MS)
         return {
             "action": "upload",
             "paths": normalized_paths,
@@ -678,7 +678,7 @@ class BrowserTools(Toolkit):
             del labels  # Label overlays are currently not implemented.
 
         fmt = "aria" if snapshot_format == "aria" else "ai"
-        resolved_limit = max(1, limit) if isinstance(limit, int) and limit > 0 else DEFAULT_SNAPSHOT_LIMIT
+        resolved_limit = max(1, limit) if isinstance(limit, int) and limit > 0 else _DEFAULT_SNAPSHOT_LIMIT
         resolved_depth = max(1, depth) if isinstance(depth, int) and depth > 0 else 12
         interactive_only = interactive if isinstance(interactive, bool) else True
         rows = await tab.page.evaluate(
@@ -764,7 +764,7 @@ class BrowserTools(Toolkit):
             return max_chars if max_chars > 0 else None
         if mode == "efficient":
             return None
-        return DEFAULT_AI_SNAPSHOT_MAX_CHARS
+        return _DEFAULT_AI_SNAPSHOT_MAX_CHARS
 
     async def _act(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
@@ -886,9 +886,9 @@ class BrowserTools(Toolkit):
             if isinstance(time_ms, int) and time_ms >= 0:
                 await tab.page.wait_for_timeout(time_ms)
             elif text is not None:
-                await tab.page.wait_for_selector(f"text={text}", state="visible", timeout=DEFAULT_TIMEOUT_MS)
+                await tab.page.wait_for_selector(f"text={text}", state="visible", timeout=_DEFAULT_TIMEOUT_MS)
             elif text_gone is not None:
-                await tab.page.wait_for_selector(f"text={text_gone}", state="detached", timeout=DEFAULT_TIMEOUT_MS)
+                await tab.page.wait_for_selector(f"text={text_gone}", state="detached", timeout=_DEFAULT_TIMEOUT_MS)
             else:
                 await tab.page.wait_for_timeout(500)
             return self._act_result(profile_name, resolved_target_id, kind)
@@ -922,7 +922,7 @@ class BrowserTools(Toolkit):
         payload.update(extra)
         return payload
 
-    async def _ensure_profile(self, profile_name: str) -> BrowserProfileState:
+    async def _ensure_profile(self, profile_name: str) -> _BrowserProfileState:
         async with self._lock:
             state = self._profiles.get(profile_name)
             if state is not None:
@@ -938,8 +938,8 @@ class BrowserTools(Toolkit):
             if executable:
                 launch_kwargs["executable_path"] = executable
             browser = await playwright.chromium.launch(**launch_kwargs)
-            context = await browser.new_context(viewport={"height": VIEWPORT_HEIGHT, "width": VIEWPORT_WIDTH})
-            state = BrowserProfileState(playwright=playwright, browser=browser, context=context)
+            context = await browser.new_context(viewport={"height": _VIEWPORT_HEIGHT, "width": _VIEWPORT_WIDTH})
+            state = _BrowserProfileState(playwright=playwright, browser=browser, context=context)
             self._profiles[profile_name] = state
 
             page = await context.new_page()
@@ -958,9 +958,9 @@ class BrowserTools(Toolkit):
 
     async def _resolve_tab(
         self,
-        state: BrowserProfileState,
+        state: _BrowserProfileState,
         target_id: str | None,
-    ) -> tuple[str, BrowserTabState]:
+    ) -> tuple[str, _BrowserTabState]:
         resolved_target_id = target_id or state.active_target_id
         if resolved_target_id is not None:
             tab = state.tabs.get(resolved_target_id)
@@ -976,9 +976,9 @@ class BrowserTools(Toolkit):
         state.active_target_id = candidate_id
         return candidate_id, state.tabs[candidate_id]
 
-    def _register_tab(self, state: BrowserProfileState, page: Page) -> str:
+    def _register_tab(self, state: _BrowserProfileState, page: Page) -> str:
         target_id = uuid4().hex[:8]
-        tab = BrowserTabState(target_id=target_id, page=page)
+        tab = _BrowserTabState(target_id=target_id, page=page)
         state.tabs[target_id] = tab
         page.on("console", lambda message: self._record_console(tab, message))
         page.on("dialog", lambda dialog: asyncio.create_task(self._handle_dialog(tab, dialog)))
@@ -986,17 +986,17 @@ class BrowserTools(Toolkit):
         return target_id
 
     @staticmethod
-    def _record_console(tab: BrowserTabState, message: ConsoleMessage) -> None:
+    def _record_console(tab: _BrowserTabState, message: ConsoleMessage) -> None:
         entry = {
             "level": message.type,
             "location": message.location,
             "text": message.text,
         }
         tab.console.append(entry)
-        if len(tab.console) > MAX_CONSOLE_ENTRIES:
-            del tab.console[:-MAX_CONSOLE_ENTRIES]
+        if len(tab.console) > _MAX_CONSOLE_ENTRIES:
+            del tab.console[:-_MAX_CONSOLE_ENTRIES]
 
-    async def _handle_dialog(self, tab: BrowserTabState, dialog: Dialog) -> None:
+    async def _handle_dialog(self, tab: _BrowserTabState, dialog: Dialog) -> None:
         behavior = tab.pending_dialog
         if behavior is None:
             await dialog.dismiss()
@@ -1008,7 +1008,7 @@ class BrowserTools(Toolkit):
         await dialog.dismiss()
 
     @staticmethod
-    def _resolve_selector(tab: BrowserTabState, ref_or_selector: str | None) -> str | None:
+    def _resolve_selector(tab: _BrowserTabState, ref_or_selector: str | None) -> str | None:
         if ref_or_selector is None:
             return None
         return tab.refs.get(ref_or_selector, ref_or_selector)
@@ -1017,7 +1017,7 @@ class BrowserTools(Toolkit):
         return self._output_dir / f"{uuid4().hex}.{extension}"
 
     @staticmethod
-    def _remove_tab(state: BrowserProfileState, target_id: str) -> None:
+    def _remove_tab(state: _BrowserProfileState, target_id: str) -> None:
         state.tabs.pop(target_id, None)
         if state.active_target_id == target_id:
             state.active_target_id = next(iter(state.tabs.keys()), None)
