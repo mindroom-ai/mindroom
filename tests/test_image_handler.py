@@ -9,6 +9,7 @@ import pytest
 from agno.media import Image
 
 from mindroom.matrix import image_handler
+from mindroom.matrix.media import extract_media_caption
 
 
 class TestExtractCaption:
@@ -26,32 +27,32 @@ class TestExtractCaption:
     def test_caption_when_filename_differs_from_body(self) -> None:
         """When filename is present and differs from body, body is a caption."""
         event = self._make_event(body="What is in this chart?", filename="chart.png")
-        assert image_handler.extract_caption(event) == "What is in this chart?"
+        assert extract_media_caption(event, default="[Attached image]") == "What is in this chart?"
 
     def test_no_caption_when_filename_matches_body(self) -> None:
         """When filename equals body, there is no caption."""
         event = self._make_event(body="photo.jpg", filename="photo.jpg")
-        assert image_handler.extract_caption(event) == "[Attached image]"
+        assert extract_media_caption(event, default="[Attached image]") == "[Attached image]"
 
     def test_no_caption_when_filename_absent(self) -> None:
         """When filename field is absent, body is the filename."""
         event = self._make_event(body="IMG_1234.jpg")
-        assert image_handler.extract_caption(event) == "[Attached image]"
+        assert extract_media_caption(event, default="[Attached image]") == "[Attached image]"
 
     def test_no_caption_when_body_empty(self) -> None:
         """When body is empty, return default prompt."""
         event = self._make_event(body="", filename="photo.jpg")
-        assert image_handler.extract_caption(event) == "[Attached image]"
+        assert extract_media_caption(event, default="[Attached image]") == "[Attached image]"
 
     def test_caption_ending_with_image_extension(self) -> None:
         """Captions that end with image extensions are preserved."""
         event = self._make_event(body="analyze report.png", filename="report.png")
-        assert image_handler.extract_caption(event) == "analyze report.png"
+        assert extract_media_caption(event, default="[Attached image]") == "analyze report.png"
 
     def test_no_filename_no_body(self) -> None:
         """Both body and filename absent/empty."""
         event = self._make_event(body="")
-        assert image_handler.extract_caption(event) == "[Attached image]"
+        assert extract_media_caption(event, default="[Attached image]") == "[Attached image]"
 
 
 class TestDownloadImage:

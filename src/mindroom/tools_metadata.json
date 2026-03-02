@@ -5316,7 +5316,7 @@
       "category": "productivity",
       "config_fields": [],
       "dependencies": [],
-      "description": "List, register, and send context-scoped file attachments",
+      "description": "List and register context-scoped file attachments",
       "display_name": "Attachments",
       "docs_url": null,
       "helper_text": null,

@@ -17,7 +17,7 @@ from mindroom.commands.parsing import get_command_list
 from mindroom.constants import VOICE_PREFIX
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import agent_username_localpart
-from mindroom.matrix.media import download_media_bytes, extract_media_caption, media_mime_type
+from mindroom.matrix.media import download_media_bytes, media_mime_type
 
 if TYPE_CHECKING:
     import nio
@@ -94,11 +94,6 @@ async def handle_voice_message(
         logger.exception("Error handling voice message")
         return None
     return None
-
-
-def extract_caption(event: nio.RoomMessageAudio | nio.RoomEncryptedAudio) -> str:
-    """Extract user caption from an audio event using MSC2530 semantics."""
-    return extract_media_caption(event, default="[Attached voice message]")
 
 
 async def download_audio(

@@ -18,6 +18,7 @@ from mindroom.matrix.identity import (
     MatrixID,
     extract_agent_name,
 )
+from mindroom.matrix.media import extract_media_caption
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.presence import (
     build_agent_status_message,
@@ -77,7 +78,6 @@ from .ai import ai_response, stream_agent_response
 from .attachment_media import resolve_attachment_media
 from .attachments import (
     append_attachment_ids_prompt,
-    extract_file_or_video_caption,
     merge_attachment_ids,
     parse_attachment_ids_from_event_source,
     register_audio_attachment,
@@ -263,6 +263,15 @@ class _MessageContext:
 type DispatchEvent = (
     nio.RoomMessageText
     | nio.RoomMessageImage
+    | nio.RoomEncryptedImage
+    | nio.RoomMessageFile
+    | nio.RoomEncryptedFile
+    | nio.RoomMessageVideo
+    | nio.RoomEncryptedVideo
+)
+
+type MediaDispatchEvent = (
+    nio.RoomMessageImage
     | nio.RoomEncryptedImage
     | nio.RoomMessageFile
     | nio.RoomEncryptedFile
@@ -515,13 +524,13 @@ class AgentBot:
             self.client.add_event_callback(_create_task_wrapper(self._on_voice_message), nio.RoomMessageAudio)
             self.client.add_event_callback(_create_task_wrapper(self._on_voice_message), nio.RoomEncryptedAudio)
 
-        # Register image message callbacks on all agents (each agent handles its own routing)
-        self.client.add_event_callback(_create_task_wrapper(self._on_image_message), nio.RoomMessageImage)
-        self.client.add_event_callback(_create_task_wrapper(self._on_image_message), nio.RoomEncryptedImage)
-        self.client.add_event_callback(_create_task_wrapper(self._on_file_or_video_message), nio.RoomMessageFile)
-        self.client.add_event_callback(_create_task_wrapper(self._on_file_or_video_message), nio.RoomEncryptedFile)
-        self.client.add_event_callback(_create_task_wrapper(self._on_file_or_video_message), nio.RoomMessageVideo)
-        self.client.add_event_callback(_create_task_wrapper(self._on_file_or_video_message), nio.RoomEncryptedVideo)
+        # Register media callbacks on all agents (each agent handles its own routing)
+        self.client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomMessageImage)
+        self.client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomEncryptedImage)
+        self.client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomMessageFile)
+        self.client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomEncryptedFile)
+        self.client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomMessageVideo)
+        self.client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomEncryptedVideo)
 
         self.running = True
 
@@ -948,7 +957,7 @@ class AgentBot:
             event_id=event.event_id,
             sender=event.sender,
         )
-        fallback_message = f"{VOICE_PREFIX}{voice_handler.extract_caption(event)}"
+        fallback_message = f"{VOICE_PREFIX}{extract_media_caption(event, default='[Attached voice message]')}"
         response_event_id = await self._send_response(
             room_id=room.room_id,
             reply_to_event_id=event.event_id,
@@ -967,18 +976,46 @@ class AgentBot:
         room: nio.MatrixRoom,
         event: nio.RoomMessageImage | nio.RoomEncryptedImage,
     ) -> None:
-        """Handle image message events by passing the image to the AI model."""
+        """Compatibility wrapper for image handlers."""
+        await self._on_media_message(room, event)
+
+    async def _on_file_or_video_message(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
+    ) -> None:
+        """Compatibility wrapper for file/video handlers."""
+        await self._on_media_message(room, event)
+
+    async def _on_media_message(
+        self,
+        room: nio.MatrixRoom,
+        event: MediaDispatchEvent,
+    ) -> None:
+        """Handle image/file/video events and dispatch media-aware responses."""
         assert self.client is not None
+
+        is_image_event = isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage)
+        default_caption = (
+            "[Attached image]"
+            if is_image_event
+            else (
+                "[Attached video]"
+                if isinstance(event, nio.RoomMessageVideo | nio.RoomEncryptedVideo)
+                else "[Attached file]"
+            )
+        )
+        caption = extract_media_caption(event, default=default_caption)
 
         dispatch = await self._prepare_dispatch(
             room,
             event,
-            event_label="image",
+            event_label="image" if is_image_event else "media",
         )
         if dispatch is None:
             return
 
-        caption = image_handler.extract_caption(event)
+        context = dispatch.context
         action = await self._resolve_dispatch_action(
             room,
             event,
@@ -990,29 +1027,61 @@ class AgentBot:
         if action is None:
             return
 
-        # Download image only after confirming we should respond
-        image = await image_handler.download_image(self.client, event)
-        if image is None:
-            self.logger.error("Failed to download image", event_id=event.event_id)
-            self.response_tracker.mark_responded(event.event_id)
-            return
-
-        context = dispatch.context
         effective_thread_id = self._resolve_reply_thread_id(
             context.thread_id,
             event.event_id,
             event_source=event.source,
         )
-        attachment_record = await register_image_attachment(
-            self.client,
-            self.storage_path,
-            room_id=room.room_id,
-            thread_id=effective_thread_id,
-            event=event,
-            image_bytes=image.content,
-        )
-        # Keep processing even without attachment registration; image bytes are already available to the model.
-        attachment_ids = [attachment_record.attachment_id] if attachment_record is not None else []
+        media = MediaInputs()
+        attachment_ids: list[str] = []
+        if is_image_event:
+            assert isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage)
+            # Download image only after confirming we should respond.
+            image = await image_handler.download_image(self.client, event)
+            if image is None:
+                self.logger.error("Failed to download image", event_id=event.event_id)
+                self.response_tracker.mark_responded(event.event_id)
+                return
+            attachment_record = await register_image_attachment(
+                self.client,
+                self.storage_path,
+                room_id=room.room_id,
+                thread_id=effective_thread_id,
+                event=event,
+                image_bytes=image.content,
+            )
+            # Keep processing even without attachment registration; image bytes are already available to the model.
+            attachment_ids = [attachment_record.attachment_id] if attachment_record is not None else []
+            media = MediaInputs.from_optional(images=[image])
+        else:
+            assert isinstance(
+                event,
+                nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
+            )
+            attachment_record = await register_file_or_video_attachment(
+                self.client,
+                self.storage_path,
+                room_id=room.room_id,
+                thread_id=effective_thread_id,
+                event=event,
+            )
+            if attachment_record is None:
+                # File/video media is resolved from persisted attachments, so registration is required.
+                self.logger.error("Failed to register media attachment", event_id=event.event_id)
+                self.response_tracker.mark_responded(event.event_id)
+                return
+            attachment_ids, attachment_audio, _, attachment_files, attachment_videos = resolve_attachment_media(
+                self.storage_path,
+                [attachment_record.attachment_id],
+                room_id=room.room_id,
+                thread_id=effective_thread_id,
+            )
+            media = MediaInputs.from_optional(
+                audio=attachment_audio,
+                files=attachment_files,
+                videos=attachment_videos,
+            )
+
         prompt_text = append_attachment_ids_prompt(caption, attachment_ids)
         await self._execute_dispatch_action(
             room,
@@ -1021,81 +1090,10 @@ class AgentBot:
             action,
             _DispatchPayload(
                 prompt=prompt_text,
-                media=MediaInputs.from_optional(images=[image]),
+                media=media,
                 attachment_ids=attachment_ids or None,
             ),
-            processing_log="Processing image",
-        )
-
-    async def _on_file_or_video_message(
-        self,
-        room: nio.MatrixRoom,
-        event: nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
-    ) -> None:
-        """Handle file/video events by registering attachment IDs for tool/model access."""
-        assert self.client is not None
-
-        dispatch = await self._prepare_dispatch(
-            room,
-            event,
-            event_label="media",
-        )
-        if dispatch is None:
-            return
-
-        context = dispatch.context
-        caption = extract_file_or_video_caption(event)
-        action = await self._resolve_dispatch_action(
-            room,
-            event,
-            dispatch,
-            message_for_decision=event.body,
-            router_message=caption,
-            extra_content={ORIGINAL_SENDER_KEY: event.sender},
-        )
-        if action is None:
-            return
-
-        effective_thread_id = self._resolve_reply_thread_id(
-            context.thread_id,
-            event.event_id,
-            event_source=event.source,
-        )
-        attachment_record = await register_file_or_video_attachment(
-            self.client,
-            self.storage_path,
-            room_id=room.room_id,
-            thread_id=effective_thread_id,
-            event=event,
-        )
-        if attachment_record is None:
-            # File/video media is resolved from persisted attachments, so registration is required.
-            self.logger.error("Failed to register media attachment", event_id=event.event_id)
-            self.response_tracker.mark_responded(event.event_id)
-            return
-
-        resolved_attachment_ids, attachment_audio, _, attachment_files, attachment_videos = resolve_attachment_media(
-            self.storage_path,
-            [attachment_record.attachment_id],
-            room_id=room.room_id,
-            thread_id=effective_thread_id,
-        )
-        prompt_text = append_attachment_ids_prompt(caption, resolved_attachment_ids)
-        await self._execute_dispatch_action(
-            room,
-            event,
-            dispatch,
-            action,
-            _DispatchPayload(
-                prompt=prompt_text,
-                media=MediaInputs.from_optional(
-                    audio=attachment_audio,
-                    files=attachment_files,
-                    videos=attachment_videos,
-                ),
-                attachment_ids=resolved_attachment_ids or None,
-            ),
-            processing_log="Processing media message",
+            processing_log="Processing image" if is_image_event else "Processing media message",
         )
 
     async def _register_routed_attachment(

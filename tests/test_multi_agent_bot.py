@@ -1562,7 +1562,7 @@ class TestAgentBot:
             patch("mindroom.bot.has_multiple_non_agent_users_in_thread", return_value=False),
             patch("mindroom.bot.get_available_agents_for_sender") as mock_get_available,
             patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.bot.image_handler.extract_caption", return_value="[Attached image]"),
+            patch("mindroom.bot.extract_media_caption", return_value="[Attached image]"),
         ):
             mock_get_available.return_value = [config.ids["general"], config.ids["calculator"]]
             await bot._on_image_message(room, event)
@@ -2021,7 +2021,7 @@ class TestAgentBot:
             ),
             patch("mindroom.bot.is_authorized_sender", return_value=True),
             patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
-            patch("mindroom.bot.image_handler.extract_caption", return_value="[Attached image]"),
+            patch("mindroom.bot.extract_media_caption", return_value="[Attached image]"),
             patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
         ):
             await bot._on_message(room, text_event)
@@ -2084,7 +2084,7 @@ class TestAgentBot:
             patch("mindroom.bot.get_available_agents_for_sender", return_value=[config.ids["calculator"]]),
             patch("mindroom.bot.is_authorized_sender", return_value=True),
             patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
-            patch("mindroom.bot.image_handler.extract_caption", return_value="[Attached image]"),
+            patch("mindroom.bot.extract_media_caption", return_value="[Attached image]"),
             patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
         ):
             await bot._on_message(room, text_event)

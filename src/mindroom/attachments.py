@@ -18,7 +18,7 @@ import nio
 
 from .constants import ATTACHMENT_IDS_KEY
 from .logging_config import get_logger
-from .matrix.media import download_media_bytes, extract_media_caption, media_mime_type
+from .matrix.media import download_media_bytes, media_mime_type
 
 logger = get_logger(__name__)
 
@@ -171,16 +171,6 @@ async def _store_media_bytes_locally_async(
         media_bytes,
         mime_type,
     )
-
-
-def extract_file_or_video_caption(
-    event: FileOrVideoEvent,
-) -> str:
-    """Extract user caption for file/video events using MSC2530 semantics."""
-    default = (
-        "[Attached video]" if isinstance(event, nio.RoomMessageVideo | nio.RoomEncryptedVideo) else "[Attached file]"
-    )
-    return extract_media_caption(event, default=default)
 
 
 def attachment_id_for_event(event_id: str) -> str:
