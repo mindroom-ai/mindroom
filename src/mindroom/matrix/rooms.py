@@ -103,7 +103,7 @@ def load_rooms() -> dict[str, MatrixRoom]:
     return state.rooms
 
 
-def get_room_aliases() -> dict[str, str]:
+def _get_room_aliases() -> dict[str, str]:
     """Get mapping of room aliases to room IDs."""
     state = MatrixState.load()
     return state.get_room_aliases()
@@ -116,7 +116,7 @@ def _get_room_id(room_key: str) -> str | None:
     return room.room_id if room else None
 
 
-def add_room(room_key: str, room_id: str, alias: str, name: str) -> None:
+def _add_room(room_key: str, room_id: str, alias: str, name: str) -> None:
     """Add a new room to the state."""
     state = MatrixState.load()
     state.add_room(room_key, room_id, alias, name)
@@ -143,7 +143,7 @@ def resolve_room_aliases(room_list: list[str]) -> list[str]:
         List of room IDs (aliases resolved to IDs, IDs passed through)
 
     """
-    room_aliases = get_room_aliases()
+    room_aliases = _get_room_aliases()
     return [room_aliases.get(room, room) for room in room_list]
 
 
@@ -157,7 +157,7 @@ def get_room_alias_from_id(room_id: str) -> str | None:
         Room alias if found, None otherwise
 
     """
-    room_aliases = get_room_aliases()
+    room_aliases = _get_room_aliases()
     for alias, rid in room_aliases.items():
         if rid == room_id:
             return alias
@@ -201,7 +201,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
         if room_key not in existing_rooms or existing_rooms[room_key].room_id != room_id:
             if room_name is None:
                 room_name = _room_key_to_name(room_key)
-            add_room(room_key, room_id, full_alias, room_name)
+            _add_room(room_key, room_id, full_alias, room_name)
             logger.info(f"Updated state with existing room {room_key} (ID: {room_id})")
 
         # Try to join the room
@@ -261,7 +261,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
 
     if created_room_id:
         # Save room info
-        add_room(room_key, created_room_id, full_alias, room_name)
+        _add_room(room_key, created_room_id, full_alias, room_name)
         logger.info(f"Created room {room_key} with ID {created_room_id}")
 
         if config.matrix_room_access.is_multi_user_mode():

@@ -130,14 +130,14 @@ def _get_google_credentials() -> Credentials | None:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(google_request_cls())
             # Save refreshed credentials
-            save_credentials(creds)
+            _save_credentials(creds)
     except Exception:
         return None
     else:
         return creds if creds and creds.valid else None
 
 
-def save_credentials(creds: Credentials) -> None:
+def _save_credentials(creds: Credentials) -> None:
     """Save credentials using the unified credentials manager."""
     # Full token with all scopes
     token_data = {
@@ -300,7 +300,7 @@ async def callback(request: Request) -> RedirectResponse:
         flow.fetch_token(code=code)
 
         # Save credentials
-        save_credentials(flow.credentials)
+        _save_credentials(flow.credentials)
 
         # Redirect back to widget with success message
         # Extract the domain from the redirect URI for the final redirect
