@@ -230,7 +230,7 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai.get_cache", return_value=None),
+            patch("mindroom.ai._get_cache", return_value=None),
         ):
             mock_prepare.return_value = (mock_agent, "test prompt", [])
             await ai_response(
@@ -264,7 +264,7 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai.get_cache", return_value=None),
+            patch("mindroom.ai._get_cache", return_value=None),
         ):
             mock_prepare.return_value = (mock_agent, "test prompt", [])
             _chunks = [
