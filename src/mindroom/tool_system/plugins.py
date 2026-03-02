@@ -12,8 +12,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.constants import resolve_config_relative_path
 from mindroom.logging_config import get_logger
-
-from .skills import set_plugin_skill_roots
+from mindroom.tool_system.skills import set_plugin_skill_roots
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
