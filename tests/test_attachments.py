@@ -73,11 +73,39 @@ def test_register_resolve_and_convert_attachment(tmp_path: Path) -> None:
     resolved = resolve_attachments(tmp_path, ["att_payload", "att_missing"])
     assert [record.attachment_id for record in resolved] == ["att_payload"]
 
-    resolved_ids, _, files, videos = resolve_attachment_media(tmp_path, ["att_payload"])
+    resolved_ids, _, _, files, videos = resolve_attachment_media(tmp_path, ["att_payload"])
     assert resolved_ids == ["att_payload"]
     assert len(files) == 1
     assert files[0].filename == "payload.zip"
     assert str(files[0].filepath) == str(file_path.resolve())
+    assert videos == []
+
+
+def test_resolve_attachment_media_includes_images(tmp_path: Path) -> None:
+    """Image attachments should resolve into model image media."""
+    image_path = tmp_path / "photo.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    registered = register_local_attachment(
+        tmp_path,
+        image_path,
+        kind="image",
+        attachment_id="att_image",
+        filename="photo.png",
+        mime_type="image/png",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        source_event_id="$evt_image",
+        sender="@user:localhost",
+    )
+    assert registered is not None
+
+    resolved_ids, audio, images, files, videos = resolve_attachment_media(tmp_path, ["att_image"])
+    assert resolved_ids == ["att_image"]
+    assert audio == []
+    assert len(images) == 1
+    assert str(images[0].filepath) == str(image_path.resolve())
+    assert files == []
     assert videos == []
 
 
@@ -283,7 +311,7 @@ def test_resolve_attachment_media_drops_cross_thread_ids(tmp_path: Path) -> None
     assert allowed is not None
     assert rejected is not None
 
-    resolved_ids, _, files, _ = resolve_attachment_media(
+    resolved_ids, _, _, files, _ = resolve_attachment_media(
         tmp_path,
         ["att_ok", "att_wrong_thread"],
         room_id="!room:localhost",

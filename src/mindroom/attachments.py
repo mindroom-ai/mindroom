@@ -25,6 +25,7 @@ logger = get_logger(__name__)
 AttachmentKind = Literal["audio", "file", "image", "video"]
 FileOrVideoEvent = nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo
 ImageEvent = nio.RoomMessageImage | nio.RoomEncryptedImage
+AudioEvent = nio.RoomMessageAudio | nio.RoomEncryptedAudio
 _ATTACHMENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$")
 _ATTACHMENT_RETENTION_DAYS = 30
 _CLEANUP_INTERVAL = timedelta(hours=1)
@@ -194,21 +195,6 @@ def extract_file_or_video_caption(
     if isinstance(event, nio.RoomMessageVideo | nio.RoomEncryptedVideo):
         return "[Attached video]"
     return "[Attached file]"
-
-
-async def _store_file_or_video_locally(
-    client: nio.AsyncClient,
-    storage_path: Path,
-    event: FileOrVideoEvent,
-) -> Path | None:
-    """Download and persist file/video media to local storage."""
-    media_bytes = await download_media_bytes(client, event)
-    return await _store_media_bytes_locally_async(
-        storage_path,
-        event.event_id,
-        media_bytes,
-        media_mime_type(event),
-    )
 
 
 def attachment_id_for_event(event_id: str) -> str:
@@ -450,6 +436,50 @@ def register_local_attachment(
     return record
 
 
+def _filename_for_media_event(event: FileOrVideoEvent | ImageEvent | AudioEvent) -> str | None:
+    """Extract best-effort filename from Matrix media event content."""
+    content = event.source.get("content", {})
+    filename = content.get("filename")
+    if isinstance(filename, str) and filename:
+        return filename
+    return event.body if isinstance(event.body, str) and event.body else None
+
+
+async def _register_media_attachment(
+    *,
+    storage_path: Path,
+    event_id: str,
+    media_bytes: bytes | None,
+    mime_type: str | None,
+    room_id: str,
+    thread_id: str | None,
+    sender: str,
+    filename: str | None,
+    kind: AttachmentKind,
+) -> AttachmentRecord | None:
+    """Persist media bytes and register a scoped attachment record."""
+    local_media_path = await _store_media_bytes_locally_async(
+        storage_path,
+        event_id,
+        media_bytes,
+        mime_type,
+    )
+    if local_media_path is None:
+        return None
+    return register_local_attachment(
+        storage_path,
+        local_media_path,
+        kind=kind,
+        attachment_id=attachment_id_for_event(event_id),
+        filename=filename,
+        mime_type=mime_type,
+        room_id=room_id,
+        thread_id=thread_id,
+        source_event_id=event_id,
+        sender=sender,
+    )
+
+
 async def register_file_or_video_attachment(
     client: nio.AsyncClient,
     storage_path: Path,
@@ -459,27 +489,18 @@ async def register_file_or_video_attachment(
     event: FileOrVideoEvent,
 ) -> AttachmentRecord | None:
     """Persist a file/video event and register it as an attachment record."""
-    local_media_path = await _store_file_or_video_locally(client, storage_path, event)
-    if local_media_path is None:
-        return None
-
-    content = event.source.get("content", {})
-    filename = content.get("filename")
-    if not isinstance(filename, str) or not filename:
-        filename = event.body
+    media_bytes = await download_media_bytes(client, event)
     kind: AttachmentKind = "video" if isinstance(event, nio.RoomMessageVideo | nio.RoomEncryptedVideo) else "file"
-
-    return register_local_attachment(
-        storage_path,
-        local_media_path,
-        kind=kind,
-        attachment_id=attachment_id_for_event(event.event_id),
-        filename=filename if isinstance(filename, str) else None,
+    return await _register_media_attachment(
+        storage_path=storage_path,
+        event_id=event.event_id,
+        media_bytes=media_bytes,
         mime_type=media_mime_type(event),
         room_id=room_id,
         thread_id=thread_id,
-        source_event_id=event.event_id,
         sender=event.sender,
+        filename=_filename_for_media_event(event),
+        kind=kind,
     )
 
 
@@ -494,31 +515,16 @@ async def register_image_attachment(
 ) -> AttachmentRecord | None:
     """Persist an image event and register it as an attachment record."""
     media_bytes = image_bytes if image_bytes is not None else await download_media_bytes(client, event)
-    local_media_path = await _store_media_bytes_locally_async(
-        storage_path,
-        event.event_id,
-        media_bytes,
-        media_mime_type(event),
-    )
-    if local_media_path is None:
-        return None
-
-    content = event.source.get("content", {})
-    filename = content.get("filename")
-    if not isinstance(filename, str) or not filename:
-        filename = event.body
-
-    return register_local_attachment(
-        storage_path,
-        local_media_path,
-        kind="image",
-        attachment_id=attachment_id_for_event(event.event_id),
-        filename=filename if isinstance(filename, str) else None,
+    return await _register_media_attachment(
+        storage_path=storage_path,
+        event_id=event.event_id,
+        media_bytes=media_bytes,
         mime_type=media_mime_type(event),
         room_id=room_id,
         thread_id=thread_id,
-        source_event_id=event.event_id,
         sender=event.sender,
+        filename=_filename_for_media_event(event),
+        kind="image",
     )
 
 
@@ -534,25 +540,16 @@ async def register_audio_attachment(
     filename: str | None = None,
 ) -> AttachmentRecord | None:
     """Persist raw audio bytes and register them as an attachment record."""
-    local_audio_path = await _store_media_bytes_locally_async(
-        storage_path,
-        event_id,
-        audio_bytes,
-        mime_type,
-    )
-    if local_audio_path is None:
-        return None
-    return register_local_attachment(
-        storage_path,
-        local_audio_path,
-        kind="audio",
-        attachment_id=attachment_id_for_event(event_id),
-        filename=filename,
+    return await _register_media_attachment(
+        storage_path=storage_path,
+        event_id=event_id,
+        media_bytes=audio_bytes,
         mime_type=mime_type,
         room_id=room_id,
         thread_id=thread_id,
-        source_event_id=event_id,
         sender=sender,
+        filename=filename,
+        kind="audio",
     )
 
 

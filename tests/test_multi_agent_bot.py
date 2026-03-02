@@ -2099,7 +2099,7 @@ class TestAgentBot:
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """After router routes an image, the selected agent should download it from the thread root."""
+        """After router routes an image, the selected agent should resolve it via attachments."""
         config = Config.from_yaml()
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
@@ -2109,9 +2109,7 @@ class TestAgentBot:
         bot.response_tracker = tracker
         bot._generate_response = AsyncMock(return_value="$response")
 
-        # The thread root is the original image event
         fake_image = Image(content=b"png-bytes", mime_type="image/png")
-        bot._fetch_thread_images = AsyncMock(return_value=[fake_image])
 
         # Simulate the routing mention event in a thread rooted at the image
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_calculator:localhost")
@@ -2146,6 +2144,15 @@ class TestAgentBot:
             patch("mindroom.bot.get_agents_in_thread", return_value=[]),
             patch("mindroom.bot.get_available_agents_for_sender", return_value=[]),
             patch(
+                "mindroom.bot.resolve_thread_attachment_ids",
+                new_callable=AsyncMock,
+                return_value=["att_img_root"],
+            ) as mock_resolve_attachment_ids,
+            patch(
+                "mindroom.bot.resolve_attachment_media",
+                return_value=(["att_img_root"], [], [fake_image], [], []),
+            ),
+            patch(
                 "mindroom.bot.decide_team_formation",
                 new_callable=AsyncMock,
                 return_value=TeamFormationDecision(
@@ -2158,12 +2165,11 @@ class TestAgentBot:
         ):
             await bot._on_message(room, event)
 
-        bot._fetch_thread_images.assert_awaited_once()
-        fetch_call = bot._fetch_thread_images.await_args
-        assert fetch_call.args == ("!test:localhost", "$img_root")
+        mock_resolve_attachment_ids.assert_awaited_once()
         bot._generate_response.assert_awaited_once()
         call_kwargs = bot._generate_response.call_args.kwargs
         assert list(call_kwargs["media"].images) == [fake_image]
+        assert call_kwargs["attachment_ids"] == ["att_img_root"]
 
     @pytest.mark.asyncio
     async def test_decide_team_for_sender_passes_sender_filtered_dm_agents(

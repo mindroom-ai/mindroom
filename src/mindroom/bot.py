@@ -19,7 +19,6 @@ from .attachment_media import resolve_attachment_media
 from .attachments import (
     append_attachment_ids_prompt,
     extract_file_or_video_caption,
-    is_voice_raw_audio_fallback,
     merge_attachment_ids,
     parse_attachment_ids_from_event_source,
     register_audio_attachment,
@@ -122,7 +121,6 @@ if TYPE_CHECKING:
     import structlog
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
-    from agno.media import Audio, Image
 
     from .config.main import Config
     from .orchestrator import MultiAgentOrchestrator
@@ -398,52 +396,6 @@ class AgentBot:
     def stop_manager(self) -> StopManager:
         """Get or create the StopManager for this agent."""
         return StopManager()
-
-    async def _fetch_thread_root_event(
-        self,
-        room_id: str,
-        thread_id: str,
-    ) -> nio.Event | None:
-        """Fetch the thread root event once for reuse across media helpers."""
-        assert self.client is not None
-        response = await self.client.room_get_event(room_id, thread_id)
-        if not isinstance(response, nio.RoomGetEventResponse):
-            return None
-        return response.event
-
-    async def _fetch_thread_images(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        thread_root_event: nio.Event | None = None,
-    ) -> list[Image]:
-        """Download images from the thread root event, if it is an image message."""
-        assert self.client is not None
-        event = thread_root_event
-        if event is None:
-            event = await self._fetch_thread_root_event(room_id, thread_id)
-        if event is None or not isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage):
-            return []
-        img = await image_handler.download_image(self.client, event)
-        return [img] if img else []
-
-    async def _fetch_thread_audio(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        thread_root_event: nio.Event | None = None,
-    ) -> list[Audio]:
-        """Download audio from the thread root event, if it is an audio message."""
-        assert self.client is not None
-        event = thread_root_event
-        if event is None:
-            event = await self._fetch_thread_root_event(room_id, thread_id)
-        if event is None or not isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio):
-            return []
-        audio = await voice_handler.download_audio(self.client, event)
-        return [audio] if audio else []
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
@@ -769,53 +721,26 @@ class AgentBot:
         if action is None:
             return
 
-        # If responding in a thread, fetch the root event once and reuse it
-        # across image, audio, and attachment resolution to avoid duplicate
-        # room_get_event round-trips.
         context = dispatch.context
-        thread_root_event = (
-            await self._fetch_thread_root_event(room.room_id, context.thread_id) if context.thread_id else None
-        )
-        thread_images = (
-            await self._fetch_thread_images(
-                room.room_id,
-                context.thread_id,
-                thread_root_event=thread_root_event,
-            )
-            if context.thread_id
-            else []
-        )
         thread_attachment_ids = (
             await resolve_thread_attachment_ids(
                 self.client,
                 self.storage_path,
                 room_id=room.room_id,
                 thread_id=context.thread_id,
-                thread_root_event=thread_root_event,
             )
             if context.thread_id
             else []
         )
         attachment_ids = merge_attachment_ids(message_attachment_ids, thread_attachment_ids)
-        resolved_attachment_ids, attachment_audio, attachment_files, attachment_videos = resolve_attachment_media(
-            self.storage_path,
-            attachment_ids,
-            room_id=room.room_id,
-            thread_id=context.thread_id,
-        )
-        # Fetch thread-root audio only when voice fallback is flagged AND no
-        # attachment already carries the same recording (avoids duplicate audio).
-        is_fallback = is_voice_raw_audio_fallback(event.source)
-        thread_audio = (
-            await self._fetch_thread_audio(
-                room.room_id,
-                context.thread_id,
-                thread_root_event=thread_root_event,
+        resolved_attachment_ids, attachment_audio, attachment_images, attachment_files, attachment_videos = (
+            resolve_attachment_media(
+                self.storage_path,
+                attachment_ids,
+                room_id=room.room_id,
+                thread_id=context.thread_id,
             )
-            if context.thread_id and is_fallback and not attachment_audio
-            else []
         )
-        merged_audio = [*thread_audio, *attachment_audio]
         prompt_text = append_attachment_ids_prompt(event.body, resolved_attachment_ids)
         await self._execute_dispatch_action(
             room,
@@ -825,8 +750,8 @@ class AgentBot:
             _DispatchPayload(
                 prompt=prompt_text,
                 media=MediaInputs.from_optional(
-                    audio=merged_audio,
-                    images=thread_images,
+                    audio=attachment_audio,
+                    images=attachment_images,
                     files=attachment_files,
                     videos=attachment_videos,
                 ),
@@ -1128,7 +1053,7 @@ class AgentBot:
             self.response_tracker.mark_responded(event.event_id)
             return
 
-        resolved_attachment_ids, attachment_audio, attachment_files, attachment_videos = resolve_attachment_media(
+        resolved_attachment_ids, attachment_audio, _, attachment_files, attachment_videos = resolve_attachment_media(
             self.storage_path,
             [attachment_record.attachment_id],
             room_id=room.room_id,

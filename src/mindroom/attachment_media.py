@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from agno.media import Audio, File, Video
+from agno.media import Audio, File, Image, Video
 
 from .attachments import AttachmentRecord, filter_attachments_for_context, resolve_attachments
 from .logging_config import get_logger
@@ -17,9 +17,10 @@ logger = get_logger(__name__)
 
 def _attachment_records_to_media(
     attachment_records: list[AttachmentRecord],
-) -> tuple[list[Audio], list[File], list[Video]]:
+) -> tuple[list[Audio], list[Image], list[File], list[Video]]:
     """Convert persisted attachments into Agno media objects."""
     audio: list[Audio] = []
+    images: list[Image] = []
     files: list[File] = []
     videos: list[Video] = []
 
@@ -29,6 +30,13 @@ def _attachment_records_to_media(
         if record.kind == "audio":
             audio.append(
                 Audio(
+                    filepath=str(record.local_path),
+                    mime_type=record.mime_type,
+                ),
+            )
+        elif record.kind == "image":
+            images.append(
+                Image(
                     filepath=str(record.local_path),
                     mime_type=record.mime_type,
                 ),
@@ -56,7 +64,7 @@ def _attachment_records_to_media(
                 ),
             )
 
-    return audio, files, videos
+    return audio, images, files, videos
 
 
 def resolve_attachment_media(
@@ -65,7 +73,7 @@ def resolve_attachment_media(
     *,
     room_id: str | None = None,
     thread_id: str | None = None,
-) -> tuple[list[str], list[Audio], list[File], list[Video]]:
+) -> tuple[list[str], list[Audio], list[Image], list[File], list[Video]]:
     """Resolve attachment IDs into Agno media objects.
 
     When *room_id* is provided, only attachments registered for the current
@@ -87,5 +95,7 @@ def resolve_attachment_media(
                 thread_id=thread_id,
             )
     resolved_attachment_ids = [record.attachment_id for record in attachment_records]
-    attachment_audio, attachment_files, attachment_videos = _attachment_records_to_media(attachment_records)
-    return resolved_attachment_ids, attachment_audio, attachment_files, attachment_videos
+    attachment_audio, attachment_images, attachment_files, attachment_videos = _attachment_records_to_media(
+        attachment_records,
+    )
+    return resolved_attachment_ids, attachment_audio, attachment_images, attachment_files, attachment_videos

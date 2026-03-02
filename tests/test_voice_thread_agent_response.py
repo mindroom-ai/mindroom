@@ -239,7 +239,7 @@ async def test_agent_ignores_non_voice_router_messages(mock_home_bot: AgentBot) 
 
 @pytest.mark.asyncio
 async def test_agent_receives_thread_audio_on_voice_raw_fallback(mock_home_bot: AgentBot) -> None:
-    """Voice fallback relays should pass thread audio into agent generation."""
+    """Voice fallback relays should pass resolved attachment audio into generation."""
     bot = mock_home_bot
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
@@ -277,12 +277,16 @@ async def test_agent_receives_thread_audio_on_voice_raw_fallback(mock_home_bot: 
     with (
         patch("mindroom.bot.fetch_thread_history", return_value=thread_history),
         patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
-        patch.object(bot, "_fetch_thread_images", new_callable=AsyncMock, return_value=[]),
-        patch.object(
-            bot,
-            "_fetch_thread_audio",
-            new_callable=AsyncMock,
-            return_value=[Audio(content=b"voice-bytes", mime_type="audio/ogg")],
+        patch("mindroom.bot.resolve_thread_attachment_ids", new_callable=AsyncMock, return_value=["att_voice_root"]),
+        patch(
+            "mindroom.bot.resolve_attachment_media",
+            return_value=(
+                ["att_voice_root"],
+                [Audio(content=b"voice-bytes", mime_type="audio/ogg")],
+                [],
+                [],
+                [],
+            ),
         ),
         patch("mindroom.bot.should_agent_respond", return_value=True),
     ):
@@ -301,7 +305,8 @@ async def test_agent_receives_thread_audio_on_voice_raw_fallback(mock_home_bot: 
     bot._generate_response.assert_called_once()
     call_kwargs = bot._generate_response.call_args.kwargs
     assert call_kwargs["media"].audio
-    assert call_kwargs["prompt"] == f"{VOICE_PREFIX}[Attached voice message]"
+    assert call_kwargs["prompt"].startswith(f"{VOICE_PREFIX}[Attached voice message]")
+    assert "att_voice_root" in call_kwargs["prompt"]
 
 
 @pytest.mark.asyncio
@@ -346,15 +351,8 @@ async def test_agent_voice_fallback_uses_attachment_audio_without_refetch(mock_h
     with (
         patch("mindroom.bot.fetch_thread_history", return_value=thread_history),
         patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
-        patch("mindroom.bot.resolve_attachment_media", return_value=(["att_voice"], attachment_audio, [], [])),
+        patch("mindroom.bot.resolve_attachment_media", return_value=(["att_voice"], attachment_audio, [], [], [])),
         patch("mindroom.bot.resolve_thread_attachment_ids", new_callable=AsyncMock, return_value=[]),
-        patch.object(bot, "_fetch_thread_images", new_callable=AsyncMock, return_value=[]),
-        patch.object(
-            bot,
-            "_fetch_thread_audio",
-            new_callable=AsyncMock,
-            return_value=[Audio(content=b"duplicate", mime_type="audio/ogg")],
-        ) as fetch_thread_audio,
         patch("mindroom.bot.should_agent_respond", return_value=True),
     ):
 
@@ -369,7 +367,6 @@ async def test_agent_voice_fallback_uses_attachment_audio_without_refetch(mock_h
 
         await bot._on_message(room, fallback_event)
 
-    fetch_thread_audio.assert_not_awaited()
     bot._generate_response.assert_called_once()
     call_kwargs = bot._generate_response.call_args.kwargs
     assert list(call_kwargs["media"].audio) == attachment_audio
@@ -432,9 +429,8 @@ async def test_followup_text_in_voice_thread_recovers_audio(mock_home_bot: Agent
         ),
         patch(
             "mindroom.bot.resolve_attachment_media",
-            return_value=(["att_voiceroot"], attachment_audio, [], []),
+            return_value=(["att_voiceroot"], attachment_audio, [], [], []),
         ),
-        patch.object(bot, "_fetch_thread_images", new_callable=AsyncMock, return_value=[]),
         patch("mindroom.bot.should_agent_respond", return_value=True),
     ):
 
