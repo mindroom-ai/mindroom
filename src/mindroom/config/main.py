@@ -26,24 +26,24 @@ if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
 
 AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
-OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
-    "shell",
-    "coding",
-    "duckduckgo",
-    "website",
-    "browser",
-    "scheduler",
-    "subagents",
-    "matrix_message",
-)
 logger = get_logger(__name__)
 
 
 class Config(BaseModel):
     """Complete configuration from YAML."""
 
-    TOOL_PRESETS: ClassVar[dict[str, tuple[str, ...]]] = {
-        "openclaw_compat": OPENCLAW_COMPAT_PRESET_TOOLS,
+    IMPLIED_TOOLS: ClassVar[dict[str, tuple[str, ...]]] = {
+        "matrix_message": ("attachments",),
+        "openclaw_compat": (
+            "shell",
+            "coding",
+            "duckduckgo",
+            "website",
+            "browser",
+            "scheduler",
+            "subagents",
+            "matrix_message",
+        ),
     }
 
     agents: dict[str, AgentConfig] = Field(default_factory=dict, description="Agent configurations")
@@ -334,27 +334,20 @@ class Config(BaseModel):
         return self.expand_tool_names(tool_names)
 
     @classmethod
-    def get_tool_preset(cls, tool_name: str) -> tuple[str, ...] | None:
-        """Return the tool expansion for a preset name."""
-        return cls.TOOL_PRESETS.get(tool_name)
-
-    @classmethod
-    def is_tool_preset(cls, tool_name: str) -> bool:
-        """Return whether a tool name is a known config preset."""
-        return tool_name in cls.TOOL_PRESETS
-
-    @classmethod
     def expand_tool_names(cls, tool_names: list[str]) -> list[str]:
-        """Expand configured tool presets and dedupe while preserving order."""
+        """Expand implied tools and dedupe while preserving order."""
         expanded: list[str] = []
         seen: set[str] = set()
-        for tool_name in tool_names:
-            entries = cls.get_tool_preset(tool_name) or (tool_name,)
-            for entry in entries:
-                if entry in seen:
-                    continue
-                seen.add(entry)
-                expanded.append(entry)
+        queue = list(tool_names)
+        while queue:
+            tool_name = queue.pop(0)
+            if tool_name in seen:
+                continue
+            seen.add(tool_name)
+            expanded.append(tool_name)
+            queue.extend(
+                implied_tool for implied_tool in cls.IMPLIED_TOOLS.get(tool_name, ()) if implied_tool not in seen
+            )
         return expanded
 
     def get_agent_memory_backend(self, agent_name: str) -> MemoryBackend:

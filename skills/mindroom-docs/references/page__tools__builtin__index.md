@@ -171,11 +171,12 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 
 ## Memory & Storage
 
-| Icon              | Tool     | Description                                          | Config Required                |
-| ----------------- | -------- | ---------------------------------------------------- | ------------------------------ |
-| :lucide-database: | `memory` | Explicitly store and search agent memories on demand | -                              |
-| :lucide-database: | `mem0`   | Persistent memory system                             | `api_key` (optional for cloud) |
-| :lucide-database: | `zep`    | Conversation memory                                  | `api_key`                      |
+| Icon               | Tool          | Description                                                                                                                   | Config Required                |
+| ------------------ | ------------- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| :lucide-database:  | `memory`      | Explicitly store and search agent memories on demand                                                                          | -                              |
+| :lucide-database:  | `mem0`        | Persistent memory system                                                                                                      | `api_key` (optional for cloud) |
+| :lucide-database:  | `zep`         | Conversation memory                                                                                                           | `api_key`                      |
+| :lucide-paperclip: | `attachments` | List, register, and send context-scoped file attachments (see [Attachments](https://docs.mindroom.chat/attachments/index.md)) | -                              |
 
 ## Custom & Config
 
@@ -185,7 +186,7 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | :lucide-sliders-horizontal: | `config_manager` | MindRoom configuration management             | -               |
 | :lucide-workflow:           | `subagents`      | Spawn and communicate with sub-agent sessions | -               |
 
-Tool presets are config-only macros, not runtime tools. For OpenClaw workspace portability, `openclaw_compat` expands to `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, `subagents`, and `matrix_message`.
+Tool presets are config-only macros, not runtime tools. For OpenClaw workspace portability, `openclaw_compat` expands to `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, `subagents`, `matrix_message`, and `attachments`.
 
 ## Claude Agent Sessions
 

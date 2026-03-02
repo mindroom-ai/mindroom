@@ -46,7 +46,7 @@ def config_search_locations() -> list[Path]:
     return locations
 
 
-def config_base_dir(config_path: Path | None = None) -> Path:
+def _config_base_dir(config_path: Path | None = None) -> Path:
     """Return the absolute directory containing the active config file."""
     resolved_config_path = (config_path or CONFIG_PATH).expanduser().resolve()
     return resolved_config_path.parent
@@ -57,7 +57,7 @@ def resolve_config_relative_path(raw_path: str | Path, *, config_path: Path | No
     unresolved = Path(raw_path).expanduser()
     if unresolved.is_absolute():
         return unresolved.resolve()
-    return (config_base_dir(config_path) / unresolved).resolve()
+    return (_config_base_dir(config_path) / unresolved).resolve()
 
 
 def find_config() -> Path:
@@ -113,6 +113,8 @@ def env_flag(name: str, *, default: bool = False) -> bool:
 # Other constants
 VOICE_PREFIX = "🎤 "
 ORIGINAL_SENDER_KEY = "com.mindroom.original_sender"
+VOICE_RAW_AUDIO_FALLBACK_KEY = "com.mindroom.voice_raw_audio_fallback"
+ATTACHMENT_IDS_KEY = "com.mindroom.attachment_ids"
 AI_RUN_METADATA_KEY = "io.mindroom.ai_run"
 ENABLE_AI_CACHE = env_flag("MINDROOM_ENABLE_AI_CACHE", default=True)
 

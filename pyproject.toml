@@ -61,6 +61,7 @@ optional-dependencies.arxiv = [
   "arxiv",
   "pypdf",
 ]
+optional-dependencies.attachments = [  ]
 optional-dependencies.aws_lambda = [
   "boto3>=1.40.8",
 ]
@@ -255,6 +256,7 @@ optional-dependencies.openai = [
 optional-dependencies.openbb = [
   "openbb",
 ]
+optional-dependencies.openclaw_compat = [  ]
 optional-dependencies.openweather = [
   "requests",
 ]

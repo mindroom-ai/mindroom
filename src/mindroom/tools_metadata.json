@@ -3614,6 +3614,21 @@
     {
       "auth_provider": null,
       "category": "development",
+      "config_fields": null,
+      "dependencies": null,
+      "description": "Convenience bundle that implies shell, coding, browser, and other common tools",
+      "display_name": "OpenClaw Compat",
+      "docs_url": null,
+      "helper_text": "Implies: shell, coding, duckduckgo, website, browser, scheduler, subagents, matrix_message, attachments.",
+      "icon": "Workflow",
+      "icon_color": "text-orange-500",
+      "name": "openclaw_compat",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "auth_provider": null,
+      "category": "development",
       "config_fields": [
         {
           "default": null,
@@ -5322,6 +5337,21 @@
       "name": "shopify",
       "setup_type": "api_key",
       "status": "requires_config"
+    },
+    {
+      "auth_provider": null,
+      "category": "productivity",
+      "config_fields": [],
+      "dependencies": [],
+      "description": "List and send context-scoped file attachments",
+      "display_name": "Attachments",
+      "docs_url": null,
+      "helper_text": null,
+      "icon": "Paperclip",
+      "icon_color": "text-teal-500",
+      "name": "attachments",
+      "setup_type": "none",
+      "status": "available"
     },
     {
       "auth_provider": null,

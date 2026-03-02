@@ -97,7 +97,7 @@ class TestDownloadImage:
         response.body = b"encrypted_image_data"
         client.download.return_value = response
 
-        with patch("mindroom.image_handler.crypto.attachments.decrypt_attachment") as mock_decrypt:
+        with patch("mindroom.matrix.media.crypto.attachments.decrypt_attachment") as mock_decrypt:
             mock_decrypt.return_value = b"decrypted_image_data"
 
             result = await image_handler.download_image(client, event)
@@ -179,7 +179,7 @@ class TestDownloadImage:
         response.body = b"encrypted_image_data"
         client.download.return_value = response
 
-        with patch("mindroom.image_handler.crypto.attachments.decrypt_attachment") as mock_decrypt:
+        with patch("mindroom.matrix.media.crypto.attachments.decrypt_attachment") as mock_decrypt:
             mock_decrypt.side_effect = ValueError("bad ciphertext")
             result = await image_handler.download_image(client, event)
 
@@ -222,7 +222,7 @@ class TestDownloadImage:
         response.body = b"encrypted_data"
         client.download.return_value = response
 
-        with patch("mindroom.image_handler.crypto.attachments.decrypt_attachment") as mock_decrypt:
+        with patch("mindroom.matrix.media.crypto.attachments.decrypt_attachment") as mock_decrypt:
             mock_decrypt.return_value = b"decrypted_data"
             result = await image_handler.download_image(client, event)
 
@@ -250,7 +250,7 @@ class TestDownloadImage:
         response.body = b"encrypted_data"
         client.download.return_value = response
 
-        with patch("mindroom.image_handler.crypto.attachments.decrypt_attachment") as mock_decrypt:
+        with patch("mindroom.matrix.media.crypto.attachments.decrypt_attachment") as mock_decrypt:
             mock_decrypt.return_value = b"decrypted_data"
             result = await image_handler.download_image(client, event)
 

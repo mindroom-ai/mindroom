@@ -37,6 +37,7 @@ async def test_voice_handler_returns_transcription() -> None:
 
     # Mock config
     config = Config.from_yaml()
+    config.voice.enabled = True
 
     # Mock audio download
     mock_response = MagicMock()

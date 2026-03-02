@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from agno.media import Audio
 
 from mindroom import voice_handler
 from mindroom.config.agent import AgentConfig
@@ -100,7 +101,10 @@ class TestVoiceHandler:
         event.sender = "@alice:example.com"
 
         with (
-            patch("mindroom.voice_handler._download_audio", return_value=b"audio"),
+            patch(
+                "mindroom.voice_handler.download_audio",
+                new=AsyncMock(return_value=Audio(content=b"audio", mime_type="audio/ogg")),
+            ),
             patch("mindroom.voice_handler._transcribe_audio", return_value="help me"),
             patch("mindroom.voice_handler._process_transcription", new_callable=AsyncMock) as mock_process,
         ):
@@ -115,32 +119,25 @@ class TestVoiceHandler:
     @pytest.mark.asyncio
     async def test_download_audio_unencrypted(self) -> None:
         """Test downloading unencrypted audio messages."""
-        from nio import RoomMessageAudio  # noqa: PLC0415
-
         Config(voice=VoiceConfig(enabled=True))  # Just to verify it works, not used in test
 
         # Mock client and event
         client = AsyncMock()
-        event = MagicMock(spec=RoomMessageAudio)
-        event.url = "mxc://example.org/abc123"
+        event = MagicMock(spec=nio.RoomMessageAudio)
 
-        # Mock successful download
-        response = MagicMock()
-        response.body = b"audio_data"
-        client.download.return_value = response
+        with (
+            patch(
+                "mindroom.voice_handler.download_media_bytes",
+                new=AsyncMock(return_value=b"audio_data"),
+            ) as mock_download,
+            patch("mindroom.voice_handler.media_mime_type", return_value="audio/ogg"),
+        ):
+            result = await voice_handler.download_audio(client, event)
 
-        # Patch isinstance to handle the type checks
-        def mock_isinstance_check(obj: object, cls: type) -> bool:
-            if obj is event and cls is nio.RoomMessageAudio:
-                return True
-            if obj is response and cls is nio.DownloadError:
-                return False  # Not an error
-            return isinstance.__wrapped__(obj, cls)
-
-        with patch("mindroom.voice_handler.isinstance", side_effect=mock_isinstance_check):
-            result = await voice_handler._download_audio(client, event)
-            assert result == b"audio_data"
-            client.download.assert_called_once_with("mxc://example.org/abc123")
+        assert result is not None
+        assert result.content == b"audio_data"
+        assert result.mime_type == "audio/ogg"
+        mock_download.assert_awaited_once_with(client, event)
 
     @pytest.mark.asyncio
     async def test_download_audio_encrypted(self) -> None:
@@ -149,32 +146,18 @@ class TestVoiceHandler:
 
         # Mock client and encrypted event
         client = AsyncMock()
-        event = MagicMock(spec=["url", "source"])
-        event.url = "mxc://example.org/encrypted123"
-        event.source = {
-            "content": {
-                "file": {
-                    "key": {"k": "test_key"},
-                    "hashes": {"sha256": "test_hash"},
-                    "iv": "test_iv",
-                },
-            },
-        }
+        event = MagicMock(spec=nio.RoomEncryptedAudio)
 
-        # Mock successful download
-        response = MagicMock()
-        response.body = b"encrypted_audio_data"
-        client.download.return_value = response
+        with (
+            patch(
+                "mindroom.voice_handler.download_media_bytes",
+                new=AsyncMock(return_value=b"decrypted_audio_data"),
+            ) as mock_download,
+            patch("mindroom.voice_handler.media_mime_type", return_value="audio/mpeg"),
+        ):
+            result = await voice_handler.download_audio(client, event)
 
-        # Mock decryption
-        with patch("mindroom.voice_handler.crypto.attachments.decrypt_attachment") as mock_decrypt:
-            mock_decrypt.return_value = b"decrypted_audio_data"
-
-            # Use nio.RoomEncryptedAudio type hint for the test
-            from nio import RoomEncryptedAudio  # noqa: PLC0415
-
-            event.__class__ = RoomEncryptedAudio
-
-            result = await voice_handler._download_audio(client, event)
-            assert result == b"decrypted_audio_data"
-            mock_decrypt.assert_called_once()
+        assert result is not None
+        assert result.content == b"decrypted_audio_data"
+        assert result.mime_type == "audio/mpeg"
+        mock_download.assert_awaited_once_with(client, event)

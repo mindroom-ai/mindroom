@@ -15,6 +15,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.media_inputs import MediaInputs
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.teams import TeamMode
 
@@ -138,7 +139,7 @@ async def test_agent_processes_direct_mention(
                     room_id=test_room_id,
                     knowledge=None,
                     user_id=test_user_id,
-                    images=None,
+                    media=MediaInputs(),
                     reply_to_event_id="$test_event:localhost",
                     show_tool_calls=True,
                     run_metadata_collector=ANY,
@@ -426,7 +427,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 room_id=test_room_id,
                 knowledge=None,
                 user_id=test_user_id,
-                images=None,
+                media=MediaInputs(),
                 reply_to_event_id=f"$test_event2:{domain}",
                 show_tool_calls=True,
                 tool_trace_collector=ANY,

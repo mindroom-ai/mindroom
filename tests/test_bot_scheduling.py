@@ -1233,6 +1233,7 @@ class TestRouterSkipsSingleAgent:
             None,
             message=None,
             requester_user_id="@user:localhost",
+            extra_content=None,
         )
 
         # Verify it didn't log about skipping

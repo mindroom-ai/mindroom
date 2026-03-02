@@ -102,8 +102,8 @@ class TestUpdateOwnConfig:
         finally:
             config_path.unlink(missing_ok=True)
 
-    def test_update_tools_allows_openclaw_preset(self) -> None:
-        """Preset tool entries should be accepted in tools updates."""
+    def test_update_tools_allows_openclaw_compat(self) -> None:
+        """openclaw_compat should be accepted in tools updates and expand implied tools."""
         _, config_path = _make_config(
             agents={"coder": AgentConfig(display_name="Coder", role="Code", tools=[])},
         )
@@ -114,14 +114,10 @@ class TestUpdateOwnConfig:
 
             reloaded = Config.from_yaml(config_path)
             assert reloaded.agents["coder"].tools == ["openclaw_compat", "python"]
-            assert reloaded.get_agent_tools("coder")[:6] == [
-                "shell",
-                "coding",
-                "duckduckgo",
-                "website",
-                "browser",
-                "scheduler",
-            ]
+            effective = reloaded.get_agent_tools("coder")
+            assert effective[0] == "openclaw_compat"
+            assert "shell" in effective
+            assert "matrix_message" in effective
         finally:
             config_path.unlink(missing_ok=True)
 

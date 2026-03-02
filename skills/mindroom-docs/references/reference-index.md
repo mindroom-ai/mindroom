@@ -30,6 +30,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Memory System | `memory.md` | `memory/index.md` | `page__memory__index.md` |
 | Voice Messages | `voice.md` | `voice/index.md` | `page__voice__index.md` |
 | Image Messages | `images.md` | `images/index.md` | `page__images__index.md` |
+| File & Video Attachments | `attachments.md` | `attachments/index.md` | `page__attachments__index.md` |
 | Scheduling | `scheduling.md` | `scheduling/index.md` | `page__scheduling__index.md` |
 | Authorization | `authorization.md` | `authorization/index.md` | `page__authorization__index.md` |
 | OpenAI-Compatible API | `openai-api.md` | `openai-api/index.md` | `page__openai-api__index.md` |

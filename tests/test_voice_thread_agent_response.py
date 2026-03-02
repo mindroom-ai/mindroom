@@ -8,10 +8,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from agno.media import Audio
 
 from mindroom.bot import ROUTER_AGENT_NAME, AgentBot
 from mindroom.config.main import Config
-from mindroom.constants import ORIGINAL_SENDER_KEY, VOICE_PREFIX
+from mindroom.constants import (
+    ATTACHMENT_IDS_KEY,
+    ORIGINAL_SENDER_KEY,
+    VOICE_PREFIX,
+    VOICE_RAW_AUDIO_FALLBACK_KEY,
+)
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.teams import TeamFormationDecision, TeamMode
@@ -229,3 +235,223 @@ async def test_agent_ignores_non_voice_router_messages(mock_home_bot: AgentBot) 
 
         # Verify that HomeAssistant does NOT generate a response
         bot._generate_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_receives_thread_audio_on_voice_raw_fallback(mock_home_bot: AgentBot) -> None:
+    """Voice fallback relays should pass thread audio into agent generation."""
+    bot = mock_home_bot
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!test:server"
+    room.canonical_alias = None
+
+    fallback_event = MagicMock(spec=nio.RoomMessageText)
+    fallback_event.event_id = "$voice_fallback_event"
+    fallback_event.sender = f"@mindroom_{ROUTER_AGENT_NAME}:localhost"
+    fallback_event.body = f"{VOICE_PREFIX}[Attached voice message]"
+    fallback_event.source = {
+        "content": {
+            "body": f"{VOICE_PREFIX}[Attached voice message]",
+            ORIGINAL_SENDER_KEY: "@user:example.com",
+            VOICE_RAW_AUDIO_FALLBACK_KEY: True,
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": "$thread_root",
+            },
+        },
+    }
+
+    thread_history = [
+        {
+            "event_id": "$thread_root",
+            "sender": "@user:example.com",
+            "content": {"body": "Voice root"},
+        },
+        {
+            "event_id": "$home_response",
+            "sender": "@mindroom_home:localhost",
+            "content": {"body": "Ready"},
+        },
+    ]
+
+    with (
+        patch("mindroom.bot.fetch_thread_history", return_value=thread_history),
+        patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
+        patch.object(bot, "_fetch_thread_images", new_callable=AsyncMock, return_value=[]),
+        patch.object(
+            bot,
+            "_fetch_thread_audio",
+            new_callable=AsyncMock,
+            return_value=[Audio(content=b"voice-bytes", mime_type="audio/ogg")],
+        ),
+        patch("mindroom.bot.should_agent_respond", return_value=True),
+    ):
+
+        def extract_agent_side_effect(user_id: str, config: Config) -> str | None:  # noqa: ARG001
+            if user_id == f"@mindroom_{ROUTER_AGENT_NAME}:localhost":
+                return ROUTER_AGENT_NAME
+            if user_id == "@mindroom_home:localhost":
+                return "home"
+            return None
+
+        mock_extract_agent.side_effect = extract_agent_side_effect
+
+        await bot._on_message(room, fallback_event)
+
+    bot._generate_response.assert_called_once()
+    call_kwargs = bot._generate_response.call_args.kwargs
+    assert call_kwargs["media"].audio
+    assert call_kwargs["prompt"] == f"{VOICE_PREFIX}[Attached voice message]"
+
+
+@pytest.mark.asyncio
+async def test_agent_voice_fallback_uses_attachment_audio_without_refetch(mock_home_bot: AgentBot) -> None:
+    """Fallback relays with attachment audio should skip thread-audio redownload."""
+    bot = mock_home_bot
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!test:server"
+    room.canonical_alias = None
+
+    fallback_event = MagicMock(spec=nio.RoomMessageText)
+    fallback_event.event_id = "$voice_fallback_attached"
+    fallback_event.sender = f"@mindroom_{ROUTER_AGENT_NAME}:localhost"
+    fallback_event.body = f"{VOICE_PREFIX}[Attached voice message]"
+    fallback_event.source = {
+        "content": {
+            "body": f"{VOICE_PREFIX}[Attached voice message]",
+            ORIGINAL_SENDER_KEY: "@user:example.com",
+            VOICE_RAW_AUDIO_FALLBACK_KEY: True,
+            ATTACHMENT_IDS_KEY: ["att_voice"],
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": "$thread_root",
+            },
+        },
+    }
+
+    thread_history = [
+        {
+            "event_id": "$thread_root",
+            "sender": "@user:example.com",
+            "content": {"body": "Voice root"},
+        },
+        {
+            "event_id": "$home_response",
+            "sender": "@mindroom_home:localhost",
+            "content": {"body": "Ready"},
+        },
+    ]
+    attachment_audio = [Audio(content=b"voice-bytes", mime_type="audio/ogg")]
+
+    with (
+        patch("mindroom.bot.fetch_thread_history", return_value=thread_history),
+        patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
+        patch("mindroom.bot.resolve_attachment_media", return_value=(["att_voice"], attachment_audio, [], [])),
+        patch("mindroom.bot.resolve_thread_attachment_ids", new_callable=AsyncMock, return_value=[]),
+        patch.object(bot, "_fetch_thread_images", new_callable=AsyncMock, return_value=[]),
+        patch.object(
+            bot,
+            "_fetch_thread_audio",
+            new_callable=AsyncMock,
+            return_value=[Audio(content=b"duplicate", mime_type="audio/ogg")],
+        ) as fetch_thread_audio,
+        patch("mindroom.bot.should_agent_respond", return_value=True),
+    ):
+
+        def extract_agent_side_effect(user_id: str, config: Config) -> str | None:  # noqa: ARG001
+            if user_id == f"@mindroom_{ROUTER_AGENT_NAME}:localhost":
+                return ROUTER_AGENT_NAME
+            if user_id == "@mindroom_home:localhost":
+                return "home"
+            return None
+
+        mock_extract_agent.side_effect = extract_agent_side_effect
+
+        await bot._on_message(room, fallback_event)
+
+    fetch_thread_audio.assert_not_awaited()
+    bot._generate_response.assert_called_once()
+    call_kwargs = bot._generate_response.call_args.kwargs
+    assert list(call_kwargs["media"].audio) == attachment_audio
+    assert "att_voice" in call_kwargs["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_followup_text_in_voice_thread_recovers_audio(mock_home_bot: AgentBot) -> None:
+    """A follow-up text message in a voice-fallback thread should recover the audio attachment."""
+    bot = mock_home_bot
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!test:server"
+    room.canonical_alias = None
+
+    # Simulate a plain follow-up text in a thread rooted at a voice event.
+    followup_event = MagicMock(spec=nio.RoomMessageText)
+    followup_event.event_id = "$followup_text"
+    followup_event.sender = "@user:example.com"
+    followup_event.body = "Can you repeat that?"
+    followup_event.source = {
+        "content": {
+            "body": "Can you repeat that?",
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": "$voice_root",
+            },
+        },
+    }
+
+    thread_history = [
+        {
+            "event_id": "$voice_root",
+            "sender": "@user:example.com",
+            "content": {"body": "audio.ogg"},
+        },
+        {
+            "event_id": "$fallback_relay",
+            "sender": f"@mindroom_{ROUTER_AGENT_NAME}:localhost",
+            "content": {"body": f"{VOICE_PREFIX}[Attached voice message]"},
+        },
+        {
+            "event_id": "$home_response",
+            "sender": "@mindroom_home:localhost",
+            "content": {"body": "I heard you"},
+        },
+    ]
+
+    # The voice root is an audio event; resolve_thread_attachment_ids should
+    # discover the existing audio attachment record registered by the voice
+    # fallback handler.
+    attachment_audio = [Audio(content=b"voice-bytes", mime_type="audio/ogg")]
+
+    with (
+        patch("mindroom.bot.fetch_thread_history", return_value=thread_history),
+        patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
+        patch(
+            "mindroom.bot.resolve_thread_attachment_ids",
+            new_callable=AsyncMock,
+            return_value=["att_voiceroot"],
+        ),
+        patch(
+            "mindroom.bot.resolve_attachment_media",
+            return_value=(["att_voiceroot"], attachment_audio, [], []),
+        ),
+        patch.object(bot, "_fetch_thread_images", new_callable=AsyncMock, return_value=[]),
+        patch("mindroom.bot.should_agent_respond", return_value=True),
+    ):
+
+        def extract_agent_side_effect(user_id: str, config: Config) -> str | None:  # noqa: ARG001
+            if user_id == f"@mindroom_{ROUTER_AGENT_NAME}:localhost":
+                return ROUTER_AGENT_NAME
+            if user_id == "@mindroom_home:localhost":
+                return "home"
+            return None
+
+        mock_extract_agent.side_effect = extract_agent_side_effect
+
+        await bot._on_message(room, followup_event)
+
+    bot._generate_response.assert_called_once()
+    call_kwargs = bot._generate_response.call_args.kwargs
+    # Audio from the voice-root attachment should be present despite no
+    # fallback flag on the current event.
+    assert list(call_kwargs["media"].audio) == attachment_audio
+    assert "att_voiceroot" in call_kwargs["prompt"]
