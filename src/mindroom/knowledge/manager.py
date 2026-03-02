@@ -6,18 +6,15 @@ import asyncio
 import hashlib
 import re
 from contextlib import suppress
-from copy import deepcopy
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlparse, urlunparse
 
-from agno.knowledge.chunking.fixed import FixedSizeChunking
 from agno.knowledge.embedder.ollama import OllamaEmbedder
 from agno.knowledge.embedder.openai import OpenAIEmbedder
 from agno.knowledge.knowledge import Knowledge
-from agno.knowledge.reader import ReaderFactory
 from agno.vectordb.chroma import ChromaDb
 from watchfiles import Change, awatch
 
@@ -28,7 +25,6 @@ from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from agno.knowledge.embedder.base import Embedder
-    from agno.knowledge.reader.base import Reader
 
     from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
     from mindroom.config.main import Config
@@ -77,8 +73,6 @@ def _settings_key(config: Config, storage_path: Path, base_id: str) -> tuple[str
         embedder_config.model,
         embedder_config.host or "",
         str(base_config.watch),
-        str(base_config.chunk_size),
-        str(base_config.chunk_overlap),
         git_config.repo_url if git_config is not None else "",
         git_config.branch if git_config is not None else "",
         str(git_config.poll_interval_seconds) if git_config is not None else "",
@@ -414,24 +408,6 @@ class KnowledgeManager:
     def _relative_path(self, file_path: Path) -> str:
         return file_path.relative_to(self.knowledge_path).as_posix()
 
-    def _build_reader(self, file_path: Path) -> Reader:
-        """Build a per-file reader with conservative chunking for text-like content."""
-        base_config = _knowledge_base_config(self.config, self.base_id)
-        reader = ReaderFactory.get_reader_for_extension(file_path.suffix.lower())
-
-        # Large markdown/plain-text files are the common source of oversized embed requests.
-        if reader.__class__.__name__ not in {"TextReader", "MarkdownReader"}:
-            return reader
-
-        configured_reader = deepcopy(reader)
-        configured_reader.chunk = True
-        configured_reader.chunk_size = base_config.chunk_size
-        configured_reader.chunking_strategy = FixedSizeChunking(
-            chunk_size=base_config.chunk_size,
-            overlap=base_config.chunk_overlap,
-        )
-        return configured_reader
-
     def _reset_collection(self) -> None:
         if self._knowledge.vector_db is None:
             return
@@ -613,7 +589,6 @@ class KnowledgeManager:
         """Index one file while holding the manager lock."""
         relative_path = self._relative_path(resolved_path)
         metadata = {"source_path": relative_path}
-        reader = self._build_reader(resolved_path)
 
         try:
             if upsert:
@@ -625,7 +600,6 @@ class KnowledgeManager:
                 path=str(resolved_path),
                 metadata=metadata,
                 upsert=upsert,
-                reader=reader,
             )
         except Exception:
             logger.exception("Failed to index knowledge file", base_id=self.base_id, path=str(resolved_path))
