@@ -150,8 +150,9 @@ def _save_credentials(creds: Credentials) -> None:
     }
 
     # Add ID token if available for user info
-    if hasattr(creds, "_id_token") and creds._id_token:
-        token_data["_id_token"] = creds._id_token
+    id_token = creds.id_token
+    if id_token:
+        token_data["_id_token"] = id_token
 
     # Save using credentials manager (handles backward compatibility)
     _creds_manager.save_credentials("google", token_data)
@@ -226,8 +227,9 @@ async def get_status() -> GoogleStatus:
         # Get user email from token
         email = None
         try:
-            if hasattr(creds, "_id_token") and creds._id_token:
-                decoded = jwt.decode(creds._id_token, options={"verify_signature": False})
+            id_token = creds.id_token
+            if id_token:
+                decoded = jwt.decode(id_token, options={"verify_signature": False})
                 email = decoded.get("email")
         except Exception:
             email = None

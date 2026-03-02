@@ -676,9 +676,8 @@ class AgentBot:
             # Check if the only message is our welcome message
             msg = response.chunk[0]
             if (
-                hasattr(msg, "sender")
+                isinstance(msg, nio.RoomMessageText)
                 and msg.sender == self.agent_user.user_id
-                and hasattr(msg, "body")
                 and "Welcome to MindRoom" in msg.body
             ):
                 self.logger.debug("Welcome message already sent", room_id=room_id)
