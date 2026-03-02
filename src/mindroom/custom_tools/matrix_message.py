@@ -11,8 +11,7 @@ from typing import TYPE_CHECKING, ClassVar
 import nio
 from agno.tools import Toolkit
 
-from mindroom.attachments import load_attachment
-from mindroom.authorization import is_authorized_sender
+from mindroom.custom_tools.attachments import resolve_context_attachment_path, room_access_allowed
 from mindroom.matrix.client import (
     fetch_thread_history,
     get_latest_thread_event_id_if_needed,
@@ -82,25 +81,7 @@ class MatrixMessageTools(Toolkit):
         return normalized, None
 
     @staticmethod
-    def _resolve_context_attachment_path(
-        context: ToolRuntimeContext,
-        attachment_id: str,
-    ) -> tuple[Path | None, str | None]:
-        if context.storage_path is None:
-            return None, "Attachment storage path is unavailable in this runtime path."
-        if attachment_id not in context.attachment_ids:
-            return None, f"Attachment ID is not available in this context: {attachment_id}"
-
-        attachment = load_attachment(context.storage_path, attachment_id)
-        if attachment is None:
-            return None, f"Attachment metadata not found: {attachment_id}"
-        if not attachment.local_path.is_file():
-            return None, f"Attachment file is missing on disk: {attachment_id}"
-        return attachment.local_path, None
-
-    @classmethod
     def _resolve_attachment_paths(
-        cls,
         context: ToolRuntimeContext,
         attachments: list[str],
     ) -> tuple[list[Path], list[str], str | None]:
@@ -112,7 +93,7 @@ class MatrixMessageTools(Toolkit):
         for reference in attachments:
             if not reference.startswith("att_"):
                 return [], [], "attachments entries must be context attachment IDs (att_*)."
-            attachment_path, error = cls._resolve_context_attachment_path(context, reference)
+            attachment_path, error = resolve_context_attachment_path(context, reference)
             if error is not None:
                 return [], [], error
             if attachment_path is None:
@@ -152,7 +133,7 @@ class MatrixMessageTools(Toolkit):
                 action=action,
                 message=f"attachments cannot exceed {self._MAX_ATTACHMENTS_PER_CALL} per call.",
             )
-        if action != "context" and not self._room_access_allowed(context, room_id):
+        if action != "context" and not room_access_allowed(context, room_id):
             return self._payload(
                 "error",
                 action=action,
@@ -160,18 +141,6 @@ class MatrixMessageTools(Toolkit):
                 message="Not authorized to access the target room.",
             )
         return None
-
-    @staticmethod
-    def _room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool:
-        if room_id == context.room_id:
-            return True
-        room_alias = room_id if room_id.startswith("#") else None
-        return is_authorized_sender(
-            context.requester_id,
-            context.config,
-            room_id,
-            room_alias=room_alias,
-        )
 
     @classmethod
     def _check_rate_limit(
@@ -430,7 +399,7 @@ class MatrixMessageTools(Toolkit):
             room_id=resolved_room_id,
             thread_id=thread_id,
         )
-        if room_id and not self._room_access_allowed(context, resolved_room_id):
+        if room_id and not room_access_allowed(context, resolved_room_id):
             return self._payload(
                 "error",
                 action=normalized_action,

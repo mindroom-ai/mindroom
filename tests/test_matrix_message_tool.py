@@ -506,7 +506,7 @@ async def test_matrix_message_cross_room_reply_does_not_inherit_context_thread()
     ctx = _make_context(thread_id="$origin-thread:localhost")
 
     with (
-        patch("mindroom.custom_tools.matrix_message.is_authorized_sender", return_value=True),
+        patch("mindroom.custom_tools.matrix_message.room_access_allowed", return_value=True),
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
@@ -527,7 +527,7 @@ async def test_matrix_message_cross_room_read_defaults_to_room_level() -> None:
     ctx.client.room_messages.return_value = response
 
     with (
-        patch("mindroom.custom_tools.matrix_message.is_authorized_sender", return_value=True),
+        patch("mindroom.custom_tools.matrix_message.room_access_allowed", return_value=True),
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
@@ -547,7 +547,7 @@ async def test_matrix_message_cross_room_context_does_not_leak_thread() -> None:
     ctx = _make_context(thread_id="$origin-thread:localhost", reply_to_event_id="$evt:localhost")
 
     with (
-        patch("mindroom.custom_tools.matrix_message.is_authorized_sender", return_value=True),
+        patch("mindroom.custom_tools.matrix_message.room_access_allowed", return_value=True),
         tool_runtime_context(ctx),
     ):
         payload = json.loads(

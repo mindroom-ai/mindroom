@@ -40,7 +40,8 @@ def _attachment_tool_payload(status: str, **kwargs: object) -> str:
     return json.dumps(payload, sort_keys=True)
 
 
-def _room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool:
+def room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool:
+    """Return whether the requester may act in the given room."""
     if room_id == context.room_id:
         return True
     room_alias = room_id if room_id.startswith("#") else None
@@ -52,10 +53,11 @@ def _room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool:
     )
 
 
-def _resolve_context_attachment_path(
+def resolve_context_attachment_path(
     context: ToolRuntimeContext,
     attachment_id: str,
 ) -> tuple[Path | None, str | None]:
+    """Resolve a context attachment ID to a local file path."""
     if context.storage_path is None:
         return None, "Attachment storage path is unavailable in this runtime path."
     if attachment_id not in context.attachment_ids:
@@ -87,7 +89,7 @@ def _resolve_attachment_reference(
             "attachments entries must be context attachment IDs (att_*).",
         )
 
-    attachment_path, error = _resolve_context_attachment_path(context, reference)
+    attachment_path, error = resolve_context_attachment_path(context, reference)
     if error is not None:
         return _ResolvedAttachmentReference(None, None, error)
     return _ResolvedAttachmentReference(attachment_path, reference, None)
@@ -177,7 +179,7 @@ def resolve_send_target(
 ) -> tuple[str, str | None, str | None]:
     """Resolve room/thread destination and validate room access for sending."""
     effective_room_id = room_id or context.room_id
-    if not _room_access_allowed(context, effective_room_id):
+    if not room_access_allowed(context, effective_room_id):
         return effective_room_id, None, "Not authorized to access the target room."
     if effective_room_id not in context.client.rooms:
         return effective_room_id, None, f"Cannot send to room {effective_room_id}: bot has not joined this room."
