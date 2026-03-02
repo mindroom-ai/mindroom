@@ -16,6 +16,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import (
     MatrixID,
     extract_agent_name,
+    is_agent_id,
 )
 from mindroom.matrix.media import extract_media_caption
 from mindroom.matrix.mentions import format_message_with_mentions
@@ -943,7 +944,7 @@ class AgentBot:
         if self._precheck_event(room, event) is None:
             return
 
-        if self._is_agent_sender(event.sender):
+        if is_agent_id(event.sender, self.config):
             self.logger.debug(
                 "Ignoring agent audio event for voice transcription",
                 event_id=event.event_id,
@@ -1182,10 +1183,6 @@ class AgentBot:
     ) -> str:
         """Return the effective requester for per-user reply checks."""
         return get_effective_sender_id_for_reply_permissions(event.sender, event.source, self.config)
-
-    def _is_agent_sender(self, sender_id: str) -> bool:
-        """Return whether a sender is a configured agent, team, or router."""
-        return extract_agent_name(sender_id, self.config) is not None
 
     def _precheck_event(
         self,
