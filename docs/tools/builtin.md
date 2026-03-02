@@ -191,7 +191,7 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | :lucide-workflow: | `subagents` | Spawn and communicate with sub-agent sessions | - |
 
 Tool presets are config-only macros, not runtime tools.
-For OpenClaw workspace portability, `openclaw_compat` expands to `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, `subagents`, and `matrix_message`.
+For OpenClaw workspace portability, `openclaw_compat` expands to `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, `subagents`, `matrix_message`, and `attachments`.
 
 ## Claude Agent Sessions
 

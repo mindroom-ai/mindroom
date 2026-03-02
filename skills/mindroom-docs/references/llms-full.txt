@@ -1864,7 +1864,7 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | :lucide-sliders-horizontal: | `config_manager` | MindRoom configuration management             | -               |
 | :lucide-workflow:           | `subagents`      | Spawn and communicate with sub-agent sessions | -               |
 
-Tool presets are config-only macros, not runtime tools. For OpenClaw workspace portability, `openclaw_compat` expands to `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, `subagents`, and `matrix_message`.
+Tool presets are config-only macros, not runtime tools. For OpenClaw workspace portability, `openclaw_compat` expands to `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, `subagents`, `matrix_message`, and `attachments`.
 
 ## Claude Agent Sessions
 
@@ -2002,8 +2002,9 @@ Preset expansion:
 - `scheduler`
 - `subagents`
 - `matrix_message`
+- `attachments`
 
-Attachment handling is provided by the standalone `attachments` tool. Memory is not a separate OpenClaw subsystem in MindRoom. It uses the normal MindRoom memory backend.
+Memory is not a separate OpenClaw subsystem in MindRoom. It uses the normal MindRoom memory backend.
 
 ## Drop-in config
 
@@ -2040,7 +2041,6 @@ agents:
 
     tools:
       - openclaw_compat
-      - attachments
       - python
 
     skills:
@@ -2058,7 +2058,7 @@ memory:
     enabled: true
 ```
 
-`memory_file_path` points the file-memory scope directly at the workspace root, so `MEMORY.md` is loaded automatically by the file backend as the entrypoint — no need to list it in `context_files`. `memory_file_path` is ignored unless the effective backend is `file`; if you switch this agent to `mem0`, re-add `MEMORY.md` to `context_files` when you still want it preloaded. The `openclaw_compat` preset already expands to native shell, coding, search/fetch, browser, scheduler, sub-agent orchestration, and `matrix_message` tools, so listing those tools individually is not necessary.
+`memory_file_path` points the file-memory scope directly at the workspace root, so `MEMORY.md` is loaded automatically by the file backend as the entrypoint — no need to list it in `context_files`. `memory_file_path` is ignored unless the effective backend is `file`; if you switch this agent to `mem0`, re-add `MEMORY.md` to `context_files` when you still want it preloaded. The `openclaw_compat` preset already expands to native shell, coding, search/fetch, browser, scheduler, sub-agent orchestration, `matrix_message`, and `attachments` tools, so listing those tools individually is not necessary.
 
 ## Recommended workspace layout
 

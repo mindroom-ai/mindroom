@@ -35,6 +35,7 @@ OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
     "scheduler",
     "subagents",
     "matrix_message",
+    "attachments",
 )
 logger = get_logger(__name__)
 

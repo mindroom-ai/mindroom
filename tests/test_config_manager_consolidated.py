@@ -645,6 +645,7 @@ class TestGetAgentSandboxTools:
             "scheduler",
             "subagents",
             "matrix_message",
+            "attachments",
             "python",
         ]
 
@@ -666,5 +667,6 @@ class TestGetAgentSandboxTools:
             "scheduler",
             "subagents",
             "matrix_message",
+            "attachments",
             "python",
         ]

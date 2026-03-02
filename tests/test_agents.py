@@ -138,6 +138,7 @@ def test_openclaw_compat_preset_expansion_dedupes_preserving_order() -> None:
         "scheduler",
         "subagents",
         "matrix_message",
+        "attachments",
         "python",
     ]
 
