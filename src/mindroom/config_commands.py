@@ -16,7 +16,7 @@ from .logging_config import get_logger
 logger = get_logger(__name__)
 
 
-def parse_config_args(args_text: str) -> tuple[str, list[str]]:
+def _parse_config_args(args_text: str) -> tuple[str, list[str]]:
     """Parse config command arguments.
 
     Args:
@@ -45,7 +45,7 @@ def parse_config_args(args_text: str) -> tuple[str, list[str]]:
     return operation, args
 
 
-def get_nested_value(data: Any, path: str) -> Any:  # noqa: ANN401
+def _get_nested_value(data: Any, path: str) -> Any:  # noqa: ANN401
     """Get a value from nested dict using dot notation.
 
     Args:
@@ -72,7 +72,7 @@ def get_nested_value(data: Any, path: str) -> Any:  # noqa: ANN401
     return current
 
 
-def set_nested_value(data: Any, path: str, value: Any) -> None:  # noqa: ANN401
+def _set_nested_value(data: Any, path: str, value: Any) -> None:  # noqa: ANN401
     """Set a value in nested dict using dot notation.
 
     Args:
@@ -106,7 +106,7 @@ def set_nested_value(data: Any, path: str, value: Any) -> None:  # noqa: ANN401
         current[final_key] = value
 
 
-def parse_value(value_str: str) -> Any:  # noqa: ANN401
+def _parse_value(value_str: str) -> Any:  # noqa: ANN401
     """Parse a string value into appropriate Python type.
 
     Args:
@@ -133,7 +133,7 @@ def parse_value(value_str: str) -> Any:  # noqa: ANN401
     return value_str
 
 
-def format_value(value: Any) -> str:  # noqa: ANN401
+def _format_value(value: Any) -> str:  # noqa: ANN401
     """Format a value for display as YAML.
 
     Args:
@@ -164,7 +164,7 @@ async def handle_config_command(args_text: str, config_path: Path | None = None)
         The config change dict contains info needed for confirmation
 
     """
-    operation, args = parse_config_args(args_text)
+    operation, args = _parse_config_args(args_text)
     path = config_path or CONFIG_PATH
 
     # Load current config
@@ -185,11 +185,11 @@ async def handle_config_command(args_text: str, config_path: Path | None = None)
 
         config_path_str = args[0]
         try:
-            value = get_nested_value(config_dict, config_path_str)
+            value = _get_nested_value(config_dict, config_path_str)
         except (KeyError, IndexError) as e:
             return f"❌ Configuration path not found: `{config_path_str}`\nError: {e}", None
         else:
-            formatted = format_value(value)
+            formatted = _format_value(value)
             return f"**Configuration value for `{config_path_str}`:**\n```yaml\n{formatted}\n```", None
 
     elif operation == "set":
@@ -204,11 +204,11 @@ async def handle_config_command(args_text: str, config_path: Path | None = None)
         value_str = " ".join(args[1:])
 
         # Parse the value - YAML parsing handles both quoted and unquoted formats
-        value = parse_value(value_str)
+        value = _parse_value(value_str)
 
         # Get the current value for comparison
         try:
-            old_value = get_nested_value(config_dict, config_path_str)
+            old_value = _get_nested_value(config_dict, config_path_str)
         except (KeyError, IndexError):
             old_value = None  # Path doesn't exist yet
 
@@ -217,7 +217,7 @@ async def handle_config_command(args_text: str, config_path: Path | None = None)
 
         try:
             # Verify the path exists or can be created
-            set_nested_value(test_config_dict, config_path_str, value)
+            _set_nested_value(test_config_dict, config_path_str, value)
 
             # Validate the modified config
             Config(**test_config_dict)  # This will raise ValidationError if invalid
@@ -233,8 +233,8 @@ async def handle_config_command(args_text: str, config_path: Path | None = None)
             return f"❌ Invalid configuration:\n{error_msg}\n\nChanges were NOT applied.", None
         else:
             # Format the preview message
-            formatted_old = format_value(old_value) if old_value is not None else "Not set"
-            formatted_new = format_value(value)
+            formatted_old = _format_value(old_value) if old_value is not None else "Not set"
+            formatted_new = _format_value(value)
 
             preview_msg = (
                 f"**Configuration Change Preview**\n\n"
@@ -300,7 +300,7 @@ async def apply_config_change(
         config_dict = config.model_dump()
 
         # Apply the specific change
-        set_nested_value(config_dict, config_path_str, new_value)
+        _set_nested_value(config_dict, config_path_str, new_value)
 
         # Validate the modified config
         try:
