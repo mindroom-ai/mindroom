@@ -1,4 +1,3 @@
-# ruff: noqa: INP001, TID252
 """Configuration command handling for user-driven config changes."""
 
 from __future__ import annotations
@@ -10,9 +9,9 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
-from ..config.main import Config
-from ..constants import CONFIG_PATH
-from ..logging_config import get_logger
+from mindroom.config.main import Config
+from mindroom.constants import CONFIG_PATH
+from mindroom.logging_config import get_logger
 
 logger = get_logger(__name__)
 

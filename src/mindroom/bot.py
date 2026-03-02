@@ -12,8 +12,6 @@ from typing import TYPE_CHECKING, Any, Literal
 import nio
 from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
 
-import mindroom.commands.config_confirmation
-
 from . import image_handler, interactive, voice_handler
 from .agents import create_agent, create_session_storage, remove_run_by_event_id
 from .ai import ai_response, stream_agent_response
@@ -25,6 +23,7 @@ from .authorization import (
     is_sender_allowed_for_agent_reply,
 )
 from .background_tasks import create_background_task, wait_for_background_tasks
+from .commands import config_confirmation
 from .commands.handler import CommandHandlerContext, _generate_welcome_message, handle_command
 from .commands.parsing import Command, command_parser
 from .constants import MATRIX_HOMESERVER, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
@@ -111,7 +110,6 @@ if TYPE_CHECKING:
     from .tool_events import ToolTraceEntry
 
 logger = get_logger(__name__)
-config_confirmation = mindroom.commands.config_confirmation
 
 __all__ = ["AgentBot", "MultiKnowledgeVectorDb"]
 
