@@ -24,14 +24,14 @@ from mindroom.credentials import CredentialsManager
 router = APIRouter(prefix="/api/homeassistant", tags=["homeassistant-integration"])
 
 # Initialize credentials manager
-creds_manager = CredentialsManager()
+_creds_manager = CredentialsManager()
 
 # OAuth scopes for Home Assistant
 # Home Assistant doesn't use traditional OAuth scopes, but we request full API access
-SCOPES: list[str] = []
+_SCOPES: list[str] = []
 
 # Get configuration from environment
-BACKEND_PORT = os.getenv("BACKEND_PORT", "8765")
+_BACKEND_PORT = os.getenv("BACKEND_PORT", "8765")
 _FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
 
@@ -63,12 +63,12 @@ class HomeAssistantConfig(BaseModel):
 
 def _get_stored_config() -> dict[str, Any] | None:
     """Get stored Home Assistant configuration."""
-    return creds_manager.load_credentials("homeassistant")
+    return _creds_manager.load_credentials("homeassistant")
 
 
-def save_config(config: dict[str, Any]) -> None:
+def _save_config(config: dict[str, Any]) -> None:
     """Save Home Assistant configuration."""
-    creds_manager.save_credentials("homeassistant", config)
+    _creds_manager.save_credentials("homeassistant", config)
 
 
 async def _test_connection(instance_url: str, token: str) -> dict[str, Any]:
@@ -212,7 +212,7 @@ async def connect_oauth(config: HomeAssistantConfig) -> HomeAssistantAuthUrl:
         "client_id": config.client_id,
         "redirect_uri": redirect_uri,
     }
-    save_config(temp_config)
+    _save_config(temp_config)
 
     return HomeAssistantAuthUrl(auth_url=auth_url)
 
@@ -249,7 +249,7 @@ async def connect_token(config: HomeAssistantConfig) -> dict[str, str]:
         ) from e
 
     # Save configuration
-    save_config(
+    _save_config(
         {
             "instance_url": instance_url,
             "long_lived_token": config.long_lived_token,
@@ -300,7 +300,7 @@ async def callback(request: Request) -> RedirectResponse:
             token_data = token_response.json()
 
             # Save the access token
-            save_config(
+            _save_config(
                 {
                     "instance_url": instance_url,
                     "client_id": client_id,
@@ -322,7 +322,7 @@ async def disconnect() -> dict[str, str]:
     """Disconnect Home Assistant by removing stored tokens."""
     try:
         # Remove credentials using the manager
-        creds_manager.delete_credentials("homeassistant")
+        _creds_manager.delete_credentials("homeassistant")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to disconnect: {e!s}") from e
     else:

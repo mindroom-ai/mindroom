@@ -198,7 +198,7 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
         extract_mapping: Whether to extract option mapping and return options list
 
     Returns:
-        InteractiveResponse with formatted_text, option_map, and options_list
+        _InteractiveResponse with formatted_text, option_map, and options_list
 
     """
     # Find the first interactive block for processing
@@ -308,6 +308,6 @@ async def add_reaction_buttons(
             logger.warning("Failed to add reaction", emoji=emoji_char, error=str(reaction_response))
 
 
-def cleanup() -> None:
+def _cleanup() -> None:
     """Clean up when shutting down."""
     _active_questions.clear()

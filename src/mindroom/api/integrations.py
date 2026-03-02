@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
 # Initialize credentials manager
-creds_manager = CredentialsManager()
+_creds_manager = CredentialsManager()
 
 
 def _ensure_spotify_packages() -> tuple[type[Spotify], type[SpotifyOAuth]]:
@@ -67,13 +67,13 @@ class _ApiKeyRequest(BaseModel):
 
 def _get_service_credentials(service: str) -> dict[str, Any]:
     """Get stored credentials for a service."""
-    credentials = creds_manager.load_credentials(service)
+    credentials = _creds_manager.load_credentials(service)
     return credentials if credentials else {}
 
 
 def _save_service_credentials(service: str, credentials: dict[str, Any]) -> None:
     """Save service credentials."""
-    creds_manager.save_credentials(service, credentials)
+    _creds_manager.save_credentials(service, credentials)
 
 
 @router.get("/{service}/status")
@@ -193,6 +193,6 @@ async def disconnect_service(service: str) -> dict[str, str]:
         raise HTTPException(status_code=404, detail=f"Unknown service: {service}")
 
     # Delete credentials using the manager
-    creds_manager.delete_credentials(service)
+    _creds_manager.delete_credentials(service)
 
     return {"status": "disconnected"}

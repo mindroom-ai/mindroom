@@ -31,10 +31,10 @@ if TYPE_CHECKING:
 router = APIRouter(prefix="/api/google", tags=["google-integration"])
 
 # Initialize credentials manager
-creds_manager = CredentialsManager()
+_creds_manager = CredentialsManager()
 
 # OAuth scopes for all Google services needed by MindRoom
-SCOPES = [
+_SCOPES = [
     # Gmail
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.modify",
@@ -55,8 +55,8 @@ SCOPES = [
 _ENV_PATH = Path(__file__).parent.parent.parent.parent.parent / ".env"
 
 # Get configuration from environment
-BACKEND_PORT = os.getenv("BACKEND_PORT", "8765")
-_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", f"http://localhost:{BACKEND_PORT}/api/google/callback")
+_BACKEND_PORT = os.getenv("BACKEND_PORT", "8765")
+_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", f"http://localhost:{_BACKEND_PORT}/api/google/callback")
 
 
 _GOOGLE_DEPS = ["google-auth", "google-auth-oauthlib"]
@@ -111,7 +111,7 @@ def _get_oauth_credentials() -> dict[str, Any] | None:
 
 def _get_google_credentials() -> Credentials | None:
     """Get Google credentials from stored token."""
-    token_data = creds_manager.load_credentials("google")
+    token_data = _creds_manager.load_credentials("google")
     if not token_data:
         return None
 
@@ -123,7 +123,7 @@ def _get_google_credentials() -> Credentials | None:
             token_uri=token_data.get("token_uri"),
             client_id=token_data.get("client_id"),
             client_secret=token_data.get("client_secret"),
-            scopes=token_data.get("scopes", SCOPES),
+            scopes=token_data.get("scopes", _SCOPES),
         )
 
         # Refresh token if expired
@@ -154,7 +154,7 @@ def save_credentials(creds: Credentials) -> None:
         token_data["_id_token"] = creds._id_token
 
     # Save using credentials manager (handles backward compatibility)
-    creds_manager.save_credentials("google", token_data)
+    _creds_manager.save_credentials("google", token_data)
 
 
 def _save_env_credentials(client_id: str, client_secret: str, project_id: str | None = None) -> None:
@@ -172,7 +172,7 @@ def _save_env_credentials(client_id: str, client_secret: str, project_id: str | 
         "GOOGLE_CLIENT_SECRET": client_secret,
         "GOOGLE_PROJECT_ID": project_id or "mindroom-integration",
         "GOOGLE_REDIRECT_URI": current_redirect_uri,
-        "BACKEND_PORT": BACKEND_PORT,
+        "BACKEND_PORT": _BACKEND_PORT,
     }
 
     for key, value in env_vars.items():
@@ -262,7 +262,7 @@ async def connect() -> GoogleAuthUrl:
         # Create OAuth flow with all scopes
         # Use current environment variable for redirect URI to support multiple deployments
         current_redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", _REDIRECT_URI)
-        flow = flow_cls.from_client_config(oauth_config, scopes=SCOPES, redirect_uri=current_redirect_uri)
+        flow = flow_cls.from_client_config(oauth_config, scopes=_SCOPES, redirect_uri=current_redirect_uri)
 
         # Generate authorization URL
         auth_url, _ = flow.authorization_url(
@@ -296,7 +296,7 @@ async def callback(request: Request) -> RedirectResponse:
         # Create OAuth flow and exchange code for tokens
         # Use current environment variable for redirect URI to support multiple deployments
         current_redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", _REDIRECT_URI)
-        flow = flow_cls.from_client_config(oauth_config, scopes=SCOPES, redirect_uri=current_redirect_uri)
+        flow = flow_cls.from_client_config(oauth_config, scopes=_SCOPES, redirect_uri=current_redirect_uri)
         flow.fetch_token(code=code)
 
         # Save credentials
@@ -325,7 +325,7 @@ async def disconnect() -> dict[str, str]:
     """Disconnect Google services by removing stored tokens."""
     try:
         # Remove credentials using the manager
-        creds_manager.delete_credentials("google")
+        _creds_manager.delete_credentials("google")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to disconnect: {e!s}") from e
     else:
@@ -359,7 +359,7 @@ async def reset() -> dict[str, Any]:
     """Reset Google integration by removing all credentials and tokens."""
     try:
         # Remove credentials using the manager
-        creds_manager.delete_credentials("google")
+        _creds_manager.delete_credentials("google")
 
         # Remove from environment variables
         if _ENV_PATH.exists():

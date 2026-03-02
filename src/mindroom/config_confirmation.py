@@ -290,7 +290,7 @@ async def restore_pending_changes(client: nio.AsyncClient, room_id: str) -> int:
         return 0
 
 
-def cleanup() -> None:
+def _cleanup() -> None:
     """Clean up when shutting down."""
     _pending_changes.clear()
 

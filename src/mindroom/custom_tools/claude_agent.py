@@ -36,7 +36,7 @@ _MAX_STDERR_LINES = 12
 
 
 @runtime_checkable
-class Agent(Protocol):
+class _Agent(Protocol):
     """Minimal agent protocol needed by this tool."""
 
     name: str | None
@@ -353,12 +353,12 @@ class ClaudeAgentTools(Toolkit):
             details.extend(f"- {line}" for line in list(stderr_lines)[-5:])
         return "\n".join([message, *details])
 
-    def _namespace(self, agent: Agent | None) -> str:
+    def _namespace(self, agent: _Agent | None) -> str:
         if isinstance(agent, _AgentWithId):
             agent_id = agent.id
             if agent_id and agent_id.strip():
                 return agent_id.strip()
-        if not isinstance(agent, Agent):
+        if not isinstance(agent, _Agent):
             return "mindroom"
         agent_name = agent.name
         if agent_name and agent_name.strip():
@@ -377,7 +377,7 @@ class ClaudeAgentTools(Toolkit):
         *,
         session_label: str | None,
         run_context: _RunContext | None,
-        agent: Agent | None,
+        agent: _Agent | None,
     ) -> str:
         agent_name = self._namespace(agent)
         run_session = run_context.session_id if run_context is not None else "default"
@@ -385,7 +385,7 @@ class ClaudeAgentTools(Toolkit):
             return f"{agent_name}:{run_session}:{session_label.strip()}"
         return f"{agent_name}:{run_session}"
 
-    def _resolve_model(self, agent: Agent | None) -> str | None:
+    def _resolve_model(self, agent: _Agent | None) -> str | None:
         if self.model and self.model.strip():
             return self.model.strip()
 
@@ -406,7 +406,7 @@ class ClaudeAgentTools(Toolkit):
         resume: str | None,
         fork_session: bool,
         run_context: _RunContext | None,
-        agent: Agent | None,
+        agent: _Agent | None,
     ) -> tuple[_ClaudeSessionState, bool, str, str | None] | str:
         """Shared session acquisition logic.
 
@@ -460,7 +460,7 @@ class ClaudeAgentTools(Toolkit):
         resume: str | None = None,
         fork_session: bool = False,
         run_context: _RunContext | None = None,
-        agent: Agent | None = None,
+        agent: _Agent | None = None,
     ) -> str:
         """Start or reuse a persistent Claude coding session for this conversation."""
         result = await self._get_or_create_session(
@@ -483,7 +483,7 @@ class ClaudeAgentTools(Toolkit):
         resume: str | None = None,
         fork_session: bool = False,
         run_context: _RunContext | None = None,
-        agent: Agent | None = None,
+        agent: _Agent | None = None,
     ) -> str:
         """Send a prompt to a persistent Claude session and return Claude's response."""
         trimmed_prompt = prompt.strip()
@@ -575,7 +575,7 @@ class ClaudeAgentTools(Toolkit):
         self,
         session_label: str | None = None,
         run_context: _RunContext | None = None,
-        agent: Agent | None = None,
+        agent: _Agent | None = None,
     ) -> str:
         """Show status information for the current persistent Claude session."""
         session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)
@@ -598,7 +598,7 @@ class ClaudeAgentTools(Toolkit):
         self,
         session_label: str | None = None,
         run_context: _RunContext | None = None,
-        agent: Agent | None = None,
+        agent: _Agent | None = None,
     ) -> str:
         """Send an interrupt signal to an active Claude session."""
         session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)
@@ -617,7 +617,7 @@ class ClaudeAgentTools(Toolkit):
         self,
         session_label: str | None = None,
         run_context: _RunContext | None = None,
-        agent: Agent | None = None,
+        agent: _Agent | None = None,
     ) -> str:
         """Close and remove an active Claude session."""
         session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)

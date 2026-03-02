@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# ruff: noqa: D101,D103,C901,PLR0912,PERF401
 """Detect public top-level symbols that are never imported by other src modules.
 
 These are candidates for being made private (prefixed with ``_``).
@@ -20,6 +19,8 @@ from pathlib import Path
 
 @dataclass
 class Symbol:
+    """A public top-level symbol found in a module."""
+
     name: str
     kind: str  # "function", "class", or "variable"
     lineno: int
@@ -29,6 +30,8 @@ class Symbol:
 
 @dataclass
 class Module:
+    """A parsed Python module with its top-level symbols."""
+
     name: str
     path: Path
     package_parts: tuple[str, ...]
@@ -61,7 +64,7 @@ def _package_parts(module_name: str) -> tuple[str, ...]:
     return tuple(parts[0].split("."))
 
 
-def collect_modules(src_dir: Path) -> dict[str, Module]:
+def collect_modules(src_dir: Path) -> dict[str, Module]:  # noqa: C901, PLR0912
     """Parse every .py under src/ and collect top-level public definitions."""
     modules: dict[str, Module] = {}
 
@@ -175,7 +178,7 @@ def _resolve_relative_import(
     return ".".join(base) if base else None
 
 
-def find_cross_imports(modules: dict[str, Module]) -> set[tuple[str, str]]:
+def find_cross_imports(modules: dict[str, Module]) -> set[tuple[str, str]]:  # noqa: C901, PLR0912
     """Return (module_name, symbol_name) pairs that are imported by another src module."""
     known = set(modules)
     used: set[tuple[str, str]] = set()
@@ -242,6 +245,7 @@ def find_cross_imports(modules: dict[str, Module]) -> set[tuple[str, str]]:
 
 
 def main() -> int:
+    """Entry point: scan project and report module-local public symbols."""
     if len(sys.argv) < 2:
         print(f"Usage: {sys.argv[0]} <project-root>", file=sys.stderr)
         return 2
@@ -255,11 +259,9 @@ def main() -> int:
     modules = collect_modules(src_dir)
     cross_imports = find_cross_imports(modules)
 
-    candidates: list[Symbol] = []
-    for mod in modules.values():
-        for sym in mod.symbols:
-            if (sym.module, sym.name) not in cross_imports:
-                candidates.append(sym)
+    candidates: list[Symbol] = [
+        sym for mod in modules.values() for sym in mod.symbols if (sym.module, sym.name) not in cross_imports
+    ]
 
     candidates.sort(key=lambda s: (str(s.path), s.lineno))
 
