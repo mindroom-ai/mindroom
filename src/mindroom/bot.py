@@ -738,6 +738,7 @@ class AgentBot:
             return
 
         message_attachment_ids = parse_attachment_ids_from_event_source(event.source)
+        suppress_inline_voice_attachments = self._is_router_voice_transcription_relay(event)
 
         action = await self._resolve_dispatch_action(
             room,
@@ -756,6 +757,8 @@ class AgentBot:
             prompt=event.body,
             current_attachment_ids=message_attachment_ids,
             media_thread_id=context.thread_id,
+            include_attachment_media=not suppress_inline_voice_attachments,
+            include_attachment_prompt=not suppress_inline_voice_attachments,
         )
         await self._execute_dispatch_action(
             room,
@@ -866,6 +869,21 @@ class AgentBot:
             # Mark the original interactive question as responded
             self.response_tracker.mark_responded(event.reacts_to, response_event_id)
 
+    def _is_router_voice_transcription_relay(self, event: nio.RoomMessageText) -> bool:
+        """Return whether this is a successful router voice relay message."""
+        if event.sender != self.config.ids[ROUTER_AGENT_NAME].full_id:
+            return False
+        content = event.source.get("content")
+        if not isinstance(content, dict):
+            return False
+        body = content.get("body")
+        if not isinstance(body, str) or not body.startswith(VOICE_PREFIX):
+            return False
+        if bool(content.get(VOICE_RAW_AUDIO_FALLBACK_KEY)):
+            return False
+        original_sender = content.get(ORIGINAL_SENDER_KEY)
+        return isinstance(original_sender, str) and bool(original_sender.strip())
+
     @staticmethod
     def _build_voice_extra_content(
         *,
@@ -890,6 +908,8 @@ class AgentBot:
         current_attachment_ids: list[str],
         media_thread_id: str | None,
         fallback_images: list[Image] | None = None,
+        include_attachment_media: bool = True,
+        include_attachment_prompt: bool = True,
     ) -> _DispatchPayload:
         """Build dispatch payload by merging thread/history attachment media."""
         assert self.client is not None
@@ -917,10 +937,18 @@ class AgentBot:
                 thread_id=media_thread_id,
             )
         )
-        if fallback_images is not None and not attachment_images:
+        if not include_attachment_media:
+            attachment_audio = []
+            attachment_images = []
+            attachment_files = []
+            attachment_videos = []
+        elif fallback_images is not None and not attachment_images:
             attachment_images = fallback_images
+        payload_prompt = (
+            append_attachment_ids_prompt(prompt, resolved_attachment_ids) if include_attachment_prompt else prompt
+        )
         return _DispatchPayload(
-            prompt=append_attachment_ids_prompt(prompt, resolved_attachment_ids),
+            prompt=payload_prompt,
             media=MediaInputs.from_optional(
                 audio=attachment_audio,
                 images=attachment_images,
