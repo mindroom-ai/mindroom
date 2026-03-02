@@ -36,7 +36,7 @@ def mindroom_namespace() -> str | None:
     return _ACTIVE_NAMESPACE
 
 
-def strip_agent_namespace_suffix(agent_identifier: str) -> str | None:
+def _strip_agent_namespace_suffix(agent_identifier: str) -> str | None:
     """Return the agent name without namespace suffix, or None if namespace mismatches."""
     namespace = mindroom_namespace()
     if not namespace:
@@ -112,7 +112,7 @@ class MatrixID:
 
         # Remove prefix
         agent_identifier = self.username[len(self.AGENT_PREFIX) :]
-        name = strip_agent_namespace_suffix(agent_identifier)
+        name = _strip_agent_namespace_suffix(agent_identifier)
         if name is None:
             return None
 
@@ -131,14 +131,14 @@ class MatrixID:
 
 
 @dataclass(frozen=True)
-class ThreadStateKey:
+class _ThreadStateKey:
     """Represents a thread state key like 'thread_id:agent_name'."""
 
     thread_id: str
     agent_name: str
 
     @classmethod
-    def parse(cls, state_key: str) -> ThreadStateKey:
+    def parse(cls, state_key: str) -> _ThreadStateKey:
         """Parse a state key."""
         parts = state_key.split(":", 1)
         if len(parts) != 2:
