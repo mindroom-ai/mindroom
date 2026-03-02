@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, call
 
 import pytest
+from pydantic import ValidationError
 
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
@@ -64,8 +65,15 @@ class _DummyKnowledge:
         self.insert_calls: list[dict[str, object]] = []
         self.remove_calls: list[dict[str, object]] = []
 
-    def insert(self, *, path: str, metadata: dict[str, object], upsert: bool) -> None:
-        self.insert_calls.append({"path": path, "metadata": metadata, "upsert": upsert})
+    def insert(
+        self,
+        *,
+        path: str,
+        metadata: dict[str, object],
+        upsert: bool,
+        reader: object | None = None,
+    ) -> None:
+        self.insert_calls.append({"path": path, "metadata": metadata, "upsert": upsert, "reader": reader})
 
     def remove_vectors_by_metadata(self, metadata: dict[str, object]) -> bool:
         self.remove_calls.append(metadata)
@@ -180,6 +188,56 @@ async def test_index_file_upsert_removes_existing_vectors(dummy_manager: Knowled
     assert knowledge.remove_calls == [{"source_path": "doc.txt"}]
     assert knowledge.insert_calls[0]["metadata"] == {"source_path": "doc.txt"}
     assert knowledge.insert_calls[0]["upsert"] is True
+    reader = knowledge.insert_calls[0]["reader"]
+    assert reader is not None
+    assert getattr(reader, "chunk", None) is True
+    assert getattr(reader, "chunk_size", None) == 5000
+
+
+@pytest.mark.asyncio
+async def test_index_file_uses_configured_chunk_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Knowledge manager should apply per-base chunk settings when indexing text files."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    config = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(
+                path=str(tmp_path / "knowledge"),
+                watch=False,
+                chunk_size=640,
+                chunk_overlap=32,
+            ),
+        },
+    )
+    manager = KnowledgeManager(base_id="research", config=config, storage_path=tmp_path / "storage")
+    file_path = manager.knowledge_path / "doc.md"
+    file_path.write_text("test", encoding="utf-8")
+
+    indexed = await manager.index_file(file_path, upsert=True)
+
+    assert indexed is True
+    knowledge = manager.get_knowledge()
+    assert isinstance(knowledge, _DummyKnowledge)
+    reader = knowledge.insert_calls[0]["reader"]
+    assert reader is not None
+    assert getattr(reader, "chunk_size", None) == 640
+    chunking_strategy = getattr(reader, "chunking_strategy", None)
+    assert chunking_strategy is not None
+    assert getattr(chunking_strategy, "chunk_size", None) == 640
+    assert getattr(chunking_strategy, "overlap", None) == 32
+
+
+def test_knowledge_base_chunk_overlap_must_be_smaller_than_chunk_size() -> None:
+    """KnowledgeBaseConfig should reject overlap >= size."""
+    with pytest.raises(ValidationError, match="chunk_overlap must be smaller than chunk_size"):
+        KnowledgeBaseConfig(path="./docs", chunk_size=500, chunk_overlap=500)
 
 
 @pytest.mark.asyncio
