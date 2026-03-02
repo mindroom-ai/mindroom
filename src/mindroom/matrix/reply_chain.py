@@ -174,7 +174,7 @@ def _shortest_common_supersequence_ids(thread_ids: list[str], chain_ids: list[st
     return merged_ids
 
 
-def merge_thread_and_chain_history(
+def _merge_thread_and_chain_history(
     thread_history: list[dict[str, Any]],
     chain_history: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -440,7 +440,7 @@ async def derive_conversation_context(
 
         thread_history = await fetch_history(client, room_id, context_root_id)
         if chain_history:
-            thread_history = merge_thread_and_chain_history(thread_history, chain_history)
+            thread_history = _merge_thread_and_chain_history(thread_history, chain_history)
         return True, context_root_id, thread_history
 
     # Policy choice: reply-only chains are still treated as one conversation
