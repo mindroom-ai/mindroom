@@ -182,8 +182,8 @@ class TestSandboxToolsOverride:
         monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOOLS", {"shell"})
 
         # None override → falls through to env var logic
-        assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool("shell", sandbox_tools_override=None) is True
-        assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool("calculator", sandbox_tools_override=None) is False
+        assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", sandbox_tools_override=None) is True
+        assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("calculator", sandbox_tools_override=None) is False
 
     def test_override_empty_list_disables_sandboxing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Empty list override should disable sandboxing even when env vars enable it."""
@@ -191,8 +191,8 @@ class TestSandboxToolsOverride:
         monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox:8765")
         monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "all")
 
-        assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool("shell", sandbox_tools_override=[]) is False
-        assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool("file", sandbox_tools_override=[]) is False
+        assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", sandbox_tools_override=[]) is False
+        assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("file", sandbox_tools_override=[]) is False
 
     def test_override_explicit_list_selects_tools(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Explicit list override should sandbox only the listed tools."""
@@ -202,15 +202,15 @@ class TestSandboxToolsOverride:
         monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "off")
 
         assert (
-            sandbox_proxy_module.sandbox_proxy_enabled_for_tool("shell", sandbox_tools_override=["shell", "file"])
+            sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", sandbox_tools_override=["shell", "file"])
             is True
         )
         assert (
-            sandbox_proxy_module.sandbox_proxy_enabled_for_tool("file", sandbox_tools_override=["shell", "file"])
+            sandbox_proxy_module._sandbox_proxy_enabled_for_tool("file", sandbox_tools_override=["shell", "file"])
             is True
         )
         assert (
-            sandbox_proxy_module.sandbox_proxy_enabled_for_tool("calculator", sandbox_tools_override=["shell", "file"])
+            sandbox_proxy_module._sandbox_proxy_enabled_for_tool("calculator", sandbox_tools_override=["shell", "file"])
             is False
         )
 
@@ -219,14 +219,14 @@ class TestSandboxToolsOverride:
         monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", True)
         monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox:8765")
 
-        assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool("shell", sandbox_tools_override=["shell"]) is False
+        assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", sandbox_tools_override=["shell"]) is False
 
     def test_override_still_requires_proxy_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """No proxy URL should always disable proxying, even with override."""
         monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
         monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", None)
 
-        assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool("shell", sandbox_tools_override=["shell"]) is False
+        assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", sandbox_tools_override=["shell"]) is False
 
     def test_get_tool_by_name_passes_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """get_tool_by_name should pass sandbox_tools_override through to the proxy wrapper."""

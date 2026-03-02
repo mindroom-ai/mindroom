@@ -36,11 +36,11 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # Maximum length for instruction descriptions to include in agent summary
-MAX_INSTRUCTION_LENGTH = 100
+_MAX_INSTRUCTION_LENGTH = 100
 
 
 @dataclass
-class CachedCultureManager:
+class _CachedCultureManager:
     """Cached culture manager with a signature for invalidation on config changes."""
 
     signature: tuple[str, str]
@@ -48,7 +48,7 @@ class CachedCultureManager:
 
 
 @dataclass(frozen=True)
-class CultureAgentSettings:
+class _CultureAgentSettings:
     """Culture feature flags to apply to the Agent constructor."""
 
     add_culture_to_context: bool
@@ -57,7 +57,7 @@ class CultureAgentSettings:
 
 
 @dataclass
-class AdditionalContextChunk:
+class _AdditionalContextChunk:
     """Chunk of preload context with truncation priority metadata."""
 
     kind: str
@@ -65,7 +65,7 @@ class AdditionalContextChunk:
     body: str
 
 
-_CULTURE_MANAGER_CACHE: dict[tuple[str, str], CachedCultureManager] = {}
+_CULTURE_MANAGER_CACHE: dict[tuple[str, str], _CachedCultureManager] = {}
 
 
 def get_datetime_context(timezone_str: str) -> str:
@@ -92,14 +92,14 @@ The current time is {time_str} ({timezone_str} timezone).
 """
 
 
-def _load_context_files(context_files: list[str]) -> list[AdditionalContextChunk]:
+def _load_context_files(context_files: list[str]) -> list[_AdditionalContextChunk]:
     """Load configured context files."""
-    loaded_parts: list[AdditionalContextChunk] = []
+    loaded_parts: list[_AdditionalContextChunk] = []
     for raw_path in context_files:
         resolved_path = resolve_config_relative_path(raw_path)
         if resolved_path.is_file():
             loaded_parts.append(
-                AdditionalContextChunk(
+                _AdditionalContextChunk(
                     kind="personality",
                     title=resolved_path.name,
                     body=resolved_path.read_text(encoding="utf-8").strip(),
@@ -110,7 +110,7 @@ def _load_context_files(context_files: list[str]) -> list[AdditionalContextChunk
     return loaded_parts
 
 
-def _render_context_chunks(section_heading: str, chunks: list[AdditionalContextChunk]) -> str:
+def _render_context_chunks(section_heading: str, chunks: list[_AdditionalContextChunk]) -> str:
     """Render context chunks into a markdown section."""
     rendered = [f"### {chunk.title}\n{chunk.body.strip()}" for chunk in chunks if chunk.body.strip()]
     if not rendered:
@@ -118,21 +118,21 @@ def _render_context_chunks(section_heading: str, chunks: list[AdditionalContextC
     return f"{section_heading}\n" + "\n\n".join(rendered) + "\n\n"
 
 
-def _render_additional_context(personality_chunks: list[AdditionalContextChunk]) -> str:
+def _render_additional_context(personality_chunks: list[_AdditionalContextChunk]) -> str:
     """Render full additional context from personality chunks."""
     return _render_context_chunks("## Personality Context", personality_chunks)
 
 
 def _build_preload_truncation_groups(
-    personality_chunks: list[AdditionalContextChunk],
-) -> list[list[AdditionalContextChunk]]:
+    personality_chunks: list[_AdditionalContextChunk],
+) -> list[list[_AdditionalContextChunk]]:
     """Return truncation groups ordered from least to most critical context."""
     return [[chunk for chunk in personality_chunks if chunk.kind == "personality"]]
 
 
 def _drop_whole_chunks(
-    groups: list[list[AdditionalContextChunk]],
-    personality_chunks: list[AdditionalContextChunk],
+    groups: list[list[_AdditionalContextChunk]],
+    personality_chunks: list[_AdditionalContextChunk],
     max_preload_chars: int,
 ) -> int:
     """Drop entire chunk bodies (least critical first) until under the cap."""
@@ -149,8 +149,8 @@ def _drop_whole_chunks(
 
 
 def _trim_chunk_tails(
-    groups: list[list[AdditionalContextChunk]],
-    personality_chunks: list[AdditionalContextChunk],
+    groups: list[list[_AdditionalContextChunk]],
+    personality_chunks: list[_AdditionalContextChunk],
     max_preload_chars: int,
 ) -> int:
     """Trim from the *end* of chunks to preserve headers/identity at the top."""
@@ -168,7 +168,7 @@ def _trim_chunk_tails(
     return omitted
 
 
-def _apply_preload_cap(personality_chunks: list[AdditionalContextChunk], max_preload_chars: int) -> tuple[str, int]:
+def _apply_preload_cap(personality_chunks: list[_AdditionalContextChunk], max_preload_chars: int) -> tuple[str, int]:
     """Apply hard preload cap with deterministic truncation priority.
 
     Truncation order is by file list order.
@@ -205,7 +205,7 @@ def _build_additional_context(
     This is evaluated when the agent is created (and re-created on config
     reload), so file content snapshots update on agent hot-reload.
     """
-    personality_chunks: list[AdditionalContextChunk] = []
+    personality_chunks: list[_AdditionalContextChunk] = []
     if agent_config.context_files:
         personality_chunks = _load_context_files(agent_config.context_files)
 
@@ -220,7 +220,7 @@ def _build_additional_context(
 
 
 # Rich prompt mapping - agents that use detailed prompts instead of simple roles
-RICH_PROMPTS = {
+_RICH_PROMPTS = {
     "code": agent_prompts.CODE_AGENT_PROMPT,
     "research": agent_prompts.RESEARCH_AGENT_PROMPT,
     "calculator": agent_prompts.CALCULATOR_AGENT_PROMPT,
@@ -233,19 +233,19 @@ RICH_PROMPTS = {
 }
 
 
-def is_learning_enabled(agent_config: AgentConfig, defaults: DefaultsConfig) -> bool:
+def _is_learning_enabled(agent_config: AgentConfig, defaults: DefaultsConfig) -> bool:
     """Check if learning is enabled for an agent, falling back to defaults."""
     learning = agent_config.learning if agent_config.learning is not None else defaults.learning
     return learning is not False
 
 
-def resolve_agent_learning(
+def _resolve_agent_learning(
     agent_config: AgentConfig,
     defaults: DefaultsConfig,
     learning_storage: SqliteDb | None = None,
 ) -> bool | LearningMachine:
     """Resolve Agent.learning setting from MindRoom agent configuration."""
-    if not is_learning_enabled(agent_config, defaults):
+    if not _is_learning_enabled(agent_config, defaults):
         return False
 
     learning_mode = agent_config.learning_mode or defaults.learning_mode
@@ -265,14 +265,14 @@ def create_session_storage(agent_name: str, storage_path: Path) -> SqliteDb:
     return SqliteDb(session_table=f"{agent_name}_sessions", db_file=str(sessions_dir / f"{agent_name}.db"))
 
 
-def create_learning_storage(agent_name: str, storage_path: Path) -> SqliteDb:
+def _create_learning_storage(agent_name: str, storage_path: Path) -> SqliteDb:
     """Create persistent learning storage for an agent."""
     learning_dir = storage_path / "learning"
     learning_dir.mkdir(parents=True, exist_ok=True)
     return SqliteDb(session_table=f"{agent_name}_learning_sessions", db_file=str(learning_dir / f"{agent_name}.db"))
 
 
-def create_culture_storage(culture_name: str, storage_path: Path) -> SqliteDb:
+def _create_culture_storage(culture_name: str, storage_path: Path) -> SqliteDb:
     """Create persistent culture storage shared by all agents in a culture."""
     culture_dir = storage_path / "culture"
     culture_dir.mkdir(parents=True, exist_ok=True)
@@ -324,21 +324,21 @@ def remove_run_by_event_id(storage: SqliteDb, session_id: str, event_id: str) ->
     return True
 
 
-def resolve_culture_settings(mode: CultureMode) -> CultureAgentSettings:
+def _resolve_culture_settings(mode: CultureMode) -> _CultureAgentSettings:
     """Map a culture mode to Agno culture feature flags."""
     if mode == "automatic":
-        return CultureAgentSettings(
+        return _CultureAgentSettings(
             add_culture_to_context=True,
             update_cultural_knowledge=True,
             enable_agentic_culture=False,
         )
     if mode == "agentic":
-        return CultureAgentSettings(
+        return _CultureAgentSettings(
             add_culture_to_context=True,
             update_cultural_knowledge=False,
             enable_agentic_culture=True,
         )
-    return CultureAgentSettings(
+    return _CultureAgentSettings(
         add_culture_to_context=True,
         update_cultural_knowledge=False,
         enable_agentic_culture=False,
@@ -349,19 +349,19 @@ def _culture_signature(culture_config: CultureConfig) -> tuple[str, str]:
     return (culture_config.mode, culture_config.description)
 
 
-def resolve_agent_culture(
+def _resolve_agent_culture(
     agent_name: str,
     config: Config,
     storage_path: Path,
     model: Model,
-) -> tuple[CultureManager | None, CultureAgentSettings | None]:
+) -> tuple[CultureManager | None, _CultureAgentSettings | None]:
     """Resolve shared culture manager and feature flags for an agent."""
     culture_assignment = config.get_agent_culture(agent_name)
     if culture_assignment is None:
         return None, None
 
     culture_name, culture_config = culture_assignment
-    settings = resolve_culture_settings(culture_config.mode)
+    settings = _resolve_culture_settings(culture_config.mode)
     cache_key = (str(storage_path.resolve()), culture_name)
     signature = _culture_signature(culture_config)
     cached_manager = _CULTURE_MANAGER_CACHE.get(cache_key)
@@ -372,14 +372,14 @@ def resolve_agent_culture(
     culture_scope = culture_config.description.strip() or "Shared best practices and principles."
     culture_manager = CultureManager(
         model=model,
-        db=create_culture_storage(culture_name, storage_path),
+        db=_create_culture_storage(culture_name, storage_path),
         culture_capture_instructions=f"Culture '{culture_name}': {culture_scope}",
         add_knowledge=culture_config.mode != "manual",
         update_knowledge=culture_config.mode != "manual",
         delete_knowledge=False,
         clear_knowledge=False,
     )
-    _CULTURE_MANAGER_CACHE[cache_key] = CachedCultureManager(
+    _CULTURE_MANAGER_CACHE[cache_key] = _CachedCultureManager(
         signature=signature,
         manager=culture_manager,
     )
@@ -504,8 +504,8 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
 
     storage = create_session_storage(agent_name, resolved_storage_path)
     learning_storage = (
-        create_learning_storage(agent_name, resolved_storage_path)
-        if is_learning_enabled(agent_config, defaults)
+        _create_learning_storage(agent_name, resolved_storage_path)
+        if _is_learning_enabled(agent_config, defaults)
         else None
     )
 
@@ -540,10 +540,10 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     )
 
     # Use rich prompt if available, otherwise use YAML config
-    if agent_name in RICH_PROMPTS:
+    if agent_name in _RICH_PROMPTS:
         logger.info(f"Using rich prompt for agent: {agent_name}")
         # Prepend full context to the rich prompt
-        role = full_context + RICH_PROMPTS[agent_name]
+        role = full_context + _RICH_PROMPTS[agent_name]
         instructions = []  # Instructions are in the rich prompt
     else:
         logger.info(f"Using YAML config for agent: {agent_name}")
@@ -569,7 +569,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         instructions.append(agent_prompts.INTERACTIVE_QUESTION_PROMPT)
 
     knowledge_enabled = bool(agent_config.knowledge_bases) and knowledge is not None
-    culture_manager, culture_settings = resolve_agent_culture(
+    culture_manager, culture_settings = _resolve_agent_culture(
         agent_name,
         config,
         resolved_storage_path,
@@ -627,7 +627,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         skills=skills,
         instructions=instructions,
         db=storage,
-        learning=resolve_agent_learning(agent_config, defaults, learning_storage),
+        learning=_resolve_agent_learning(agent_config, defaults, learning_storage),
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         knowledge=knowledge if knowledge_enabled else None,
         search_knowledge=knowledge_enabled,
@@ -707,7 +707,7 @@ def describe_agent(agent_name: str, config: Config) -> str:
     if agent_config.instructions:
         # Take first instruction as it's usually the most descriptive
         first_instruction = agent_config.instructions[0]
-        if len(first_instruction) < MAX_INSTRUCTION_LENGTH:  # Only include if reasonably short
+        if len(first_instruction) < _MAX_INSTRUCTION_LENGTH:  # Only include if reasonably short
             parts.append(f"- {first_instruction}")
 
     return "\n  ".join(parts)

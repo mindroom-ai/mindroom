@@ -157,7 +157,7 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai.get_cache", return_value=None),
+            patch("mindroom.ai._get_cache", return_value=None),
         ):
             mock_prepare.return_value = (mock_agent, "test prompt", [])
 
@@ -189,7 +189,7 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai.get_cache", return_value=None),
+            patch("mindroom.ai._get_cache", return_value=None),
         ):
             mock_prepare.return_value = (mock_agent, "test prompt", [])
 
@@ -224,7 +224,7 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai.get_cache", return_value=None),
+            patch("mindroom.ai._get_cache", return_value=None),
         ):
             mock_prepare.return_value = (mock_agent, "test prompt", [])
 
@@ -256,7 +256,7 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai.get_cache", return_value=mock_cache),
+            patch("mindroom.ai._get_cache", return_value=mock_cache),
             patch("mindroom.ai._build_cache_key", return_value="cache-key") as mock_build_cache_key,
         ):
             mock_prepare.return_value = (mock_agent, "test prompt", [])
@@ -298,7 +298,7 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai.get_cache", return_value=None),
+            patch("mindroom.ai._get_cache", return_value=None),
         ):
             mock_prepare.return_value = (mock_agent, "test prompt", [])
             tool_trace: list[object] = []
@@ -350,7 +350,7 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai.get_cache", return_value=None),
+            patch("mindroom.ai._get_cache", return_value=None),
         ):
             mock_prepare.return_value = (mock_agent, "test prompt", [])
             run_metadata: dict[str, object] = {}
@@ -413,7 +413,7 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai.get_cache", return_value=None),
+            patch("mindroom.ai._get_cache", return_value=None),
         ):
             mock_prepare.return_value = (mock_agent, "test prompt", [])
             run_metadata: dict[str, object] = {}
@@ -464,7 +464,7 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai.get_cache", return_value=None),
+            patch("mindroom.ai._get_cache", return_value=None),
         ):
             mock_prepare.return_value = (mock_agent, "test prompt", [])
             run_metadata: dict[str, object] = {}

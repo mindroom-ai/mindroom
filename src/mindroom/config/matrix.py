@@ -9,11 +9,11 @@ from pydantic import BaseModel, Field, field_validator
 
 from mindroom.matrix.identity import managed_room_key_from_alias_localpart, room_alias_localpart
 
-RoomAccessMode = Literal["single_user_private", "multi_user"]
-MultiUserJoinRule = Literal["public", "knock"]
+_RoomAccessMode = Literal["single_user_private", "multi_user"]
+_MultiUserJoinRule = Literal["public", "knock"]
 RoomJoinRule = Literal["invite", "public", "knock"]
 RoomDirectoryVisibility = Literal["public", "private"]
-MATRIX_LOCALPART_PATTERN = re.compile(r"^[a-z0-9._=/-]+$")
+_MATRIX_LOCALPART_PATTERN = re.compile(r"^[a-z0-9._=/-]+$")
 
 
 class MindRoomUserConfig(BaseModel):
@@ -46,7 +46,7 @@ class MindRoomUserConfig(BaseModel):
             msg = "mindroom_user.username must be a Matrix localpart (without domain)"
             raise ValueError(msg)
 
-        if not MATRIX_LOCALPART_PATTERN.fullmatch(normalized):
+        if not _MATRIX_LOCALPART_PATTERN.fullmatch(normalized):
             msg = (
                 "mindroom_user.username contains invalid characters; "
                 "allowed: lowercase letters, digits, '.', '_', '=', '-', '/'"
@@ -59,14 +59,14 @@ class MindRoomUserConfig(BaseModel):
 class MatrixRoomAccessConfig(BaseModel):
     """Configuration for managed Matrix room access and discoverability."""
 
-    mode: RoomAccessMode = Field(
+    mode: _RoomAccessMode = Field(
         default="single_user_private",
         description=(
             "Room access mode. 'single_user_private' preserves invite-only/private behavior. "
             "'multi_user' applies configured join rules and directory visibility."
         ),
     )
-    multi_user_join_rule: MultiUserJoinRule = Field(
+    multi_user_join_rule: _MultiUserJoinRule = Field(
         default="public",
         description="Default join rule for managed rooms in multi_user mode",
     )

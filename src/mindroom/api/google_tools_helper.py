@@ -3,7 +3,7 @@
 from typing import Any
 
 
-def get_google_tool_scopes(tool_name: str) -> list[str]:
+def _get_google_tool_scopes(tool_name: str) -> list[str]:
     """Get required OAuth scopes for a Google tool."""
     scope_map = {
         "google_calendar": [
@@ -31,7 +31,7 @@ def check_google_tool_configured(tool_name: str, google_creds: dict[str, Any]) -
         return False
 
     configured_scopes = google_creds.get("scopes", [])
-    required_scopes = get_google_tool_scopes(tool_name)
+    required_scopes = _get_google_tool_scopes(tool_name)
 
     if not required_scopes:
         return False

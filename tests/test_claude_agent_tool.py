@@ -227,10 +227,10 @@ class _GatewayProbeClaudeSDKClient:
 
 
 @pytest.fixture
-def fake_manager(monkeypatch: pytest.MonkeyPatch) -> claude_agent_module.ClaudeSessionManager:
+def fake_manager(monkeypatch: pytest.MonkeyPatch) -> claude_agent_module._ClaudeSessionManager:
     """Use an isolated in-memory manager and fake SDK client for each test."""
     _FakeClaudeSDKClient.instances = []
-    manager = claude_agent_module.ClaudeSessionManager()
+    manager = claude_agent_module._ClaudeSessionManager()
     monkeypatch.setattr(claude_agent_module.ClaudeAgentTools, "_session_manager", manager)
     monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _FakeClaudeSDKClient)
     return manager
@@ -341,7 +341,7 @@ def test_claude_tool_type_hints_resolve_at_runtime(
 
 
 @pytest.mark.asyncio
-async def test_claude_send_reuses_session(fake_manager: claude_agent_module.ClaudeSessionManager) -> None:  # noqa: ARG001
+async def test_claude_send_reuses_session(fake_manager: claude_agent_module._ClaudeSessionManager) -> None:  # noqa: ARG001
     """Repeated calls in the same run context should reuse one SDK client session."""
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = RunContext(run_id="run-1", session_id="session-1")
@@ -357,7 +357,7 @@ async def test_claude_send_reuses_session(fake_manager: claude_agent_module.Clau
 
 
 @pytest.mark.asyncio
-async def test_claude_send_sets_gateway_env_vars(fake_manager: claude_agent_module.ClaudeSessionManager) -> None:  # noqa: ARG001
+async def test_claude_send_sets_gateway_env_vars(fake_manager: claude_agent_module._ClaudeSessionManager) -> None:  # noqa: ARG001
     """Gateway configuration should be propagated to Claude SDK env vars."""
     tools = claude_agent_module.ClaudeAgentTools(
         api_key="sk-test",
@@ -381,7 +381,7 @@ async def test_claude_send_sets_gateway_env_vars(fake_manager: claude_agent_modu
 
 @pytest.mark.asyncio
 async def test_claude_send_sets_session_control_options(
-    fake_manager: claude_agent_module.ClaudeSessionManager,  # noqa: ARG001
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
 ) -> None:
     """Runtime session control fields should pass through to ClaudeAgentOptions."""
     tools = claude_agent_module.ClaudeAgentTools(
@@ -407,7 +407,7 @@ async def test_claude_send_sets_session_control_options(
 
 @pytest.mark.asyncio
 async def test_claude_send_uses_agent_model_when_tool_model_unset(
-    fake_manager: claude_agent_module.ClaudeSessionManager,  # noqa: ARG001
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
 ) -> None:
     """Agent model id should be used when tool-config model is not set."""
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
@@ -422,7 +422,7 @@ async def test_claude_send_uses_agent_model_when_tool_model_unset(
 
 @pytest.mark.asyncio
 async def test_claude_send_tool_model_overrides_agent_model(
-    fake_manager: claude_agent_module.ClaudeSessionManager,  # noqa: ARG001
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
 ) -> None:
     """Explicit tool-config model should override the calling agent model id."""
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", model="claude-opus-4-6")
@@ -437,7 +437,7 @@ async def test_claude_send_tool_model_overrides_agent_model(
 
 @pytest.mark.asyncio
 async def test_claude_send_with_different_session_labels_creates_multiple_sessions(
-    fake_manager: claude_agent_module.ClaudeSessionManager,  # noqa: ARG001
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
 ) -> None:
     """Different explicit session labels should map to independent sessions."""
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
@@ -452,7 +452,7 @@ async def test_claude_send_with_different_session_labels_creates_multiple_sessio
 
 @pytest.mark.asyncio
 async def test_claude_send_namespaces_sessions_by_agent_id(
-    fake_manager: claude_agent_module.ClaudeSessionManager,
+    fake_manager: claude_agent_module._ClaudeSessionManager,
 ) -> None:
     """Agents with the same display name but different IDs should not share sessions."""
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
@@ -470,7 +470,7 @@ async def test_claude_send_namespaces_sessions_by_agent_id(
 
 @pytest.mark.asyncio
 async def test_claude_send_does_not_expire_active_session_during_cleanup(
-    fake_manager: claude_agent_module.ClaudeSessionManager,  # noqa: ARG001
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """TTL cleanup should skip active sessions that are currently processing a query."""
@@ -511,7 +511,7 @@ async def test_claude_send_does_not_expire_active_session_during_cleanup(
 
 @pytest.mark.asyncio
 async def test_claude_send_same_session_is_serialized_by_lock(
-    fake_manager: claude_agent_module.ClaudeSessionManager,  # noqa: ARG001
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Concurrent sends to the same session key should serialize query execution."""
@@ -540,7 +540,7 @@ async def test_claude_send_same_session_is_serialized_by_lock(
 
 @pytest.mark.asyncio
 async def test_claude_interrupt_does_not_block_while_send_is_running(
-    fake_manager: claude_agent_module.ClaudeSessionManager,  # noqa: ARG001
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Interrupt should be able to cancel an in-flight query for the same session."""
@@ -578,7 +578,7 @@ async def test_claude_interrupt_does_not_block_while_send_is_running(
 
 @pytest.mark.asyncio
 async def test_claude_send_refreshes_last_used_after_long_query(
-    fake_manager: claude_agent_module.ClaudeSessionManager,  # noqa: ARG001
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Long-running turns should not be treated as idle time for TTL expiry."""
@@ -611,7 +611,7 @@ async def test_claude_send_refreshes_last_used_after_long_query(
 
 
 @pytest.mark.asyncio
-async def test_session_status_interrupt_and_end(fake_manager: claude_agent_module.ClaudeSessionManager) -> None:  # noqa: ARG001
+async def test_session_status_interrupt_and_end(fake_manager: claude_agent_module._ClaudeSessionManager) -> None:  # noqa: ARG001
     """Status/interrupt/end management tools should operate on active sessions."""
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = RunContext(run_id="run-1", session_id="session-1")
@@ -630,7 +630,7 @@ async def test_session_status_interrupt_and_end(fake_manager: claude_agent_modul
 
 @pytest.mark.asyncio
 async def test_expired_session_is_cleaned_and_recreated(
-    fake_manager: claude_agent_module.ClaudeSessionManager,
+    fake_manager: claude_agent_module._ClaudeSessionManager,
 ) -> None:
     """Expired sessions should be disconnected and recreated on next use."""
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", session_ttl_minutes=1)
@@ -653,7 +653,7 @@ async def test_expired_session_is_cleaned_and_recreated(
 
 @pytest.mark.asyncio
 async def test_session_limits_are_namespace_scoped(
-    fake_manager: claude_agent_module.ClaudeSessionManager,
+    fake_manager: claude_agent_module._ClaudeSessionManager,
 ) -> None:
     """Per-agent max_sessions should not overwrite limits for other agents."""
     tools_alpha = claude_agent_module.ClaudeAgentTools(api_key="sk-test", max_sessions=1)
@@ -675,7 +675,7 @@ async def test_session_limits_are_namespace_scoped(
 
 @pytest.mark.asyncio
 async def test_gateway_probe_posts_to_v1_messages_and_reuses_sdk_session(
-    fake_manager: claude_agent_module.ClaudeSessionManager,  # noqa: ARG001
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
     fake_anthropic_gateway: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -711,7 +711,7 @@ async def test_gateway_probe_posts_to_v1_messages_and_reuses_sdk_session(
 
 @pytest.mark.asyncio
 async def test_gateway_probe_can_include_anthropic_beta_header_when_not_disabled(
-    fake_manager: claude_agent_module.ClaudeSessionManager,  # noqa: ARG001
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
     fake_anthropic_gateway: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -737,7 +737,7 @@ async def test_gateway_probe_can_include_anthropic_beta_header_when_not_disabled
 
 @pytest.mark.asyncio
 async def test_gateway_probe_error_is_propagated_and_session_is_closed(
-    fake_manager: claude_agent_module.ClaudeSessionManager,
+    fake_manager: claude_agent_module._ClaudeSessionManager,
     fake_anthropic_gateway: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -765,7 +765,7 @@ async def test_gateway_probe_error_is_propagated_and_session_is_closed(
 
 @pytest.mark.asyncio
 async def test_claude_send_error_does_not_deadlock(
-    fake_manager: claude_agent_module.ClaudeSessionManager,
+    fake_manager: claude_agent_module._ClaudeSessionManager,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Errors while querying should close the session without hanging on locks."""
@@ -792,7 +792,7 @@ async def test_claude_send_error_does_not_deadlock(
 
 @pytest.mark.asyncio
 async def test_claude_send_error_includes_runtime_session_hints(
-    fake_manager: claude_agent_module.ClaudeSessionManager,
+    fake_manager: claude_agent_module._ClaudeSessionManager,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Error output should include runtime session hints for LLM self-correction."""
@@ -835,7 +835,7 @@ async def test_claude_send_error_includes_runtime_session_hints(
 
 @pytest.mark.asyncio
 async def test_claude_start_session_error_includes_context(
-    fake_manager: claude_agent_module.ClaudeSessionManager,  # noqa: ARG001
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Start-session failures should return context-rich diagnostics."""

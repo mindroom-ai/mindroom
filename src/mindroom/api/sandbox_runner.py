@@ -31,12 +31,12 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
 
-MAX_LEASE_TTL_SECONDS = 3600
-DEFAULT_LEASE_TTL_SECONDS = 60
-DEFAULT_SUBPROCESS_TIMEOUT_SECONDS = 120.0
-SUBPROCESS_WORKER_ARG = "--sandbox-subprocess-worker"
-RUNNER_EXECUTION_MODE_ENV = "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"
-RUNNER_SUBPROCESS_TIMEOUT_ENV = "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS"
+_MAX_LEASE_TTL_SECONDS = 3600
+_DEFAULT_LEASE_TTL_SECONDS = 60
+_DEFAULT_SUBPROCESS_TIMEOUT_SECONDS = 120.0
+_SUBPROCESS_WORKER_ARG = "--sandbox-subprocess-worker"
+_RUNNER_EXECUTION_MODE_ENV = "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"
+_RUNNER_SUBPROCESS_TIMEOUT_ENV = "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS"
 
 # Sentinel written to stderr to delimit the JSON response from tool output.
 _RESPONSE_MARKER = "__SANDBOX_RESPONSE__"
@@ -65,7 +65,7 @@ def ensure_registry_loaded_with_config() -> None:
 
 
 @dataclass
-class CredentialLease:
+class _CredentialLease:
     """In-memory lease for short-lived credential overrides."""
 
     lease_id: str
@@ -78,8 +78,8 @@ class CredentialLease:
 
 # NOTE: In-process dict — leases are not shared across multiple uvicorn workers.
 # The sandbox runner must be deployed with a single worker for lease correctness.
-LEASES_BY_ID: dict[str, CredentialLease] = {}
-LEASES_LOCK = threading.Lock()
+_LEASES_BY_ID: dict[str, _CredentialLease] = {}
+_LEASES_LOCK = threading.Lock()
 
 
 class SandboxRunnerExecuteRequest(BaseModel):
@@ -103,7 +103,7 @@ class SandboxRunnerLeaseRequest(BaseModel):
     tool_name: str
     function_name: str
     credential_overrides: dict[str, Any] = Field(default_factory=dict)
-    ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS
+    ttl_seconds: int = _DEFAULT_LEASE_TTL_SECONDS
     max_uses: int = 1
 
 
@@ -165,7 +165,7 @@ def _resolve_entrypoint(
 
 
 def _bounded_ttl_seconds(raw_ttl_seconds: int) -> int:
-    return max(1, min(MAX_LEASE_TTL_SECONDS, raw_ttl_seconds))
+    return max(1, min(_MAX_LEASE_TTL_SECONDS, raw_ttl_seconds))
 
 
 def _bounded_max_uses(raw_max_uses: int) -> int:
@@ -173,17 +173,17 @@ def _bounded_max_uses(raw_max_uses: int) -> int:
 
 
 def _cleanup_expired_leases(now: float) -> None:
-    expired_ids = [lease_id for lease_id, lease in LEASES_BY_ID.items() if lease.expires_at <= now]
+    expired_ids = [lease_id for lease_id, lease in _LEASES_BY_ID.items() if lease.expires_at <= now]
     for lease_id in expired_ids:
-        LEASES_BY_ID.pop(lease_id, None)
+        _LEASES_BY_ID.pop(lease_id, None)
 
 
-def _create_credential_lease(request: SandboxRunnerLeaseRequest) -> CredentialLease:
+def _create_credential_lease(request: SandboxRunnerLeaseRequest) -> _CredentialLease:
     ttl_seconds = _bounded_ttl_seconds(request.ttl_seconds)
     max_uses = _bounded_max_uses(request.max_uses)
     now = time.time()
     expires_at = now + ttl_seconds
-    lease = CredentialLease(
+    lease = _CredentialLease(
         lease_id=secrets.token_urlsafe(24),
         tool_name=request.tool_name,
         function_name=request.function_name,
@@ -191,17 +191,17 @@ def _create_credential_lease(request: SandboxRunnerLeaseRequest) -> CredentialLe
         expires_at=expires_at,
         uses_remaining=max_uses,
     )
-    with LEASES_LOCK:
+    with _LEASES_LOCK:
         _cleanup_expired_leases(now)
-        LEASES_BY_ID[lease.lease_id] = lease
+        _LEASES_BY_ID[lease.lease_id] = lease
     return lease
 
 
 def _consume_credential_lease(lease_id: str, *, tool_name: str, function_name: str) -> dict[str, object]:
     now = time.time()
-    with LEASES_LOCK:
+    with _LEASES_LOCK:
         _cleanup_expired_leases(now)
-        lease = LEASES_BY_ID.get(lease_id)
+        lease = _LEASES_BY_ID.get(lease_id)
         if lease is None:
             raise HTTPException(status_code=400, detail="Credential lease is invalid or expired.")
         if lease.tool_name != tool_name or lease.function_name != function_name:
@@ -209,13 +209,13 @@ def _consume_credential_lease(lease_id: str, *, tool_name: str, function_name: s
 
         lease.uses_remaining -= 1
         if lease.uses_remaining <= 0:
-            LEASES_BY_ID.pop(lease_id, None)
+            _LEASES_BY_ID.pop(lease_id, None)
 
     return dict(lease.credential_overrides)
 
 
 def _runner_execution_mode() -> str:
-    return os.getenv(RUNNER_EXECUTION_MODE_ENV, "inprocess").strip().lower()
+    return os.getenv(_RUNNER_EXECUTION_MODE_ENV, "inprocess").strip().lower()
 
 
 def _runner_uses_subprocess() -> bool:
@@ -223,11 +223,11 @@ def _runner_uses_subprocess() -> bool:
 
 
 def _runner_subprocess_timeout_seconds() -> float:
-    raw_timeout = os.getenv(RUNNER_SUBPROCESS_TIMEOUT_ENV, str(DEFAULT_SUBPROCESS_TIMEOUT_SECONDS))
+    raw_timeout = os.getenv(_RUNNER_SUBPROCESS_TIMEOUT_ENV, str(_DEFAULT_SUBPROCESS_TIMEOUT_SECONDS))
     try:
         timeout = float(raw_timeout)
     except ValueError:
-        timeout = DEFAULT_SUBPROCESS_TIMEOUT_SECONDS
+        timeout = _DEFAULT_SUBPROCESS_TIMEOUT_SECONDS
     return max(1.0, timeout)
 
 
@@ -264,7 +264,7 @@ async def _execute_request_inprocess(request: SandboxRunnerExecuteRequest) -> Sa
 
 
 def _subprocess_worker_command() -> list[str]:
-    return [sys.executable, "-m", "mindroom.api.sandbox_runner", SUBPROCESS_WORKER_ARG]
+    return [sys.executable, "-m", "mindroom.api.sandbox_runner", _SUBPROCESS_WORKER_ARG]
 
 
 def _execute_request_subprocess_sync(request: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteResponse:
@@ -386,5 +386,5 @@ async def execute_tool_call(
 
 
 if __name__ == "__main__":
-    if SUBPROCESS_WORKER_ARG in sys.argv:
+    if _SUBPROCESS_WORKER_ARG in sys.argv:
         raise SystemExit(_run_subprocess_worker())

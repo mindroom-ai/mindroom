@@ -27,7 +27,7 @@ from mindroom.credentials import get_credentials_manager
 TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
 
 
-def register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable[[], type[Toolkit]]]:
+def _register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable[[], type[Toolkit]]]:
     """Decorator to register a tool factory function.
 
     Args:
@@ -267,12 +267,12 @@ def register_tool_with_metadata(
     return decorator
 
 
-def get_tool_metadata(name: str) -> ToolMetadata | None:
+def _get_tool_metadata(name: str) -> ToolMetadata | None:
     """Get metadata for a tool by name."""
     return TOOL_METADATA.get(name)
 
 
-def get_all_tool_metadata() -> dict[str, ToolMetadata]:
+def _get_all_tool_metadata() -> dict[str, ToolMetadata]:
     """Get all tool metadata."""
     return TOOL_METADATA.copy()
 

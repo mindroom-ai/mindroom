@@ -74,7 +74,7 @@ def _has_lockfile() -> bool:
 
 
 @cache
-def available_tool_extras() -> set[str]:
+def _available_tool_extras() -> set[str]:
     """Discover available tool extras from pyproject or installed metadata."""
     pyproject_path = _PROJECT_ROOT / "pyproject.toml"
     if pyproject_path.exists():
@@ -89,7 +89,7 @@ def available_tool_extras() -> set[str]:
     return set(metadata.get_all("Provides-Extra") or [])
 
 
-def is_uv_tool_install() -> bool:
+def _is_uv_tool_install() -> bool:
     """Check if running from a uv tool environment."""
     return (Path(sys.prefix) / _RECEIPT_NAME).exists()
 
@@ -167,7 +167,7 @@ def install_tool_extras(extras: list[str], *, quiet: bool = False) -> bool:
     """
     if not extras:
         return False
-    if is_uv_tool_install():
+    if _is_uv_tool_install():
         current_extras = _get_current_uv_tool_extras()
         merged = sorted(set(current_extras) | set(extras))
         return _install_via_uv_tool(merged, quiet=quiet)
@@ -180,7 +180,7 @@ def auto_install_tool_extra(tool_name: str) -> bool:
     """Auto-install a tool extra when supported and enabled."""
     if not auto_install_enabled():
         return False
-    if tool_name not in available_tool_extras():
+    if tool_name not in _available_tool_extras():
         return False
     return install_tool_extras([tool_name], quiet=True)
 

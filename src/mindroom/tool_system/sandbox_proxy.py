@@ -20,12 +20,12 @@ if TYPE_CHECKING:
     from agno.tools.function import Function
     from agno.tools.toolkit import Toolkit
 
-SANDBOX_PROXY_EXECUTE_PATH = "/api/sandbox-runner/execute"
-SANDBOX_PROXY_LEASE_PATH = "/api/sandbox-runner/leases"
-SANDBOX_PROXY_TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
-DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
-DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS = 60
-MAX_CREDENTIAL_LEASE_TTL_SECONDS = 3600
+_SANDBOX_PROXY_EXECUTE_PATH = "/api/sandbox-runner/execute"
+_SANDBOX_PROXY_LEASE_PATH = "/api/sandbox-runner/leases"
+_SANDBOX_PROXY_TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
+_DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
+_DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS = 60
+_MAX_CREDENTIAL_LEASE_TTL_SECONDS = 3600
 
 _SANDBOX_RUNNER_MODE = env_flag("MINDROOM_SANDBOX_RUNNER_MODE")
 
@@ -45,11 +45,11 @@ def _read_proxy_token() -> str | None:
 
 
 def _read_proxy_timeout() -> float:
-    raw = os.getenv("MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS", str(DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS))
+    raw = os.getenv("MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS", str(_DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS))
     try:
         return float(raw)
     except ValueError:
-        return DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS
+        return _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS
 
 
 def _read_execution_mode() -> str | None:
@@ -63,12 +63,12 @@ def _read_execution_mode() -> str | None:
 
 
 def _read_credential_lease_ttl() -> int:
-    raw = os.getenv("MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS", str(DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS))
+    raw = os.getenv("MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS", str(_DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS))
     try:
         ttl_seconds = int(raw)
     except ValueError:
-        ttl_seconds = DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS
-    return max(1, min(MAX_CREDENTIAL_LEASE_TTL_SECONDS, ttl_seconds))
+        ttl_seconds = _DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS
+    return max(1, min(_MAX_CREDENTIAL_LEASE_TTL_SECONDS, ttl_seconds))
 
 
 def _read_proxy_tools(execution_mode: str | None) -> set[str] | None:
@@ -169,7 +169,7 @@ def _collect_shared_credential_overrides(tool_name: str, function_name: str) -> 
     return merged_overrides
 
 
-def sandbox_proxy_enabled_for_tool(
+def _sandbox_proxy_enabled_for_tool(
     tool_name: str,
     *,
     sandbox_tools_override: list[str] | None = None,
@@ -210,7 +210,7 @@ def _call_proxy_sync(
     if _PROXY_URL is None:
         msg = "MINDROOM_SANDBOX_PROXY_URL must be set when sandbox proxying is enabled."
         raise RuntimeError(msg)
-    headers = {SANDBOX_PROXY_TOKEN_HEADER: _PROXY_TOKEN}
+    headers = {_SANDBOX_PROXY_TOKEN_HEADER: _PROXY_TOKEN}
     base_url = _PROXY_URL
 
     credential_overrides = _collect_shared_credential_overrides(tool_name, function_name)
@@ -224,7 +224,7 @@ def _call_proxy_sync(
                 "ttl_seconds": _CREDENTIAL_LEASE_TTL,
                 "max_uses": 1,
             }
-            response = client.post(f"{base_url}{SANDBOX_PROXY_LEASE_PATH}", json=lease_payload, headers=headers)
+            response = client.post(f"{base_url}{_SANDBOX_PROXY_LEASE_PATH}", json=lease_payload, headers=headers)
             response.raise_for_status()
             lease_data = response.json()
             if not isinstance(lease_data, Mapping) or not isinstance(lease_data.get("lease_id"), str):
@@ -241,7 +241,7 @@ def _call_proxy_sync(
         if lease_id is not None:
             payload["lease_id"] = lease_id
 
-        response = client.post(f"{base_url}{SANDBOX_PROXY_EXECUTE_PATH}", json=payload, headers=headers)
+        response = client.post(f"{base_url}{_SANDBOX_PROXY_EXECUTE_PATH}", json=payload, headers=headers)
         response.raise_for_status()
         data = response.json()
 
@@ -300,7 +300,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
     Note: mutates ``toolkit.functions`` and ``toolkit.async_functions`` in place.
     Callers must pass a freshly-created toolkit (``get_tool_by_name`` does this).
     """
-    if not sandbox_proxy_enabled_for_tool(tool_name, sandbox_tools_override=sandbox_tools_override):
+    if not _sandbox_proxy_enabled_for_tool(tool_name, sandbox_tools_override=sandbox_tools_override):
         return toolkit
 
     toolkit.functions = {
