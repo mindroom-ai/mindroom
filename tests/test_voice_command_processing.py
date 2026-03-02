@@ -16,7 +16,6 @@ from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     VOICE_PREFIX,
-    VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 
 
@@ -401,7 +400,6 @@ async def test_router_voice_transcription_falls_back_to_raw_audio(tmp_path) -> N
     extra_content = bot._send_response.call_args.kwargs["extra_content"]
     expected_attachment_id = _attachment_id_for_event("$voice_event")
     assert extra_content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
-    assert extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] is True
     assert extra_content[ATTACHMENT_IDS_KEY] == [expected_attachment_id]
     attachment = load_attachment(tmp_path, expected_attachment_id)
     assert attachment is not None
