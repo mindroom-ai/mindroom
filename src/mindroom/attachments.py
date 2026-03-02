@@ -27,7 +27,7 @@ FileOrVideoEvent = nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessage
 _ATTACHMENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$")
 _ATTACHMENT_RETENTION_DAYS = 30
 _CLEANUP_INTERVAL = timedelta(hours=1)
-_last_cleanup_time: datetime | None = None
+_last_cleanup_time_by_storage_path: dict[Path, datetime] = {}
 
 
 def _normalize_attachment_id(raw_attachment_id: str) -> str | None:
@@ -376,13 +376,14 @@ def _cleanup_attachment_storage(storage_path: Path) -> None:
 
 def _maybe_cleanup_attachment_storage(storage_path: Path) -> None:
     """Run cleanup at most once per ``_CLEANUP_INTERVAL``."""
-    global _last_cleanup_time
+    resolved_storage_path = storage_path.resolve()
     now = datetime.now(UTC)
-    if _last_cleanup_time is not None and now - _last_cleanup_time < _CLEANUP_INTERVAL:
+    last_cleanup_time = _last_cleanup_time_by_storage_path.get(resolved_storage_path)
+    if last_cleanup_time is not None and now - last_cleanup_time < _CLEANUP_INTERVAL:
         return
     try:
-        _cleanup_attachment_storage(storage_path)
-        _last_cleanup_time = now
+        _cleanup_attachment_storage(resolved_storage_path)
+        _last_cleanup_time_by_storage_path[resolved_storage_path] = now
     except Exception:
         logger.exception("Failed to prune expired attachment storage")
 

@@ -143,7 +143,7 @@ def test_register_local_attachment_throttles_cleanup_runs(tmp_path: Path) -> Non
     file_path.write_text("payload", encoding="utf-8")
 
     with (
-        patch("mindroom.attachments._last_cleanup_time", None),
+        patch("mindroom.attachments._last_cleanup_time_by_storage_path", {}),
         patch("mindroom.attachments._cleanup_attachment_storage") as mock_cleanup,
     ):
         first = register_local_attachment(
@@ -163,7 +163,7 @@ def test_register_local_attachment_throttles_cleanup_runs(tmp_path: Path) -> Non
 
     assert first is not None
     assert second is not None
-    mock_cleanup.assert_called_once_with(tmp_path)
+    mock_cleanup.assert_called_once_with(tmp_path.resolve())
 
 
 def test_merge_attachment_ids_preserves_order() -> None:
@@ -327,7 +327,7 @@ def test_register_local_attachment_prunes_expired_managed_media(tmp_path: Path) 
     fresh_media_path = tmp_path / "incoming_media" / "fresh.bin"
     fresh_media_path.write_bytes(b"fresh")
     # Reset the cleanup throttle so the second registration triggers cleanup.
-    with patch("mindroom.attachments._last_cleanup_time", None):
+    with patch("mindroom.attachments._last_cleanup_time_by_storage_path", {}):
         fresh_record = register_local_attachment(
             tmp_path,
             fresh_media_path,
@@ -367,7 +367,7 @@ def test_register_local_attachment_prunes_expired_metadata_without_deleting_unma
     fresh_media_path.parent.mkdir(parents=True, exist_ok=True)
     fresh_media_path.write_bytes(b"fresh")
     # Reset the cleanup throttle so the second registration triggers cleanup.
-    with patch("mindroom.attachments._last_cleanup_time", None):
+    with patch("mindroom.attachments._last_cleanup_time_by_storage_path", {}):
         fresh_record = register_local_attachment(
             tmp_path,
             fresh_media_path,

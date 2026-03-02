@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="attachments",
     display_name="Attachments",
-    description="List and send context-scoped file attachments",
+    description="List, register, and send context-scoped file attachments",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

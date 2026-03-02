@@ -5,15 +5,17 @@ from __future__ import annotations
 import json
 import time
 from collections import defaultdict, deque
-from pathlib import Path
 from threading import Lock
 from typing import ClassVar
 
 import nio
 from agno.tools import Toolkit
 
-from mindroom.attachments import register_local_attachment
-from mindroom.custom_tools.attachments import resolve_context_attachment_path, room_access_allowed
+from mindroom.custom_tools.attachment_helpers import (
+    resolve_attachment_file_paths,
+    resolve_attachment_ids,
+    room_access_allowed,
+)
 from mindroom.matrix.client import (
     fetch_thread_history,
     get_latest_thread_event_id_if_needed,
@@ -24,7 +26,6 @@ from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_content import extract_and_resolve_message
 from mindroom.tool_runtime_context import (
     ToolRuntimeContext,
-    append_tool_runtime_attachment_id,
     get_tool_runtime_context,
 )
 
@@ -81,75 +82,6 @@ class MatrixMessageTools(Toolkit):
             if value:
                 normalized.append(value)
         return normalized, None
-
-    @staticmethod
-    def _resolve_attachment_id_paths(
-        context: ToolRuntimeContext,
-        attachment_ids: list[str],
-    ) -> tuple[list[Path], list[str], str | None]:
-        if not attachment_ids:
-            return [], [], None
-
-        attachment_paths: list[Path] = []
-        resolved_attachment_ids: list[str] = []
-        for attachment_id in attachment_ids:
-            if not attachment_id.startswith("att_"):
-                return [], [], "attachment_ids entries must be context attachment IDs (att_*)."
-            attachment_path, error = resolve_context_attachment_path(context, attachment_id)
-            if error is not None:
-                return [], [], error
-            if attachment_path is None:
-                continue
-            attachment_paths.append(attachment_path)
-            resolved_attachment_ids.append(attachment_id)
-        return attachment_paths, resolved_attachment_ids, None
-
-    @staticmethod
-    def _register_attachment_file_path(
-        context: ToolRuntimeContext,
-        attachment_file_path: str,
-    ) -> tuple[str | None, Path | None, str | None]:
-        if context.storage_path is None:
-            return None, None, "Attachment storage path is unavailable in this runtime path."
-
-        resolved_path = Path(attachment_file_path).expanduser().resolve()
-        attachment_record = register_local_attachment(
-            context.storage_path,
-            resolved_path,
-            kind="file",
-            room_id=context.room_id,
-            thread_id=context.thread_id,
-            sender=context.requester_id,
-        )
-        if attachment_record is None:
-            return None, None, f"Failed to register attachment file: {resolved_path}"
-
-        append_tool_runtime_attachment_id(attachment_record.attachment_id)
-        return attachment_record.attachment_id, attachment_record.local_path, None
-
-    @classmethod
-    def _resolve_attachment_file_paths(
-        cls,
-        context: ToolRuntimeContext,
-        attachment_file_paths: list[str],
-    ) -> tuple[list[Path], list[str], str | None]:
-        if not attachment_file_paths:
-            return [], [], None
-
-        attachment_paths: list[Path] = []
-        newly_registered_attachment_ids: list[str] = []
-        for attachment_file_path in attachment_file_paths:
-            attachment_id, attachment_path, register_error = cls._register_attachment_file_path(
-                context,
-                attachment_file_path,
-            )
-            if register_error is not None:
-                return [], [], register_error
-            if attachment_path is None or attachment_id is None:
-                continue
-            attachment_paths.append(attachment_path)
-            newly_registered_attachment_ids.append(attachment_id)
-        return attachment_paths, newly_registered_attachment_ids, None
 
     @staticmethod
     def _action_supports_attachments(action: str) -> bool:
@@ -269,13 +201,13 @@ class MatrixMessageTools(Toolkit):
             return self._payload("error", action=action, message="thread_id is required for replies.")
 
         text = message.strip() if isinstance(message, str) and message.strip() else None
-        attachment_paths, resolved_attachment_ids, attachment_error = self._resolve_attachment_id_paths(
+        attachment_paths, resolved_attachment_ids, attachment_error = resolve_attachment_ids(
             context,
             attachment_ids,
         )
         if attachment_error is not None:
             return self._payload("error", action=action, room_id=room_id, message=attachment_error)
-        file_path_attachments, newly_registered_attachment_ids, file_path_error = self._resolve_attachment_file_paths(
+        file_path_attachments, newly_registered_attachment_ids, file_path_error = resolve_attachment_file_paths(
             context,
             attachment_file_paths,
         )

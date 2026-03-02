@@ -247,7 +247,7 @@ async def test_attachments_tool_cross_room_send_requires_authorization(tmp_path:
 
     with (
         tool_runtime_context(ctx),
-        patch("mindroom.custom_tools.attachments.is_authorized_sender", return_value=False),
+        patch("mindroom.custom_tools.attachment_helpers.is_authorized_sender", return_value=False),
         patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
     ):
         payload = json.loads(
