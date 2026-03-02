@@ -31,10 +31,10 @@ if TYPE_CHECKING:
 router = APIRouter(prefix="/api/google", tags=["google-integration"])
 
 # Initialize credentials manager
-creds_manager = CredentialsManager()
+_creds_manager = CredentialsManager()
 
 # OAuth scopes for all Google services needed by MindRoom
-SCOPES = [
+_SCOPES = [
     # Gmail
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.modify",
@@ -52,11 +52,11 @@ SCOPES = [
 ]
 
 # Environment path for OAuth credentials
-ENV_PATH = Path(__file__).parent.parent.parent.parent.parent / ".env"
+_ENV_PATH = Path(__file__).parent.parent.parent.parent.parent / ".env"
 
 # Get configuration from environment
-BACKEND_PORT = os.getenv("BACKEND_PORT", "8765")
-REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", f"http://localhost:{BACKEND_PORT}/api/google/callback")
+_BACKEND_PORT = os.getenv("BACKEND_PORT", "8765")
+_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", f"http://localhost:{_BACKEND_PORT}/api/google/callback")
 
 
 _GOOGLE_DEPS = ["google-auth", "google-auth-oauthlib"]
@@ -89,7 +89,7 @@ class GoogleAuthUrl(BaseModel):
     auth_url: str
 
 
-def get_oauth_credentials() -> dict[str, Any] | None:
+def _get_oauth_credentials() -> dict[str, Any] | None:
     """Get OAuth credentials from environment variables."""
     client_id = os.getenv("GOOGLE_CLIENT_ID")
     client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
@@ -104,14 +104,14 @@ def get_oauth_credentials() -> dict[str, Any] | None:
             "auth_uri": "https://accounts.google.com/o/oauth2/auth",
             "token_uri": "https://oauth2.googleapis.com/token",
             "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-            "redirect_uris": [REDIRECT_URI],
+            "redirect_uris": [_REDIRECT_URI],
         },
     }
 
 
-def get_google_credentials() -> Credentials | None:
+def _get_google_credentials() -> Credentials | None:
     """Get Google credentials from stored token."""
-    token_data = creds_manager.load_credentials("google")
+    token_data = _creds_manager.load_credentials("google")
     if not token_data:
         return None
 
@@ -123,7 +123,7 @@ def get_google_credentials() -> Credentials | None:
             token_uri=token_data.get("token_uri"),
             client_id=token_data.get("client_id"),
             client_secret=token_data.get("client_secret"),
-            scopes=token_data.get("scopes", SCOPES),
+            scopes=token_data.get("scopes", _SCOPES),
         )
 
         # Refresh token if expired
@@ -154,25 +154,25 @@ def save_credentials(creds: Credentials) -> None:
         token_data["_id_token"] = creds._id_token
 
     # Save using credentials manager (handles backward compatibility)
-    creds_manager.save_credentials("google", token_data)
+    _creds_manager.save_credentials("google", token_data)
 
 
-def save_env_credentials(client_id: str, client_secret: str, project_id: str | None = None) -> None:
+def _save_env_credentials(client_id: str, client_secret: str, project_id: str | None = None) -> None:
     """Save OAuth credentials to .env file."""
     env_lines = []
-    if ENV_PATH.exists():
-        with ENV_PATH.open() as f:
+    if _ENV_PATH.exists():
+        with _ENV_PATH.open() as f:
             env_lines = f.readlines()
 
     # Update or add credentials
     # Use current environment variable for redirect URI to support multiple deployments
-    current_redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", REDIRECT_URI)
+    current_redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", _REDIRECT_URI)
     env_vars = {
         "GOOGLE_CLIENT_ID": client_id,
         "GOOGLE_CLIENT_SECRET": client_secret,
         "GOOGLE_PROJECT_ID": project_id or "mindroom-integration",
         "GOOGLE_REDIRECT_URI": current_redirect_uri,
-        "BACKEND_PORT": BACKEND_PORT,
+        "BACKEND_PORT": _BACKEND_PORT,
     }
 
     for key, value in env_vars.items():
@@ -186,7 +186,7 @@ def save_env_credentials(client_id: str, client_secret: str, project_id: str | N
             env_lines.append(f"{key}={value}\n")
 
     # Write back to .env file
-    with ENV_PATH.open("w") as f:
+    with _ENV_PATH.open("w") as f:
         f.writelines(env_lines)
 
     # Also set in current environment
@@ -203,7 +203,7 @@ async def get_status() -> GoogleStatus:
     has_credentials = bool(client_id and client_secret)
 
     # Get current credentials
-    creds = get_google_credentials()
+    creds = _get_google_credentials()
 
     if not creds:
         return GoogleStatus(
@@ -249,7 +249,7 @@ async def get_status() -> GoogleStatus:
 @router.post("/connect")
 async def connect() -> GoogleAuthUrl:
     """Start Google OAuth flow."""
-    oauth_config = get_oauth_credentials()
+    oauth_config = _get_oauth_credentials()
     if not oauth_config:
         raise HTTPException(
             status_code=503,
@@ -261,8 +261,8 @@ async def connect() -> GoogleAuthUrl:
 
         # Create OAuth flow with all scopes
         # Use current environment variable for redirect URI to support multiple deployments
-        current_redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", REDIRECT_URI)
-        flow = flow_cls.from_client_config(oauth_config, scopes=SCOPES, redirect_uri=current_redirect_uri)
+        current_redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", _REDIRECT_URI)
+        flow = flow_cls.from_client_config(oauth_config, scopes=_SCOPES, redirect_uri=current_redirect_uri)
 
         # Generate authorization URL
         auth_url, _ = flow.authorization_url(
@@ -286,7 +286,7 @@ async def callback(request: Request) -> RedirectResponse:
     if not code:
         raise HTTPException(status_code=400, detail="No authorization code received")
 
-    oauth_config = get_oauth_credentials()
+    oauth_config = _get_oauth_credentials()
     if not oauth_config:
         raise HTTPException(status_code=503, detail="OAuth not configured")
 
@@ -295,8 +295,8 @@ async def callback(request: Request) -> RedirectResponse:
 
         # Create OAuth flow and exchange code for tokens
         # Use current environment variable for redirect URI to support multiple deployments
-        current_redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", REDIRECT_URI)
-        flow = flow_cls.from_client_config(oauth_config, scopes=SCOPES, redirect_uri=current_redirect_uri)
+        current_redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", _REDIRECT_URI)
+        flow = flow_cls.from_client_config(oauth_config, scopes=_SCOPES, redirect_uri=current_redirect_uri)
         flow.fetch_token(code=code)
 
         # Save credentials
@@ -325,7 +325,7 @@ async def disconnect() -> dict[str, str]:
     """Disconnect Google services by removing stored tokens."""
     try:
         # Remove credentials using the manager
-        creds_manager.delete_credentials("google")
+        _creds_manager.delete_credentials("google")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to disconnect: {e!s}") from e
     else:
@@ -347,7 +347,7 @@ async def configure(credentials: dict[str, str]) -> dict[str, Any]:
 
     try:
         # Save to environment
-        save_env_credentials(client_id, client_secret, project_id)
+        _save_env_credentials(client_id, client_secret, project_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save credentials: {e!s}") from e
     else:
@@ -359,11 +359,11 @@ async def reset() -> dict[str, Any]:
     """Reset Google integration by removing all credentials and tokens."""
     try:
         # Remove credentials using the manager
-        creds_manager.delete_credentials("google")
+        _creds_manager.delete_credentials("google")
 
         # Remove from environment variables
-        if ENV_PATH.exists():
-            with ENV_PATH.open() as f:
+        if _ENV_PATH.exists():
+            with _ENV_PATH.open() as f:
                 lines = f.readlines()
 
             # Filter out Google-related variables
@@ -375,7 +375,7 @@ async def reset() -> dict[str, Any]:
             ]
             filtered_lines = [line for line in lines if not any(line.startswith(f"{var}=") for var in google_vars)]
 
-            with ENV_PATH.open("w") as f:
+            with _ENV_PATH.open("w") as f:
                 f.writelines(filtered_lines)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to reset: {e!s}") from e

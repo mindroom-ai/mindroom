@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-class ResponseRecord(TypedDict):
+class _ResponseRecord(TypedDict):
     """Record of a response to a user message."""
 
     timestamp: float
@@ -31,7 +31,7 @@ class ResponseTracker:
 
     agent_name: str
     base_path: Path = TRACKING_DIR
-    _responses: dict[str, ResponseRecord] = field(default_factory=dict, init=False)
+    _responses: dict[str, _ResponseRecord] = field(default_factory=dict, init=False)
     _responses_file: Path = field(init=False)
     _thread_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 

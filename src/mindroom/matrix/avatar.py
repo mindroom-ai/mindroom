@@ -72,7 +72,7 @@ async def _upload_avatar_file(
     return str(upload_response.content_uri)
 
 
-async def set_avatar_from_file(
+async def _set_avatar_from_file(
     client: nio.AsyncClient,
     avatar_path: Path,
 ) -> bool:
@@ -123,17 +123,17 @@ async def check_and_set_avatar(
             logger.debug(f"Avatar already set for room {room_id}")
             return True
         # Set room avatar
-        return await set_room_avatar_from_file(client, room_id, avatar_path)
+        return await _set_room_avatar_from_file(client, room_id, avatar_path)
     # Check user avatar
     response = await client.get_profile(client.user_id)
     if isinstance(response, nio.ProfileGetResponse) and response.avatar_url:
         logger.debug(f"Avatar already set for {client.user_id}")
         return True
     # Set user avatar
-    return await set_avatar_from_file(client, avatar_path)
+    return await _set_avatar_from_file(client, avatar_path)
 
 
-async def set_room_avatar_from_file(
+async def _set_room_avatar_from_file(
     client: nio.AsyncClient,
     room_id: str,
     avatar_path: Path,

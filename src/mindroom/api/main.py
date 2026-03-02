@@ -41,7 +41,7 @@ async def _watch_config(stop_event: asyncio.Event) -> None:
         for _change, path in changes:
             if path.endswith("config.yaml"):
                 print(f"Config file changed: {path}")
-                load_config_from_file()
+                _load_config_from_file()
 
 
 @asynccontextmanager
@@ -89,7 +89,7 @@ def load_runtime_config() -> tuple[Config, Path]:
     return Config.from_yaml(CONFIG_PATH), CONFIG_PATH
 
 
-def ensure_writable_config() -> None:
+def _ensure_writable_config() -> None:
     """Ensure the config file exists at a writable location.
 
     In managed deployments the writable config is placed on a persistent
@@ -114,7 +114,7 @@ def ensure_writable_config() -> None:
     print(f"Created new config file at {CONFIG_PATH}")
 
 
-def save_config_to_file(config: dict[str, Any]) -> None:
+def _save_config_to_file(config: dict[str, Any]) -> None:
     """Save config to YAML file with deterministic ordering."""
     tmp_path = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".tmp")
     with tmp_path.open("w", encoding="utf-8") as f:
@@ -143,7 +143,7 @@ def _run_config_write[T](
     try:
         with config_lock:
             result = mutate()
-            save_config_to_file(config if save_payload is None else save_payload)
+            _save_config_to_file(config if save_payload is None else save_payload)
             return result
     except HTTPException:
         raise
@@ -171,12 +171,12 @@ def _resolve_unique_entity_id(base_id: str, entities: dict[str, Any]) -> str:
 # =========================
 # Supabase JWT verification
 # =========================
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
-ACCOUNT_ID = os.getenv("ACCOUNT_ID")  # optional: enforce instance ownership
-MINDROOM_API_KEY = os.getenv("MINDROOM_API_KEY")  # optional: dashboard auth for standalone mode
+_SUPABASE_URL = os.getenv("SUPABASE_URL")
+_SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+_ACCOUNT_ID = os.getenv("ACCOUNT_ID")  # optional: enforce instance ownership
+_MINDROOM_API_KEY = os.getenv("MINDROOM_API_KEY")  # optional: dashboard auth for standalone mode
 
-STANDALONE_PUBLIC_PATHS = frozenset(
+_STANDALONE_PUBLIC_PATHS = frozenset(
     {
         "/api/google/callback",
         "/api/homeassistant/callback",
@@ -207,7 +207,7 @@ def _init_supabase_auth(supabase_url: str | None, supabase_anon_key: str | None)
     return create_client(supabase_url, supabase_anon_key)
 
 
-_supabase_auth: "SupabaseClient | None" = _init_supabase_auth(SUPABASE_URL, SUPABASE_ANON_KEY)
+_supabase_auth: "SupabaseClient | None" = _init_supabase_auth(_SUPABASE_URL, _SUPABASE_ANON_KEY)
 
 
 async def verify_user(request: Request, authorization: str | None = Header(None)) -> dict:
@@ -217,14 +217,14 @@ async def verify_user(request: Request, authorization: str | None = Header(None)
     """
     if _supabase_auth is None:
         # Standalone mode
-        if request.url.path in STANDALONE_PUBLIC_PATHS:
+        if request.url.path in _STANDALONE_PUBLIC_PATHS:
             return {"user_id": "standalone", "email": None}
 
-        if MINDROOM_API_KEY:
+        if _MINDROOM_API_KEY:
             if not authorization or not authorization.startswith("Bearer "):
                 raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
             token = authorization.removeprefix("Bearer ").strip()
-            if not secrets.compare_digest(token, MINDROOM_API_KEY):
+            if not secrets.compare_digest(token, _MINDROOM_API_KEY):
                 raise HTTPException(status_code=401, detail="Invalid API key")
         return {"user_id": "standalone", "email": None}
 
@@ -240,13 +240,13 @@ async def verify_user(request: Request, authorization: str | None = Header(None)
     if not user or not user.user:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    if ACCOUNT_ID and user.user.id != ACCOUNT_ID:
+    if _ACCOUNT_ID and user.user.id != _ACCOUNT_ID:
         raise HTTPException(status_code=403, detail="Forbidden")
 
     return {"user_id": user.user.id, "email": user.user.email}
 
 
-def load_config_from_file() -> None:
+def _load_config_from_file() -> None:
     """Load config from YAML file."""
     global config
     try:
@@ -257,10 +257,10 @@ def load_config_from_file() -> None:
         print(f"Error loading config: {e}")
 
 
-ensure_writable_config()
+_ensure_writable_config()
 
 # Load initial config
-load_config_from_file()
+_load_config_from_file()
 
 # Include routers
 app.include_router(credentials_router, dependencies=[Depends(verify_user)])

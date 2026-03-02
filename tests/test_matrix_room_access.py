@@ -84,7 +84,7 @@ async def test_configure_managed_room_access_public_mode(monkeypatch: pytest.Mon
     monkeypatch.setattr(matrix_rooms, "ensure_room_join_rule", ensure_join_rule)
     monkeypatch.setattr(matrix_rooms, "ensure_room_directory_visibility", ensure_directory_visibility)
 
-    result = await matrix_rooms.configure_managed_room_access(
+    result = await matrix_rooms._configure_managed_room_access(
         client=mock_client,
         room_key="lobby",
         room_id="!lobby:example.com",
@@ -114,7 +114,7 @@ async def test_configure_managed_room_access_invite_only_override(monkeypatch: p
     monkeypatch.setattr(matrix_rooms, "ensure_room_join_rule", ensure_join_rule)
     monkeypatch.setattr(matrix_rooms, "ensure_room_directory_visibility", ensure_directory_visibility)
 
-    result = await matrix_rooms.configure_managed_room_access(
+    result = await matrix_rooms._configure_managed_room_access(
         client=mock_client,
         room_key="lobby",
         room_id="!lobby:example.com",
@@ -154,9 +154,9 @@ async def test_existing_room_reconciliation_respects_flag(
     monkeypatch.setattr(matrix_rooms, "join_room", AsyncMock(return_value=True))
     monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", AsyncMock())
     configure_access = AsyncMock(return_value=True)
-    monkeypatch.setattr(matrix_rooms, "configure_managed_room_access", configure_access)
+    monkeypatch.setattr(matrix_rooms, "_configure_managed_room_access", configure_access)
 
-    room_id = await matrix_rooms.ensure_room_exists(
+    room_id = await matrix_rooms._ensure_room_exists(
         client=mock_client,
         room_key="lobby",
         config=config,
@@ -187,9 +187,9 @@ async def test_new_room_creation_applies_access_policy_in_multi_user_mode(monkey
     monkeypatch.setattr(matrix_rooms, "create_room", AsyncMock(return_value="!lobby:example.com"))
     monkeypatch.setattr(matrix_rooms, "add_room", MagicMock())
     configure_access = AsyncMock(return_value=True)
-    monkeypatch.setattr(matrix_rooms, "configure_managed_room_access", configure_access)
+    monkeypatch.setattr(matrix_rooms, "_configure_managed_room_access", configure_access)
 
-    room_id = await matrix_rooms.ensure_room_exists(
+    room_id = await matrix_rooms._ensure_room_exists(
         client=mock_client,
         room_key="lobby",
         config=config,
@@ -212,9 +212,9 @@ async def test_new_room_creation_applies_access_policy_in_multi_user_mode(monkey
 async def test_ensure_room_join_rule_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
     """Join-rule reconciliation should be idempotent when already in desired state."""
     mock_client = AsyncMock()
-    monkeypatch.setattr(matrix_client, "get_room_join_rule", AsyncMock(return_value="public"))
+    monkeypatch.setattr(matrix_client, "_get_room_join_rule", AsyncMock(return_value="public"))
     set_room_join_rule = AsyncMock(return_value=True)
-    monkeypatch.setattr(matrix_client, "set_room_join_rule", set_room_join_rule)
+    monkeypatch.setattr(matrix_client, "_set_room_join_rule", set_room_join_rule)
 
     result = await matrix_client.ensure_room_join_rule(mock_client, "!room:example.com", "public")
 
@@ -226,9 +226,9 @@ async def test_ensure_room_join_rule_idempotent(monkeypatch: pytest.MonkeyPatch)
 async def test_ensure_room_directory_visibility_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
     """Directory visibility reconciliation should be idempotent when already in desired state."""
     mock_client = AsyncMock()
-    monkeypatch.setattr(matrix_client, "get_room_directory_visibility", AsyncMock(return_value="private"))
+    monkeypatch.setattr(matrix_client, "_get_room_directory_visibility", AsyncMock(return_value="private"))
     set_room_directory_visibility = AsyncMock(return_value=True)
-    monkeypatch.setattr(matrix_client, "set_room_directory_visibility", set_room_directory_visibility)
+    monkeypatch.setattr(matrix_client, "_set_room_directory_visibility", set_room_directory_visibility)
 
     result = await matrix_client.ensure_room_directory_visibility(mock_client, "!room:example.com", "private")
 
@@ -245,7 +245,7 @@ async def test_set_room_join_rule_logs_actionable_permission_error(monkeypatch: 
     warning = MagicMock()
     monkeypatch.setattr(matrix_client.logger, "warning", warning)
 
-    result = await matrix_client.set_room_join_rule(mock_client, "!room:example.com", "public")
+    result = await matrix_client._set_room_join_rule(mock_client, "!room:example.com", "public")
 
     assert result is False
     assert warning.call_count == 1
@@ -268,7 +268,7 @@ async def test_set_room_directory_visibility_logs_actionable_permission_error(
     warning = MagicMock()
     monkeypatch.setattr(matrix_client.logger, "warning", warning)
 
-    result = await matrix_client.set_room_directory_visibility(mock_client, "!room:example.com", "public")
+    result = await matrix_client._set_room_directory_visibility(mock_client, "!room:example.com", "public")
 
     assert result is False
     assert warning.call_count == 1
@@ -285,7 +285,7 @@ async def test_set_room_directory_visibility_releases_response_on_success() -> N
     response = _FakeHttpResponse(status=200, body="")
     mock_client.send.return_value = response
 
-    result = await matrix_client.set_room_directory_visibility(mock_client, "!room:example.com", "public")
+    result = await matrix_client._set_room_directory_visibility(mock_client, "!room:example.com", "public")
 
     assert result is True
     assert response.released is True
@@ -312,10 +312,10 @@ async def test_existing_room_reconciliation_skipped_when_not_joined(monkeypatch:
     monkeypatch.setattr(matrix_rooms, "add_room", MagicMock())
     monkeypatch.setattr(matrix_rooms, "join_room", AsyncMock(return_value=False))
     configure_access = AsyncMock(return_value=True)
-    monkeypatch.setattr(matrix_rooms, "configure_managed_room_access", configure_access)
+    monkeypatch.setattr(matrix_rooms, "_configure_managed_room_access", configure_access)
 
     with pytest.raises(RuntimeError, match="could not join"):
-        await matrix_rooms.ensure_room_exists(
+        await matrix_rooms._ensure_room_exists(
             client=mock_client,
             room_key="lobby",
             config=config,
@@ -343,7 +343,7 @@ async def test_configure_managed_room_access_respects_alias_invite_only(monkeypa
     monkeypatch.setattr(matrix_rooms, "ensure_room_join_rule", ensure_join_rule)
     monkeypatch.setattr(matrix_rooms, "ensure_room_directory_visibility", ensure_directory_visibility)
 
-    result = await matrix_rooms.configure_managed_room_access(
+    result = await matrix_rooms._configure_managed_room_access(
         client=mock_client,
         room_key="secret",
         room_id="!secret:example.com",
@@ -373,7 +373,7 @@ async def test_ensure_all_rooms_exist_continues_after_room_failure(monkeypatch: 
         return "!ops:example.com"
 
     ensure_room_exists_mock = AsyncMock(side_effect=_ensure_room_exists)
-    monkeypatch.setattr(matrix_rooms, "ensure_room_exists", ensure_room_exists_mock)
+    monkeypatch.setattr(matrix_rooms, "_ensure_room_exists", ensure_room_exists_mock)
     logger_exception = MagicMock()
     monkeypatch.setattr(matrix_rooms.logger, "exception", logger_exception)
 
