@@ -65,7 +65,7 @@ def validate_knowledge_bases(
     return f"Error: Unknown knowledge bases: {invalid}. Available knowledge bases: {available}."
 
 
-class InfoType(str, Enum):
+class _InfoType(str, Enum):
     """Types of information that can be retrieved."""
 
     MINDROOM_DOCS = "mindroom_docs"
@@ -132,31 +132,31 @@ class ConfigManagerTools(Toolkit):
 
         """
         try:
-            if info_type == InfoType.MINDROOM_DOCS:
+            if info_type == _InfoType.MINDROOM_DOCS:
                 return self._get_mindroom_info()
-            if info_type == InfoType.CONFIG_SCHEMA:
+            if info_type == _InfoType.CONFIG_SCHEMA:
                 return self._get_config_schema()
-            if info_type == InfoType.AVAILABLE_MODELS:
+            if info_type == _InfoType.AVAILABLE_MODELS:
                 return self._get_available_models()
-            if info_type == InfoType.AGENTS:
+            if info_type == _InfoType.AGENTS:
                 return self._list_agents()
-            if info_type == InfoType.TEAMS:
+            if info_type == _InfoType.TEAMS:
                 return self._list_teams()
-            if info_type == InfoType.AVAILABLE_TOOLS:
+            if info_type == _InfoType.AVAILABLE_TOOLS:
                 return self._list_available_tools()
-            if info_type == InfoType.TOOL_DETAILS:
+            if info_type == _InfoType.TOOL_DETAILS:
                 if not name:
                     return "Error: tool_details requires 'name' parameter with the tool name"
                 return self._get_tool_details(name)
-            if info_type == InfoType.AGENT_CONFIG:
+            if info_type == _InfoType.AGENT_CONFIG:
                 if not name:
                     return "Error: agent_config requires 'name' parameter with the agent name"
                 return self._get_agent_config(name)
-            if info_type == InfoType.AGENT_TEMPLATE:
+            if info_type == _InfoType.AGENT_TEMPLATE:
                 if not name:
                     return "Error: agent_template requires 'name' parameter with the template type (researcher, developer, social, communicator, analyst, productivity)"
                 return self._generate_agent_template(name)
-            return f"Error: Unknown info_type '{info_type}'. Valid options: {', '.join([t.value for t in InfoType])}"
+            return f"Error: Unknown info_type '{info_type}'. Valid options: {', '.join([t.value for t in _InfoType])}"
         except Exception as e:
             logger.exception(f"Failed to get info for type {info_type}")
             return f"Error getting {info_type}: {e}"
