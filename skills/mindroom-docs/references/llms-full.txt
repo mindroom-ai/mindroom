@@ -104,22 +104,23 @@ mindroom run
 
 ## Features
 
-| Feature                   | Description                                                       |
-| ------------------------- | ----------------------------------------------------------------- |
-| **Agents**                | Single-specialty actors with specific tools and instructions      |
-| **Teams**                 | Collaborative bundles of agents (coordinate or collaborate modes) |
-| **Router**                | Built-in traffic director that routes messages to the right agent |
-| **Memory**                | Mem0-inspired memory system with agent, room, and team scopes     |
-| **Knowledge Bases**       | File-backed RAG indexing with per-agent base assignment           |
-| **Tools**                 | 100+ integrations for external services                           |
-| **Skills**                | OpenClaw-compatible skills system for extended agent capabilities |
-| **Scheduling**            | Schedule tasks with cron expressions or natural language          |
-| **Voice**                 | Speech-to-text transcription for voice messages                   |
-| **Images**                | Pass user-sent images to vision-capable AI models                 |
-| **Cultures**              | Shared evolving principles across groups of agents                |
-| **Authorization**         | Fine-grained user and room access control                         |
-| **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client       |
-| **Hot Reload**            | Config changes are detected and agents restart automatically      |
+| Feature                      | Description                                                       |
+| ---------------------------- | ----------------------------------------------------------------- |
+| **Agents**                   | Single-specialty actors with specific tools and instructions      |
+| **Teams**                    | Collaborative bundles of agents (coordinate or collaborate modes) |
+| **Router**                   | Built-in traffic director that routes messages to the right agent |
+| **Memory**                   | Mem0-inspired memory system with agent, room, and team scopes     |
+| **Knowledge Bases**          | File-backed RAG indexing with per-agent base assignment           |
+| **Tools**                    | 100+ integrations for external services                           |
+| **Skills**                   | OpenClaw-compatible skills system for extended agent capabilities |
+| **Scheduling**               | Schedule tasks with cron expressions or natural language          |
+| **Voice**                    | Speech-to-text transcription for voice messages                   |
+| **Images**                   | Pass user-sent images to vision-capable AI models                 |
+| **File & Video Attachments** | Context-scoped file and video handling with attachment IDs        |
+| **Cultures**                 | Shared evolving principles across groups of agents                |
+| **Authorization**            | Fine-grained user and room access control                         |
+| **OpenAI-Compatible API**    | Use agents from LibreChat, Open WebUI, or any OpenAI client       |
+| **Hot Reload**               | Config changes are detected and agents restart automatically      |
 
 ## Architecture
 
@@ -154,6 +155,7 @@ mindroom run
 - [Scheduling](https://docs.mindroom.chat/scheduling/index.md) - Schedule tasks with cron or natural language
 - [Voice Messages](https://docs.mindroom.chat/voice/index.md) - Voice message transcription
 - [Image Messages](https://docs.mindroom.chat/images/index.md) - Image analysis with vision models
+- [File & Video Attachments](https://docs.mindroom.chat/attachments/index.md) - Context-scoped file and video handling
 - [Authorization](https://docs.mindroom.chat/authorization/index.md) - User and room access control
 - [Architecture](https://docs.mindroom.chat/architecture/index.md) - How it works under the hood
 - [Deployment](https://docs.mindroom.chat/deployment/index.md) - Docker and Kubernetes deployment
@@ -1847,11 +1849,12 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 
 ## Memory & Storage
 
-| Icon              | Tool     | Description                                          | Config Required                |
-| ----------------- | -------- | ---------------------------------------------------- | ------------------------------ |
-| :lucide-database: | `memory` | Explicitly store and search agent memories on demand | -                              |
-| :lucide-database: | `mem0`   | Persistent memory system                             | `api_key` (optional for cloud) |
-| :lucide-database: | `zep`    | Conversation memory                                  | `api_key`                      |
+| Icon               | Tool          | Description                                                                                                                                        | Config Required                |
+| ------------------ | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| :lucide-database:  | `memory`      | Explicitly store and search agent memories on demand                                                                                               | -                              |
+| :lucide-database:  | `mem0`        | Persistent memory system                                                                                                                           | `api_key` (optional for cloud) |
+| :lucide-database:  | `zep`         | Conversation memory                                                                                                                                | `api_key`                      |
+| :lucide-paperclip: | `attachments` | List and register context-scoped file attachments (send via `matrix_message`) (see [Attachments](https://docs.mindroom.chat/attachments/index.md)) | -                              |
 
 ## Custom & Config
 
@@ -1861,7 +1864,7 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | :lucide-sliders-horizontal: | `config_manager` | MindRoom configuration management             | -               |
 | :lucide-workflow:           | `subagents`      | Spawn and communicate with sub-agent sessions | -               |
 
-Tool presets are config-only macros, not runtime tools. For OpenClaw workspace portability, `openclaw_compat` expands to `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, `subagents`, and `matrix_message`.
+Tool presets are config-only macros, not runtime tools. For OpenClaw workspace portability, `openclaw_compat` expands to `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, `subagents`, `matrix_message`, and `attachments`.
 
 ## Claude Agent Sessions
 
@@ -1999,6 +2002,7 @@ Preset expansion:
 - `scheduler`
 - `subagents`
 - `matrix_message`
+- `attachments`
 
 Memory is not a separate OpenClaw subsystem in MindRoom. It uses the normal MindRoom memory backend.
 
@@ -2054,7 +2058,7 @@ memory:
     enabled: true
 ```
 
-`memory_file_path` points the file-memory scope directly at the workspace root, so `MEMORY.md` is loaded automatically by the file backend as the entrypoint — no need to list it in `context_files`. `memory_file_path` is ignored unless the effective backend is `file`; if you switch this agent to `mem0`, re-add `MEMORY.md` to `context_files` when you still want it preloaded. The `openclaw_compat` preset already expands to native shell, coding, search/fetch, browser, scheduler, sub-agent orchestration, and `matrix_message` tools, so listing those tools individually is not necessary.
+`memory_file_path` points the file-memory scope directly at the workspace root, so `MEMORY.md` is loaded automatically by the file backend as the entrypoint — no need to list it in `context_files`. `memory_file_path` is ignored unless the effective backend is `file`; if you switch this agent to `mem0`, re-add `MEMORY.md` to `context_files` when you still want it preloaded. The `openclaw_compat` preset already expands to native shell, coding, search/fetch, browser, scheduler, sub-agent orchestration, `matrix_message`, and `attachments` tools, so listing those tools individually is not necessary.
 
 ## Recommended workspace layout
 
@@ -2968,7 +2972,7 @@ Voice messages in Matrix are:
 - Detected as `RoomMessageAudio` or `RoomEncryptedAudio` events
 - Downloaded from the Matrix media server
 - Decrypted if end-to-end encrypted (using the encryption key from the event)
-- Saved temporarily as `.ogg` files for processing
+- Processed in memory as audio bytes for STT requests
 - Sent to the STT service via the OpenAI-compatible API
 
 The router agent handles all voice message processing to avoid duplicate transcriptions.
@@ -2990,10 +2994,22 @@ MindRoom also supports text-to-speech (TTS) through agent tools. These are separ
 
 See the [Tools documentation](https://docs.mindroom.chat/tools/index.md) for configuration details.
 
+## Voice Fallback (No STT Configured)
+
+When voice is enabled but no STT provider is configured (or transcription fails), MindRoom falls back to raw audio passthrough:
+
+1. The voice message audio is downloaded and saved locally as an attachment
+1. A text fallback `🎤 [Attached voice message]` is sent to the room
+1. The raw audio is registered as an attachment ID available to agents in the thread
+1. When an agent responds in the thread, it automatically receives the raw audio as an Agno `Audio` object
+
+This means voice messages still reach agents even without STT -- agents with audio-capable models can process the raw audio directly. Attachment IDs in this fallback path use the same context-scoping rules described in [File & Video Attachments](https://docs.mindroom.chat/attachments/index.md).
+
 ## Limitations
 
 - Only OpenAI-compatible STT APIs are supported
 - Audio quality and background noise affect transcription accuracy
+- Without STT, agents receive raw audio instead of transcription -- the model must support audio inputs to process it
 
 ## Tips
 
@@ -3053,6 +3069,103 @@ AI response caching is automatically skipped when images are present, since imag
 - **Routing in multi-agent rooms** -- in multi-agent rooms without an `@mention`, the router selects the best agent based on the image caption.
 - **Bridge mention detection** uses `m.mentions` in the event, falling back to parsing HTML pills from `formatted_body` when `m.mentions` is absent (e.g., mautrix-telegram). Bridges that set neither may not trigger agent responses.
 - **Model support** -- the configured model must support vision. Text-only models will ignore the image or return an error.
+
+# File & Video Attachments
+
+MindRoom can process files and videos sent to Matrix rooms, passing them to agents for analysis or action.
+
+## Overview
+
+When a user sends a file or video in a Matrix room:
+
+1. The agent determines whether it should respond (via mention, thread participation, or DM)
+1. The media is downloaded and decrypted (if E2E encrypted)
+1. The file is saved locally and registered as a context-scoped attachment
+1. The agent receives the media as an Agno `File` or `Video` object plus an attachment ID it can reference in tool calls
+1. The agent responds with its analysis or takes action on the file
+
+File and video support works automatically for all agents -- no configuration is needed.
+
+## How It Works
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│ File/Video  │────>│ Download &  │────>│ Register    │────>│ Pass to AI  │
+│ (Matrix)    │     │ Decrypt     │     │ Attachment  │     │ Model       │
+└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+                                                                  │
+                                                                  v
+                                                            ┌─────────────┐
+                                                            │ Agent       │
+                                                            │ Responds    │
+                                                            └─────────────┘
+```
+
+## Usage
+
+Send a file or video in a Matrix room and mention the agent in the caption:
+
+- **With caption**: `@assistant Summarize this document` -- the caption is used as the prompt
+- **Without caption**: The agent receives `[Attached file]` or `[Attached video]` as the prompt
+- **Bare filename**: If the body is just the filename (e.g., `report.pdf`), it is treated the same as no caption
+
+Files and videos work in both direct messages and threads, and with both individual agents and teams.
+
+## Attachment IDs
+
+Each uploaded file or video is assigned a stable attachment ID (e.g., `att_abc123`). The agent's prompt is augmented with the available IDs:
+
+```
+Available attachment IDs: att_abc123. Use tool calls to inspect or process them.
+```
+
+Attachment IDs are **context-scoped** -- an attachment registered in one room or thread is not accessible from another. This prevents cross-room data leakage for ID-based access. Voice raw-audio fallback uses the same attachment ID mechanism; see [Voice Fallback](https://docs.mindroom.chat/voice/#voice-fallback-no-stt-configured).
+
+## The `attachments` Tool
+
+Agents can use the optional `attachments` tool to interact with context-scoped attachments programmatically.
+
+### Enabling
+
+Add `attachments` to the agent's tool list:
+
+```
+agents:
+  assistant:
+    tools:
+      - attachments
+```
+
+### Operations
+
+| Operation                        | Description                                                                                      |
+| -------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `list_attachments(target?)`      | List metadata for attachments in the current context (ID, local_path, filename, MIME type, size) |
+| `get_attachment(attachment_id)`  | Return one context attachment record, including its local file path                              |
+| `register_attachment(file_path)` | Register a local file path as a context attachment ID (`att_*`)                                  |
+
+`attachment_ids` accepts only context attachment IDs (`att_*`). `attachment_file_paths` accepts local file paths and auto-registers them in the current context before sending. Use `matrix_message(action="send"|"reply"|"thread-reply", attachment_ids=..., attachment_file_paths=...)` to send attachments.
+
+### Why use this tool?
+
+Not all AI models support direct file inputs. The `attachments` tool lets any model work with files by calling tools that operate on attachment IDs, even if the model itself cannot ingest the raw bytes.
+
+## Encryption
+
+Both unencrypted and E2E encrypted files and videos are supported. Encrypted media is decrypted transparently using the key material from the Matrix event.
+
+## Caching
+
+AI response caching is automatically skipped when files, videos, or audio are present, since media payloads are large and unlikely to repeat.
+
+## Retention
+
+MindRoom automatically prunes attachment metadata and managed `incoming_media/` files older than 30 days. Pruning runs opportunistically during new attachment registration.
+
+## Limitations
+
+- **Routing in multi-agent rooms** -- in multi-agent rooms without an `@mention`, the router selects the best agent based on the file caption.
+- **Model support** -- the configured model must support file or video inputs for direct analysis. Models that do not can still use the `attachments` tool to inspect and process files via tool calls.
 
 # Scheduling
 

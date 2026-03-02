@@ -9,7 +9,7 @@ import pytest
 import mindroom.tools  # noqa: F401
 from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA
 
-SKIP_CUSTOM = {"homeassistant", "gmail", "google_calendar", "google_sheets"}
+SKIP_CUSTOM = {"homeassistant", "gmail", "google_calendar", "google_sheets", "openclaw_compat"}
 
 
 @pytest.mark.parametrize("tool_name", list(_TOOL_REGISTRY.keys()))

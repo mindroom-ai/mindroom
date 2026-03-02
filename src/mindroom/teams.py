@@ -25,6 +25,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
+from mindroom.media_inputs import MediaInputs
 from mindroom.tool_system.events import (
     StructuredStreamChunk,
     ToolTraceEntry,
@@ -34,10 +35,9 @@ from mindroom.tool_system.events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Sequence
+    from collections.abc import AsyncIterator, Callable
 
     import nio
-    from agno.media import Image
     from agno.models.response import ToolExecution
 
     from mindroom.config.main import Config
@@ -529,7 +529,7 @@ async def team_response(
     orchestrator: MultiAgentOrchestrator,
     thread_history: list[dict] | None = None,
     model_name: str | None = None,
-    images: Sequence[Image] | None = None,
+    media: MediaInputs | None = None,
 ) -> str:
     """Create a team and execute response."""
     agents = _get_agents_from_orchestrator(agent_names, orchestrator)
@@ -537,6 +537,7 @@ async def team_response(
     if not agents:
         return _NO_AGENTS_RESPONSE
 
+    media_inputs = media or MediaInputs()
     prompt = _build_prompt_with_context(message, thread_history)
     team = _create_team_instance(agents, agent_names, mode, orchestrator, model_name)
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
@@ -545,7 +546,13 @@ async def team_response(
     logger.info(f"TEAM PROMPT: {prompt[:500]}")
 
     try:
-        response = await team.arun(prompt, images=images)
+        response = await team.arun(
+            prompt,
+            audio=media_inputs.audio,
+            images=media_inputs.images,
+            files=media_inputs.files,
+            videos=media_inputs.videos,
+        )
     except Exception as e:
         logger.exception(f"Error in team response with agents {agent_list}")
         # Return user-friendly error message
@@ -582,7 +589,7 @@ async def _team_response_stream_raw(
     orchestrator: MultiAgentOrchestrator,
     thread_history: list[dict] | None = None,
     model_name: str | None = None,
-    images: Sequence[Image] | None = None,
+    media: MediaInputs | None = None,
 ) -> AsyncIterator[Any]:
     """Yield raw team events (for structured live rendering). Falls back to a final response.
 
@@ -600,15 +607,23 @@ async def _team_response_stream_raw(
 
         return _empty()
 
+    media_inputs = media or MediaInputs()
     prompt = _build_prompt_with_context(message, thread_history)
     team = _create_team_instance(agents, agent_names, mode, orchestrator, model_name)
-
     logger.info(f"Created team with {len(agents)} agents in {mode.value} mode")
     for agent in agents:
         logger.debug(f"Team member: {agent.name}")
 
     try:
-        return team.arun(prompt, stream=True, stream_events=True, images=images)
+        return team.arun(
+            prompt,
+            stream=True,
+            stream_events=True,
+            audio=media_inputs.audio,
+            images=media_inputs.images,
+            files=media_inputs.files,
+            videos=media_inputs.videos,
+        )
     except Exception as e:
         logger.exception(f"Error in team streaming with agents {agent_names}")
         team_name = f"Team ({', '.join(agent_names)})"
@@ -627,7 +642,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     mode: TeamMode = TeamMode.COORDINATE,
     thread_history: list[dict] | None = None,
     model_name: str | None = None,
-    images: Sequence[Image] | None = None,
+    media: MediaInputs | None = None,
     show_tool_calls: bool = True,
 ) -> AsyncIterator[_TeamStreamChunk]:
     """Aggregate team streaming into a non-stream-style document, live.
@@ -666,7 +681,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         orchestrator=orchestrator,
         thread_history=thread_history,
         model_name=model_name,
-        images=images,
+        media=media,
     )
 
     def _scope_key_for_agent(agent_name: str) -> str:

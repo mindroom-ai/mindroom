@@ -16,6 +16,7 @@ from mindroom.tools.agentql import agentql_tools
 from mindroom.tools.airflow import airflow_tools
 from mindroom.tools.apify import apify_tools
 from mindroom.tools.arxiv import arxiv_tools
+from mindroom.tools.attachments import attachments_tools
 from mindroom.tools.aws_lambda import aws_lambda_tools
 from mindroom.tools.aws_ses import aws_ses_tools
 from mindroom.tools.baidusearch import baidusearch_tools
@@ -130,6 +131,7 @@ __all__ = [
     "airflow_tools",
     "apify_tools",
     "arxiv_tools",
+    "attachments_tools",
     "aws_lambda_tools",
     "aws_ses_tools",
     "baidusearch_tools",
@@ -235,6 +237,22 @@ __all__ = [
     "zep_tools",
     "zoom_tools",
 ]
+
+
+@register_tool_with_metadata(
+    name="openclaw_compat",
+    display_name="OpenClaw Compat",
+    description="Convenience bundle that implies shell, coding, browser, and other common tools",
+    category=ToolCategory.DEVELOPMENT,
+    icon="Workflow",
+    icon_color="text-orange-500",
+    helper_text="Implies: shell, coding, duckduckgo, website, browser, scheduler, subagents, matrix_message, attachments.",
+)
+def _openclaw_compat_tools() -> type[Toolkit]:
+    """Return an empty toolkit — the real tools are loaded via IMPLIED_TOOLS."""
+    from agno.tools import Toolkit
+
+    return Toolkit
 
 
 @register_tool_with_metadata(

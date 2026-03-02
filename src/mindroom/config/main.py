@@ -44,6 +44,9 @@ class Config(BaseModel):
     TOOL_PRESETS: ClassVar[dict[str, tuple[str, ...]]] = {
         "openclaw_compat": _OPENCLAW_COMPAT_PRESET_TOOLS,
     }
+    IMPLIED_TOOLS: ClassVar[dict[str, tuple[str, ...]]] = {
+        "matrix_message": ("attachments",),
+    }
 
     agents: dict[str, AgentConfig] = Field(default_factory=dict, description="Agent configurations")
     teams: dict[str, TeamConfig] = Field(default_factory=dict, description="Team configurations")
@@ -344,16 +347,19 @@ class Config(BaseModel):
 
     @classmethod
     def expand_tool_names(cls, tool_names: list[str]) -> list[str]:
-        """Expand configured tool presets and dedupe while preserving order."""
+        """Expand tool presets and implied tools, deduping while preserving order."""
         expanded: list[str] = []
         seen: set[str] = set()
-        for tool_name in tool_names:
-            entries = cls.get_tool_preset(tool_name) or (tool_name,)
-            for entry in entries:
-                if entry in seen:
-                    continue
-                seen.add(entry)
-                expanded.append(entry)
+        queue = list(tool_names)
+        while queue:
+            tool_name = queue.pop(0)
+            if tool_name in seen:
+                continue
+            seen.add(tool_name)
+            expanded.append(tool_name)
+            next_tools = list(cls.get_tool_preset(tool_name) or ())
+            next_tools.extend(cls.IMPLIED_TOOLS.get(tool_name, ()))
+            queue.extend(implied_tool for implied_tool in next_tools if implied_tool not in seen)
         return expanded
 
     def get_agent_memory_backend(self, agent_name: str) -> MemoryBackend:

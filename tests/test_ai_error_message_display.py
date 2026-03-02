@@ -31,6 +31,7 @@ class TestAIErrorDisplay:
         bot.agent_name = "test_agent"
         bot.storage_path = tmp_path
         bot.config = Config.from_yaml()
+        bot._build_runtime_tool_contexts = MagicMock(return_value=(None, None))
 
         # Mock the _edit_message method to track what gets edited
         edited_messages = []
@@ -87,6 +88,7 @@ class TestAIErrorDisplay:
         bot.matrix_id.domain = "localhost"
         bot.config = Config.from_yaml()
         bot.storage_path = tmp_path
+        bot._build_runtime_tool_contexts = MagicMock(return_value=(None, None))
 
         # Mock the _edit_message method to track what gets edited
         edited_messages = []
@@ -143,6 +145,7 @@ class TestAIErrorDisplay:
         bot.agent_name = "test_agent"
         bot.storage_path = tmp_path
         bot.config = Config.from_yaml()
+        bot._build_runtime_tool_contexts = MagicMock(return_value=(None, None))
 
         # Mock the _edit_message method to track what gets edited
         edited_messages = []
@@ -195,6 +198,7 @@ class TestAIErrorDisplay:
         bot.agent_name = "test_agent"
         bot.storage_path = tmp_path
         bot.config = Config.from_yaml()
+        bot._build_runtime_tool_contexts = MagicMock(return_value=(None, None))
 
         # Track edited messages
         edited_messages = []

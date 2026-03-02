@@ -8,9 +8,8 @@ import uuid
 from typing import TYPE_CHECKING
 
 import httpx
-import nio
 from agno.agent import Agent
-from nio import crypto
+from agno.media import Audio
 
 from mindroom.ai import get_model_instance
 from mindroom.authorization import get_available_agents_for_sender
@@ -18,8 +17,11 @@ from mindroom.commands.parsing import get_command_list
 from mindroom.constants import VOICE_PREFIX
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import agent_username_localpart
+from mindroom.matrix.media import download_media_bytes, media_mime_type
 
 if TYPE_CHECKING:
+    import nio
+
     from mindroom.config.main import Config
 
 logger = get_logger(__name__)
@@ -40,6 +42,7 @@ async def handle_voice_message(
     room: nio.MatrixRoom,
     event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
     config: Config,
+    audio: Audio | None = None,
 ) -> str | None:
     """Handle a voice message event.
 
@@ -48,6 +51,7 @@ async def handle_voice_message(
         room: Matrix room
         event: Voice message event
         config: Application configuration
+        audio: Optional pre-downloaded audio payload to reuse across fallbacks
 
     Returns:
         The transcribed and formatted message, or None if transcription failed
@@ -57,14 +61,13 @@ async def handle_voice_message(
         return None
 
     try:
-        # Download the audio file
-        audio_data = await _download_audio(client, event)
-        if not audio_data:
+        voice_audio = audio or await download_audio(client, event)
+        if voice_audio is None or voice_audio.content is None:
             logger.error("Failed to download audio file")
             return None
 
         # Transcribe the audio
-        transcription = await _transcribe_audio(audio_data, config)
+        transcription = await _transcribe_audio(voice_audio.content, config)
         if not transcription:
             logger.warning("Failed to transcribe audio or empty transcription")
             return None
@@ -93,42 +96,16 @@ async def handle_voice_message(
     return None
 
 
-async def _download_audio(
+async def download_audio(
     client: nio.AsyncClient,
     event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
-) -> bytes | None:
-    """Download and decrypt audio file from Matrix.
+) -> Audio | None:
+    """Download Matrix audio and convert it to an agno Audio media object."""
+    audio_data = await download_media_bytes(client, event)
+    if audio_data is None:
+        return None
 
-    Args:
-        client: Matrix client
-        event: Audio event
-
-    Returns:
-        Audio file bytes or None if failed
-
-    """
-    try:
-        # Unencrypted audio
-        mxc = event.url
-        response = await client.download(mxc)
-        if isinstance(response, nio.DownloadError):
-            logger.error(f"Download failed: {response}")
-            return None
-        if isinstance(event, nio.RoomMessageAudio):
-            return response.body
-
-        assert isinstance(event, nio.RoomEncryptedAudio)
-        # Decrypt the audio
-        return crypto.attachments.decrypt_attachment(
-            response.body,
-            event.source["content"]["file"]["key"]["k"],
-            event.source["content"]["file"]["hashes"]["sha256"],
-            event.source["content"]["file"]["iv"],
-        )
-
-    except Exception:
-        logger.exception("Error downloading audio")
-    return None
+    return Audio(content=audio_data, mime_type=media_mime_type(event))
 
 
 async def _transcribe_audio(audio_data: bytes, config: Config) -> str | None:

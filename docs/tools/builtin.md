@@ -180,6 +180,7 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | :lucide-database: | `memory` | Explicitly store and search agent memories on demand | - |
 | :lucide-database: | `mem0` | Persistent memory system | `api_key` (optional for cloud) |
 | :lucide-database: | `zep` | Conversation memory | `api_key` |
+| :lucide-paperclip: | `attachments` | List and register context-scoped file attachments (send via `matrix_message`) (see [Attachments](../attachments.md)) | - |
 
 ## Custom & Config
 
@@ -190,7 +191,7 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | :lucide-workflow: | `subagents` | Spawn and communicate with sub-agent sessions | - |
 
 Tool presets are config-only macros, not runtime tools.
-For OpenClaw workspace portability, `openclaw_compat` expands to `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, `subagents`, and `matrix_message`.
+For OpenClaw workspace portability, `openclaw_compat` expands to `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, `subagents`, `matrix_message`, and `attachments`.
 
 ## Claude Agent Sessions
 

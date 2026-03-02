@@ -60,8 +60,8 @@ async def test_voice_message_in_main_room_creates_thread(mock_router_bot: AgentB
 
         # Should reply to voice message
         assert call_kwargs["reply_to_event_id"] == "$voice123"
-        # Should NOT have a thread_id (None means create new thread from reply_to)
-        assert call_kwargs["thread_id"] is None
+        # Should use the voice event as thread root when starting a new thread
+        assert call_kwargs["thread_id"] == "$voice123"
         # Message should have voice prefix
         assert call_kwargs["response_text"] == "🎤 what is the weather"
 

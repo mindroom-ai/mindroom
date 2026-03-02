@@ -36,6 +36,7 @@ nav = [
   { "Memory System" = "memory.md" },
   { "Voice Messages" = "voice.md" },
   { "Image Messages" = "images.md" },
+  { "File & Video Attachments" = "attachments.md" },
   { "Scheduling" = "scheduling.md" },
   { "Authorization" = "authorization.md" },
   { "OpenAI-Compatible API" = "openai-api.md" },

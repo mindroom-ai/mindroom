@@ -116,6 +116,7 @@ mindroom run
 | **Scheduling** | Schedule tasks with cron expressions or natural language |
 | **Voice** | Speech-to-text transcription for voice messages |
 | **Images** | Pass user-sent images to vision-capable AI models |
+| **File & Video Attachments** | Context-scoped file and video handling with attachment IDs |
 | **Cultures** | Shared evolving principles across groups of agents |
 | **Authorization** | Fine-grained user and room access control |
 | **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client |
@@ -154,6 +155,7 @@ mindroom run
 - [Scheduling](scheduling.md) - Schedule tasks with cron or natural language
 - [Voice Messages](voice.md) - Voice message transcription
 - [Image Messages](images.md) - Image analysis with vision models
+- [File & Video Attachments](attachments.md) - Context-scoped file and video handling
 - [Authorization](authorization.md) - User and room access control
 - [Architecture](architecture/index.md) - How it works under the hood
 - [Deployment](deployment/index.md) - Docker and Kubernetes deployment

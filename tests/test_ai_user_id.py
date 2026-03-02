@@ -6,15 +6,23 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from agno.media import File
 from agno.models.metrics import Metrics
-from agno.run.agent import ModelRequestCompletedEvent, RunCompletedEvent, RunContentEvent
+from agno.models.vertexai.claude import Claude as VertexAIClaude
+from agno.run.agent import ModelRequestCompletedEvent, RunCompletedEvent, RunContentEvent, RunErrorEvent
 from agno.run.base import RunStatus
 
-from mindroom.ai import ai_response, stream_agent_response
+from mindroom.ai import (
+    _append_inline_media_fallback_prompt,
+    _is_media_validation_error_text,
+    ai_response,
+    stream_agent_response,
+)
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.media_inputs import MediaInputs
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -208,6 +216,302 @@ class TestUserIdPassthrough:
 
             mock_agent.arun.assert_called_once()
             assert mock_agent.arun.call_args.kwargs["user_id"] == "@user:localhost"
+
+    @pytest.mark.asyncio
+    async def test_ai_response_passes_all_files_for_vertex_claude(self, tmp_path: Path) -> None:
+        """Vertex Claude path should not silently drop non-PDF file media."""
+        mock_agent = MagicMock()
+        mock_agent.model = VertexAIClaude(id="claude-sonnet-4@20250514")
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        mock_run_output = MagicMock()
+        mock_run_output.content = "Response"
+        mock_run_output.tools = None
+        mock_agent.arun = AsyncMock(return_value=mock_run_output)
+
+        pdf_file = File(filepath=str(tmp_path / "report.pdf"), filename="report.pdf", mime_type="application/pdf")
+        zip_file = File(filepath=str(tmp_path / "archive.zip"), filename="archive.zip")
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai._get_cache", return_value=None),
+        ):
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
+            await ai_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                storage_path=tmp_path,
+                config=Config.from_yaml(),
+                media=MediaInputs(files=[pdf_file, zip_file]),
+            )
+
+        mock_agent.arun.assert_called_once()
+        sent_files = list(mock_agent.arun.call_args.kwargs["files"])
+        assert sent_files == [pdf_file, zip_file]
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_passes_all_files_for_vertex_claude(self, tmp_path: Path) -> None:
+        """Streaming path should not silently drop non-PDF files for Vertex Claude."""
+        mock_agent = MagicMock()
+        mock_agent.model = VertexAIClaude(id="claude-sonnet-4@20250514")
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[RunContentEvent]:
+            yield RunContentEvent(content="chunk")
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+
+        pdf_file = File(filepath=str(tmp_path / "report.pdf"), filename="report.pdf", mime_type="application/pdf")
+        zip_file = File(filepath=str(tmp_path / "archive.zip"), filename="archive.zip")
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai._get_cache", return_value=None),
+        ):
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
+            _chunks = [
+                _chunk
+                async for _chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    storage_path=tmp_path,
+                    config=Config.from_yaml(),
+                    media=MediaInputs(files=[pdf_file, zip_file]),
+                )
+            ]
+
+        mock_agent.arun.assert_called_once()
+        sent_files = list(mock_agent.arun.call_args.kwargs["files"])
+        assert sent_files == [pdf_file, zip_file]
+
+    @pytest.mark.asyncio
+    async def test_ai_response_retries_without_media_on_validation_error(self, tmp_path: Path) -> None:
+        """When inline media is rejected, non-streaming should retry once without media."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        mock_run_output = MagicMock()
+        mock_run_output.content = "Recovered response"
+        mock_run_output.tools = None
+        mock_agent.arun = AsyncMock(
+            side_effect=[
+                Exception(
+                    "litellm.BadRequestError: invalid_request_error: "
+                    "document.source.base64.media_type: Input should be 'application/pdf'",
+                ),
+                mock_run_output,
+            ],
+        )
+
+        document_file = File(
+            filepath=str(tmp_path / "report.pdf"),
+            filename="report.pdf",
+            mime_type="application/pdf",
+        )
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai._get_cache", return_value=None),
+        ):
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
+            response = await ai_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                storage_path=tmp_path,
+                config=Config.from_yaml(),
+                media=MediaInputs(files=[document_file]),
+            )
+
+        assert response == "Recovered response"
+        assert mock_agent.arun.await_count == 2
+        first_call = mock_agent.arun.await_args_list[0]
+        second_call = mock_agent.arun.await_args_list[1]
+        assert list(first_call.kwargs["files"]) == [document_file]
+        assert list(second_call.kwargs["files"]) == []
+        assert "Inline media unavailable for this model" in second_call.args[0]
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_retries_without_media_on_validation_error(self, tmp_path: Path) -> None:
+        """When inline media is rejected, streaming should retry once without media."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def failing_stream() -> AsyncIterator[object]:
+            yield RunErrorEvent(
+                content=(
+                    "litellm.BadRequestError: invalid_request_error: "
+                    "document.source.base64.media_type: Input should be 'application/pdf'"
+                ),
+            )
+
+        async def successful_stream() -> AsyncIterator[object]:
+            yield RunContentEvent(content="Recovered stream")
+
+        mock_agent.arun = MagicMock(side_effect=[failing_stream(), successful_stream()])
+
+        document_file = File(
+            filepath=str(tmp_path / "report.pdf"),
+            filename="report.pdf",
+            mime_type="application/pdf",
+        )
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai._get_cache", return_value=None),
+        ):
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    storage_path=tmp_path,
+                    config=Config.from_yaml(),
+                    media=MediaInputs(files=[document_file]),
+                )
+            ]
+
+        assert mock_agent.arun.call_count == 2
+        first_call = mock_agent.arun.call_args_list[0]
+        second_call = mock_agent.arun.call_args_list[1]
+        assert list(first_call.kwargs["files"]) == [document_file]
+        assert list(second_call.kwargs["files"]) == []
+        assert "Inline media unavailable for this model" in second_call.args[0]
+        assert any(isinstance(chunk, RunContentEvent) and chunk.content == "Recovered stream" for chunk in chunks)
+
+    @pytest.mark.parametrize(
+        ("error_text", "expected"),
+        [
+            (
+                "invalid_request_error: messages.1.content.0.document.source.base64.media_type: Input should be 'application/pdf'",
+                True,
+            ),
+            (
+                "invalid_request_error: messages.8.content.1.image.source.base64: The image was specified using the image/jpeg media type, but the image appears to be a image/png image",
+                True,
+            ),
+            ("invalid_request_error: max_tokens must be <= 4096", False),
+            ("Rate limit exceeded", False),
+        ],
+    )
+    def test_is_media_validation_error_text(self, error_text: str, expected: bool) -> None:
+        """Media validation matcher should target inline-media field/path failures only."""
+        assert _is_media_validation_error_text(error_text) is expected
+
+    def test_append_inline_media_fallback_prompt_is_idempotent(self) -> None:
+        """Fallback marker should only be appended once across retries."""
+        initial_prompt = "Inspect this attachment."
+        first = _append_inline_media_fallback_prompt(initial_prompt)
+        second = _append_inline_media_fallback_prompt(first)
+        assert first == second
+
+    @pytest.mark.asyncio
+    async def test_ai_response_does_not_retry_without_media_validation_match(self, tmp_path: Path) -> None:
+        """Non-media failures should not trigger inline-media retry even when media is present."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+        mock_agent.arun = AsyncMock(side_effect=Exception("invalid_request_error: max_tokens must be <= 4096"))
+
+        document_file = File(
+            filepath=str(tmp_path / "report.pdf"),
+            filename="report.pdf",
+            mime_type="application/pdf",
+        )
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai._get_cache", return_value=None),
+            patch("mindroom.ai.get_user_friendly_error_message", return_value="friendly") as mock_friendly_error,
+        ):
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
+            response = await ai_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                storage_path=tmp_path,
+                config=Config.from_yaml(),
+                media=MediaInputs(files=[document_file]),
+            )
+
+        assert response == "friendly"
+        assert mock_agent.arun.await_count == 1
+        mock_friendly_error.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_retries_only_once_on_repeated_media_validation_error(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Streaming should attempt exactly one inline-media fallback retry."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def media_validation_error_stream() -> AsyncIterator[object]:
+            yield RunErrorEvent(
+                content=(
+                    "invalid_request_error: "
+                    "messages.3.content.0.document.source.base64.media_type: Input should be 'application/pdf'"
+                ),
+            )
+
+        mock_agent.arun = MagicMock(
+            side_effect=[media_validation_error_stream(), media_validation_error_stream()],
+        )
+
+        document_file = File(
+            filepath=str(tmp_path / "report.pdf"),
+            filename="report.pdf",
+            mime_type="application/pdf",
+        )
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai._get_cache", return_value=None),
+            patch("mindroom.ai.get_user_friendly_error_message", return_value="friendly-error") as mock_friendly_error,
+        ):
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    storage_path=tmp_path,
+                    config=Config.from_yaml(),
+                    media=MediaInputs(files=[document_file]),
+                )
+            ]
+
+        assert mock_agent.arun.call_count == 2
+        first_call = mock_agent.arun.call_args_list[0]
+        second_call = mock_agent.arun.call_args_list[1]
+        assert list(first_call.kwargs["files"]) == [document_file]
+        assert list(second_call.kwargs["files"]) == []
+        assert second_call.args[0].count("Inline media unavailable for this model") == 1
+        assert chunks == ["friendly-error"]
+        mock_friendly_error.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_user_id_none_when_not_provided(self, tmp_path: Path) -> None:

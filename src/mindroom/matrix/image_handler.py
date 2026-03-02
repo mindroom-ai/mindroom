@@ -2,32 +2,17 @@
 
 from __future__ import annotations
 
-import nio
+from typing import TYPE_CHECKING
+
 from agno.media import Image
-from nio import crypto
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.media import download_media_bytes, media_mime_type, resolve_image_mime_type
+
+if TYPE_CHECKING:
+    import nio
 
 logger = get_logger(__name__)
-
-
-def extract_caption(event: nio.RoomMessageImage | nio.RoomEncryptedImage) -> str:
-    """Extract user caption from an image event using MSC2530 semantics.
-
-    Per the Matrix spec (MSC2530): when a ``filename`` field is present in the
-    event content and differs from ``body``, ``body`` is a user-provided
-    caption.  Otherwise ``body`` is just the filename.
-
-    Returns:
-        The caption text, or ``"[Attached image]"`` when no caption was provided.
-
-    """
-    content = event.source.get("content", {})
-    filename = content.get("filename")
-    body = event.body
-    if filename and filename != body and body:
-        return body
-    return "[Attached image]"
 
 
 async def download_image(
@@ -47,43 +32,16 @@ async def download_image(
         agno Image object or None if download failed
 
     """
-    try:
-        mxc = event.url
-        response = await client.download(mxc)
-        if isinstance(response, nio.DownloadError):
-            logger.error(f"Image download failed: {response}")
-            return None
-
-        if isinstance(event, nio.RoomMessageImage):
-            image_bytes = response.body
-        else:
-            # Decrypt the image (same pattern as voice_handler._download_audio).
-            # Return None on malformed payloads to match this function's contract.
-            try:
-                key = event.source["content"]["file"]["key"]["k"]
-                sha256 = event.source["content"]["file"]["hashes"]["sha256"]
-                iv = event.source["content"]["file"]["iv"]
-            except (KeyError, TypeError):
-                logger.exception(
-                    "Encrypted image payload missing decryption fields",
-                    event_id=getattr(event, "event_id", None),
-                )
-                return None
-
-            try:
-                image_bytes = crypto.attachments.decrypt_attachment(response.body, key, sha256, iv)
-            except Exception:
-                logger.exception("Image decryption failed")
-                return None
-
-        # Prefer Matrix-provided mimetype metadata and keep it unset when absent.
-        # For encrypted images, nio parses info.mimetype -> file.mimetype into
-        # event.mimetype; for unencrypted images we read content.info.mimetype.
-        if isinstance(event, nio.RoomEncryptedImage):
-            mime_type = event.mimetype
-        else:
-            mime_type = event.source.get("content", {}).get("info", {}).get("mimetype")
-        return Image(content=image_bytes, mime_type=mime_type)
-    except Exception:
-        logger.exception("Error downloading image")
-    return None
+    image_bytes = await download_media_bytes(client, event)
+    if image_bytes is None:
+        return None
+    mime_resolution = resolve_image_mime_type(image_bytes, media_mime_type(event))
+    if mime_resolution.is_mismatch:
+        event_id = getattr(event, "event_id", None)
+        logger.warning(
+            "Image MIME mismatch between Matrix metadata and payload bytes",
+            event_id=event_id if isinstance(event_id, str) else None,
+            declared_mime_type=mime_resolution.declared_mime_type,
+            detected_mime_type=mime_resolution.detected_mime_type,
+        )
+    return Image(content=image_bytes, mime_type=mime_resolution.effective_mime_type)
