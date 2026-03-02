@@ -82,6 +82,6 @@ async def wait_for_background_tasks(timeout: float | None = None) -> None:  # no
         await asyncio.gather(*_background_tasks, return_exceptions=True)
 
 
-def get_background_task_count() -> int:
+def _get_background_task_count() -> int:
     """Get the number of currently running background tasks."""
     return len(_background_tasks)
