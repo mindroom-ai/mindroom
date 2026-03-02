@@ -176,7 +176,7 @@ def get_configured_agents_for_room(room_id: str, config: Config) -> list[MatrixI
     return sorted(configured_agents, key=lambda x: x.full_id)
 
 
-def has_any_agent_mentions_in_thread(thread_history: list[dict[str, Any]], config: Config) -> bool:
+def _has_any_agent_mentions_in_thread(thread_history: list[dict[str, Any]], config: Config) -> bool:
     """Check if any agents are mentioned anywhere in the thread."""
     for msg in thread_history:
         content = msg.get("content", {})
