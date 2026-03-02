@@ -24,10 +24,10 @@ if TYPE_CHECKING:
 from mindroom.credentials import get_credentials_manager
 
 # Registry mapping tool names to their factory functions
-TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
+_TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
 
 
-def register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable[[], type[Toolkit]]]:
+def _register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable[[], type[Toolkit]]]:
     """Decorator to register a tool factory function.
 
     Args:
@@ -39,7 +39,7 @@ def register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable
     """
 
     def decorator(func: Callable[[], type[Toolkit]]) -> Callable[[], type[Toolkit]]:
-        TOOL_REGISTRY[name] = func
+        _TOOL_REGISTRY[name] = func
         return func
 
     return decorator
@@ -53,7 +53,7 @@ def _build_tool_instance(
     sandbox_tools_override: list[str] | None = None,
 ) -> Toolkit:
     """Instantiate a tool from the registry, applying credentials and sandbox proxy."""
-    tool_class = TOOL_REGISTRY[tool_name]()
+    tool_class = _TOOL_REGISTRY[tool_name]()
     creds_manager = get_credentials_manager()
     credentials = creds_manager.load_credentials(tool_name) or {}
     if credential_overrides:
@@ -80,8 +80,8 @@ def get_tool_by_name(
     sandbox_tools_override: list[str] | None = None,
 ) -> Toolkit:
     """Get a tool instance by its registered name."""
-    if tool_name not in TOOL_REGISTRY:
-        available = ", ".join(sorted(TOOL_REGISTRY.keys()))
+    if tool_name not in _TOOL_REGISTRY:
+        available = ", ".join(sorted(_TOOL_REGISTRY.keys()))
         msg = f"Unknown tool: {tool_name}. Available tools: {available}"
         raise ValueError(msg)
 
@@ -260,19 +260,19 @@ def register_tool_with_metadata(
         TOOL_METADATA[name] = metadata
 
         # Also register in TOOL_REGISTRY for actual tool loading
-        TOOL_REGISTRY[name] = func
+        _TOOL_REGISTRY[name] = func
 
         return func
 
     return decorator
 
 
-def get_tool_metadata(name: str) -> ToolMetadata | None:
+def _get_tool_metadata(name: str) -> ToolMetadata | None:
     """Get metadata for a tool by name."""
     return TOOL_METADATA.get(name)
 
 
-def get_all_tool_metadata() -> dict[str, ToolMetadata]:
+def _get_all_tool_metadata() -> dict[str, ToolMetadata]:
     """Get all tool metadata."""
     return TOOL_METADATA.copy()
 
