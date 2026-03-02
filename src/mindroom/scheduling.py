@@ -18,22 +18,22 @@ from cron_descriptor import get_description
 from croniter import croniter
 from pydantic import BaseModel, Field
 
-from .ai import get_model_instance
-from .authorization import get_available_agents_in_room
-from .constants import ORIGINAL_SENDER_KEY
-from .logging_config import get_logger
-from .matrix.client import (
+from mindroom.ai import get_model_instance
+from mindroom.authorization import get_available_agents_in_room
+from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.logging_config import get_logger
+from mindroom.matrix.client import (
     fetch_thread_history,
     get_latest_thread_event_id_if_needed,
     send_message,
 )
-from .matrix.identity import MatrixID
-from .matrix.mentions import format_message_with_mentions, parse_mentions_in_text
-from .matrix.message_builder import build_message_content
-from .thread_utils import get_agents_in_thread
+from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.mentions import format_message_with_mentions, parse_mentions_in_text
+from mindroom.matrix.message_builder import build_message_content
+from mindroom.thread_utils import get_agents_in_thread
 
 if TYPE_CHECKING:
-    from .config.main import Config
+    from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 

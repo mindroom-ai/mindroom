@@ -15,13 +15,13 @@ from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProf
 from agno.run.agent import RunOutput
 from agno.session.agent import AgentSession
 
-from . import agent_prompts
-from . import tools as _tools_module  # noqa: F401
-from .constants import ROUTER_AGENT_NAME, STORAGE_PATH_OBJ, resolve_config_relative_path
-from .logging_config import get_logger
-from .plugins import load_plugins
-from .skills import build_agent_skills
-from .tools_metadata import get_tool_by_name
+from mindroom import agent_prompts
+from mindroom import tools as _tools_module  # noqa: F401
+from mindroom.constants import ROUTER_AGENT_NAME, STORAGE_PATH_OBJ, resolve_config_relative_path
+from mindroom.logging_config import get_logger
+from mindroom.plugins import load_plugins
+from mindroom.skills import build_agent_skills
+from mindroom.tools_metadata import get_tool_by_name
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -29,9 +29,9 @@ if TYPE_CHECKING:
     from agno.knowledge.protocol import KnowledgeProtocol
     from agno.models.base import Model
 
-    from .config.agent import AgentConfig, CultureConfig, CultureMode
-    from .config.main import Config
-    from .config.models import DefaultsConfig
+    from mindroom.config.agent import AgentConfig, CultureConfig, CultureMode
+    from mindroom.config.main import Config
+    from mindroom.config.models import DefaultsConfig
 
 logger = get_logger(__name__)
 
@@ -420,7 +420,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         ValueError: If agent_name is not found in configuration
 
     """
-    from .ai import get_model_instance  # noqa: PLC0415
+    from mindroom.ai import get_model_instance  # noqa: PLC0415
 
     resolved_storage_path = storage_path if storage_path is not None else STORAGE_PATH_OBJ
 
@@ -438,7 +438,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     for tool_name in tool_names:
         try:
             if tool_name == "memory":
-                from .custom_tools.memory import MemoryTools  # noqa: PLC0415
+                from mindroom.custom_tools.memory import MemoryTools  # noqa: PLC0415
 
                 tools.append(
                     MemoryTools(
@@ -448,8 +448,8 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                     ),
                 )
             elif tool_name == "delegate":
-                from .custom_tools.delegate import MAX_DELEGATION_DEPTH as _MAX_DEPTH  # noqa: PLC0415
-                from .custom_tools.delegate import DelegateTools  # noqa: PLC0415
+                from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH as _MAX_DEPTH  # noqa: PLC0415
+                from mindroom.custom_tools.delegate import DelegateTools  # noqa: PLC0415
 
                 if not agent_config.delegate_to:
                     logger.warning(
@@ -471,7 +471,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                         ),
                     )
             elif tool_name == "self_config":
-                from .custom_tools.self_config import SelfConfigTools  # noqa: PLC0415
+                from mindroom.custom_tools.self_config import SelfConfigTools  # noqa: PLC0415
 
                 tools.append(SelfConfigTools(agent_name=agent_name, config_path=config_path))
             else:
@@ -480,7 +480,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             logger.warning(f"Could not load tool '{tool_name}' for agent '{agent_name}': {e}")
 
     # Auto-inject delegation tool when delegate_to is configured
-    from .custom_tools.delegate import MAX_DELEGATION_DEPTH, DelegateTools  # noqa: PLC0415
+    from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH, DelegateTools  # noqa: PLC0415
 
     if agent_config.delegate_to and "delegate" not in tool_names and delegation_depth < MAX_DELEGATION_DEPTH:
         tools.append(
@@ -498,7 +498,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         agent_config.allow_self_config if agent_config.allow_self_config is not None else defaults.allow_self_config
     )
     if allow_self_config and not any(getattr(tool, "name", None) == "self_config" for tool in tools):
-        from .custom_tools.self_config import SelfConfigTools  # noqa: PLC0415
+        from mindroom.custom_tools.self_config import SelfConfigTools  # noqa: PLC0415
 
         tools.append(SelfConfigTools(agent_name=agent_name, config_path=config_path))
 

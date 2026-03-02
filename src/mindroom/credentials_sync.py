@@ -10,9 +10,9 @@ while still picking up .env changes for keys that were never manually set.
 import os
 from pathlib import Path
 
-from .constants import PROVIDER_ENV_KEYS
-from .credentials import get_credentials_manager
-from .logging_config import get_logger
+from mindroom.constants import PROVIDER_ENV_KEYS
+from mindroom.credentials import get_credentials_manager
+from mindroom.logging_config import get_logger
 
 logger = get_logger(__name__)
 

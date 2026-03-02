@@ -21,8 +21,7 @@ from mindroom.constants import (
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.teams import TeamFormationDecision, TeamMode
-
-from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
 
 def _extract_agent_side_effect(user_id: str, config: Config) -> str | None:  # noqa: ARG001

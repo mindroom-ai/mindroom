@@ -19,8 +19,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-
-from .conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD
 
 if TYPE_CHECKING:
     from pathlib import Path

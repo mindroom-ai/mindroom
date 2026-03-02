@@ -10,8 +10,7 @@ from zoneinfo import ZoneInfo
 
 from mindroom.constants import resolve_config_relative_path
 from mindroom.logging_config import get_logger
-
-from .config import create_memory_instance
+from mindroom.memory.config import create_memory_instance
 
 if TYPE_CHECKING:
     from pathlib import Path

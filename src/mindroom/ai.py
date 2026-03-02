@@ -30,15 +30,15 @@ from agno.run.agent import (
 from agno.run.base import RunStatus
 from agno.utils.message import filter_tool_calls
 
-from .agents import _get_agent_session, create_agent, create_session_storage, get_seen_event_ids
-from .constants import AI_RUN_METADATA_KEY, ENABLE_AI_CACHE, PROVIDER_ENV_KEYS, ROUTER_AGENT_NAME
-from .credentials import get_credentials_manager
-from .credentials_sync import get_api_key_for_provider, get_ollama_host
-from .error_handling import get_user_friendly_error_message
-from .logging_config import get_logger
-from .media_inputs import MediaInputs
-from .memory import build_memory_enhanced_prompt
-from .tool_events import (
+from mindroom.agents import _get_agent_session, create_agent, create_session_storage, get_seen_event_ids
+from mindroom.constants import AI_RUN_METADATA_KEY, ENABLE_AI_CACHE, PROVIDER_ENV_KEYS, ROUTER_AGENT_NAME
+from mindroom.credentials import get_credentials_manager
+from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
+from mindroom.error_handling import get_user_friendly_error_message
+from mindroom.logging_config import get_logger
+from mindroom.media_inputs import MediaInputs
+from mindroom.memory import build_memory_enhanced_prompt
+from mindroom.tool_events import (
     complete_pending_tool_block,
     extract_tool_completed_info,
     format_tool_combined,
@@ -54,9 +54,9 @@ if TYPE_CHECKING:
     from agno.models.base import Model
     from agno.session.agent import AgentSession
 
-    from .config.main import Config
-    from .config.models import ModelConfig
-    from .tool_events import ToolTraceEntry
+    from mindroom.config.main import Config
+    from mindroom.config.models import ModelConfig
+    from mindroom.tool_events import ToolTraceEntry
 
 logger = get_logger(__name__)
 

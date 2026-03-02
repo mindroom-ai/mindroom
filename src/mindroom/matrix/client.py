@@ -16,10 +16,9 @@ from nio import crypto
 from mindroom.config.matrix import RoomDirectoryVisibility, RoomJoinRule
 from mindroom.constants import ENCRYPTION_KEYS_DIR, MATRIX_SSL_VERIFY
 from mindroom.logging_config import get_logger
-
-from .event_info import EventInfo
-from .large_messages import prepare_large_message
-from .message_content import extract_and_resolve_message, extract_edit_body
+from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.large_messages import prepare_large_message
+from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body
 
 logger = get_logger(__name__)
 

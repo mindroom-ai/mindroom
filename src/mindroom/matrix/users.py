@@ -10,11 +10,10 @@ import nio
 from mindroom.config.main import Config
 from mindroom.constants import MATRIX_SSL_VERIFY, ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
-
-from . import provisioning
-from .client import login, matrix_client
-from .identity import MatrixID, agent_username_localpart, extract_server_name_from_homeserver
-from .state import MatrixState
+from mindroom.matrix import provisioning
+from mindroom.matrix.client import login, matrix_client
+from mindroom.matrix.identity import MatrixID, agent_username_localpart, extract_server_name_from_homeserver
+from mindroom.matrix.state import MatrixState
 
 logger = get_logger(__name__)
 

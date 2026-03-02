@@ -9,8 +9,8 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypedDict
 
-from .constants import TRACKING_DIR
-from .logging_config import get_logger
+from mindroom.constants import TRACKING_DIR
+from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from pathlib import Path
