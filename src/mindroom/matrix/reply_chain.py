@@ -414,11 +414,17 @@ async def derive_conversation_context(
     fetch_history: _FetchThreadHistory,
 ) -> tuple[bool, str | None, list[dict[str, Any]]]:
     """Derive conversation context from threads or reply chains."""
-    if event_info.thread_id:
-        thread_history = await fetch_history(client, room_id, event_info.thread_id)
-        return True, event_info.thread_id, thread_history
+    thread_root_id = event_info.thread_id
+    if thread_root_id is None and event_info.is_edit:
+        # Matrix edit events use top-level `m.replace`; thread relation can
+        # live in `m.new_content` and should still resolve to thread history.
+        thread_root_id = event_info.thread_id_from_edit
+    if thread_root_id is not None:
+        thread_history = await fetch_history(client, room_id, thread_root_id)
+        return True, thread_root_id, thread_history
 
-    if not event_info.reply_to_event_id:
+    reply_chain_seed = event_info.original_event_id if event_info.is_edit else event_info.reply_to_event_id
+    if not reply_chain_seed:
         return False, None, []
 
     (
@@ -432,7 +438,7 @@ async def derive_conversation_context(
         logger,
         fetch_history,
         room_id,
-        event_info.reply_to_event_id,
+        reply_chain_seed,
     )
     if points_to_thread:
         if is_full_thread_history:
@@ -444,5 +450,7 @@ async def derive_conversation_context(
         return True, context_root_id, thread_history
 
     # Policy choice: reply-only chains are still treated as one conversation
-    # context so responder selection and memory use a stable root.
-    return True, context_root_id, chain_history
+    # context so responder selection and memory use a stable root. Edits that
+    # don't map to a thread keep room-level context behavior.
+    is_thread_context = not event_info.is_edit
+    return is_thread_context, context_root_id if is_thread_context else None, chain_history if is_thread_context else []

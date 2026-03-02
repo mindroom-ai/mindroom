@@ -309,8 +309,8 @@ class TestThreadHistory:
         assert history[1]["body"] == "Final answer"
 
     @pytest.mark.asyncio
-    async def test_fetch_thread_history_edit_without_thread_ignored(self) -> None:
-        """Ignore edits that do not include thread metadata in m.new_content."""
+    async def test_fetch_thread_history_edit_without_thread_updates_existing_message(self) -> None:
+        """Apply edit bodies even when m.new_content does not carry thread metadata."""
         client = AsyncMock()
 
         root_event = self._make_text_event(
@@ -341,7 +341,7 @@ class TestThreadHistory:
             source_content={
                 "body": "* replacement",
                 "m.new_content": {
-                    "body": "Should be ignored",
+                    "body": "Updated answer",
                 },
                 "m.relates_to": {
                     "rel_type": "m.replace",
@@ -358,7 +358,38 @@ class TestThreadHistory:
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
 
         assert [msg["event_id"] for msg in history] == ["$thread_root", "$agent_msg"]
-        assert history[1]["body"] == "Original answer"
+        assert history[1]["body"] == "Updated answer"
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_history_edit_without_thread_does_not_synthesize_missing_original(self) -> None:
+        """Do not synthesize messages from edits without explicit thread metadata."""
+        client = AsyncMock()
+
+        edit_only_event = self._make_text_event(
+            event_id="$edit1",
+            sender="@agent:localhost",
+            body="* replacement",
+            server_timestamp=3000,
+            source_content={
+                "body": "* replacement",
+                "m.new_content": {
+                    "body": "Should remain hidden",
+                },
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$missing_original",
+                },
+            },
+        )
+
+        response = MagicMock(spec=nio.RoomMessagesResponse)
+        response.chunk = [edit_only_event]
+        response.end = None
+        client.room_messages.return_value = response
+
+        history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+
+        assert history == []
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_edit_only_event_still_visible(self) -> None:

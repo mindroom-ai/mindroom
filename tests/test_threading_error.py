@@ -319,6 +319,101 @@ class TestThreadingBehavior:
         mock_fetch.assert_awaited_once_with(bot.client, room.room_id, "$thread_root:localhost")
 
     @pytest.mark.asyncio
+    async def test_extract_context_edit_uses_thread_from_new_content(self, bot: AgentBot) -> None:
+        """Edit events with thread metadata in m.new_content should resolve thread context."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "* updated",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "updated",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
+                    },
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$thread_msg:localhost"},
+                },
+                "event_id": "$edit_event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567894,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        expected_history = [
+            {"event_id": "$thread_root:localhost", "body": "Root"},
+            {"event_id": "$thread_msg:localhost", "body": "Original"},
+        ]
+        with patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=expected_history)) as mock_fetch:
+            context = await bot._extract_message_context(room, event)
+
+        assert context.is_thread is True
+        assert context.thread_id == "$thread_root:localhost"
+        assert context.thread_history == expected_history
+        mock_fetch.assert_awaited_once_with(bot.client, room.room_id, "$thread_root:localhost")
+
+    @pytest.mark.asyncio
+    async def test_extract_context_edit_resolves_thread_from_original_event(self, bot: AgentBot) -> None:
+        """Edits without nested thread metadata should still resolve to the edited message thread."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "* updated",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "updated",
+                        "msgtype": "m.text",
+                    },
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$thread_msg:localhost"},
+                },
+                "event_id": "$edit_event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567895,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        bot.client.room_get_event = AsyncMock(
+            return_value=nio.RoomGetEventResponse.from_dict(
+                {
+                    "content": {
+                        "body": "Thread message",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
+                    },
+                    "event_id": "$thread_msg:localhost",
+                    "sender": "@mindroom_general:localhost",
+                    "origin_server_ts": 1234567893,
+                    "room_id": "!test:localhost",
+                    "type": "m.room.message",
+                },
+            ),
+        )
+
+        expected_history = [
+            {"event_id": "$thread_root:localhost", "body": "Root"},
+            {"event_id": "$thread_msg:localhost", "body": "Thread message"},
+        ]
+        with patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=expected_history)) as mock_fetch:
+            context = await bot._extract_message_context(room, event)
+
+        assert context.is_thread is True
+        assert context.thread_id == "$thread_root:localhost"
+        assert context.thread_history == expected_history
+        bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$thread_msg:localhost")
+        mock_fetch.assert_awaited_once_with(bot.client, room.room_id, "$thread_root:localhost")
+
+    @pytest.mark.asyncio
     async def test_extract_context_builds_reply_chain_history_without_threads(self, bot: AgentBot) -> None:
         """Reply-only chains should still keep linear conversation context."""
         room = MagicMock(spec=nio.MatrixRoom)
