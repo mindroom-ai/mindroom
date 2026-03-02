@@ -43,30 +43,40 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 | `matrix/` | Matrix protocol integration (client, users, rooms, presence, provisioning, message formatting) |
 | `matrix/large_messages.py` | Large-message sidecar storage and retrieval for oversized Matrix payloads |
 | `matrix/message_content.py` | Canonical Matrix message content building for text, edits, and tool traces |
+| `matrix/message_builder.py` | Message content building helpers |
 | `matrix/provisioning.py` | Hosted provisioning client flow used for local pairing and server-side agent registration |
-| `commands.py` | Chat command parsing (`!help`, `!schedule`, `!skill`, etc.) |
+| `matrix/image_handler.py` | Image message download, decryption, and AI processing |
+| `matrix/media.py` | Shared Matrix media download and decryption helpers |
+| `matrix/room_cleanup.py` | Orphaned bot cleanup from rooms |
+| `matrix/event_info.py` | Event metadata parsing |
+| `matrix/reply_chain.py` | Reply chain context management |
+| `matrix/identity.py` | Matrix ID parsing and utilities |
+| `matrix/mentions.py` | Matrix mention formatting |
+| `matrix/typing.py` | Typing indicator utilities |
+| `matrix/avatar.py` | Avatar management |
+| `commands/` | Chat command parsing (`!help`, `!schedule`, `!skill`, etc.) |
+| `commands/config_commands.py` | Chat-based config commands (`!config`) |
+| `commands/config_confirmation.py` | Interactive config confirmation workflows |
 | `voice_handler.py` | Voice message download, transcription, and command recognition |
 | `tool_system/sandbox_proxy.py` | Container sandbox proxy for isolating shell/python tools |
 | `streaming.py` | Response streaming via progressive message edits |
 | `agent_prompts.py` | Rich built-in prompts for named agents (code, research, etc.) |
-| `image_handler.py` | Image message download, decryption, and AI processing |
 | `attachments.py` | Attachment persistence, registration, and context-scoped resolution |
 | `attachment_media.py` | Convert attachment records to Agno media objects |
-| `tool_runtime_context.py` | Shared runtime ContextVar for tool calls (including attachment scope) |
-| `matrix/media.py` | Shared Matrix media download and decryption helpers |
+| `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `api/` | FastAPI REST API (dashboard, credentials, OpenAI-compatible endpoint) |
 | `custom_tools/` | Built-in custom tool implementations (gmail, calendar, scheduler, etc.) |
 | `background_tasks.py` | Background task management for non-blocking operations |
 | `tool_system/events.py` | Tool-event formatting and metadata for Matrix messages |
+| `tool_system/metadata.py` | Tool registry metadata and registration decorators |
+| `tool_system/runtime_context.py` | Shared runtime ContextVar for tool calls (including attachment scope) |
 | `constants.py` | Shared constants, paths, and environment variable defaults |
 | `error_handling.py` | User-friendly error message extraction |
 | `authorization.py` | Sender and per-agent authorization checks |
 | `thread_utils.py` | Thread analysis and agent detection |
 | `file_watcher.py` | File change detection for config hot-reload |
-| `config_confirmation.py` | Interactive config confirmation workflows |
 | `interactive.py` | Interactive Q&A system via Matrix reactions |
 | `stop.py` | StopManager for cancelling in-progress responses |
-| `room_cleanup.py` | Orphaned bot cleanup from rooms |
 | `topic_generator.py` | AI-generated room topics |
 | `cli/main.py` | Main CLI entry point (Typer app) |
 | `cli/banner.py` | CLI startup banner |
@@ -74,13 +84,9 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 | `cli/connect.py` | `mindroom connect` pairing helpers and owner placeholder replacement |
 | `cli/doctor.py` | Doctor command implementation |
 | `cli/local_stack.py` | Local stack setup command |
-| `config_commands.py` | Chat-based config commands (`!config`) |
 | `credentials_sync.py` | `.env` to credentials vault sync |
 | `logging_config.py` | Structured logging setup |
 | `response_tracker.py` | Duplicate response prevention |
-| `scheduling_context.py` | Scheduling tool context management |
-| `tool_system/metadata.py` | Tool registry metadata and registration decorators |
-| `tool_system/runtime_context.py` | Tool runtime context for custom tools |
 | `knowledge/utils.py` | Multi-knowledge-base vector DB utilities |
 
 **Persistent state** lives under `mindroom_data/` (next to `config.yaml`, overridable via `MINDROOM_STORAGE_PATH`):
@@ -145,6 +151,15 @@ defaults:
   tools: [scheduler]
   markdown: true
   enable_streaming: true
+
+memory:
+  backend: mem0
+
+plugins: []
+
+room_models: {}
+
+bot_accounts: []
 
 models:
   default:
