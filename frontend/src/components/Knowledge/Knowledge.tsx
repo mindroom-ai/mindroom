@@ -46,9 +46,15 @@ interface KnowledgeFilesResponse {
   file_count: number;
 }
 
+const MIN_CHUNK_SIZE = 128;
+const DEFAULT_CHUNK_SIZE = 5000;
+const DEFAULT_CHUNK_OVERLAP = 0;
+
 const DEFAULT_BASE_SETTINGS: KnowledgeBaseConfig = {
   path: './knowledge_docs/default',
   watch: true,
+  chunk_size: DEFAULT_CHUNK_SIZE,
+  chunk_overlap: DEFAULT_CHUNK_OVERLAP,
 };
 
 const DEFAULT_GIT_SETTINGS: KnowledgeGitConfig = {
@@ -82,6 +88,24 @@ function defaultGitSettings(gitConfig?: KnowledgeGitConfig): KnowledgeGitConfig 
   return {
     ...DEFAULT_GIT_SETTINGS,
     ...gitConfig,
+  };
+}
+
+function normalizeChunking(
+  chunkSize: number | undefined,
+  chunkOverlap: number | undefined
+): Pick<KnowledgeBaseConfig, 'chunk_size' | 'chunk_overlap'> {
+  const nextChunkSize =
+    typeof chunkSize === 'number' && Number.isFinite(chunkSize)
+      ? Math.max(MIN_CHUNK_SIZE, Math.trunc(chunkSize))
+      : DEFAULT_CHUNK_SIZE;
+  const requestedOverlap =
+    typeof chunkOverlap === 'number' && Number.isFinite(chunkOverlap)
+      ? Math.max(0, Math.trunc(chunkOverlap))
+      : DEFAULT_CHUNK_OVERLAP;
+  return {
+    chunk_size: nextChunkSize,
+    chunk_overlap: Math.min(requestedOverlap, nextChunkSize - 1),
   };
 }
 
@@ -201,9 +225,11 @@ export function Knowledge() {
       return;
     }
 
+    const chunking = normalizeChunking(selectedConfig.chunk_size, selectedConfig.chunk_overlap);
     setSettings({
       path: selectedConfig.path,
       watch: selectedConfig.watch,
+      ...chunking,
       git: selectedConfig.git ? defaultGitSettings(selectedConfig.git) : undefined,
     });
   }, [knowledgeBases, selectedBase]);
@@ -289,12 +315,17 @@ export function Knowledge() {
       return;
     }
 
+    const normalizedChunking = normalizeChunking(settings.chunk_size, settings.chunk_overlap);
     const nextSettings: KnowledgeBaseConfig = settings.git
       ? {
           ...settings,
+          ...normalizedChunking,
           git: normalizeGitConfig(settings.git),
         }
-      : settings;
+      : {
+          ...settings,
+          ...normalizedChunking,
+        };
 
     setSettings(nextSettings);
     updateKnowledgeBase(selectedBase, nextSettings);
@@ -346,6 +377,8 @@ export function Knowledge() {
       const nextBaseConfig: KnowledgeBaseConfig = {
         path: defaultPathForBase(baseName),
         watch: true,
+        chunk_size: DEFAULT_CHUNK_SIZE,
+        chunk_overlap: DEFAULT_CHUNK_OVERLAP,
       };
 
       if (newBaseSourceType === 'git') {
@@ -876,6 +909,57 @@ export function Knowledge() {
                     checked={settings.watch}
                     onCheckedChange={checked => updateSettings({ watch: checked === true })}
                   />
+                </div>
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium" htmlFor="knowledge-chunk-size">
+                      Chunk Size (characters)
+                    </label>
+                    <Input
+                      id="knowledge-chunk-size"
+                      type="number"
+                      min={MIN_CHUNK_SIZE}
+                      value={settings.chunk_size ?? DEFAULT_CHUNK_SIZE}
+                      onChange={event => {
+                        const parsedValue = Number.parseInt(event.target.value, 10);
+                        updateSettings({
+                          chunk_size:
+                            Number.isNaN(parsedValue) || parsedValue < MIN_CHUNK_SIZE
+                              ? MIN_CHUNK_SIZE
+                              : parsedValue,
+                        });
+                      }}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Larger chunks reduce requests but increase per-request token load.
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium" htmlFor="knowledge-chunk-overlap">
+                      Chunk Overlap (characters)
+                    </label>
+                    <Input
+                      id="knowledge-chunk-overlap"
+                      type="number"
+                      min={0}
+                      value={settings.chunk_overlap ?? DEFAULT_CHUNK_OVERLAP}
+                      onChange={event => {
+                        const parsedValue = Number.parseInt(event.target.value, 10);
+                        const nextChunkSize = settings.chunk_size ?? DEFAULT_CHUNK_SIZE;
+                        const normalizedValue = Number.isNaN(parsedValue)
+                          ? 0
+                          : Math.max(0, Math.min(parsedValue, nextChunkSize - 1));
+                        updateSettings({
+                          chunk_overlap: normalizedValue,
+                        });
+                      }}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Must stay lower than chunk size.
+                    </p>
+                  </div>
                 </div>
 
                 {settingsSourceType === 'git' && settings.git ? (
