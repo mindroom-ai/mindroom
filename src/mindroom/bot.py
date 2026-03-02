@@ -12,7 +12,9 @@ from typing import TYPE_CHECKING, Any, Literal
 import nio
 from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
 
-from . import config_confirmation, image_handler, interactive, voice_handler
+from mindroom.matrix import image_handler
+
+from . import config_confirmation, interactive, voice_handler
 from .agents import create_agent, create_session_storage, remove_run_by_event_id
 from .ai import ai_response, stream_agent_response
 from .authorization import (
@@ -46,6 +48,7 @@ from .matrix.identity import (
 from .matrix.mentions import format_message_with_mentions
 from .matrix.presence import build_agent_status_message, is_user_online, set_presence_status, should_use_streaming
 from .matrix.reply_chain import ReplyChainCaches, derive_conversation_context
+from .matrix.room_cleanup import cleanup_all_orphaned_bots
 from .matrix.rooms import (
     is_dm_room,
     leave_non_dm_rooms,
@@ -63,7 +66,6 @@ from .memory.auto_flush import (
     reprioritize_auto_flush_sessions,
 )
 from .response_tracker import ResponseTracker
-from .room_cleanup import cleanup_all_orphaned_bots
 from .routing import suggest_agent_for_message
 from .scheduling import (
     restore_scheduled_tasks,
