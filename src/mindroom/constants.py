@@ -46,7 +46,7 @@ def config_search_locations() -> list[Path]:
     return locations
 
 
-def config_base_dir(config_path: Path | None = None) -> Path:
+def _config_base_dir(config_path: Path | None = None) -> Path:
     """Return the absolute directory containing the active config file."""
     resolved_config_path = (config_path or CONFIG_PATH).expanduser().resolve()
     return resolved_config_path.parent
@@ -57,7 +57,7 @@ def resolve_config_relative_path(raw_path: str | Path, *, config_path: Path | No
     unresolved = Path(raw_path).expanduser()
     if unresolved.is_absolute():
         return unresolved.resolve()
-    return (config_base_dir(config_path) / unresolved).resolve()
+    return (_config_base_dir(config_path) / unresolved).resolve()
 
 
 def find_config() -> Path:
@@ -97,7 +97,7 @@ STORAGE_PATH_OBJ = Path(STORAGE_PATH).expanduser().resolve()
 # Specific files and directories
 MATRIX_STATE_FILE = STORAGE_PATH_OBJ / "matrix_state.yaml"
 TRACKING_DIR = STORAGE_PATH_OBJ / "tracking"
-MEMORY_DIR = STORAGE_PATH_OBJ / "memory"
+_MEMORY_DIR = STORAGE_PATH_OBJ / "memory"
 CREDENTIALS_DIR = STORAGE_PATH_OBJ / "credentials"
 ENCRYPTION_KEYS_DIR = STORAGE_PATH_OBJ / "encryption_keys"
 

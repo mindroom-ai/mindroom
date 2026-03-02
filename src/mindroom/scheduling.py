@@ -41,13 +41,13 @@ logger = get_logger(__name__)
 SCHEDULED_TASK_EVENT_TYPE = "com.mindroom.scheduled.task"
 
 # Maximum length for message preview in task listings
-MESSAGE_PREVIEW_LENGTH = 50
+_MESSAGE_PREVIEW_LENGTH = 50
 
 # Shared validation message for edit attempts that change task type.
 SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR = "Changing schedule_type is not supported; cancel and recreate the schedule"
 
 # How often running tasks should re-check persisted Matrix state for edits/cancellations.
-TASK_STATE_POLL_INTERVAL_SECONDS = 30
+_TASK_STATE_POLL_INTERVAL_SECONDS = 30
 
 # Global task storage for running asyncio tasks
 _running_tasks: dict[str, asyncio.Task] = {}
@@ -129,7 +129,7 @@ def _parse_datetime(value: object) -> datetime | None:
         return None
 
 
-def parse_scheduled_task_record(
+def _parse_scheduled_task_record(
     room_id: str,
     task_id: str,
     content: dict[str, object],
@@ -219,7 +219,7 @@ def _start_scheduled_task(
     _running_tasks[task_id] = task
 
 
-def cancel_running_task(task_id: str) -> None:
+def _cancel_running_task(task_id: str) -> None:
     """Cancel a running scheduled task if it exists."""
     if task_id in _running_tasks:
         _running_tasks[task_id].cancel()
@@ -254,7 +254,7 @@ def _parse_task_records_from_state(
         if not isinstance(state_key, str) or not isinstance(content, dict):
             continue
 
-        task = parse_scheduled_task_record(room_id, state_key, content)
+        task = _parse_scheduled_task_record(room_id, state_key, content)
         if not task:
             continue
         if not include_non_pending and task.status != "pending":
@@ -293,7 +293,7 @@ async def get_scheduled_task(
         return None
     if not isinstance(response.content, dict):
         return None
-    return parse_scheduled_task_record(room_id, task_id, response.content)
+    return _parse_scheduled_task_record(room_id, task_id, response.content)
 
 
 async def _get_pending_task_record(
@@ -311,7 +311,7 @@ async def _get_pending_task_record(
     return task_record
 
 
-async def save_scheduled_task(
+async def _save_scheduled_task(
     client: nio.AsyncClient,
     room_id: str,
     task_id: str,
@@ -323,7 +323,7 @@ async def save_scheduled_task(
 ) -> None:
     """Persist scheduled task state and optionally restart its in-memory task runner."""
     if restart_task:
-        cancel_running_task(task_id)
+        _cancel_running_task(task_id)
 
     if isinstance(created_at, datetime):
         created_at_value = created_at.isoformat()
@@ -366,7 +366,7 @@ async def save_edited_scheduled_task(
     if workflow.schedule_type != existing_task.workflow.schedule_type:
         raise ValueError(SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR)
 
-    await save_scheduled_task(
+    await _save_scheduled_task(
         client=client,
         room_id=room_id,
         task_id=task_id,
@@ -546,7 +546,7 @@ async def run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 delay = (next_run - datetime.now(UTC)).total_seconds()
                 if delay <= 0:
                     break
-                await asyncio.sleep(min(delay, TASK_STATE_POLL_INTERVAL_SECONDS))
+                await asyncio.sleep(min(delay, _TASK_STATE_POLL_INTERVAL_SECONDS))
 
                 refreshed_task = await _get_pending_task_record(
                     client=client,
@@ -637,7 +637,7 @@ async def run_once_task(  # noqa: C901
             delay = (execute_at - datetime.now(UTC)).total_seconds()
             if delay <= 0:
                 break
-            await asyncio.sleep(min(delay, TASK_STATE_POLL_INTERVAL_SECONDS))
+            await asyncio.sleep(min(delay, _TASK_STATE_POLL_INTERVAL_SECONDS))
 
         latest_before_execute = await _get_pending_task_record(
             client=client,
@@ -854,7 +854,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
                 restart_task=restart_task,
             )
         else:
-            await save_scheduled_task(
+            await _save_scheduled_task(
                 client=client,
                 room_id=room_id,
                 task_id=task_id,
@@ -973,8 +973,8 @@ async def list_scheduled_tasks(
         else:
             time_str = workflow.cron_schedule.to_natural_language() if workflow.cron_schedule else "recurring"
 
-        msg_preview = workflow.message[:MESSAGE_PREVIEW_LENGTH] + (
-            "..." if len(workflow.message) > MESSAGE_PREVIEW_LENGTH else ""
+        msg_preview = workflow.message[:_MESSAGE_PREVIEW_LENGTH] + (
+            "..." if len(workflow.message) > _MESSAGE_PREVIEW_LENGTH else ""
         )
         lines.append(f'• `{record.task_id}` - {time_str}\n  {workflow.description}\n  Message: "{msg_preview}"')
 
@@ -990,7 +990,7 @@ async def cancel_scheduled_task(
     """Cancel a scheduled task."""
     # Cancel the asyncio task if running
     if cancel_in_memory:
-        cancel_running_task(task_id)
+        _cancel_running_task(task_id)
 
     # First check if task exists
     response = await client.room_get_state_event(
@@ -1036,7 +1036,7 @@ async def cancel_all_scheduled_tasks(
                 task_id = event["state_key"]
 
                 # Cancel the asyncio task if running
-                cancel_running_task(task_id)
+                _cancel_running_task(task_id)
 
                 # Update to cancelled in Matrix state
                 try:

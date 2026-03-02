@@ -36,7 +36,7 @@ def mindroom_namespace() -> str | None:
     return _ACTIVE_NAMESPACE
 
 
-def strip_agent_namespace_suffix(agent_identifier: str) -> str | None:
+def _strip_agent_namespace_suffix(agent_identifier: str) -> str | None:
     """Return the agent name without namespace suffix, or None if namespace mismatches."""
     namespace = mindroom_namespace()
     if not namespace:
@@ -112,7 +112,7 @@ class MatrixID:
 
         # Remove prefix
         agent_identifier = self.username[len(self.AGENT_PREFIX) :]
-        name = strip_agent_namespace_suffix(agent_identifier)
+        name = _strip_agent_namespace_suffix(agent_identifier)
         if name is None:
             return None
 

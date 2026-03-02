@@ -116,7 +116,7 @@ __all__ = ["AgentBot", "MultiKnowledgeVectorDb"]
 
 
 # Constants
-SYNC_TIMEOUT_MS = 30000
+_SYNC_TIMEOUT_MS = 30000
 
 
 def _create_task_wrapper(
@@ -622,7 +622,7 @@ class AgentBot:
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
         assert self.client is not None
-        await self.client.sync_forever(timeout=SYNC_TIMEOUT_MS, full_state=True)
+        await self.client.sync_forever(timeout=_SYNC_TIMEOUT_MS, full_state=True)
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         assert self.client is not None

@@ -23,14 +23,14 @@ if TYPE_CHECKING:
     from .config.main import Config
 
 logger = get_logger(__name__)
-VOICE_MENTION_PATTERN = re.compile(
+_VOICE_MENTION_PATTERN = re.compile(
     r"(?<![\w])@(?:(?P<prefix>mindroom_))?(?P<name>[A-Za-z0-9_]+)(?::[A-Za-z0-9.\-]+)?",
 )
-VOICE_COMMAND_PATTERN = re.compile(r"^!(?P<command>[a-zA-Z][a-zA-Z0-9_-]*)\b")
-VOICE_SKILL_INTENT_PATTERN = re.compile(
+_VOICE_COMMAND_PATTERN = re.compile(r"^!(?P<command>[a-zA-Z][a-zA-Z0-9_-]*)\b")
+_VOICE_SKILL_INTENT_PATTERN = re.compile(
     r"^\s*skill\b|\b(?:run|use|execute|invoke|trigger)\s+(?:the\s+)?skill\b|\b(?:bang|exclamation(?:\s+mark)?)\s+skill\b",
 )
-VOICE_HELP_INTENT_PATTERN = re.compile(
+_VOICE_HELP_INTENT_PATTERN = re.compile(
     r"^\s*help\b|\bshow(?: me)?\s+(?:the\s+)?help\b|\bhelp\s+command\b|\bwhat\s+commands?\b",
 )
 
@@ -340,20 +340,20 @@ def _sanitize_unavailable_mentions(
         # Strip only '@', preserving exact matched token shape (mindroom_ prefix/domain suffix/case).
         return match.group(0)[1:]
 
-    return VOICE_MENTION_PATTERN.sub(_replace, text)
+    return _VOICE_MENTION_PATTERN.sub(_replace, text)
 
 
 def _is_speculative_command_rewrite(transcription: str, formatted_message: str) -> bool:
     """Return True when model output invents a command not clearly requested by the user."""
     if not formatted_message:
         return False
-    match = VOICE_COMMAND_PATTERN.match(formatted_message.strip())
+    match = _VOICE_COMMAND_PATTERN.match(formatted_message.strip())
     if match is None:
         return False
     command_name = match.group("command").lower().replace("-", "_")
     normalized_transcription = transcription.strip().lower()
     if command_name == "skill":
-        return VOICE_SKILL_INTENT_PATTERN.search(normalized_transcription) is None
+        return _VOICE_SKILL_INTENT_PATTERN.search(normalized_transcription) is None
     if command_name == "help":
-        return VOICE_HELP_INTENT_PATTERN.search(normalized_transcription) is None
+        return _VOICE_HELP_INTENT_PATTERN.search(normalized_transcription) is None
     return False
