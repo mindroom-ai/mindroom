@@ -37,8 +37,8 @@ from mindroom.ai import (
 )
 from mindroom.config.main import Config
 from mindroom.constants import CONFIG_PATH, ROUTER_AGENT_NAME, STORAGE_PATH_OBJ
-from mindroom.knowledge import get_knowledge_manager, initialize_knowledge_managers
-from mindroom.knowledge_utils import resolve_agent_knowledge
+from mindroom.knowledge.manager import get_knowledge_manager, initialize_knowledge_managers
+from mindroom.knowledge.utils import resolve_agent_knowledge
 from mindroom.logging_config import get_logger
 from mindroom.routing import suggest_agent
 from mindroom.teams import TeamMode, format_team_response

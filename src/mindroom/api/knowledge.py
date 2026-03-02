@@ -11,7 +11,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from mindroom.config.main import Config
 from mindroom.constants import STORAGE_PATH_OBJ, resolve_config_relative_path
-from mindroom.knowledge import (
+from mindroom.knowledge.manager import (
     KnowledgeManager,
     get_knowledge_manager,
     initialize_knowledge_managers,
