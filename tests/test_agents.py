@@ -239,6 +239,26 @@ def test_openclaw_compat_auto_matrix_message_does_not_duplicate() -> None:
     assert effective_tools.count("matrix_message") == 1
 
 
+def test_matrix_message_implies_attachments_tool() -> None:
+    """matrix_message should automatically include attachments via implied tools."""
+    config = Config.from_yaml()
+    config.agents["summary"].tools = ["matrix_message"]
+    config.agents["summary"].include_default_tools = False
+
+    effective_tools = config.get_agent_tools("summary")
+    assert effective_tools == ["matrix_message", "attachments"]
+
+
+def test_matrix_message_implied_attachments_does_not_duplicate() -> None:
+    """Explicit attachments should not duplicate implied attachments."""
+    config = Config.from_yaml()
+    config.agents["summary"].tools = ["matrix_message", "attachments"]
+    config.agents["summary"].include_default_tools = False
+
+    effective_tools = config.get_agent_tools("summary")
+    assert effective_tools.count("attachments") == 1
+
+
 @patch("mindroom.agents.SqliteDb")
 def test_get_agent_code(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the code agent is created correctly."""

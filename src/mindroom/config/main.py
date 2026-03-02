@@ -46,6 +46,9 @@ class Config(BaseModel):
     TOOL_PRESETS: ClassVar[dict[str, tuple[str, ...]]] = {
         "openclaw_compat": OPENCLAW_COMPAT_PRESET_TOOLS,
     }
+    IMPLIED_TOOLS: ClassVar[dict[str, tuple[str, ...]]] = {
+        "matrix_message": ("attachments",),
+    }
 
     agents: dict[str, AgentConfig] = Field(default_factory=dict, description="Agent configurations")
     teams: dict[str, TeamConfig] = Field(default_factory=dict, description="Team configurations")
@@ -356,6 +359,11 @@ class Config(BaseModel):
                     continue
                 seen.add(entry)
                 expanded.append(entry)
+                for implied_tool in cls.IMPLIED_TOOLS.get(entry, ()):
+                    if implied_tool in seen:
+                        continue
+                    seen.add(implied_tool)
+                    expanded.append(implied_tool)
         return expanded
 
     def get_agent_memory_backend(self, agent_name: str) -> MemoryBackend:

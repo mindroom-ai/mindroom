@@ -201,6 +201,67 @@ async def test_attachments_tool_rejects_send_to_unjoined_room(tmp_path: Path) ->
     mocked.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_attachments_tool_registers_file_and_updates_runtime_context(tmp_path: Path) -> None:
+    """Registering a file should return att_* and make it available for sending in the same context."""
+    tool = AttachmentTools()
+    generated_file = tmp_path / "generated.txt"
+    generated_file.write_text("artifact", encoding="utf-8")
+    ctx = _tool_context(tmp_path)
+
+    with (
+        tool_runtime_context(ctx),
+        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
+    ):
+        register_payload = json.loads(await tool.register_attachment(str(generated_file)))
+        current_context = get_tool_runtime_context()
+        assert current_context is not None
+        attachment_id = register_payload["attachment_id"]
+        send_payload = json.loads(await tool.send_attachments(attachments=[attachment_id]))
+
+    assert register_payload["status"] == "ok"
+    assert register_payload["tool"] == "attachments"
+    assert register_payload["attachment_id"].startswith("att_")
+    assert attachment_id in current_context.attachment_ids
+    assert send_payload["status"] == "ok"
+    assert send_payload["resolved_attachment_ids"] == [attachment_id]
+    mocked.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_cross_room_send_requires_authorization(tmp_path: Path) -> None:
+    """Cross-room sends should reject unauthorized targets even when joined."""
+    tool = AttachmentTools()
+    sample_file = tmp_path / "upload.txt"
+    sample_file.write_text("payload", encoding="utf-8")
+    attachment = register_local_attachment(
+        tmp_path,
+        sample_file,
+        kind="file",
+        attachment_id="att_authz",
+    )
+    assert attachment is not None
+
+    ctx = _tool_context(tmp_path, attachment_ids=("att_authz",))
+    ctx.client.rooms["!other:localhost"] = MagicMock()
+
+    with (
+        tool_runtime_context(ctx),
+        patch("mindroom.custom_tools.attachments.is_authorized_sender", return_value=False),
+        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
+    ):
+        payload = json.loads(
+            await tool.send_attachments(
+                attachments=["att_authz"],
+                room_id="!other:localhost",
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert "Not authorized" in payload["message"]
+    mocked.assert_not_awaited()
+
+
 def test_tool_runtime_context_none_temporarily_clears_nested_scope(tmp_path: Path) -> None:
     """tool_runtime_context(None) should clear and then restore an outer context."""
     ctx = _tool_context(tmp_path, attachment_ids=("att_upload",))

@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
 from agno.tools import Toolkit
 
-from mindroom.attachments import attachments_for_tool_payload, load_attachment, resolve_attachments
+from mindroom.attachments import (
+    attachments_for_tool_payload,
+    load_attachment,
+    register_local_attachment,
+    resolve_attachments,
+)
+from mindroom.authorization import is_authorized_sender
 from mindroom.matrix.client import send_file_message
-from mindroom.tool_runtime_context import get_tool_runtime_context
+from mindroom.tool_runtime_context import append_tool_runtime_attachment_id, get_tool_runtime_context
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mindroom.tool_runtime_context import ToolRuntimeContext
 
 
@@ -33,6 +38,18 @@ def _attachment_tool_payload(status: str, **kwargs: object) -> str:
     }
     payload.update(kwargs)
     return json.dumps(payload, sort_keys=True)
+
+
+def _room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool:
+    if room_id == context.room_id:
+        return True
+    room_alias = room_id if room_id.startswith("#") else None
+    return is_authorized_sender(
+        context.requester_id,
+        context.config,
+        room_id,
+        room_alias=room_alias,
+    )
 
 
 def _resolve_context_attachment_path(
@@ -152,6 +169,25 @@ async def send_attachment_paths(
     return attachment_event_ids, None
 
 
+def resolve_send_target(
+    context: ToolRuntimeContext,
+    *,
+    room_id: str | None,
+    thread_id: str | None,
+) -> tuple[str, str | None, str | None]:
+    """Resolve room/thread destination and validate room access for sending."""
+    effective_room_id = room_id or context.room_id
+    if not _room_access_allowed(context, effective_room_id):
+        return effective_room_id, None, "Not authorized to access the target room."
+    if effective_room_id not in context.client.rooms:
+        return effective_room_id, None, f"Cannot send to room {effective_room_id}: bot has not joined this room."
+    if thread_id is not None:
+        return effective_room_id, thread_id, None
+    if effective_room_id == context.room_id:
+        return effective_room_id, context.thread_id, None
+    return effective_room_id, None, None
+
+
 class AttachmentTools(Toolkit):
     """Toolkit for reading and sending context-scoped attachments."""
 
@@ -160,6 +196,7 @@ class AttachmentTools(Toolkit):
             name="attachments",
             tools=[
                 self.list_attachments,
+                self.register_attachment,
                 self.send_attachments,
             ],
         )
@@ -182,6 +219,44 @@ class AttachmentTools(Toolkit):
             attachment_ids=requested_attachment_ids,
             attachments=attachments,
             missing_attachment_ids=missing_attachment_ids,
+        )
+
+    async def register_attachment(self, file_path: str) -> str:
+        """Register a local file as a context attachment ID."""
+        context = get_tool_runtime_context()
+        if context is None:
+            return _attachment_tool_payload(
+                "error",
+                message="Tool runtime context is unavailable in this runtime path.",
+            )
+        if context.storage_path is None:
+            return _attachment_tool_payload(
+                "error",
+                message="Attachment storage path is unavailable in this runtime path.",
+            )
+        if not isinstance(file_path, str) or not file_path.strip():
+            return _attachment_tool_payload("error", message="file_path must be a non-empty string.")
+
+        resolved_path = Path(file_path).expanduser().resolve()
+        attachment_record = register_local_attachment(
+            context.storage_path,
+            resolved_path,
+            kind="file",
+            room_id=context.room_id,
+            thread_id=context.thread_id,
+            sender=context.requester_id,
+        )
+        if attachment_record is None:
+            return _attachment_tool_payload(
+                "error",
+                message=f"Failed to register attachment file: {resolved_path}",
+            )
+
+        append_tool_runtime_attachment_id(attachment_record.attachment_id)
+        return _attachment_tool_payload(
+            "ok",
+            attachment_id=attachment_record.attachment_id,
+            attachment=attachments_for_tool_payload([attachment_record], include_local_path=False)[0],
         )
 
     async def send_attachments(
@@ -207,18 +282,17 @@ class AttachmentTools(Toolkit):
         if not attachment_paths:
             return _attachment_tool_payload("error", message="attachments cannot be empty.")
 
-        effective_room_id = room_id or context.room_id
-        if effective_room_id not in context.client.rooms:
+        effective_room_id, effective_thread_id, destination_error = resolve_send_target(
+            context,
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+        if destination_error is not None:
             return _attachment_tool_payload(
                 "error",
-                message=f"Cannot send to room {effective_room_id}: bot has not joined this room.",
+                room_id=effective_room_id,
+                message=destination_error,
             )
-        if thread_id is not None:
-            effective_thread_id = thread_id
-        elif effective_room_id == context.room_id:
-            effective_thread_id = context.thread_id
-        else:
-            effective_thread_id = None
         attachment_event_ids, send_error = await send_attachment_paths(
             context,
             room_id=effective_room_id,

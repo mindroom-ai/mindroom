@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 
 import mindroom.tools  # noqa: F401
+from mindroom.attachments import register_local_attachment
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.tool_runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tools_metadata import TOOL_METADATA, get_tool_by_name
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.fixture(autouse=True)
@@ -26,6 +31,8 @@ def _make_context(
     room_id: str = "!room:localhost",
     thread_id: str | None = "$thread:localhost",
     reply_to_event_id: str | None = "$reply:localhost",
+    storage_path: Path | None = None,
+    attachment_ids: tuple[str, ...] = (),
 ) -> ToolRuntimeContext:
     config = Config(agents={"general": AgentConfig(display_name="General Agent")})
     client = AsyncMock()
@@ -41,7 +48,8 @@ def _make_context(
         config=config,
         room=None,
         reply_to_event_id=reply_to_event_id,
-        storage_path=None,
+        storage_path=storage_path,
+        attachment_ids=attachment_ids,
     )
 
 
@@ -78,6 +86,88 @@ async def test_matrix_message_send_defaults_to_room_level() -> None:
     sent_content = mock_send.await_args.args[2]
     assert sent_content["body"] == "hello"
     assert "m.relates_to" not in sent_content
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_send_supports_context_attachments(tmp_path: Path) -> None:
+    """Send should accept context att_* IDs and upload them after text."""
+    tool = MatrixMessageTools()
+    sample_file = tmp_path / "upload.txt"
+    sample_file.write_text("payload", encoding="utf-8")
+    attachment = register_local_attachment(
+        tmp_path,
+        sample_file,
+        kind="file",
+        attachment_id="att_upload",
+    )
+    assert attachment is not None
+    ctx = _make_context(storage_path=tmp_path, attachment_ids=("att_upload",))
+
+    with (
+        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
+        patch(
+            "mindroom.custom_tools.matrix_message.send_file_message",
+            new=AsyncMock(return_value="$file_evt"),
+        ) as mock_send_file,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="send",
+                message="hello",
+                attachments=["att_upload"],
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["event_id"] == "$evt"
+    assert payload["attachment_event_ids"] == ["$file_evt"]
+    assert payload["resolved_attachment_ids"] == ["att_upload"]
+    mock_send.assert_awaited_once()
+    mock_send_file.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        attachment.local_path,
+        thread_id=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_send_allows_attachment_only(tmp_path: Path) -> None:
+    """Send should allow attachments without a text body."""
+    tool = MatrixMessageTools()
+    sample_file = tmp_path / "upload.txt"
+    sample_file.write_text("payload", encoding="utf-8")
+    attachment = register_local_attachment(
+        tmp_path,
+        sample_file,
+        kind="file",
+        attachment_id="att_only",
+    )
+    assert attachment is not None
+    ctx = _make_context(storage_path=tmp_path, attachment_ids=("att_only",))
+
+    with (
+        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")) as mock_send,
+        patch(
+            "mindroom.custom_tools.matrix_message.send_file_message",
+            new=AsyncMock(return_value="$file_evt"),
+        ) as mock_send_file,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="send",
+                attachments=["att_only"],
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["event_id"] is None
+    assert payload["attachment_event_ids"] == ["$file_evt"]
+    assert payload["resolved_attachment_ids"] == ["att_only"]
+    mock_send.assert_not_awaited()
+    mock_send_file.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -214,7 +304,7 @@ async def test_matrix_message_read_room_happy_path() -> None:
 
 @pytest.mark.asyncio
 async def test_matrix_message_send_validates_non_empty_message() -> None:
-    """Send action should reject empty message content."""
+    """Send should reject calls where both message and attachments are empty."""
     tool = MatrixMessageTools()
     ctx = _make_context()
 
@@ -222,7 +312,62 @@ async def test_matrix_message_send_validates_non_empty_message() -> None:
         payload = json.loads(await tool.matrix_message(action="send", message="  "))
 
     assert payload["status"] == "error"
-    assert "cannot be empty" in payload["message"]
+    assert "At least one of message or attachments" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_rejects_attachments_for_non_send_actions(tmp_path: Path) -> None:
+    """Attachments should be accepted only by send/reply/thread-reply actions."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(storage_path=tmp_path)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="react",
+                target="$target",
+                attachments=["att_upload"],
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert "only supported for send, reply, and thread-reply" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_rejects_non_att_attachment_references(tmp_path: Path) -> None:
+    """Attachment refs should require context-scoped att_* IDs."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(storage_path=tmp_path)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="send",
+                attachments=["output.txt"],
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert "must be context attachment IDs" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_rejects_attachment_count_over_limit(tmp_path: Path) -> None:
+    """Send should enforce a maximum attachment count per call."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(storage_path=tmp_path)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="send",
+                attachments=["att_over"] * 6,
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert "cannot exceed 5" in payload["message"]
 
 
 @pytest.mark.asyncio
@@ -292,6 +437,45 @@ async def test_matrix_message_rate_limit_guardrail() -> None:
         tool_runtime_context(ctx),
     ):
         first = json.loads(await tool.matrix_message(action="send", message="first"))
+        second = json.loads(await tool.matrix_message(action="send", message="second"))
+
+    assert first["status"] == "ok"
+    assert second["status"] == "error"
+    assert "Rate limit exceeded" in second["message"]
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_rate_limit_counts_attachments_weight(tmp_path: Path) -> None:
+    """Rate limiting should charge one tick for message plus one per attachment."""
+    tool = MatrixMessageTools()
+    sample_file = tmp_path / "upload.txt"
+    sample_file.write_text("payload", encoding="utf-8")
+    attachment = register_local_attachment(
+        tmp_path,
+        sample_file,
+        kind="file",
+        attachment_id="att_weighted",
+    )
+    assert attachment is not None
+    ctx = _make_context(storage_path=tmp_path, attachment_ids=("att_weighted",))
+
+    with (
+        patch("mindroom.custom_tools.matrix_message.send_message", new=AsyncMock(return_value="$evt")),
+        patch(
+            "mindroom.custom_tools.matrix_message.send_file_message",
+            new=AsyncMock(return_value="$file_evt"),
+        ),
+        patch.object(MatrixMessageTools, "_RATE_LIMIT_MAX_ACTIONS", 2),
+        patch.object(MatrixMessageTools, "_RATE_LIMIT_WINDOW_SECONDS", 60.0),
+        tool_runtime_context(ctx),
+    ):
+        first = json.loads(
+            await tool.matrix_message(
+                action="send",
+                message="first",
+                attachments=["att_weighted"],
+            ),
+        )
         second = json.loads(await tool.matrix_message(action="send", message="second"))
 
     assert first["status"] == "ok"
