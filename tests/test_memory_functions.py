@@ -9,7 +9,7 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.memory.functions import (
-    MemoryResult,
+    _MemoryResult,
     add_agent_memory,
     add_room_memory,
     append_agent_daily_memory,
@@ -302,7 +302,7 @@ class TestMemoryFunctions:
 
     def test_format_memories_as_context(self) -> None:
         """Test formatting memories into context string."""
-        memories: list[MemoryResult] = [
+        memories: list[_MemoryResult] = [
             {"memory": "First memory", "id": "1"},
             {"memory": "Second memory", "id": "2"},
         ]
@@ -886,7 +886,7 @@ class TestMemoryFunctions:
 
     def test_get_team_ids_for_agent(self, config: Config) -> None:
         """Test getting team IDs for an agent."""
-        from mindroom.memory.functions import get_team_ids_for_agent  # noqa: PLC0415
+        from mindroom.memory.functions import _get_team_ids_for_agent  # noqa: PLC0415
 
         # Setup config with multiple teams
         config.teams = {
@@ -896,18 +896,18 @@ class TestMemoryFunctions:
         }
 
         # Calculator is in two teams
-        team_ids = get_team_ids_for_agent("calculator", config)
+        team_ids = _get_team_ids_for_agent("calculator", config)
         assert len(team_ids) == 2
         assert "team_calculator+data_analyst+finance" in team_ids
         assert "team_calculator+researcher" in team_ids
 
         # General is in one team
-        team_ids = get_team_ids_for_agent("general", config)
+        team_ids = _get_team_ids_for_agent("general", config)
         assert len(team_ids) == 1
         assert "team_assistant+general" in team_ids  # Sorted alphabetically
 
         # Unknown agent has no teams
-        team_ids = get_team_ids_for_agent("unknown", config)
+        team_ids = _get_team_ids_for_agent("unknown", config)
         assert len(team_ids) == 0
 
     @pytest.mark.asyncio
@@ -993,7 +993,7 @@ class TestMemoryFunctions:
     def test_memory_result_typed_dict(self) -> None:
         """Test MemoryResult TypedDict structure."""
         # This is mainly for documentation, but ensures the type is importable
-        result: MemoryResult = {
+        result: _MemoryResult = {
             "id": "123",
             "memory": "Test memory",
             "score": 0.95,

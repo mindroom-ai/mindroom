@@ -13,7 +13,7 @@ from mindroom.logging_config import get_logger
 logger = get_logger(__name__)
 
 
-def get_memory_config(storage_path: Path, config: Config) -> dict:  # noqa: C901, PLR0912
+def _get_memory_config(storage_path: Path, config: Config) -> dict:  # noqa: C901, PLR0912
     """Get Mem0 configuration with ChromaDB backend.
 
     Args:
@@ -133,7 +133,7 @@ async def create_memory_instance(storage_path: Path, config: Config) -> AsyncMem
         Configured AsyncMemory instance
 
     """
-    config_dict = get_memory_config(storage_path, config)
+    config_dict = _get_memory_config(storage_path, config)
 
     # Create AsyncMemory instance with dictionary config directly
     # Mem0 expects a dict for configuration, not config objects

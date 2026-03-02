@@ -36,21 +36,21 @@ config_app = typer.Typer(
 )
 
 # Reusable option definitions
-CONFIG_PATH_OPTION: Path | None = typer.Option(
+_CONFIG_PATH_OPTION: Path | None = typer.Option(
     None,
     "--path",
     "-p",
     help="Override auto-detection and use this config file path.",
 )
 
-ProviderPreset = Literal["openai", "openrouter"]
+_ProviderPreset = Literal["openai", "openrouter"]
 
-_DEFAULT_MODEL_PRESETS: dict[ProviderPreset, tuple[str, str]] = {
+_DEFAULT_MODEL_PRESETS: dict[_ProviderPreset, tuple[str, str]] = {
     "openai": ("openai", "gpt-5.2"),
     "openrouter": ("openrouter", "anthropic/claude-sonnet-4-5"),
 }
 
-_REQUIRED_ENV_KEYS: dict[ProviderPreset, tuple[str, ...]] = {
+_REQUIRED_ENV_KEYS: dict[_ProviderPreset, tuple[str, ...]] = {
     "openai": ("OPENAI_API_KEY",),
     "openrouter": ("OPENROUTER_API_KEY",),
 }
@@ -152,7 +152,7 @@ def config_init(
         raise typer.Exit(1)
 
     if selected_profile == "minimal":
-        selected_preset: ProviderPreset = provider_preset or "openai"
+        selected_preset: _ProviderPreset = provider_preset or "openai"
     elif provider_preset is not None:
         selected_preset = provider_preset
     elif selected_profile == "public":
@@ -184,7 +184,7 @@ def config_init(
 
 @config_app.command("show")
 def config_show(
-    path: Path | None = CONFIG_PATH_OPTION,
+    path: Path | None = _CONFIG_PATH_OPTION,
     raw: bool = typer.Option(
         False,
         "--raw",
@@ -217,7 +217,7 @@ def config_show(
 
 @config_app.command("edit")
 def config_edit(
-    path: Path | None = CONFIG_PATH_OPTION,
+    path: Path | None = _CONFIG_PATH_OPTION,
 ) -> None:
     """Open config.yaml in your default editor.
 
@@ -298,7 +298,7 @@ def config_validate(
 
 @config_app.command("path")
 def config_path_cmd(
-    path: Path | None = CONFIG_PATH_OPTION,
+    path: Path | None = _CONFIG_PATH_OPTION,
 ) -> None:
     """Show the resolved config file path and search locations."""
     resolved = _resolve_config_path(path)
@@ -362,10 +362,10 @@ def _check_env_keys(config: Config) -> None:
         console.print("\nYou can set these in a .env file or export them in your shell.")
 
 
-def _normalize_provider_preset(provider: str) -> ProviderPreset | None:
+def _normalize_provider_preset(provider: str) -> _ProviderPreset | None:
     """Normalize provider preset values used by prompts and CLI flags."""
     normalized = provider.strip().lower()
-    aliases: dict[str, ProviderPreset] = {
+    aliases: dict[str, _ProviderPreset] = {
         "openai": "openai",
         "o": "openai",
         "openrouter": "openrouter",
@@ -375,7 +375,7 @@ def _normalize_provider_preset(provider: str) -> ProviderPreset | None:
     return aliases.get(normalized)
 
 
-def _prompt_provider_preset() -> ProviderPreset:
+def _prompt_provider_preset() -> _ProviderPreset:
     """Prompt the user for a starter provider preset."""
     while True:
         raw_value = typer.prompt(
@@ -389,7 +389,7 @@ def _prompt_provider_preset() -> ProviderPreset:
         console.print("[red]Invalid choice.[/red] Enter openai or openrouter.")
 
 
-def _full_template(provider_preset: ProviderPreset) -> str:
+def _full_template(provider_preset: _ProviderPreset) -> str:
     """Return a provider-aware starter config."""
     provider, model_id = _DEFAULT_MODEL_PRESETS[provider_preset]
     return f"""\
@@ -450,7 +450,7 @@ defaults:
 """
 
 
-def _env_template(profile: str, provider_preset: ProviderPreset) -> str:
+def _env_template(profile: str, provider_preset: _ProviderPreset) -> str:
     """Return a starter .env file for standalone deployments.
 
     Generates a random dashboard API key.
@@ -513,7 +513,7 @@ MINDROOM_API_KEY={api_key}
 """
 
 
-def _minimal_template(provider_preset: ProviderPreset = "openai") -> str:
+def _minimal_template(provider_preset: _ProviderPreset = "openai") -> str:
     """Return a bare-minimum inline config."""
     provider, model_id = _DEFAULT_MODEL_PRESETS[provider_preset]
     return f"""\

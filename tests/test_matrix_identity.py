@@ -8,7 +8,13 @@ import mindroom.matrix.identity as matrix_identity
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.matrix.identity import MatrixID, ThreadStateKey, agent_username_localpart, extract_agent_name, is_agent_id
+from mindroom.matrix.identity import (
+    MatrixID,
+    _ThreadStateKey,
+    agent_username_localpart,
+    extract_agent_name,
+    is_agent_id,
+)
 
 
 class TestMatrixID:
@@ -92,7 +98,7 @@ class TestThreadStateKey:
 
     def test_parse_state_key(self) -> None:
         """Test parsing a state key."""
-        key = ThreadStateKey.parse("$thread123:calculator")
+        key = _ThreadStateKey.parse("$thread123:calculator")
         assert key.thread_id == "$thread123"
         assert key.agent_name == "calculator"
         assert key.key == "$thread123:calculator"
@@ -100,11 +106,11 @@ class TestThreadStateKey:
     def test_parse_invalid_state_key(self) -> None:
         """Test parsing invalid state keys."""
         with pytest.raises(ValueError, match="Invalid state key"):
-            ThreadStateKey.parse("invalid")
+            _ThreadStateKey.parse("invalid")
 
     def test_create_state_key(self) -> None:
         """Test creating a state key."""
-        key = ThreadStateKey("$thread456", "general")
+        key = _ThreadStateKey("$thread456", "general")
         assert key.thread_id == "$thread456"
         assert key.agent_name == "general"
         assert key.key == "$thread456:general"

@@ -9,7 +9,7 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
-from mindroom.custom_tools.config_manager import ConfigManagerTools, InfoType
+from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
 
 
 class TestConsolidatedConfigManager:
@@ -476,9 +476,9 @@ class TestConsolidatedConfigManager:
         cm = ConfigManagerTools()
 
         # Test each enum value
-        for info_type in InfoType:
+        for info_type in _InfoType:
             # Some require name parameter
-            if info_type in [InfoType.TOOL_DETAILS, InfoType.AGENT_CONFIG, InfoType.AGENT_TEMPLATE]:
+            if info_type in [_InfoType.TOOL_DETAILS, _InfoType.AGENT_CONFIG, _InfoType.AGENT_TEMPLATE]:
                 result = cm.get_info(info_type=info_type.value)
                 assert "requires 'name' parameter" in result
             else:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mindroom.commands.parsing import COMMAND_DOCS, CommandType, command_parser, get_command_help
+from mindroom.commands.parsing import _COMMAND_DOCS, CommandType, command_parser, get_command_help
 
 
 def test_help_command() -> None:
@@ -136,15 +136,15 @@ def test_all_commands_have_documentation() -> None:
     """Test that all CommandType values have documentation."""
     # Check that all commands have documentation (except UNKNOWN which is special)
     commands_needing_docs = set(CommandType) - {CommandType.UNKNOWN}
-    missing_docs = commands_needing_docs - set(COMMAND_DOCS.keys())
+    missing_docs = commands_needing_docs - set(_COMMAND_DOCS.keys())
     assert not missing_docs, f"Missing documentation for commands: {missing_docs}"
 
     # Check that there are no extra documentation entries
-    extra_docs = set(COMMAND_DOCS.keys()) - set(CommandType)
+    extra_docs = set(_COMMAND_DOCS.keys()) - set(CommandType)
     assert not extra_docs, f"Documentation for non-existent commands: {extra_docs}"
 
     # Check that all documentation entries are properly formatted
-    for cmd_type, (syntax, description) in COMMAND_DOCS.items():
+    for cmd_type, (syntax, description) in _COMMAND_DOCS.items():
         assert syntax.startswith("!"), f"{cmd_type} syntax should start with '!'"
         assert len(description) > 0, f"{cmd_type} should have a description"
 

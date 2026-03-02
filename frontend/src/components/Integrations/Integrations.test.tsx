@@ -108,21 +108,21 @@ vi.mock('./integrations/index', () => ({
       }),
       loadStatus: vi.fn().mockResolvedValue({ status: 'available', connected: false }),
     },
-    imdb: {
+    plex: {
       getConfig: () => ({
         integration: {
-          id: 'imdb',
-          name: 'IMDb',
+          id: 'plex',
+          name: 'Plex',
           description: 'Movie and TV show database',
           category: 'entertainment',
-          icon: <span>IMDb Icon</span>,
+          icon: <span>Plex Icon</span>,
           status: 'connected',
           setup_type: 'api_key',
           connected: true,
         },
         onAction: vi.fn(),
         onDisconnect: vi.fn(),
-        ConfigComponent: () => <div>IMDb Config Component</div>,
+        ConfigComponent: () => <div>Plex Config Component</div>,
         checkConnection: vi.fn().mockResolvedValue(true),
       }),
       loadStatus: vi.fn().mockResolvedValue({ status: 'connected', connected: true }),
@@ -168,18 +168,18 @@ vi.mock('./integrations/index', () => ({
     vi.mocked({
       getConfig: () => ({
         integration: {
-          id: 'imdb',
-          name: 'IMDb',
+          id: 'plex',
+          name: 'Plex',
           description: 'Movie and TV show database',
           category: 'entertainment',
-          icon: <span>IMDb Icon</span>,
+          icon: <span>Plex Icon</span>,
           status: 'connected',
           setup_type: 'api_key',
           connected: true,
         },
         onAction: vi.fn(),
         onDisconnect: vi.fn(),
-        ConfigComponent: () => <div>IMDb Config Component</div>,
+        ConfigComponent: () => <div>Plex Config Component</div>,
         checkConnection: vi.fn().mockResolvedValue(true),
       }),
       loadStatus: vi.fn().mockResolvedValue({ status: 'connected', connected: true }),
@@ -213,7 +213,7 @@ describe('Integrations', () => {
       expect(screen.getByText('Gmail, Calendar, and Drive integration')).toBeInTheDocument();
       expect(screen.getByText('Spotify')).toBeInTheDocument();
       expect(screen.getByText('Music streaming service')).toBeInTheDocument();
-      expect(screen.getByText('IMDb')).toBeInTheDocument();
+      expect(screen.getByText('Plex')).toBeInTheDocument();
       expect(screen.getByText('Movie and TV show database')).toBeInTheDocument();
 
       // Backend tools
@@ -231,7 +231,7 @@ describe('Integrations', () => {
       expect(availableBadges.length).toBeGreaterThanOrEqual(2); // At least Google and Spotify
 
       // Connected integration
-      expect(screen.getByText('Connected')).toBeInTheDocument(); // IMDb
+      expect(screen.getByText('Connected')).toBeInTheDocument(); // Plex
     });
   });
 
@@ -248,7 +248,7 @@ describe('Integrations', () => {
     await waitFor(() => {
       expect(screen.getByText('Spotify')).toBeInTheDocument();
       expect(screen.queryByText('Google Services')).not.toBeInTheDocument();
-      expect(screen.queryByText('IMDb')).not.toBeInTheDocument();
+      expect(screen.queryByText('Plex')).not.toBeInTheDocument();
     });
   });
 
@@ -295,9 +295,9 @@ describe('Integrations', () => {
 
     // Wait a bit for tab content to change
     await waitFor(() => {
-      // In Entertainment category, we should see Spotify and IMDb
+      // In Entertainment category, we should see Spotify and Plex
       expect(screen.getByText('Spotify')).toBeInTheDocument();
-      expect(screen.getByText('IMDb')).toBeInTheDocument();
+      expect(screen.getByText('Plex')).toBeInTheDocument();
     });
 
     // Since tabs hide other content, these should not be visible
@@ -383,11 +383,11 @@ describe('Integrations', () => {
     render(<Integrations />);
 
     await waitFor(() => {
-      expect(screen.getByText('IMDb')).toBeInTheDocument();
+      expect(screen.getByText('Plex')).toBeInTheDocument();
     });
 
-    // Find and click the IMDb Disconnect button
-    const imdbCard = screen.getByText('IMDb').closest('.h-full');
+    // Find and click the Plex Disconnect button
+    const imdbCard = screen.getByText('Plex').closest('.h-full');
     const disconnectButton = imdbCard?.querySelector('button[class*="destructive"]');
 
     if (disconnectButton) {
@@ -396,7 +396,7 @@ describe('Integrations', () => {
       await waitFor(() => {
         expect(mockToast).toHaveBeenCalledWith({
           title: 'Disconnected',
-          description: 'IMDb has been disconnected.',
+          description: 'Plex has been disconnected.',
         });
       });
     }

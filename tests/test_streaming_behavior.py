@@ -17,9 +17,9 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.streaming import (
-    CANCELLED_RESPONSE_NOTE,
+    _CANCELLED_RESPONSE_NOTE,
+    _PROGRESS_PLACEHOLDER,
     IN_PROGRESS_MARKER,
-    PROGRESS_PLACEHOLDER,
     ReplacementStreamingResponse,
     StreamingResponse,
     is_in_progress_message,
@@ -568,7 +568,7 @@ class TestStreamingBehavior:
 
         assert mock_edit.await_count == 1
         edit_args = mock_edit.await_args.args
-        assert edit_args[3]["body"].startswith(PROGRESS_PLACEHOLDER)
+        assert edit_args[3]["body"].startswith(_PROGRESS_PLACEHOLDER)
         assert IN_PROGRESS_MARKER in edit_args[3]["body"]
 
     @pytest.mark.asyncio
@@ -599,7 +599,7 @@ class TestStreamingBehavior:
         assert mock_client.room_send.call_count == 1
         assert streaming.event_id == "$cold_start_1"
         sent_content = mock_client.room_send.call_args[1]["content"]
-        assert sent_content["body"].startswith(PROGRESS_PLACEHOLDER)
+        assert sent_content["body"].startswith(_PROGRESS_PLACEHOLDER)
         assert IN_PROGRESS_MARKER in sent_content["body"]
 
     @pytest.mark.asyncio
@@ -643,7 +643,7 @@ class TestStreamingBehavior:
 
         assert mock_edit.await_count == 1
         final_body = mock_edit.await_args.args[3]["body"]
-        assert final_body == PROGRESS_PLACEHOLDER
+        assert final_body == _PROGRESS_PLACEHOLDER
         assert IN_PROGRESS_MARKER not in final_body
 
     @pytest.mark.asyncio
@@ -750,4 +750,4 @@ class TestStreamingBehavior:
 
         assert len(edited_texts) == 2
         assert IN_PROGRESS_MARKER in edited_texts[0]
-        assert edited_texts[-1] == f"Partial answer\n\n{CANCELLED_RESPONSE_NOTE}"
+        assert edited_texts[-1] == f"Partial answer\n\n{_CANCELLED_RESPONSE_NOTE}"

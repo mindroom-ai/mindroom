@@ -51,7 +51,7 @@ class TestTeamRoomUpdates:
             config1 = Config.model_validate(initial_config_data)
             mock_load_config.return_value = config1
 
-            with patch("mindroom.matrix.users.ensure_all_agent_users") as mock_ensure_users:
+            with patch("mindroom.matrix.users._ensure_all_agent_users") as mock_ensure_users:
                 mock_agent1_user = MagicMock(user_id="@agent1:localhost", agent_name="agent1")
                 mock_team_user = MagicMock(user_id="@team1:localhost", agent_name="team1")
                 mock_router_user = MagicMock(user_id="@router:localhost", agent_name="router")
@@ -119,7 +119,7 @@ class TestTeamRoomUpdates:
             config1 = Config.model_validate(initial_config_data)
             mock_load_config.return_value = config1
 
-            with patch("mindroom.matrix.users.ensure_all_agent_users") as mock_ensure_users:
+            with patch("mindroom.matrix.users._ensure_all_agent_users") as mock_ensure_users:
                 mock_router_user = MagicMock(user_id="@router:localhost", agent_name="router")
                 mock_ensure_users.return_value = {"router": mock_router_user}
 
@@ -200,7 +200,7 @@ class TestTeamRoomUpdates:
             config = Config.model_validate(config_data)
             mock_load_config.return_value = config
 
-            with patch("mindroom.matrix.users.ensure_all_agent_users") as mock_ensure_users:
+            with patch("mindroom.matrix.users._ensure_all_agent_users") as mock_ensure_users:
                 mock_team_user = MagicMock(user_id="@team1:localhost", agent_name="team1")
                 mock_router_user = MagicMock(user_id="@router:localhost", agent_name="router")
                 mock_ensure_users.return_value = {"team1": mock_team_user, "router": mock_router_user}

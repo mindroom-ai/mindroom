@@ -98,7 +98,7 @@ async def test_claude_agent_nightly_soak_loop(monkeypatch: pytest.MonkeyPatch) -
     _NightlySoakSDKClient.max_concurrent_queries = 0
     _NightlySoakSDKClient.forced_failures = 0
 
-    manager = claude_agent_module.ClaudeSessionManager()
+    manager = claude_agent_module._ClaudeSessionManager()
     monkeypatch.setattr(claude_agent_module.ClaudeAgentTools, "_session_manager", manager)
     monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _NightlySoakSDKClient)
 

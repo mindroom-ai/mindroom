@@ -361,7 +361,7 @@ async def ensure_room_directory_visibility(
     return await _set_room_directory_visibility(client, room_id, target_visibility)
 
 
-async def create_dm_room(
+async def _create_dm_room(
     client: nio.AsyncClient,
     invite_user_ids: list[str],
     name: str | None = None,

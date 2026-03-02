@@ -85,7 +85,7 @@ def _load_config() -> tuple[Config, Path]:
 # ---------------------------------------------------------------------------
 
 
-class ChatMessage(BaseModel):
+class _ChatMessage(BaseModel):
     """A single message in the chat conversation."""
 
     role: Literal["system", "developer", "user", "assistant", "tool"]
@@ -98,7 +98,7 @@ class _ChatCompletionRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     model: str
-    messages: list[ChatMessage]
+    messages: list[_ChatMessage]
     stream: bool = False
     user: str | None = None
     # Accepted but ignored — agent's model config controls these:
@@ -126,7 +126,7 @@ class _ChatCompletionChoice(BaseModel):
     """A single choice in a chat completion response."""
 
     index: int = 0
-    message: ChatMessage
+    message: _ChatMessage
     finish_reason: str = "stop"
 
 
@@ -345,7 +345,7 @@ def _find_last_user_message(
 
 
 def _convert_messages(
-    messages: list[ChatMessage],
+    messages: list[_ChatMessage],
 ) -> tuple[str, list[dict[str, Any]] | None]:
     """Convert OpenAI messages to MindRoom's (prompt, thread_history) format.
 
@@ -701,7 +701,7 @@ async def _non_stream_completion(
         model=agent_name,
         choices=[
             _ChatCompletionChoice(
-                message=ChatMessage(role="assistant", content=response_text),
+                message=_ChatMessage(role="assistant", content=response_text),
             ),
         ],
     )
@@ -997,7 +997,7 @@ async def _non_stream_team_completion(
         model=model_id,
         choices=[
             _ChatCompletionChoice(
-                message=ChatMessage(role="assistant", content=response_text),
+                message=_ChatMessage(role="assistant", content=response_text),
             ),
         ],
     )
