@@ -1248,6 +1248,11 @@ class TestAgentBot:
         event.source = {"content": {"body": "photo.jpg"}}  # no filename → body is filename
 
         image = MagicMock()
+        image.content = b"image-bytes"
+        image.mime_type = "image/jpeg"
+        attachment_id = attachment_id_for_event("$img_event")
+        attachment_record = MagicMock()
+        attachment_record.attachment_id = attachment_id
 
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
@@ -1263,13 +1268,19 @@ class TestAgentBot:
             ),
             patch("mindroom.bot.should_agent_respond", return_value=True),
             patch("mindroom.bot.image_handler.download_image", new_callable=AsyncMock, return_value=image),
+            patch(
+                "mindroom.bot.register_image_attachment",
+                new_callable=AsyncMock,
+                return_value=attachment_record,
+            ),
         ):
             await bot._on_image_message(room, event)
 
         bot._generate_response.assert_awaited_once()
         generate_kwargs = bot._generate_response.await_args.kwargs
         assert generate_kwargs["room_id"] == "!test:localhost"
-        assert generate_kwargs["prompt"] == "[Attached image]"
+        assert "Available attachment IDs" in generate_kwargs["prompt"]
+        assert attachment_id in generate_kwargs["prompt"]
         assert generate_kwargs["reply_to_event_id"] == "$img_event"
         assert generate_kwargs["thread_id"] is None
         assert generate_kwargs["thread_history"] == []
@@ -1279,7 +1290,7 @@ class TestAgentBot:
         assert list(media.audio) == []
         assert list(media.files) == []
         assert list(media.videos) == []
-        assert generate_kwargs["attachment_ids"] is None
+        assert generate_kwargs["attachment_ids"] == [attachment_id]
         tracker.mark_responded.assert_called_once_with("$img_event", "$response")
 
     @pytest.mark.asyncio
@@ -1746,6 +1757,78 @@ class TestAgentBot:
 
         mock_register_file.assert_awaited_once()
         assert mock_register_file.await_args.kwargs["thread_id"] is None
+        sent_extra_content = bot._send_response.await_args.kwargs["extra_content"]
+        assert sent_extra_content[ATTACHMENT_IDS_KEY] == [attachment_record.attachment_id]
+
+    @pytest.mark.asyncio
+    async def test_router_routing_registers_image_with_effective_thread_scope(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Router should register routed image attachments using outgoing thread scope."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+
+        config = Config(
+            agents={
+                "router": AgentConfig(display_name="Router"),
+                "general": AgentConfig(display_name="General", thread_mode="room"),
+            },
+        )
+        config.ids = {
+            "router": MatrixID.from_username("mindroom_router", "localhost"),
+            "general": MatrixID.from_username("mindroom_general", "localhost"),
+        }
+
+        bot = AgentBot(agent_user, tmp_path, config=config)
+        bot.client = AsyncMock()
+        bot.response_tracker = MagicMock()
+        bot._send_response = AsyncMock(return_value="$route")
+
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
+        event = nio.RoomMessageImage.from_dict(
+            {
+                "event_id": "$image_route",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.image",
+                    "body": "photo.jpg",
+                    "url": "mxc://localhost/test_image",
+                    "info": {"mimetype": "image/jpeg"},
+                },
+            },
+        )
+
+        attachment_record = MagicMock()
+        attachment_record.attachment_id = attachment_id_for_event("$image_route")
+
+        with (
+            patch("mindroom.bot.filter_agents_by_sender_permissions", return_value=[config.ids["general"]]),
+            patch("mindroom.bot.suggest_agent_for_message", new_callable=AsyncMock, return_value="general"),
+            patch(
+                "mindroom.bot.register_image_attachment",
+                new_callable=AsyncMock,
+                return_value=attachment_record,
+            ) as mock_register_image,
+        ):
+            await bot._handle_ai_routing(
+                room=room,
+                event=event,
+                thread_history=[],
+                thread_id=None,
+                message="[Attached image]",
+                requester_user_id="@user:localhost",
+                extra_content={ORIGINAL_SENDER_KEY: "@user:localhost"},
+            )
+
+        mock_register_image.assert_awaited_once()
+        assert mock_register_image.await_args.kwargs["thread_id"] is None
         sent_extra_content = bot._send_response.await_args.kwargs["extra_content"]
         assert sent_extra_content[ATTACHMENT_IDS_KEY] == [attachment_record.attachment_id]
 

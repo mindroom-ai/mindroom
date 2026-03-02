@@ -22,8 +22,9 @@ from .matrix.media import download_media_bytes, media_mime_type
 
 logger = get_logger(__name__)
 
-AttachmentKind = Literal["audio", "file", "video"]
+AttachmentKind = Literal["audio", "file", "image", "video"]
 FileOrVideoEvent = nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo
+ImageEvent = nio.RoomMessageImage | nio.RoomEncryptedImage
 _ATTACHMENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$")
 _ATTACHMENT_RETENTION_DAYS = 30
 _CLEANUP_INTERVAL = timedelta(hours=1)
@@ -482,6 +483,45 @@ async def register_file_or_video_attachment(
     )
 
 
+async def register_image_attachment(
+    client: nio.AsyncClient,
+    storage_path: Path,
+    *,
+    room_id: str,
+    thread_id: str | None,
+    event: ImageEvent,
+    image_bytes: bytes | None = None,
+) -> AttachmentRecord | None:
+    """Persist an image event and register it as an attachment record."""
+    media_bytes = image_bytes if image_bytes is not None else await download_media_bytes(client, event)
+    local_media_path = await _store_media_bytes_locally_async(
+        storage_path,
+        event.event_id,
+        media_bytes,
+        media_mime_type(event),
+    )
+    if local_media_path is None:
+        return None
+
+    content = event.source.get("content", {})
+    filename = content.get("filename")
+    if not isinstance(filename, str) or not filename:
+        filename = event.body
+
+    return register_local_attachment(
+        storage_path,
+        local_media_path,
+        kind="image",
+        attachment_id=attachment_id_for_event(event.event_id),
+        filename=filename if isinstance(filename, str) else None,
+        mime_type=media_mime_type(event),
+        room_id=room_id,
+        thread_id=thread_id,
+        source_event_id=event.event_id,
+        sender=event.sender,
+    )
+
+
 async def register_audio_attachment(
     storage_path: Path,
     *,
@@ -536,7 +576,7 @@ def load_attachment(storage_path: Path, attachment_id: str) -> AttachmentRecord 
 
     kind = raw_payload.get("kind")
     local_path = raw_payload.get("local_path")
-    if kind not in {"audio", "file", "video"} or not isinstance(local_path, str) or not local_path:
+    if kind not in {"audio", "file", "image", "video"} or not isinstance(local_path, str) or not local_path:
         return None
 
     filename = raw_payload.get("filename")
@@ -614,7 +654,7 @@ async def resolve_thread_attachment_ids(
     thread_id: str,
     thread_root_event: nio.Event | None = None,
 ) -> list[str]:
-    """Resolve attachment IDs from thread root event metadata or file/video payload.
+    """Resolve attachment IDs from thread root event metadata or media payload.
 
     When *thread_root_event* is provided, the ``room_get_event`` round-trip
     is skipped, avoiding duplicate homeserver calls when the caller already
@@ -632,14 +672,15 @@ async def resolve_thread_attachment_ids(
         return event_attachment_ids
 
     # Check for an existing attachment record for any media root (file, video,
-    # or audio).  Audio roots are registered by the voice fallback handler
-    # and can be looked up but not re-downloaded here.
+    # image, or audio). Audio roots are registered by the voice handler and
+    # can be looked up but not re-downloaded here.
     is_file_or_video = isinstance(
         event,
         nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
     )
+    is_image = isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage)
     is_audio = isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio)
-    if not is_file_or_video and not is_audio:
+    if not is_file_or_video and not is_image and not is_audio:
         return []
 
     existing_attachment_id = attachment_id_for_event(event.event_id)
@@ -652,22 +693,30 @@ async def resolve_thread_attachment_ids(
     ):
         return [existing_record.attachment_id]
 
+    record: AttachmentRecord | None = None
+    if is_file_or_video:
+        assert isinstance(
+            event,
+            nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
+        )
+        record = await register_file_or_video_attachment(
+            client,
+            storage_path,
+            room_id=room_id,
+            thread_id=thread_id,
+            event=event,
+        )
+    elif is_image:
+        assert isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage)
+        record = await register_image_attachment(
+            client,
+            storage_path,
+            room_id=room_id,
+            thread_id=thread_id,
+            event=event,
+        )
     # Audio roots cannot be re-registered here (the voice handler owns that
-    # lifecycle).  Only file/video roots can be lazily downloaded and stored.
-    if not is_file_or_video:
-        return []
-
-    assert isinstance(
-        event,
-        nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
-    )
-    record = await register_file_or_video_attachment(
-        client,
-        storage_path,
-        room_id=room_id,
-        thread_id=thread_id,
-        event=event,
-    )
+    # lifecycle), so ``record`` stays ``None``.
     return [record.attachment_id] if record is not None else []
 
 

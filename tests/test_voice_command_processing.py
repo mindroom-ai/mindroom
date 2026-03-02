@@ -142,17 +142,24 @@ async def test_router_voice_transcription_includes_original_sender_metadata(tmp_
     event = MagicMock()
     event.sender = "@alice:example.com"
     event.event_id = "$voice_event"
+    event.body = "voice.ogg"
     event.source = {"content": {"body": "voice.ogg"}}
 
     with (
         patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.bot.is_authorized_sender", return_value=True),
     ):
         mock_voice.return_value = "🎤 turn on the lights"
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_voice_message(room, event)
 
     bot._send_response.assert_called_once()
-    assert bot._send_response.call_args.kwargs["extra_content"] == {ORIGINAL_SENDER_KEY: "@alice:example.com"}
+    expected_attachment_id = attachment_id_for_event("$voice_event")
+    assert bot._send_response.call_args.kwargs["extra_content"] == {
+        ORIGINAL_SENDER_KEY: "@alice:example.com",
+        ATTACHMENT_IDS_KEY: [expected_attachment_id],
+    }
 
 
 @pytest.mark.asyncio

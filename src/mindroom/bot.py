@@ -24,6 +24,7 @@ from .attachments import (
     parse_attachment_ids_from_event_source,
     register_audio_attachment,
     register_file_or_video_attachment,
+    register_image_attachment,
     resolve_thread_attachment_ids,
 )
 from .authorization import (
@@ -964,14 +965,29 @@ class AgentBot:
             event.event_id,
             event_source=event.source,
         )
+        attachment_record = None
+        if voice_audio is not None:
+            attachment_record = await register_audio_attachment(
+                self.storage_path,
+                event_id=event.event_id,
+                audio_bytes=voice_audio.content,
+                mime_type=voice_audio.mime_type,
+                room_id=room.room_id,
+                thread_id=effective_thread_id,
+                sender=event.sender,
+                filename=event.body if isinstance(event.body, str) else None,
+            )
 
         if transcribed_message:
+            transcribed_extra_content: dict[str, str | list[str]] = {ORIGINAL_SENDER_KEY: event.sender}
+            if attachment_record is not None:
+                transcribed_extra_content[ATTACHMENT_IDS_KEY] = [attachment_record.attachment_id]
             response_event_id = await self._send_response(
                 room_id=room.room_id,
                 reply_to_event_id=event.event_id,
                 response_text=transcribed_message,
                 thread_id=effective_thread_id,
-                extra_content={ORIGINAL_SENDER_KEY: event.sender},
+                extra_content=transcribed_extra_content,
             )
             self.response_tracker.mark_responded(event.event_id, response_event_id)
             return
@@ -985,16 +1001,6 @@ class AgentBot:
             "Voice transcription unavailable, relaying raw audio fallback",
             event_id=event.event_id,
             sender=event.sender,
-        )
-        attachment_record = await register_audio_attachment(
-            self.storage_path,
-            event_id=event.event_id,
-            audio_bytes=voice_audio.content,
-            mime_type=voice_audio.mime_type,
-            room_id=room.room_id,
-            thread_id=effective_thread_id,
-            sender=event.sender,
-            filename=event.body if isinstance(event.body, str) else None,
         )
         fallback_message = f"{VOICE_PREFIX}{voice_handler.extract_caption(event)}"
         fallback_extra_content: dict[str, str | bool | list[str]] = {
@@ -1047,14 +1053,31 @@ class AgentBot:
             self.response_tracker.mark_responded(event.event_id)
             return
 
+        context = dispatch.context
+        effective_thread_id = self._resolve_reply_thread_id(
+            context.thread_id,
+            event.event_id,
+            event_source=event.source,
+        )
+        attachment_record = await register_image_attachment(
+            self.client,
+            self.storage_path,
+            room_id=room.room_id,
+            thread_id=effective_thread_id,
+            event=event,
+            image_bytes=image.content,
+        )
+        attachment_ids = [attachment_record.attachment_id] if attachment_record is not None else []
+        prompt_text = append_attachment_ids_prompt(caption, attachment_ids)
         await self._execute_dispatch_action(
             room,
             event,
             dispatch,
             action,
             _DispatchPayload(
-                prompt=caption,
+                prompt=prompt_text,
                 media=MediaInputs.from_optional(images=[image]),
+                attachment_ids=attachment_ids or None,
             ),
             processing_log="Processing image",
         )
@@ -2459,6 +2482,20 @@ class AgentBot:
             )
             if attachment_record is None:
                 self.logger.error("Failed to register routed media attachment", event_id=event.event_id)
+                routed_extra_content.pop(ATTACHMENT_IDS_KEY, None)
+            else:
+                routed_extra_content[ATTACHMENT_IDS_KEY] = [attachment_record.attachment_id]
+        elif isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage):
+            assert self.client is not None
+            attachment_record = await register_image_attachment(
+                self.client,
+                self.storage_path,
+                room_id=room.room_id,
+                thread_id=thread_event_id,
+                event=event,
+            )
+            if attachment_record is None:
+                self.logger.error("Failed to register routed image attachment", event_id=event.event_id)
                 routed_extra_content.pop(ATTACHMENT_IDS_KEY, None)
             else:
                 routed_extra_content[ATTACHMENT_IDS_KEY] = [attachment_record.attachment_id]
