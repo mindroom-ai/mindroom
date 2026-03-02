@@ -171,12 +171,12 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 
 ## Memory & Storage
 
-| Icon               | Tool          | Description                                                                                                                   | Config Required                |
-| ------------------ | ------------- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
-| :lucide-database:  | `memory`      | Explicitly store and search agent memories on demand                                                                          | -                              |
-| :lucide-database:  | `mem0`        | Persistent memory system                                                                                                      | `api_key` (optional for cloud) |
-| :lucide-database:  | `zep`         | Conversation memory                                                                                                           | `api_key`                      |
-| :lucide-paperclip: | `attachments` | List, register, and send context-scoped file attachments (see [Attachments](https://docs.mindroom.chat/attachments/index.md)) | -                              |
+| Icon               | Tool          | Description                                                                                                                                        | Config Required                |
+| ------------------ | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| :lucide-database:  | `memory`      | Explicitly store and search agent memories on demand                                                                                               | -                              |
+| :lucide-database:  | `mem0`        | Persistent memory system                                                                                                                           | `api_key` (optional for cloud) |
+| :lucide-database:  | `zep`         | Conversation memory                                                                                                                                | `api_key`                      |
+| :lucide-paperclip: | `attachments` | List and register context-scoped file attachments (send via `matrix_message`) (see [Attachments](https://docs.mindroom.chat/attachments/index.md)) | -                              |
 
 ## Custom & Config
 

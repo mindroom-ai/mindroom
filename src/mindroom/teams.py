@@ -19,7 +19,7 @@ from agno.team import Team
 from pydantic import BaseModel, Field
 
 from . import agent_prompts
-from .ai import get_model_instance
+from .ai import get_model_instance, sanitize_media_for_model
 from .authorization import get_available_agents_in_room
 from .constants import ROUTER_AGENT_NAME
 from .error_handling import get_user_friendly_error_message
@@ -540,6 +540,7 @@ async def team_response(
     media_inputs = media or MediaInputs()
     prompt = _build_prompt_with_context(message, thread_history)
     team = _create_team_instance(agents, agent_names, mode, orchestrator, model_name)
+    media_inputs = sanitize_media_for_model(team.model, media_inputs, agent_name=team.name or "team")
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
 
     logger.info(f"Executing team response with {len(agents)} agents in {mode.value} mode")
@@ -610,6 +611,7 @@ async def _team_response_stream_raw(
     media_inputs = media or MediaInputs()
     prompt = _build_prompt_with_context(message, thread_history)
     team = _create_team_instance(agents, agent_names, mode, orchestrator, model_name)
+    media_inputs = sanitize_media_for_model(team.model, media_inputs, agent_name=team.name or "team")
 
     logger.info(f"Created team with {len(agents)} agents in {mode.value} mode")
     for agent in agents:

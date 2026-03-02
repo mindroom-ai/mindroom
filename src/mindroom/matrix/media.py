@@ -29,6 +29,21 @@ def media_mime_type(event: nio.RoomMessageMedia | nio.RoomEncryptedMedia) -> str
     return mimetype if isinstance(mimetype, str) and mimetype else None
 
 
+def extract_media_caption(
+    event: nio.RoomMessageMedia | nio.RoomEncryptedMedia,
+    *,
+    default: str,
+) -> str:
+    """Extract user caption from Matrix media event content using MSC2530 semantics."""
+    source = getattr(event, "source", {})
+    content = source.get("content", {}) if isinstance(source, dict) else {}
+    filename = content.get("filename")
+    body = getattr(event, "body", None)
+    if isinstance(filename, str) and filename and isinstance(body, str) and body and filename != body:
+        return body
+    return default
+
+
 def _decrypt_encrypted_media_bytes(
     event: nio.RoomEncryptedMedia,
     encrypted_bytes: bytes,

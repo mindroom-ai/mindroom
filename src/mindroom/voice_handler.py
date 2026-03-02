@@ -17,7 +17,7 @@ from .commands import get_command_list
 from .constants import VOICE_PREFIX
 from .logging_config import get_logger
 from .matrix.identity import agent_username_localpart
-from .matrix.media import download_media_bytes, media_mime_type
+from .matrix.media import download_media_bytes, extract_media_caption, media_mime_type
 
 if TYPE_CHECKING:
     import nio
@@ -98,12 +98,7 @@ async def handle_voice_message(
 
 def extract_caption(event: nio.RoomMessageAudio | nio.RoomEncryptedAudio) -> str:
     """Extract user caption from an audio event using MSC2530 semantics."""
-    content = event.source.get("content", {})
-    filename = content.get("filename")
-    body = event.body
-    if filename and filename != body and body:
-        return body
-    return "[Attached voice message]"
+    return extract_media_caption(event, default="[Attached voice message]")
 
 
 async def download_audio(

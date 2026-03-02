@@ -1003,6 +1003,7 @@ class AgentBot:
             event=event,
             image_bytes=image.content,
         )
+        # Keep processing even without attachment registration; image bytes are already available to the model.
         attachment_ids = [attachment_record.attachment_id] if attachment_record is not None else []
         prompt_text = append_attachment_ids_prompt(caption, attachment_ids)
         await self._execute_dispatch_action(
@@ -1060,6 +1061,7 @@ class AgentBot:
             event=event,
         )
         if attachment_record is None:
+            # File/video media is resolved from persisted attachments, so registration is required.
             self.logger.error("Failed to register media attachment", event_id=event.event_id)
             self.response_tracker.mark_responded(event.event_id)
             return
@@ -1087,6 +1089,47 @@ class AgentBot:
             ),
             processing_log="Processing media message",
         )
+
+    async def _register_routed_attachment(
+        self,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        event: DispatchEvent,
+    ) -> str | None:
+        """Register a routed media event and return its attachment ID when available."""
+        if isinstance(
+            event,
+            nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
+        ):
+            assert self.client is not None
+            attachment_record = await register_file_or_video_attachment(
+                self.client,
+                self.storage_path,
+                room_id=room_id,
+                thread_id=thread_id,
+                event=event,
+            )
+            if attachment_record is None:
+                self.logger.error("Failed to register routed media attachment", event_id=event.event_id)
+                return None
+            return attachment_record.attachment_id
+
+        if isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage):
+            assert self.client is not None
+            attachment_record = await register_image_attachment(
+                self.client,
+                self.storage_path,
+                room_id=room_id,
+                thread_id=thread_id,
+                event=event,
+            )
+            if attachment_record is None:
+                self.logger.error("Failed to register routed image attachment", event_id=event.event_id)
+                return None
+            return attachment_record.attachment_id
+
+        return None
 
     async def _derive_conversation_context(
         self,
@@ -2406,35 +2449,22 @@ class AgentBot:
         routed_extra_content = dict(extra_content) if extra_content is not None else {}
         if isinstance(
             event,
-            nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
+            nio.RoomMessageFile
+            | nio.RoomEncryptedFile
+            | nio.RoomMessageVideo
+            | nio.RoomEncryptedVideo
+            | nio.RoomMessageImage
+            | nio.RoomEncryptedImage,
         ):
-            assert self.client is not None
-            attachment_record = await register_file_or_video_attachment(
-                self.client,
-                self.storage_path,
+            attachment_id = await self._register_routed_attachment(
                 room_id=room.room_id,
                 thread_id=thread_event_id,
                 event=event,
             )
-            if attachment_record is None:
-                self.logger.error("Failed to register routed media attachment", event_id=event.event_id)
+            if attachment_id is None:
                 routed_extra_content.pop(ATTACHMENT_IDS_KEY, None)
             else:
-                routed_extra_content[ATTACHMENT_IDS_KEY] = [attachment_record.attachment_id]
-        elif isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage):
-            assert self.client is not None
-            attachment_record = await register_image_attachment(
-                self.client,
-                self.storage_path,
-                room_id=room.room_id,
-                thread_id=thread_event_id,
-                event=event,
-            )
-            if attachment_record is None:
-                self.logger.error("Failed to register routed image attachment", event_id=event.event_id)
-                routed_extra_content.pop(ATTACHMENT_IDS_KEY, None)
-            else:
-                routed_extra_content[ATTACHMENT_IDS_KEY] = [attachment_record.attachment_id]
+                routed_extra_content[ATTACHMENT_IDS_KEY] = [attachment_id]
 
         event_id = await self._send_response(
             room_id=room.room_id,

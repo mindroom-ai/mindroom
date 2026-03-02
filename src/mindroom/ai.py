@@ -687,9 +687,8 @@ def _is_pdf_media_file(file_media: object) -> bool:
     return isinstance(filepath, str) and filepath.lower().endswith(".pdf")
 
 
-def _sanitize_media_for_model(agent: Agent, media_inputs: MediaInputs, *, agent_name: str) -> MediaInputs:
+def sanitize_media_for_model(model: object, media_inputs: MediaInputs, *, agent_name: str) -> MediaInputs:
     """Drop media combinations unsupported by the active model backend."""
-    model = agent.model
     if model is None or not isinstance(model, VertexAIClaude):
         return media_inputs
 
@@ -711,6 +710,11 @@ def _sanitize_media_for_model(agent: Agent, media_inputs: MediaInputs, *, agent_
         files=allowed_files,
         videos=media_inputs.videos,
     )
+
+
+def _sanitize_media_for_model(agent: Agent, media_inputs: MediaInputs, *, agent_name: str) -> MediaInputs:
+    """Drop media combinations unsupported by the active model backend."""
+    return sanitize_media_for_model(agent.model, media_inputs, agent_name=agent_name)
 
 
 async def _cached_agent_run(

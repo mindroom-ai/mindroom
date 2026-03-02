@@ -16,9 +16,9 @@ from uuid import uuid4
 
 import nio
 
-from .constants import ATTACHMENT_IDS_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
+from .constants import ATTACHMENT_IDS_KEY
 from .logging_config import get_logger
-from .matrix.media import download_media_bytes, media_mime_type
+from .matrix.media import download_media_bytes, extract_media_caption, media_mime_type
 
 logger = get_logger(__name__)
 
@@ -103,16 +103,6 @@ def merge_attachment_ids(*attachment_id_lists: list[str]) -> list[str]:
     return merged
 
 
-def is_voice_raw_audio_fallback(event_source: dict[str, Any] | None) -> bool:
-    """Return whether this message carries raw-audio fallback metadata."""
-    if not isinstance(event_source, dict):
-        return False
-    content = event_source.get("content")
-    if not isinstance(content, dict):
-        return False
-    return bool(content.get(VOICE_RAW_AUDIO_FALLBACK_KEY, False))
-
-
 def append_attachment_ids_prompt(prompt: str, attachment_ids: list[str]) -> str:
     """Append attachment guidance to a prompt when attachment IDs are available."""
     if not attachment_ids:
@@ -187,14 +177,10 @@ def extract_file_or_video_caption(
     event: FileOrVideoEvent,
 ) -> str:
     """Extract user caption for file/video events using MSC2530 semantics."""
-    content = event.source.get("content", {})
-    filename = content.get("filename")
-    body = event.body
-    if filename and filename != body and body:
-        return body
-    if isinstance(event, nio.RoomMessageVideo | nio.RoomEncryptedVideo):
-        return "[Attached video]"
-    return "[Attached file]"
+    default = (
+        "[Attached video]" if isinstance(event, nio.RoomMessageVideo | nio.RoomEncryptedVideo) else "[Attached file]"
+    )
+    return extract_media_caption(event, default=default)
 
 
 def attachment_id_for_event(event_id: str) -> str:
@@ -721,17 +707,7 @@ def attachments_for_tool_payload(attachment_records: list[AttachmentRecord]) -> 
     """Render attachment records for tool JSON responses."""
     payloads: list[dict[str, Any]] = []
     for record in attachment_records:
-        payload: dict[str, Any] = {
-            "attachment_id": record.attachment_id,
-            "kind": record.kind,
-            "filename": record.filename,
-            "mime_type": record.mime_type,
-            "size_bytes": record.size_bytes,
-            "room_id": record.room_id,
-            "thread_id": record.thread_id,
-            "source_event_id": record.source_event_id,
-            "available": record.local_path.is_file(),
-            "local_path": str(record.local_path),
-        }
+        payload = record.to_payload()
+        payload["available"] = record.local_path.is_file()
         payloads.append(payload)
     return payloads

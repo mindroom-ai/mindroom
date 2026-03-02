@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from agno.media import Image
 
 from .logging_config import get_logger
-from .matrix.media import download_media_bytes, media_mime_type
+from .matrix.media import download_media_bytes, extract_media_caption, media_mime_type
 
 if TYPE_CHECKING:
     import nio
@@ -26,12 +26,7 @@ def extract_caption(event: nio.RoomMessageImage | nio.RoomEncryptedImage) -> str
         The caption text, or ``"[Attached image]"`` when no caption was provided.
 
     """
-    content = event.source.get("content", {})
-    filename = content.get("filename")
-    body = event.body
-    if filename and filename != body and body:
-        return body
-    return "[Attached image]"
+    return extract_media_caption(event, default="[Attached image]")
 
 
 async def download_image(
