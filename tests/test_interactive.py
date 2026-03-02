@@ -180,7 +180,7 @@ Based on your choice, I'll proceed accordingly."""
         interactive._active_questions.clear()
 
         # Set up an active question
-        interactive._active_questions["$question123"] = interactive.InteractiveQuestion(
+        interactive._active_questions["$question123"] = interactive._InteractiveQuestion(
             room_id="!room:localhost",
             thread_id="$thread123",
             options={"🚀": "fast", "🐢": "slow", "1": "fast", "2": "slow"},
@@ -238,7 +238,7 @@ Based on your choice, I'll proceed accordingly."""
         interactive._active_questions.clear()
 
         # Set up a question
-        interactive._active_questions["$question123"] = interactive.InteractiveQuestion(
+        interactive._active_questions["$question123"] = interactive._InteractiveQuestion(
             room_id="!room:localhost",
             thread_id=None,
             options={"✅": "yes"},
@@ -268,7 +268,7 @@ Based on your choice, I'll proceed accordingly."""
         interactive._active_questions.clear()
 
         # Set up an active question
-        interactive._active_questions["$question123"] = interactive.InteractiveQuestion(
+        interactive._active_questions["$question123"] = interactive._InteractiveQuestion(
             room_id="!room:localhost",
             thread_id="$thread123",
             options={"1": "first", "2": "second", "3": "third"},
@@ -301,7 +301,7 @@ Based on your choice, I'll proceed accordingly."""
         interactive._active_questions.clear()
 
         # Set up a question
-        interactive._active_questions["$question123"] = interactive.InteractiveQuestion(
+        interactive._active_questions["$question123"] = interactive._InteractiveQuestion(
             room_id="!room:localhost",
             thread_id=None,
             options={"1": "one", "2": "two"},

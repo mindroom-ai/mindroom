@@ -25,8 +25,8 @@ from .voice import VoiceConfig
 if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
 
-AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
-OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
+_AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
+_OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
     "shell",
     "coding",
     "duckduckgo",
@@ -43,7 +43,7 @@ class Config(BaseModel):
     """Complete configuration from YAML."""
 
     TOOL_PRESETS: ClassVar[dict[str, tuple[str, ...]]] = {
-        "openclaw_compat": OPENCLAW_COMPAT_PRESET_TOOLS,
+        "openclaw_compat": _OPENCLAW_COMPAT_PRESET_TOOLS,
     }
 
     agents: dict[str, AgentConfig] = Field(default_factory=dict, description="Agent configurations")
@@ -84,8 +84,8 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def validate_entity_names(self) -> Config:
         """Ensure agent and team names contain only alphanumeric characters and underscores."""
-        invalid_agents = [name for name in self.agents if not AGENT_NAME_PATTERN.fullmatch(name)]
-        invalid_teams = [name for name in self.teams if not AGENT_NAME_PATTERN.fullmatch(name)]
+        invalid_agents = [name for name in self.agents if not _AGENT_NAME_PATTERN.fullmatch(name)]
+        invalid_teams = [name for name in self.teams if not _AGENT_NAME_PATTERN.fullmatch(name)]
         invalid = sorted(invalid_agents + invalid_teams)
         if invalid:
             msg = f"Agent/team names must be alphanumeric/underscore only, got: {', '.join(invalid)}"
