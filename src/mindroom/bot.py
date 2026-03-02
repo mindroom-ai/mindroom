@@ -971,22 +971,6 @@ class AgentBot:
         )
         self.response_tracker.mark_responded(event.event_id, response_event_id)
 
-    async def _on_image_message(
-        self,
-        room: nio.MatrixRoom,
-        event: nio.RoomMessageImage | nio.RoomEncryptedImage,
-    ) -> None:
-        """Compatibility wrapper for image handlers."""
-        await self._on_media_message(room, event)
-
-    async def _on_file_or_video_message(
-        self,
-        room: nio.MatrixRoom,
-        event: nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
-    ) -> None:
-        """Compatibility wrapper for file/video handlers."""
-        await self._on_media_message(room, event)
-
     async def _on_media_message(
         self,
         room: nio.MatrixRoom,

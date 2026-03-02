@@ -2,8 +2,7 @@
 
 import os
 from collections.abc import AsyncGenerator, Generator
-from typing import Protocol
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -18,7 +17,6 @@ __all__ = [
     "aioresponse",
     "bypass_authorization",
     "create_mock_room",
-    "setup_common_bot_mocks",
 ]
 
 
@@ -31,15 +29,6 @@ class FakeCredentialsManager:
     def load_credentials(self, service: str) -> dict[str, object]:
         """Return stored credentials for *service*, or empty dict."""
         return self._credentials_by_service.get(service, {})
-
-
-class _BotLike(Protocol):
-    """Structural type for tests that patch bot internals."""
-
-    client: object
-    logger: object
-    response_tracker: object
-    stop_manager: object
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
@@ -73,20 +62,6 @@ def create_mock_room(
     else:
         room.users = {}
     return room
-
-
-def setup_common_bot_mocks(
-    bot: _BotLike,
-    *,
-    has_responded: bool = False,
-) -> _BotLike:
-    """Apply shared bot mock scaffolding for unit tests."""
-    bot.client = AsyncMock()
-    bot.logger = MagicMock()
-    bot.response_tracker = MagicMock()
-    bot.response_tracker.has_responded.return_value = has_responded
-    bot.stop_manager = MagicMock()
-    return bot
 
 
 @pytest_asyncio.fixture

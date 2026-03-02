@@ -213,11 +213,11 @@ class TestAgentBot:
         if handler_name == "message":
             await bot._on_message(room, event)
         elif handler_name == "image":
-            await bot._on_image_message(room, event)
+            await bot._on_media_message(room, event)
         elif handler_name == "voice":
             await bot._on_voice_message(room, event)
         elif handler_name == "file":
-            await bot._on_file_or_video_message(room, event)
+            await bot._on_media_message(room, event)
         elif handler_name == "reaction":
             await bot._on_reaction(room, event)
         else:  # pragma: no cover - defensive guard for test helper misuse
@@ -1273,7 +1273,7 @@ class TestAgentBot:
                 return_value=attachment_record,
             ),
         ):
-            await bot._on_image_message(room, event)
+            await bot._on_media_message(room, event)
 
         bot._generate_response.assert_awaited_once()
         generate_kwargs = bot._generate_response.await_args.kwargs
@@ -1343,7 +1343,7 @@ class TestAgentBot:
             patch("mindroom.bot.should_agent_respond", return_value=True),
             patch("mindroom.bot.image_handler.download_image", new_callable=AsyncMock, return_value=None),
         ):
-            await bot._on_image_message(room, event)
+            await bot._on_media_message(room, event)
 
         bot._generate_response.assert_not_called()
         tracker.mark_responded.assert_called_once_with("$img_event_fail")
@@ -1421,7 +1421,7 @@ class TestAgentBot:
                 return_value=attachment_record,
             ),
         ):
-            await bot._on_file_or_video_message(room, event)
+            await bot._on_media_message(room, event)
 
         bot._generate_response.assert_awaited_once()
         generate_kwargs = bot._generate_response.await_args.kwargs
@@ -1492,7 +1492,7 @@ class TestAgentBot:
             patch("mindroom.bot.should_agent_respond", return_value=True),
             patch("mindroom.bot.register_file_or_video_attachment", new_callable=AsyncMock, return_value=None),
         ):
-            await bot._on_file_or_video_message(room, event)
+            await bot._on_media_message(room, event)
 
         bot._generate_response.assert_not_called()
         tracker.mark_responded.assert_called_once_with("$file_event_fail")
@@ -1565,7 +1565,7 @@ class TestAgentBot:
             patch("mindroom.bot.extract_media_caption", return_value="[Attached image]"),
         ):
             mock_get_available.return_value = [config.ids["general"], config.ids["calculator"]]
-            await bot._on_image_message(room, event)
+            await bot._on_media_message(room, event)
 
         bot._handle_ai_routing.assert_called_once_with(
             room,
@@ -1665,7 +1665,7 @@ class TestAgentBot:
             ) as mock_register_file,
         ):
             mock_get_available.return_value = [config.ids["general"], config.ids["calculator"]]
-            await bot._on_file_or_video_message(room, event)
+            await bot._on_media_message(room, event)
 
         bot._handle_ai_routing.assert_called_once()
         mock_register_file.assert_not_awaited()
@@ -1952,8 +1952,8 @@ class TestAgentBot:
                 return_value=attachment_record,
             ) as mock_register,
         ):
-            await router_bot._on_file_or_video_message(router_room, file_event)
-            await general_bot._on_file_or_video_message(general_room, file_event)
+            await router_bot._on_media_message(router_room, file_event)
+            await general_bot._on_media_message(general_room, file_event)
 
         mock_register.assert_awaited_once()
         assert mock_register.await_args.kwargs["room_id"] == "!test:localhost"
@@ -2025,7 +2025,7 @@ class TestAgentBot:
             patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
         ):
             await bot._on_message(room, text_event)
-            await bot._on_image_message(room, image_event)
+            await bot._on_media_message(room, image_event)
 
         assert bot._handle_ai_routing.await_count == 2
         first_call = bot._handle_ai_routing.await_args_list[0].kwargs
@@ -2088,7 +2088,7 @@ class TestAgentBot:
             patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
         ):
             await bot._on_message(room, text_event)
-            await bot._on_image_message(room, image_event)
+            await bot._on_media_message(room, image_event)
 
         bot._handle_ai_routing.assert_not_awaited()
 

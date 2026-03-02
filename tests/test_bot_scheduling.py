@@ -18,7 +18,7 @@ from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, VOICE_PRE
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_utils import should_agent_respond
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, create_mock_room, setup_common_bot_mocks
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, create_mock_room
 
 
 @pytest.fixture
@@ -34,7 +34,8 @@ def mock_agent_bot() -> AgentBot:
     config = Config.from_yaml()  # Load actual config for testing
     with tempfile.TemporaryDirectory() as tmpdir:
         bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
-    setup_common_bot_mocks(bot, has_responded=False)
+    bot.client = AsyncMock()
+    bot.logger = MagicMock()
     bot._send_response = AsyncMock()
     return bot
 
