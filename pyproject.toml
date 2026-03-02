@@ -418,7 +418,6 @@ packages = [ "src/mindroom" ]
 [tool.ruff]
 target-version = "py312"
 line-length = 120
-namespace-packages = [ "src/mindroom/tool_system" ]
 
 lint.select = [
   "ALL",

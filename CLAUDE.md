@@ -33,11 +33,11 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 | `teams.py` | Multi-agent collaboration (coordinate vs collaborate modes) |
 | `memory/` | Mem0 memory: agent, room, and team-scoped |
 | `knowledge.py` | Knowledge base / RAG file indexing with watcher |
-| `skills.py` | Skill integration system (OpenClaw-compatible) |
-| `plugins.py` | Plugin loading and tool/skill extension |
+| `tool_system/skills.py` | Skill integration system (OpenClaw-compatible) |
+| `tool_system/plugins.py` | Plugin loading and tool/skill extension |
 | `scheduling.py` | Cron and natural-language task scheduling |
 | `tools/` | 100+ tool integrations |
-| `tool_dependencies.py` | Auto-install per-tool optional dependencies at runtime |
+| `tool_system/dependencies.py` | Auto-install per-tool optional dependencies at runtime |
 | `ai.py` | AI model instantiation, caching, and response generation |
 | `credentials.py` | Unified credential management (CredentialsManager) |
 | `matrix/` | Matrix protocol integration (client, users, rooms, presence, provisioning, message formatting) |
@@ -46,14 +46,14 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 | `matrix/provisioning.py` | Hosted provisioning client flow used for local pairing and server-side agent registration |
 | `commands.py` | Chat command parsing (`!help`, `!schedule`, `!skill`, etc.) |
 | `voice_handler.py` | Voice message download, transcription, and command recognition |
-| `sandbox_proxy.py` | Container sandbox proxy for isolating shell/python tools |
+| `tool_system/sandbox_proxy.py` | Container sandbox proxy for isolating shell/python tools |
 | `streaming.py` | Response streaming via progressive message edits |
 | `agent_prompts.py` | Rich built-in prompts for named agents (code, research, etc.) |
 | `image_handler.py` | Image message download, decryption, and AI processing |
 | `api/` | FastAPI REST API (dashboard, credentials, OpenAI-compatible endpoint) |
 | `custom_tools/` | Built-in custom tool implementations (gmail, calendar, scheduler, etc.) |
 | `background_tasks.py` | Background task management for non-blocking operations |
-| `tool_events.py` | Tool-event formatting and metadata for Matrix messages |
+| `tool_system/events.py` | Tool-event formatting and metadata for Matrix messages |
 | `constants.py` | Shared constants, paths, and environment variable defaults |
 | `error_handling.py` | User-friendly error message extraction |
 | `authorization.py` | Sender and per-agent authorization checks |
@@ -73,7 +73,8 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 | `logging_config.py` | Structured logging setup |
 | `response_tracker.py` | Duplicate response prevention |
 | `scheduling_context.py` | Scheduling tool context management |
-| `tools_metadata.py` | Tool registry metadata and registration decorators |
+| `tool_system/metadata.py` | Tool registry metadata and registration decorators |
+| `tool_system/runtime_context.py` | Tool runtime context for custom tools |
 | `knowledge_utils.py` | Multi-knowledge-base vector DB utilities |
 
 **Persistent state** lives under `mindroom_data/` (next to `config.yaml`, overridable via `MINDROOM_STORAGE_PATH`):
