@@ -2566,11 +2566,23 @@ class AgentBot:
         # Remove the stale run from Agno history before regenerating.
         # The original run stored reply_to_event_id (= original_event_id) as
         # matrix_event_id in its metadata, so we look up by that key.
-        session_id = create_session_id(room.room_id, context.thread_id)
         storage = create_session_storage(self.agent_name, self.storage_path)
-        removed = remove_run_by_event_id(storage, session_id, event_info.original_event_id)
-        if removed:
-            self.logger.info("Removed stale run for edited message", event_id=event_info.original_event_id)
+        session_ids_to_check = [
+            create_session_id(room.room_id, context.thread_id),
+            create_session_id(room.room_id, None),
+        ]
+        checked_session_ids: set[str] = set()
+        for session_id in session_ids_to_check:
+            if session_id in checked_session_ids:
+                continue
+            checked_session_ids.add(session_id)
+            removed = remove_run_by_event_id(storage, session_id, event_info.original_event_id)
+            if removed:
+                self.logger.info(
+                    "Removed stale run for edited message",
+                    event_id=event_info.original_event_id,
+                    session_id=session_id,
+                )
 
         # Generate new response
         await self._generate_response(
