@@ -8,12 +8,15 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import nio
 import pytest
 
-from mindroom import config_confirmation, interactive
+import mindroom.commands.config_confirmation
+from mindroom import interactive
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
+
+config_confirmation = mindroom.commands.config_confirmation
 
 
 @pytest.mark.asyncio

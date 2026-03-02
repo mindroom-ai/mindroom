@@ -1,3 +1,4 @@
+# ruff: noqa: INP001, TID252
 """Command parsing and handling for user commands."""
 
 from __future__ import annotations
@@ -9,8 +10,8 @@ from typing import Any
 
 import nio
 
-from .constants import VOICE_PREFIX
-from .logging_config import get_logger
+from ..constants import VOICE_PREFIX
+from ..logging_config import get_logger
 
 logger = get_logger(__name__)
 

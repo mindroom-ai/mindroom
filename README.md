@@ -231,7 +231,7 @@ resolves the reply chain and continues the correct conversation thread.
 <!-- CODE:START -->
 <!-- import sys -->
 <!-- sys.path.insert(0, 'src') -->
-<!-- from mindroom.commands import _get_command_entries -->
+<!-- from mindroom.commands.parsing import _get_command_entries -->
 <!-- for entry in _get_command_entries(format_code=True): -->
 <!--     print(entry) -->
 <!-- CODE:END -->

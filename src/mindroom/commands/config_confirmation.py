@@ -1,3 +1,4 @@
+# ruff: noqa: INP001, TID252
 """Configuration change confirmation system using Matrix reactions with persistence."""
 
 from __future__ import annotations
@@ -8,10 +9,10 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
-from .logging_config import get_logger
+from ..logging_config import get_logger
 
 if TYPE_CHECKING:
-    from .bot import AgentBot
+    from ..bot import AgentBot
 
 logger = get_logger(__name__)
 

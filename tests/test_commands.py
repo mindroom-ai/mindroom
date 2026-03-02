@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mindroom.commands import COMMAND_DOCS, CommandType, command_parser, get_command_help
+from mindroom.commands.parsing import COMMAND_DOCS, CommandType, command_parser, get_command_help
 
 
 def test_help_command() -> None:

@@ -1,3 +1,4 @@
+# ruff: noqa: INP001, TID252
 """Command handling helpers extracted from bot dispatch logic."""
 
 from __future__ import annotations
@@ -6,23 +7,24 @@ import inspect
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from . import config_confirmation
-from .authorization import get_available_agents_for_sender
-from .commands import Command, CommandType, get_command_help, handle_widget_command
-from .config_commands import handle_config_command
-from .constants import ROUTER_AGENT_NAME
-from .logging_config import get_logger
-from .matrix.event_info import EventInfo
-from .scheduling import (
+import mindroom.commands.config_confirmation
+
+from ..authorization import get_available_agents_for_sender
+from ..constants import ROUTER_AGENT_NAME
+from ..logging_config import get_logger
+from ..matrix.event_info import EventInfo
+from ..scheduling import (
     cancel_all_scheduled_tasks,
     cancel_scheduled_task,
     edit_scheduled_task,
     list_scheduled_tasks,
     schedule_task,
 )
-from .skills import resolve_skill_command_spec
-from .thread_utils import check_agent_mentioned, get_configured_agents_for_room
-from .tools_metadata import get_tool_by_name
+from ..skills import resolve_skill_command_spec
+from ..thread_utils import check_agent_mentioned, get_configured_agents_for_room
+from ..tools_metadata import get_tool_by_name
+from .config_commands import handle_config_command
+from .parsing import Command, CommandType, get_command_help, handle_widget_command
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -32,11 +34,12 @@ if TYPE_CHECKING:
     from agno.tools.function import Function
     from agno.tools.toolkit import Toolkit
 
-    from .config.main import Config
-    from .matrix.identity import MatrixID
-    from .response_tracker import ResponseTracker
+    from ..config.main import Config
+    from ..matrix.identity import MatrixID
+    from ..response_tracker import ResponseTracker
 
 logger = get_logger(__name__)
+config_confirmation = mindroom.commands.config_confirmation
 
 
 @dataclass(frozen=True)
