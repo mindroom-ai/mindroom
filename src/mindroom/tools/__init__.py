@@ -268,7 +268,7 @@ __all__ = [
     ],
     docs_url="https://www.home-assistant.io/integrations/",
 )
-def homeassistant_tools() -> type[Toolkit]:
+def _homeassistant_tools() -> type[Toolkit]:
     """Return Home Assistant tools for smart home control."""
     from mindroom.custom_tools.homeassistant import HomeAssistantTools
 
@@ -297,7 +297,7 @@ def homeassistant_tools() -> type[Toolkit]:
     helper_text="Get a free API key from [OMDb API website](http://www.omdbapi.com/apikey.aspx)",
     docs_url="http://www.omdbapi.com/",
 )
-def imdb_tools() -> type[Toolkit]:
+def _imdb_tools() -> type[Toolkit]:
     """IMDb integration - coming soon."""
     msg = "IMDb integration is coming soon"
     raise NotImplementedError(msg)
