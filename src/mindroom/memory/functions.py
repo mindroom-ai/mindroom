@@ -258,7 +258,7 @@ def _search_scope_memory_entries(  # noqa: C901
             continue
         enriched = dict(entry)
         enriched["score"] = score
-        scored_entries.append(cast("MemoryResult", enriched))
+        scored_entries.append(cast("_MemoryResult", enriched))
         if normalized_text:
             seen_scored_text.add(normalized_text)
 
@@ -441,7 +441,7 @@ async def _get_scoped_memory_by_id(
         )
         return None
 
-    return cast("MemoryResult", result)
+    return cast("_MemoryResult", result)
 
 
 async def add_agent_memory(

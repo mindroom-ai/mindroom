@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: D101,D103,C901,PLR0912,PERF401
 """Detect public top-level symbols that are never imported by other src modules.
 
 These are candidates for being made private (prefixed with ``_``).
@@ -199,7 +200,9 @@ def find_cross_imports(modules: dict[str, Module]) -> set[tuple[str, str]]:
 
             elif isinstance(node, ast.ImportFrom):
                 source = _resolve_relative_import(
-                    consumer.package_parts, node.level or 0, node.module,
+                    consumer.package_parts,
+                    node.level or 0,
+                    node.module,
                 )
                 if source is None:
                     continue

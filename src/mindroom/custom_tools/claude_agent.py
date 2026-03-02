@@ -81,7 +81,7 @@ def _normalize_permission_mode(permission_mode: str | None) -> _PermissionMode:
     normalized = permission_mode.strip()
     if normalized not in _VALID_PERMISSION_MODES:
         return _DEFAULT_PERMISSION_MODE
-    return cast("PermissionMode", normalized)
+    return cast("_PermissionMode", normalized)
 
 
 def _parse_int(value: int | None, *, default: int, minimum: int) -> int:
