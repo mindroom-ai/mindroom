@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
@@ -1479,12 +1478,7 @@ class AgentBot:
         client = self.client
         if client is None:
             return None
-        if not hasattr(client, "rooms"):
-            return None
-        rooms = client.rooms
-        if not isinstance(rooms, Mapping):
-            return None
-        return rooms.get(room_id)
+        return client.rooms.get(room_id)
 
     def _build_tool_runtime_context(
         self,

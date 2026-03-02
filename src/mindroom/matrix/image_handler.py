@@ -37,10 +37,9 @@ async def download_image(
         return None
     mime_resolution = resolve_image_mime_type(image_bytes, media_mime_type(event))
     if mime_resolution.is_mismatch:
-        event_id = event.event_id if hasattr(event, "event_id") and isinstance(event.event_id, str) else None
         logger.warning(
             "Image MIME mismatch between Matrix metadata and payload bytes",
-            event_id=event_id,
+            event_id=event.event_id,
             declared_mime_type=mime_resolution.declared_mime_type,
             detected_mime_type=mime_resolution.detected_mime_type,
         )

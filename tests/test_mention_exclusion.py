@@ -47,6 +47,7 @@ async def test_agent_ignores_user_message_mentioning_other_agents(tmp_path) -> N
     # Mock the client
     general_bot.client = AsyncMock(spec=nio.AsyncClient)
     general_bot.client.user_id = f"@mindroom_general:{domain}"
+    general_bot.client.rooms = {}
 
     # Mock response tracker
     general_bot.response_tracker = Mock()
@@ -118,6 +119,7 @@ async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None
     # Mock the client
     general_bot.client = AsyncMock(spec=nio.AsyncClient)
     general_bot.client.user_id = f"@mindroom_general:{domain}"
+    general_bot.client.rooms = {}
 
     # Mock response tracker
     general_bot.response_tracker = Mock()

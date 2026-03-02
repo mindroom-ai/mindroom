@@ -23,8 +23,6 @@ class _ImageMimeResolution:
 
 
 def _event_id_for_log(event: nio.RoomMessageMedia | nio.RoomEncryptedMedia) -> str | None:
-    if not hasattr(event, "event_id"):
-        return None
     event_id = event.event_id
     return event_id if isinstance(event_id, str) else None
 
@@ -36,8 +34,6 @@ def media_mime_type(event: nio.RoomMessageMedia | nio.RoomEncryptedMedia) -> str
         if isinstance(mimetype, str) and mimetype:
             return mimetype
 
-    if not hasattr(event, "source"):
-        return None
     source = event.source
     content = source.get("content", {}) if isinstance(source, dict) else {}
     info = content.get("info", {}) if isinstance(content, dict) else {}
@@ -93,8 +89,6 @@ def extract_media_caption(
     default: str,
 ) -> str:
     """Extract user caption from Matrix media event content using MSC2530 semantics."""
-    if not hasattr(event, "source") or not hasattr(event, "body"):
-        return default
     source = event.source
     content = source.get("content", {}) if isinstance(source, dict) else {}
     filename = content.get("filename")
