@@ -1,3 +1,4 @@
+# ruff: noqa: INP001, TID252
 """Shared knowledge base utilities used by both bot.py and openai_compat.py."""
 
 from __future__ import annotations
@@ -8,14 +9,14 @@ from typing import TYPE_CHECKING, Any
 
 from agno.knowledge.knowledge import Knowledge
 
-from .logging_config import get_logger
+from ..logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from agno.knowledge.document import Document
 
-    from .config.main import Config
+    from ..config.main import Config
 
 logger = get_logger(__name__)
 

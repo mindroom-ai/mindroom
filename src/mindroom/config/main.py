@@ -10,13 +10,13 @@ from typing import TYPE_CHECKING, ClassVar, Literal
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
+from mindroom.config.knowledge import KnowledgeBaseConfig  # noqa: TC001
 from mindroom.constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, safe_replace
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import agent_username_localpart
 
 from .agent import AgentConfig, CultureConfig, TeamConfig  # noqa: TC001
 from .auth import AuthorizationConfig
-from .knowledge import KnowledgeBaseConfig  # noqa: TC001
 from .matrix import MatrixRoomAccessConfig, MindRoomUserConfig
 from .memory import MemoryBackend, MemoryConfig
 from .models import DefaultsConfig, ModelConfig, RouterConfig

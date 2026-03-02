@@ -1,3 +1,4 @@
+# ruff: noqa: INP001, TID252
 """Knowledge base management for file-backed RAG."""
 
 from __future__ import annotations
@@ -18,16 +19,16 @@ from agno.knowledge.knowledge import Knowledge
 from agno.vectordb.chroma import ChromaDb
 from watchfiles import Change, awatch
 
-from .constants import resolve_config_relative_path
-from .credentials import get_credentials_manager
-from .credentials_sync import get_api_key_for_provider, get_ollama_host
-from .logging_config import get_logger
+from ..constants import resolve_config_relative_path
+from ..credentials import get_credentials_manager
+from ..credentials_sync import get_api_key_for_provider, get_ollama_host
+from ..logging_config import get_logger
 
 if TYPE_CHECKING:
     from agno.knowledge.embedder.base import Embedder
 
-    from .config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
-    from .config.main import Config
+    from ..config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
+    from ..config.main import Config
 
 logger = get_logger(__name__)
 
