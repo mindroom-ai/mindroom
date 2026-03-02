@@ -3,7 +3,7 @@
 MindRoom supports a practical OpenClaw-compatible workflow focused on workspace portability:
 
 - Reuse your OpenClaw markdown files (`SOUL.md`, `AGENTS.md`, `USER.md`, `MEMORY.md`, etc.)
-- Use `openclaw_compat` tool names where supported
+- Use the `openclaw_compat` preset to enable a native MindRoom tool bundle
 - Use MindRoom's unified memory backend (`memory.backend`) for persistence
 - Optionally add semantic recall over workspace files via knowledge bases
 
@@ -15,31 +15,34 @@ Works well:
 
 - File-based identity and memory documents
 - OpenClaw-inspired behavior and instructions
-- `sessions_send`, `sessions_spawn`, `list_sessions`, `agents_list`, `web_*`, `exec/process`, `cron`, `browser` compatibility surface
-- Native Matrix messaging via `matrix_message` (`send`, `reply`, `thread-reply`, `react`, `read`, `context`)
+- Native MindRoom tool bundle via the `openclaw_compat` preset
+- Native Matrix messaging via the `matrix_message` tool in the preset bundle
+- Native sub-agent session orchestration via the `subagents` tool in the preset bundle
 
 Not included:
 
 - OpenClaw gateway control plane
 - Device nodes and canvas platform tools
-- `tts` and `image` tool aliases (use MindRoom's native TTS/image tools directly)
+- OpenClaw alias-name wrapper APIs like `exec`, `process`, `web_search`, and `web_fetch`
+- `tts` and `image` aliases (use MindRoom's native TTS/image tools directly)
 - Heartbeat runtime - schedule heartbeats via `cron`/`scheduler` instead
 
-## The `openclaw_compat` toolkit
+## The `openclaw_compat` preset
 
-The `openclaw_compat` tool provides OpenClaw-named aliases so prompts and skills written for OpenClaw work without rewriting tool calls:
+`openclaw_compat` is a config macro, not a runtime toolkit. `Config.get_agent_tools` expands it into native MindRoom tools and dedupes while preserving order.
 
-| OpenClaw tool                                                     | MindRoom backend                                            |
-| ----------------------------------------------------------------- | ----------------------------------------------------------- |
-| `exec`, `process`                                                 | `ShellTools`                                                |
-| `web_search`, `web_fetch`                                         | `DuckDuckGoTools`, `WebsiteTools`                           |
-| `cron`                                                            | `SchedulerTools`                                            |
-| `agents_list`, `sessions_send`, `sessions_spawn`, `list_sessions` | `SubAgentsTools` (also available standalone as `subagents`) |
-| `browser`                                                         | `BrowserTools` (Playwright, host target only)               |
+Preset expansion:
 
-Attachment handling is provided by the standalone `attachments` tool, not `openclaw_compat.message`.
+- `shell`
+- `coding`
+- `duckduckgo`
+- `website`
+- `browser`
+- `scheduler`
+- `subagents`
+- `matrix_message`
 
-Memory is not a separate OpenClaw subsystem in MindRoom. It uses the normal MindRoom memory backend. When `openclaw_compat` is enabled for an agent, `matrix_message` is added automatically as the messaging tool.
+Attachment handling is provided by the standalone `attachments` tool. Memory is not a separate OpenClaw subsystem in MindRoom. It uses the normal MindRoom memory backend.
 
 ## Drop-in config
 
@@ -94,7 +97,7 @@ memory:
     enabled: true
 ```
 
-`memory_file_path` points the file-memory scope directly at the workspace root, so `MEMORY.md` is loaded automatically by the file backend as the entrypoint — no need to list it in `context_files`. `memory_file_path` is ignored unless the effective backend is `file`; if you switch this agent to `mem0`, re-add `MEMORY.md` to `context_files` when you still want it preloaded. The `openclaw_compat` toolkit already bundles shell, file operations, web search, web fetch, browser, and scheduler aliases, so listing those tools individually is not necessary. Use `matrix_message` as the first-class messaging tool for non-OpenClaw agents.
+`memory_file_path` points the file-memory scope directly at the workspace root, so `MEMORY.md` is loaded automatically by the file backend as the entrypoint — no need to list it in `context_files`. `memory_file_path` is ignored unless the effective backend is `file`; if you switch this agent to `mem0`, re-add `MEMORY.md` to `context_files` when you still want it preloaded. The `openclaw_compat` preset already expands to native shell, coding, search/fetch, browser, scheduler, sub-agent orchestration, and `matrix_message` tools, so listing those tools individually is not necessary.
 
 ## Recommended workspace layout
 

@@ -256,7 +256,6 @@ optional-dependencies.openai = [
 optional-dependencies.openbb = [
   "openbb",
 ]
-optional-dependencies.openclaw_compat = [  ]
 optional-dependencies.openweather = [
   "requests",
 ]
