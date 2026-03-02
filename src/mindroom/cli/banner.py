@@ -1,3 +1,4 @@
+# ruff: noqa: INP001
 """ASCII art banner with Matrix-themed easter eggs for the MindRoom CLI."""
 
 from __future__ import annotations

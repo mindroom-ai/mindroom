@@ -1,3 +1,4 @@
+# ruff: noqa: INP001
 """Helpers for CLI `connect` command and local onboarding config updates."""
 
 from __future__ import annotations

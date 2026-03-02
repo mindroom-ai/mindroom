@@ -1,3 +1,4 @@
+# ruff: noqa: INP001
 """Mindroom CLI - Simplified multi-agent Matrix bot system."""
 
 from __future__ import annotations
@@ -14,23 +15,25 @@ import typer
 import yaml
 from pydantic import ValidationError
 
-from mindroom import __version__, cli_connect
-from mindroom.cli_banner import make_banner
-from mindroom.cli_config import (
-    _check_env_keys,
-    _format_validation_errors,
-    _load_config_quiet,
-    config_app,
-    console,
-)
-from mindroom.cli_doctor import doctor
-from mindroom.cli_local_stack import local_stack_setup
+import mindroom.cli.connect as cli_connect
+from mindroom import __version__
 from mindroom.constants import (
     CONFIG_PATH,
     MATRIX_SSL_VERIFY,
     STORAGE_PATH,
     config_search_locations,
 )
+
+from .banner import make_banner
+from .config import (
+    _check_env_keys,
+    _format_validation_errors,
+    _load_config_quiet,
+    config_app,
+    console,
+)
+from .doctor import doctor
+from .local_stack import local_stack_setup
 
 _HELP = """\
 AI agents that live in Matrix and work everywhere via bridges.

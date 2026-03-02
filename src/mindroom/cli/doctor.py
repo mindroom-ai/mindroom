@@ -1,3 +1,4 @@
+# ruff: noqa: INP001
 """Doctor command implementation for MindRoom CLI."""
 
 from __future__ import annotations
@@ -12,7 +13,6 @@ import typer
 import yaml
 from pydantic import ValidationError
 
-from mindroom.cli_config import _load_config_quiet, console
 from mindroom.constants import (
     CONFIG_PATH,
     MATRIX_HOMESERVER,
@@ -20,6 +20,8 @@ from mindroom.constants import (
     STORAGE_PATH,
     env_key_for_provider,
 )
+
+from .config import _load_config_quiet, console
 
 if TYPE_CHECKING:
     from collections.abc import Callable

@@ -1,3 +1,4 @@
+# ruff: noqa: INP001
 """Configuration management CLI subcommands for MindRoom."""
 
 from __future__ import annotations
