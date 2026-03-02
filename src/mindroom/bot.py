@@ -130,6 +130,7 @@ if TYPE_CHECKING:
     import structlog
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
+    from agno.media import Image
 
     from mindroom.config.main import Config
     from mindroom.orchestrator import MultiAgentOrchestrator
@@ -890,7 +891,7 @@ class AgentBot:
         prompt: str,
         current_attachment_ids: list[str],
         media_thread_id: str | None,
-        fallback_images: list[Any] | None = None,
+        fallback_images: list[Image] | None = None,
     ) -> _DispatchPayload:
         """Build dispatch payload by merging thread/history attachment media."""
         assert self.client is not None
@@ -1056,7 +1057,7 @@ class AgentBot:
             event_source=event.source,
         )
         current_attachment_ids: list[str]
-        fallback_images: list[Any] | None = None
+        fallback_images: list[Image] | None = None
         if is_image_event:
             assert isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage)
             # Download image only after confirming we should respond.

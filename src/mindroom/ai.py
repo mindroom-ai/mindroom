@@ -744,6 +744,7 @@ def _request_stream_retry(
 ) -> bool:
     """Set retry flag when inline-media fallback should be attempted."""
     if retried_without_inline_media or state.full_response:
+        # Once any stream content is emitted, retrying would duplicate partial output.
         return False
     if not _should_retry_without_inline_media(error, media_inputs):
         return False
