@@ -751,20 +751,21 @@ async def _apply_thread_edits_to_history(
 ) -> None:
     """Apply latest edits to history entries and synthesize missing originals."""
     for original_event_id, (edit_event, edit_thread_id) in latest_edits_by_original_event_id.items():
+        existing_message = messages_by_event_id.get(original_event_id)
+
+        # Ignore unrelated missing originals before resolving potentially large
+        # edit payloads from sidecar storage.
+        if existing_message is None and edit_thread_id != thread_id:
+            continue
+
         edited_body, edited_content = await extract_edit_body(edit_event.source, client)
         if edited_body is None:
             continue
 
-        existing_message = messages_by_event_id.get(original_event_id)
         if existing_message is not None:
             existing_message["body"] = edited_body
             if edited_content is not None:
                 existing_message["content"] = edited_content
-            continue
-
-        # Only synthesize a missing original when the edit explicitly carries
-        # thread metadata for this thread.
-        if edit_thread_id != thread_id:
             continue
 
         synthesized_message = {

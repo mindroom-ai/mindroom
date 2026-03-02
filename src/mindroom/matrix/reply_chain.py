@@ -450,7 +450,5 @@ async def derive_conversation_context(
         return True, context_root_id, thread_history
 
     # Policy choice: reply-only chains are still treated as one conversation
-    # context so responder selection and memory use a stable root. Edits that
-    # don't map to a thread keep room-level context behavior.
-    is_thread_context = not event_info.is_edit
-    return is_thread_context, context_root_id if is_thread_context else None, chain_history if is_thread_context else []
+    # context so responder selection and memory use a stable root.
+    return True, context_root_id, chain_history
