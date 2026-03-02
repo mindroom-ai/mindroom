@@ -49,7 +49,7 @@ def create_background_task(
             # Task was cancelled, this is fine
             pass
         except Exception as e:
-            task_name = task.get_name() if hasattr(task, "get_name") else "unknown"
+            task_name = task.get_name()
             logger.exception("Background task failed", task_name=task_name, error=str(e))
             if error_handler:
                 try:

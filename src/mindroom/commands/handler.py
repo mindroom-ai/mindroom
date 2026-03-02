@@ -354,16 +354,12 @@ async def _run_skill_command_tool(
     assert entrypoint is not None
 
     try:
-        if toolkit and getattr(toolkit, "_requires_connect", False):
-            connect = getattr(toolkit, "connect", None)
-            close = getattr(toolkit, "close", None)
-            if connect:
-                await _maybe_await(connect())
+        if toolkit and toolkit.requires_connect:
+            await _maybe_await(toolkit.connect())
             try:
                 result = await _maybe_await(entrypoint(*call_args.args, **call_args.kwargs))
             finally:
-                if close:
-                    await _maybe_await(close())
+                await _maybe_await(toolkit.close())
         else:
             result = await _maybe_await(entrypoint(*call_args.args, **call_args.kwargs))
     except Exception as exc:

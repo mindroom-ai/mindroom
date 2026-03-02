@@ -167,12 +167,14 @@ class SelfConfigTools(Toolkit):
         except ValidationError as e:
             return f"Error validating configuration: {e}"
 
+        current_values = agent.model_dump()
+        validated_values = validated_agent.model_dump()
         updates: dict[str, str] = {}
         for field_name, new_value in requested_updates:
             if new_value is None:
                 continue
-            current_value = getattr(agent, field_name)
-            validated_value = getattr(validated_agent, field_name)
+            current_value = current_values[field_name]
+            validated_value = validated_values[field_name]
             if validated_value == current_value:
                 continue
             display = field_name.replace("_", " ").title()

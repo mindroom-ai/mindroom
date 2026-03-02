@@ -55,7 +55,7 @@ _TOOL_MODULE_CACHE: dict[Path, float] = {}
 
 def load_plugins(config: Config, *, config_path: Path | None = None) -> list[_Plugin]:
     """Load plugins from config and register their tools and skills."""
-    plugin_paths = getattr(config, "plugins", None)
+    plugin_paths = config.plugins
     if not plugin_paths:
         set_plugin_skill_roots([])
         return []

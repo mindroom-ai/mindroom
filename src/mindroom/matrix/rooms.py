@@ -433,7 +433,7 @@ def _is_two_member_group_room(client: nio.AsyncClient, room_id: str) -> bool:
     Rooms with an explicit topic are excluded because DMs almost never have one,
     while small project rooms often do.
     """
-    room_lookup = getattr(client, "rooms", None)
+    room_lookup = client.rooms
     if not isinstance(room_lookup, dict):
         return False
 

@@ -240,15 +240,11 @@ async def _execute_request_inprocess(request: SandboxRunnerExecuteRequest) -> Sa
 
     try:
         if toolkit.requires_connect:
-            connect = getattr(toolkit, "connect", None)
-            close = getattr(toolkit, "close", None)
-            if connect is not None:
-                await _maybe_await(connect())
+            await _maybe_await(toolkit.connect())
             try:
                 result = await _maybe_await(entrypoint(*request.args, **request.kwargs))
             finally:
-                if close is not None:
-                    await _maybe_await(close())
+                await _maybe_await(toolkit.close())
         else:
             result = await _maybe_await(entrypoint(*request.args, **request.kwargs))
     except Exception as exc:

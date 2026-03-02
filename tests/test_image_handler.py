@@ -17,6 +17,7 @@ class TestExtractCaption:
 
     def _make_event(self, body: str, filename: str | None = None) -> MagicMock:
         event = MagicMock(spec=nio.RoomMessageImage)
+        event.event_id = "$test_event"
         event.body = body
         content: dict = {"body": body}
         if filename is not None:
@@ -63,6 +64,7 @@ class TestDownloadImage:
         """Test downloading an unencrypted image from Matrix."""
         client = AsyncMock()
         event = MagicMock(spec=nio.RoomMessageImage)
+        event.event_id = "$test_event"
         event.url = "mxc://example.org/abc123"
         event.source = {"content": {"info": {"mimetype": "image/png"}}}
 
@@ -81,6 +83,7 @@ class TestDownloadImage:
         """Test downloading and decrypting an encrypted image."""
         client = AsyncMock()
         event = MagicMock(spec=nio.RoomEncryptedImage)
+        event.event_id = "$test_event"
         event.url = "mxc://example.org/encrypted123"
         event.mimetype = "image/jpeg"
         event.source = {
@@ -117,6 +120,7 @@ class TestDownloadImage:
         """Payload signature should win when Matrix metadata MIME is incorrect."""
         client = AsyncMock()
         event = MagicMock(spec=nio.RoomMessageImage)
+        event.event_id = "$test_event"
         event.url = "mxc://example.org/mismatch"
         event.source = {"content": {"info": {"mimetype": "image/jpeg"}}}
 
@@ -133,6 +137,7 @@ class TestDownloadImage:
         """Test that download returns None on DownloadError."""
         client = AsyncMock()
         event = MagicMock(spec=nio.RoomMessageImage)
+        event.event_id = "$test_event"
         event.url = "mxc://example.org/fail"
 
         error_response = MagicMock(spec=nio.DownloadError)
@@ -146,6 +151,7 @@ class TestDownloadImage:
         """Test that exceptions from client.download() return None."""
         client = AsyncMock()
         event = MagicMock(spec=nio.RoomMessageImage)
+        event.event_id = "$test_event"
         event.url = "mxc://example.org/timeout"
 
         client.download.side_effect = TimeoutError("connection timed out")
@@ -158,6 +164,7 @@ class TestDownloadImage:
         """Test encrypted payloads missing key material fail gracefully."""
         client = AsyncMock()
         event = MagicMock(spec=nio.RoomEncryptedImage)
+        event.event_id = "$test_event"
         event.url = "mxc://example.org/encrypted_missing_keys"
         event.source = {
             "content": {
@@ -181,6 +188,7 @@ class TestDownloadImage:
         """Test decryption failures are handled without raising."""
         client = AsyncMock()
         event = MagicMock(spec=nio.RoomEncryptedImage)
+        event.event_id = "$test_event"
         event.url = "mxc://example.org/encrypted_bad"
         event.source = {
             "content": {
@@ -207,6 +215,7 @@ class TestDownloadImage:
         """Test that missing unencrypted mimetype remains unset."""
         client = AsyncMock()
         event = MagicMock(spec=nio.RoomMessageImage)
+        event.event_id = "$test_event"
         event.url = "mxc://example.org/notype"
         event.source = {"content": {}}
 
@@ -223,6 +232,7 @@ class TestDownloadImage:
         """Test that encrypted images use event.mimetype (nio-parsed)."""
         client = AsyncMock()
         event = MagicMock(spec=nio.RoomEncryptedImage)
+        event.event_id = "$test_event"
         event.url = "mxc://example.org/enc_webp"
         event.mimetype = "image/webp"
         event.source = {
@@ -251,6 +261,7 @@ class TestDownloadImage:
         """Test that encrypted images keep mimetype unset when absent."""
         client = AsyncMock()
         event = MagicMock(spec=nio.RoomEncryptedImage)
+        event.event_id = "$test_event"
         event.url = "mxc://example.org/enc_notype"
         event.mimetype = None
         event.source = {

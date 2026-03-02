@@ -30,6 +30,7 @@ from agno.run.agent import (
     ToolCallStartedEvent,
 )
 from agno.run.base import RunStatus
+from agno.run.team import TeamRunOutput
 from agno.utils.message import filter_tool_calls
 
 from mindroom.agents import _get_agent_session, create_agent, create_session_storage, get_seen_event_ids
@@ -54,6 +55,7 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
     from agno.models.base import Model
+    from agno.models.message import Message
     from agno.session.agent import AgentSession
 
     from mindroom.config.main import Config
@@ -101,32 +103,31 @@ def _canonical_provider(provider: str) -> str:
     return provider.strip().lower().replace("-", "_")
 
 
-def _estimate_message_media_chars(message: object) -> int:
-    media_fields = (
-        "images",
-        "audio",
-        "videos",
-        "files",
-        "audio_output",
-        "image_output",
-        "video_output",
-        "file_output",
+def _estimate_message_media_chars(message: Message) -> int:
+    media_values = (
+        message.images,
+        message.audio,
+        message.videos,
+        message.files,
+        message.audio_output,
+        message.image_output,
+        message.video_output,
+        message.file_output,
     )
     media_chars = 0
-    for media_field in media_fields:
-        media_value = getattr(message, media_field, None)
+    for media_value in media_values:
         if media_value:
             media_chars += len(str(media_value))
     return media_chars
 
 
-def _estimate_messages_tokens(messages: Sequence[Any] | None) -> int:
+def _estimate_messages_tokens(messages: Sequence[Message] | None) -> int:
     """Estimate token count for messages using chars / 4 approximation."""
     if not messages:
         return 0
     total_chars = 0
     for msg in messages:
-        content = getattr(msg, "compressed_content", None) or getattr(msg, "content", None)
+        content = msg.compressed_content or msg.content
         if isinstance(content, str):
             total_chars += len(content)
         elif isinstance(content, list):
@@ -134,7 +135,7 @@ def _estimate_messages_tokens(messages: Sequence[Any] | None) -> int:
                 total_chars += len(str(part))
         elif content is not None:
             total_chars += len(str(content))
-        tool_calls = getattr(msg, "tool_calls", None)
+        tool_calls = msg.tool_calls
         if tool_calls:
             total_chars += len(str(tool_calls))
         total_chars += _estimate_message_media_chars(msg)
@@ -156,7 +157,7 @@ def _estimate_static_tokens(agent: Agent, full_prompt: str) -> int:
 
 def _get_history_skip_roles(agent: Agent) -> list[str] | None:
     """Return history skip_roles matching Agno's run-message construction."""
-    system_role = getattr(agent, "system_message_role", None)
+    system_role = agent.system_message_role
     if isinstance(system_role, str) and system_role not in {"user", "assistant", "tool"}:
         return [system_role]
     return None
@@ -164,22 +165,22 @@ def _get_history_skip_roles(agent: Agent) -> list[str] | None:
 
 def _get_team_scope(agent: Agent) -> tuple[str | None, str | None]:
     """Return (team_id, agent_id) only when agent is actually in a team scope."""
-    team_id = getattr(agent, "team_id", None)
+    team_id = agent.team_id
     if not isinstance(team_id, str) or not team_id:
         return None, None
-    agent_id = getattr(agent, "id", None)
+    agent_id = agent.id
     return team_id, agent_id if isinstance(agent_id, str) and agent_id else None
 
 
-def _get_replayable_runs(session: AgentSession, agent: Agent) -> list[RunOutput]:
+def _get_replayable_runs(session: AgentSession, agent: Agent) -> list[RunOutput | TeamRunOutput]:
     """Get runs eligible for history replay, matching Agno session filtering."""
-    runs = [run for run in session.runs or [] if isinstance(run, RunOutput)]
+    runs = [run for run in session.runs or [] if isinstance(run, (RunOutput, TeamRunOutput))]
 
     team_id, agent_id = _get_team_scope(agent)
     if team_id is not None:
-        if agent_id:
-            runs = [run for run in runs if run.agent_id == agent_id]
-        runs = [run for run in runs if getattr(run, "team_id", None) == team_id]
+        runs = [run for run in runs if isinstance(run, TeamRunOutput) and run.team_id == team_id]
+    elif agent_id:
+        runs = [run for run in runs if isinstance(run, RunOutput) and run.agent_id == agent_id]
 
     skip_statuses = {RunStatus.paused, RunStatus.cancelled, RunStatus.error}
     return [run for run in runs if run.parent_run_id is None and run.status not in skip_statuses]
@@ -195,7 +196,7 @@ def _estimate_history_tokens(session: AgentSession, agent: Agent, run_limit: int
         limit=None,
         skip_roles=_get_history_skip_roles(agent),
     )
-    max_tool_calls_from_history = getattr(agent, "max_tool_calls_from_history", None)
+    max_tool_calls_from_history = agent.max_tool_calls_from_history
     if max_tool_calls_from_history is None:
         return _estimate_messages_tokens(messages)
     history_copy = [deepcopy(msg) for msg in messages]
@@ -1221,19 +1222,20 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         cache_key = _build_cache_key(agent, full_prompt, session_id, show_tool_calls=show_tool_calls)
         cached_result = cache.get(cache_key)
         if cached_result is not None:
+            cached_run = cast("RunOutput", cached_result)
             logger.info("Cache hit", agent=agent_name)
-            response_text = cached_result.content or ""
+            response_text = cached_run.content or ""
             if run_metadata_collector is not None:
                 cached_metadata = _build_ai_run_metadata_content(
                     agent_name=agent_name,
                     config=config,
-                    run_id=getattr(cached_result, "run_id", None),
-                    session_id=getattr(cached_result, "session_id", None) or session_id,
+                    run_id=cached_run.run_id,
+                    session_id=cached_run.session_id or session_id,
                     status="cached",
-                    model=getattr(cached_result, "model", None),
-                    model_provider=getattr(cached_result, "model_provider", None),
-                    metrics=getattr(cached_result, "metrics", None),
-                    tool_count=len(cached_result.tools) if getattr(cached_result, "tools", None) else 0,
+                    model=cached_run.model,
+                    model_provider=cached_run.model_provider,
+                    metrics=cached_run.metrics,
+                    tool_count=len(cached_run.tools) if cached_run.tools else 0,
                 )
                 if cached_metadata:
                     run_metadata_collector.update(cached_metadata)

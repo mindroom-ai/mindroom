@@ -143,11 +143,7 @@ def _session_key_to_room_thread(session_key: str) -> tuple[str, str | None]:
 
 
 def _agent_thread_mode(context: ToolRuntimeContext, agent_name: str) -> str:
-    resolver = getattr(context.config, "get_entity_thread_mode", None)
-    if not callable(resolver):
-        return "thread"
-
-    mode = resolver(agent_name)
+    mode = context.config.get_entity_thread_mode(agent_name)
     return "room" if mode == "room" else "thread"
 
 

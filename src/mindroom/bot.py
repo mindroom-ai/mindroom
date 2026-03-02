@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
@@ -473,7 +472,7 @@ class AgentBot:
         moving this responsibility from the orchestrator to the agent itself.
         """
         # If we already have a user_id (e.g., provided by tests or config), assume account exists
-        if getattr(self.agent_user, "user_id", ""):
+        if self.agent_user.user_id:
             return
         # Create or retrieve the Matrix user account
         self.agent_user = await create_agent_user(
@@ -677,9 +676,8 @@ class AgentBot:
             # Check if the only message is our welcome message
             msg = response.chunk[0]
             if (
-                hasattr(msg, "sender")
+                isinstance(msg, nio.RoomMessageText)
                 and msg.sender == self.agent_user.user_id
-                and hasattr(msg, "body")
                 and "Welcome to MindRoom" in msg.body
             ):
                 self.logger.debug("Welcome message already sent", room_id=room_id)
@@ -1479,10 +1477,7 @@ class AgentBot:
         client = self.client
         if client is None:
             return None
-        rooms = getattr(client, "rooms", None)
-        if not isinstance(rooms, Mapping):
-            return None
-        return rooms.get(room_id)
+        return client.rooms.get(room_id)
 
     def _build_tool_runtime_context(
         self,
