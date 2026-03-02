@@ -16,14 +16,14 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # Event type for pending config changes in Matrix state
-PENDING_CONFIG_EVENT_TYPE = "com.mindroom.pending.config"
+_PENDING_CONFIG_EVENT_TYPE = "com.mindroom.pending.config"
 
 # Maximum age for pending confirmations (24 hours)
-MAX_PENDING_AGE_HOURS = 24
+_MAX_PENDING_AGE_HOURS = 24
 
 
 @dataclass
-class PendingConfigChange:
+class _PendingConfigChange:
     """Represents a pending configuration change awaiting confirmation."""
 
     room_id: str
@@ -37,7 +37,7 @@ class PendingConfigChange:
     def is_expired(self) -> bool:
         """Check if this pending change has expired."""
         age = datetime.now(UTC) - self.created_at
-        return age.total_seconds() > MAX_PENDING_AGE_HOURS * 3600
+        return age.total_seconds() > _MAX_PENDING_AGE_HOURS * 3600
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for Matrix state storage."""
@@ -52,7 +52,7 @@ class PendingConfigChange:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> PendingConfigChange:
+    def from_dict(cls, data: dict[str, Any]) -> _PendingConfigChange:
         """Create from dictionary retrieved from Matrix state."""
         # Parse the ISO format datetime
         created_at = datetime.fromisoformat(data["created_at"])
@@ -69,7 +69,7 @@ class PendingConfigChange:
 
 
 # Track pending configuration changes by event_id
-_pending_changes: dict[str, PendingConfigChange] = {}
+_pending_changes: dict[str, _PendingConfigChange] = {}
 
 
 def register_pending_change(
@@ -93,7 +93,7 @@ def register_pending_change(
         requester: User ID who requested the change
 
     """
-    _pending_changes[event_id] = PendingConfigChange(
+    _pending_changes[event_id] = _PendingConfigChange(
         room_id=room_id,
         thread_id=thread_id,
         config_path=config_path,
@@ -109,7 +109,7 @@ def register_pending_change(
     )
 
 
-def get_pending_change(event_id: str) -> PendingConfigChange | None:
+def get_pending_change(event_id: str) -> _PendingConfigChange | None:
     """Get a pending configuration change by event ID.
 
     Args:
@@ -122,7 +122,7 @@ def get_pending_change(event_id: str) -> PendingConfigChange | None:
     return _pending_changes.get(event_id)
 
 
-def remove_pending_change(event_id: str) -> PendingConfigChange | None:
+def _remove_pending_change(event_id: str) -> _PendingConfigChange | None:
     """Remove and return a pending configuration change.
 
     Args:
@@ -138,7 +138,7 @@ def remove_pending_change(event_id: str) -> PendingConfigChange | None:
 async def store_pending_change_in_matrix(
     client: nio.AsyncClient,
     event_id: str,
-    pending_change: PendingConfigChange,
+    pending_change: _PendingConfigChange,
 ) -> None:
     """Store pending config change in Matrix room state for persistence.
 
@@ -151,7 +151,7 @@ async def store_pending_change_in_matrix(
     try:
         response = await client.room_put_state(
             room_id=pending_change.room_id,
-            event_type=PENDING_CONFIG_EVENT_TYPE,
+            event_type=_PENDING_CONFIG_EVENT_TYPE,
             content=pending_change.to_dict(),
             state_key=event_id,
         )
@@ -173,7 +173,7 @@ async def store_pending_change_in_matrix(
         logger.exception("Error storing pending config change in Matrix state")
 
 
-async def remove_pending_change_from_matrix(
+async def _remove_pending_change_from_matrix(
     client: nio.AsyncClient,
     room_id: str,
     event_id: str,
@@ -190,7 +190,7 @@ async def remove_pending_change_from_matrix(
         # To remove a state event, set it with empty content
         response = await client.room_put_state(
             room_id=room_id,
-            event_type=PENDING_CONFIG_EVENT_TYPE,
+            event_type=_PENDING_CONFIG_EVENT_TYPE,
             content={},
             state_key=event_id,
         )
@@ -236,7 +236,7 @@ async def restore_pending_changes(client: nio.AsyncClient, room_id: str) -> int:
         expired_count = 0
 
         for event in response.events:
-            if event.get("type") != PENDING_CONFIG_EVENT_TYPE:
+            if event.get("type") != _PENDING_CONFIG_EVENT_TYPE:
                 continue
 
             state_key = event.get("state_key")
@@ -247,7 +247,7 @@ async def restore_pending_changes(client: nio.AsyncClient, room_id: str) -> int:
                 continue
 
             try:
-                pending_change = PendingConfigChange.from_dict(content)
+                pending_change = _PendingConfigChange.from_dict(content)
 
                 # Check if expired
                 if pending_change.is_expired():
@@ -257,7 +257,7 @@ async def restore_pending_changes(client: nio.AsyncClient, room_id: str) -> int:
                         created_at=pending_change.created_at,
                     )
                     # Remove from Matrix state
-                    await remove_pending_change_from_matrix(client, room_id, state_key)
+                    await _remove_pending_change_from_matrix(client, room_id, state_key)
                     expired_count += 1
                 else:
                     # Restore to memory
@@ -339,7 +339,7 @@ async def handle_confirmation_reaction(
     bot: AgentBot,
     room: nio.MatrixRoom,
     event: nio.ReactionEvent,
-    pending_change: PendingConfigChange,
+    pending_change: _PendingConfigChange,
 ) -> None:
     """Handle reactions to config confirmation messages.
 
@@ -371,8 +371,8 @@ async def handle_confirmation_reaction(
         return
 
     # Remove the pending change from memory and Matrix state
-    remove_pending_change(event.reacts_to)
-    await remove_pending_change_from_matrix(
+    _remove_pending_change(event.reacts_to)
+    await _remove_pending_change_from_matrix(
         bot.client,
         pending_change.room_id,
         event.reacts_to,
