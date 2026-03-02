@@ -235,10 +235,10 @@ def _select_recent_chat_lines(
     selected: list[str] = []
     char_count = 0
     for message in reversed(messages):
-        role = getattr(message, "role", None)
+        role = message.role
         if role not in {"user", "assistant"}:
             continue
-        content = getattr(message, "content", None)
+        content = message.content
         if not isinstance(content, str):
             continue
         cleaned = " ".join(content.split())

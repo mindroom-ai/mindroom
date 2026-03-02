@@ -551,7 +551,7 @@ class ConfigManagerTools(Toolkit):
             logger.exception("Failed to create agent")
             return f"Error creating agent: {e}"
 
-    def _update_agent_config(  # noqa: C901
+    def _update_agent_config(  # noqa: C901, PLR0912, PLR0915
         self,
         agent_name: str,
         display_name: str | None,
@@ -586,30 +586,54 @@ class ConfigManagerTools(Toolkit):
                 if knowledge_base_error:
                     return knowledge_base_error
 
-            # Map of field names to (new_value, display_formatter)
-            updates = {
-                "display_name": (display_name, lambda v: v),
-                "role": (role, lambda v: v),
-                "tools": (tools, lambda v: ", ".join(v) if v else "(empty)"),
-                "instructions": (instructions, lambda v: f"{len(v)} instructions" if v else "(empty)"),
-                "model": (model, lambda v: v),
-                "rooms": (rooms, lambda v: ", ".join(v) if v else "(empty)"),
-                "knowledge_bases": (knowledge_bases, lambda v: ", ".join(v) if v else "(empty)"),
-                "include_default_tools": (include_default_tools, lambda v: str(v)),
-                "markdown": (markdown, lambda v: str(v)),
-                "learning": (learning, lambda v: str(v)),
-                "learning_mode": (learning_mode, lambda v: str(v)),
-            }
-
-            # Apply updates and track changes
             changes = []
-            for field_name, (new_value, formatter) in updates.items():
-                if new_value is not None:
-                    current_value = getattr(agent, field_name)
-                    if new_value != current_value:
-                        setattr(agent, field_name, new_value)
-                        display_name = field_name.replace("_", " ").title()
-                        changes.append(f"{display_name} -> {formatter(new_value)}")
+
+            if display_name is not None and display_name != agent.display_name:
+                agent.display_name = display_name
+                changes.append(f"Display Name -> {display_name}")
+
+            if role is not None and role != agent.role:
+                agent.role = role
+                changes.append(f"Role -> {role}")
+
+            if tools is not None and tools != agent.tools:
+                agent.tools = tools
+                changes.append(f"Tools -> {', '.join(tools) if tools else '(empty)'}")
+
+            if instructions is not None and instructions != agent.instructions:
+                agent.instructions = instructions
+                if instructions:
+                    changes.append(f"Instructions -> {len(instructions)} instructions")
+                else:
+                    changes.append("Instructions -> (empty)")
+
+            if model is not None and model != agent.model:
+                agent.model = model
+                changes.append(f"Model -> {model}")
+
+            if rooms is not None and rooms != agent.rooms:
+                agent.rooms = rooms
+                changes.append(f"Rooms -> {', '.join(rooms) if rooms else '(empty)'}")
+
+            if knowledge_bases is not None and knowledge_bases != agent.knowledge_bases:
+                agent.knowledge_bases = knowledge_bases
+                changes.append(f"Knowledge Bases -> {', '.join(knowledge_bases) if knowledge_bases else '(empty)'}")
+
+            if include_default_tools is not None and include_default_tools != agent.include_default_tools:
+                agent.include_default_tools = include_default_tools
+                changes.append(f"Include Default Tools -> {include_default_tools}")
+
+            if markdown is not None and markdown != agent.markdown:
+                agent.markdown = markdown
+                changes.append(f"Markdown -> {markdown}")
+
+            if learning is not None and learning != agent.learning:
+                agent.learning = learning
+                changes.append(f"Learning -> {learning}")
+
+            if learning_mode is not None and learning_mode != agent.learning_mode:
+                agent.learning_mode = learning_mode
+                changes.append(f"Learning Mode -> {learning_mode}")
 
             if not changes:
                 return "No changes made. All provided values are the same as current configuration."

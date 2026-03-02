@@ -473,7 +473,7 @@ class AgentBot:
         moving this responsibility from the orchestrator to the agent itself.
         """
         # If we already have a user_id (e.g., provided by tests or config), assume account exists
-        if getattr(self.agent_user, "user_id", ""):
+        if self.agent_user.user_id:
             return
         # Create or retrieve the Matrix user account
         self.agent_user = await create_agent_user(
@@ -1479,7 +1479,9 @@ class AgentBot:
         client = self.client
         if client is None:
             return None
-        rooms = getattr(client, "rooms", None)
+        if not hasattr(client, "rooms"):
+            return None
+        rooms = client.rooms
         if not isinstance(rooms, Mapping):
             return None
         return rooms.get(room_id)

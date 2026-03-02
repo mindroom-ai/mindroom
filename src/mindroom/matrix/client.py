@@ -216,14 +216,13 @@ async def create_room(
 
 def _describe_matrix_response_error(response: object) -> str:
     """Convert a Matrix response object into a concise error string."""
-    status_code = getattr(response, "status_code", None)
-    message = getattr(response, "message", None)
-    if status_code and message:
-        return f"{status_code}: {message}"
-    if status_code:
-        return str(status_code)
-    if message:
-        return str(message)
+    if isinstance(response, nio.ErrorResponse):
+        if response.status_code and response.message:
+            return f"{response.status_code}: {response.message}"
+        if response.status_code:
+            return str(response.status_code)
+        if response.message:
+            return str(response.message)
     return str(response)
 
 
