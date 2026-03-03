@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import yaml
 from typer.testing import CliRunner
 
 from mindroom.cli.main import app
@@ -47,6 +48,49 @@ class TestConfigInit:
         assert "models:" in content
         assert "authorization:" in content
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER in content
+
+    def test_init_full_profile_adds_openclaw_style_daimon(self, tmp_path: Path) -> None:
+        """Full template should include OpenClaw-style Daimon memory/context setup."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
+        assert result.exit_code == 0
+        config = yaml.safe_load(target.read_text())
+        daimon = config["agents"]["daimon"]
+
+        assert daimon["display_name"] == "Daimon"
+        assert daimon["include_default_tools"] is False
+        assert daimon["learning"] is False
+        assert daimon["memory_backend"] == "file"
+        assert daimon["memory_file_path"] == "./sidekick_data"
+        assert daimon["rooms"] == ["personal"]
+        assert daimon["context_files"] == [
+            "./sidekick_data/SOUL.md",
+            "./sidekick_data/AGENTS.md",
+            "./sidekick_data/USER.md",
+            "./sidekick_data/IDENTITY.md",
+            "./sidekick_data/TOOLS.md",
+            "./sidekick_data/HEARTBEAT.md",
+        ]
+        assert daimon["knowledge_bases"] == ["daimon_memory"]
+        assert daimon["tools"] == [
+            "shell",
+            "coding",
+            "duckduckgo",
+            "website",
+            "browser",
+            "scheduler",
+            "subagents",
+            "matrix_message",
+            "attachments",
+            "python",
+        ]
+        assert daimon["skills"] == ["transcribe"]
+        assert config["knowledge_bases"]["daimon_memory"]["path"] == "./sidekick_data/memory"
+        assert config["knowledge_bases"]["daimon_memory"]["watch"] is True
+        assert config["memory"]["backend"] == "file"
+        assert config["memory"]["file"]["max_entrypoint_lines"] == 200
+        assert config["memory"]["auto_flush"]["enabled"] is True
+        assert "openclaw_compat" not in target.read_text()
 
     def test_init_without_path_uses_detected_default_location(
         self,
@@ -96,6 +140,18 @@ class TestConfigInit:
         assert "MINDROOM_PROVISIONING_URL=https://mindroom.chat" in env_content
         assert "MATRIX_REGISTRATION_TOKEN=" in env_content
         assert "\n\n\n# AI provider API keys" not in env_content
+
+        # Public profile next steps must include the pairing command
+        output = _strip_ansi(result.output)
+        assert "mindroom connect --pair-code" in output
+
+    def test_init_full_profile_omits_pairing_step(self, tmp_path: Path) -> None:
+        """Full profile next steps should NOT mention pairing."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
+        assert result.exit_code == 0
+        output = _strip_ansi(result.output)
+        assert "mindroom connect" not in output
 
     def test_init_creates_env_with_dashboard_key(self, tmp_path: Path) -> None:
         """Config init writes a random MINDROOM_API_KEY to .env."""

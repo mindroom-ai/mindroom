@@ -131,7 +131,7 @@ def config_init(
 ) -> None:
     """Create a starter config.yaml with example agents and models.
 
-    Generates a YAML config with one agent, one model, and sensible defaults.
+    Generates a YAML config with starter agents, one model, and sensible defaults.
     """
     target = _resolve_config_path(path)
 
@@ -181,7 +181,16 @@ def config_init(
     console.print(f"[green]Config created:[/green] {target}")
     console.print("\nNext steps:")
     if env_created:
-        console.print(f"  [cyan]Edit {env_path}[/cyan]  Set your API keys and Matrix homeserver")
+        if selected_profile == "public":
+            env_hint = "Set your API keys (Matrix homeserver is prefilled)"
+        else:
+            env_hint = "Set your API keys and Matrix homeserver"
+        console.print(f"  [cyan]Edit {env_path}[/cyan]  {env_hint}")
+    if selected_profile == "public":
+        console.print(
+            "  [cyan]mindroom connect --pair-code XXXX[/cyan]  "
+            "Pair with hosted Matrix (get code from chat.mindroom.chat)"
+        )
     console.print("  [cyan]mindroom config edit[/cyan]      Customize your config")
     console.print("  [cyan]mindroom config validate[/cyan]  Verify it's valid")
     console.print("  [cyan]mindroom run[/cyan]              Start the system")
@@ -430,6 +439,44 @@ agents:
     tools: []
     instructions:
       - Be helpful and conversational
+  daimon:
+    display_name: Daimon
+    role: OpenClaw-style personal assistant with persistent file-based identity and memory
+    model: default
+    include_default_tools: false
+    learning: false
+    memory_backend: file
+    memory_file_path: ./sidekick_data
+    rooms:
+      - personal
+    context_files:
+      - ./sidekick_data/SOUL.md
+      - ./sidekick_data/AGENTS.md
+      - ./sidekick_data/USER.md
+      - ./sidekick_data/IDENTITY.md
+      - ./sidekick_data/TOOLS.md
+      - ./sidekick_data/HEARTBEAT.md
+    knowledge_bases:
+      - daimon_memory
+    tools:
+      - shell
+      - coding
+      - duckduckgo
+      - website
+      - browser
+      - scheduler
+      - subagents
+      - matrix_message
+      - attachments
+      - python
+    skills:
+      - transcribe
+    instructions:
+      - You wake up fresh each session with no memory of previous conversations. Your context files are already loaded into your system prompt.
+      - Important long-term context is persisted by the configured MindRoom memory backend. If something must be preserved exactly, write or update the relevant file directly.
+      - MEMORY.md is curated long-term memory; daily files are short-lived notes and logs.
+      - Ask before external or destructive actions.
+      - Before answering prior-history questions, search memory files first when a knowledge base is configured.
 
 router:
   model: default
@@ -441,9 +488,18 @@ matrix_room_access:
   invite_only_rooms: []
   reconcile_existing_rooms: false
 
+knowledge_bases:
+  daimon_memory:
+    path: ./sidekick_data/memory
+    watch: true
+
 # File-based memory requires no external embedder or LLM.
 memory:
   backend: file
+  file:
+    max_entrypoint_lines: 200
+  auto_flush:
+    enabled: true
 
 authorization:
   default_room_access: false
