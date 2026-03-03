@@ -359,6 +359,28 @@ async def test_sync_indexed_files_upserts_changed_and_removes_deleted(dummy_mana
 
 
 @pytest.mark.asyncio
+async def test_sync_indexed_files_does_not_suppress_retry_for_previously_indexed(dummy_manager: KnowledgeManager) -> None:
+    """A previously-indexed file whose upsert fails should NOT be recorded as a persistent failure."""
+    file_path = dummy_manager.knowledge_path / "doc.md"
+    file_path.write_text("changed content", encoding="utf-8")
+    _DummyChromaDb.metadatas = [
+        {"source_path": "doc.md", "source_mtime_ns": 1, "source_size": 1},
+    ]
+    dummy_manager.index_file = AsyncMock(return_value=False)
+    dummy_manager.remove_file = AsyncMock(return_value=True)
+    saved: dict[str, tuple[int, int]] = {}
+    dummy_manager._save_failed_signatures = lambda value: saved.update(value)
+
+    result = await dummy_manager.sync_indexed_files()
+
+    assert result == {"loaded_count": 1, "indexed_count": 0, "removed_count": 0}
+    dummy_manager.index_file.assert_awaited_once_with("doc.md", upsert=True)
+    # Failure must NOT be persisted — file was previously indexed and lost its
+    # vectors during the upsert; it must be retried on next startup.
+    assert saved == {}
+
+
+@pytest.mark.asyncio
 async def test_initialize_knowledge_managers_maintains_registry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

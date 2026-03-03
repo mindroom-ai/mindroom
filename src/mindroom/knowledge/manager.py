@@ -619,7 +619,10 @@ class KnowledgeManager:
             indexed_count += int(indexed)
             if indexed:
                 failed_signatures.pop(relative_path, None)
-            else:
+            elif relative_path not in indexed_files:
+                # Only suppress retries for genuinely new files.  Previously-
+                # indexed files lost their vectors during the upsert attempt
+                # and must be retried on the next startup.
                 failed_signatures[relative_path] = current_signatures[relative_path]
 
         await asyncio.to_thread(self._save_failed_signatures, failed_signatures)
