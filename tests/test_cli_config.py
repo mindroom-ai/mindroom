@@ -87,6 +87,8 @@ class TestConfigInit:
         target = tmp_path / "config.yaml"
         result = runner.invoke(app, ["config", "init", "--path", str(target), "--profile", "public"])
         assert result.exit_code == 0
+        config_content = target.read_text()
+        assert "mindroom_user:" not in config_content
 
         env_content = (tmp_path / ".env").read_text()
         assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
