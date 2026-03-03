@@ -13,9 +13,9 @@ from agno.run.agent import ModelRequestCompletedEvent, RunCompletedEvent, RunCon
 from agno.run.base import RunStatus
 
 from mindroom.ai import (
-    _append_inline_media_fallback_prompt,
-    _is_media_validation_error_text,
     ai_response,
+    append_inline_media_fallback_prompt,
+    should_retry_without_inline_media,
     stream_agent_response,
 )
 from mindroom.bot import AgentBot
@@ -404,19 +404,20 @@ class TestUserIdPassthrough:
                 "invalid_request_error: messages.8.content.1.image.source.base64: The image was specified using the image/jpeg media type, but the image appears to be a image/png image",
                 True,
             ),
+            ("Error code: 500 - audio input is not supported", True),
             ("invalid_request_error: max_tokens must be <= 4096", False),
             ("Rate limit exceeded", False),
         ],
     )
-    def test_is_media_validation_error_text(self, error_text: str, expected: bool) -> None:
-        """Media validation matcher should target inline-media field/path failures only."""
-        assert _is_media_validation_error_text(error_text) is expected
+    def test_should_retry_without_inline_media_error_matching(self, error_text: str, expected: bool) -> None:
+        """Retry matcher should target inline-media validation and unsupported-input failures."""
+        assert should_retry_without_inline_media(error_text, MediaInputs(images=(object(),))) is expected
 
     def test_append_inline_media_fallback_prompt_is_idempotent(self) -> None:
         """Fallback marker should only be appended once across retries."""
         initial_prompt = "Inspect this attachment."
-        first = _append_inline_media_fallback_prompt(initial_prompt)
-        second = _append_inline_media_fallback_prompt(first)
+        first = append_inline_media_fallback_prompt(initial_prompt)
+        second = append_inline_media_fallback_prompt(first)
         assert first == second
 
     @pytest.mark.asyncio

@@ -2008,7 +2008,7 @@ class AgentBot:
                 room_id=room_id,
                 thread_id=thread_id,
             )
-            if self.config.get_agent_memory_backend(agent_name) != "file":
+            if self.config.get_agent_memory_backend(agent_name) == "mem0":
                 create_background_task(
                     store_conversation_memory(
                         prompt,
@@ -2264,7 +2264,7 @@ class AgentBot:
                 room_id=room_id,
                 thread_id=thread_id,
             )
-            if self.config.get_agent_memory_backend(self.agent_name) != "file":
+            if self.config.get_agent_memory_backend(self.agent_name) == "mem0":
                 create_background_task(
                     store_conversation_memory(
                         prompt,
