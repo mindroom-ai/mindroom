@@ -26,8 +26,14 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
+from mindroom.media_fallback import (
+    append_inline_media_fallback_prompt,
+    remember_inline_audio_unsupported,
+    should_mark_inline_audio_unsupported,
+    should_preflight_skip_inline_audio,
+    should_retry_without_inline_media,
+)
 from mindroom.media_inputs import MediaInputs
-from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
 from mindroom.tool_system.events import (
     StructuredStreamChunk,
     ToolTraceEntry,
@@ -683,8 +689,35 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
 
     logger.info(f"Team streaming setup - agents: {agent_names}, display names: {display_names}")
     media_inputs = media or MediaInputs()
-    attempt_message = message
-    attempt_media_inputs = media_inputs
+    resolved_model_name = model_name or "default"
+    model_config = orchestrator.config.models.get(resolved_model_name)
+    model_base_url = None
+    if model_config and model_config.extra_kwargs:
+        base_url = model_config.extra_kwargs.get("base_url")
+        if isinstance(base_url, str):
+            model_base_url = base_url
+
+    if should_preflight_skip_inline_audio(
+        media_inputs,
+        provider=model_config.provider if model_config else None,
+        model_id=model_config.id if model_config else None,
+        base_url=model_base_url,
+    ):
+        logger.info(
+            "Preflight dropping inline audio from learned capability cache",
+            model=resolved_model_name,
+            provider=model_config.provider if model_config else None,
+            model_id=model_config.id if model_config else None,
+        )
+        attempt_message = append_inline_media_fallback_prompt(message)
+        attempt_media_inputs = MediaInputs(
+            images=media_inputs.images,
+            files=media_inputs.files,
+            videos=media_inputs.videos,
+        )
+    else:
+        attempt_message = message
+        attempt_media_inputs = media_inputs
     team_name = f"Team ({', '.join(agent_names)})"
 
     per_member: dict[str, str] = {}
@@ -858,6 +891,12 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                         agents=", ".join(agent_names),
                         error=error_text,
                     )
+                    if should_mark_inline_audio_unsupported(error_text, attempt_media_inputs):
+                        remember_inline_audio_unsupported(
+                            provider=model_config.provider if model_config else None,
+                            model_id=model_config.id if model_config else None,
+                            base_url=model_base_url,
+                        )
                     attempt_message = append_inline_media_fallback_prompt(attempt_message)
                     attempt_media_inputs = MediaInputs()
                     retry_requested = True
