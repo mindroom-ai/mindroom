@@ -405,7 +405,7 @@ def _build_prompt_with_context(
     context_parts = []
     for msg in recent_messages:
         sender = msg.get("sender", "Unknown")
-        body = msg.get("content", {}).get("body", "")
+        body = msg.get("body", "")
         if body and len(body) < _MAX_CONTEXT_MESSAGE_LENGTH:
             context_parts.append(f"{sender}: {body}")
 
