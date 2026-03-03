@@ -70,7 +70,13 @@ from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
 from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.logging_config import get_logger
-from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
+from mindroom.media_fallback import (
+    append_inline_media_fallback_prompt,
+    remember_inline_audio_unsupported,
+    should_mark_inline_audio_unsupported,
+    should_preflight_skip_inline_audio,
+    should_retry_without_inline_media,
+)
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import build_memory_enhanced_prompt
 from mindroom.timing import DispatchPipelineTiming, timed
@@ -119,6 +125,23 @@ QUEUED_MESSAGE_NOTICE_TEXT = (
     "Avoid further tool calls unless strictly necessary. "
     "The new message will be handled in your next turn."
 )
+
+
+def _resolve_model_capability_identity(
+    config: Config,
+    entity_name: str,
+) -> tuple[str | None, str | None, str | None]:
+    """Resolve model identity used for learned inline-media capability caching."""
+    model_name = config.get_entity_model_name(entity_name)
+    model_config = config.models.get(model_name)
+    if model_config is None:
+        return None, None, None
+    model_base_url = None
+    if model_config.extra_kwargs:
+        base_url = model_config.extra_kwargs.get("base_url")
+        if isinstance(base_url, str):
+            model_base_url = base_url
+    return model_config.provider, model_config.id, model_base_url
 
 
 class _SupportsQueuedMessageState(Protocol):
@@ -809,6 +832,9 @@ def _request_stream_retry(
     error: Exception | str,
     log_message: str,
     agent_name: str,
+    model_provider: str | None,
+    model_id: str | None,
+    model_base_url: str | None,
 ) -> bool:
     """Set retry flag when inline-media fallback should be attempted."""
     if retried_without_inline_media or state.full_response:
@@ -816,6 +842,12 @@ def _request_stream_retry(
         return False
     if not should_retry_without_inline_media(error, media_inputs):
         return False
+    if should_mark_inline_audio_unsupported(error, media_inputs):
+        remember_inline_audio_unsupported(
+            provider=model_provider,
+            model_id=model_id,
+            base_url=model_base_url,
+        )
     state.retry_requested = True
     logger.warning(
         log_message,
@@ -1214,10 +1246,30 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 unseen_event_ids,
                 extra_metadata=matrix_run_metadata,
             )
+            model_provider, model_id, model_base_url = _resolve_model_capability_identity(config, agent_name)
 
             response: RunOutput | None = None
-            attempt_prompt = full_prompt
-            attempt_media_inputs = media_inputs
+            if should_preflight_skip_inline_audio(
+                media_inputs,
+                provider=model_provider,
+                model_id=model_id,
+                base_url=model_base_url,
+            ):
+                logger.info(
+                    "Preflight dropping inline audio from learned capability cache",
+                    agent=agent_name,
+                    model_provider=model_provider,
+                    model_id=model_id,
+                )
+                attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
+                attempt_media_inputs = MediaInputs(
+                    images=media_inputs.images,
+                    files=media_inputs.files,
+                    videos=media_inputs.videos,
+                )
+            else:
+                attempt_prompt = full_prompt
+                attempt_media_inputs = media_inputs
             attempt_run_id = run_id
 
             try:
@@ -1247,6 +1299,12 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                                 agent=agent_name,
                                 error=str(e),
                             )
+                            if should_mark_inline_audio_unsupported(e, attempt_media_inputs):
+                                remember_inline_audio_unsupported(
+                                    provider=model_provider,
+                                    model_id=model_id,
+                                    base_url=model_base_url,
+                                )
                             attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
                             attempt_media_inputs = MediaInputs()
                             attempt_run_id = _next_retry_run_id(run_id)
@@ -1266,6 +1324,12 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                                 agent=agent_name,
                                 error=error_text,
                             )
+                            if should_mark_inline_audio_unsupported(error_text, attempt_media_inputs):
+                                remember_inline_audio_unsupported(
+                                    provider=model_provider,
+                                    model_id=model_id,
+                                    base_url=model_base_url,
+                                )
                             attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
                             attempt_media_inputs = MediaInputs()
                             attempt_run_id = _next_retry_run_id(run_id)
@@ -1330,6 +1394,9 @@ async def _process_stream_events(  # noqa: C901, PLR0912
     agent_name: str,
     media_inputs: MediaInputs,
     retried_without_inline_media: bool,
+    model_provider: str | None,
+    model_id: str | None,
+    model_base_url: str | None,
     timing_scope: str,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> AsyncGenerator[AIStreamChunk, None]:
@@ -1387,6 +1454,9 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                     error=error_text,
                     log_message="Retrying streaming AI response without inline media after run error",
                     agent_name=agent_name,
+                    model_provider=model_provider,
+                    model_id=model_id,
+                    model_base_url=model_base_url,
                 ):
                     return
                 logger.error("Agent run error during streaming", agent=agent_name, error=error_text)
@@ -1402,6 +1472,9 @@ async def _process_stream_events(  # noqa: C901, PLR0912
             error=e,
             log_message="Retrying streaming AI response without inline media after stream exception",
             agent_name=agent_name,
+            model_provider=model_provider,
+            model_id=model_id,
+            model_base_url=model_base_url,
         ):
             return
         logger.exception("Error during streaming AI response")
@@ -1540,9 +1613,32 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 unseen_event_ids,
                 extra_metadata=matrix_run_metadata,
             )
+            model_provider, model_id, model_base_url = _resolve_model_capability_identity(
+                config,
+                agent_name,
+            )
 
-            attempt_prompt = full_prompt
-            attempt_media_inputs = media_inputs
+            if should_preflight_skip_inline_audio(
+                media_inputs,
+                provider=model_provider,
+                model_id=model_id,
+                base_url=model_base_url,
+            ):
+                logger.info(
+                    "Preflight dropping inline audio from learned capability cache",
+                    agent=agent_name,
+                    model_provider=model_provider,
+                    model_id=model_id,
+                )
+                attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
+                attempt_media_inputs = MediaInputs(
+                    images=media_inputs.images,
+                    files=media_inputs.files,
+                    videos=media_inputs.videos,
+                )
+            else:
+                attempt_prompt = full_prompt
+                attempt_media_inputs = media_inputs
             attempt_run_id = run_id
             state = _StreamingAttemptState()
 
@@ -1574,6 +1670,9 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             agent_name=agent_name,
                             media_inputs=attempt_media_inputs,
                             retried_without_inline_media=retried_without_inline_media,
+                            model_provider=model_provider,
+                            model_id=model_id,
+                            model_base_url=model_base_url,
                             timing_scope=timing_scope,
                             pipeline_timing=pipeline_timing,
                         ):
@@ -1586,6 +1685,9 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             error=e,
                             log_message="Retrying streaming AI response without inline media after validation error",
                             agent_name=agent_name,
+                            model_provider=model_provider,
+                            model_id=model_id,
+                            model_base_url=model_base_url,
                         ):
                             attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
                             attempt_media_inputs = MediaInputs()
