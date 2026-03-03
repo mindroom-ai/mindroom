@@ -461,6 +461,7 @@ asyncio_mode = "auto"
 pythonpath = [ "src" ]
 addopts = """
     -vvv
+    -n auto
     --cov=mindroom
     --cov-report term
     --cov-report html
