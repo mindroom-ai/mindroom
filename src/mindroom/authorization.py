@@ -73,7 +73,8 @@ def is_authorized_sender(
 
     """
     # Always allow configured internal user on the current domain.
-    if sender_id == config.get_mindroom_user_id():
+    mindroom_user_id = config.get_mindroom_user_id()
+    if mindroom_user_id is not None and sender_id == mindroom_user_id:
         return True
 
     # Check if sender is an agent or team
@@ -125,7 +126,8 @@ def is_sender_allowed_for_agent_reply(sender_id: str, agent_name: str, config: C
 
     # Internal MindRoom participants are not restricted by per-user reply lists.
     # Bridge bot accounts are intentionally not exempt.
-    if sender_id == config.get_mindroom_user_id() or extract_agent_name(sender_id, config):
+    mindroom_user_id = config.get_mindroom_user_id()
+    if (mindroom_user_id is not None and sender_id == mindroom_user_id) or extract_agent_name(sender_id, config):
         return True
 
     resolved_sender = config.authorization.resolve_alias(sender_id)
@@ -145,7 +147,9 @@ def get_effective_sender_id_for_reply_permissions(
     """
     known_internal_ids = {matrix_id.full_id for matrix_id in config.ids.values()}
     mindroom_user_id = config.get_mindroom_user_id()
-    is_internal_mindroom_sender = sender_id == mindroom_user_id or sender_id in known_internal_ids
+    is_internal_mindroom_sender = (
+        mindroom_user_id is not None and sender_id == mindroom_user_id
+    ) or sender_id in known_internal_ids
     if not is_internal_mindroom_sender:
         return sender_id
     if not event_source:

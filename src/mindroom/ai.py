@@ -38,8 +38,8 @@ from mindroom.credentials import get_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.logging_config import get_logger
-from mindroom.media_inputs import MediaInputs
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
+from mindroom.media_inputs import MediaInputs
 from mindroom.memory import build_memory_enhanced_prompt
 from mindroom.tool_system.events import (
     complete_pending_tool_block,

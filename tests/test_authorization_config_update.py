@@ -23,6 +23,7 @@ def test_authorization_check_uses_updated_config() -> None:
                 "rooms": ["test_room"],
             },
         },
+        mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
         authorization={
             "global_users": ["@alice:example.com"],
             "room_permissions": {},

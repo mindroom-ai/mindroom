@@ -67,9 +67,9 @@ class Config(BaseModel):
         default="UTC",
         description="Timezone for displaying scheduled tasks (e.g., 'America/New_York')",
     )
-    mindroom_user: MindRoomUserConfig = Field(
-        default_factory=MindRoomUserConfig,
-        description="Configuration for the internal MindRoom user account",
+    mindroom_user: MindRoomUserConfig | None = Field(
+        default=None,
+        description="Configuration for the internal MindRoom user account (omit for hosted/public profiles)",
     )
     matrix_room_access: MatrixRoomAccessConfig = Field(
         default_factory=MatrixRoomAccessConfig,
@@ -197,6 +197,8 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def validate_internal_user_username_not_reserved(self) -> Config:
         """Ensure the internal user localpart does not collide with bot accounts."""
+        if self.mindroom_user is None:
+            return self
         reserved_localparts = {
             agent_username_localpart(ROUTER_AGENT_NAME): f"router '{ROUTER_AGENT_NAME}'",
             **{agent_username_localpart(agent_name): f"agent '{agent_name}'" for agent_name in self.agents},
@@ -239,8 +241,10 @@ class Config(BaseModel):
             mapping[team_name] = MatrixID.from_agent(team_name, self.domain)
         return mapping
 
-    def get_mindroom_user_id(self) -> str:
+    def get_mindroom_user_id(self) -> str | None:
         """Get the full Matrix user ID for the configured internal user."""
+        if self.mindroom_user is None:
+            return None
         from mindroom.matrix.identity import MatrixID  # noqa: PLC0415
 
         return MatrixID.from_username(self.mindroom_user.username, self.domain).full_id
