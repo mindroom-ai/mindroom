@@ -176,7 +176,7 @@ def config_init(
     console.print(f"[green]Config created:[/green] {target}")
     console.print("\nNext steps:")
     if env_created:
-        console.print(f"  [cyan]Edit {env_path.name}[/cyan]            Set your API keys and Matrix homeserver")
+        console.print(f"  [cyan]Edit {env_path}[/cyan]  Set your API keys and Matrix homeserver")
     console.print("  [cyan]mindroom config edit[/cyan]      Customize your config")
     console.print("  [cyan]mindroom config validate[/cyan]  Verify it's valid")
     console.print("  [cyan]mindroom run[/cyan]              Start the system")

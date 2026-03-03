@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 import pytest
+import yaml
 
 import mindroom.cli.connect as cli_connect
 from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
@@ -68,7 +69,7 @@ def test_persist_local_provisioning_env_writes_credentials_only(tmp_path: Path) 
 
 
 def test_replace_owner_placeholders_in_config_accepts_server_port(tmp_path: Path) -> None:
-    """Placeholder replacement should work for valid MXIDs with server ports."""
+    """Placeholder replacement should quote MXIDs so '@' doesn't break YAML."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "authorization:\n"
@@ -88,7 +89,13 @@ def test_replace_owner_placeholders_in_config_accepts_server_port(tmp_path: Path
     updated = config_path.read_text()
     assert OWNER_MATRIX_USER_ID_PLACEHOLDER not in updated
     assert "__PLACEHOLDER__" not in updated
-    assert "@alice:mindroom.chat:8448" in updated
+    # Value must be YAML-quoted so the leading '@' doesn't break parsing
+    assert '"@alice:mindroom.chat:8448"' in updated
+
+    # Verify the result is valid YAML
+    parsed = yaml.safe_load(updated)
+    assert parsed["authorization"]["global_users"] == ["@alice:mindroom.chat:8448"]
+    assert parsed["authorization"]["agent_reply_permissions"]["*"] == ["@alice:mindroom.chat:8448"]
 
 
 def test_complete_local_pairing_rejects_non_json_response() -> None:

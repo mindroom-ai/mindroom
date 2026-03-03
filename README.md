@@ -172,7 +172,7 @@ cd ~/mindroom-local
 uvx mindroom config init --profile public
 
 # Add at least one model API key
-$EDITOR .env
+$EDITOR ~/.mindroom/.env
 
 # Generate pair code in https://chat.mindroom.chat:
 # Settings -> Local MindRoom -> Generate Pair Code
