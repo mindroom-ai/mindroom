@@ -23,13 +23,13 @@ uvx mindroom config init --profile public
 
 This creates:
 
-- `config.yaml`
-- `.env` prefilled with `MATRIX_HOMESERVER=https://mindroom.chat`
+- `~/.mindroom/config.yaml`
+- `~/.mindroom/.env` prefilled with `MATRIX_HOMESERVER=https://mindroom.chat`
 
 ### 2. Add model API key(s)
 
 ```bash
-$EDITOR .env
+$EDITOR ~/.mindroom/.env
 ```
 
 Set at least one key:
@@ -52,7 +52,7 @@ uvx mindroom connect --pair-code ABCD-EFGH
 Notes:
 
 - Pair code is short-lived (10 minutes).
-- `mindroom connect` writes local provisioning values (including `MINDROOM_NAMESPACE`) into `.env`.
+- `mindroom connect` writes local provisioning values (including `MINDROOM_NAMESPACE`) into `~/.mindroom/.env` by default.
 
 ### 4. Run MindRoom
 

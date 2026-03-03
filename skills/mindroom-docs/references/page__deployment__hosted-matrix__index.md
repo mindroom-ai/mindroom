@@ -56,7 +56,7 @@ Pair code behavior:
 - Valid for 600 seconds (10 minutes).
 - Only used to bootstrap local pairing.
 
-After successful pairing, local provisioning credentials are written to `.env` unless you use `--no-persist-env`.
+After successful pairing, local provisioning credentials are written to `~/.mindroom/.env` by default unless you use `--no-persist-env`.
 
 ## 4. Start MindRoom
 
