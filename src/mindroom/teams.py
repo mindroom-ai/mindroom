@@ -40,7 +40,7 @@ from mindroom.tool_system.events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
 
     import nio
     from agno.models.response import ToolExecution
@@ -134,88 +134,6 @@ def _format_no_consensus_note(indent: int = 0) -> str:
     """
     indent_str = "  " * indent
     return f"\n{indent_str}*No team consensus - showing individual responses only*"
-
-
-def _ensure_hidden_tool_gap(text: str) -> str:
-    if text.endswith("\n\n"):
-        return text
-    return f"{text}\n\n"
-
-
-def _start_tool_in_text(
-    *,
-    text: str,
-    scope_key: str,
-    tool: ToolExecution | None,
-    show_tool_calls: bool,
-    next_tool_index: int,
-    tool_trace: list[ToolTraceEntry],
-    pending_tools: list[tuple[str, int, str]],
-) -> tuple[str, int]:
-    if not show_tool_calls:
-        return _ensure_hidden_tool_gap(text), next_tool_index
-
-    tool_msg, trace_entry = format_tool_started_event(tool, tool_index=next_tool_index)
-    if tool_msg:
-        text += tool_msg
-    if trace_entry is not None:
-        tool_trace.append(trace_entry)
-        pending_tools.append((trace_entry.tool_name, next_tool_index, scope_key))
-        next_tool_index += 1
-    return text, next_tool_index
-
-
-def _complete_tool_in_text(
-    *,
-    text: str,
-    scope_key: str,
-    tool: ToolExecution | None,
-    show_tool_calls: bool,
-    pending_tools: list[tuple[str, int, str]],
-    tool_trace: list[ToolTraceEntry],
-) -> str:
-    info = extract_tool_completed_info(tool)
-    if not info or not show_tool_calls:
-        return text
-
-    tool_name, result = info
-    match_pos = next(
-        (
-            pos
-            for pos in range(len(pending_tools) - 1, -1, -1)
-            if pending_tools[pos][0] == tool_name and pending_tools[pos][2] == scope_key
-        ),
-        None,
-    )
-    if match_pos is None:
-        logger.warning(
-            "Missing pending tool start in team stream; skipping completion marker",
-            tool_name=tool_name,
-            scope=scope_key,
-        )
-        return text
-
-    _, tool_index, _ = pending_tools.pop(match_pos)
-    updated_text, trace_entry = complete_pending_tool_block(
-        text,
-        tool_name,
-        result,
-        tool_index=tool_index,
-    )
-
-    if 0 < tool_index <= len(tool_trace):
-        existing_entry = tool_trace[tool_index - 1]
-        existing_entry.type = "tool_call_completed"
-        existing_entry.result_preview = trace_entry.result_preview
-        existing_entry.truncated = existing_entry.truncated or trace_entry.truncated
-    else:
-        logger.warning(
-            "Missing tool trace slot in team stream for completion",
-            tool_name=tool_name,
-            tool_index=tool_index,
-            trace_len=len(tool_trace),
-        )
-    return updated_text
 
 
 def format_team_response(response: TeamRunOutput | RunOutput) -> list[str]:
@@ -788,14 +706,145 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     attempt_message = message
     attempt_media_inputs = media_inputs
     team_name = f"Team ({', '.join(agent_names)})"
+    retried_without_inline_media = False
 
-    for retried_without_inline_media in (False, True):
+    per_member: dict[str, str] = {}
+    consensus: str = ""
+    tool_trace: list[ToolTraceEntry] = []
+    next_tool_index = 1
+    pending_tools: list[tuple[str, int, str]] = []
+
+    def _scope_key_for_agent(agent_name: str) -> str:
+        return f"agent:{agent_name}"
+
+    def _get_consensus() -> str:
+        return consensus
+
+    def _append_to_consensus(text: str) -> None:
+        nonlocal consensus
+        consensus += text
+
+    def _set_consensus(value: str) -> None:
+        nonlocal consensus
+        consensus = value
+
+    def _ensure_hidden_tool_gap(*, get_text: Callable[[], str], apply_text: Callable[[str], None]) -> None:
+        if not get_text().endswith("\n\n"):
+            apply_text("\n\n")
+
+    def _start_tool(
+        *,
+        scope_key: str,
+        get_text: Callable[[], str],
+        apply_text: Callable[[str], None],
+        tool: ToolExecution | None,
+    ) -> None:
+        nonlocal next_tool_index
+        if not show_tool_calls:
+            _ensure_hidden_tool_gap(get_text=get_text, apply_text=apply_text)
+            return
+
+        tool_msg, trace_entry = format_tool_started_event(tool, tool_index=next_tool_index)
+        if tool_msg:
+            apply_text(tool_msg)
+        if trace_entry is not None:
+            tool_trace.append(trace_entry)
+            pending_tools.append((trace_entry.tool_name, next_tool_index, scope_key))
+            next_tool_index += 1
+
+    def _complete_tool(
+        *,
+        scope_key: str,
+        get_text: Callable[[], str],
+        set_text: Callable[[str], None],
+        tool: ToolExecution | None,
+    ) -> None:
+        info = extract_tool_completed_info(tool)
+        if not info:
+            return
+        if not show_tool_calls:
+            return
+
+        tool_name, result = info
+        match_pos = next(
+            (
+                pos
+                for pos in range(len(pending_tools) - 1, -1, -1)
+                if pending_tools[pos][0] == tool_name and pending_tools[pos][2] == scope_key
+            ),
+            None,
+        )
+        if match_pos is None:
+            logger.warning(
+                "Missing pending tool start in team stream; skipping completion marker",
+                tool_name=tool_name,
+                scope=scope_key,
+            )
+            return
+
+        _, tool_index, _ = pending_tools.pop(match_pos)
+        updated_text, trace_entry = complete_pending_tool_block(
+            get_text(),
+            tool_name,
+            result,
+            tool_index=tool_index,
+        )
+        set_text(updated_text)
+
+        if 0 < tool_index <= len(tool_trace):
+            existing_entry = tool_trace[tool_index - 1]
+            existing_entry.type = "tool_call_completed"
+            existing_entry.result_preview = trace_entry.result_preview
+            existing_entry.truncated = existing_entry.truncated or trace_entry.truncated
+        else:
+            logger.warning(
+                "Missing tool trace slot in team stream for completion",
+                tool_name=tool_name,
+                tool_index=tool_index,
+                trace_len=len(tool_trace),
+            )
+
+    def _start_tool_for_member(agent_name: str, tool: ToolExecution | None) -> None:
+        if agent_name not in per_member:
+            per_member[agent_name] = ""
+
+        def _get_text() -> str:
+            return per_member[agent_name]
+
+        def _apply_text(text: str) -> None:
+            per_member[agent_name] += text
+
+        _start_tool(
+            scope_key=_scope_key_for_agent(agent_name),
+            get_text=_get_text,
+            apply_text=_apply_text,
+            tool=tool,
+        )
+
+    def _complete_tool_for_member(agent_name: str, tool: ToolExecution | None) -> None:
+        if agent_name not in per_member:
+            per_member[agent_name] = ""
+
+        def _get_text() -> str:
+            return per_member[agent_name]
+
+        def _set_text(value: str) -> None:
+            per_member[agent_name] = value
+
+        _complete_tool(
+            scope_key=_scope_key_for_agent(agent_name),
+            get_text=_get_text,
+            set_text=_set_text,
+            tool=tool,
+        )
+
+    while True:
         # Buffers keyed by display names (Agno emits display name as agent_name)
-        per_member: dict[str, str] = dict.fromkeys(display_names, "")
-        consensus: str = ""
-        tool_trace: list[ToolTraceEntry] = []
+        per_member = dict.fromkeys(display_names, "")
+        consensus = ""
+        tool_trace = []
         next_tool_index = 1
-        pending_tools: list[tuple[str, int, str]] = []
+        pending_tools = []
         emitted_output = False
         retry_requested = False
 
@@ -832,6 +881,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                     )
                     attempt_message = _append_inline_media_fallback_prompt(attempt_message)
                     attempt_media_inputs = MediaInputs()
+                    retried_without_inline_media = True
                     retry_requested = True
                     break
                 yield get_user_friendly_error_message(Exception(error_text), team_name)
@@ -850,33 +900,13 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             elif isinstance(event, AgentToolCallStartedEvent):
                 agent_name = event.agent_name
                 if agent_name:
-                    if agent_name not in per_member:
-                        per_member[agent_name] = ""
-                    updated_text, next_tool_index = _start_tool_in_text(
-                        text=per_member[agent_name],
-                        scope_key=f"agent:{agent_name}",
-                        tool=event.tool,
-                        show_tool_calls=show_tool_calls,
-                        next_tool_index=next_tool_index,
-                        tool_trace=tool_trace,
-                        pending_tools=pending_tools,
-                    )
-                    per_member[agent_name] = updated_text
+                    _start_tool_for_member(agent_name, event.tool)
 
             # Agent tool call completed
             elif isinstance(event, AgentToolCallCompletedEvent):
                 agent_name = event.agent_name
                 if agent_name:
-                    if agent_name not in per_member:
-                        per_member[agent_name] = ""
-                    per_member[agent_name] = _complete_tool_in_text(
-                        text=per_member[agent_name],
-                        scope_key=f"agent:{agent_name}",
-                        tool=event.tool,
-                        show_tool_calls=show_tool_calls,
-                        pending_tools=pending_tools,
-                        tool_trace=tool_trace,
-                    )
+                    _complete_tool_for_member(agent_name, event.tool)
 
             # Team consensus content event
             elif isinstance(event, TeamRunContentEvent):
@@ -887,24 +917,19 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
 
             # Team-level tool call events (no specific agent context)
             elif isinstance(event, TeamToolCallStartedEvent):
-                consensus, next_tool_index = _start_tool_in_text(
-                    text=consensus,
+                _start_tool(
                     scope_key="team",
+                    get_text=_get_consensus,
+                    apply_text=_append_to_consensus,
                     tool=event.tool,
-                    show_tool_calls=show_tool_calls,
-                    next_tool_index=next_tool_index,
-                    tool_trace=tool_trace,
-                    pending_tools=pending_tools,
                 )
 
             elif isinstance(event, TeamToolCallCompletedEvent):
-                consensus = _complete_tool_in_text(
-                    text=consensus,
+                _complete_tool(
                     scope_key="team",
+                    get_text=_get_consensus,
+                    set_text=_set_consensus,
                     tool=event.tool,
-                    show_tool_calls=show_tool_calls,
-                    pending_tools=pending_tools,
-                    tool_trace=tool_trace,
                 )
 
             # Skip other event types
