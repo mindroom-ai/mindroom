@@ -19,7 +19,11 @@ from agno.team import Team
 from pydantic import BaseModel, Field
 
 from mindroom import agent_prompts
-from mindroom.ai import get_model_instance
+from mindroom.ai import (
+    _append_inline_media_fallback_prompt,
+    _should_retry_without_inline_media,
+    get_model_instance,
+)
 from mindroom.authorization import get_available_agents_in_room
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.error_handling import get_user_friendly_error_message
@@ -545,18 +549,32 @@ async def team_response(
     logger.info(f"Executing team response with {len(agents)} agents in {mode.value} mode")
     logger.info(f"TEAM PROMPT: {prompt[:500]}")
 
-    try:
-        response = await team.arun(
-            prompt,
-            images=media_inputs.images,
-            files=media_inputs.files,
-            videos=media_inputs.videos,
-        )
-    except Exception as e:
-        logger.exception(f"Error in team response with agents {agent_list}")
-        # Return user-friendly error message
-        team_name = f"Team ({agent_list})"
-        return get_user_friendly_error_message(e, team_name)
+    attempt_prompt = prompt
+    attempt_media_inputs = media_inputs
+
+    for retried_without_inline_media in (False, True):
+        try:
+            response = await team.arun(
+                attempt_prompt,
+                images=attempt_media_inputs.images,
+                files=attempt_media_inputs.files,
+                videos=attempt_media_inputs.videos,
+            )
+            break
+        except Exception as e:
+            if not retried_without_inline_media and _should_retry_without_inline_media(e, attempt_media_inputs):
+                logger.warning(
+                    "Retrying team response without inline media after validation error",
+                    agents=agent_list,
+                    error=str(e),
+                )
+                attempt_prompt = _append_inline_media_fallback_prompt(prompt)
+                attempt_media_inputs = MediaInputs()
+                continue
+            logger.exception(f"Error in team response with agents {agent_list}")
+            # Return user-friendly error message
+            team_name = f"Team ({agent_list})"
+            return get_user_friendly_error_message(e, team_name)
 
     if isinstance(response, TeamRunOutput):
         if response.member_responses:
@@ -613,24 +631,42 @@ async def _team_response_stream_raw(
     for agent in agents:
         logger.debug(f"Team member: {agent.name}")
 
-    try:
-        return team.arun(
-            prompt,
-            stream=True,
-            stream_events=True,
-            images=media_inputs.images,
-            files=media_inputs.files,
-            videos=media_inputs.videos,
-        )
-    except Exception as e:
-        logger.exception(f"Error in team streaming with agents {agent_names}")
-        team_name = f"Team ({', '.join(agent_names)})"
-        error_message = get_user_friendly_error_message(e, team_name)
+    attempt_prompt = prompt
+    attempt_media_inputs = media_inputs
 
-        async def _error() -> AsyncIterator[RunOutput]:
-            yield RunOutput(content=error_message)
+    for retried_without_inline_media in (False, True):
+        try:
+            return team.arun(
+                attempt_prompt,
+                stream=True,
+                stream_events=True,
+                images=attempt_media_inputs.images,
+                files=attempt_media_inputs.files,
+                videos=attempt_media_inputs.videos,
+            )
+        except Exception as e:
+            if not retried_without_inline_media and _should_retry_without_inline_media(e, attempt_media_inputs):
+                logger.warning(
+                    "Retrying team streaming without inline media after validation error",
+                    agents=", ".join(agent_names),
+                    error=str(e),
+                )
+                attempt_prompt = _append_inline_media_fallback_prompt(prompt)
+                attempt_media_inputs = MediaInputs()
+                continue
+            logger.exception(f"Error in team streaming with agents {agent_names}")
+            team_name = f"Team ({', '.join(agent_names)})"
+            error_message = get_user_friendly_error_message(e, team_name)
 
-        return _error()
+            async def _error(message: str = error_message) -> AsyncIterator[RunOutput]:
+                yield RunOutput(content=message)
+
+            return _error()
+
+    async def _unexpected_error() -> AsyncIterator[RunOutput]:
+        yield RunOutput(content="Team streaming failed unexpectedly.")
+
+    return _unexpected_error()
 
 
 async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
