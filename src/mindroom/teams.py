@@ -648,25 +648,12 @@ async def _team_response_stream_raw(
     try:
         return _start_stream(prompt, media_inputs)
     except Exception as e:
-        if should_retry_without_inline_media(e, media_inputs):
-            logger.warning(
-                "Retrying team streaming without inline media after validation error",
-                agents=", ".join(agent_names),
-                error=str(e),
-            )
-            try:
-                return _start_stream(append_inline_media_fallback_prompt(prompt), MediaInputs())
-            except Exception as retry_error:
-                logger.exception(f"Error in team streaming with agents {agent_names}")
-                team_name = f"Team ({', '.join(agent_names)})"
-                error_message = get_user_friendly_error_message(retry_error, team_name)
-        else:
-            logger.exception(f"Error in team streaming with agents {agent_names}")
-            team_name = f"Team ({', '.join(agent_names)})"
-            error_message = get_user_friendly_error_message(e, team_name)
+        logger.exception(f"Error in team streaming with agents {agent_names}")
+        team_name = f"Team ({', '.join(agent_names)})"
+        error_message = get_user_friendly_error_message(e, team_name)
 
-        async def _error(message: str = error_message) -> AsyncIterator[RunOutput]:
-            yield RunOutput(content=message)
+        async def _error() -> AsyncIterator[RunOutput]:
+            yield RunOutput(content=error_message)
 
         return _error()
 
