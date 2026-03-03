@@ -22,6 +22,7 @@ from mindroom.knowledge.manager import (
     _FAILED_SIGNATURE_RETRY_NS,
     _MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES,
     KnowledgeManager,
+    _ThrottledEmbedder,
     _create_embedder,
     _get_shared_knowledge_manager,
     _shared_knowledge_managers,
@@ -135,6 +136,35 @@ class _DummyChromaDb:
 
     def exists(self) -> bool:
         return True
+
+
+class _TrackingEmbedder:
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    def get_embedding(self, text: str) -> list[float]:
+        _ = text
+        return [0.0]
+
+    def get_embedding_and_usage(self, text: str) -> tuple[list[float], None]:
+        _ = text
+        return [0.0], None
+
+    async def async_get_embedding(self, text: str) -> list[float]:
+        embedding, _usage = await self.async_get_embedding_and_usage(text)
+        return embedding
+
+    async def async_get_embedding_and_usage(self, text: str) -> tuple[list[float], None]:
+        _ = text
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            await self.release.wait()
+            return [0.0], None
+        finally:
+            self.in_flight -= 1
 
 
 def _mind_private_agent(
@@ -411,6 +441,9 @@ def test_create_embedder_supports_sentence_transformers(monkeypatch: pytest.Monk
     config = Config(
         agents={},
         models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(path="./docs", watch=False),
+        },
         memory={
             "embedder": {
                 "provider": "sentence_transformers",
@@ -423,7 +456,7 @@ def test_create_embedder_supports_sentence_transformers(monkeypatch: pytest.Monk
     )
 
     runtime_paths = resolve_runtime_paths()
-    assert _create_embedder(config, runtime_paths) is sentinel
+    assert _create_embedder(config, runtime_paths, "research") is sentinel
     assert captured == {
         "runtime_paths": runtime_paths,
         "model": "sentence-transformers/all-MiniLM-L6-v2",
@@ -527,6 +560,59 @@ def test_knowledge_base_chunk_overlap_must_be_smaller_than_chunk_size() -> None:
     """KnowledgeBaseConfig should reject overlap >= size."""
     with pytest.raises(ValidationError, match="chunk_overlap must be smaller than chunk_size"):
         KnowledgeBaseConfig(path="./docs", chunk_size=500, chunk_overlap=500)
+
+
+def test_knowledge_base_embedding_backpressure_default_and_validation() -> None:
+    """Backpressure config should default to disabled and reject negative values."""
+    config = KnowledgeBaseConfig(path="./docs")
+    assert config.embedding_max_in_flight_requests == 0
+
+    with pytest.raises(ValidationError):
+        KnowledgeBaseConfig(path="./docs", embedding_max_in_flight_requests=-1)
+
+
+def test_create_embedder_wraps_when_backpressure_is_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Per-base backpressure settings should wrap the configured embedder."""
+    tracking = _TrackingEmbedder()
+
+    monkeypatch.setattr("mindroom.knowledge.manager.create_sentence_transformers_embedder", lambda *_args, **_kwargs: tracking)
+
+    config = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(
+                path="./docs",
+                watch=False,
+                embedding_max_in_flight_requests=2,
+            ),
+        },
+        memory={
+            "embedder": {
+                "provider": "sentence_transformers",
+                "config": {
+                    "model": "sentence-transformers/all-MiniLM-L6-v2",
+                },
+            },
+        },
+    )
+
+    embedder = _create_embedder(config, resolve_runtime_paths(), "research")
+    assert isinstance(embedder, _ThrottledEmbedder)
+
+
+@pytest.mark.asyncio
+async def test_throttled_embedder_caps_concurrency() -> None:
+    """Throttled wrapper should cap concurrent async embedding calls."""
+    tracking = _TrackingEmbedder()
+    wrapped = _ThrottledEmbedder(tracking, max_concurrent=2)
+
+    tasks = [asyncio.create_task(wrapped.async_get_embedding_and_usage(f"chunk-{idx}")) for idx in range(6)]
+    await asyncio.sleep(0)
+    await asyncio.sleep(0.01)
+    assert tracking.max_in_flight == 2
+    tracking.release.set()
+    await asyncio.gather(*tasks)
 
 
 @pytest.mark.asyncio

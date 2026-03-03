@@ -48,6 +48,14 @@ class KnowledgeBaseConfig(BaseModel):
         ge=0,
         description="Number of overlapping characters between adjacent chunks",
     )
+    embedding_max_in_flight_requests: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Maximum concurrent embedding requests during knowledge indexing for this base. "
+            "Set to 0 to disable indexing backpressure and keep unconstrained concurrency."
+        ),
+    )
     git: KnowledgeGitConfig | None = Field(
         default=None,
         description="Optional Git sync configuration for this knowledge base",
