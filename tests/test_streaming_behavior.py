@@ -647,8 +647,8 @@ class TestStreamingBehavior:
         assert IN_PROGRESS_MARKER not in final_body
 
     @pytest.mark.asyncio
-    async def test_finalize_does_not_overwrite_existing_message_without_placeholder(self) -> None:
-        """Finalize should not force a placeholder onto arbitrary existing messages."""
+    async def test_finalize_edits_existing_message_when_no_text_arrived(self) -> None:
+        """Finalize should edit an existing message to strip the marker even when no text arrived."""
         mock_client = AsyncMock()
 
         streaming = StreamingResponse(
@@ -658,7 +658,6 @@ class TestStreamingBehavior:
             sender_domain="localhost",
             config=self.config,
         )
-        # Existing event from edit/ack flows, but no placeholder progress was sent.
         streaming.event_id = "$existing_msg"
 
         with patch(
@@ -667,7 +666,7 @@ class TestStreamingBehavior:
         ) as mock_edit:
             await streaming.finalize(mock_client)
 
-        assert mock_edit.await_count == 0
+        assert mock_edit.await_count == 1
 
     @pytest.mark.asyncio
     async def test_streaming_in_progress_marker(
