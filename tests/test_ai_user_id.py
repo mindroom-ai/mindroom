@@ -404,6 +404,7 @@ class TestUserIdPassthrough:
                 "invalid_request_error: messages.8.content.1.image.source.base64: The image was specified using the image/jpeg media type, but the image appears to be a image/png image",
                 True,
             ),
+            ("Error code: 500 - audio input is not supported", True),
             ("invalid_request_error: max_tokens must be <= 4096", False),
             ("Rate limit exceeded", False),
         ],

@@ -69,6 +69,7 @@ _AI_RUN_METADATA_VERSION = 1
 _INLINE_MEDIA_FALLBACK_MARKER = "[Inline media unavailable for this model]"
 _INLINE_MEDIA_FIELD_PATTERN = re.compile(r"(?:document|image|audio|video)\.source\.base64(?:\.media_type)?")
 _INLINE_MEDIA_MIME_MISMATCH_PATTERN = re.compile(r"image was specified using the .* media type")
+_INLINE_MEDIA_UNSUPPORTED_PATTERN = re.compile(r"(?:audio|image|video|file|document) input is not supported")
 
 
 def _empty_request_metric_totals() -> dict[str, int]:
@@ -707,11 +708,12 @@ def _build_cache_key(
 
 
 def _is_media_validation_error_text(error_text: str) -> bool:
-    """Return whether provider error text indicates inline media validation failure."""
+    """Return whether provider error text indicates inline media validation/capability failure."""
     lowered_error_text = error_text.lower()
     return bool(
         _INLINE_MEDIA_FIELD_PATTERN.search(lowered_error_text)
-        or _INLINE_MEDIA_MIME_MISMATCH_PATTERN.search(lowered_error_text),
+        or _INLINE_MEDIA_MIME_MISMATCH_PATTERN.search(lowered_error_text)
+        or _INLINE_MEDIA_UNSUPPORTED_PATTERN.search(lowered_error_text),
     )
 
 

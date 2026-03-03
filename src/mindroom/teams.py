@@ -556,6 +556,7 @@ async def team_response(
         try:
             response = await team.arun(
                 attempt_prompt,
+                audio=attempt_media_inputs.audio,
                 images=attempt_media_inputs.images,
                 files=attempt_media_inputs.files,
                 videos=attempt_media_inputs.videos,
@@ -640,6 +641,7 @@ async def _team_response_stream_raw(
                 attempt_prompt,
                 stream=True,
                 stream_events=True,
+                audio=attempt_media_inputs.audio,
                 images=attempt_media_inputs.images,
                 files=attempt_media_inputs.files,
                 videos=attempt_media_inputs.videos,
