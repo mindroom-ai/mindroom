@@ -102,7 +102,7 @@
       "dependencies": [
         "agno"
       ],
-      "description": "Send, reply, react, and read Matrix messages with room/thread context defaults",
+      "description": "Send, reply, react, read, thread-list, and edit Matrix messages with room/thread context defaults",
       "display_name": "Matrix Message",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
       "helper_text": null,
