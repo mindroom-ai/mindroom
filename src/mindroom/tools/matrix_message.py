@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="matrix_message",
     display_name="Matrix Message",
-    description="Send, reply, react, and read Matrix messages with room/thread context defaults",
+    description=("Send, reply, react, read, thread-list, and edit Matrix messages with room/thread context defaults"),
     category=ToolCategory.COMMUNICATION,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
