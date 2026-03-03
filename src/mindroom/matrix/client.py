@@ -693,20 +693,20 @@ def _record_latest_thread_edit(
     event: nio.RoomMessageText,
     *,
     event_info: EventInfo,
-    thread_id: str,
-    latest_edits_by_original_event_id: dict[str, nio.RoomMessageText],
+    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText, str | None]],
 ) -> bool:
-    """Track latest relevant edit for a thread, returning True if event is an edit."""
-    if not (event_info.is_edit and event_info.thread_id_from_edit == thread_id and event_info.original_event_id):
+    """Track latest edit candidate, returning True if event is an edit."""
+    if not (event_info.is_edit and event_info.original_event_id):
         return False
 
     original_event_id = event_info.original_event_id
-    current_latest_edit = latest_edits_by_original_event_id.get(original_event_id)
+    current_latest_edit_data = latest_edits_by_original_event_id.get(original_event_id)
+    current_latest_edit = current_latest_edit_data[0] if current_latest_edit_data else None
     if current_latest_edit is None or (event.server_timestamp, event.event_id) > (
         current_latest_edit.server_timestamp,
         current_latest_edit.event_id,
     ):
-        latest_edits_by_original_event_id[original_event_id] = event
+        latest_edits_by_original_event_id[original_event_id] = (event, event_info.thread_id_from_edit)
     return True
 
 
@@ -744,17 +744,24 @@ async def _record_thread_message(
 async def _apply_thread_edits_to_history(
     client: nio.AsyncClient,
     *,
+    thread_id: str,
     messages: list[dict[str, Any]],
     messages_by_event_id: dict[str, dict[str, Any]],
-    latest_edits_by_original_event_id: dict[str, nio.RoomMessageText],
+    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText, str | None]],
 ) -> None:
     """Apply latest edits to history entries and synthesize missing originals."""
-    for original_event_id, edit_event in latest_edits_by_original_event_id.items():
+    for original_event_id, (edit_event, edit_thread_id) in latest_edits_by_original_event_id.items():
+        existing_message = messages_by_event_id.get(original_event_id)
+
+        # Ignore missing originals unrelated to this thread before resolving
+        # potentially large edit payloads from sidecar storage.
+        if existing_message is None and edit_thread_id != thread_id:
+            continue
+
         edited_body, edited_content = await extract_edit_body(edit_event.source, client)
         if edited_body is None:
             continue
 
-        existing_message = messages_by_event_id.get(original_event_id)
         if existing_message is not None:
             existing_message["body"] = edited_body
             if edited_content is not None:
@@ -790,7 +797,7 @@ async def fetch_thread_history(
     """
     messages: list[dict[str, Any]] = []
     messages_by_event_id: dict[str, dict[str, Any]] = {}
-    latest_edits_by_original_event_id: dict[str, nio.RoomMessageText] = {}
+    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText, str | None]] = {}
     from_token = None
     root_message_found = False
 
@@ -819,7 +826,6 @@ async def fetch_thread_history(
             if _record_latest_thread_edit(
                 event,
                 event_info=event_info,
-                thread_id=thread_id,
                 latest_edits_by_original_event_id=latest_edits_by_original_event_id,
             ):
                 continue
@@ -841,6 +847,7 @@ async def fetch_thread_history(
 
     await _apply_thread_edits_to_history(
         client,
+        thread_id=thread_id,
         messages=messages,
         messages_by_event_id=messages_by_event_id,
         latest_edits_by_original_event_id=latest_edits_by_original_event_id,

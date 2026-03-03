@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.knowledge.manager import (
+    _FAILED_SIGNATURE_RETRY_NS,
     KnowledgeManager,
     get_knowledge_manager,
     initialize_knowledge_managers,
@@ -317,18 +318,23 @@ async def test_sync_indexed_files_skips_legacy_entries_without_signatures(dummy_
 
 
 @pytest.mark.asyncio
-async def test_sync_indexed_files_skips_retries_for_failed_unchanged_files(dummy_manager: KnowledgeManager) -> None:
+async def test_sync_indexed_files_skips_retries_for_failed_unchanged_files(
+    dummy_manager: KnowledgeManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Failed unchanged files should be skipped until content changes."""
     file_path = dummy_manager.knowledge_path / "doc.md"
     file_path.write_text("same", encoding="utf-8")
     stat = file_path.stat()
     _DummyChromaDb.metadatas = []
 
-    failed_signatures = {"doc.md": (stat.st_mtime_ns, stat.st_size)}
+    now_ns = 1_000_000_000_000
+    monkeypatch.setattr("mindroom.knowledge.manager.time.time_ns", lambda: now_ns)
+    failed_signatures = {"doc.md": (stat.st_mtime_ns, stat.st_size, now_ns)}
     dummy_manager.index_file = AsyncMock(return_value=True)
     dummy_manager.remove_file = AsyncMock(return_value=True)
     dummy_manager._load_failed_signatures = lambda: failed_signatures
-    saved: dict[str, tuple[int, int]] = {}
+    saved: dict[str, tuple[int, int, int]] = {}
     dummy_manager._save_failed_signatures = lambda value: saved.update(value)
 
     result = await dummy_manager.sync_indexed_files()
@@ -337,6 +343,34 @@ async def test_sync_indexed_files_skips_retries_for_failed_unchanged_files(dummy
     dummy_manager.index_file.assert_not_awaited()
     dummy_manager.remove_file.assert_not_awaited()
     assert saved == failed_signatures
+
+
+@pytest.mark.asyncio
+async def test_sync_indexed_files_retries_failed_unchanged_files_after_retry_window(
+    dummy_manager: KnowledgeManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed unchanged files should be retried after the retry window elapses."""
+    file_path = dummy_manager.knowledge_path / "doc.md"
+    file_path.write_text("same", encoding="utf-8")
+    stat = file_path.stat()
+    _DummyChromaDb.metadatas = []
+
+    now_ns = 2_000_000_000_000
+    monkeypatch.setattr("mindroom.knowledge.manager.time.time_ns", lambda: now_ns)
+    failed_signatures = {"doc.md": (stat.st_mtime_ns, stat.st_size, now_ns - _FAILED_SIGNATURE_RETRY_NS - 1)}
+    dummy_manager.index_file = AsyncMock(return_value=True)
+    dummy_manager.remove_file = AsyncMock(return_value=True)
+    dummy_manager._load_failed_signatures = lambda: failed_signatures
+    saved: dict[str, tuple[int, int, int]] = {}
+    dummy_manager._save_failed_signatures = lambda value: saved.update(value)
+
+    result = await dummy_manager.sync_indexed_files()
+
+    assert result == {"loaded_count": 0, "indexed_count": 1, "removed_count": 0}
+    dummy_manager.index_file.assert_awaited_once_with("doc.md", upsert=True)
+    dummy_manager.remove_file.assert_not_awaited()
+    assert saved == {}
 
 
 @pytest.mark.asyncio
@@ -359,7 +393,9 @@ async def test_sync_indexed_files_upserts_changed_and_removes_deleted(dummy_mana
 
 
 @pytest.mark.asyncio
-async def test_sync_indexed_files_does_not_suppress_retry_for_previously_indexed(dummy_manager: KnowledgeManager) -> None:
+async def test_sync_indexed_files_does_not_suppress_retry_for_previously_indexed(
+    dummy_manager: KnowledgeManager,
+) -> None:
     """A previously-indexed file whose upsert fails should NOT be recorded as a persistent failure."""
     file_path = dummy_manager.knowledge_path / "doc.md"
     file_path.write_text("changed content", encoding="utf-8")
@@ -368,7 +404,7 @@ async def test_sync_indexed_files_does_not_suppress_retry_for_previously_indexed
     ]
     dummy_manager.index_file = AsyncMock(return_value=False)
     dummy_manager.remove_file = AsyncMock(return_value=True)
-    saved: dict[str, tuple[int, int]] = {}
+    saved: dict[str, tuple[int, int, int]] = {}
     dummy_manager._save_failed_signatures = lambda value: saved.update(value)
 
     result = await dummy_manager.sync_indexed_files()

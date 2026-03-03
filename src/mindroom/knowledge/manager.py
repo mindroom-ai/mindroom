@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import re
+import time
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -43,6 +44,8 @@ _URL_PATTERN = re.compile(r"https?://[^\s'\"<>]+")
 _SOURCE_PATH_KEY = "source_path"
 _SOURCE_MTIME_NS_KEY = "source_mtime_ns"
 _SOURCE_SIZE_KEY = "source_size"
+_FAILED_SIGNATURE_RETRY_SECONDS = 300
+_FAILED_SIGNATURE_RETRY_NS = _FAILED_SIGNATURE_RETRY_SECONDS * 1_000_000_000
 
 
 def _resolve_knowledge_path(path: str) -> Path:
@@ -444,7 +447,7 @@ class KnowledgeManager:
         stat = file_path.stat()
         return stat.st_mtime_ns, stat.st_size
 
-    def _load_failed_signatures(self) -> dict[str, tuple[int, int]]:
+    def _load_failed_signatures(self) -> dict[str, tuple[int, int, int]]:
         if not self._index_failures_path.exists():
             return {}
 
@@ -456,22 +459,38 @@ class KnowledgeManager:
         if not isinstance(payload, dict):
             return {}
 
-        failed_signatures: dict[str, tuple[int, int]] = {}
+        failed_signatures: dict[str, tuple[int, int, int]] = {}
         for path, value in payload.items():
             if not isinstance(path, str):
                 continue
-            if not isinstance(value, list | tuple) or len(value) != 2:
+            if not isinstance(value, list | tuple) or len(value) not in {2, 3}:
                 continue
             mtime_ns = _coerce_int(value[0])
             size = _coerce_int(value[1])
             if mtime_ns is None or size is None:
                 continue
-            failed_signatures[path] = (mtime_ns, size)
+            failed_at_ns = _coerce_int(value[2]) if len(value) == 3 else 0
+            failed_signatures[path] = (mtime_ns, size, max(failed_at_ns or 0, 0))
         return failed_signatures
 
-    def _save_failed_signatures(self, failed_signatures: dict[str, tuple[int, int]]) -> None:
-        payload = {path: [signature[0], signature[1]] for path, signature in failed_signatures.items()}
+    def _save_failed_signatures(self, failed_signatures: dict[str, tuple[int, int, int]]) -> None:
+        payload = {path: [signature[0], signature[1], signature[2]] for path, signature in failed_signatures.items()}
         self._index_failures_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+    def _should_skip_failed_signature(
+        self,
+        *,
+        failed_signature: tuple[int, int, int],
+        current_signature: tuple[int, int],
+    ) -> bool:
+        failed_mtime_ns, failed_size, failed_at_ns = failed_signature
+        if (failed_mtime_ns, failed_size) != current_signature:
+            return False
+        if failed_at_ns <= 0:
+            # Legacy entries without timestamps should be retried.
+            return False
+        elapsed_ns = time.time_ns() - failed_at_ns
+        return elapsed_ns < _FAILED_SIGNATURE_RETRY_NS
 
     def _has_vectors_for_source_path(self, relative_path: str) -> bool:
         vector_db = self._knowledge.vector_db
@@ -597,7 +616,11 @@ class KnowledgeManager:
         changed_or_missing_paths: list[str] = []
         for path, signature in current_signatures.items():
             if path not in indexed_files:
-                if failed_signatures.get(path) == signature:
+                failed_signature = failed_signatures.get(path)
+                if failed_signature and self._should_skip_failed_signature(
+                    failed_signature=failed_signature,
+                    current_signature=signature,
+                ):
                     continue
                 changed_or_missing_paths.append(path)
                 continue
@@ -623,7 +646,8 @@ class KnowledgeManager:
                 # Only suppress retries for genuinely new files.  Previously-
                 # indexed files lost their vectors during the upsert attempt
                 # and must be retried on the next startup.
-                failed_signatures[relative_path] = current_signatures[relative_path]
+                source_mtime_ns, source_size = current_signatures[relative_path]
+                failed_signatures[relative_path] = (source_mtime_ns, source_size, time.time_ns())
 
         await asyncio.to_thread(self._save_failed_signatures, failed_signatures)
 
