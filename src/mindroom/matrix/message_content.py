@@ -208,7 +208,7 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, C901
         response = await client.download(server_name, media_id)
 
         if not isinstance(response, nio.DownloadResponse):
-            logger.error(f"Failed to download MXC content: {response}")
+            logger.error(f"Failed to download MXC content: {response}", mxc_url=mxc_url)
             return None
 
         # Handle encryption if needed
