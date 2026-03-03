@@ -13,7 +13,9 @@ from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.knowledge.manager import (
     _FAILED_SIGNATURE_RETRY_NS,
+    _INDEXING_EMBEDDING_BACKPRESSURE_ACTIVE,
     KnowledgeManager,
+    _IndexingBackpressureEmbedder,
     get_knowledge_manager,
     initialize_knowledge_managers,
     shutdown_knowledge_managers,
@@ -111,6 +113,35 @@ class _DummyChromaDb:
 
     def exists(self) -> bool:
         return True
+
+
+class _TrackingEmbedder:
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    def get_embedding(self, text: str) -> list[float]:
+        _ = text
+        return [0.0]
+
+    def get_embedding_and_usage(self, text: str) -> tuple[list[float], None]:
+        _ = text
+        return [0.0], None
+
+    async def async_get_embedding(self, text: str) -> list[float]:
+        embedding, _usage = await self.async_get_embedding_and_usage(text)
+        return embedding
+
+    async def async_get_embedding_and_usage(self, text: str) -> tuple[list[float], None]:
+        _ = text
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            await self.release.wait()
+            return [0.0], None
+        finally:
+            self.in_flight -= 1
 
 
 def _make_config(path: Path) -> Config:
@@ -258,6 +289,47 @@ def test_knowledge_base_chunk_overlap_must_be_smaller_than_chunk_size() -> None:
     """KnowledgeBaseConfig should reject overlap >= size."""
     with pytest.raises(ValidationError, match="chunk_overlap must be smaller than chunk_size"):
         KnowledgeBaseConfig(path="./docs", chunk_size=500, chunk_overlap=500)
+
+
+def test_knowledge_base_embedding_backpressure_default_and_validation() -> None:
+    """Backpressure config should default to disabled and reject negative values."""
+    config = KnowledgeBaseConfig(path="./docs")
+    assert config.embedding_max_in_flight_requests == 0
+
+    with pytest.raises(ValidationError):
+        KnowledgeBaseConfig(path="./docs", embedding_max_in_flight_requests=-1)
+
+
+@pytest.mark.asyncio
+async def test_indexing_backpressure_embedder_caps_concurrency_when_active() -> None:
+    """Backpressure wrapper should cap indexing-time async embedding concurrency."""
+    tracking = _TrackingEmbedder()
+    wrapped = _IndexingBackpressureEmbedder(tracking, max_in_flight_requests=2)
+    token = _INDEXING_EMBEDDING_BACKPRESSURE_ACTIVE.set(True)
+
+    try:
+        tasks = [asyncio.create_task(wrapped.async_get_embedding_and_usage(f"chunk-{idx}")) for idx in range(6)]
+        await asyncio.sleep(0)
+        await asyncio.sleep(0.01)
+        assert tracking.max_in_flight == 2
+        tracking.release.set()
+        await asyncio.gather(*tasks)
+    finally:
+        _INDEXING_EMBEDDING_BACKPRESSURE_ACTIVE.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_indexing_backpressure_embedder_is_noop_when_inactive() -> None:
+    """Wrapper should not throttle calls outside the indexing path."""
+    tracking = _TrackingEmbedder()
+    wrapped = _IndexingBackpressureEmbedder(tracking, max_in_flight_requests=2)
+
+    tasks = [asyncio.create_task(wrapped.async_get_embedding_and_usage(f"chunk-{idx}")) for idx in range(4)]
+    await asyncio.sleep(0)
+    await asyncio.sleep(0.01)
+    assert tracking.max_in_flight >= 3
+    tracking.release.set()
+    await asyncio.gather(*tasks)
 
 
 @pytest.mark.asyncio
@@ -542,6 +614,48 @@ async def test_initialize_knowledge_managers_non_index_setting_change_uses_incre
     initialize.assert_not_awaited()
     sync_indexed_files.assert_awaited_once()
 
+    await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_initialize_knowledge_managers_can_schedule_background_sync_on_create(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Background create-time sync should not block manager initialization."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    config = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(path=str(tmp_path / "research"), watch=False),
+        },
+    )
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _sync_indexed_files(self: KnowledgeManager) -> dict[str, int]:
+        _ = self
+        started.set()
+        await release.wait()
+        return {"loaded_count": 0, "indexed_count": 0, "removed_count": 0}
+
+    monkeypatch.setattr(KnowledgeManager, "sync_indexed_files", _sync_indexed_files)
+
+    managers = await initialize_knowledge_managers(
+        config,
+        tmp_path / "storage",
+        reindex_on_create=False,
+        background_sync_on_create=True,
+    )
+
+    assert set(managers) == {"research"}
+    await asyncio.wait_for(started.wait(), timeout=1)
+    release.set()
     await shutdown_knowledge_managers()
 
 
