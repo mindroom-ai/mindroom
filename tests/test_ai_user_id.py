@@ -15,7 +15,7 @@ from agno.run.base import RunStatus
 from mindroom.ai import (
     ai_response,
     append_inline_media_fallback_prompt,
-    is_media_validation_error_text,
+    should_retry_without_inline_media,
     stream_agent_response,
 )
 from mindroom.bot import AgentBot
@@ -409,9 +409,9 @@ class TestUserIdPassthrough:
             ("Rate limit exceeded", False),
         ],
     )
-    def test_is_media_validation_error_text(self, error_text: str, expected: bool) -> None:
-        """Media validation matcher should target inline-media field/path failures only."""
-        assert is_media_validation_error_text(error_text) is expected
+    def test_should_retry_without_inline_media_error_matching(self, error_text: str, expected: bool) -> None:
+        """Retry matcher should target inline-media field/path failures only."""
+        assert should_retry_without_inline_media(error_text, MediaInputs(images=(object(),))) is expected
 
     def test_append_inline_media_fallback_prompt_is_idempotent(self) -> None:
         """Fallback marker should only be appended once across retries."""

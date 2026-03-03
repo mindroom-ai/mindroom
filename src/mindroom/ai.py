@@ -707,7 +707,7 @@ def _build_cache_key(
     return f"{key}:tool_calls={visibility}"
 
 
-def is_media_validation_error_text(error_text: str) -> bool:
+def _is_media_validation_error_text(error_text: str) -> bool:
     """Return whether provider error text indicates inline media validation/capability failure."""
     lowered_error_text = error_text.lower()
     return bool(
@@ -721,7 +721,7 @@ def should_retry_without_inline_media(error: Exception | str, media_inputs: Medi
     """Return whether this run should retry once without inline media."""
     if not media_inputs.has_any():
         return False
-    return is_media_validation_error_text(str(error))
+    return _is_media_validation_error_text(str(error))
 
 
 def append_inline_media_fallback_prompt(full_prompt: str) -> str:
