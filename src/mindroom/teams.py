@@ -546,6 +546,7 @@ async def team_response(
     prompt = _build_prompt_with_context(message, thread_history)
     team = _create_team_instance(agents, agent_names, mode, orchestrator, model_name)
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
+    team_name = f"Team ({agent_list})"
 
     logger.info(f"Executing team response with {len(agents)} agents in {mode.value} mode")
     logger.info(f"TEAM PROMPT: {prompt[:500]}")
@@ -562,22 +563,19 @@ async def team_response(
     try:
         response = await _run(prompt, media_inputs)
     except Exception as e:
-        if should_retry_without_inline_media(e, media_inputs):
-            logger.warning(
-                "Retrying team response without inline media after validation error",
-                agents=agent_list,
-                error=str(e),
-            )
-            try:
-                response = await _run(append_inline_media_fallback_prompt(prompt), MediaInputs())
-            except Exception as retry_error:
-                logger.exception(f"Error in team response with agents {agent_list}")
-                team_name = f"Team ({agent_list})"
-                return get_user_friendly_error_message(retry_error, team_name)
-        else:
+        if not should_retry_without_inline_media(e, media_inputs):
             logger.exception(f"Error in team response with agents {agent_list}")
-            team_name = f"Team ({agent_list})"
             return get_user_friendly_error_message(e, team_name)
+        logger.warning(
+            "Retrying team response without inline media after validation error",
+            agents=agent_list,
+            error=str(e),
+        )
+        try:
+            response = await _run(append_inline_media_fallback_prompt(prompt), MediaInputs())
+        except Exception as retry_error:
+            logger.exception(f"Error in team response with agents {agent_list}")
+            return get_user_friendly_error_message(retry_error, team_name)
 
     if isinstance(response, TeamRunOutput):
         if response.member_responses:

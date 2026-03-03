@@ -1768,7 +1768,7 @@ class AgentBot:
 
             # Add stop button if configured AND user is online
             # This uses the same logic as streaming to determine if user is online
-            show_stop_button = self.config.defaults.show_stop_button is True
+            show_stop_button = self.config.defaults.show_stop_button
             if show_stop_button and user_id:
                 # Check if user is online - same logic as streaming decision
                 user_is_online = await is_user_online(self.client, user_id)
