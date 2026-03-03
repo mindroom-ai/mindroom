@@ -548,7 +548,6 @@ async def team_response(
     try:
         response = await team.arun(
             prompt,
-            audio=media_inputs.audio,
             images=media_inputs.images,
             files=media_inputs.files,
             videos=media_inputs.videos,
@@ -619,7 +618,6 @@ async def _team_response_stream_raw(
             prompt,
             stream=True,
             stream_events=True,
-            audio=media_inputs.audio,
             images=media_inputs.images,
             files=media_inputs.files,
             videos=media_inputs.videos,
