@@ -49,8 +49,8 @@ class TestConfigInit:
         assert "authorization:" in content
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER in content
 
-    def test_init_full_profile_adds_openclaw_style_mind(self, tmp_path: Path) -> None:
-        """Full template should include OpenClaw-style Mind memory/context setup."""
+    def test_init_full_profile_adds_mindroom_style_mind(self, tmp_path: Path) -> None:
+        """Full template should include MindRoom-style Mind memory/context setup."""
         target = tmp_path / "config.yaml"
         result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
         assert result.exit_code == 0
