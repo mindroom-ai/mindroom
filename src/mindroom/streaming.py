@@ -37,8 +37,19 @@ logger = get_logger(__name__)
 IN_PROGRESS_MARKER = " ⋯"
 _PROGRESS_PLACEHOLDER = "Thinking..."
 _CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
+_STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 _StreamInputChunk = str | StructuredStreamChunk | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
 _IN_PROGRESS_MESSAGE_PATTERN = re.compile(rf"{re.escape(IN_PROGRESS_MARKER)}\.*$")
+
+
+def _format_stream_error_note(error: Exception) -> str:
+    """Return a concise user-facing note for stream-time exceptions."""
+    normalized_error = " ".join(str(error).split())
+    if not normalized_error:
+        return f"{_STREAM_ERROR_RESPONSE_NOTE}. Please retry.]**"
+    if len(normalized_error) > 220:
+        normalized_error = f"{normalized_error[:219]}…"
+    return f"{_STREAM_ERROR_RESPONSE_NOTE}: {normalized_error}]**"
 
 
 def is_in_progress_message(text: object) -> bool:
@@ -179,9 +190,19 @@ class StreamingResponse:
         self._update(new_chunk)
         await self._throttled_send(client)
 
-    async def finalize(self, client: nio.AsyncClient, *, cancelled: bool = False) -> None:
+    async def finalize(
+        self,
+        client: nio.AsyncClient,
+        *,
+        cancelled: bool = False,
+        error: Exception | None = None,
+    ) -> None:
         """Send final message update."""
-        if cancelled:
+        if error is not None:
+            stripped_text = self.accumulated_text.rstrip()
+            error_note = _format_stream_error_note(error)
+            self.accumulated_text = f"{stripped_text}\n\n{error_note}" if stripped_text else error_note
+        elif cancelled:
             stripped_text = self.accumulated_text.rstrip()
             self.accumulated_text = (
                 f"{stripped_text}\n\n{_CANCELLED_RESPONSE_NOTE}" if stripped_text else _CANCELLED_RESPONSE_NOTE
@@ -425,7 +446,11 @@ async def send_streaming_response(
     except asyncio.CancelledError:
         await streaming.finalize(client, cancelled=True)
         raise
-
-    await streaming.finalize(client)
+    except Exception as e:
+        logger.exception("Streaming response failed", error=str(e))
+        await streaming.finalize(client, error=e)
+        raise
+    else:
+        await streaming.finalize(client)
 
     return streaming.event_id, streaming.accumulated_text
