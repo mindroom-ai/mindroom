@@ -394,7 +394,7 @@ def _prompt_provider_preset() -> _ProviderPreset:
         console.print("[red]Invalid choice.[/red] Enter openai or openrouter.")
 
 
-def _full_template(provider_preset: _ProviderPreset, *, profile: str = "full") -> str:
+def _full_template(provider_preset: _ProviderPreset, *, profile: Literal["full", "public"] = "full") -> str:
     """Return a provider-aware starter config."""
     provider, model_id = _DEFAULT_MODEL_PRESETS[provider_preset]
 

@@ -350,6 +350,13 @@ def test_mindroom_user_username_rejects_agent_collision() -> None:
         )
 
 
+def test_mindroom_user_none_validates_and_returns_none_id() -> None:
+    """Config with mindroom_user omitted should validate and return None user ID."""
+    config = Config()
+    assert config.mindroom_user is None
+    assert config.get_mindroom_user_id() is None
+
+
 def test_agent_and_team_names_must_not_overlap() -> None:
     """Agent keys and team keys must be distinct to avoid identity collisions."""
     with pytest.raises(ValueError, match="Agent and team names must be distinct"):
