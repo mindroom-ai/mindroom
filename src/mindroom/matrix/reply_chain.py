@@ -416,8 +416,8 @@ async def derive_conversation_context(
     """Derive conversation context from threads or reply chains."""
     thread_root_id = event_info.thread_id
     if thread_root_id is None and event_info.is_edit:
-        # Matrix edit events use top-level `m.replace`; thread relation can
-        # live in `m.new_content` and should still resolve to thread history.
+        # Edit events use top-level m.replace, but thread relation may still
+        # exist in m.new_content for thread edits.
         thread_root_id = event_info.thread_id_from_edit
     if thread_root_id is not None:
         thread_history = await fetch_history(client, room_id, thread_root_id)

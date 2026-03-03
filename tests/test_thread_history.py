@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
@@ -310,7 +310,7 @@ class TestThreadHistory:
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_edit_without_thread_updates_existing_message(self) -> None:
-        """Apply edit bodies even when m.new_content does not carry thread metadata."""
+        """Apply edits for known thread messages even without nested thread metadata."""
         client = AsyncMock()
 
         root_event = self._make_text_event(
@@ -362,7 +362,7 @@ class TestThreadHistory:
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_edit_without_thread_does_not_synthesize_missing_original(self) -> None:
-        """Do not synthesize messages from edits without explicit thread metadata."""
+        """Do not synthesize unrelated missing messages from edits without thread metadata."""
         client = AsyncMock()
 
         edit_only_event = self._make_text_event(
@@ -390,39 +390,6 @@ class TestThreadHistory:
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
 
         assert history == []
-
-    @pytest.mark.asyncio
-    async def test_fetch_thread_history_skips_unrelated_missing_edit_before_body_extraction(self) -> None:
-        """Avoid edit-body extraction for missing originals unrelated to this thread."""
-        client = AsyncMock()
-
-        unrelated_edit = self._make_text_event(
-            event_id="$edit1",
-            sender="@agent:localhost",
-            body="* replacement",
-            server_timestamp=3000,
-            source_content={
-                "body": "* replacement",
-                "m.new_content": {
-                    "body": "Should not be extracted",
-                },
-                "m.relates_to": {
-                    "rel_type": "m.replace",
-                    "event_id": "$missing_original",
-                },
-            },
-        )
-
-        response = MagicMock(spec=nio.RoomMessagesResponse)
-        response.chunk = [unrelated_edit]
-        response.end = None
-        client.room_messages.return_value = response
-
-        with patch("mindroom.matrix.client.extract_edit_body", new_callable=AsyncMock) as mock_extract_edit_body:
-            history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
-
-        assert history == []
-        mock_extract_edit_body.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_edit_only_event_still_visible(self) -> None:

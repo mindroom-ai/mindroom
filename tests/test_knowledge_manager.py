@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.knowledge.manager import (
+    _FAILED_SIGNATURE_RETRY_NS,
     KnowledgeManager,
     get_knowledge_manager,
     initialize_knowledge_managers,
@@ -43,12 +44,16 @@ class _DummyCollection:
         limit: int | None = None,
         offset: int = 0,
         include: list[str] | None = None,
+        where: dict[str, object] | None = None,
     ) -> dict[str, object]:
         _ = include
-        if limit is None:
-            selected = _DummyChromaDb.metadatas[offset:]
-        else:
-            selected = _DummyChromaDb.metadatas[offset : offset + limit]
+        selected_all = _DummyChromaDb.metadatas
+        if where:
+            key, value = next(iter(where.items()))
+            selected_all = [
+                metadata for metadata in selected_all if isinstance(metadata, dict) and metadata.get(key) == value
+            ]
+        selected = selected_all[offset:] if limit is None else selected_all[offset : offset + limit]
         ids = [str(index) for index in range(offset, offset + len(selected))]
         return {"ids": ids, "metadatas": selected}
 
@@ -74,6 +79,17 @@ class _DummyKnowledge:
         reader: object | None = None,
     ) -> None:
         self.insert_calls.append({"path": path, "metadata": metadata, "upsert": upsert, "reader": reader})
+        _DummyChromaDb.metadatas.append(dict(metadata))
+
+    async def ainsert(
+        self,
+        *,
+        path: str,
+        metadata: dict[str, object],
+        upsert: bool,
+        reader: object | None = None,
+    ) -> None:
+        self.insert(path=path, metadata=metadata, upsert=upsert, reader=reader)
 
     def remove_vectors_by_metadata(self, metadata: dict[str, object]) -> bool:
         self.remove_calls.append(metadata)
@@ -186,7 +202,11 @@ async def test_index_file_upsert_removes_existing_vectors(dummy_manager: Knowled
     knowledge = dummy_manager.get_knowledge()
     assert isinstance(knowledge, _DummyKnowledge)
     assert knowledge.remove_calls == [{"source_path": "doc.txt"}]
-    assert knowledge.insert_calls[0]["metadata"] == {"source_path": "doc.txt"}
+    metadata = knowledge.insert_calls[0]["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["source_path"] == "doc.txt"
+    assert isinstance(metadata["source_mtime_ns"], int)
+    assert metadata["source_size"] == 4
     assert knowledge.insert_calls[0]["upsert"] is True
     reader = knowledge.insert_calls[0]["reader"]
     assert reader is not None
@@ -256,6 +276,144 @@ async def test_load_indexed_files_recovers_source_paths(dummy_manager: Knowledge
     assert indexed_count == 2
     status = dummy_manager.get_status()
     assert status["indexed_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_sync_indexed_files_skips_unchanged_files(dummy_manager: KnowledgeManager) -> None:
+    """sync_indexed_files should not upsert files when persisted signatures match disk."""
+    file_path = dummy_manager.knowledge_path / "doc.md"
+    file_path.write_text("same", encoding="utf-8")
+    stat = file_path.stat()
+    _DummyChromaDb.metadatas = [
+        {
+            "source_path": "doc.md",
+            "source_mtime_ns": stat.st_mtime_ns,
+            "source_size": stat.st_size,
+        },
+    ]
+    dummy_manager.index_file = AsyncMock(return_value=True)
+    dummy_manager.remove_file = AsyncMock(return_value=True)
+
+    result = await dummy_manager.sync_indexed_files()
+
+    assert result == {"loaded_count": 1, "indexed_count": 0, "removed_count": 0}
+    dummy_manager.index_file.assert_not_awaited()
+    dummy_manager.remove_file.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_indexed_files_skips_legacy_entries_without_signatures(dummy_manager: KnowledgeManager) -> None:
+    """Legacy entries with only source_path metadata should not force reindex on restart."""
+    file_path = dummy_manager.knowledge_path / "doc.md"
+    file_path.write_text("same", encoding="utf-8")
+    _DummyChromaDb.metadatas = [{"source_path": "doc.md"}]
+    dummy_manager.index_file = AsyncMock(return_value=True)
+    dummy_manager.remove_file = AsyncMock(return_value=True)
+
+    result = await dummy_manager.sync_indexed_files()
+
+    assert result == {"loaded_count": 1, "indexed_count": 0, "removed_count": 0}
+    dummy_manager.index_file.assert_not_awaited()
+    dummy_manager.remove_file.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_indexed_files_skips_retries_for_failed_unchanged_files(
+    dummy_manager: KnowledgeManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed unchanged files should be skipped until content changes."""
+    file_path = dummy_manager.knowledge_path / "doc.md"
+    file_path.write_text("same", encoding="utf-8")
+    stat = file_path.stat()
+    _DummyChromaDb.metadatas = []
+
+    now_ns = 1_000_000_000_000
+    monkeypatch.setattr("mindroom.knowledge.manager.time.time_ns", lambda: now_ns)
+    failed_signatures = {"doc.md": (stat.st_mtime_ns, stat.st_size, now_ns)}
+    dummy_manager.index_file = AsyncMock(return_value=True)
+    dummy_manager.remove_file = AsyncMock(return_value=True)
+    dummy_manager._load_failed_signatures = lambda: failed_signatures
+    saved: dict[str, tuple[int, int, int]] = {}
+    dummy_manager._save_failed_signatures = lambda value: saved.update(value)
+
+    result = await dummy_manager.sync_indexed_files()
+
+    assert result == {"loaded_count": 0, "indexed_count": 0, "removed_count": 0}
+    dummy_manager.index_file.assert_not_awaited()
+    dummy_manager.remove_file.assert_not_awaited()
+    assert saved == failed_signatures
+
+
+@pytest.mark.asyncio
+async def test_sync_indexed_files_retries_failed_unchanged_files_after_retry_window(
+    dummy_manager: KnowledgeManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed unchanged files should be retried after the retry window elapses."""
+    file_path = dummy_manager.knowledge_path / "doc.md"
+    file_path.write_text("same", encoding="utf-8")
+    stat = file_path.stat()
+    _DummyChromaDb.metadatas = []
+
+    now_ns = 2_000_000_000_000
+    monkeypatch.setattr("mindroom.knowledge.manager.time.time_ns", lambda: now_ns)
+    failed_signatures = {"doc.md": (stat.st_mtime_ns, stat.st_size, now_ns - _FAILED_SIGNATURE_RETRY_NS - 1)}
+    dummy_manager.index_file = AsyncMock(return_value=True)
+    dummy_manager.remove_file = AsyncMock(return_value=True)
+    dummy_manager._load_failed_signatures = lambda: failed_signatures
+    saved: dict[str, tuple[int, int, int]] = {}
+    dummy_manager._save_failed_signatures = lambda value: saved.update(value)
+
+    result = await dummy_manager.sync_indexed_files()
+
+    assert result == {"loaded_count": 0, "indexed_count": 1, "removed_count": 0}
+    dummy_manager.index_file.assert_awaited_once_with("doc.md", upsert=True)
+    dummy_manager.remove_file.assert_not_awaited()
+    assert saved == {}
+
+
+@pytest.mark.asyncio
+async def test_sync_indexed_files_upserts_changed_and_removes_deleted(dummy_manager: KnowledgeManager) -> None:
+    """sync_indexed_files should update changed files and remove stale indexed entries."""
+    file_path = dummy_manager.knowledge_path / "doc.md"
+    file_path.write_text("changed content", encoding="utf-8")
+    _DummyChromaDb.metadatas = [
+        {"source_path": "doc.md", "source_mtime_ns": 1, "source_size": 1},
+        {"source_path": "deleted.md", "source_mtime_ns": 1, "source_size": 1},
+    ]
+    dummy_manager.index_file = AsyncMock(return_value=True)
+    dummy_manager.remove_file = AsyncMock(return_value=True)
+
+    result = await dummy_manager.sync_indexed_files()
+
+    assert result == {"loaded_count": 2, "indexed_count": 1, "removed_count": 1}
+    dummy_manager.index_file.assert_awaited_once_with("doc.md", upsert=True)
+    dummy_manager.remove_file.assert_awaited_once_with("deleted.md")
+
+
+@pytest.mark.asyncio
+async def test_sync_indexed_files_does_not_suppress_retry_for_previously_indexed(
+    dummy_manager: KnowledgeManager,
+) -> None:
+    """A previously-indexed file whose upsert fails should NOT be recorded as a persistent failure."""
+    file_path = dummy_manager.knowledge_path / "doc.md"
+    file_path.write_text("changed content", encoding="utf-8")
+    _DummyChromaDb.metadatas = [
+        {"source_path": "doc.md", "source_mtime_ns": 1, "source_size": 1},
+    ]
+    dummy_manager.index_file = AsyncMock(return_value=False)
+    dummy_manager.remove_file = AsyncMock(return_value=True)
+    saved: dict[str, tuple[int, int, int]] = {}
+    dummy_manager._save_failed_signatures = lambda value: saved.update(value)
+
+    result = await dummy_manager.sync_indexed_files()
+
+    assert result == {"loaded_count": 1, "indexed_count": 0, "removed_count": 0}
+    dummy_manager.index_file.assert_awaited_once_with("doc.md", upsert=True)
+    # Failure must NOT be persisted — file was previously indexed and lost its
+    # vectors during the upsert; it must be retried on next startup.
+    assert saved == {}
 
 
 @pytest.mark.asyncio

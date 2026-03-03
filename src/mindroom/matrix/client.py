@@ -753,8 +753,8 @@ async def _apply_thread_edits_to_history(
     for original_event_id, (edit_event, edit_thread_id) in latest_edits_by_original_event_id.items():
         existing_message = messages_by_event_id.get(original_event_id)
 
-        # Ignore unrelated missing originals before resolving potentially large
-        # edit payloads from sidecar storage.
+        # Ignore missing originals unrelated to this thread before resolving
+        # potentially large edit payloads from sidecar storage.
         if existing_message is None and edit_thread_id != thread_id:
             continue
 

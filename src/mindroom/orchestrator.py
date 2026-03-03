@@ -113,6 +113,7 @@ class MultiAgentOrchestrator:
             config=config,
             storage_path=self.storage_path,
             start_watchers=start_watcher,
+            reindex_on_create=False,
         )
 
     async def initialize(self) -> None:
