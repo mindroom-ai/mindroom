@@ -495,7 +495,7 @@ agents:
       - Be helpful and conversational
   mind:
     display_name: Mind
-    role: MindRoom-style personal assistant with persistent file-based identity and memory
+    role: Personal assistant with persistent file-based identity and memory
     model: default
     include_default_tools: false
     learning: false
