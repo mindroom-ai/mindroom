@@ -57,6 +57,76 @@ _REQUIRED_ENV_KEYS: dict[_ProviderPreset, tuple[str, ...]] = {
 }
 
 
+_MIND_TEMPLATE_DIR = Path(__file__).resolve().parent / "templates" / "mind_data"
+_MIND_WORKSPACE_TEMPLATE_FILES: tuple[str, ...] = (
+    "SOUL.md",
+    "AGENTS.md",
+    "USER.md",
+    "IDENTITY.md",
+    "TOOLS.md",
+    "HEARTBEAT.md",
+)
+_MIND_MEMORY_TEMPLATE = "# Memory\n\n"
+
+
+def _ensure_mind_workspace(workspace_path: Path, *, force: bool) -> None:
+    """Create the default Mind workspace files used by the full/public templates."""
+    workspace_path.mkdir(parents=True, exist_ok=True)
+    (workspace_path / "memory").mkdir(parents=True, exist_ok=True)
+
+    for filename in _MIND_WORKSPACE_TEMPLATE_FILES:
+        source_path = _MIND_TEMPLATE_DIR / filename
+        file_path = workspace_path / filename
+        if file_path.exists() and not force:
+            continue
+        file_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    memory_path = workspace_path / "MEMORY.md"
+    if not memory_path.exists() or force:
+        memory_path.write_text(_MIND_MEMORY_TEMPLATE, encoding="utf-8")
+
+
+def _write_env_file(
+    env_path: Path,
+    selected_profile: str,
+    selected_preset: _ProviderPreset,
+    *,
+    force: bool,
+) -> bool:
+    """Create or update .env and return whether the file changed."""
+    if not env_path.exists():
+        env_path.write_text(_env_template(selected_profile, selected_preset), encoding="utf-8")
+        console.print(f"[green]Env file created:[/green] {env_path}")
+        return True
+
+    should_overwrite = force or typer.confirm(f"Overwrite existing .env file ({env_path})?", default=False)
+    if not should_overwrite:
+        return False
+
+    env_path.write_text(_env_template(selected_profile, selected_preset), encoding="utf-8")
+    console.print(f"[green]Env file overwritten:[/green] {env_path}")
+    return True
+
+
+def _print_config_init_next_steps(env_path: Path, *, env_created: bool, selected_profile: str) -> None:
+    """Print post-init guidance for the selected profile."""
+    console.print("\nNext steps:")
+    if env_created:
+        if selected_profile == "public":
+            env_hint = "Set your API keys (Matrix homeserver is prefilled)"
+        else:
+            env_hint = "Set your API keys and Matrix homeserver"
+        console.print(f"  [cyan]Edit {env_path}[/cyan]  {env_hint}")
+    if selected_profile == "public":
+        console.print(
+            "  [cyan]mindroom connect --pair-code XXXX[/cyan]  "
+            "Pair with hosted Matrix (get code from chat.mindroom.chat)",
+        )
+    console.print("  [cyan]mindroom config edit[/cyan]      Customize your config")
+    console.print("  [cyan]mindroom config validate[/cyan]  Verify it's valid")
+    console.print("  [cyan]mindroom run[/cyan]              Start the system")
+
+
 def _resolve_config_path(path: Path | None) -> Path:
     """Resolve the config file path from explicit argument or default."""
     if path is not None:
@@ -131,7 +201,7 @@ def config_init(
 ) -> None:
     """Create a starter config.yaml with example agents and models.
 
-    Generates a YAML config with one agent, one model, and sensible defaults.
+    Generates a YAML config with starter agents, one model, and sensible defaults.
     """
     target = _resolve_config_path(path)
 
@@ -161,30 +231,23 @@ def config_init(
     else:
         selected_preset = _prompt_provider_preset()
 
-    content = (
-        _minimal_template(selected_preset)
-        if selected_profile == "minimal"
-        else _full_template(selected_preset, profile=selected_profile)
-    )
+    if selected_profile == "minimal":
+        content = _minimal_template(selected_preset)
+    else:
+        full_profile: Literal["full", "public"] = "public" if selected_profile == "public" else "full"
+        content = _full_template(selected_preset, profile=full_profile)
 
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
 
-    # Also create a .env file next to the config if one doesn't exist
+    if selected_profile != "minimal":
+        _ensure_mind_workspace(target.parent / "mind_data", force=force)
+
     env_path = target.parent / ".env"
-    env_created = False
-    if not env_path.exists():
-        env_path.write_text(_env_template(selected_profile, selected_preset), encoding="utf-8")
-        console.print(f"[green]Env file created:[/green] {env_path}")
-        env_created = True
+    env_created = _write_env_file(env_path, selected_profile, selected_preset, force=force)
 
     console.print(f"[green]Config created:[/green] {target}")
-    console.print("\nNext steps:")
-    if env_created:
-        console.print(f"  [cyan]Edit {env_path}[/cyan]  Set your API keys and Matrix homeserver")
-    console.print("  [cyan]mindroom config edit[/cyan]      Customize your config")
-    console.print("  [cyan]mindroom config validate[/cyan]  Verify it's valid")
-    console.print("  [cyan]mindroom run[/cyan]              Start the system")
+    _print_config_init_next_steps(env_path, env_created=env_created, selected_profile=selected_profile)
 
 
 @config_app.command("show")
@@ -430,6 +493,42 @@ agents:
     tools: []
     instructions:
       - Be helpful and conversational
+  mind:
+    display_name: Mind
+    role: Personal assistant with persistent file-based identity and memory
+    model: default
+    include_default_tools: false
+    learning: false
+    memory_backend: file
+    memory_file_path: ./mind_data
+    rooms:
+      - personal
+    context_files:
+      - ./mind_data/SOUL.md
+      - ./mind_data/AGENTS.md
+      - ./mind_data/USER.md
+      - ./mind_data/IDENTITY.md
+      - ./mind_data/TOOLS.md
+      - ./mind_data/HEARTBEAT.md
+    knowledge_bases:
+      - mind_memory
+    tools:
+      - shell
+      - coding
+      - duckduckgo
+      - website
+      - browser
+      - scheduler
+      - subagents
+      - matrix_message
+    skills:
+      - mindroom-docs
+    instructions:
+      - You wake up fresh each session with no memory of previous conversations. Your context files are already loaded into your system prompt.
+      - Important long-term context is persisted by the configured MindRoom memory backend. If something must be preserved exactly, write or update the relevant file directly.
+      - MEMORY.md is curated long-term memory; daily files are short-lived notes and logs.
+      - Ask before external or destructive actions.
+      - Before answering prior-history questions, search memory files first when a knowledge base is configured.
 
 router:
   model: default
@@ -441,9 +540,18 @@ matrix_room_access:
   invite_only_rooms: []
   reconcile_existing_rooms: false
 
+knowledge_bases:
+  mind_memory:
+    path: ./mind_data/memory
+    watch: true
+
 # File-based memory requires no external embedder or LLM.
 memory:
   backend: file
+  file:
+    max_entrypoint_lines: 200
+  auto_flush:
+    enabled: true
 
 authorization:
   default_room_access: false
