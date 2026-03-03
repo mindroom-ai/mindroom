@@ -219,9 +219,7 @@ class MultiAgentOrchestrator:
 
         # Identify what changed - we can keep using the existing helper functions
         entities_to_restart = await _identify_entities_to_restart(current_config, new_config, self.agent_bots)
-        mindroom_user_changed = (
-            current_config.mindroom_user != new_config.mindroom_user and new_config.mindroom_user is not None
-        )
+        mindroom_user_changed = current_config.mindroom_user != new_config.mindroom_user
         matrix_room_access_changed = current_config.matrix_room_access != new_config.matrix_room_access
 
         # Also check for new entities that didn't exist before
