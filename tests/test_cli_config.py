@@ -92,6 +92,24 @@ class TestConfigInit:
         assert config["memory"]["auto_flush"]["enabled"] is True
         assert "openclaw_compat" not in target.read_text()
 
+    def test_init_full_profile_creates_mind_workspace_files(self, tmp_path: Path) -> None:
+        """Full template should scaffold the required mind_data files."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
+        assert result.exit_code == 0
+
+        workspace = tmp_path / "mind_data"
+        assert workspace.exists()
+        assert (workspace / "memory").exists()
+        assert (workspace / "SOUL.md").exists()
+        assert (workspace / "AGENTS.md").exists()
+        assert (workspace / "USER.md").exists()
+        assert (workspace / "IDENTITY.md").exists()
+        assert (workspace / "TOOLS.md").exists()
+        assert (workspace / "HEARTBEAT.md").exists()
+        assert (workspace / "MEMORY.md").exists()
+        assert not (workspace / "BOOT.md").exists()
+
     def test_init_without_path_uses_detected_default_location(
         self,
         tmp_path: Path,
