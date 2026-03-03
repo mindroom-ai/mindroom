@@ -26,8 +26,8 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
-from mindroom.media_inputs import MediaInputs
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
+from mindroom.media_inputs import MediaInputs
 from mindroom.tool_system.events import (
     StructuredStreamChunk,
     ToolTraceEntry,

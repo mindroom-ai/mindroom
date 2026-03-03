@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 
-from mindroom.media_inputs import MediaInputs
+if TYPE_CHECKING:
+    from mindroom.media_inputs import MediaInputs
 
 _INLINE_MEDIA_FALLBACK_MARKER = "[Inline media unavailable for this model]"
 _INLINE_MEDIA_FIELD_PATTERN = re.compile(r"(?:document|image|audio|video)\.source\.base64(?:\.media_type)?")
