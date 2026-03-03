@@ -49,30 +49,30 @@ class TestConfigInit:
         assert "authorization:" in content
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER in content
 
-    def test_init_full_profile_adds_openclaw_style_daimon(self, tmp_path: Path) -> None:
-        """Full template should include OpenClaw-style Daimon memory/context setup."""
+    def test_init_full_profile_adds_openclaw_style_mind(self, tmp_path: Path) -> None:
+        """Full template should include OpenClaw-style Mind memory/context setup."""
         target = tmp_path / "config.yaml"
         result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
         assert result.exit_code == 0
         config = yaml.safe_load(target.read_text())
-        daimon = config["agents"]["daimon"]
+        mind = config["agents"]["mind"]
 
-        assert daimon["display_name"] == "Daimon"
-        assert daimon["include_default_tools"] is False
-        assert daimon["learning"] is False
-        assert daimon["memory_backend"] == "file"
-        assert daimon["memory_file_path"] == "./sidekick_data"
-        assert daimon["rooms"] == ["personal"]
-        assert daimon["context_files"] == [
-            "./sidekick_data/SOUL.md",
-            "./sidekick_data/AGENTS.md",
-            "./sidekick_data/USER.md",
-            "./sidekick_data/IDENTITY.md",
-            "./sidekick_data/TOOLS.md",
-            "./sidekick_data/HEARTBEAT.md",
+        assert mind["display_name"] == "Mind"
+        assert mind["include_default_tools"] is False
+        assert mind["learning"] is False
+        assert mind["memory_backend"] == "file"
+        assert mind["memory_file_path"] == "./mind_data"
+        assert mind["rooms"] == ["personal"]
+        assert mind["context_files"] == [
+            "./mind_data/SOUL.md",
+            "./mind_data/AGENTS.md",
+            "./mind_data/USER.md",
+            "./mind_data/IDENTITY.md",
+            "./mind_data/TOOLS.md",
+            "./mind_data/HEARTBEAT.md",
         ]
-        assert daimon["knowledge_bases"] == ["daimon_memory"]
-        assert daimon["tools"] == [
+        assert mind["knowledge_bases"] == ["mind_memory"]
+        assert mind["tools"] == [
             "shell",
             "coding",
             "duckduckgo",
@@ -84,9 +84,9 @@ class TestConfigInit:
             "attachments",
             "python",
         ]
-        assert daimon["skills"] == ["transcribe"]
-        assert config["knowledge_bases"]["daimon_memory"]["path"] == "./sidekick_data/memory"
-        assert config["knowledge_bases"]["daimon_memory"]["watch"] is True
+        assert mind["skills"] == ["transcribe"]
+        assert config["knowledge_bases"]["mind_memory"]["path"] == "./mind_data/memory"
+        assert config["knowledge_bases"]["mind_memory"]["watch"] is True
         assert config["memory"]["backend"] == "file"
         assert config["memory"]["file"]["max_entrypoint_lines"] == 200
         assert config["memory"]["auto_flush"]["enabled"] is True
@@ -169,8 +169,8 @@ class TestConfigInit:
         # VITE_API_KEY should NOT be in the template (auth is handled at proxy layer)
         assert "VITE_API_KEY" not in content
 
-    def test_init_force_does_not_overwrite_existing_env(self, tmp_path: Path) -> None:
-        """Config init --force should never overwrite an existing .env file."""
+    def test_init_force_overwrites_existing_env(self, tmp_path: Path) -> None:
+        """Config init --force should overwrite an existing .env file."""
         target = tmp_path / "config.yaml"
         env_path = tmp_path / ".env"
         env_path.write_text("ANTHROPIC_API_KEY=sk-existing\n")
@@ -179,7 +179,38 @@ class TestConfigInit:
             ["config", "init", "--path", str(target), "--force", "--provider", "openai"],
         )
         assert result.exit_code == 0
+        new_content = env_path.read_text()
+        assert "ANTHROPIC_API_KEY=sk-existing" not in new_content
+        assert "OPENAI_API_KEY=" in new_content
+
+    def test_init_prompts_to_overwrite_env_separately(self, tmp_path: Path) -> None:
+        """Config init should ask separately about overwriting .env when it exists."""
+        target = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        env_path.write_text("ANTHROPIC_API_KEY=sk-existing\n")
+        # Answer 'n' to .env overwrite prompt
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--provider", "openai"],
+            input="n\n",
+        )
+        assert result.exit_code == 0
         assert env_path.read_text() == "ANTHROPIC_API_KEY=sk-existing\n"
+
+    def test_init_overwrites_env_when_confirmed(self, tmp_path: Path) -> None:
+        """Config init should overwrite .env when user confirms."""
+        target = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        env_path.write_text("ANTHROPIC_API_KEY=sk-existing\n")
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--provider", "openai"],
+            input="y\n",
+        )
+        assert result.exit_code == 0
+        new_content = env_path.read_text()
+        assert "ANTHROPIC_API_KEY=sk-existing" not in new_content
+        assert "Env file overwritten" in _strip_ansi(result.output)
 
     def test_init_refuses_overwrite_without_force(self, tmp_path: Path) -> None:
         """Config init prompts before overwriting and aborts on 'n'."""

@@ -170,12 +170,16 @@ def config_init(
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
 
-    # Also create a .env file next to the config if one doesn't exist
+    # Create or optionally overwrite the .env file next to the config
     env_path = target.parent / ".env"
     env_created = False
     if not env_path.exists():
         env_path.write_text(_env_template(selected_profile, selected_preset), encoding="utf-8")
         console.print(f"[green]Env file created:[/green] {env_path}")
+        env_created = True
+    elif force or typer.confirm(f"Overwrite existing .env file ({env_path})?", default=False):
+        env_path.write_text(_env_template(selected_profile, selected_preset), encoding="utf-8")
+        console.print(f"[green]Env file overwritten:[/green] {env_path}")
         env_created = True
 
     console.print(f"[green]Config created:[/green] {target}")
@@ -439,25 +443,25 @@ agents:
     tools: []
     instructions:
       - Be helpful and conversational
-  daimon:
-    display_name: Daimon
+  mind:
+    display_name: Mind
     role: OpenClaw-style personal assistant with persistent file-based identity and memory
     model: default
     include_default_tools: false
     learning: false
     memory_backend: file
-    memory_file_path: ./sidekick_data
+    memory_file_path: ./mind_data
     rooms:
       - personal
     context_files:
-      - ./sidekick_data/SOUL.md
-      - ./sidekick_data/AGENTS.md
-      - ./sidekick_data/USER.md
-      - ./sidekick_data/IDENTITY.md
-      - ./sidekick_data/TOOLS.md
-      - ./sidekick_data/HEARTBEAT.md
+      - ./mind_data/SOUL.md
+      - ./mind_data/AGENTS.md
+      - ./mind_data/USER.md
+      - ./mind_data/IDENTITY.md
+      - ./mind_data/TOOLS.md
+      - ./mind_data/HEARTBEAT.md
     knowledge_bases:
-      - daimon_memory
+      - mind_memory
     tools:
       - shell
       - coding
@@ -489,8 +493,8 @@ matrix_room_access:
   reconcile_existing_rooms: false
 
 knowledge_bases:
-  daimon_memory:
-    path: ./sidekick_data/memory
+  mind_memory:
+    path: ./mind_data/memory
     watch: true
 
 # File-based memory requires no external embedder or LLM.
