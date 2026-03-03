@@ -245,6 +245,7 @@ Teams (`src/mindroom/teams.py`) let multiple agents work together:
 - **Documentation Line Style**: In Markdown docs, write one sentence per line, and never split a single sentence across multiple lines.
 - Do not wrap things in try-excepts unless it's necessary. Avoid wrapping things that should not fail.
 - NEVER put imports in the function, unless it is to avoid circular imports. Imports should be at the top of the file.
+- **Merge and forget**: Code you touch should be polished enough to never revisit. Fix rough edges in code you're already changing.
 
 ### Refactor Policy
 

@@ -13,9 +13,9 @@ Never approve with suggestions. Never say "looks good overall but...". If there'
 
 ## Scope and Refactor Standard
 
-Enforce strict quality, but avoid speculative architecture churn.
+Code touched by a PR must be merge-and-forget quality — no rough edges, no avoidable duplication, no unconventional idioms.
+Do not require refactors of untouched code unless they have clear immediate ROI.
 
-- Default expectation: smallest correct fix for the PR scope.
 - Require a broader refactor only when it has clear immediate ROI:
   - It removes active duplication in current code paths.
   - It creates one clear consolidation point.
