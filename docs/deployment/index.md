@@ -37,8 +37,9 @@ Use these guides if you want users to connect Google accounts in the MindRoom fr
 ```bash
 mkdir -p ~/mindroom-local
 cd ~/mindroom-local
+# Creates ~/.mindroom/config.yaml and ~/.mindroom/.env by default
 uvx mindroom config init --profile public
-$EDITOR .env
+$EDITOR ~/.mindroom/.env
 uvx mindroom connect --pair-code ABCD-EFGH
 uvx mindroom run
 ```

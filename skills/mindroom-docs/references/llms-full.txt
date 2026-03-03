@@ -193,13 +193,13 @@ uvx mindroom config init --profile public
 
 This creates:
 
-- `config.yaml`
-- `.env` prefilled with `MATRIX_HOMESERVER=https://mindroom.chat`
+- `~/.mindroom/config.yaml`
+- `~/.mindroom/.env` prefilled with `MATRIX_HOMESERVER=https://mindroom.chat`
 
 ### 2. Add model API key(s)
 
 ```
-$EDITOR .env
+$EDITOR ~/.mindroom/.env
 ```
 
 Set at least one key:
@@ -222,7 +222,7 @@ uvx mindroom connect --pair-code ABCD-EFGH
 Notes:
 
 - Pair code is short-lived (10 minutes).
-- `mindroom connect` writes local provisioning values (including `MINDROOM_NAMESPACE`) into `.env`.
+- `mindroom connect` writes local provisioning values (including `MINDROOM_NAMESPACE`) into `~/.mindroom/.env` by default.
 
 ### 4. Run MindRoom
 
@@ -3995,8 +3995,9 @@ Use these guides if you want users to connect Google accounts in the MindRoom fr
 ```
 mkdir -p ~/mindroom-local
 cd ~/mindroom-local
+# Creates ~/.mindroom/config.yaml and ~/.mindroom/.env by default
 uvx mindroom config init --profile public
-$EDITOR .env
+$EDITOR ~/.mindroom/.env
 uvx mindroom connect --pair-code ABCD-EFGH
 uvx mindroom run
 ```
@@ -4127,7 +4128,7 @@ Pair code behavior:
 - Valid for 600 seconds (10 minutes).
 - Only used to bootstrap local pairing.
 
-After successful pairing, local provisioning credentials are written to `.env` unless you use `--no-persist-env`.
+After successful pairing, local provisioning credentials are written to `~/.mindroom/.env` by default unless you use `--no-persist-env`.
 
 ## 4. Start MindRoom
 

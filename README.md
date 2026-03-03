@@ -168,7 +168,7 @@ Use this path if you want to run only the backend locally while using hosted cha
 mkdir -p ~/mindroom-local
 cd ~/mindroom-local
 
-# Create starter config + .env tuned for hosted matrix
+# Create starter config + .env in ~/.mindroom tuned for hosted matrix
 uvx mindroom config init --profile public
 
 # Add at least one model API key
