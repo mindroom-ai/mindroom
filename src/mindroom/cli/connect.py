@@ -131,9 +131,12 @@ def replace_owner_placeholders_in_config(*, config_path: Path, owner_user_id: st
         return False
 
     content = config_path.read_text(encoding="utf-8")
-    replaced = content.replace(OWNER_MATRIX_USER_ID_PLACEHOLDER, owner_user_id).replace(
+    # Quote the Matrix user ID so the leading '@' doesn't break YAML parsing
+    # (@ starts a YAML tag/anchor when unquoted).
+    quoted = f'"{owner_user_id}"'
+    replaced = content.replace(OWNER_MATRIX_USER_ID_PLACEHOLDER, quoted).replace(
         _LEGACY_OWNER_PLACEHOLDER,
-        owner_user_id,
+        quoted,
     )
     if replaced == content:
         return False

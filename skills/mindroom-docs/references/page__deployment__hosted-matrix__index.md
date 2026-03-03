@@ -29,11 +29,11 @@ cd ~/mindroom-local
 uvx mindroom config init --profile public
 ```
 
-This creates `config.yaml` and `.env` with hosted defaults.
+This creates `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted defaults.
 
 ## 2. Add AI Provider Key
 
-Edit `.env` and set at least one provider key:
+Edit `~/.mindroom/.env` and set at least one provider key:
 
 ```
 OPENAI_API_KEY=...
