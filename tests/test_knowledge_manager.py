@@ -455,6 +455,97 @@ async def test_initialize_knowledge_managers_maintains_registry(
 
 
 @pytest.mark.asyncio
+async def test_initialize_knowledge_managers_full_reindex_on_settings_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Index-affecting settings changes must trigger full reindex, not incremental sync."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    config = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(path=str(tmp_path / "research"), watch=False),
+        },
+    )
+
+    managers = await initialize_knowledge_managers(config, tmp_path / "storage", reindex_on_create=False)
+    original_manager = managers["research"]
+
+    # Change chunk_size to trigger an index-affecting settings mismatch.
+    updated_config = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(
+                path=str(tmp_path / "research"),
+                watch=False,
+                chunk_size=1234,
+            ),
+        },
+    )
+
+    initialize = AsyncMock()
+    sync_indexed_files = AsyncMock(return_value={"loaded_count": 0, "indexed_count": 0, "removed_count": 0})
+    monkeypatch.setattr(KnowledgeManager, "initialize", initialize)
+    monkeypatch.setattr(KnowledgeManager, "sync_indexed_files", sync_indexed_files)
+
+    managers = await initialize_knowledge_managers(updated_config, tmp_path / "storage", reindex_on_create=False)
+    new_manager = managers["research"]
+    assert new_manager is not original_manager
+    initialize.assert_awaited_once()
+    sync_indexed_files.assert_not_awaited()
+
+    await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_initialize_knowledge_managers_non_index_setting_change_uses_incremental_sync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-index settings (like watch) should keep startup on incremental sync."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    config = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(path=str(tmp_path / "research"), watch=False),
+        },
+    )
+
+    managers = await initialize_knowledge_managers(config, tmp_path / "storage", reindex_on_create=False)
+    original_manager = managers["research"]
+
+    updated_config = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(path=str(tmp_path / "research"), watch=True),
+        },
+    )
+
+    initialize = AsyncMock()
+    sync_indexed_files = AsyncMock(return_value={"loaded_count": 1, "indexed_count": 0, "removed_count": 0})
+    monkeypatch.setattr(KnowledgeManager, "initialize", initialize)
+    monkeypatch.setattr(KnowledgeManager, "sync_indexed_files", sync_indexed_files)
+
+    managers = await initialize_knowledge_managers(updated_config, tmp_path / "storage", reindex_on_create=False)
+    new_manager = managers["research"]
+    assert new_manager is not original_manager
+    initialize.assert_not_awaited()
+    sync_indexed_files.assert_awaited_once()
+
+    await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
 async def test_sync_git_repository_updates_index_for_changed_and_deleted_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
