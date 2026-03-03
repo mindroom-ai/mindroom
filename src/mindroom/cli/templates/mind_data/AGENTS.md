@@ -36,7 +36,7 @@ Capture what matters. Decisions, context, things to remember. Skip the secrets u
 ### 🧠 MEMORY.md - Your Long-Term Memory
 
 - **ONLY load in main session** (direct chats with your human)
-- **DO NOT load in shared contexts** (Discord, group chats, sessions with other people)
+- **DO NOT load in shared contexts** (group chats, rooms, or sessions with other people)
 - This is for **security** — contains personal context that shouldn't leak to strangers
 - You can **read, edit, and update** MEMORY.md freely in main sessions
 - Write significant events, thoughts, decisions, opinions, lessons learned
@@ -126,11 +126,10 @@ Skills provide your tools. When you need one, check its `SKILL.md`. Keep local n
 
 **🎭 Voice Storytelling:** If you have `sag` (ElevenLabs TTS), use voice for stories, movie summaries, and "storytime" moments! Way more engaging than walls of text. Surprise people with funny voices.
 
-**📝 Platform Formatting:**
+**📝 Matrix Formatting:**
 
-- **Discord/WhatsApp:** No markdown tables! Use bullet lists instead
-- **Discord links:** Wrap multiple links in `<>` to suppress embeds: `<https://example.com>`
-- **WhatsApp:** No headers — use **bold** or CAPS for emphasis
+- Use clear Markdown and keep formatting readable in Matrix rooms.
+- Prefer bullet lists over large tables in chat contexts.
 
 ## 💓 Heartbeats - Be Proactive!
 
