@@ -19,6 +19,10 @@ _mxc_cache: OrderedDict[str, tuple[str, float]] = OrderedDict()
 _cache_ttl = 3600.0  # 1 hour TTL
 _mxc_cache_max_entries = 500
 
+# Short-lived negative cache for failed MXC fetches
+_mxc_failure_cache: dict[str, float] = {}
+_failure_cache_ttl = 30.0  # 30 seconds
+
 
 def _extract_large_message_v2_content(payload_json: str) -> dict[str, Any] | None:
     """Extract canonical content dict from a v2 large-message sidecar JSON payload."""
@@ -117,22 +121,33 @@ async def _download_mxc_text(  # noqa: PLR0911, C901
         # Expired, remove from cache
         del _mxc_cache[mxc_url]
 
+    # Check short-lived negative cache for failed fetches
+    failure_timestamp = _mxc_failure_cache.get(mxc_url)
+    if failure_timestamp is not None:
+        if current_time - failure_timestamp < _failure_cache_ttl:
+            logger.debug("mxc_failure_cache_hit", mxc_url=mxc_url)
+            return None
+        del _mxc_failure_cache[mxc_url]
+
     try:
-        # Parse MXC URL
+        # Basic validation before download
         if not mxc_url.startswith("mxc://"):
             logger.error("invalid_mxc_url", mxc_url=mxc_url)
+            _mxc_failure_cache[mxc_url] = time.time()
             return None
 
         # Validate the MXC URL structure before issuing the download.
         parts = mxc_url[6:].split("/", 1)
         if len(parts) != 2 or not parts[0] or not parts[1]:
             logger.error("invalid_mxc_url_format", mxc_url=mxc_url)
+            _mxc_failure_cache[mxc_url] = time.time()
             return None
 
         response = await client.download(mxc=mxc_url)
 
         if not isinstance(response, nio.DownloadResponse):
             logger.error("mxc_download_failed", mxc_url=mxc_url, error=str(response))
+            _mxc_failure_cache[mxc_url] = time.time()
             return None
 
         # Handle encryption if needed
@@ -148,6 +163,7 @@ async def _download_mxc_text(  # noqa: PLR0911, C901
                 text_bytes = decrypted
             except Exception:
                 logger.exception("Failed to decrypt attachment")
+                _mxc_failure_cache[mxc_url] = time.time()
                 return None
         else:
             text_bytes = response.body
@@ -157,17 +173,20 @@ async def _download_mxc_text(  # noqa: PLR0911, C901
             decoded_text: str = text_bytes.decode("utf-8")
         except UnicodeDecodeError:
             logger.exception("Downloaded content is not valid UTF-8 text")
+            _mxc_failure_cache[mxc_url] = time.time()
             return None
         # Cache the result
         _mxc_cache[mxc_url] = (decoded_text, time.time())
         _mxc_cache.move_to_end(mxc_url)
+        _mxc_failure_cache.pop(mxc_url, None)
         logger.debug("mxc_content_cached", mxc_url=mxc_url)
 
-        if len(_mxc_cache) > _mxc_cache_max_entries:
+        if len(_mxc_cache) > _mxc_cache_max_entries or len(_mxc_failure_cache) > _mxc_cache_max_entries:
             _clean_expired_cache()
 
     except Exception:
         logger.exception("Error downloading MXC content")
+        _mxc_failure_cache[mxc_url] = time.time()
         return None
     else:
         return decoded_text
@@ -275,14 +294,22 @@ def _clean_expired_cache() -> None:
     expired_keys = [key for key, (_, timestamp) in _mxc_cache.items() if current_time - timestamp >= _cache_ttl]
     for key in expired_keys:
         del _mxc_cache[key]
+
+    expired_failure_keys = [
+        key for key, timestamp in _mxc_failure_cache.items() if current_time - timestamp >= _failure_cache_ttl
+    ]
+    for key in expired_failure_keys:
+        del _mxc_failure_cache[key]
+
     evicted_entries = 0
     while len(_mxc_cache) > _mxc_cache_max_entries:
         _mxc_cache.popitem(last=False)
         evicted_entries += 1
-    if expired_keys or evicted_entries:
+    if expired_keys or expired_failure_keys or evicted_entries:
         logger.debug(
             "mxc_cache_cleaned",
             expired_entries=len(expired_keys),
+            expired_failures=len(expired_failure_keys),
             evicted_entries=evicted_entries,
         )
 
@@ -290,3 +317,4 @@ def _clean_expired_cache() -> None:
 def _clear_mxc_cache() -> None:
     """Clear the entire MXC cache. Useful for testing."""
     _mxc_cache.clear()
+    _mxc_failure_cache.clear()

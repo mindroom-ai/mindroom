@@ -339,6 +339,19 @@ class TestDownloadMxcText:
         assert result is None
 
     @pytest.mark.asyncio
+    async def test_download_failure_uses_negative_cache(self) -> None:
+        """Repeated failures for the same MXC should not re-download immediately."""
+        client = AsyncMock()
+        client.download.return_value = MagicMock(spec=nio.DownloadError)
+
+        first_result = await _download_mxc_text(client, "mxc://server/media123")
+        second_result = await _download_mxc_text(client, "mxc://server/media123")
+
+        assert first_result is None
+        assert second_result is None
+        client.download.assert_called_once_with(mxc="mxc://server/media123")
+
+    @pytest.mark.asyncio
     async def test_mxc_cache_uses_lru_eviction(self) -> None:
         """A cache hit should refresh recency so the oldest untouched entry is evicted first."""
         client = AsyncMock()
