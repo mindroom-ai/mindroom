@@ -16,7 +16,6 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     VOICE_PREFIX,
-    VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
@@ -237,7 +236,6 @@ async def test_agent_receives_thread_audio_on_voice_raw_fallback(mock_home_bot: 
         "content": {
             "body": f"{VOICE_PREFIX}[Attached voice message]",
             ORIGINAL_SENDER_KEY: "@user:example.com",
-            VOICE_RAW_AUDIO_FALLBACK_KEY: True,
             "m.relates_to": {
                 "rel_type": "m.thread",
                 "event_id": "$thread_root",
@@ -301,7 +299,6 @@ async def test_agent_voice_fallback_uses_attachment_audio_without_refetch(mock_h
         "content": {
             "body": f"{VOICE_PREFIX}[Attached voice message]",
             ORIGINAL_SENDER_KEY: "@user:example.com",
-            VOICE_RAW_AUDIO_FALLBACK_KEY: True,
             ATTACHMENT_IDS_KEY: ["att_voice"],
             "m.relates_to": {
                 "rel_type": "m.thread",

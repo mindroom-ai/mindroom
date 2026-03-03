@@ -113,7 +113,6 @@ def env_flag(name: str, *, default: bool = False) -> bool:
 # Other constants
 VOICE_PREFIX = "🎤 "
 ORIGINAL_SENDER_KEY = "com.mindroom.original_sender"
-VOICE_RAW_AUDIO_FALLBACK_KEY = "com.mindroom.voice_raw_audio_fallback"
 ATTACHMENT_IDS_KEY = "com.mindroom.attachment_ids"
 AI_RUN_METADATA_KEY = "io.mindroom.ai_run"
 ENABLE_AI_CACHE = env_flag("MINDROOM_ENABLE_AI_CACHE", default=True)

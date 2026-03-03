@@ -103,7 +103,6 @@ from .constants import (
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     VOICE_PREFIX,
-    VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 from .knowledge.utils import MultiKnowledgeVectorDb, resolve_agent_knowledge
 from .logging_config import emoji, get_logger
@@ -872,12 +871,9 @@ class AgentBot:
         *,
         sender: str,
         attachment_id: str | None,
-        voice_raw_audio_fallback: bool = False,
     ) -> dict[str, str | bool | list[str]]:
         """Build metadata payload for router voice relay messages."""
         extra_content: dict[str, str | bool | list[str]] = {ORIGINAL_SENDER_KEY: sender}
-        if voice_raw_audio_fallback:
-            extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
         if attachment_id is not None:
             extra_content[ATTACHMENT_IDS_KEY] = [attachment_id]
         return extra_content
@@ -1011,11 +1007,7 @@ class AgentBot:
             reply_to_event_id=event.event_id,
             response_text=fallback_message,
             thread_id=effective_thread_id,
-            extra_content=self._build_voice_extra_content(
-                sender=event.sender,
-                attachment_id=attachment_id,
-                voice_raw_audio_fallback=True,
-            ),
+            extra_content=self._build_voice_extra_content(sender=event.sender, attachment_id=attachment_id),
         )
         self.response_tracker.mark_responded(event.event_id, response_event_id)
 
