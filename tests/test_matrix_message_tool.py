@@ -466,8 +466,16 @@ async def test_matrix_message_edit_happy_path() -> None:
     """Edit should update an existing message by target event ID."""
     tool = MatrixMessageTools()
     ctx = _make_context(thread_id="$ctx-thread:localhost")
+    thread_messages = [
+        {"event_id": "$one", "timestamp": 1, "sender": "@alice:localhost", "body": "first"},
+        {"event_id": "$latest", "timestamp": 2, "sender": "@alice:localhost", "body": "latest"},
+    ]
 
     with (
+        patch(
+            "mindroom.custom_tools.matrix_message.fetch_thread_history",
+            new=AsyncMock(return_value=thread_messages),
+        ) as mock_fetch,
         patch(
             "mindroom.custom_tools.matrix_message.edit_message",
             new=AsyncMock(return_value="$edit_evt"),
@@ -486,6 +494,11 @@ async def test_matrix_message_edit_happy_path() -> None:
     assert args[2] == "$target"
     assert args[4] == "updated text"
     assert args[3]["body"] == "updated text"
+    assert args[3]["m.relates_to"]["rel_type"] == "m.thread"
+    assert args[3]["m.relates_to"]["event_id"] == "$ctx-thread:localhost"
+    assert args[3]["m.relates_to"]["is_falling_back"] is True
+    assert args[3]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest"
+    mock_fetch.assert_awaited_once_with(ctx.client, ctx.room_id, "$ctx-thread:localhost")
 
 
 @pytest.mark.asyncio

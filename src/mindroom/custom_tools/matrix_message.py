@@ -439,10 +439,22 @@ class MatrixMessageTools(Toolkit):
         if new_text is None:
             return self._payload("error", action="edit", message="message is required for edit.")
 
+        latest_thread_event_id: str | None = None
+        if thread_id is not None:
+            thread_messages = await fetch_thread_history(context.client, room_id, thread_id)
+            if thread_messages:
+                maybe_latest = thread_messages[-1].get("event_id")
+                if isinstance(maybe_latest, str) and maybe_latest:
+                    latest_thread_event_id = maybe_latest
+            if latest_thread_event_id is None:
+                latest_thread_event_id = target
+
         content = format_message_with_mentions(
             context.config,
             new_text,
             sender_domain=context.config.domain,
+            thread_event_id=thread_id,
+            latest_thread_event_id=latest_thread_event_id,
         )
         edit_event_id = await edit_message(context.client, room_id, target, content, new_text)
         if edit_event_id is None:
