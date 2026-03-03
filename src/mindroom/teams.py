@@ -20,17 +20,14 @@ from agno.team import Team
 from pydantic import BaseModel, Field
 
 from mindroom import agent_prompts
-from mindroom.ai import (
-    append_inline_media_fallback_prompt,
-    get_model_instance,
-    should_retry_without_inline_media,
-)
+from mindroom.ai import get_model_instance
 from mindroom.authorization import get_available_agents_in_room
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
 from mindroom.media_inputs import MediaInputs
+from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
 from mindroom.tool_system.events import (
     StructuredStreamChunk,
     ToolTraceEntry,
@@ -689,7 +686,6 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     attempt_message = message
     attempt_media_inputs = media_inputs
     team_name = f"Team ({', '.join(agent_names)})"
-    retried_without_inline_media = False
 
     per_member: dict[str, str] = {}
     consensus: str = ""
@@ -821,7 +817,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             tool=tool,
         )
 
-    while True:
+    for retried_without_inline_media in (False, True):
         # Buffers keyed by display names (Agno emits display name as agent_name)
         per_member = dict.fromkeys(display_names, "")
         consensus = ""
@@ -864,7 +860,6 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                     )
                     attempt_message = append_inline_media_fallback_prompt(attempt_message)
                     attempt_media_inputs = MediaInputs()
-                    retried_without_inline_media = True
                     retry_requested = True
                     break
                 yield get_user_friendly_error_message(Exception(error_text), team_name)
