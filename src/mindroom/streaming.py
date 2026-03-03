@@ -441,16 +441,18 @@ async def send_streaming_response(
     if header:
         await streaming.update_content(header, client)
 
+    cancelled = False
+    error: Exception | None = None
     try:
         await _consume_streaming_chunks(client, response_stream, streaming)
     except asyncio.CancelledError:
-        await streaming.finalize(client, cancelled=True)
+        cancelled = True
         raise
     except Exception as e:
         logger.exception("Streaming response failed", error=str(e))
-        await streaming.finalize(client, error=e)
+        error = e
         raise
-    else:
-        await streaming.finalize(client)
+    finally:
+        await streaming.finalize(client, cancelled=cancelled, error=error)
 
     return streaming.event_id, streaming.accumulated_text

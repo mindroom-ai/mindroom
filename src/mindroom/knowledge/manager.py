@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import hashlib
 import json
 import re
@@ -13,7 +12,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote, urlparse, urlunparse
 
 from agno.knowledge.chunking.fixed import FixedSizeChunking
@@ -32,8 +31,6 @@ from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
     from agno.knowledge.embedder.base import Embedder
     from agno.knowledge.reader.base import Reader
 
@@ -49,11 +46,6 @@ _SOURCE_MTIME_NS_KEY = "source_mtime_ns"
 _SOURCE_SIZE_KEY = "source_size"
 _FAILED_SIGNATURE_RETRY_SECONDS = 300
 _FAILED_SIGNATURE_RETRY_NS = _FAILED_SIGNATURE_RETRY_SECONDS * 1_000_000_000
-_INDEXING_EMBEDDING_BACKPRESSURE_ACTIVE: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "knowledge_indexing_embedding_backpressure_active",
-    default=False,
-)
-_BackpressureResult = TypeVar("_BackpressureResult")
 
 
 def _resolve_knowledge_path(path: str) -> Path:
@@ -115,27 +107,15 @@ def _settings_key(config: Config, storage_path: Path, base_id: str) -> tuple[str
     )
 
 
-class _IndexingBackpressureEmbedder:
-    """Cap concurrent embedding calls while indexing knowledge."""
+class _ThrottledEmbedder:
+    """Cap concurrent async embedding calls."""
 
-    def __init__(self, embedder: Embedder, *, max_in_flight_requests: int) -> None:
+    def __init__(self, embedder: Embedder, *, max_concurrent: int) -> None:
         self._embedder = embedder
-        self._semaphore = asyncio.Semaphore(max_in_flight_requests)
+        self._semaphore = asyncio.Semaphore(max_concurrent)
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._embedder, name)
-
-    async def _run_with_optional_backpressure(
-        self,
-        method: Callable[..., Awaitable[_BackpressureResult]],
-        *args: object,
-        **kwargs: object,
-    ) -> _BackpressureResult:
-        if not _INDEXING_EMBEDDING_BACKPRESSURE_ACTIVE.get():
-            return await method(*args, **kwargs)
-
-        async with self._semaphore:
-            return await method(*args, **kwargs)
 
     def get_embedding(self, text: str) -> list[float]:
         return self._embedder.get_embedding(text)
@@ -144,10 +124,12 @@ class _IndexingBackpressureEmbedder:
         return self._embedder.get_embedding_and_usage(text)
 
     async def async_get_embedding(self, text: str) -> list[float]:
-        return await self._run_with_optional_backpressure(self._embedder.async_get_embedding, text)
+        async with self._semaphore:
+            return await self._embedder.async_get_embedding(text)
 
     async def async_get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, object] | None]:
-        return await self._run_with_optional_backpressure(self._embedder.async_get_embedding_and_usage, text)
+        async with self._semaphore:
+            return await self._embedder.async_get_embedding_and_usage(text)
 
 
 def _create_embedder(config: Config, base_id: str) -> Embedder:
@@ -171,7 +153,7 @@ def _create_embedder(config: Config, base_id: str) -> Embedder:
     if max_in_flight_requests <= 0:
         return embedder
 
-    return cast("Embedder", _IndexingBackpressureEmbedder(embedder, max_in_flight_requests=max_in_flight_requests))
+    return cast("Embedder", _ThrottledEmbedder(embedder, max_concurrent=max_in_flight_requests))
 
 
 def _coerce_int(value: object) -> int | None:
@@ -312,6 +294,7 @@ class KnowledgeManager:
     _git_sync_task: asyncio.Task[None] | None = field(default=None, init=False)
     _git_sync_stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _git_sync_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _sync_completed: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         """Initialize filesystem paths and the underlying vector database."""
@@ -655,6 +638,7 @@ class KnowledgeManager:
             await self.sync_git_repository()
 
         indexed_count = await self.reindex_all()
+        self._sync_completed = True
         logger.info(
             "Knowledge base initialized",
             base_id=self.base_id,
@@ -720,6 +704,7 @@ class KnowledgeManager:
 
         await asyncio.to_thread(self._save_failed_signatures, failed_signatures)
 
+        self._sync_completed = True
         return {
             "loaded_count": len(indexed_files),
             "indexed_count": indexed_count,
@@ -853,16 +838,12 @@ class KnowledgeManager:
                 # Agno/Chroma upsert keys by content hash, so stale chunks from an older
                 # version of the same file can remain unless we clear by source metadata first.
                 await asyncio.to_thread(self._knowledge.remove_vectors_by_metadata, {_SOURCE_PATH_KEY: relative_path})
-            token = _INDEXING_EMBEDDING_BACKPRESSURE_ACTIVE.set(True)
-            try:
-                await self._knowledge.ainsert(
-                    path=str(resolved_path),
-                    metadata=metadata,
-                    upsert=upsert,
-                    reader=reader,
-                )
-            finally:
-                _INDEXING_EMBEDDING_BACKPRESSURE_ACTIVE.reset(token)
+            await self._knowledge.ainsert(
+                path=str(resolved_path),
+                metadata=metadata,
+                upsert=upsert,
+                reader=reader,
+            )
         except Exception:
             logger.exception("Failed to index knowledge file", base_id=self.base_id, path=str(resolved_path))
             return False
@@ -1012,6 +993,12 @@ async def initialize_knowledge_managers(
             existing.config = config
             existing._settings = _settings_key(config, storage_path, base_id)
             existing._indexing_settings = _indexing_settings_key(config, storage_path, base_id)
+            if not existing._sync_completed and background_sync_on_create and base_id not in _knowledge_sync_tasks:
+                _knowledge_sync_tasks[base_id] = asyncio.create_task(
+                    _run_background_sync(existing),
+                    name=f"knowledge_sync_{base_id}",
+                )
+                logger.info("Retrying background sync for previously failed knowledge base", base_id=base_id)
             if start_watchers:
                 await existing.start_watcher()
             continue

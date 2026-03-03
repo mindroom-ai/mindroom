@@ -13,10 +13,9 @@ from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.knowledge.manager import (
     _FAILED_SIGNATURE_RETRY_NS,
-    _INDEXING_EMBEDDING_BACKPRESSURE_ACTIVE,
     KnowledgeManager,
-    _IndexingBackpressureEmbedder,
     _knowledge_sync_tasks,
+    _ThrottledEmbedder,
     get_knowledge_manager,
     initialize_knowledge_managers,
     shutdown_knowledge_managers,
@@ -302,33 +301,15 @@ def test_knowledge_base_embedding_backpressure_default_and_validation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_indexing_backpressure_embedder_caps_concurrency_when_active() -> None:
-    """Backpressure wrapper should cap indexing-time async embedding concurrency."""
+async def test_throttled_embedder_caps_concurrency() -> None:
+    """Throttled wrapper should cap concurrent async embedding calls."""
     tracking = _TrackingEmbedder()
-    wrapped = _IndexingBackpressureEmbedder(tracking, max_in_flight_requests=2)
-    token = _INDEXING_EMBEDDING_BACKPRESSURE_ACTIVE.set(True)
+    wrapped = _ThrottledEmbedder(tracking, max_concurrent=2)
 
-    try:
-        tasks = [asyncio.create_task(wrapped.async_get_embedding_and_usage(f"chunk-{idx}")) for idx in range(6)]
-        await asyncio.sleep(0)
-        await asyncio.sleep(0.01)
-        assert tracking.max_in_flight == 2
-        tracking.release.set()
-        await asyncio.gather(*tasks)
-    finally:
-        _INDEXING_EMBEDDING_BACKPRESSURE_ACTIVE.reset(token)
-
-
-@pytest.mark.asyncio
-async def test_indexing_backpressure_embedder_is_noop_when_inactive() -> None:
-    """Wrapper should not throttle calls outside the indexing path."""
-    tracking = _TrackingEmbedder()
-    wrapped = _IndexingBackpressureEmbedder(tracking, max_in_flight_requests=2)
-
-    tasks = [asyncio.create_task(wrapped.async_get_embedding_and_usage(f"chunk-{idx}")) for idx in range(4)]
+    tasks = [asyncio.create_task(wrapped.async_get_embedding_and_usage(f"chunk-{idx}")) for idx in range(6)]
     await asyncio.sleep(0)
     await asyncio.sleep(0.01)
-    assert tracking.max_in_flight >= 3
+    assert tracking.max_in_flight == 2
     tracking.release.set()
     await asyncio.gather(*tasks)
 
@@ -665,6 +646,50 @@ async def test_initialize_knowledge_managers_can_schedule_background_sync_on_cre
         await asyncio.sleep(0.01)
     assert "research" not in _knowledge_sync_tasks
 
+    await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_initialize_knowledge_managers_retries_background_sync_on_matching_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed background sync should be retried when config matches on next init call."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    config = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(path=str(tmp_path / "research"), watch=False),
+        },
+    )
+
+    call_count = 0
+
+    async def _failing_then_ok(self: KnowledgeManager) -> dict[str, int]:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            msg = "simulated failure"
+            raise RuntimeError(msg)
+        return {"loaded_count": 0, "indexed_count": 0, "removed_count": 0}
+
+    monkeypatch.setattr(KnowledgeManager, "sync_indexed_files", _failing_then_ok)
+
+    storage = tmp_path / "storage"
+
+    # First init: background sync fails
+    await initialize_knowledge_managers(config, storage, reindex_on_create=False, background_sync_on_create=True)
+    await asyncio.sleep(0.05)  # let the background task run and fail
+
+    # Second init with same config: should retry
+    await initialize_knowledge_managers(config, storage, reindex_on_create=False, background_sync_on_create=True)
+    await asyncio.sleep(0.05)
+
+    assert call_count == 2
     await shutdown_knowledge_managers()
 
 
