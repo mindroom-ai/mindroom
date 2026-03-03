@@ -521,10 +521,8 @@ agents:
       - scheduler
       - subagents
       - matrix_message
-      - attachments
-      - python
     skills:
-      - transcribe
+      - mindroom-docs
     instructions:
       - You wake up fresh each session with no memory of previous conversations. Your context files are already loaded into your system prompt.
       - Important long-term context is persisted by the configured MindRoom memory backend. If something must be preserved exactly, write or update the relevant file directly.

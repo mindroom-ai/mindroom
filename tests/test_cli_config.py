@@ -81,10 +81,8 @@ class TestConfigInit:
             "scheduler",
             "subagents",
             "matrix_message",
-            "attachments",
-            "python",
         ]
-        assert mind["skills"] == ["transcribe"]
+        assert mind["skills"] == ["mindroom-docs"]
         assert config["knowledge_bases"]["mind_memory"]["path"] == "./mind_data/memory"
         assert config["knowledge_bases"]["mind_memory"]["watch"] is True
         assert config["memory"]["backend"] == "file"
