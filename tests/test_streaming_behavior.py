@@ -751,3 +751,91 @@ class TestStreamingBehavior:
         assert len(edited_texts) == 2
         assert IN_PROGRESS_MARKER in edited_texts[0]
         assert edited_texts[-1] == f"Partial answer\n\n{_CANCELLED_RESPONSE_NOTE}"
+
+    @pytest.mark.asyncio
+    async def test_stream_error_preserves_partial_text_and_appends_error_hint(self) -> None:
+        """Stream failures should remove pending state and append an error hint."""
+        mock_client = AsyncMock()
+        edited_texts: list[str] = []
+
+        async def record_edit(
+            _client: object,
+            _room_id: str,
+            _event_id: str,
+            _new_content: dict[str, object],
+            new_text: str,
+        ) -> str:
+            edited_texts.append(new_text)
+            return "$edit"
+
+        async def failing_stream() -> AsyncIterator[str]:
+            yield "Partial answer"
+            msg = "model backend disconnected"
+            raise RuntimeError(msg)
+
+        with (
+            patch("mindroom.streaming.edit_message", new=AsyncMock(side_effect=record_edit)),
+            pytest.raises(RuntimeError, match="model backend disconnected"),
+        ):
+            await send_streaming_response(
+                client=mock_client,
+                room_id="!test:localhost",
+                reply_to_event_id="$original_123",
+                thread_id=None,
+                sender_domain="localhost",
+                config=self.config,
+                response_stream=failing_stream(),
+                existing_event_id="$thinking_123",
+                room_mode=True,
+            )
+
+        assert len(edited_texts) == 2
+        assert IN_PROGRESS_MARKER in edited_texts[0]
+        final_text = edited_texts[-1]
+        assert final_text.startswith("Partial answer\n\n**[Response interrupted by an error:")
+        assert "model backend disconnected" in final_text
+        assert IN_PROGRESS_MARKER not in final_text
+
+    @pytest.mark.asyncio
+    async def test_stream_error_replaces_placeholder_when_no_text_arrives(self) -> None:
+        """Stream failures before first chunk should replace a thinking placeholder with an error hint."""
+        mock_client = AsyncMock()
+        edited_texts: list[str] = []
+
+        async def record_edit(
+            _client: object,
+            _room_id: str,
+            _event_id: str,
+            _new_content: dict[str, object],
+            new_text: str,
+        ) -> str:
+            edited_texts.append(new_text)
+            return "$edit"
+
+        async def failing_stream() -> AsyncIterator[str]:
+            if False:
+                yield ""
+            msg = "provider stream failed"
+            raise RuntimeError(msg)
+
+        with (
+            patch("mindroom.streaming.edit_message", new=AsyncMock(side_effect=record_edit)),
+            pytest.raises(RuntimeError, match="provider stream failed"),
+        ):
+            await send_streaming_response(
+                client=mock_client,
+                room_id="!test:localhost",
+                reply_to_event_id="$original_123",
+                thread_id=None,
+                sender_domain="localhost",
+                config=self.config,
+                response_stream=failing_stream(),
+                existing_event_id="$thinking_123",
+                room_mode=True,
+            )
+
+        assert len(edited_texts) == 1
+        final_text = edited_texts[0]
+        assert final_text.startswith("**[Response interrupted by an error:")
+        assert "provider stream failed" in final_text
+        assert IN_PROGRESS_MARKER not in final_text
