@@ -1768,7 +1768,7 @@ class AgentBot:
 
             # Add stop button if configured AND user is online
             # This uses the same logic as streaming to determine if user is online
-            show_stop_button = self.config.defaults.show_stop_button
+            show_stop_button = self.config.defaults.show_stop_button is True
             if show_stop_button and user_id:
                 # Check if user is online - same logic as streaming decision
                 user_is_online = await is_user_online(self.client, user_id)
@@ -2008,7 +2008,7 @@ class AgentBot:
                 room_id=room_id,
                 thread_id=thread_id,
             )
-            if self.config.get_agent_memory_backend(agent_name) != "file":
+            if self.config.get_agent_memory_backend(agent_name) == "mem0":
                 create_background_task(
                     store_conversation_memory(
                         prompt,
@@ -2264,7 +2264,7 @@ class AgentBot:
                 room_id=room_id,
                 thread_id=thread_id,
             )
-            if self.config.get_agent_memory_backend(self.agent_name) != "file":
+            if self.config.get_agent_memory_backend(self.agent_name) == "mem0":
                 create_background_task(
                     store_conversation_memory(
                         prompt,

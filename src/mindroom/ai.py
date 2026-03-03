@@ -707,7 +707,7 @@ def _build_cache_key(
     return f"{key}:tool_calls={visibility}"
 
 
-def _is_media_validation_error_text(error_text: str) -> bool:
+def is_media_validation_error_text(error_text: str) -> bool:
     """Return whether provider error text indicates inline media validation/capability failure."""
     lowered_error_text = error_text.lower()
     return bool(
@@ -717,14 +717,14 @@ def _is_media_validation_error_text(error_text: str) -> bool:
     )
 
 
-def _should_retry_without_inline_media(error: Exception | str, media_inputs: MediaInputs) -> bool:
+def should_retry_without_inline_media(error: Exception | str, media_inputs: MediaInputs) -> bool:
     """Return whether this run should retry once without inline media."""
     if not media_inputs.has_any():
         return False
-    return _is_media_validation_error_text(str(error))
+    return is_media_validation_error_text(str(error))
 
 
-def _append_inline_media_fallback_prompt(full_prompt: str) -> str:
+def append_inline_media_fallback_prompt(full_prompt: str) -> str:
     """Append one-time guidance when inline media had to be dropped."""
     if _INLINE_MEDIA_FALLBACK_MARKER in full_prompt:
         return full_prompt
@@ -749,7 +749,7 @@ def _request_stream_retry(
     if retried_without_inline_media or state.full_response:
         # Once any stream content is emitted, retrying would duplicate partial output.
         return False
-    if not _should_retry_without_inline_media(error, media_inputs):
+    if not should_retry_without_inline_media(error, media_inputs):
         return False
     state.retry_requested = True
     logger.warning(
@@ -1023,13 +1023,13 @@ async def ai_response(
             metadata=metadata,
         )
     except Exception as e:
-        if _should_retry_without_inline_media(e, media_inputs):
+        if should_retry_without_inline_media(e, media_inputs):
             logger.warning(
                 "Retrying AI response without inline media after validation error",
                 agent=agent_name,
                 error=str(e),
             )
-            fallback_prompt = _append_inline_media_fallback_prompt(full_prompt)
+            fallback_prompt = append_inline_media_fallback_prompt(full_prompt)
             try:
                 response = await _cached_agent_run(
                     agent,
@@ -1274,7 +1274,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 log_message="Retrying streaming AI response without inline media after validation error",
                 agent_name=agent_name,
             ):
-                attempt_prompt = _append_inline_media_fallback_prompt(full_prompt)
+                attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
                 attempt_media_inputs = MediaInputs()
                 continue
             logger.exception("Error starting streaming AI response")
@@ -1292,7 +1292,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             yield stream_chunk
 
         if state.retry_requested:
-            attempt_prompt = _append_inline_media_fallback_prompt(full_prompt)
+            attempt_prompt = append_inline_media_fallback_prompt(full_prompt)
             attempt_media_inputs = MediaInputs()
             continue
 
