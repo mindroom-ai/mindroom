@@ -334,7 +334,87 @@ async def test_matrix_message_read_thread_enforces_max_limit() -> None:
     assert payload["status"] == "ok"
     assert payload["limit"] == MatrixMessageTools._MAX_READ_LIMIT
     assert len(payload["messages"]) == MatrixMessageTools._MAX_READ_LIMIT
+    assert "edit_options" in payload
     mock_fetch.assert_awaited_once_with(ctx.client, ctx.room_id, ctx.thread_id)
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_read_thread_includes_edit_options() -> None:
+    """Thread reads should include event IDs that can be edited."""
+    tool = MatrixMessageTools()
+    ctx = _make_context()
+    ctx.client.user_id = "@mindroom_general:localhost"
+    thread_messages = [
+        {"event_id": "$one", "timestamp": 1, "sender": "@alice:localhost", "body": "earlier message"},
+        {"event_id": "$two", "timestamp": 2, "sender": "@mindroom_general:localhost", "body": "latest message"},
+    ]
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_message.fetch_thread_history",
+            new=AsyncMock(return_value=thread_messages),
+        ),
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_message(action="read"))
+
+    assert payload["status"] == "ok"
+    assert payload["action"] == "read"
+    assert payload["thread_id"] == ctx.thread_id
+    assert payload["edit_options"][0]["event_id"] == "$two"
+    assert payload["edit_options"][0]["can_edit"] is True
+    assert payload["edit_options"][0]["edit_action"] == {"action": "edit", "target": "$two"}
+    assert payload["edit_options"][1]["event_id"] == "$one"
+    assert payload["edit_options"][1]["can_edit"] is False
+    assert "edit_action" not in payload["edit_options"][1]
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_thread_list_requires_thread_context_or_target() -> None:
+    """thread-list should fail when no thread can be resolved."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(thread_id=None)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_message(action="thread-list"))
+
+    assert payload["status"] == "error"
+    assert payload["action"] == "thread-list"
+    assert "thread_id is required" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_thread_list_returns_thread_messages() -> None:
+    """thread-list should return thread messages and edit options."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(thread_id=None)
+    ctx.client.user_id = "@mindroom_general:localhost"
+    thread_messages = [
+        {"event_id": "$one", "timestamp": 1, "sender": "@mindroom_general:localhost", "body": "first"},
+        {"event_id": "$two", "timestamp": 2, "sender": "@alice:localhost", "body": "second"},
+    ]
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_message.fetch_thread_history",
+            new=AsyncMock(return_value=thread_messages),
+        ) as mock_fetch,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="thread-list",
+                thread_id="$thread-other:localhost",
+                limit=1,
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["action"] == "thread-list"
+    assert payload["thread_id"] == "$thread-other:localhost"
+    assert payload["messages"] == [thread_messages[-1]]
+    assert payload["edit_options"][0]["event_id"] == "$two"
+    mock_fetch.assert_awaited_once_with(ctx.client, ctx.room_id, "$thread-other:localhost")
 
 
 @pytest.mark.asyncio
@@ -379,6 +459,59 @@ async def test_matrix_message_read_room_happy_path() -> None:
         message_filter={"types": ["m.room.message"]},
     )
     mock_extract.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_edit_happy_path() -> None:
+    """Edit should update an existing message by target event ID."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(thread_id="$ctx-thread:localhost")
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_message.edit_message",
+            new=AsyncMock(return_value="$edit_evt"),
+        ) as mock_edit,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_message(action="edit", message="updated text", target="$target"))
+
+    assert payload["status"] == "ok"
+    assert payload["action"] == "edit"
+    assert payload["target"] == "$target"
+    assert payload["event_id"] == "$edit_evt"
+    mock_edit.assert_awaited_once()
+    args = mock_edit.await_args.args
+    assert args[1] == ctx.room_id
+    assert args[2] == "$target"
+    assert args[4] == "updated text"
+    assert args[3]["body"] == "updated text"
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_edit_requires_target() -> None:
+    """Edit action should require target event ID."""
+    tool = MatrixMessageTools()
+    ctx = _make_context()
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_message(action="edit", message="updated text"))
+
+    assert payload["status"] == "error"
+    assert "target event_id is required for edit" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_edit_requires_message() -> None:
+    """Edit action should require non-empty replacement text."""
+    tool = MatrixMessageTools()
+    ctx = _make_context()
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_message(action="edit", target="$target", message="  "))
+
+    assert payload["status"] == "error"
+    assert "message is required for edit" in payload["message"]
 
 
 @pytest.mark.asyncio

@@ -17,6 +17,7 @@ from mindroom.custom_tools.attachment_helpers import (
 )
 from mindroom.custom_tools.attachments import send_context_attachments
 from mindroom.matrix.client import (
+    edit_message,
     fetch_thread_history,
     get_latest_thread_event_id_if_needed,
     send_message,
@@ -37,7 +38,7 @@ class MatrixMessageTools(Toolkit):
     _DEFAULT_READ_LIMIT: ClassVar[int] = 20
     _MAX_READ_LIMIT: ClassVar[int] = 50
     _VALID_ACTIONS: ClassVar[frozenset[str]] = frozenset(
-        {"send", "thread-reply", "reply", "react", "read", "context"},
+        {"send", "thread-reply", "reply", "react", "read", "thread-list", "edit", "context"},
     )
 
     def __init__(self) -> None:
@@ -82,7 +83,9 @@ class MatrixMessageTools(Toolkit):
             return self._payload(
                 "error",
                 action=action,
-                message="Unsupported action. Use send, reply, thread-reply, react, read, or context.",
+                message=(
+                    "Unsupported action. Use send, reply, thread-reply, react, read, thread-list, edit, or context."
+                ),
             )
         if attachment_count and not supports_attachments:
             return self._payload(
@@ -308,14 +311,12 @@ class MatrixMessageTools(Toolkit):
         read_limit: int,
     ) -> str:
         if effective_thread_id is not None:
-            thread_messages = await fetch_thread_history(context.client, room_id, effective_thread_id)
-            return self._payload(
-                "ok",
+            return await self._thread_read_payload(
+                context,
                 action="read",
                 room_id=room_id,
                 thread_id=effective_thread_id,
-                limit=read_limit,
-                messages=thread_messages[-read_limit:],
+                read_limit=read_limit,
             )
 
         response = await context.client.room_messages(
@@ -343,6 +344,124 @@ class MatrixMessageTools(Toolkit):
             room_id=room_id,
             limit=read_limit,
             messages=resolved,
+        )
+
+    @staticmethod
+    def _message_preview(body: object, max_length: int = 120) -> str:
+        if not isinstance(body, str):
+            return ""
+        compact = " ".join(body.split())
+        if len(compact) <= max_length:
+            return compact
+        return f"{compact[: max_length - 3].rstrip()}..."
+
+    def _build_edit_options(
+        self,
+        context: ToolRuntimeContext,
+        *,
+        messages: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        current_user_id = context.client.user_id
+        options: list[dict[str, object]] = []
+        for message in reversed(messages):
+            event_id = message.get("event_id")
+            sender = message.get("sender")
+            if not isinstance(event_id, str) or not isinstance(sender, str):
+                continue
+            can_edit = current_user_id is not None and sender == current_user_id
+            option: dict[str, object] = {
+                "event_id": event_id,
+                "sender": sender,
+                "can_edit": can_edit,
+                "body_preview": self._message_preview(message.get("body")),
+            }
+            if can_edit:
+                option["edit_action"] = {"action": "edit", "target": event_id}
+            options.append(option)
+        return options
+
+    async def _thread_read_payload(
+        self,
+        context: ToolRuntimeContext,
+        *,
+        action: str,
+        room_id: str,
+        thread_id: str,
+        read_limit: int,
+    ) -> str:
+        thread_messages = await fetch_thread_history(context.client, room_id, thread_id)
+        recent_messages = thread_messages[-read_limit:]
+        return self._payload(
+            "ok",
+            action=action,
+            room_id=room_id,
+            thread_id=thread_id,
+            limit=read_limit,
+            messages=recent_messages,
+            edit_options=self._build_edit_options(context, messages=recent_messages),
+        )
+
+    async def _message_thread_list(
+        self,
+        context: ToolRuntimeContext,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        read_limit: int,
+    ) -> str:
+        if thread_id is None:
+            return self._payload(
+                "error",
+                action="thread-list",
+                room_id=room_id,
+                message="thread_id is required for thread-list when no thread context is active.",
+            )
+        return await self._thread_read_payload(
+            context,
+            action="thread-list",
+            room_id=room_id,
+            thread_id=thread_id,
+            read_limit=read_limit,
+        )
+
+    async def _message_edit(
+        self,
+        context: ToolRuntimeContext,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        target: str | None,
+        message: str | None,
+    ) -> str:
+        if target is None:
+            return self._payload("error", action="edit", message="target event_id is required for edit.")
+        new_text = message.strip() if isinstance(message, str) and message.strip() else None
+        if new_text is None:
+            return self._payload("error", action="edit", message="message is required for edit.")
+
+        content = format_message_with_mentions(
+            context.config,
+            new_text,
+            sender_domain=context.config.domain,
+        )
+        edit_event_id = await edit_message(context.client, room_id, target, content, new_text)
+        if edit_event_id is None:
+            return self._payload(
+                "error",
+                action="edit",
+                room_id=room_id,
+                thread_id=thread_id,
+                target=target,
+                message="Failed to edit message in Matrix.",
+            )
+
+        return self._payload(
+            "ok",
+            action="edit",
+            room_id=room_id,
+            thread_id=thread_id,
+            target=target,
+            event_id=edit_event_id,
         )
 
     @staticmethod
@@ -409,18 +528,10 @@ class MatrixMessageTools(Toolkit):
         thread_id: str | None,
         limit: int | None,
     ) -> str:
-        if action == "send":
-            return await self._message_send_or_reply(
-                context,
-                action=action,
-                message=message,
-                attachment_ids=attachment_ids,
-                attachment_file_paths=attachment_file_paths,
-                room_id=room_id,
-                effective_thread_id=thread_id,
-            )
-        if action in {"thread-reply", "reply"}:
-            effective_thread_id = self._safe_thread_id(context, room_id=room_id, thread_id=thread_id)
+        if action in {"send", "thread-reply", "reply"}:
+            effective_thread_id = thread_id
+            if action in {"thread-reply", "reply"}:
+                effective_thread_id = self._safe_thread_id(context, room_id=room_id, thread_id=thread_id)
             return await self._message_send_or_reply(
                 context,
                 action=action,
@@ -445,10 +556,27 @@ class MatrixMessageTools(Toolkit):
                 effective_thread_id=safe_thread,
                 read_limit=self._read_limit(limit),
             )
+        if action == "thread-list":
+            safe_thread = self._safe_thread_id(context, room_id=room_id, thread_id=thread_id)
+            return await self._message_thread_list(
+                context,
+                room_id=room_id,
+                thread_id=safe_thread,
+                read_limit=self._read_limit(limit),
+            )
+        if action == "edit":
+            safe_thread = self._safe_thread_id(context, room_id=room_id, thread_id=thread_id)
+            return await self._message_edit(
+                context,
+                room_id=room_id,
+                thread_id=safe_thread,
+                target=target,
+                message=message,
+            )
         return self._payload(
             "error",
             action=action,
-            message="Unsupported action. Use send, reply, thread-reply, react, read, or context.",
+            message=("Unsupported action. Use send, reply, thread-reply, react, read, thread-list, edit, or context."),
         )
 
     async def matrix_message(  # noqa: PLR0911
@@ -471,6 +599,8 @@ class MatrixMessageTools(Toolkit):
           local file paths (`attachment_file_paths`).
         - react: React to target event ID with message text as emoji (defaults to 👍).
         - read: Read latest messages from room or current thread.
+        - thread-list: List messages in a thread and include edit options by event ID.
+        - edit: Edit a previously sent message by setting `target` to the original event ID.
         - context: Return runtime room/thread/event metadata for tool targeting.
 
         """
