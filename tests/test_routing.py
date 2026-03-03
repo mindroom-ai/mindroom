@@ -208,6 +208,7 @@ class TestThreadUtils:
             teams={},
             room_models={},
             models={"default": ModelConfig(provider="ollama", id="test-model")},
+            mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
         )
 
     def test_has_any_agent_mentions_in_thread_with_mentions(self) -> None:

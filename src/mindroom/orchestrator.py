@@ -97,7 +97,11 @@ class MultiAgentOrchestrator:
 
         This reuses the same create_agent_user function that agents use,
         treating the user as a special "agent" named "user".
+        Skipped when mindroom_user is not configured (e.g. hosted/public profile).
         """
+        if config.mindroom_user is None:
+            logger.debug("mindroom_user not configured, skipping user account creation")
+            return
         # The user account is just another "agent" from the perspective of account management
         user_account = await create_agent_user(
             MATRIX_HOMESERVER,
@@ -215,7 +219,9 @@ class MultiAgentOrchestrator:
 
         # Identify what changed - we can keep using the existing helper functions
         entities_to_restart = await _identify_entities_to_restart(current_config, new_config, self.agent_bots)
-        mindroom_user_changed = current_config.mindroom_user != new_config.mindroom_user
+        mindroom_user_changed = (
+            current_config.mindroom_user != new_config.mindroom_user and new_config.mindroom_user is not None
+        )
         matrix_room_access_changed = current_config.matrix_room_access != new_config.matrix_room_access
 
         # Also check for new entities that didn't exist before
