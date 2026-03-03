@@ -219,9 +219,7 @@ class MultiAgentOrchestrator:
 
         # Identify what changed - we can keep using the existing helper functions
         entities_to_restart = await _identify_entities_to_restart(current_config, new_config, self.agent_bots)
-        mindroom_user_changed = (
-            current_config.mindroom_user != new_config.mindroom_user and new_config.mindroom_user is not None
-        )
+        mindroom_user_changed = current_config.mindroom_user != new_config.mindroom_user
         matrix_room_access_changed = current_config.matrix_room_access != new_config.matrix_room_access
 
         # Also check for new entities that didn't exist before
@@ -370,7 +368,7 @@ class MultiAgentOrchestrator:
         # Get all room IDs (not just newly created ones)
         all_rooms = load_rooms()
         all_room_ids = {room_key: room.room_id for room_key, room in all_rooms.items()}
-        if all_room_ids:
+        if all_room_ids and config.mindroom_user is not None:
             await ensure_user_in_rooms(MATRIX_HOMESERVER, all_room_ids)
 
         # Now have bots join their configured rooms
@@ -432,7 +430,7 @@ class MultiAgentOrchestrator:
         # First, invite the user account to all rooms
         state = MatrixState.load()
         user_account = state.get_account(INTERNAL_USER_ACCOUNT_KEY)
-        if user_account:
+        if config.mindroom_user is not None and user_account:
             user_id = MatrixID.from_username(user_account.username, server_name).full_id
             authorized_user_ids.discard(user_id)
             for room_id in joined_rooms:

@@ -28,7 +28,7 @@ from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix.users import AgentMatrixUser
+from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.teams import TeamFormationDecision, TeamMode
@@ -2781,6 +2781,77 @@ class TestMultiAgentOrchestrator:
 
         invited_users = [call.args[2] for call in mock_invite.await_args_list]
         assert invited_users == ["@alice:localhost"]
+
+    @pytest.mark.asyncio
+    async def test_ensure_room_invitations_skips_internal_user_when_unconfigured(self, tmp_path: Path) -> None:
+        """When mindroom_user is unset, stale internal account credentials must not trigger invites."""
+        config = Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="GeneralAgent",
+                    rooms=["!room1:localhost"],
+                ),
+            },
+            authorization={"default_room_access": False},
+        )
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator.config = config
+
+        router_bot = MagicMock()
+        router_bot.client = AsyncMock()
+        orchestrator.agent_bots = {"router": router_bot}
+
+        state = MatrixState()
+        state.add_account(INTERNAL_USER_ACCOUNT_KEY, "legacy_internal_user", "legacy-password")
+
+        async def mock_get_room_members(_client: AsyncMock, _room_id: str) -> set[str]:
+            return {"@mindroom_general:localhost", "@mindroom_router:localhost"}
+
+        mock_invite = AsyncMock(return_value=True)
+
+        with (
+            patch("mindroom.orchestrator.MATRIX_HOMESERVER", "http://localhost:8008"),
+            patch("mindroom.orchestrator.get_joined_rooms", new=AsyncMock(return_value=["!room1:localhost"])),
+            patch("mindroom.orchestrator.get_room_members", side_effect=mock_get_room_members),
+            patch("mindroom.orchestrator.invite_to_room", mock_invite),
+            patch("mindroom.orchestrator.MatrixState.load", return_value=state),
+        ):
+            await orchestrator._ensure_room_invitations()
+
+        mock_invite.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_setup_rooms_and_memberships_skips_internal_user_join_when_unconfigured(self, tmp_path: Path) -> None:
+        """When mindroom_user is unset, orchestrator should not attempt internal-user room joins."""
+        config = Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="GeneralAgent",
+                    rooms=["lobby"],
+                ),
+            },
+        )
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator.config = config
+
+        bot = AsyncMock()
+        bot.agent_name = "general"
+        bot.rooms = []
+        bot.ensure_rooms = AsyncMock()
+
+        with (
+            patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock()),
+            patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),
+            patch("mindroom.orchestrator.get_rooms_for_entity", return_value=["lobby"]),
+            patch("mindroom.orchestrator.resolve_room_aliases", return_value=["!room1:localhost"]),
+            patch("mindroom.orchestrator.load_rooms", return_value={"lobby": MagicMock(room_id="!room1:localhost")}),
+            patch("mindroom.orchestrator.ensure_user_in_rooms", new=AsyncMock()) as mock_ensure_user_in_rooms,
+        ):
+            await orchestrator._setup_rooms_and_memberships([bot])
+
+        assert bot.rooms == ["!room1:localhost"]
+        mock_ensure_user_in_rooms.assert_not_awaited()
+        bot.ensure_rooms.assert_awaited_once()
 
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator initialization
