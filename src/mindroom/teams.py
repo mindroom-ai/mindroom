@@ -647,11 +647,10 @@ async def _team_response_stream_raw(
         return _start_stream(prompt, media_inputs)
     except Exception as e:
         logger.exception(f"Error in team streaming with agents {agent_names}")
-        team_name = f"Team ({', '.join(agent_names)})"
-        error_message = get_user_friendly_error_message(e, team_name)
+        error_text = str(e)
 
-        async def _error() -> AsyncIterator[RunOutput]:
-            yield RunOutput(content=error_message)
+        async def _error(content: str = error_text) -> AsyncIterator[TeamRunErrorEvent]:
+            yield TeamRunErrorEvent(content=content)
 
         return _error()
 
@@ -844,13 +843,13 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         )
 
         async for event in raw_stream:
-            # Handle explicit fallback errors from stream setup
+            # Handle explicit fallback stream outputs (for example no agents available)
             if isinstance(event, RunOutput):
                 content = _get_response_content(event)
                 yield content
                 return
 
-            # Handle stream-time team errors from provider/model
+            # Handle setup/stream-time team errors from provider/model
             if isinstance(event, TeamRunErrorEvent):
                 error_text = event.content or "Unknown team error"
                 if (
@@ -859,7 +858,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                     and should_retry_without_inline_media(error_text, attempt_media_inputs)
                 ):
                     logger.warning(
-                        "Retrying team streaming without inline media after run error",
+                        "Retrying team streaming without inline media after team error",
                         agents=", ".join(agent_names),
                         error=error_text,
                     )

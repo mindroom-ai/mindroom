@@ -410,7 +410,7 @@ class TestUserIdPassthrough:
         ],
     )
     def test_should_retry_without_inline_media_error_matching(self, error_text: str, expected: bool) -> None:
-        """Retry matcher should target inline-media field/path failures only."""
+        """Retry matcher should target inline-media validation and unsupported-input failures."""
         assert should_retry_without_inline_media(error_text, MediaInputs(images=(object(),))) is expected
 
     def test_append_inline_media_fallback_prompt_is_idempotent(self) -> None:
