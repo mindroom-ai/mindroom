@@ -174,7 +174,14 @@ def patch_chromadb_for_python314() -> None:
     from pydantic._internal import _model_construction  # noqa: PLC0415
     from pydantic_settings import BaseSettings  # noqa: PLC0415
 
-    pydantic.BaseSettings = BaseSettings
+    # pydantic-settings v2 defaults to extra="forbid", but pydantic v1's
+    # BaseSettings silently ignored env vars / .env keys that didn't match
+    # any field.  chromadb relies on that tolerance, so we must restore it.
+    class _PermissiveBaseSettings(BaseSettings):
+        model_config = BaseSettings.model_config.copy()
+        model_config["extra"] = "ignore"
+
+    pydantic.BaseSettings = _PermissiveBaseSettings  # type: ignore[attr-defined]
 
     original_inspect_namespace = _model_construction.inspect_namespace
 
