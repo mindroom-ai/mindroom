@@ -985,6 +985,8 @@ async def _run_background_sync(manager: KnowledgeManager) -> None:
             base_id=manager.base_id,
             path=str(manager.knowledge_path),
         )
+    finally:
+        _knowledge_sync_tasks.pop(manager.base_id, None)
 
 
 async def initialize_knowledge_managers(
@@ -1022,7 +1024,6 @@ async def initialize_knowledge_managers(
         manager = KnowledgeManager(base_id=base_id, config=config, storage_path=storage_path)
         if reindex_on_create or full_reindex_required:
             await manager.initialize()
-            await _cancel_background_sync(base_id)
         elif background_sync_on_create:
             _knowledge_sync_tasks[base_id] = asyncio.create_task(
                 _run_background_sync(manager),

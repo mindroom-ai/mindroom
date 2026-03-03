@@ -16,6 +16,7 @@ from mindroom.knowledge.manager import (
     _INDEXING_EMBEDDING_BACKPRESSURE_ACTIVE,
     KnowledgeManager,
     _IndexingBackpressureEmbedder,
+    _knowledge_sync_tasks,
     get_knowledge_manager,
     initialize_knowledge_managers,
     shutdown_knowledge_managers,
@@ -655,7 +656,15 @@ async def test_initialize_knowledge_managers_can_schedule_background_sync_on_cre
 
     assert set(managers) == {"research"}
     await asyncio.wait_for(started.wait(), timeout=1)
+    assert "research" in _knowledge_sync_tasks
     release.set()
+
+    for _ in range(20):
+        if "research" not in _knowledge_sync_tasks:
+            break
+        await asyncio.sleep(0.01)
+    assert "research" not in _knowledge_sync_tasks
+
     await shutdown_knowledge_managers()
 
 
