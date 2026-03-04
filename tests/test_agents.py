@@ -1799,6 +1799,48 @@ def test_agent_context_files_are_loaded_into_role(mock_storage: MagicMock, tmp_p
 
 
 @patch("mindroom.agents.SqliteDb")
+def test_agent_boot_file_is_loaded_into_startup_context(mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG001
+    """boot_file should always be loaded when present."""
+    config = _test_config()
+    workspace = agent_workspace_root_path(tmp_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    boot_path = workspace / "BOOT.md"
+    boot_path.write_text("Always-on startup checklist.", encoding="utf-8")
+    config.agents["general"].boot_file = "BOOT.md"
+
+    agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+
+    assert "## Startup Context" in agent.role
+    assert "### BOOT.md" in agent.role
+    assert "Always-on startup checklist." in agent.role
+
+
+@patch("mindroom.agents.SqliteDb")
+def test_agent_bootstrap_file_is_loaded_only_while_present(
+    mock_storage: MagicMock,  # noqa: ARG001
+    tmp_path: Path,
+) -> None:
+    """bootstrap_file should be loaded while present and disappear after deletion."""
+    config = _test_config()
+    workspace = agent_workspace_root_path(tmp_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    bootstrap_path = workspace / "BOOTSTRAP.md"
+    bootstrap_path.write_text("First-run ritual.", encoding="utf-8")
+    config.agents["general"].bootstrap_file = "BOOTSTRAP.md"
+
+    bound_config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
+
+    agent = _create_agent_for_test("general", config=bound_config)
+    assert "### BOOTSTRAP.md" in agent.role
+    assert "First-run ritual." in agent.role
+
+    bootstrap_path.unlink()
+    agent_after_delete = _create_agent_for_test("general", config=bound_config)
+    assert "### BOOTSTRAP.md" not in agent_after_delete.role
+    assert "First-run ritual." not in agent_after_delete.role
+
+
+@patch("mindroom.agents.SqliteDb")
 def test_agent_preload_cap_truncates_context_files_in_order(
     mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
@@ -2094,6 +2136,33 @@ def test_create_agent_private_root_requires_execution_identity(
         create_agent("general", config=config, runtime_paths=_runtime_paths(tmp_path), execution_identity=None)
 
     assert not (tmp_path / "mind_data").exists()
+
+
+def test_agent_relative_boot_paths_resolve_from_workspace_not_cwd(tmp_path: Path) -> None:
+    """Relative boot paths should resolve from the canonical workspace, not CWD."""
+    config = _test_config()
+    workspace = agent_workspace_root_path(tmp_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    boot_path = workspace / "BOOT.md"
+    bootstrap_path = workspace / "BOOTSTRAP.md"
+    boot_path.write_text("Relative boot context.", encoding="utf-8")
+    bootstrap_path.write_text("Relative bootstrap context.", encoding="utf-8")
+
+    config.agents["general"].boot_file = "BOOT.md"
+    config.agents["general"].bootstrap_file = "BOOTSTRAP.md"
+
+    original_cwd = Path.cwd()
+    other_cwd = tmp_path / "other"
+    other_cwd.mkdir(parents=True, exist_ok=True)
+    os.chdir(other_cwd)
+    try:
+        with patch("mindroom.agents.SqliteDb"):
+            agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+    finally:
+        os.chdir(original_cwd)
+
+    assert "Relative boot context." in agent.role
+    assert "Relative bootstrap context." in agent.role
 
 
 def test_config_rejects_unknown_agent_knowledge_base_assignment() -> None:

@@ -706,6 +706,8 @@ agents:
     include_default_tools: false
     learning: false
     memory_backend: file
+    boot_file: BOOT.md
+    bootstrap_file: BOOTSTRAP.md
     rooms:
       - personal
     context_files:

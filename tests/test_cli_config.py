@@ -121,6 +121,8 @@ class TestConfigInit:
         assert mind["include_default_tools"] is False
         assert mind["learning"] is False
         assert mind["memory_backend"] == "file"
+        assert mind["boot_file"] == "BOOT.md"
+        assert mind["bootstrap_file"] == "BOOTSTRAP.md"
         assert mind["rooms"] == ["personal"]
         assert mind["context_files"] == [
             "SOUL.md",
