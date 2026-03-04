@@ -43,7 +43,14 @@ def _resolve_agent_thread_mode(
     agent_config: AgentConfig,
     room_id: str | None,
 ) -> Literal["thread", "room"]:
-    """Get effective thread mode for one agent in an optional room context."""
+    """Resolve one agent's effective thread mode for an optional room context.
+
+    Resolution order is:
+    1. Explicit room ID key match in ``room_thread_modes``.
+    2. Reverse alias lookup from room ID to managed room key.
+    3. Any ``room_thread_modes`` key that resolves to the active room ID.
+    4. Fallback to ``thread_mode``.
+    """
     default_mode = agent_config.thread_mode
     if room_id is None or not agent_config.room_thread_modes:
         return default_mode
@@ -55,6 +62,7 @@ def _resolve_agent_thread_mode(
     if direct_mode is not None:
         return direct_mode
 
+    # Keep this import local to avoid config<->matrix import cycles during module initialization.
     from mindroom.matrix.rooms import get_room_alias_from_id, resolve_room_aliases  # noqa: PLC0415
 
     room_alias = get_room_alias_from_id(room_id)
@@ -75,10 +83,18 @@ def _router_agents_for_room(
     teams: dict[str, TeamConfig],
     room_id: str | None,
 ) -> set[str]:
-    """Get agent names relevant for router mode resolution in a room context."""
+    """Return agents relevant for router mode resolution in one room context.
+
+    Includes:
+    - Agents directly configured for the room.
+    - Agents brought into the room via ``teams.<name>.rooms`` mappings.
+
+    Falls back to all agents when no room-specific subset is found.
+    """
     if room_id is None:
         return set(agents)
 
+    # Keep this import local to avoid config<->matrix import cycles during module initialization.
     from mindroom.matrix.rooms import resolve_room_aliases  # noqa: PLC0415
 
     router_agents: set[str] = set()

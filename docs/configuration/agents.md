@@ -154,6 +154,24 @@ The dashboard Agents tab exposes this as the **Memory Backend** selector for eac
 
 Learning data is persisted to `mindroom_data/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted.
 
+## Thread Mode Resolution
+
+Thread mode is resolved per message using the current room ID.
+For an agent, MindRoom checks `room_thread_modes` in this order.
+First, it checks an exact room ID key.
+Second, it checks the managed room key/alias associated with that room ID.
+Third, it resolves each configured `room_thread_modes` key to a room ID and matches that against the current room.
+If none match, it falls back to `thread_mode`.
+
+For a team, MindRoom resolves mode per member agent for that room.
+If all member agents resolve to the same mode, the team uses that mode.
+If member modes differ, the team defaults to `thread`.
+
+For the router, MindRoom resolves mode using agents relevant to the active room.
+This includes agents directly configured for the room and agents included via `teams.<name>.rooms`.
+If all relevant agents resolve to the same mode, the router uses that mode.
+If modes are mixed, the router defaults to `thread`.
+
 ## File-Based Context Loading
 
 You can inject file content directly into an agent's role context without using a knowledge base.
