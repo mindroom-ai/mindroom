@@ -2929,7 +2929,7 @@ class TestMultiAgentOrchestrator:
 
     @pytest.mark.asyncio
     async def test_orchestrator_start_sets_up_rooms_before_knowledge(self, tmp_path: Path) -> None:
-        """Room creation/invites should happen before knowledge refresh scheduling."""
+        """Room creation/invites should happen before knowledge refresh work."""
         orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
         orchestrator.config = MagicMock()
 
@@ -2943,19 +2943,41 @@ class TestMultiAgentOrchestrator:
         async def _setup_rooms(_: list[Any]) -> None:
             call_order.append("setup_rooms")
 
-        async def _schedule_knowledge(*_: object, **__: object) -> None:
-            call_order.append("schedule_knowledge")
+        async def _configure_knowledge(*_: object, **__: object) -> None:
+            call_order.append("configure_knowledge")
 
         with (
             patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
-            patch.object(orchestrator, "_schedule_knowledge_refresh", side_effect=_schedule_knowledge),
+            patch.object(orchestrator, "_configure_knowledge", side_effect=_configure_knowledge),
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
             patch("mindroom.orchestrator._sync_forever_with_restart", new=AsyncMock()),
         ):
             await orchestrator.start()
 
-        assert call_order == ["setup_rooms", "schedule_knowledge"]
+        assert call_order == ["setup_rooms", "configure_knowledge"]
         bot.try_start.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_schedule_knowledge_refresh_logs_failure(self, tmp_path: Path) -> None:
+        """Background knowledge failures should be logged and task state reset."""
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        config = MagicMock()
+
+        mock_configure = AsyncMock(side_effect=RuntimeError("boom"))
+
+        with (
+            patch.object(orchestrator, "_configure_knowledge", mock_configure),
+            patch("mindroom.orchestrator.logger.exception") as mock_exception,
+        ):
+            await orchestrator._schedule_knowledge_refresh(config, start_watcher=True)
+            task = orchestrator._knowledge_refresh_task
+            assert task is not None
+            await asyncio.gather(task, return_exceptions=True)
+            await asyncio.sleep(0)
+
+        assert orchestrator._knowledge_refresh_task is None
+        assert mock_configure.await_count == 2
+        mock_exception.assert_called_once_with("Background knowledge refresh failed")
 
     @pytest.mark.asyncio
     async def test_update_config_schedules_knowledge_refresh_when_running(self, tmp_path: Path) -> None:

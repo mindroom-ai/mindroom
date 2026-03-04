@@ -128,18 +128,36 @@ class MultiAgentOrchestrator:
         if task is None:
             return
         task.cancel()
-        with suppress(asyncio.CancelledError):
+        with suppress(asyncio.CancelledError, Exception):
             await task
 
-    async def _run_knowledge_refresh(self, config: Config, *, start_watcher: bool) -> None:
-        """Run one background knowledge refresh and log failures."""
-        current_task = asyncio.current_task()
+    @staticmethod
+    def _log_knowledge_refresh_task_result(task: asyncio.Task) -> None:
+        """Log detached knowledge refresh task failures."""
         try:
-            await self._configure_knowledge(config, start_watcher=start_watcher)
+            task.result()
         except asyncio.CancelledError:
-            raise
+            return
         except Exception:
             logger.exception("Background knowledge refresh failed")
+
+    async def _run_knowledge_refresh(self, config: Config, *, start_watcher: bool) -> None:
+        """Run one background knowledge refresh with a single retry."""
+        current_task = asyncio.current_task()
+        try:
+            for attempt in range(2):
+                try:
+                    await self._configure_knowledge(config, start_watcher=start_watcher)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    if attempt == 0:
+                        logger.warning("Background knowledge refresh failed; retrying once")
+                        await asyncio.sleep(1)
+                        continue
+                    raise
+                else:
+                    return
         finally:
             if self._knowledge_refresh_task is current_task:
                 self._knowledge_refresh_task = None
@@ -147,10 +165,12 @@ class MultiAgentOrchestrator:
     async def _schedule_knowledge_refresh(self, config: Config, *, start_watcher: bool) -> None:
         """Schedule knowledge refresh in the background, replacing any in-flight run."""
         await self._cancel_knowledge_refresh_task()
-        self._knowledge_refresh_task = asyncio.create_task(
+        task = asyncio.create_task(
             self._run_knowledge_refresh(config, start_watcher=start_watcher),
             name="knowledge_refresh",
         )
+        task.add_done_callback(self._log_knowledge_refresh_task_result)
+        self._knowledge_refresh_task = task
 
     async def _refresh_knowledge_for_runtime(self, config: Config, *, start_watcher: bool) -> None:
         """Refresh knowledge now (startup path) or in background (runtime updates)."""
@@ -224,6 +244,9 @@ class MultiAgentOrchestrator:
         # knowledge indexing, so new rooms/invites are not delayed by embeddings.
         await self._setup_rooms_and_memberships(list(self.agent_bots.values()))
 
+        # Build knowledge before sync loops start so first responses include configured bases.
+        await self._configure_knowledge(config, start_watcher=True)
+
         await self._sync_memory_auto_flush_worker()
 
         # Create sync tasks for each bot with automatic restart on failure
@@ -232,9 +255,6 @@ class MultiAgentOrchestrator:
             sync_task = asyncio.create_task(_sync_forever_with_restart(bot))
             # Store the task reference for later cancellation
             self._sync_tasks[entity_name] = sync_task
-
-        # Keep startup responsive: start sync loops first, then build knowledge index in background.
-        await self._schedule_knowledge_refresh(config, start_watcher=True)
 
         # Run all sync tasks
         await asyncio.gather(*tuple(self._sync_tasks.values()))
