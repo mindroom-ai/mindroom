@@ -59,6 +59,8 @@ _REQUIRED_ENV_KEYS: dict[_ProviderPreset, tuple[str, ...]] = {
 
 _MIND_TEMPLATE_DIR = Path(__file__).resolve().parent / "templates" / "mind_data"
 _MIND_WORKSPACE_TEMPLATE_FILES: tuple[str, ...] = (
+    "BOOT.md",
+    "BOOTSTRAP.md",
     "SOUL.md",
     "AGENTS.md",
     "USER.md",
