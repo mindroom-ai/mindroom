@@ -647,8 +647,8 @@ class TestStreamingBehavior:
         assert IN_PROGRESS_MARKER not in final_body
 
     @pytest.mark.asyncio
-    async def test_finalize_edits_existing_message_when_no_text_arrived(self) -> None:
-        """Finalize should edit an existing message to strip the marker even when no text arrived."""
+    async def test_finalize_does_not_overwrite_existing_message_without_placeholder(self) -> None:
+        """Finalize should not rewrite an existing message when this stream sent no placeholder progress."""
         mock_client = AsyncMock()
 
         streaming = StreamingResponse(
@@ -666,7 +666,42 @@ class TestStreamingBehavior:
         ) as mock_edit:
             await streaming.finalize(mock_client)
 
-        assert mock_edit.await_count == 1
+        assert mock_edit.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_finalize_edits_existing_message_after_placeholder_progress(self) -> None:
+        """Finalize should strip marker after placeholder keepalive edits on an existing message."""
+        mock_client = AsyncMock()
+
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            update_interval=5.0,
+            progress_update_interval=0.2,
+        )
+        streaming.event_id = "$existing_msg"
+        streaming.stream_started_at = 100.0
+        streaming.last_update = 100.0
+
+        with (
+            patch("mindroom.streaming.time.time", return_value=100.25),
+            patch(
+                "mindroom.streaming.edit_message",
+                new=AsyncMock(return_value="$existing_msg"),
+            ) as mock_edit,
+        ):
+            await streaming._throttled_send(mock_client, progress_hint=True)
+            await streaming.finalize(mock_client)
+
+        assert mock_edit.await_count == 2
+        first_body = mock_edit.await_args_list[0].args[3]["body"]
+        second_body = mock_edit.await_args_list[1].args[3]["body"]
+        assert IN_PROGRESS_MARKER in first_body
+        assert second_body == _PROGRESS_PLACEHOLDER
+        assert IN_PROGRESS_MARKER not in second_body
 
     @pytest.mark.asyncio
     async def test_streaming_in_progress_marker(

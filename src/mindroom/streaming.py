@@ -208,10 +208,10 @@ class StreamingResponse:
                 f"{stripped_text}\n\n{_CANCELLED_RESPONSE_NOTE}" if stripped_text else _CANCELLED_RESPONSE_NOTE
             )
 
-        # When an existing message has no real text, still edit to strip
-        # the in-progress marker (covers both self-sent placeholders and
-        # externally provided existing_event_id).
-        needs_empty_edit = self.event_id is not None and not self.accumulated_text.strip()
+        # For placeholder-only streams, still issue a final edit to remove the
+        # in-progress marker. Avoid rewriting arbitrary existing messages when
+        # this stream never emitted progress.
+        needs_empty_edit = self.event_id is not None and self.placeholder_progress_sent and not self.accumulated_text.strip()
         await self._send_or_edit_message(client, is_final=True, allow_empty_progress=needs_empty_edit)
 
     async def _send_or_edit_message(

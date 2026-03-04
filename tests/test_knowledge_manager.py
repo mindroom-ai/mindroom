@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, call
 
@@ -13,6 +14,9 @@ from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.knowledge.manager import (
     _FAILED_SIGNATURE_RETRY_NS,
+    _cancel_background_sync,
+    _knowledge_sync_tasks,
+    _run_background_sync,
     KnowledgeManager,
     _knowledge_sync_tasks,
     _ThrottledEmbedder,
@@ -142,6 +146,33 @@ class _TrackingEmbedder:
             return [0.0], None
         finally:
             self.in_flight -= 1
+
+
+class _BlockingBackgroundSyncManager:
+    def __init__(self, base_id: str, started: asyncio.Event, cancelled: asyncio.Event, release: asyncio.Event) -> None:
+        self.base_id = base_id
+        self.knowledge_path = "."
+        self._started = started
+        self._cancelled = cancelled
+        self._release = release
+
+    async def sync_indexed_files(self) -> dict[str, int]:
+        self._started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self._cancelled.set()
+            await self._release.wait()
+            raise
+
+
+class _IdleBackgroundSyncManager:
+    def __init__(self, base_id: str) -> None:
+        self.base_id = base_id
+        self.knowledge_path = "."
+
+    async def sync_indexed_files(self) -> dict[str, int]:
+        await asyncio.Event().wait()
 
 
 def _make_config(path: Path) -> Config:
@@ -691,6 +722,41 @@ async def test_initialize_knowledge_managers_retries_background_sync_on_matching
 
     assert call_count == 2
     await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_background_sync_cancellation_does_not_drop_replacement_task() -> None:
+    """A canceled task must not clear tracking for a newer replacement task."""
+    base_id = "research"
+    _knowledge_sync_tasks.clear()
+    second_task: asyncio.Task[None] | None = None
+
+    try:
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+        release = asyncio.Event()
+        first = _BlockingBackgroundSyncManager(base_id, started, cancelled, release)
+
+        first_task = asyncio.create_task(_run_background_sync(first), name="knowledge_sync_first")
+        _knowledge_sync_tasks[base_id] = first_task
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        cancel_task = asyncio.create_task(_cancel_background_sync(base_id))
+        await asyncio.wait_for(cancelled.wait(), timeout=1)
+
+        second = _IdleBackgroundSyncManager(base_id)
+        second_task = asyncio.create_task(_run_background_sync(second), name="knowledge_sync_second")
+        _knowledge_sync_tasks[base_id] = second_task
+
+        release.set()
+        await asyncio.wait_for(cancel_task, timeout=1)
+        assert _knowledge_sync_tasks.get(base_id) is second_task
+    finally:
+        if second_task is not None:
+            second_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await second_task
+        _knowledge_sync_tasks.clear()
 
 
 @pytest.mark.asyncio

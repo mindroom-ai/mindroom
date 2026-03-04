@@ -950,6 +950,7 @@ async def _cancel_background_sync(base_id: str) -> None:
 
 
 async def _run_background_sync(manager: KnowledgeManager) -> None:
+    current_task = asyncio.current_task()
     try:
         sync_result = await manager.sync_indexed_files()
         logger.info(
@@ -967,7 +968,11 @@ async def _run_background_sync(manager: KnowledgeManager) -> None:
             path=str(manager.knowledge_path),
         )
     finally:
-        _knowledge_sync_tasks.pop(manager.base_id, None)
+        # Only clear registration if this exact task is still tracked.
+        # A replacement task may have been registered for the same base while
+        # this task was finishing or being cancelled.
+        if current_task is not None and _knowledge_sync_tasks.get(manager.base_id) is current_task:
+            _knowledge_sync_tasks.pop(manager.base_id, None)
 
 
 async def initialize_knowledge_managers(
