@@ -525,6 +525,29 @@ async def register_image_attachment(
     )
 
 
+async def register_audio_attachment_from_event(
+    client: nio.AsyncClient,
+    storage_path: Path,
+    *,
+    room_id: str,
+    thread_id: str | None,
+    event: _AudioEvent,
+) -> AttachmentRecord | None:
+    """Download and register an audio attachment from a Matrix audio event."""
+    media_bytes = await download_media_bytes(client, event)
+    return await _register_media_attachment(
+        storage_path=storage_path,
+        event_id=event.event_id,
+        media_bytes=media_bytes,
+        mime_type=media_mime_type(event),
+        room_id=room_id,
+        thread_id=thread_id,
+        sender=event.sender,
+        filename=_filename_for_media_event(event),
+        kind="audio",
+    )
+
+
 async def register_audio_attachment(
     storage_path: Path,
     *,

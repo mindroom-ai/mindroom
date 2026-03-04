@@ -82,6 +82,7 @@ from .attachments import (
     parse_attachment_ids_from_event_source,
     parse_attachment_ids_from_thread_history,
     register_audio_attachment,
+    register_audio_attachment_from_event,
     register_file_or_video_attachment,
     register_image_attachment,
     resolve_thread_attachment_ids,
@@ -279,6 +280,8 @@ type _MediaDispatchEvent = (
     | nio.RoomEncryptedFile
     | nio.RoomMessageVideo
     | nio.RoomEncryptedVideo
+    | nio.RoomMessageAudio
+    | nio.RoomEncryptedAudio
 )
 
 type _DispatchOrVoiceEvent = _DispatchEvent | nio.RoomMessageAudio | nio.RoomEncryptedAudio
@@ -543,6 +546,11 @@ class AgentBot:
         self.client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomEncryptedFile)
         self.client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomMessageVideo)
         self.client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomEncryptedVideo)
+
+        # Register audio as media for non-router agents (router uses _on_voice_message instead)
+        if self.agent_name != ROUTER_AGENT_NAME:
+            self.client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomMessageAudio)
+            self.client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomEncryptedAudio)
 
         self.running = True
 
@@ -1028,15 +1036,15 @@ class AgentBot:
         assert self.client is not None
 
         is_image_event = isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage)
-        default_caption = (
-            "[Attached image]"
-            if is_image_event
-            else (
-                "[Attached video]"
-                if isinstance(event, nio.RoomMessageVideo | nio.RoomEncryptedVideo)
-                else "[Attached file]"
-            )
-        )
+        is_audio_event = isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio)
+        if is_image_event:
+            default_caption = "[Attached image]"
+        elif isinstance(event, nio.RoomMessageVideo | nio.RoomEncryptedVideo):
+            default_caption = "[Attached video]"
+        elif is_audio_event:
+            default_caption = "[Attached audio]"
+        else:
+            default_caption = "[Attached file]"
         caption = extract_media_caption(event, default=default_caption)
 
         dispatch = await self._prepare_dispatch(
@@ -1086,6 +1094,20 @@ class AgentBot:
             # Keep processing even without attachment registration; image bytes are already available to the model.
             current_attachment_ids = [attachment_record.attachment_id] if attachment_record is not None else []
             fallback_images = [image]
+        elif is_audio_event:
+            assert isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio)
+            attachment_record = await register_audio_attachment_from_event(
+                self.client,
+                self.storage_path,
+                room_id=room.room_id,
+                thread_id=effective_thread_id,
+                event=event,
+            )
+            if attachment_record is None:
+                self.logger.error("Failed to register audio attachment", event_id=event.event_id)
+                self.response_tracker.mark_responded(event.event_id)
+                return
+            current_attachment_ids = [attachment_record.attachment_id]
         else:
             assert isinstance(
                 event,
@@ -1157,6 +1179,20 @@ class AgentBot:
             )
             if attachment_record is None:
                 self.logger.error("Failed to register routed image attachment", event_id=event.event_id)
+                return None
+            return attachment_record.attachment_id
+
+        if isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio):
+            assert self.client is not None
+            attachment_record = await register_audio_attachment_from_event(
+                self.client,
+                self.storage_path,
+                room_id=room_id,
+                thread_id=thread_id,
+                event=event,
+            )
+            if attachment_record is None:
+                self.logger.error("Failed to register routed audio attachment", event_id=event.event_id)
                 return None
             return attachment_record.attachment_id
 
