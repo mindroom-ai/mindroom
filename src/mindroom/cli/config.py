@@ -503,6 +503,8 @@ agents:
     learning: false
     memory_backend: file
     memory_file_path: ./mind_data
+    boot_file: ./mind_data/BOOT.md
+    bootstrap_file: ./mind_data/BOOTSTRAP.md
     rooms:
       - personal
     context_files:

@@ -62,6 +62,8 @@ class TestConfigInit:
         assert mind["learning"] is False
         assert mind["memory_backend"] == "file"
         assert mind["memory_file_path"] == "./mind_data"
+        assert mind["boot_file"] == "./mind_data/BOOT.md"
+        assert mind["bootstrap_file"] == "./mind_data/BOOTSTRAP.md"
         assert mind["rooms"] == ["personal"]
         assert mind["context_files"] == [
             "./mind_data/SOUL.md",
