@@ -13,7 +13,7 @@ from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProf
 from pydantic import ValidationError
 
 from mindroom import agent_prompts
-from mindroom.agents import _CULTURE_MANAGER_CACHE, create_agent
+from mindroom.agents import _CULTURE_MANAGER_CACHE, _load_context_files, create_agent
 from mindroom.config.agent import AgentConfig, CultureConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
@@ -431,6 +431,17 @@ def test_agent_missing_context_file_is_ignored(mock_storage: MagicMock, tmp_path
 
     assert "## Personality Context" not in agent.role
     assert "does-not-exist.md" not in agent.role
+
+
+def test_load_context_files_skips_missing_bootstrap_without_warning(tmp_path: Path) -> None:
+    """Missing BOOTSTRAP.md should be treated as optional onboarding state."""
+    bootstrap_path = tmp_path / "BOOTSTRAP.md"
+
+    with patch("mindroom.agents.logger.warning") as mock_warning:
+        chunks = _load_context_files([str(bootstrap_path)])
+
+    assert chunks == []
+    mock_warning.assert_not_called()
 
 
 def test_agent_relative_context_paths_resolve_from_config_dir(tmp_path: Path) -> None:

@@ -70,6 +70,8 @@ class TestConfigInit:
             "./mind_data/IDENTITY.md",
             "./mind_data/TOOLS.md",
             "./mind_data/HEARTBEAT.md",
+            "./mind_data/BOOT.md",
+            "./mind_data/BOOTSTRAP.md",
         ]
         assert mind["knowledge_bases"] == ["mind_memory"]
         assert mind["tools"] == [
@@ -105,8 +107,9 @@ class TestConfigInit:
         assert (workspace / "IDENTITY.md").exists()
         assert (workspace / "TOOLS.md").exists()
         assert (workspace / "HEARTBEAT.md").exists()
+        assert (workspace / "BOOT.md").exists()
+        assert (workspace / "BOOTSTRAP.md").exists()
         assert (workspace / "MEMORY.md").exists()
-        assert not (workspace / "BOOT.md").exists()
 
     def test_init_without_path_uses_detected_default_location(
         self,

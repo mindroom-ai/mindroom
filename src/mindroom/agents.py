@@ -38,6 +38,7 @@ logger = get_logger(__name__)
 
 # Maximum length for instruction descriptions to include in agent summary
 _MAX_INSTRUCTION_LENGTH = 100
+_OPTIONAL_CONTEXT_FILENAMES = {"BOOTSTRAP.md"}
 
 
 @dataclass
@@ -107,6 +108,8 @@ def _load_context_files(context_files: list[str]) -> list[_AdditionalContextChun
                 ),
             )
         else:
+            if resolved_path.name in _OPTIONAL_CONTEXT_FILENAMES:
+                continue
             logger.warning(f"Context file not found: {resolved_path}")
     return loaded_parts
 

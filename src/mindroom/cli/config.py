@@ -65,6 +65,8 @@ _MIND_WORKSPACE_TEMPLATE_FILES: tuple[str, ...] = (
     "IDENTITY.md",
     "TOOLS.md",
     "HEARTBEAT.md",
+    "BOOT.md",
+    "BOOTSTRAP.md",
 )
 _MIND_MEMORY_TEMPLATE = "# Memory\n\n"
 
@@ -510,6 +512,8 @@ agents:
       - ./mind_data/IDENTITY.md
       - ./mind_data/TOOLS.md
       - ./mind_data/HEARTBEAT.md
+      - ./mind_data/BOOT.md
+      - ./mind_data/BOOTSTRAP.md
     knowledge_bases:
       - mind_memory
     tools:
@@ -527,6 +531,8 @@ agents:
       - You wake up fresh each session with no memory of previous conversations. Your context files are already loaded into your system prompt.
       - Important long-term context is persisted by the configured MindRoom memory backend. If something must be preserved exactly, write or update the relevant file directly.
       - MEMORY.md is curated long-term memory; daily files are short-lived notes and logs.
+      - BOOT.md is a startup checklist loaded each time the agent starts.
+      - BOOTSTRAP.md is a first-run onboarding ritual; complete it once, then delete it.
       - Ask before external or destructive actions.
       - Before answering prior-history questions, search memory files first when a knowledge base is configured.
 
