@@ -52,6 +52,10 @@ class AgentConfig(BaseModel):
         default="thread",
         description="Conversation threading mode: 'thread' creates Matrix threads per conversation, 'room' uses a single continuous conversation per room (ideal for bridges/mobile)",
     )
+    room_thread_modes: dict[str, Literal["thread", "room"]] = Field(
+        default_factory=dict,
+        description="Per-room thread mode overrides keyed by room alias/name or Matrix room ID",
+    )
     num_history_runs: int | None = Field(
         default=None,
         description="Number of prior Agno runs to include as history context (per-agent override)",

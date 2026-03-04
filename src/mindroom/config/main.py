@@ -402,27 +402,76 @@ class Config(BaseModel):
             all_room_aliases.update(team_config.rooms)
         return all_room_aliases
 
-    def get_entity_thread_mode(self, entity_name: str) -> Literal["thread", "room"]:
+    def _get_agent_thread_mode_for_room(
+        self,
+        agent_name: str,
+        room_id: str | None = None,
+    ) -> Literal["thread", "room"]:
+        """Get effective thread mode for one agent in an optional room context."""
+        agent_config = self.agents[agent_name]
+        default_mode = agent_config.thread_mode
+        if room_id is None or not agent_config.room_thread_modes:
+            return default_mode
+
+        overrides = agent_config.room_thread_modes
+
+        # Fast path: direct room-id key.
+        direct_mode = overrides.get(room_id)
+        if direct_mode is not None:
+            return direct_mode
+
+        from mindroom.matrix.rooms import get_room_alias_from_id, resolve_room_aliases  # noqa: PLC0415
+
+        room_alias = get_room_alias_from_id(room_id)
+        if room_alias:
+            alias_mode = overrides.get(room_alias)
+            if alias_mode is not None:
+                return alias_mode
+
+        for override_key, resolved_room_id in zip(overrides, resolve_room_aliases(list(overrides)), strict=False):
+            if resolved_room_id == room_id:
+                return overrides[override_key]
+
+        return default_mode
+
+    def get_entity_thread_mode(
+        self,
+        entity_name: str,
+        room_id: str | None = None,
+    ) -> Literal["thread", "room"]:
         """Get effective thread mode for an agent, team, or router.
 
         Agents use their explicit per-agent setting.
         Teams inherit a mode only when all member agents share it.
-        Router inherits a mode only when all configured agents share it.
+        Router inherits a mode only when all relevant configured agents share it.
         In ambiguous cases, default to "thread".
         """
         if entity_name in self.agents:
-            return self.agents[entity_name].thread_mode
+            return self._get_agent_thread_mode_for_room(entity_name, room_id)
 
         if entity_name in self.teams:
             team_modes: set[Literal["thread", "room"]] = {
-                self.agents[name].thread_mode for name in self.teams[entity_name].agents if name in self.agents
+                self._get_agent_thread_mode_for_room(name, room_id)
+                for name in self.teams[entity_name].agents
+                if name in self.agents
             }
             if len(team_modes) == 1:
                 return next(iter(team_modes))
 
         if entity_name == ROUTER_AGENT_NAME:
+            router_agents: set[str]
+            if room_id is None:
+                router_agents = set(self.agents)
+            else:
+                from mindroom.matrix.rooms import resolve_room_aliases  # noqa: PLC0415
+
+                router_agents = {
+                    agent_name
+                    for agent_name, agent_cfg in self.agents.items()
+                    if room_id in set(resolve_room_aliases(agent_cfg.rooms))
+                } or set(self.agents)
             configured_modes: set[Literal["thread", "room"]] = {
-                agent_cfg.thread_mode for agent_cfg in self.agents.values()
+                self._get_agent_thread_mode_for_room(agent_name, room_id) for agent_name in router_agents
             }
             if len(configured_modes) == 1:
                 return next(iter(configured_modes))

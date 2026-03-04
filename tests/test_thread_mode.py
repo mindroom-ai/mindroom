@@ -93,6 +93,20 @@ class TestThreadModeConfig:
         with pytest.raises(ValidationError):
             AgentConfig(display_name="Test", thread_mode="invalid")
 
+    def test_room_thread_modes_override(self) -> None:
+        """Per-room thread mode overrides should parse and persist."""
+        agent = AgentConfig(
+            display_name="Test",
+            thread_mode="thread",
+            room_thread_modes={"lobby": "room", "!room:localhost": "thread"},
+        )
+        assert agent.room_thread_modes == {"lobby": "room", "!room:localhost": "thread"}
+
+    def test_invalid_room_thread_mode_rejected(self) -> None:
+        """Invalid room_thread_modes values should be rejected by Pydantic."""
+        with pytest.raises(ValidationError):
+            AgentConfig(display_name="Test", room_thread_modes={"lobby": "invalid"})
+
 
 class TestAgentBotThreadMode:
     """Test AgentBot.thread_mode property."""
@@ -128,6 +142,24 @@ class TestAgentBotThreadMode:
 
 class TestConfigThreadModeResolution:
     """Test thread-mode resolution for non-agent entities."""
+
+    def test_agent_uses_room_override_for_matching_room(self) -> None:
+        """Agent should honor room-specific thread mode overrides."""
+        config = Config(
+            agents={
+                "assistant": AgentConfig(
+                    display_name="Assistant",
+                    thread_mode="thread",
+                    room_thread_modes={"!room:localhost": "room"},
+                ),
+            },
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        )
+        assert config.get_entity_thread_mode("assistant", room_id="!room:localhost") == "room"
+        assert config.get_entity_thread_mode("assistant", room_id="!other:localhost") == "thread"
 
     def test_router_inherits_uniform_room_mode(self) -> None:
         """Router should use room mode when all configured agents use room mode."""
@@ -182,6 +214,58 @@ class TestConfigThreadModeResolution:
             router=RouterConfig(model="default"),
         )
         assert config.get_entity_thread_mode("ops") == "thread"
+
+    def test_team_uses_room_specific_member_modes(self) -> None:
+        """Team should resolve member modes with room-specific overrides."""
+        config = Config(
+            agents={
+                "assistant": AgentConfig(
+                    display_name="Assistant",
+                    thread_mode="thread",
+                    room_thread_modes={"!room:localhost": "room"},
+                ),
+                "coder": AgentConfig(
+                    display_name="Coder",
+                    thread_mode="thread",
+                    room_thread_modes={"!room:localhost": "room"},
+                ),
+            },
+            teams={
+                "ops": TeamConfig(
+                    display_name="Ops Team",
+                    role="Operations",
+                    agents=["assistant", "coder"],
+                ),
+            },
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        )
+        assert config.get_entity_thread_mode("ops", room_id="!room:localhost") == "room"
+        assert config.get_entity_thread_mode("ops", room_id="!other:localhost") == "thread"
+
+    def test_router_uses_room_specific_modes_for_room_agents(self) -> None:
+        """Router should resolve mode from agents configured for the active room."""
+        config = Config(
+            agents={
+                "assistant": AgentConfig(
+                    display_name="Assistant",
+                    rooms=["!room:localhost"],
+                    thread_mode="thread",
+                    room_thread_modes={"!room:localhost": "room"},
+                ),
+                "coder": AgentConfig(
+                    display_name="Coder",
+                    rooms=["!other:localhost"],
+                    thread_mode="thread",
+                ),
+            },
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        )
+        assert config.get_entity_thread_mode(ROUTER_AGENT_NAME, room_id="!room:localhost") == "room"
 
 
 class TestRouterHandoffThreadMode:
@@ -317,6 +401,61 @@ class TestExtractMessageContextRoomMode:
         assert ctx.is_thread is False
         assert ctx.thread_id is None
         assert ctx.thread_history == []
+
+    @pytest.mark.asyncio
+    async def test_room_override_skips_derive_only_for_matching_room(
+        self,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Room-specific mode overrides should only affect matching rooms."""
+        config = Config(
+            agents={
+                "assistant": AgentConfig(
+                    display_name="Assistant",
+                    rooms=["!room:localhost", "!other:localhost"],
+                    thread_mode="thread",
+                    room_thread_modes={"!room:localhost": "room"},
+                ),
+            },
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        )
+        bot = AgentBot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+        bot.client = MagicMock()
+        bot._derive_conversation_context = AsyncMock(return_value=(True, "$thread123", [{"event_id": "$thread123"}]))
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.name = "Room Override"
+
+        other_room = MagicMock(spec=nio.MatrixRoom)
+        other_room.room_id = "!other:localhost"
+        other_room.name = "No Override"
+
+        event = MagicMock(spec=nio.RoomMessageText)
+        event.event_id = "$event123"
+        event.sender = "@user:localhost"
+        event.source = {
+            "event_id": "$event123",
+            "sender": "@user:localhost",
+            "content": {"body": "hello", "msgtype": "m.text"},
+            "type": "m.room.message",
+        }
+
+        with patch("mindroom.bot.check_agent_mentioned", return_value=([], False, False)):
+            room_mode_ctx = await bot._extract_message_context(room, event)
+            thread_mode_ctx = await bot._extract_message_context(other_room, event)
+
+        assert room_mode_ctx.is_thread is False
+        assert room_mode_ctx.thread_id is None
+        assert room_mode_ctx.thread_history == []
+
+        assert thread_mode_ctx.is_thread is True
+        assert thread_mode_ctx.thread_id == "$thread123"
+        assert thread_mode_ctx.thread_history == [{"event_id": "$thread123"}]
 
 
 class TestSendResponseRoomMode:

@@ -142,8 +142,8 @@ def _session_key_to_room_thread(session_key: str) -> tuple[str, str | None]:
     return session_key, None
 
 
-def _agent_thread_mode(context: ToolRuntimeContext, agent_name: str) -> str:
-    mode = context.config.get_entity_thread_mode(agent_name)
+def _agent_thread_mode(context: ToolRuntimeContext, agent_name: str, room_id: str | None = None) -> str:
+    mode = context.config.get_entity_thread_mode(agent_name, room_id=room_id or context.room_id)
     return "room" if mode == "room" else "thread"
 
 
@@ -151,12 +151,13 @@ def _threaded_dispatch_error(
     context: ToolRuntimeContext,
     *,
     session_key: str,
+    room_id: str,
     thread_id: str | None,
     target_agent: str,
 ) -> str | None:
     if thread_id is None:
         return None
-    if _agent_thread_mode(context, target_agent) != "room":
+    if _agent_thread_mode(context, target_agent, room_id=room_id) != "room":
         return None
     return _payload(
         "sessions_send",
@@ -325,6 +326,7 @@ class SubAgentsTools(Toolkit):
         thread_dispatch_error = _threaded_dispatch_error(
             context,
             session_key=target_session,
+            room_id=target_room_id,
             thread_id=target_thread_id,
             target_agent=target_agent,
         )
