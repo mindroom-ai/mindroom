@@ -171,8 +171,9 @@ class TestConfigInit:
         assert (workspace / "IDENTITY.md").exists()
         assert (workspace / "TOOLS.md").exists()
         assert (workspace / "HEARTBEAT.md").exists()
+        assert (workspace / "BOOT.md").exists()
+        assert (workspace / "BOOTSTRAP.md").exists()
         assert (workspace / "MEMORY.md").exists()
-        assert not (workspace / "BOOT.md").exists()
 
     def test_init_full_profile_respects_storage_path_override(
         self,
