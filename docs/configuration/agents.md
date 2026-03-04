@@ -86,6 +86,13 @@ agents:
     # Response mode: "thread" (replies in Matrix threads) or "room" (plain room messages)
     thread_mode: thread
 
+    # Optional room-specific overrides for thread mode
+    # Keys may be managed room aliases/names or Matrix room IDs
+    room_thread_modes:
+      lobby: thread
+      bridge_telegram: room
+      "!abc123:example.com": room
+
     # Tools to execute through the sandbox proxy (optional, inherits from defaults)
     sandbox_tools: [shell, file]
 
@@ -126,6 +133,7 @@ agents:
 | `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents |
 | `context_files` | list | `[]` | File paths loaded at agent init/reload and prepended to role context (under `Personality Context`) |
 | `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
+| `room_thread_modes` | map | `{}` | Per-room thread mode overrides keyed by room alias/name or Matrix room ID. Values are `thread` or `room`. Overrides apply before `thread_mode` fallback |
 | `num_history_runs` | int | `null` | Number of prior Agno runs to include as history context (`null` = all). Mutually exclusive with `num_history_messages` |
 | `num_history_messages` | int | `null` | Max messages from history. Mutually exclusive with `num_history_runs` |
 | `compress_tool_results` | bool | `null` | Compress tool results in history to save context. Inherits from `defaults.compress_tool_results` (default: `true`) |
@@ -145,6 +153,24 @@ Per-agent values override them.
 The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
 
 Learning data is persisted to `mindroom_data/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted.
+
+## Thread Mode Resolution
+
+Thread mode is resolved per message using the current room ID.
+For an agent, MindRoom checks `room_thread_modes` in this order.
+First, it checks an exact room ID key.
+Second, it checks the managed room key/alias associated with that room ID.
+Third, it resolves each configured `room_thread_modes` key to a room ID and matches that against the current room.
+If none match, it falls back to `thread_mode`.
+
+For a team, MindRoom resolves mode per member agent for that room.
+If all member agents resolve to the same mode, the team uses that mode.
+If member modes differ, the team defaults to `thread`.
+
+For the router, MindRoom resolves mode using agents relevant to the active room.
+This includes agents directly configured for the room and agents included via `teams.<name>.rooms`.
+If all relevant agents resolve to the same mode, the router uses that mode.
+If modes are mixed, the router defaults to `thread`.
 
 ## File-Based Context Loading
 

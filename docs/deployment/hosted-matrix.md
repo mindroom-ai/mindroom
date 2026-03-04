@@ -33,11 +33,11 @@ cd ~/mindroom-local
 uvx mindroom config init --profile public
 ```
 
-This creates `config.yaml` and `.env` with hosted defaults.
+This creates `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted defaults.
 
 ## 2. Add AI Provider Key
 
-Edit `.env` and set at least one provider key:
+Edit `~/.mindroom/.env` and set at least one provider key:
 
 ```bash
 OPENAI_API_KEY=...
@@ -60,7 +60,7 @@ Pair code behavior:
 - Valid for 600 seconds (10 minutes).
 - Only used to bootstrap local pairing.
 
-After successful pairing, local provisioning credentials are written to `.env` unless you use `--no-persist-env`.
+After successful pairing, local provisioning credentials are written to `~/.mindroom/.env` by default unless you use `--no-persist-env`.
 
 ## 4. Start MindRoom
 

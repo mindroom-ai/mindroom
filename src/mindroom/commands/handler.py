@@ -49,7 +49,7 @@ class CommandHandlerContext:
     response_tracker: ResponseTracker
     derive_conversation_context: Callable[[str, EventInfo], Awaitable[tuple[bool, str | None, list[dict[str, Any]]]]]
     requester_user_id_for_event: Callable[[nio.RoomMessageText], str]
-    resolve_reply_thread_id: Callable[[str | None, str | None], str | None]
+    resolve_reply_thread_id: Callable[..., str | None]
     send_response: Callable[..., Awaitable[str | None]]
     send_skill_command_response: Callable[..., Awaitable[str | None]]
 
@@ -400,7 +400,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
 
     # Commands/tools that persist conversation context should use the same
     # thread-root policy as outgoing replies.
-    effective_thread_id = context.resolve_reply_thread_id(thread_id, event.event_id)
+    effective_thread_id = context.resolve_reply_thread_id(thread_id, event.event_id, room_id=room.room_id)
 
     response_text = ""
 

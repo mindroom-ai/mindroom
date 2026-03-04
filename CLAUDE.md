@@ -340,7 +340,7 @@ cd ~/mindroom-local
 uvx mindroom config init --profile public
 ```
 
-2) Add at least one model provider key in `.env` (for example `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`)
+2) Add at least one model provider key in `~/.mindroom/.env` (for example `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`)
 
 3) Generate a pair code in `https://chat.mindroom.chat` (`Settings -> Local MindRoom`) and pair locally
 ```bash
@@ -352,7 +352,7 @@ uvx mindroom connect --pair-code ABCD-EFGH
 uvx mindroom run
 ```
 
-`mindroom connect` writes `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` to `.env` (unless `--no-persist-env` is used) and auto-replaces owner placeholder tokens in `config.yaml` when `owner_user_id` is returned.
+`mindroom connect` writes `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` to `~/.mindroom/.env` by default (unless `--no-persist-env` is used) and auto-replaces owner placeholder tokens in `config.yaml` when `owner_user_id` is returned.
 
 ### SaaS Platform Commands
 

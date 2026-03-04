@@ -28,7 +28,7 @@ from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix.users import AgentMatrixUser
+from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.teams import TeamFormationDecision, TeamMode
@@ -2783,6 +2783,77 @@ class TestMultiAgentOrchestrator:
         assert invited_users == ["@alice:localhost"]
 
     @pytest.mark.asyncio
+    async def test_ensure_room_invitations_skips_internal_user_when_unconfigured(self, tmp_path: Path) -> None:
+        """When mindroom_user is unset, stale internal account credentials must not trigger invites."""
+        config = Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="GeneralAgent",
+                    rooms=["!room1:localhost"],
+                ),
+            },
+            authorization={"default_room_access": False},
+        )
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator.config = config
+
+        router_bot = MagicMock()
+        router_bot.client = AsyncMock()
+        orchestrator.agent_bots = {"router": router_bot}
+
+        state = MatrixState()
+        state.add_account(INTERNAL_USER_ACCOUNT_KEY, "legacy_internal_user", "legacy-password")
+
+        async def mock_get_room_members(_client: AsyncMock, _room_id: str) -> set[str]:
+            return {"@mindroom_general:localhost", "@mindroom_router:localhost"}
+
+        mock_invite = AsyncMock(return_value=True)
+
+        with (
+            patch("mindroom.orchestrator.MATRIX_HOMESERVER", "http://localhost:8008"),
+            patch("mindroom.orchestrator.get_joined_rooms", new=AsyncMock(return_value=["!room1:localhost"])),
+            patch("mindroom.orchestrator.get_room_members", side_effect=mock_get_room_members),
+            patch("mindroom.orchestrator.invite_to_room", mock_invite),
+            patch("mindroom.orchestrator.MatrixState.load", return_value=state),
+        ):
+            await orchestrator._ensure_room_invitations()
+
+        mock_invite.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_setup_rooms_and_memberships_skips_internal_user_join_when_unconfigured(self, tmp_path: Path) -> None:
+        """When mindroom_user is unset, orchestrator should not attempt internal-user room joins."""
+        config = Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="GeneralAgent",
+                    rooms=["lobby"],
+                ),
+            },
+        )
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator.config = config
+
+        bot = AsyncMock()
+        bot.agent_name = "general"
+        bot.rooms = []
+        bot.ensure_rooms = AsyncMock()
+
+        with (
+            patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock()),
+            patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),
+            patch("mindroom.orchestrator.get_rooms_for_entity", return_value=["lobby"]),
+            patch("mindroom.orchestrator.resolve_room_aliases", return_value=["!room1:localhost"]),
+            patch("mindroom.orchestrator.load_rooms", return_value={"lobby": MagicMock(room_id="!room1:localhost")}),
+            patch("mindroom.orchestrator.ensure_user_in_rooms", new=AsyncMock()) as mock_ensure_user_in_rooms,
+        ):
+            await orchestrator._setup_rooms_and_memberships([bot])
+
+        assert bot.rooms == ["!room1:localhost"]
+        mock_ensure_user_in_rooms.assert_not_awaited()
+        bot.ensure_rooms.assert_awaited_once()
+
+    @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator initialization
     @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
     @patch("mindroom.config.main.Config.from_yaml")
@@ -2855,6 +2926,93 @@ class TestMultiAgentOrchestrator:
             # Verify start was called for each bot
             for mock_start in start_mocks:
                 mock_start.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_start_sets_up_rooms_before_knowledge(self, tmp_path: Path) -> None:
+        """Room creation/invites should happen before knowledge refresh work."""
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator.config = MagicMock()
+
+        bot = MagicMock()
+        bot.agent_name = "router"
+        bot.try_start = AsyncMock(return_value=True)
+        orchestrator.agent_bots = {"router": bot}
+
+        call_order: list[str] = []
+
+        async def _setup_rooms(_: list[Any]) -> None:
+            call_order.append("setup_rooms")
+
+        async def _configure_knowledge(*_: object, **__: object) -> None:
+            call_order.append("configure_knowledge")
+
+        with (
+            patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
+            patch.object(orchestrator, "_configure_knowledge", side_effect=_configure_knowledge),
+            patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+            patch("mindroom.orchestrator._sync_forever_with_restart", new=AsyncMock()),
+        ):
+            await orchestrator.start()
+
+        assert call_order == ["setup_rooms", "configure_knowledge"]
+        bot.try_start.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_schedule_knowledge_refresh_logs_failure(self, tmp_path: Path) -> None:
+        """Background knowledge failures should be logged and task state reset."""
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        config = MagicMock()
+
+        mock_configure = AsyncMock(side_effect=RuntimeError("boom"))
+
+        with (
+            patch.object(orchestrator, "_configure_knowledge", mock_configure),
+            patch("mindroom.orchestrator.logger.exception") as mock_exception,
+        ):
+            await orchestrator._schedule_knowledge_refresh(config, start_watcher=True)
+            task = orchestrator._knowledge_refresh_task
+            assert task is not None
+            await asyncio.gather(task, return_exceptions=True)
+            await asyncio.sleep(0)
+
+        assert orchestrator._knowledge_refresh_task is None
+        assert mock_configure.await_count == 2
+        mock_exception.assert_called_once_with("Background knowledge refresh failed")
+
+    @pytest.mark.asyncio
+    async def test_update_config_schedules_knowledge_refresh_when_running(self, tmp_path: Path) -> None:
+        """Hot reload should schedule (not block on) knowledge refresh while running."""
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+
+        config = MagicMock()
+        config.agents = {}
+        config.teams = {}
+        config.mindroom_user = None
+        config.matrix_room_access = MagicMock()
+        config.authorization = MagicMock()
+        config.defaults.enable_streaming = True
+
+        orchestrator.config = config
+        orchestrator.running = True
+        router_bot = MagicMock()
+        router_bot.config = config
+        router_bot.enable_streaming = True
+        router_bot._set_presence_with_model_info = AsyncMock()
+        orchestrator.agent_bots = {"router": router_bot}
+
+        with (
+            patch("mindroom.orchestrator.Config.from_yaml", return_value=config),
+            patch("mindroom.orchestrator.load_plugins"),
+            patch("mindroom.orchestrator._identify_entities_to_restart", new=AsyncMock(return_value=set())),
+            patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()) as mock_schedule_knowledge,
+            patch.object(orchestrator, "_configure_knowledge", new=AsyncMock()) as mock_configure_knowledge,
+            patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+        ):
+            updated = await orchestrator.update_config()
+
+        assert updated is False
+        mock_schedule_knowledge.assert_awaited_once_with(config, start_watcher=True)
+        mock_configure_knowledge.assert_not_awaited()
 
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator stop

@@ -34,6 +34,7 @@ def mock_config_no_restrictions() -> Config:
                 "rooms": ["test_room"],
             },
         },
+        mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
         # No authorization field means default empty authorization
     )
 
@@ -62,6 +63,7 @@ def mock_config_with_restrictions() -> Config:
                 "rooms": ["test_room"],
             },
         },
+        mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
         authorization={
             "global_users": ["@alice:example.com", "@bob:example.com"],
             "room_permissions": {},

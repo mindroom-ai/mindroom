@@ -265,6 +265,7 @@ async def test_router_processes_audio_events_from_non_agent_internal_user(tmp_pa
     config = Config(
         authorization={"default_room_access": True},
         voice={"enabled": True},
+        mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
     )
 
     bot = AgentBot(

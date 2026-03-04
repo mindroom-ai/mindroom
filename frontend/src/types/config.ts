@@ -94,6 +94,7 @@ export interface Agent {
   sandbox_tools?: string[]; // Tool names to execute through sandbox proxy (overrides defaults)
   delegate_to?: string[]; // Agent names this agent can delegate tasks to
   thread_mode?: ThreadMode; // Conversation threading mode
+  room_thread_modes?: Record<string, ThreadMode>; // Room-specific thread mode overrides
   num_history_runs?: number | null; // Number of prior runs to include as history
   num_history_messages?: number | null; // Max messages from history (mutually exclusive with num_history_runs)
   compress_tool_results?: boolean; // Compress tool results in history

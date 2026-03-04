@@ -10,6 +10,7 @@ import pytest
 import yaml
 
 from mindroom.config.main import Config
+from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import (
     INTERNAL_USER_AGENT_NAME,
@@ -26,7 +27,7 @@ from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 if TYPE_CHECKING:
     from pathlib import Path
 
-DEFAULT_INTERNAL_USERNAME = Config().mindroom_user.username
+DEFAULT_INTERNAL_USERNAME = MindRoomUserConfig().username
 
 
 @pytest.fixture(autouse=True)

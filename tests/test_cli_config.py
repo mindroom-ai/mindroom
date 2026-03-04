@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import yaml
 from typer.testing import CliRunner
 
 from mindroom.cli.main import app
@@ -47,6 +48,65 @@ class TestConfigInit:
         assert "models:" in content
         assert "authorization:" in content
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER in content
+
+    def test_init_full_profile_adds_mindroom_style_mind(self, tmp_path: Path) -> None:
+        """Full template should include MindRoom-style Mind memory/context setup."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
+        assert result.exit_code == 0
+        config = yaml.safe_load(target.read_text())
+        mind = config["agents"]["mind"]
+
+        assert mind["display_name"] == "Mind"
+        assert mind["include_default_tools"] is False
+        assert mind["learning"] is False
+        assert mind["memory_backend"] == "file"
+        assert mind["memory_file_path"] == "./mind_data"
+        assert mind["rooms"] == ["personal"]
+        assert mind["context_files"] == [
+            "./mind_data/SOUL.md",
+            "./mind_data/AGENTS.md",
+            "./mind_data/USER.md",
+            "./mind_data/IDENTITY.md",
+            "./mind_data/TOOLS.md",
+            "./mind_data/HEARTBEAT.md",
+        ]
+        assert mind["knowledge_bases"] == ["mind_memory"]
+        assert mind["tools"] == [
+            "shell",
+            "coding",
+            "duckduckgo",
+            "website",
+            "browser",
+            "scheduler",
+            "subagents",
+            "matrix_message",
+        ]
+        assert mind["skills"] == ["mindroom-docs"]
+        assert config["knowledge_bases"]["mind_memory"]["path"] == "./mind_data/memory"
+        assert config["knowledge_bases"]["mind_memory"]["watch"] is True
+        assert config["memory"]["backend"] == "file"
+        assert config["memory"]["file"]["max_entrypoint_lines"] == 200
+        assert config["memory"]["auto_flush"]["enabled"] is True
+        assert "openclaw_compat" not in target.read_text()
+
+    def test_init_full_profile_creates_mind_workspace_files(self, tmp_path: Path) -> None:
+        """Full template should scaffold the required mind_data files."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
+        assert result.exit_code == 0
+
+        workspace = tmp_path / "mind_data"
+        assert workspace.exists()
+        assert (workspace / "memory").exists()
+        assert (workspace / "SOUL.md").exists()
+        assert (workspace / "AGENTS.md").exists()
+        assert (workspace / "USER.md").exists()
+        assert (workspace / "IDENTITY.md").exists()
+        assert (workspace / "TOOLS.md").exists()
+        assert (workspace / "HEARTBEAT.md").exists()
+        assert (workspace / "MEMORY.md").exists()
+        assert not (workspace / "BOOT.md").exists()
 
     def test_init_without_path_uses_detected_default_location(
         self,
@@ -87,6 +147,8 @@ class TestConfigInit:
         target = tmp_path / "config.yaml"
         result = runner.invoke(app, ["config", "init", "--path", str(target), "--profile", "public"])
         assert result.exit_code == 0
+        config_content = target.read_text()
+        assert "mindroom_user:" not in config_content
 
         env_content = (tmp_path / ".env").read_text()
         assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
@@ -94,6 +156,18 @@ class TestConfigInit:
         assert "MINDROOM_PROVISIONING_URL=https://mindroom.chat" in env_content
         assert "MATRIX_REGISTRATION_TOKEN=" in env_content
         assert "\n\n\n# AI provider API keys" not in env_content
+
+        # Public profile next steps must include the pairing command
+        output = _strip_ansi(result.output)
+        assert "mindroom connect --pair-code" in output
+
+    def test_init_full_profile_omits_pairing_step(self, tmp_path: Path) -> None:
+        """Full profile next steps should NOT mention pairing."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
+        assert result.exit_code == 0
+        output = _strip_ansi(result.output)
+        assert "mindroom connect" not in output
 
     def test_init_creates_env_with_dashboard_key(self, tmp_path: Path) -> None:
         """Config init writes a random MINDROOM_API_KEY to .env."""
@@ -111,8 +185,8 @@ class TestConfigInit:
         # VITE_API_KEY should NOT be in the template (auth is handled at proxy layer)
         assert "VITE_API_KEY" not in content
 
-    def test_init_force_does_not_overwrite_existing_env(self, tmp_path: Path) -> None:
-        """Config init --force should never overwrite an existing .env file."""
+    def test_init_force_overwrites_existing_env(self, tmp_path: Path) -> None:
+        """Config init --force should overwrite an existing .env file."""
         target = tmp_path / "config.yaml"
         env_path = tmp_path / ".env"
         env_path.write_text("ANTHROPIC_API_KEY=sk-existing\n")
@@ -121,7 +195,38 @@ class TestConfigInit:
             ["config", "init", "--path", str(target), "--force", "--provider", "openai"],
         )
         assert result.exit_code == 0
+        new_content = env_path.read_text()
+        assert "ANTHROPIC_API_KEY=sk-existing" not in new_content
+        assert "OPENAI_API_KEY=" in new_content
+
+    def test_init_prompts_to_overwrite_env_separately(self, tmp_path: Path) -> None:
+        """Config init should ask separately about overwriting .env when it exists."""
+        target = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        env_path.write_text("ANTHROPIC_API_KEY=sk-existing\n")
+        # Answer 'n' to .env overwrite prompt
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--provider", "openai"],
+            input="n\n",
+        )
+        assert result.exit_code == 0
         assert env_path.read_text() == "ANTHROPIC_API_KEY=sk-existing\n"
+
+    def test_init_overwrites_env_when_confirmed(self, tmp_path: Path) -> None:
+        """Config init should overwrite .env when user confirms."""
+        target = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        env_path.write_text("ANTHROPIC_API_KEY=sk-existing\n")
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--provider", "openai"],
+            input="y\n",
+        )
+        assert result.exit_code == 0
+        new_content = env_path.read_text()
+        assert "ANTHROPIC_API_KEY=sk-existing" not in new_content
+        assert "Env file overwritten" in _strip_ansi(result.output)
 
     def test_init_refuses_overwrite_without_force(self, tmp_path: Path) -> None:
         """Config init prompts before overwriting and aborts on 'n'."""

@@ -39,6 +39,75 @@ _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
 logger = get_logger(__name__)
 
 
+def _resolve_agent_thread_mode(
+    agent_config: AgentConfig,
+    room_id: str | None,
+) -> Literal["thread", "room"]:
+    """Resolve one agent's effective thread mode for an optional room context.
+
+    Resolution order is:
+    1. Explicit room ID key match in ``room_thread_modes``.
+    2. Reverse alias lookup from room ID to managed room key.
+    3. Any ``room_thread_modes`` key that resolves to the active room ID.
+    4. Fallback to ``thread_mode``.
+    """
+    default_mode = agent_config.thread_mode
+    if room_id is None or not agent_config.room_thread_modes:
+        return default_mode
+
+    overrides = agent_config.room_thread_modes
+
+    # Fast path: direct room-id key.
+    direct_mode = overrides.get(room_id)
+    if direct_mode is not None:
+        return direct_mode
+
+    # Keep this import local to avoid config<->matrix import cycles during module initialization.
+    from mindroom.matrix.rooms import get_room_alias_from_id, resolve_room_aliases  # noqa: PLC0415
+
+    room_alias = get_room_alias_from_id(room_id)
+    if room_alias:
+        alias_mode = overrides.get(room_alias)
+        if alias_mode is not None:
+            return alias_mode
+
+    for override_key, resolved_room_id in zip(overrides, resolve_room_aliases(list(overrides)), strict=False):
+        if resolved_room_id == room_id:
+            return overrides[override_key]
+
+    return default_mode
+
+
+def _router_agents_for_room(
+    agents: dict[str, AgentConfig],
+    teams: dict[str, TeamConfig],
+    room_id: str | None,
+) -> set[str]:
+    """Return agents relevant for router mode resolution in one room context.
+
+    Includes:
+    - Agents directly configured for the room.
+    - Agents brought into the room via ``teams.<name>.rooms`` mappings.
+
+    Falls back to all agents when no room-specific subset is found.
+    """
+    if room_id is None:
+        return set(agents)
+
+    # Keep this import local to avoid config<->matrix import cycles during module initialization.
+    from mindroom.matrix.rooms import resolve_room_aliases  # noqa: PLC0415
+
+    router_agents: set[str] = set()
+    for agent_name, agent_cfg in agents.items():
+        if room_id in set(resolve_room_aliases(agent_cfg.rooms)):
+            router_agents.add(agent_name)
+    for team_cfg in teams.values():
+        if room_id not in set(resolve_room_aliases(team_cfg.rooms)):
+            continue
+        router_agents.update(agent_name for agent_name in team_cfg.agents if agent_name in agents)
+    return router_agents or set(agents)
+
+
 class Config(BaseModel):
     """Complete configuration from YAML."""
 
@@ -67,9 +136,9 @@ class Config(BaseModel):
         default="UTC",
         description="Timezone for displaying scheduled tasks (e.g., 'America/New_York')",
     )
-    mindroom_user: MindRoomUserConfig = Field(
-        default_factory=MindRoomUserConfig,
-        description="Configuration for the internal MindRoom user account",
+    mindroom_user: MindRoomUserConfig | None = Field(
+        default=None,
+        description="Configuration for the internal MindRoom user account (omit for hosted/public profiles)",
     )
     matrix_room_access: MatrixRoomAccessConfig = Field(
         default_factory=MatrixRoomAccessConfig,
@@ -197,6 +266,8 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def validate_internal_user_username_not_reserved(self) -> Config:
         """Ensure the internal user localpart does not collide with bot accounts."""
+        if self.mindroom_user is None:
+            return self
         reserved_localparts = {
             agent_username_localpart(ROUTER_AGENT_NAME): f"router '{ROUTER_AGENT_NAME}'",
             **{agent_username_localpart(agent_name): f"agent '{agent_name}'" for agent_name in self.agents},
@@ -239,8 +310,10 @@ class Config(BaseModel):
             mapping[team_name] = MatrixID.from_agent(team_name, self.domain)
         return mapping
 
-    def get_mindroom_user_id(self) -> str:
+    def get_mindroom_user_id(self) -> str | None:
         """Get the full Matrix user ID for the configured internal user."""
+        if self.mindroom_user is None:
+            return None
         from mindroom.matrix.identity import MatrixID  # noqa: PLC0415
 
         return MatrixID.from_username(self.mindroom_user.username, self.domain).full_id
@@ -398,27 +471,34 @@ class Config(BaseModel):
             all_room_aliases.update(team_config.rooms)
         return all_room_aliases
 
-    def get_entity_thread_mode(self, entity_name: str) -> Literal["thread", "room"]:
+    def get_entity_thread_mode(
+        self,
+        entity_name: str,
+        room_id: str | None = None,
+    ) -> Literal["thread", "room"]:
         """Get effective thread mode for an agent, team, or router.
 
         Agents use their explicit per-agent setting.
         Teams inherit a mode only when all member agents share it.
-        Router inherits a mode only when all configured agents share it.
+        Router inherits a mode only when all relevant configured agents share it.
         In ambiguous cases, default to "thread".
         """
         if entity_name in self.agents:
-            return self.agents[entity_name].thread_mode
+            return _resolve_agent_thread_mode(self.agents[entity_name], room_id)
 
         if entity_name in self.teams:
             team_modes: set[Literal["thread", "room"]] = {
-                self.agents[name].thread_mode for name in self.teams[entity_name].agents if name in self.agents
+                _resolve_agent_thread_mode(self.agents[name], room_id)
+                for name in self.teams[entity_name].agents
+                if name in self.agents
             }
             if len(team_modes) == 1:
                 return next(iter(team_modes))
 
         if entity_name == ROUTER_AGENT_NAME:
+            router_agents = _router_agents_for_room(self.agents, self.teams, room_id)
             configured_modes: set[Literal["thread", "room"]] = {
-                agent_cfg.thread_mode for agent_cfg in self.agents.values()
+                _resolve_agent_thread_mode(self.agents[agent_name], room_id) for agent_name in router_agents
             }
             if len(configured_modes) == 1:
                 return next(iter(configured_modes))

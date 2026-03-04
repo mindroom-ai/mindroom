@@ -9,6 +9,7 @@ import nio
 import pytest
 
 from mindroom.config.main import Config
+from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, _register_user
 from mindroom.orchestrator import MultiAgentOrchestrator
@@ -17,8 +18,8 @@ from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 if TYPE_CHECKING:
     from pathlib import Path
 
-DEFAULT_INTERNAL_USERNAME = Config().mindroom_user.username
-DEFAULT_INTERNAL_DISPLAY_NAME = Config().mindroom_user.display_name
+DEFAULT_INTERNAL_USERNAME = MindRoomUserConfig().username
+DEFAULT_INTERNAL_DISPLAY_NAME = MindRoomUserConfig().display_name
 
 
 @pytest.fixture(autouse=True)
@@ -126,7 +127,10 @@ class TestUserAccountManagement:
             patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
         ):
             orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
-            await orchestrator._ensure_user_account(Config())
+            _config = Config(
+                mindroom_user={"username": DEFAULT_INTERNAL_USERNAME, "display_name": DEFAULT_INTERNAL_DISPLAY_NAME},
+            )
+            await orchestrator._ensure_user_account(_config)
 
             # Check that user was created
             state = MatrixState.load()
@@ -174,7 +178,13 @@ class TestUserAccountManagement:
                 patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
             ):
                 orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
-                await orchestrator._ensure_user_account(Config())
+                _config = Config(
+                    mindroom_user={
+                        "username": DEFAULT_INTERNAL_USERNAME,
+                        "display_name": DEFAULT_INTERNAL_DISPLAY_NAME,
+                    },
+                )
+                await orchestrator._ensure_user_account(_config)
 
                 # Should use existing account
                 result_config = MatrixState.load()
@@ -222,7 +232,13 @@ class TestUserAccountManagement:
                 patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
             ):
                 orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
-                await orchestrator._ensure_user_account(Config())
+                _config = Config(
+                    mindroom_user={
+                        "username": DEFAULT_INTERNAL_USERNAME,
+                        "display_name": DEFAULT_INTERNAL_DISPLAY_NAME,
+                    },
+                )
+                await orchestrator._ensure_user_account(_config)
 
                 # Should have kept the existing account credentials
                 # (create_agent_user doesn't regenerate passwords on login failure)
@@ -332,6 +348,13 @@ def test_mindroom_user_username_rejects_agent_collision() -> None:
             },
             mindroom_user={"username": "mindroom_assistant", "display_name": "Alice"},
         )
+
+
+def test_mindroom_user_none_validates_and_returns_none_id() -> None:
+    """Config with mindroom_user omitted should validate and return None user ID."""
+    config = Config()
+    assert config.mindroom_user is None
+    assert config.get_mindroom_user_id() is None
 
 
 def test_agent_and_team_names_must_not_overlap() -> None:
