@@ -434,6 +434,23 @@ class Config(BaseModel):
 
         return default_mode
 
+    def _router_agents_for_room(self, room_id: str | None) -> set[str]:
+        """Get agent names relevant for router mode resolution in a room context."""
+        if room_id is None:
+            return set(self.agents)
+
+        from mindroom.matrix.rooms import resolve_room_aliases  # noqa: PLC0415
+
+        router_agents = set()
+        for agent_name, agent_cfg in self.agents.items():
+            if room_id in set(resolve_room_aliases(agent_cfg.rooms)):
+                router_agents.add(agent_name)
+        for team_cfg in self.teams.values():
+            if room_id not in set(resolve_room_aliases(team_cfg.rooms)):
+                continue
+            router_agents.update(agent_name for agent_name in team_cfg.agents if agent_name in self.agents)
+        return router_agents or set(self.agents)
+
     def get_entity_thread_mode(
         self,
         entity_name: str,
@@ -459,17 +476,7 @@ class Config(BaseModel):
                 return next(iter(team_modes))
 
         if entity_name == ROUTER_AGENT_NAME:
-            router_agents: set[str]
-            if room_id is None:
-                router_agents = set(self.agents)
-            else:
-                from mindroom.matrix.rooms import resolve_room_aliases  # noqa: PLC0415
-
-                router_agents = {
-                    agent_name
-                    for agent_name, agent_cfg in self.agents.items()
-                    if room_id in set(resolve_room_aliases(agent_cfg.rooms))
-                } or set(self.agents)
+            router_agents = self._router_agents_for_room(room_id)
             configured_modes: set[Literal["thread", "room"]] = {
                 self._get_agent_thread_mode_for_room(agent_name, room_id) for agent_name in router_agents
             }

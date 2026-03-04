@@ -344,11 +344,6 @@ class AgentBot:
         """Get the Matrix ID for this agent bot."""
         return self.agent_user.matrix_id
 
-    @property
-    def thread_mode(self) -> Literal["thread", "room"]:
-        """Get the thread mode for this agent."""
-        return self.config.get_entity_thread_mode(self.agent_name)
-
     def _thread_mode_for_room(self, room_id: str | None) -> Literal["thread", "room"]:
         """Get effective thread mode for this agent in an optional room context."""
         return self.config.get_entity_thread_mode(self.agent_name, room_id=room_id)
@@ -2320,6 +2315,7 @@ class AgentBot:
         skip_mentions: bool = False,
         tool_trace: list[ToolTraceEntry] | None = None,
         extra_content: dict[str, Any] | None = None,
+        thread_mode_override: Literal["thread", "room"] | None = None,
     ) -> str | None:
         """Send a response message to a room.
 
@@ -2332,6 +2328,7 @@ class AgentBot:
             skip_mentions: If True, add metadata to indicate mentions should not trigger responses
             tool_trace: Optional structured tool trace metadata for message content
             extra_content: Optional content fields merged into the outgoing Matrix event
+            thread_mode_override: Optional thread mode to enforce for this reply
 
         Returns:
             Event ID if message was sent successfully, None otherwise.
@@ -2345,6 +2342,7 @@ class AgentBot:
             reply_to_event_id,
             room_id=room_id,
             event_source=reply_to_event.source if reply_to_event else None,
+            thread_mode_override=thread_mode_override,
         )
 
         if effective_thread_id is None:
@@ -2526,6 +2524,7 @@ class AgentBot:
             response_text=response_text,
             thread_id=thread_event_id,
             extra_content=routed_extra_content or None,
+            thread_mode_override=target_thread_mode,
         )
         if event_id:
             self.logger.info("Routed to agent", suggested_agent=suggested_agent)

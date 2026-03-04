@@ -109,35 +109,35 @@ class TestThreadModeConfig:
 
 
 class TestAgentBotThreadMode:
-    """Test AgentBot.thread_mode property."""
+    """Test AgentBot room-aware thread mode resolution helper."""
 
-    def test_thread_mode_room(
+    def test_thread_mode_for_room_uses_room_override(
         self,
         room_mode_config: Config,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Agent configured with thread_mode=room should report room mode."""
+        """Agent configured with thread_mode=room should resolve room mode for that room."""
         bot = AgentBot(
             config=room_mode_config,
             agent_user=assistant_user,
             storage_path=tmp_path,
         )
-        assert bot.thread_mode == "room"
+        assert bot._thread_mode_for_room("!room:localhost") == "room"
 
-    def test_thread_mode_default(
+    def test_thread_mode_for_room_defaults_to_thread(
         self,
         room_mode_config: Config,
         coder_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Agent with default config should report thread mode."""
+        """Agent with default config should resolve thread mode for that room."""
         bot = AgentBot(
             config=room_mode_config,
             agent_user=coder_user,
             storage_path=tmp_path,
         )
-        assert bot.thread_mode == "thread"
+        assert bot._thread_mode_for_room("!room:localhost") == "thread"
 
 
 class TestConfigThreadModeResolution:
@@ -267,6 +267,35 @@ class TestConfigThreadModeResolution:
         )
         assert config.get_entity_thread_mode(ROUTER_AGENT_NAME, room_id="!room:localhost") == "room"
 
+    def test_router_uses_team_room_agents_for_room_mode_resolution(self) -> None:
+        """Router should include agents brought into a room via team room mapping."""
+        config = Config(
+            agents={
+                "assistant": AgentConfig(
+                    display_name="Assistant",
+                    thread_mode="thread",
+                    room_thread_modes={"!team-room:localhost": "room"},
+                ),
+                "coder": AgentConfig(
+                    display_name="Coder",
+                    rooms=["!other:localhost"],
+                    thread_mode="thread",
+                ),
+            },
+            teams={
+                "ops": TeamConfig(
+                    display_name="Ops Team",
+                    role="Operations",
+                    agents=["assistant"],
+                    rooms=["!team-room:localhost"],
+                ),
+            },
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        )
+        assert config.get_entity_thread_mode(ROUTER_AGENT_NAME, room_id="!team-room:localhost") == "room"
+
 
 class TestRouterHandoffThreadMode:
     """Test router handoff replies follow the suggested entity's thread mode."""
@@ -304,24 +333,34 @@ class TestRouterHandoffThreadMode:
     ) -> None:
         """Router should send handoff in-room when the suggested agent is room-mode."""
         bot = AgentBot(config=room_mode_config, agent_user=router_user, storage_path=tmp_path)
+        bot.client = AsyncMock()
         bot.response_tracker = MagicMock()
-        bot._send_response = AsyncMock(return_value="$reply")
+        captured_content: dict[str, object] = {}
+
+        async def mock_send(_client: object, _room_id: str, content: dict) -> str:
+            captured_content.clear()
+            captured_content.update(content)
+            return "$reply"
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
 
         # Mixed agent modes keep the router itself in thread mode.
-        assert bot.thread_mode == "thread"
+        assert bot._thread_mode_for_room(room.room_id) == "thread"
 
-        with patch("mindroom.bot.suggest_agent_for_message", AsyncMock(return_value="assistant")):
+        with (
+            patch("mindroom.bot.suggest_agent_for_message", AsyncMock(return_value="assistant")),
+            patch("mindroom.bot.send_message", side_effect=mock_send),
+            patch("mindroom.bot.get_latest_thread_event_id_if_needed", new_callable=AsyncMock) as mock_get_latest,
+        ):
             await bot._handle_ai_routing(
                 room,
                 self._routing_event(),
                 thread_history=[],
                 thread_id="$thread_root",
             )
-
-        assert bot._send_response.await_args.kwargs["thread_id"] is None
+        mock_get_latest.assert_not_called()
+        assert "m.relates_to" not in captured_content
 
     @pytest.mark.asyncio
     async def test_router_handoff_uses_suggested_thread_mode(
@@ -332,21 +371,37 @@ class TestRouterHandoffThreadMode:
     ) -> None:
         """Router should keep thread replies when the suggested agent is thread-mode."""
         bot = AgentBot(config=room_mode_config, agent_user=router_user, storage_path=tmp_path)
+        bot.client = AsyncMock()
         bot.response_tracker = MagicMock()
-        bot._send_response = AsyncMock(return_value="$reply")
+        captured_content: dict[str, object] = {}
+
+        async def mock_send(_client: object, _room_id: str, content: dict) -> str:
+            captured_content.clear()
+            captured_content.update(content)
+            return "$reply"
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
 
-        with patch("mindroom.bot.suggest_agent_for_message", AsyncMock(return_value="coder")):
+        with (
+            patch("mindroom.bot.suggest_agent_for_message", AsyncMock(return_value="coder")),
+            patch("mindroom.bot.send_message", side_effect=mock_send),
+            patch(
+                "mindroom.bot.get_latest_thread_event_id_if_needed",
+                new_callable=AsyncMock,
+                return_value="$latest",
+            ) as mock_get_latest,
+        ):
             await bot._handle_ai_routing(
                 room,
                 self._routing_event(),
                 thread_history=[],
                 thread_id="$thread_root",
             )
-
-        assert bot._send_response.await_args.kwargs["thread_id"] == "$thread_root"
+        mock_get_latest.assert_awaited_once()
+        assert "m.relates_to" in captured_content
+        assert isinstance(captured_content["m.relates_to"], dict)
+        assert captured_content["m.relates_to"].get("rel_type") == "m.thread"
 
 
 class TestCreateSessionIdWithNoneThread:
