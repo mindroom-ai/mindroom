@@ -52,6 +52,7 @@ class MultiAgentOrchestrator:
     knowledge_managers: dict[str, KnowledgeManager] = field(default_factory=dict, init=False)
     _memory_auto_flush_worker: MemoryAutoFlushWorker | None = field(default=None, init=False)
     _memory_auto_flush_task: asyncio.Task | None = field(default=None, init=False)
+    _knowledge_refresh_task: asyncio.Task | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         """Store a canonical absolute storage path to survive runtime cwd changes."""
@@ -120,6 +121,64 @@ class MultiAgentOrchestrator:
             reindex_on_create=False,
         )
 
+    async def _cancel_knowledge_refresh_task(self) -> None:
+        """Cancel any in-flight background knowledge refresh task."""
+        task = self._knowledge_refresh_task
+        self._knowledge_refresh_task = None
+        if task is None:
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await task
+
+    @staticmethod
+    def _log_knowledge_refresh_task_result(task: asyncio.Task) -> None:
+        """Log detached knowledge refresh task failures."""
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("Background knowledge refresh failed")
+
+    async def _run_knowledge_refresh(self, config: Config, *, start_watcher: bool) -> None:
+        """Run one background knowledge refresh with a single retry."""
+        current_task = asyncio.current_task()
+        try:
+            for attempt in range(2):
+                try:
+                    await self._configure_knowledge(config, start_watcher=start_watcher)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    if attempt == 0:
+                        logger.warning("Background knowledge refresh failed; retrying once")
+                        await asyncio.sleep(1)
+                        continue
+                    raise
+                else:
+                    return
+        finally:
+            if self._knowledge_refresh_task is current_task:
+                self._knowledge_refresh_task = None
+
+    async def _schedule_knowledge_refresh(self, config: Config, *, start_watcher: bool) -> None:
+        """Schedule knowledge refresh in the background, replacing any in-flight run."""
+        await self._cancel_knowledge_refresh_task()
+        task = asyncio.create_task(
+            self._run_knowledge_refresh(config, start_watcher=start_watcher),
+            name="knowledge_refresh",
+        )
+        task.add_done_callback(self._log_knowledge_refresh_task_result)
+        self._knowledge_refresh_task = task
+
+    async def _refresh_knowledge_for_runtime(self, config: Config, *, start_watcher: bool) -> None:
+        """Refresh knowledge now (startup path) or in background (runtime updates)."""
+        if self.running:
+            await self._schedule_knowledge_refresh(config, start_watcher=start_watcher)
+            return
+        await self._configure_knowledge(config, start_watcher=start_watcher)
+
     async def initialize(self) -> None:
         """Initialize all agent bots with self-management.
 
@@ -133,7 +192,6 @@ class MultiAgentOrchestrator:
         # Ensure user account exists first
         await self._ensure_user_account(config)
         self.config = config
-        await self._configure_knowledge(config, start_watcher=False)
 
         # Create bots for all configured entities
         # Make Router the first so that it can manage room invitations
@@ -181,11 +239,15 @@ class MultiAgentOrchestrator:
         if config is None:
             msg = "Configuration not loaded"
             raise RuntimeError(msg)
-        await self._configure_knowledge(config, start_watcher=True)
-        await self._sync_memory_auto_flush_worker()
 
-        # Setup rooms and have all bots join them
+        # Setup rooms and have all bots join them before potentially heavy
+        # knowledge indexing, so new rooms/invites are not delayed by embeddings.
         await self._setup_rooms_and_memberships(list(self.agent_bots.values()))
+
+        # Build knowledge before sync loops start so first responses include configured bases.
+        await self._configure_knowledge(config, start_watcher=True)
+
+        await self._sync_memory_auto_flush_worker()
 
         # Create sync tasks for each bot with automatic restart on failure
         for entity_name, bot in self.agent_bots.items():
@@ -212,7 +274,8 @@ class MultiAgentOrchestrator:
         if not self.config:
             await self._ensure_user_account(new_config)
             self.config = new_config
-            await self._configure_knowledge(new_config, start_watcher=self.running)
+            await self._refresh_knowledge_for_runtime(new_config, start_watcher=self.running)
+            await self._sync_memory_auto_flush_worker()
             return False
 
         current_config = self.config
@@ -233,8 +296,6 @@ class MultiAgentOrchestrator:
 
         # Only apply the new config after all validation/account checks succeed.
         self.config = new_config
-        await self._configure_knowledge(new_config, start_watcher=self.running)
-        await self._sync_memory_auto_flush_worker()
 
         # Always update config for ALL existing bots (even those being restarted will get new config when recreated)
         logger.info(
@@ -254,6 +315,8 @@ class MultiAgentOrchestrator:
             and not matrix_room_access_changed
             and not authorization_changed
         ):
+            await self._refresh_knowledge_for_runtime(new_config, start_watcher=self.running)
+            await self._sync_memory_auto_flush_worker()
             # No entities to restart or create, we're done
             return False
 
@@ -317,6 +380,9 @@ class MultiAgentOrchestrator:
         if bots_to_setup or mindroom_user_changed or matrix_room_access_changed or authorization_changed:
             await self._setup_rooms_and_memberships(bots_to_setup)
 
+        await self._refresh_knowledge_for_runtime(new_config, start_watcher=self.running)
+        await self._sync_memory_auto_flush_worker()
+
         logger.info(f"Configuration update complete: {len(entities_to_restart) + len(new_entities)} bots affected")
         return True
 
@@ -324,6 +390,7 @@ class MultiAgentOrchestrator:
         """Stop all agent bots."""
         self.running = False
         await self._stop_memory_auto_flush_worker()
+        await self._cancel_knowledge_refresh_task()
         await shutdown_knowledge_managers()
         self.knowledge_managers = {}
 

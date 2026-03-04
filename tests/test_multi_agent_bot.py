@@ -2928,6 +2928,93 @@ class TestMultiAgentOrchestrator:
                 mock_start.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_orchestrator_start_sets_up_rooms_before_knowledge(self, tmp_path: Path) -> None:
+        """Room creation/invites should happen before knowledge refresh work."""
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator.config = MagicMock()
+
+        bot = MagicMock()
+        bot.agent_name = "router"
+        bot.try_start = AsyncMock(return_value=True)
+        orchestrator.agent_bots = {"router": bot}
+
+        call_order: list[str] = []
+
+        async def _setup_rooms(_: list[Any]) -> None:
+            call_order.append("setup_rooms")
+
+        async def _configure_knowledge(*_: object, **__: object) -> None:
+            call_order.append("configure_knowledge")
+
+        with (
+            patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
+            patch.object(orchestrator, "_configure_knowledge", side_effect=_configure_knowledge),
+            patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+            patch("mindroom.orchestrator._sync_forever_with_restart", new=AsyncMock()),
+        ):
+            await orchestrator.start()
+
+        assert call_order == ["setup_rooms", "configure_knowledge"]
+        bot.try_start.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_schedule_knowledge_refresh_logs_failure(self, tmp_path: Path) -> None:
+        """Background knowledge failures should be logged and task state reset."""
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        config = MagicMock()
+
+        mock_configure = AsyncMock(side_effect=RuntimeError("boom"))
+
+        with (
+            patch.object(orchestrator, "_configure_knowledge", mock_configure),
+            patch("mindroom.orchestrator.logger.exception") as mock_exception,
+        ):
+            await orchestrator._schedule_knowledge_refresh(config, start_watcher=True)
+            task = orchestrator._knowledge_refresh_task
+            assert task is not None
+            await asyncio.gather(task, return_exceptions=True)
+            await asyncio.sleep(0)
+
+        assert orchestrator._knowledge_refresh_task is None
+        assert mock_configure.await_count == 2
+        mock_exception.assert_called_once_with("Background knowledge refresh failed")
+
+    @pytest.mark.asyncio
+    async def test_update_config_schedules_knowledge_refresh_when_running(self, tmp_path: Path) -> None:
+        """Hot reload should schedule (not block on) knowledge refresh while running."""
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+
+        config = MagicMock()
+        config.agents = {}
+        config.teams = {}
+        config.mindroom_user = None
+        config.matrix_room_access = MagicMock()
+        config.authorization = MagicMock()
+        config.defaults.enable_streaming = True
+
+        orchestrator.config = config
+        orchestrator.running = True
+        router_bot = MagicMock()
+        router_bot.config = config
+        router_bot.enable_streaming = True
+        router_bot._set_presence_with_model_info = AsyncMock()
+        orchestrator.agent_bots = {"router": router_bot}
+
+        with (
+            patch("mindroom.orchestrator.Config.from_yaml", return_value=config),
+            patch("mindroom.orchestrator.load_plugins"),
+            patch("mindroom.orchestrator._identify_entities_to_restart", new=AsyncMock(return_value=set())),
+            patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()) as mock_schedule_knowledge,
+            patch.object(orchestrator, "_configure_knowledge", new=AsyncMock()) as mock_configure_knowledge,
+            patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+        ):
+            updated = await orchestrator.update_config()
+
+        assert updated is False
+        mock_schedule_knowledge.assert_awaited_once_with(config, start_watcher=True)
+        mock_configure_knowledge.assert_not_awaited()
+
+    @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator stop
     @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
     @patch("mindroom.config.main.Config.from_yaml")
