@@ -108,38 +108,6 @@ class TestThreadModeConfig:
             AgentConfig(display_name="Test", room_thread_modes={"lobby": "invalid"})
 
 
-class TestAgentBotThreadMode:
-    """Test AgentBot room-aware thread mode resolution helper."""
-
-    def test_thread_mode_for_room_uses_room_override(
-        self,
-        room_mode_config: Config,
-        assistant_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Agent configured with thread_mode=room should resolve room mode for that room."""
-        bot = AgentBot(
-            config=room_mode_config,
-            agent_user=assistant_user,
-            storage_path=tmp_path,
-        )
-        assert bot._thread_mode_for_room("!room:localhost") == "room"
-
-    def test_thread_mode_for_room_defaults_to_thread(
-        self,
-        room_mode_config: Config,
-        coder_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Agent with default config should resolve thread mode for that room."""
-        bot = AgentBot(
-            config=room_mode_config,
-            agent_user=coder_user,
-            storage_path=tmp_path,
-        )
-        assert bot._thread_mode_for_room("!room:localhost") == "thread"
-
-
 class TestConfigThreadModeResolution:
     """Test thread-mode resolution for non-agent entities."""
 
@@ -346,7 +314,7 @@ class TestRouterHandoffThreadMode:
         room.room_id = "!room:localhost"
 
         # Mixed agent modes keep the router itself in thread mode.
-        assert bot._thread_mode_for_room(room.room_id) == "thread"
+        assert bot.config.get_entity_thread_mode(ROUTER_AGENT_NAME, room_id=room.room_id) == "thread"
 
         with (
             patch("mindroom.bot.suggest_agent_for_message", AsyncMock(return_value="assistant")),

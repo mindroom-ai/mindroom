@@ -344,10 +344,6 @@ class AgentBot:
         """Get the Matrix ID for this agent bot."""
         return self.agent_user.matrix_id
 
-    def _thread_mode_for_room(self, room_id: str | None) -> Literal["thread", "room"]:
-        """Get effective thread mode for this agent in an optional room context."""
-        return self.config.get_entity_thread_mode(self.agent_name, room_id=room_id)
-
     def _resolve_reply_thread_id(
         self,
         thread_id: str | None,
@@ -363,7 +359,10 @@ class AgentBot:
         messages and store room-level state. In thread mode, this prefers an
         existing thread ID and falls back to a safe root/reply target.
         """
-        effective_thread_mode = thread_mode_override or self._thread_mode_for_room(room_id)
+        effective_thread_mode = thread_mode_override or self.config.get_entity_thread_mode(
+            self.agent_name,
+            room_id=room_id,
+        )
         if effective_thread_mode == "room":
             return None
         event_info = EventInfo.from_event(event_source)
@@ -1465,7 +1464,7 @@ class AgentBot:
             self.logger.info("Mentioned", event_id=event.event_id, room_name=room.name)
 
         event_info = EventInfo.from_event(event.source)
-        if self._thread_mode_for_room(room.room_id) == "room":
+        if self.config.get_entity_thread_mode(self.agent_name, room_id=room.room_id) == "room":
             is_thread = False
             thread_id = None
             thread_history: list[dict[str, Any]] = []
@@ -1576,7 +1575,7 @@ class AgentBot:
 
         # Get the appropriate model for this team and room
         model_name = select_model_for_team(self.agent_name, room_id, self.config)
-        room_mode = self._thread_mode_for_room(room_id) == "room"
+        room_mode = self.config.get_entity_thread_mode(self.agent_name, room_id=room_id) == "room"
 
         # Decide streaming based on presence
         use_streaming = await should_use_streaming(
@@ -2103,7 +2102,7 @@ class AgentBot:
         media_inputs = media or MediaInputs()
         session_id = create_session_id(room_id, thread_id)
         knowledge = self._knowledge_for_agent(self.agent_name)
-        room_mode = self._thread_mode_for_room(room_id) == "room"
+        room_mode = self.config.get_entity_thread_mode(self.agent_name, room_id=room_id) == "room"
         model_prompt = self._append_matrix_prompt_context(
             prompt,
             room_id=room_id,
@@ -2407,7 +2406,7 @@ class AgentBot:
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
 
-        if self._thread_mode_for_room(room_id) == "room":
+        if self.config.get_entity_thread_mode(self.agent_name, room_id=room_id) == "room":
             # Room mode: no thread metadata on edits
             content = format_message_with_mentions(
                 self.config,
