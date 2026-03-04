@@ -181,7 +181,7 @@ def patch_chromadb_for_python314() -> None:
         model_config = BaseSettings.model_config.copy()
         model_config["extra"] = "ignore"
 
-    pydantic.BaseSettings = _PermissiveBaseSettings  # type: ignore[attr-defined]
+    pydantic.BaseSettings = _PermissiveBaseSettings
 
     original_inspect_namespace = _model_construction.inspect_namespace
 

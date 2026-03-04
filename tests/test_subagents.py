@@ -190,6 +190,37 @@ async def test_sessions_send_rejects_room_mode_threaded_dispatch(
 
 
 @pytest.mark.asyncio
+async def test_sessions_send_checks_target_room_thread_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sessions_send should evaluate thread mode using the target room context."""
+    send_mock = AsyncMock(return_value="$evt")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    config = _make_config()
+    config.get_entity_thread_mode.side_effect = (
+        lambda _agent_name, room_id=None: "room" if room_id == "!target:localhost" else "thread"
+    )
+    ctx = _make_context(tmp_path, config=config)
+    target_session = create_session_id("!target:localhost", "$worker-thread:localhost")
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await SubAgentsTools().sessions_send(
+                message="hello",
+                session_key=target_session,
+                agent_id="openclaw",
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert payload["tool"] == "sessions_send"
+    assert "thread_mode=room" in payload["message"]
+    send_mock.assert_not_awaited()
+    config.get_entity_thread_mode.assert_called_with("openclaw", room_id="!target:localhost")
+
+
+@pytest.mark.asyncio
 async def test_sessions_send_label_resolves_to_tracked_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

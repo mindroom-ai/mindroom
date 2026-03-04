@@ -344,16 +344,12 @@ class AgentBot:
         """Get the Matrix ID for this agent bot."""
         return self.agent_user.matrix_id
 
-    @property
-    def thread_mode(self) -> Literal["thread", "room"]:
-        """Get the thread mode for this agent."""
-        return self.config.get_entity_thread_mode(self.agent_name)
-
     def _resolve_reply_thread_id(
         self,
         thread_id: str | None,
         reply_to_event_id: str | None = None,
         *,
+        room_id: str | None = None,
         event_source: dict[str, Any] | None = None,
         thread_mode_override: Literal["thread", "room"] | None = None,
     ) -> str | None:
@@ -363,7 +359,10 @@ class AgentBot:
         messages and store room-level state. In thread mode, this prefers an
         existing thread ID and falls back to a safe root/reply target.
         """
-        effective_thread_mode = thread_mode_override or self.thread_mode
+        effective_thread_mode = thread_mode_override or self.config.get_entity_thread_mode(
+            self.agent_name,
+            room_id=room_id,
+        )
         if effective_thread_mode == "room":
             return None
         event_info = EventInfo.from_event(event_source)
@@ -968,6 +967,7 @@ class AgentBot:
         effective_thread_id = self._resolve_reply_thread_id(
             thread_id,
             event.event_id,
+            room_id=room.room_id,
             event_source=event.source,
         )
         attachment_record = None
@@ -1062,6 +1062,7 @@ class AgentBot:
         effective_thread_id = self._resolve_reply_thread_id(
             context.thread_id,
             event.event_id,
+            room_id=room.room_id,
             event_source=event.source,
         )
         current_attachment_ids: list[str]
@@ -1463,7 +1464,7 @@ class AgentBot:
             self.logger.info("Mentioned", event_id=event.event_id, room_name=room.name)
 
         event_info = EventInfo.from_event(event.source)
-        if self.thread_mode == "room":
+        if self.config.get_entity_thread_mode(self.agent_name, room_id=room.room_id) == "room":
             is_thread = False
             thread_id = None
             thread_history: list[dict[str, Any]] = []
@@ -1506,7 +1507,7 @@ class AgentBot:
             agent_name=agent_name or self.agent_name,
             room_id=room_id,
             thread_id=thread_id,
-            resolved_thread_id=self._resolve_reply_thread_id(thread_id, reply_to_event_id),
+            resolved_thread_id=self._resolve_reply_thread_id(thread_id, reply_to_event_id, room_id=room_id),
             requester_id=user_id or self.matrix_id.full_id,
             client=self.client,
             config=self.config,
@@ -1541,7 +1542,7 @@ class AgentBot:
         if self._MATRIX_PROMPT_CONTEXT_MARKER in prompt:
             return prompt
 
-        effective_thread_id = self._resolve_reply_thread_id(thread_id, reply_to_event_id)
+        effective_thread_id = self._resolve_reply_thread_id(thread_id, reply_to_event_id, room_id=room_id)
         metadata_block = "\n".join(
             (
                 self._MATRIX_PROMPT_CONTEXT_MARKER,
@@ -1574,6 +1575,7 @@ class AgentBot:
 
         # Get the appropriate model for this team and room
         model_name = select_model_for_team(self.agent_name, room_id, self.config)
+        room_mode = self.config.get_entity_thread_mode(self.agent_name, room_id=room_id) == "room"
 
         # Decide streaming based on presence
         use_streaming = await should_use_streaming(
@@ -1639,7 +1641,7 @@ class AgentBot:
                             header=None,
                             show_tool_calls=self.show_tool_calls,
                             existing_event_id=message_id,
-                            room_mode=self.thread_mode == "room",
+                            room_mode=room_mode,
                         )
 
                 # Handle interactive questions in team responses
@@ -1899,7 +1901,11 @@ class AgentBot:
             # - If already in a thread, use that thread_id
             # - If not in a thread, use reply_to_event_id (the user's message) as thread root
             # This ensures consistency with how the bot creates threads
-            thread_root_for_registration = self._resolve_reply_thread_id(thread_id, reply_to_event_id)
+            thread_root_for_registration = self._resolve_reply_thread_id(
+                thread_id,
+                reply_to_event_id,
+                room_id=room_id,
+            )
             interactive.register_interactive_question(
                 event_id,
                 room_id,
@@ -1984,7 +1990,11 @@ class AgentBot:
         )
 
         if event_id and response.option_map and response.options_list:
-            thread_root_for_registration = self._resolve_reply_thread_id(thread_id, reply_to_event_id)
+            thread_root_for_registration = self._resolve_reply_thread_id(
+                thread_id,
+                reply_to_event_id,
+                room_id=room_id,
+            )
             interactive.register_interactive_question(
                 event_id,
                 room_id,
@@ -2053,7 +2063,11 @@ class AgentBot:
         if interactive.should_create_interactive_question(content):
             response = interactive.parse_and_format_interactive(content, extract_mapping=True)
             if response.option_map and response.options_list:
-                thread_root_for_registration = self._resolve_reply_thread_id(thread_id, reply_to_event_id)
+                thread_root_for_registration = self._resolve_reply_thread_id(
+                    thread_id,
+                    reply_to_event_id,
+                    room_id=room_id,
+                )
                 interactive.register_interactive_question(
                     event_id,
                     room_id,
@@ -2088,6 +2102,7 @@ class AgentBot:
         media_inputs = media or MediaInputs()
         session_id = create_session_id(room_id, thread_id)
         knowledge = self._knowledge_for_agent(self.agent_name)
+        room_mode = self.config.get_entity_thread_mode(self.agent_name, room_id=room_id) == "room"
         model_prompt = self._append_matrix_prompt_context(
             prompt,
             room_id=room_id,
@@ -2135,7 +2150,7 @@ class AgentBot:
                         response_stream,
                         streaming_cls=StreamingResponse,
                         existing_event_id=existing_event_id,
-                        room_mode=self.thread_mode == "room",
+                        room_mode=room_mode,
                         show_tool_calls=self.show_tool_calls,
                         extra_content=response_extra_content,
                     )
@@ -2299,6 +2314,7 @@ class AgentBot:
         skip_mentions: bool = False,
         tool_trace: list[ToolTraceEntry] | None = None,
         extra_content: dict[str, Any] | None = None,
+        thread_mode_override: Literal["thread", "room"] | None = None,
     ) -> str | None:
         """Send a response message to a room.
 
@@ -2311,6 +2327,7 @@ class AgentBot:
             skip_mentions: If True, add metadata to indicate mentions should not trigger responses
             tool_trace: Optional structured tool trace metadata for message content
             extra_content: Optional content fields merged into the outgoing Matrix event
+            thread_mode_override: Optional thread mode to enforce for this reply
 
         Returns:
             Event ID if message was sent successfully, None otherwise.
@@ -2322,7 +2339,9 @@ class AgentBot:
         effective_thread_id = self._resolve_reply_thread_id(
             thread_id,
             reply_to_event_id,
+            room_id=room_id,
             event_source=reply_to_event.source if reply_to_event else None,
+            thread_mode_override=thread_mode_override,
         )
 
         if effective_thread_id is None:
@@ -2387,7 +2406,7 @@ class AgentBot:
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
 
-        if self.thread_mode == "room":
+        if self.config.get_entity_thread_mode(self.agent_name, room_id=room_id) == "room":
             # Room mode: no thread metadata on edits
             content = format_message_with_mentions(
                 self.config,
@@ -2468,10 +2487,13 @@ class AgentBot:
             # Router mentions the suggested agent and asks them to help
             response_text = f"@{suggested_agent} could you help with this?"
 
-        target_thread_mode = self.config.get_entity_thread_mode(suggested_agent) if suggested_agent else None
+        target_thread_mode = (
+            self.config.get_entity_thread_mode(suggested_agent, room_id=room.room_id) if suggested_agent else None
+        )
         thread_event_id = self._resolve_reply_thread_id(
             thread_id,
             event.event_id,
+            room_id=room.room_id,
             event_source=event.source,
             thread_mode_override=target_thread_mode,
         )
@@ -2501,6 +2523,7 @@ class AgentBot:
             response_text=response_text,
             thread_id=thread_event_id,
             extra_content=routed_extra_content or None,
+            thread_mode_override=target_thread_mode,
         )
         if event_id:
             self.logger.info("Routed to agent", suggested_agent=suggested_agent)
