@@ -156,7 +156,7 @@ describe('Credentials', () => {
 
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledWith(
-        'http://localhost:8765/api/credentials/github_private',
+        '/api/credentials/github_private',
         expect.objectContaining({
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -252,7 +252,7 @@ describe('Credentials', () => {
     await waitFor(() => {
       expect(window.confirm).toHaveBeenCalledWith("Delete credentials for 'github_private'?");
       expect(global.fetch).toHaveBeenCalledWith(
-        'http://localhost:8765/api/credentials/github_private',
+        '/api/credentials/github_private',
         expect.objectContaining({
           method: 'DELETE',
         })
@@ -302,7 +302,7 @@ describe('Credentials', () => {
 
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledWith(
-        'http://localhost:8765/api/credentials/github_private/test',
+        '/api/credentials/github_private/test',
         expect.objectContaining({
           method: 'POST',
         })
