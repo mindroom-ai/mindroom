@@ -11,7 +11,9 @@ const isDocker = process.env.DOCKER_CONTAINER === '1';
 // The empty prefix '' makes loadEnv read ALL vars, not just VITE_-prefixed ones.
 // This key is used server-side by the dev proxy and never reaches the browser.
 const rootEnv = loadEnv('development', path.resolve(__dirname, '..'), '');
-const apiKey = process.env.MINDROOM_API_KEY || rootEnv.MINDROOM_API_KEY;
+const userEnvDir = process.env.HOME ? path.join(process.env.HOME, '.mindroom') : '';
+const userEnv = userEnvDir ? loadEnv('development', userEnvDir, '') : {};
+const apiKey = process.env.MINDROOM_API_KEY || rootEnv.MINDROOM_API_KEY || userEnv.MINDROOM_API_KEY;
 
 // https://vitejs.dev/config/
 export default defineConfig({
