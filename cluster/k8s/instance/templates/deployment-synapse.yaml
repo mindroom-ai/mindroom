@@ -21,7 +21,7 @@ spec:
       containers:
       - name: synapse
         image: {{ .Values.synapse_image | default "matrixdotorg/synapse:latest" }}
-        imagePullPolicy: Always
+        imagePullPolicy: {{ .Values.synapse_image_pull_policy | default "Always" }}
         ports:
         - containerPort: 8008
           name: http

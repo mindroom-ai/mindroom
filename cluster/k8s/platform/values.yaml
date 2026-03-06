@@ -27,6 +27,12 @@ stripe:
 # Provisioner
 provisioner:
   apiKey: ""
+  instanceBaseDomain: ""
+  instanceStorageClassName: ""
+  instanceMindroomImage: ""
+  instanceMindroomImagePullPolicy: ""
+  instanceSynapseImage: ""
+  instanceSynapseImagePullPolicy: ""
 
 # Optional AI API keys
 apiKeys:

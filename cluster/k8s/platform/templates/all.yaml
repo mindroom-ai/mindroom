@@ -16,6 +16,12 @@ data:
   PLATFORM_DOMAIN: {{ .Values.domain }}
   ENVIRONMENT: {{ .Values.environment }}
   ENABLE_CLEANUP_SCHEDULER: {{ .Values.cleanupScheduler.enabled | default "false" | quote }}
+  INSTANCE_BASE_DOMAIN: {{ .Values.provisioner.instanceBaseDomain | default .Values.domain | quote }}
+  INSTANCE_STORAGE_CLASS_NAME: {{ .Values.provisioner.instanceStorageClassName | default "" | quote }}
+  INSTANCE_MINDROOM_IMAGE: {{ .Values.provisioner.instanceMindroomImage | default "" | quote }}
+  INSTANCE_MINDROOM_IMAGE_PULL_POLICY: {{ .Values.provisioner.instanceMindroomImagePullPolicy | default "" | quote }}
+  INSTANCE_SYNAPSE_IMAGE: {{ .Values.provisioner.instanceSynapseImage | default "" | quote }}
+  INSTANCE_SYNAPSE_IMAGE_PULL_POLICY: {{ .Values.provisioner.instanceSynapseImagePullPolicy | default "" | quote }}
   SUPABASE_URL: {{ .Values.supabase.url | default "" | quote }}
   SUPABASE_ANON_KEY: {{ .Values.supabase.anonKey | default "" | quote }}
   STRIPE_PUBLISHABLE_KEY: {{ .Values.stripe.publishableKey | default "" | quote }}

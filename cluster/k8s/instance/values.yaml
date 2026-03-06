@@ -8,6 +8,7 @@ storagePath: "/mindroom_data"  # Base path inside container for persisted state
 mindroom_image: ghcr.io/mindroom-ai/mindroom:latest
 mindroom_image_pull_policy: Always
 synapse_image: matrixdotorg/synapse:latest
+synapse_image_pull_policy: Always
 
 # API keys and secrets (referenced via Secret in deployment)
 # Provide values here or inject via a separate Secret overwrite.

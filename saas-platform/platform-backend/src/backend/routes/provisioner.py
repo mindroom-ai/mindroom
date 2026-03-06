@@ -9,6 +9,12 @@ from backend.config import (
     ANTHROPIC_API_KEY,
     DEEPSEEK_API_KEY,
     GOOGLE_API_KEY,
+    INSTANCE_BASE_DOMAIN,
+    INSTANCE_MINDROOM_IMAGE,
+    INSTANCE_MINDROOM_IMAGE_PULL_POLICY,
+    INSTANCE_SYNAPSE_IMAGE,
+    INSTANCE_SYNAPSE_IMAGE_PULL_POLICY,
+    INSTANCE_STORAGE_CLASS_NAME,
     OPENAI_API_KEY,
     OPENROUTER_API_KEY,
     PLATFORM_DOMAIN,
@@ -157,9 +163,10 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     logger.info("Deploying instance %s to namespace %s", customer_id, namespace)
 
     # Compute URLs and persist them (subdomain is set via trigger if null)
-    frontend_url = f"https://{customer_id}.{PLATFORM_DOMAIN}"
-    api_url = f"https://{customer_id}.api.{PLATFORM_DOMAIN}"
-    matrix_url = f"https://{customer_id}.matrix.{PLATFORM_DOMAIN}"
+    base_domain = INSTANCE_BASE_DOMAIN or PLATFORM_DOMAIN
+    frontend_url = f"https://{customer_id}.{base_domain}"
+    api_url = f"https://{customer_id}.api.{base_domain}"
+    matrix_url = f"https://{customer_id}.matrix.{base_domain}"
     try:
         sb.table("instances").update(
             {
@@ -180,41 +187,51 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
 
     try:
         # Use upgrade --install to handle both new and re-provisioning cases
-        code, stdout, stderr = await run_helm(
-            [
-                "upgrade",
-                "--install",
-                helm_release_name,
-                "/app/k8s/instance/",
-                "--namespace",
-                namespace,
-                "--create-namespace",
-                "--set",
-                f"customer={customer_id}",
-                "--set",
-                f"baseDomain={PLATFORM_DOMAIN}",
-                "--set",
-                f"accountId={account_id}",
-                "--set",
-                f"supabaseUrl={SUPABASE_URL or ''}",
-                "--set",
-                f"supabaseAnonKey={SUPABASE_ANON_KEY or ''}",
-                "--set",
-                f"supabaseServiceKey={SUPABASE_SERVICE_KEY or ''}",
-                "--set",
-                f"openai_key={OPENAI_API_KEY}",
-                "--set",
-                f"anthropic_key={ANTHROPIC_API_KEY}",
-                "--set",
-                f"google_key={GOOGLE_API_KEY}",
-                "--set",
-                f"openrouter_key={OPENROUTER_API_KEY}",
-                "--set",
-                f"deepseek_key={DEEPSEEK_API_KEY}",
-                "--set",
-                f"sandbox_proxy_token={sandbox_proxy_token}",
-            ],
-        )
+        helm_args = [
+            "upgrade",
+            "--install",
+            helm_release_name,
+            "/app/k8s/instance/",
+            "--namespace",
+            namespace,
+            "--create-namespace",
+            "--set",
+            f"customer={customer_id}",
+            "--set",
+            f"baseDomain={base_domain}",
+            "--set",
+            f"accountId={account_id}",
+            "--set",
+            f"supabaseUrl={SUPABASE_URL or ''}",
+            "--set",
+            f"supabaseAnonKey={SUPABASE_ANON_KEY or ''}",
+            "--set",
+            f"supabaseServiceKey={SUPABASE_SERVICE_KEY or ''}",
+            "--set",
+            f"openai_key={OPENAI_API_KEY}",
+            "--set",
+            f"anthropic_key={ANTHROPIC_API_KEY}",
+            "--set",
+            f"google_key={GOOGLE_API_KEY}",
+            "--set",
+            f"openrouter_key={OPENROUTER_API_KEY}",
+            "--set",
+            f"deepseek_key={DEEPSEEK_API_KEY}",
+            "--set",
+            f"sandbox_proxy_token={sandbox_proxy_token}",
+        ]
+        if INSTANCE_STORAGE_CLASS_NAME:
+            helm_args += ["--set", f"storageClassName={INSTANCE_STORAGE_CLASS_NAME}"]
+        if INSTANCE_MINDROOM_IMAGE:
+            helm_args += ["--set", f"mindroom_image={INSTANCE_MINDROOM_IMAGE}"]
+        if INSTANCE_MINDROOM_IMAGE_PULL_POLICY:
+            helm_args += ["--set", f"mindroom_image_pull_policy={INSTANCE_MINDROOM_IMAGE_PULL_POLICY}"]
+        if INSTANCE_SYNAPSE_IMAGE:
+            helm_args += ["--set", f"synapse_image={INSTANCE_SYNAPSE_IMAGE}"]
+        if INSTANCE_SYNAPSE_IMAGE_PULL_POLICY:
+            helm_args += ["--set", f"synapse_image_pull_policy={INSTANCE_SYNAPSE_IMAGE_PULL_POLICY}"]
+
+        code, stdout, stderr = await run_helm(helm_args)
         if code != 0:
             # Mark as error in DB
             try:

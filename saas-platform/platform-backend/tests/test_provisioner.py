@@ -71,6 +71,7 @@ class TestProvisionerEndpoints:
         """Mock configuration values."""
         with patch.multiple(
             "backend.routes.provisioner",
+            INSTANCE_BASE_DOMAIN="mindroom.test",
             PLATFORM_DOMAIN="mindroom.test",
             SUPABASE_URL="https://supabase.test",
             SUPABASE_ANON_KEY="test-anon-key",

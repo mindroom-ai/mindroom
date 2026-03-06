@@ -12,12 +12,14 @@ PLATFORM_BACKEND_IMAGE="${REGISTRY}/platform-backend:latest"
 PLATFORM_FRONTEND_IMAGE="${REGISTRY}/platform-frontend:latest"
 MINDROOM_IMAGE="${REGISTRY}/mindroom:latest"
 MINDROOM_MINIMAL_IMAGE="${REGISTRY}/mindroom-minimal:latest"
+SYNAPSE_IMAGE="${SYNAPSE_IMAGE:-matrixdotorg/synapse:latest}"
 
 echo "[images] Building images tagged to chart/runtime defaults:"
 echo "  - ${PLATFORM_BACKEND_IMAGE}"
 echo "  - ${PLATFORM_FRONTEND_IMAGE}"
 echo "  - ${MINDROOM_IMAGE}"
 echo "  - ${MINDROOM_MINIMAL_IMAGE}"
+echo "  - ${SYNAPSE_IMAGE}"
 
 pushd "${ROOT_DIR}" >/dev/null
 
@@ -45,6 +47,7 @@ kind load docker-image "${PLATFORM_FRONTEND_IMAGE}" --name "${CLUSTER_NAME}"
 kind load docker-image "${PLATFORM_BACKEND_IMAGE}" --name "${CLUSTER_NAME}"
 kind load docker-image "${MINDROOM_IMAGE}" --name "${CLUSTER_NAME}"
 kind load docker-image "${MINDROOM_MINIMAL_IMAGE}" --name "${CLUSTER_NAME}"
+kind load docker-image "${SYNAPSE_IMAGE}" --name "${CLUSTER_NAME}"
 
 echo "[images] Done. Helm will use these images with imagePullPolicy=IfNotPresent."
 
