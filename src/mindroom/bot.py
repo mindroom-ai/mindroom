@@ -63,7 +63,6 @@ from mindroom.teams import (
 from mindroom.thread_utils import (
     check_agent_mentioned,
     create_session_id,
-    extract_mentioned_user_ids,
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
     get_configured_agents_for_room,
@@ -82,7 +81,6 @@ from .attachments import (
     merge_attachment_ids,
     parse_attachment_ids_from_event_source,
     parse_attachment_ids_from_thread_history,
-    register_audio_attachment,
     register_file_or_video_attachment,
     register_image_attachment,
     resolve_thread_attachment_ids,
@@ -103,7 +101,6 @@ from .constants import (
     MATRIX_HOMESERVER,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
-    VOICE_PREFIX,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 from .knowledge.utils import MultiKnowledgeVectorDb, resolve_agent_knowledge
@@ -131,7 +128,7 @@ if TYPE_CHECKING:
     import structlog
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
-    from agno.media import Audio, Image
+    from agno.media import Image
 
     from mindroom.config.main import Config
     from mindroom.orchestrator import MultiAgentOrchestrator
@@ -270,11 +267,9 @@ type _MediaDispatchEvent = (
     | nio.RoomEncryptedFile
     | nio.RoomMessageVideo
     | nio.RoomEncryptedVideo
+    | nio.RoomMessageAudio
+    | nio.RoomEncryptedAudio
 )
-
-type _AudioEvent = nio.RoomMessageAudio | nio.RoomEncryptedAudio
-
-type _DispatchOrVoiceEvent = _DispatchEvent | _AudioEvent
 
 
 @dataclass(frozen=True)
@@ -295,19 +290,8 @@ class _DispatchPayload:
 
 
 @dataclass(frozen=True)
-class _PreparedAudioEvent:
-    """Prepared audio inputs shared by router-owned and direct agent flows."""
-
-    context: _MessageContext
-    effective_thread_id: str | None
-    audio: Audio | None
-    attachment_id: str | None
-    transcribed_message: str | None
-
-
-@dataclass(frozen=True)
 class _SyntheticTextEvent:
-    """Minimal text-event shape for internal normalized-audio dispatch."""
+    """Minimal text-event shape for internal normalized-media dispatch."""
 
     sender: str
     event_id: str
@@ -553,10 +537,6 @@ class AgentBot:
         self.client.add_event_callback(_create_task_wrapper(self._on_message), nio.RoomMessageText)
         self.client.add_event_callback(_create_task_wrapper(self._on_reaction), nio.ReactionEvent)
 
-        # Audio uses a single attachment-first pipeline for every bot.
-        self.client.add_event_callback(_create_task_wrapper(self._on_voice_message), nio.RoomMessageAudio)
-        self.client.add_event_callback(_create_task_wrapper(self._on_voice_message), nio.RoomEncryptedAudio)
-
         # Register media callbacks on all agents (each agent handles its own routing)
         self.client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomMessageImage)
         self.client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomEncryptedImage)
@@ -564,6 +544,8 @@ class AgentBot:
         self.client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomEncryptedFile)
         self.client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomMessageVideo)
         self.client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomEncryptedVideo)
+        self.client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomMessageAudio)
+        self.client.add_event_callback(_create_task_wrapper(self._on_media_message), nio.RoomEncryptedAudio)
 
         self.running = True
 
@@ -768,14 +750,25 @@ class AgentBot:
         if dispatch is None:
             return
 
+        content = event.source.get("content") if isinstance(event.source, dict) else None
         message_attachment_ids = parse_attachment_ids_from_event_source(event.source)
+        message_extra_content: dict[str, Any] = {}
+        if message_attachment_ids:
+            message_extra_content[ATTACHMENT_IDS_KEY] = message_attachment_ids
+        if isinstance(content, dict):
+            original_sender = content.get(ORIGINAL_SENDER_KEY)
+            if isinstance(original_sender, str):
+                message_extra_content[ORIGINAL_SENDER_KEY] = original_sender
+            raw_audio_fallback = content.get(VOICE_RAW_AUDIO_FALLBACK_KEY)
+            if isinstance(raw_audio_fallback, bool) and raw_audio_fallback:
+                message_extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
 
         action = await self._resolve_dispatch_action(
             room,
             event,
             dispatch,
             message_for_decision=event.body,
-            extra_content={ATTACHMENT_IDS_KEY: message_attachment_ids} if message_attachment_ids else None,
+            extra_content=message_extra_content or None,
         )
         if action is None:
             return
@@ -946,442 +939,12 @@ class AgentBot:
             attachment_ids=resolved_attachment_ids or None,
         )
 
-    @staticmethod
-    def _audio_caption(event: _AudioEvent) -> str:
-        """Return a stable text prompt for an audio event."""
-        return extract_media_caption(event, default="[Attached voice message]")
-
-    def _router_matrix_id(self) -> MatrixID:
-        """Return the router Matrix ID, even in minimal test configs."""
-        current_user_id = self.agent_user.user_id
-        if self.agent_name == ROUTER_AGENT_NAME and isinstance(current_user_id, str):
-            return MatrixID.parse(current_user_id)
-        router_id = self.config.ids.get(ROUTER_AGENT_NAME)
-        if router_id is not None:
-            return router_id
-        if isinstance(current_user_id, str):
-            current_matrix_id = MatrixID.parse(current_user_id)
-            return MatrixID.from_agent(ROUTER_AGENT_NAME, current_matrix_id.domain)
-        return MatrixID.from_agent(ROUTER_AGENT_NAME, self.matrix_id.domain)
-
-    def _room_has_router(self, room: nio.MatrixRoom) -> bool:
-        """Return whether the router is a visible participant in the room."""
-        return self._router_matrix_id().full_id in room.users
-
-    def _router_should_own_audio(
+    async def _on_audio_media_message(
         self,
         room: nio.MatrixRoom,
-        requester_user_id: str,
-    ) -> bool:
-        """Decide whether the router should consume the original audio event.
-
-        Audio has exactly one normalization owner:
-        - when the router is present in the room and may reply to this sender,
-          the router relays transcript or fallback text
-        - otherwise one non-router entity relays the audio on behalf of the user
-        """
-        return self._room_has_router(room) and is_sender_allowed_for_agent_reply(
-            requester_user_id,
-            ROUTER_AGENT_NAME,
-            self.config,
-        )
-
-    def _available_audio_agents(
-        self,
-        room: nio.MatrixRoom,
-        requester_user_id: str,
-    ) -> list[MatrixID]:
-        """Return reply-eligible non-router agents visible in the room."""
-        available_agents = get_available_agents_for_sender(room, requester_user_id, self.config)
-        if available_agents:
-            return available_agents
-        if (
-            self.agent_name != ROUTER_AGENT_NAME
-            and self.matrix_id.full_id in room.users
-            and len(room.users) == 2
-            and self._can_reply_to_sender(requester_user_id)
-        ):
-            return [self.matrix_id]
-        return []
-
-    def _mentioned_audio_agents(
-        self,
-        requester_user_id: str,
-        event_source: dict[str, Any],
-    ) -> tuple[list[MatrixID], bool]:
-        """Return reply-eligible mentioned agents and whether a human was mentioned."""
-        mentioned_agents, _, has_non_agent_mentions = check_agent_mentioned(
-            event_source,
-            None,
-            self.config,
-        )
-        return (
-            filter_agents_by_sender_permissions(mentioned_agents, requester_user_id, self.config),
-            has_non_agent_mentions,
-        )
-
-    def _select_audio_target(
-        self,
-        room: nio.MatrixRoom,
-        context: _MessageContext,
-        requester_user_id: str,
-        *,
-        event_source: dict[str, Any] | None = None,
-        raw_audio_fallback: bool = False,
-        allow_fallback_owner: bool = False,
-    ) -> MatrixID | None:
-        """Choose the agent that should receive the normalized audio message."""
-        if event_source is None:
-            mentioned_agents = filter_agents_by_sender_permissions(
-                context.mentioned_agents,
-                requester_user_id,
-                self.config,
-            )
-            has_non_agent_mentions = context.has_non_agent_mentions
-        else:
-            mentioned_agents, has_non_agent_mentions = self._mentioned_audio_agents(
-                requester_user_id,
-                event_source,
-            )
-        if mentioned_agents:
-            return mentioned_agents[0]
-        if has_non_agent_mentions:
-            return None
-
-        agents_in_thread = filter_agents_by_sender_permissions(
-            get_agents_in_thread(context.thread_history, self.config),
-            requester_user_id,
-            self.config,
-        )
-        if agents_in_thread:
-            return agents_in_thread[0]
-
-        available_agents = self._available_audio_agents(room, requester_user_id)
-        if len(available_agents) == 1:
-            return available_agents[0]
-        if raw_audio_fallback or allow_fallback_owner:
-            return available_agents[0] if available_agents else None
-        return None
-
-    def _audio_owner_id(
-        self,
-        room: nio.MatrixRoom,
-        context: _MessageContext,
-        requester_user_id: str,
-    ) -> str | None:
-        """Return the Matrix user ID that owns normalization of this audio event."""
-        if self._router_should_own_audio(room, requester_user_id):
-            return self._router_matrix_id().full_id
-
-        target = self._select_audio_target(
-            room,
-            context,
-            requester_user_id,
-            allow_fallback_owner=True,
-        )
-        if target is not None:
-            return target.full_id
-        return None
-
-    def _current_bot_owns_audio_event(
-        self,
-        room: nio.MatrixRoom,
-        context: _MessageContext,
-        requester_user_id: str,
-        event_id: str,
-    ) -> bool:
-        """Return whether this bot should normalize the original audio event."""
-        owner_id = self._audio_owner_id(room, context, requester_user_id)
-        if owner_id != self.matrix_id.full_id:
-            self.logger.debug("Skipping audio event because another bot owns it", event_id=event_id, owner_id=owner_id)
-            return False
-        return True
-
-    @staticmethod
-    def _original_mention_user_ids(event_source: dict[str, Any]) -> list[str]:
-        """Return explicit mentions already present on the original audio event."""
-        content = event_source.get("content")
-        if not isinstance(content, dict):
-            return []
-        return extract_mentioned_user_ids(content)
-
-    def _build_audio_relay_metadata(
-        self,
-        *,
-        sender: str,
-        attachment_id: str | None,
-        mention_user_ids: list[str],
-        voice_raw_audio_fallback: bool = False,
-    ) -> dict[str, Any]:
-        """Build metadata payload for normalized audio relay messages."""
-        extra_content: dict[str, Any] = {ORIGINAL_SENDER_KEY: sender}
-        if voice_raw_audio_fallback:
-            extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
-        if attachment_id is not None:
-            extra_content[ATTACHMENT_IDS_KEY] = [attachment_id]
-        if mention_user_ids:
-            extra_content["m.mentions"] = {"user_ids": mention_user_ids}
-        return extra_content
-
-    def _build_normalized_audio_source(
-        self,
-        event: _AudioEvent,
-        *,
-        text: str,
-        extra_content: dict[str, Any],
-        thread_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Return a text-event source derived from the original audio event."""
-        source = dict(event.source) if isinstance(event.source, dict) else {}
-        current_content = source.get("content")
-        content = dict(current_content) if isinstance(current_content, dict) else {}
-        content.update(
-            format_message_with_mentions(
-                self.config,
-                text,
-                sender_domain=self.matrix_id.domain,
-                extra_content=extra_content,
-            ),
-        )
-        if thread_id is not None:
-            content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
-        source["content"] = content
-        return source
-
-    async def _prepare_audio_event(
-        self,
-        room: nio.MatrixRoom,
-        event: _AudioEvent,
-        context: _MessageContext,
-    ) -> _PreparedAudioEvent:
-        """Download, register, and optionally transcribe an audio event once."""
-        assert self.client is not None
-        effective_thread_id = self._resolve_reply_thread_id(
-            context.thread_id,
-            event.event_id,
-            room_id=room.room_id,
-            event_source=event.source,
-        )
-        self.logger.info("Processing audio message", event_id=event.event_id, sender=event.sender)
-
-        audio = await voice_handler.download_audio(self.client, event)
-        attachment_id: str | None = None
-        if audio is not None:
-            attachment_record = await register_audio_attachment(
-                self.storage_path,
-                event_id=event.event_id,
-                audio_bytes=audio.content,
-                mime_type=audio.mime_type,
-                room_id=room.room_id,
-                thread_id=effective_thread_id,
-                sender=event.sender,
-                filename=event.body if isinstance(event.body, str) else None,
-            )
-            attachment_id = attachment_record.attachment_id if attachment_record is not None else None
-
-        transcribed_message = None
-        if audio is not None and self.config.voice.enabled:
-            transcribed_message = await voice_handler.handle_voice_message(
-                self.client,
-                room,
-                event,
-                self.config,
-                audio=audio,
-            )
-
-        return _PreparedAudioEvent(
-            context=context,
-            effective_thread_id=effective_thread_id,
-            audio=audio,
-            attachment_id=attachment_id,
-            transcribed_message=transcribed_message,
-        )
-
-    async def _send_audio_relay(
-        self,
-        room: nio.MatrixRoom,
-        event: _AudioEvent,
-        prepared: _PreparedAudioEvent,
-        *,
-        relay_text: str,
-        extra_content: dict[str, Any],
+        event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
     ) -> None:
-        """Send the normalized audio as a real Matrix text event."""
-        response_event_id = await self._send_response(
-            room_id=room.room_id,
-            reply_to_event_id=event.event_id,
-            response_text=relay_text,
-            thread_id=prepared.effective_thread_id,
-            extra_content=extra_content,
-        )
-        self.response_tracker.mark_responded(event.event_id, response_event_id)
-
-    async def _handle_audio_as_text(
-        self,
-        room: nio.MatrixRoom,
-        event: _AudioEvent,
-        requester_user_id: str,
-        *,
-        text: str,
-        event_source: dict[str, Any],
-    ) -> None:
-        """Run normalized agent-owned audio through the standard text pipeline."""
-        await self._dispatch_text_message(
-            room,
-            _SyntheticTextEvent(
-                sender=event.sender,
-                event_id=event.event_id,
-                body=text,
-                source=event_source,
-            ),
-            requester_user_id,
-        )
-
-    async def _handle_router_owned_audio_event(
-        self,
-        room: nio.MatrixRoom,
-        event: _AudioEvent,
-        requester_user_id: str,
-        prepared: _PreparedAudioEvent,
-    ) -> None:
-        """Relay or route audio after the router normalizes it."""
-        if prepared.audio is None:
-            self.response_tracker.mark_responded(event.event_id)
-            return
-
-        relay_text = prepared.transcribed_message or f"{VOICE_PREFIX}{self._audio_caption(event)}"
-        raw_audio_fallback = prepared.transcribed_message is None
-        base_extra_content = self._build_audio_relay_metadata(
-            sender=event.sender,
-            attachment_id=prepared.attachment_id,
-            mention_user_ids=self._original_mention_user_ids(event.source),
-            voice_raw_audio_fallback=raw_audio_fallback,
-        )
-        base_source = self._build_normalized_audio_source(
-            event,
-            text=relay_text,
-            extra_content=base_extra_content,
-            thread_id=prepared.effective_thread_id,
-        )
-        target = self._select_audio_target(
-            room,
-            prepared.context,
-            requester_user_id,
-            event_source=base_source,
-            raw_audio_fallback=raw_audio_fallback,
-        )
-        _, has_non_agent_mentions = self._mentioned_audio_agents(requester_user_id, base_source)
-        available_agents = self._available_audio_agents(room, requester_user_id)
-        relay_mention_user_ids = extract_mentioned_user_ids(base_source["content"])
-        if target is not None and target.full_id not in relay_mention_user_ids:
-            relay_mention_user_ids.append(target.full_id)
-
-        if raw_audio_fallback:
-            self.logger.info(
-                "Voice transcription disabled or unavailable, relaying raw audio fallback",
-                event_id=event.event_id,
-                sender=event.sender,
-            )
-
-        if target is not None or has_non_agent_mentions or not available_agents:
-            await self._send_audio_relay(
-                room,
-                event,
-                prepared,
-                relay_text=relay_text,
-                extra_content=self._build_audio_relay_metadata(
-                    sender=event.sender,
-                    attachment_id=prepared.attachment_id,
-                    mention_user_ids=relay_mention_user_ids,
-                    voice_raw_audio_fallback=raw_audio_fallback,
-                ),
-            )
-            return
-
-        await self._handle_ai_routing(
-            room,
-            event,
-            prepared.context.thread_history,
-            prepared.context.thread_id,
-            message=relay_text,
-            requester_user_id=requester_user_id,
-            extra_content=base_extra_content,
-        )
-
-    async def _handle_agent_owned_audio_event(
-        self,
-        room: nio.MatrixRoom,
-        event: _AudioEvent,
-        requester_user_id: str,
-        prepared: _PreparedAudioEvent,
-    ) -> None:
-        """Route normalized audio to another agent or handle it as local text."""
-        if prepared.audio is None:
-            self.response_tracker.mark_responded(event.event_id)
-            return
-
-        relay_text = prepared.transcribed_message or f"{VOICE_PREFIX}{self._audio_caption(event)}"
-        raw_audio_fallback = prepared.transcribed_message is None
-        base_extra_content = self._build_audio_relay_metadata(
-            sender=event.sender,
-            attachment_id=prepared.attachment_id,
-            mention_user_ids=self._original_mention_user_ids(event.source),
-            voice_raw_audio_fallback=raw_audio_fallback,
-        )
-        base_source = self._build_normalized_audio_source(
-            event,
-            text=relay_text,
-            extra_content=base_extra_content,
-            thread_id=prepared.effective_thread_id,
-        )
-        target = self._select_audio_target(
-            room,
-            prepared.context,
-            requester_user_id,
-            event_source=base_source,
-            raw_audio_fallback=raw_audio_fallback,
-            allow_fallback_owner=True,
-        )
-        mention_user_ids = extract_mentioned_user_ids(base_source["content"])
-        if target is not None and target.full_id not in mention_user_ids:
-            mention_user_ids.append(target.full_id)
-        final_extra_content = self._build_audio_relay_metadata(
-            sender=event.sender,
-            attachment_id=prepared.attachment_id,
-            mention_user_ids=mention_user_ids,
-            voice_raw_audio_fallback=raw_audio_fallback,
-        )
-        final_source = self._build_normalized_audio_source(
-            event,
-            text=relay_text,
-            extra_content=final_extra_content,
-            thread_id=prepared.effective_thread_id,
-        )
-
-        if target is not None and target.full_id != self.matrix_id.full_id:
-            await self._send_audio_relay(
-                room,
-                event,
-                prepared,
-                relay_text=relay_text,
-                extra_content=final_extra_content,
-            )
-            return
-
-        await self._handle_audio_as_text(
-            room,
-            event,
-            requester_user_id,
-            text=relay_text,
-            event_source=final_source,
-        )
-
-    async def _on_voice_message(
-        self,
-        room: nio.MatrixRoom,
-        event: _AudioEvent,
-    ) -> None:
-        """Handle audio events with a single attachment-first ownership rule."""
+        """Normalize audio into a synthetic text event and reuse text dispatch."""
         assert self.client is not None
 
         requester_user_id = self._precheck_event(room, event)
@@ -1397,43 +960,65 @@ class AgentBot:
             self.response_tracker.mark_responded(event.event_id)
             return
 
-        dispatch = await self._prepare_dispatch(
+        effective_thread_id = self._resolve_reply_thread_id(
+            None,
+            event.event_id,
+            room_id=room.room_id,
+            event_source=event.source,
+        )
+        prepared_voice = await voice_handler.prepare_voice_message(
+            self.client,
+            self.storage_path,
             room,
             event,
-            requester_user_id=requester_user_id,
-            event_label="audio",
+            self.config,
+            sender_domain=self.matrix_id.domain,
+            thread_id=effective_thread_id,
         )
-        if dispatch is None:
+        if prepared_voice is None:
+            self.response_tracker.mark_responded(event.event_id)
             return
 
-        if not self._current_bot_owns_audio_event(room, dispatch.context, requester_user_id, event.event_id):
-            return
-
-        prepared = await self._prepare_audio_event(room, event, dispatch.context)
-        if self.agent_name == ROUTER_AGENT_NAME:
-            await self._handle_router_owned_audio_event(room, event, requester_user_id, prepared)
-            return
-        await self._handle_agent_owned_audio_event(room, event, requester_user_id, prepared)
+        await self._dispatch_text_message(
+            room,
+            _SyntheticTextEvent(
+                sender=event.sender,
+                event_id=event.event_id,
+                body=prepared_voice.text,
+                source=prepared_voice.source,
+            ),
+            requester_user_id,
+        )
 
     async def _on_media_message(
         self,
         room: nio.MatrixRoom,
         event: _MediaDispatchEvent,
     ) -> None:
-        """Handle image/file/video events and dispatch media-aware responses."""
+        """Handle image/file/video/audio events and dispatch media-aware responses."""
         assert self.client is not None
 
+        is_audio_event = isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio)
         is_image_event = isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage)
         default_caption = (
-            "[Attached image]"
-            if is_image_event
+            "[Attached voice message]"
+            if is_audio_event
             else (
-                "[Attached video]"
-                if isinstance(event, nio.RoomMessageVideo | nio.RoomEncryptedVideo)
-                else "[Attached file]"
+                "[Attached image]"
+                if is_image_event
+                else (
+                    "[Attached video]"
+                    if isinstance(event, nio.RoomMessageVideo | nio.RoomEncryptedVideo)
+                    else "[Attached file]"
+                )
             )
         )
         caption = extract_media_caption(event, default=default_caption)
+
+        if is_audio_event:
+            assert isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio)
+            await self._on_audio_media_message(room, event)
+            return
 
         dispatch = await self._prepare_dispatch(
             room,
@@ -1522,7 +1107,7 @@ class AgentBot:
         *,
         room_id: str,
         thread_id: str | None,
-        event: _DispatchOrVoiceEvent,
+        event: _DispatchEvent,
     ) -> str | None:
         """Register a routed media event and return its attachment ID when available."""
         if isinstance(
@@ -1576,7 +1161,7 @@ class AgentBot:
 
     def _requester_user_id_for_event(
         self,
-        event: _DispatchOrVoiceEvent,
+        event: _DispatchEvent,
     ) -> str:
         """Return the effective requester for per-user reply checks."""
         content = event.source.get("content") if isinstance(event.source, dict) else None
@@ -1605,7 +1190,7 @@ class AgentBot:
     def _precheck_event(
         self,
         room: nio.MatrixRoom,
-        event: _DispatchOrVoiceEvent,
+        event: _DispatchEvent,
         *,
         is_edit: bool = False,
     ) -> str | None:
@@ -1646,7 +1231,7 @@ class AgentBot:
     async def _prepare_dispatch(
         self,
         room: nio.MatrixRoom,
-        event: _DispatchOrVoiceEvent,
+        event: _DispatchEvent,
         *,
         requester_user_id: str | None = None,
         event_label: str,
@@ -1704,7 +1289,7 @@ class AgentBot:
     async def _execute_dispatch_action(
         self,
         room: nio.MatrixRoom,
-        event: _DispatchOrVoiceEvent,
+        event: _DispatchEvent,
         dispatch: _PreparedDispatch,
         action: _ResponseAction,
         payload: _DispatchPayload,
@@ -1859,7 +1444,7 @@ class AgentBot:
             available_agents_in_room=available_agents_in_room,
         )
 
-    async def _extract_message_context(self, room: nio.MatrixRoom, event: _DispatchOrVoiceEvent) -> _MessageContext:
+    async def _extract_message_context(self, room: nio.MatrixRoom, event: _DispatchEvent) -> _MessageContext:
         assert self.client is not None
 
         # Check if mentions should be ignored for this message
@@ -2868,7 +2453,7 @@ class AgentBot:
     async def _handle_ai_routing(
         self,
         room: nio.MatrixRoom,
-        event: _DispatchOrVoiceEvent,
+        event: _DispatchEvent,
         thread_history: list[dict],
         thread_id: str | None = None,
         message: str | None = None,

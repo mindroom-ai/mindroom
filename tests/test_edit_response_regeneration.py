@@ -708,7 +708,7 @@ async def test_config_confirmation_blocked_by_reply_permissions(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_on_voice_message_tracks_relay_event_id(tmp_path: Path) -> None:
+async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
     """Audio normalization should track the relay event ID."""
     # Create a mock agent user
     agent_user = AgentMatrixUser(
@@ -803,7 +803,7 @@ async def test_on_voice_message_tracks_relay_event_id(tmp_path: Path) -> None:
         mock_generate_response.return_value = "$response:example.com"
 
         # Process the voice event
-        await bot._on_voice_message(room, voice_event)
+        await bot._on_media_message(room, voice_event)
 
         # Verify that the bot tracked the response correctly
         assert bot.response_tracker.has_responded("$voice:example.com")
@@ -816,7 +816,7 @@ async def test_on_voice_message_tracks_relay_event_id(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_on_voice_message_no_transcription_still_marks_relayed(tmp_path: Path) -> None:
+async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: Path) -> None:
     """Audio normalization should still emit a fallback relay when transcription fails."""
     # Create a mock agent user
     agent_user = AgentMatrixUser(
@@ -911,7 +911,7 @@ async def test_on_voice_message_no_transcription_still_marks_relayed(tmp_path: P
         mock_generate_response.return_value = "$response:example.com"
 
         # Process the voice event
-        await bot._on_voice_message(room, voice_event)
+        await bot._on_media_message(room, voice_event)
 
         # Verify that the bot marked as responded with the fallback relay.
         assert bot.response_tracker.has_responded("$voice:example.com")
@@ -1007,8 +1007,8 @@ async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_on_voice_message_unauthorized_sender_marks_responded(tmp_path: Path) -> None:
-    """Test that _on_voice_message marks as responded for unauthorized senders."""
+async def test_on_media_message_unauthorized_sender_marks_responded(tmp_path: Path) -> None:
+    """Test that _on_media_message marks as responded for unauthorized senders."""
     # Create a mock agent user
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
@@ -1090,7 +1090,7 @@ async def test_on_voice_message_unauthorized_sender_marks_responded(tmp_path: Pa
         patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
     ):
         # Process the voice event
-        await bot._on_voice_message(room, voice_event)
+        await bot._on_media_message(room, voice_event)
 
         # Verify that the bot marked as responded even for unauthorized sender
         assert bot.response_tracker.has_responded("$voice:example.com")

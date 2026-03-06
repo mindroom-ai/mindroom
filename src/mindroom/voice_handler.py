@@ -5,21 +5,31 @@ from __future__ import annotations
 import os
 import re
 import uuid
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from agno.agent import Agent
 from agno.media import Audio
 
 from mindroom.ai import get_model_instance
+from mindroom.attachments import register_audio_attachment
 from mindroom.authorization import get_available_agents_for_sender
 from mindroom.commands.parsing import get_command_list
-from mindroom.constants import VOICE_PREFIX
+from mindroom.constants import (
+    ATTACHMENT_IDS_KEY,
+    ORIGINAL_SENDER_KEY,
+    VOICE_PREFIX,
+    VOICE_RAW_AUDIO_FALLBACK_KEY,
+)
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import agent_username_localpart
-from mindroom.matrix.media import download_media_bytes, media_mime_type
+from mindroom.matrix.media import download_media_bytes, extract_media_caption, media_mime_type
+from mindroom.matrix.mentions import format_message_with_mentions
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     import nio
 
     from mindroom.config.main import Config
@@ -35,6 +45,78 @@ _VOICE_SKILL_INTENT_PATTERN = re.compile(
 _VOICE_HELP_INTENT_PATTERN = re.compile(
     r"^\s*help\b|\bshow(?: me)?\s+(?:the\s+)?help\b|\bhelp\s+command\b|\bwhat\s+commands?\b",
 )
+
+
+@dataclass(frozen=True)
+class PreparedVoiceMessage:
+    """Normalized text + attachment metadata derived from one audio event."""
+
+    text: str
+    source: dict[str, Any]
+
+
+async def prepare_voice_message(
+    client: nio.AsyncClient,
+    storage_path: Path,
+    room: nio.MatrixRoom,
+    event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
+    config: Config,
+    *,
+    sender_domain: str,
+    thread_id: str | None,
+) -> PreparedVoiceMessage | None:
+    """Download/register audio and normalize it into a synthetic text event."""
+    audio = await download_audio(client, event)
+    if audio is None or audio.content is None:
+        logger.error("Failed to download audio file")
+        return None
+
+    attachment_record = await register_audio_attachment(
+        storage_path,
+        event_id=event.event_id,
+        audio_bytes=audio.content,
+        mime_type=audio.mime_type,
+        room_id=room.room_id,
+        thread_id=thread_id,
+        sender=event.sender,
+        filename=event.body if isinstance(event.body, str) else None,
+    )
+    attachment_id = attachment_record.attachment_id if attachment_record is not None else None
+
+    transcribed_message = await handle_voice_message(client, room, event, config, audio=audio)
+    if not isinstance(transcribed_message, str) or not transcribed_message.strip():
+        transcribed_message = None
+    text = transcribed_message or f"{VOICE_PREFIX}{extract_media_caption(event, default='[Attached voice message]')}"
+
+    extra_content: dict[str, Any] = {ORIGINAL_SENDER_KEY: event.sender}
+    if attachment_id is not None:
+        extra_content[ATTACHMENT_IDS_KEY] = [attachment_id]
+    if transcribed_message is None:
+        extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
+    current_content = event.source.get("content") if isinstance(event.source, dict) else None
+    inherited_mentions = current_content.get("m.mentions") if isinstance(current_content, dict) else None
+    if isinstance(inherited_mentions, dict):
+        extra_content["m.mentions"] = inherited_mentions
+
+    source = dict(event.source) if isinstance(event.source, dict) else {}
+    current_content = source.get("content")
+    content = dict(current_content) if isinstance(current_content, dict) else {}
+    content.update(
+        format_message_with_mentions(
+            config,
+            text,
+            sender_domain=sender_domain,
+            extra_content=extra_content,
+        ),
+    )
+    if thread_id is not None:
+        content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
+    source["content"] = content
+
+    return PreparedVoiceMessage(
+        text=text,
+        source=source,
+    )
 
 
 async def handle_voice_message(
