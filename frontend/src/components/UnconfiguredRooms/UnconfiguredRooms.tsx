@@ -14,8 +14,8 @@ interface RoomInfo {
   name?: string;
 }
 
-interface AgentRoomsInfo {
-  agent_id: string;
+interface MatrixEntityRoomsInfo {
+  agent_id: string; // Legacy API field; contains either an agent ID or team ID.
   display_name: string;
   configured_rooms: string[];
   joined_rooms: string[];
@@ -29,22 +29,22 @@ interface RoomLeaveRequest {
 }
 
 export function UnconfiguredRooms() {
-  const [agentsRooms, setAgentsRooms] = useState<AgentRoomsInfo[]>([]);
+  const [entitiesRooms, setEntitiesRooms] = useState<MatrixEntityRoomsInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedRooms, setSelectedRooms] = useState<Set<string>>(new Set());
   const [leavingRooms, setLeavingRooms] = useState(false);
 
-  // Load agent rooms data
+  // Load configured Matrix entity rooms data.
   const loadAgentRooms = async () => {
     setLoading(true);
     setError(null);
     try {
       const response = await fetchAPI(API_ENDPOINTS.matrix.agentsRooms);
-      setAgentsRooms(response.agents);
+      setEntitiesRooms(response.agents);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load agent rooms');
-      console.error('Error loading agent rooms:', err);
+      setError(err instanceof Error ? err.message : 'Failed to load external rooms');
+      console.error('Error loading external rooms:', err);
     } finally {
       setLoading(false);
     }
@@ -131,12 +131,15 @@ export function UnconfiguredRooms() {
   };
 
   // Calculate total unconfigured rooms
-  const totalUnconfiguredRooms = agentsRooms.reduce(
-    (sum, agent) => sum + agent.unconfigured_rooms.length,
+  const totalUnconfiguredRooms = entitiesRooms.reduce(
+    (sum, entity) => sum + entity.unconfigured_rooms.length,
     0
   );
+  const entitiesWithExternalRooms = entitiesRooms.filter(
+    entity => entity.unconfigured_rooms.length > 0
+  );
 
-  // Check if all rooms for an agent are selected
+  // Check if all rooms for an entity are selected.
   const areAllSelectedForAgent = (agentId: string, rooms: string[]) => {
     return rooms.every(roomId => selectedRooms.has(`${agentId}:${roomId}`));
   };
@@ -158,7 +161,7 @@ export function UnconfiguredRooms() {
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">External Rooms</h2>
           <p className="text-sm text-muted-foreground mt-1">
-            Manage rooms that agents have joined but are not in the configuration
+            Manage rooms that agents and teams have joined but are not in the configuration
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={loadAgentRooms} disabled={loading}>
@@ -185,8 +188,8 @@ export function UnconfiguredRooms() {
                 <CardDescription>
                   {totalUnconfiguredRooms} external room
                   {totalUnconfiguredRooms !== 1 ? 's' : ''} found across{' '}
-                  {agentsRooms.filter(a => a.unconfigured_rooms.length > 0).length} agent
-                  {agentsRooms.filter(a => a.unconfigured_rooms.length > 0).length !== 1 ? 's' : ''}
+                  {entitiesWithExternalRooms.length} entit
+                  {entitiesWithExternalRooms.length === 1 ? 'y' : 'ies'}
                 </CardDescription>
               </div>
               {selectedRooms.size > 0 && (
@@ -210,121 +213,119 @@ export function UnconfiguredRooms() {
         <Card>
           <CardContent className="pt-6">
             <p className="text-center text-muted-foreground">
-              All agent rooms are properly configured. No action needed.
+              All configured agents and teams are only in configured rooms. No action needed.
             </p>
           </CardContent>
         </Card>
       )}
 
-      {/* Agent Room Lists */}
+      {/* Entity Room Lists */}
       <ScrollArea className="h-[600px] pr-4">
         <div className="space-y-4">
-          {agentsRooms
-            .filter(agent => agent.unconfigured_rooms.length > 0)
-            .map(agent => (
-              <Card key={agent.agent_id}>
-                <CardHeader>
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <CardTitle className="text-lg">{agent.display_name}</CardTitle>
-                      <CardDescription>
-                        {agent.unconfigured_rooms.length} external room
-                        {agent.unconfigured_rooms.length !== 1 ? 's' : ''}
-                      </CardDescription>
-                    </div>
-                    <div className="flex gap-2">
-                      {agent.unconfigured_rooms.length > 1 && (
-                        <>
-                          {areAllSelectedForAgent(agent.agent_id, agent.unconfigured_rooms) ? (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() =>
-                                deselectAllForAgent(agent.agent_id, agent.unconfigured_rooms)
-                              }
-                            >
-                              Deselect All
-                            </Button>
-                          ) : (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() =>
-                                selectAllForAgent(agent.agent_id, agent.unconfigured_rooms)
-                              }
-                            >
-                              Select All
-                            </Button>
-                          )}
-                        </>
-                      )}
-                    </div>
+          {entitiesWithExternalRooms.map(entity => (
+            <Card key={entity.agent_id}>
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <CardTitle className="text-lg">{entity.display_name}</CardTitle>
+                    <CardDescription>
+                      {entity.unconfigured_rooms.length} external room
+                      {entity.unconfigured_rooms.length !== 1 ? 's' : ''}
+                    </CardDescription>
                   </div>
-                </CardHeader>
-                <CardContent>
-                  <div className="space-y-2">
-                    {agent.unconfigured_rooms.map((roomId, index) => {
-                      const key = `${agent.agent_id}:${roomId}`;
-                      const isSelected = selectedRooms.has(key);
-                      const roomDetails = agent.unconfigured_room_details?.[index];
+                  <div className="flex gap-2">
+                    {entity.unconfigured_rooms.length > 1 && (
+                      <>
+                        {areAllSelectedForAgent(entity.agent_id, entity.unconfigured_rooms) ? (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() =>
+                              deselectAllForAgent(entity.agent_id, entity.unconfigured_rooms)
+                            }
+                          >
+                            Deselect All
+                          </Button>
+                        ) : (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() =>
+                              selectAllForAgent(entity.agent_id, entity.unconfigured_rooms)
+                            }
+                          >
+                            Select All
+                          </Button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-2">
+                  {entity.unconfigured_rooms.map((roomId, index) => {
+                    const key = `${entity.agent_id}:${roomId}`;
+                    const isSelected = selectedRooms.has(key);
+                    const roomDetails = entity.unconfigured_room_details?.[index];
 
-                      return (
-                        <div
-                          key={roomId}
-                          className={cn(
-                            'flex items-center space-x-3 p-3 rounded-lg border transition-colors cursor-pointer',
-                            isSelected ? 'bg-muted/50 border-primary/20' : 'hover:bg-muted/30'
+                    return (
+                      <div
+                        key={roomId}
+                        className={cn(
+                          'flex items-center space-x-3 p-3 rounded-lg border transition-colors cursor-pointer',
+                          isSelected ? 'bg-muted/50 border-primary/20' : 'hover:bg-muted/30'
+                        )}
+                        onClick={() => toggleRoomSelection(entity.agent_id, roomId)}
+                      >
+                        <Checkbox
+                          checked={isSelected}
+                          onCheckedChange={() => toggleRoomSelection(entity.agent_id, roomId)}
+                          disabled={leavingRooms}
+                          onClick={e => e.stopPropagation()}
+                        />
+                        <div className="flex-1 min-w-0 select-none">
+                          {/* Show room name if available */}
+                          {roomDetails?.name && (
+                            <div className="font-medium text-sm mb-1">{roomDetails.name}</div>
                           )}
-                          onClick={() => toggleRoomSelection(agent.agent_id, roomId)}
-                        >
-                          <Checkbox
-                            checked={isSelected}
-                            onCheckedChange={() => toggleRoomSelection(agent.agent_id, roomId)}
-                            disabled={leavingRooms}
-                            onClick={e => e.stopPropagation()}
-                          />
-                          <div className="flex-1 min-w-0 select-none">
-                            {/* Show room name if available */}
-                            {roomDetails?.name && (
-                              <div className="font-medium text-sm mb-1">{roomDetails.name}</div>
-                            )}
-                            <div className="flex items-center gap-2">
-                              <code className="text-xs font-mono truncate text-muted-foreground">
-                                {roomId}
-                              </code>
-                              {roomId.startsWith('!') && roomId.includes(':') && (
-                                <Badge variant="outline" className="text-xs pointer-events-none">
-                                  {roomId.split(':')[1]}
-                                </Badge>
-                              )}
-                            </div>
-                            {/* Show if it's a DM room */}
-                            {roomId.includes('dm') && (
-                              <p className="text-xs text-muted-foreground mt-1">
-                                Direct Message Room
-                              </p>
+                          <div className="flex items-center gap-2">
+                            <code className="text-xs font-mono truncate text-muted-foreground">
+                              {roomId}
+                            </code>
+                            {roomId.startsWith('!') && roomId.includes(':') && (
+                              <Badge variant="outline" className="text-xs pointer-events-none">
+                                {roomId.split(':')[1]}
+                              </Badge>
                             )}
                           </div>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={e => {
-                              e.stopPropagation();
-                              // Open room in Element/Matrix client
-                              const matrixUrl = `https://matrix.to/#/${roomId}`;
-                              window.open(matrixUrl, '_blank');
-                            }}
-                            title="Open in Matrix client"
-                          >
-                            <ExternalLink className="h-4 w-4" />
-                          </Button>
+                          {/* Show if it's a DM room */}
+                          {roomId.includes('dm') && (
+                            <p className="text-xs text-muted-foreground mt-1">
+                              Direct Message Room
+                            </p>
+                          )}
                         </div>
-                      );
-                    })}
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={e => {
+                            e.stopPropagation();
+                            // Open room in Element/Matrix client
+                            const matrixUrl = `https://matrix.to/#/${roomId}`;
+                            window.open(matrixUrl, '_blank');
+                          }}
+                          title="Open in Matrix client"
+                        >
+                          <ExternalLink className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </CardContent>
+            </Card>
+          ))}
         </div>
       </ScrollArea>
     </div>

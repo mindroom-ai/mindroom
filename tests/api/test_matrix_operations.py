@@ -6,6 +6,22 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from mindroom.api import main
+
+
+def _add_test_team_to_runtime_config() -> None:
+    """Add a configured team to the API runtime config for one test."""
+    with main.config_lock:
+        main.config["teams"] = {
+            "test_team": {
+                "display_name": "Test Team",
+                "role": "A test team",
+                "agents": ["test_agent"],
+                "rooms": ["team_room"],
+                "mode": "coordinate",
+            },
+        }
+
 
 @pytest.fixture
 def mock_matrix_client() -> AsyncMock:
@@ -37,13 +53,15 @@ class TestMatrixOperations:
         mock_agent_user: Any,  # noqa: ANN401
         mock_matrix_client: Any,  # noqa: ANN401
     ) -> None:
-        """Test getting room information for all agents."""
+        """Test getting room information for configured agents and teams."""
+        _add_test_team_to_runtime_config()
+
         with (
             patch("mindroom.api.matrix_operations.create_agent_user", return_value=mock_agent_user),
             patch("mindroom.api.matrix_operations.login_agent_user", return_value=mock_matrix_client),
             patch(
                 "mindroom.api.matrix_operations.get_joined_rooms",
-                return_value=["test_room", "!extra_room:localhost", "!dm_room:localhost"],
+                return_value=["test_room", "team_room", "!extra_room:localhost", "!dm_room:localhost"],
             ),
         ):
             response = test_client.get("/api/matrix/agents/rooms")
@@ -51,15 +69,20 @@ class TestMatrixOperations:
             assert response.status_code == 200
             data = response.json()
             assert "agents" in data
-            assert len(data["agents"]) == 1  # One test agent from fixture
+            assert len(data["agents"]) == 2
 
-            agent = data["agents"][0]
-            assert agent["agent_id"] == "test_agent"
-            assert agent["display_name"] == "Test Agent"
-            assert "test_room" in agent["configured_rooms"]
-            assert len(agent["unconfigured_rooms"]) == 2
-            assert "!extra_room:localhost" in agent["unconfigured_rooms"]
-            assert "!dm_room:localhost" in agent["unconfigured_rooms"]
+            entities_by_id = {entity["agent_id"]: entity for entity in data["agents"]}
+
+            assert set(entities_by_id) == {"test_agent", "test_team"}
+            assert entities_by_id["test_agent"]["display_name"] == "Test Agent"
+            assert "test_room" in entities_by_id["test_agent"]["configured_rooms"]
+            assert "!extra_room:localhost" in entities_by_id["test_agent"]["unconfigured_rooms"]
+            assert "!dm_room:localhost" in entities_by_id["test_agent"]["unconfigured_rooms"]
+
+            assert entities_by_id["test_team"]["display_name"] == "Test Team"
+            assert "team_room" in entities_by_id["test_team"]["configured_rooms"]
+            assert "!extra_room:localhost" in entities_by_id["test_team"]["unconfigured_rooms"]
+            assert "!dm_room:localhost" in entities_by_id["test_team"]["unconfigured_rooms"]
 
     @pytest.mark.asyncio
     async def test_get_specific_agent_rooms(
@@ -86,6 +109,33 @@ class TestMatrixOperations:
             assert len(data["configured_rooms"]) == 1
             assert len(data["unconfigured_rooms"]) == 1
             assert "!extra_room:localhost" in data["unconfigured_rooms"]
+
+    @pytest.mark.asyncio
+    async def test_get_specific_team_rooms(
+        self,
+        test_client: TestClient,
+        mock_agent_user: Any,  # noqa: ANN401
+        mock_matrix_client: Any,  # noqa: ANN401
+    ) -> None:
+        """Test getting rooms for a specific configured team."""
+        _add_test_team_to_runtime_config()
+
+        with (
+            patch("mindroom.api.matrix_operations.create_agent_user", return_value=mock_agent_user),
+            patch("mindroom.api.matrix_operations.login_agent_user", return_value=mock_matrix_client),
+            patch(
+                "mindroom.api.matrix_operations.get_joined_rooms",
+                return_value=["team_room", "!external_room:localhost"],
+            ),
+        ):
+            response = test_client.get("/api/matrix/agents/test_team/rooms")
+
+            assert response.status_code == 200
+            data = response.json()
+            assert data["agent_id"] == "test_team"
+            assert data["display_name"] == "Test Team"
+            assert data["configured_rooms"] == ["team_room"]
+            assert data["unconfigured_rooms"] == ["!external_room:localhost"]
 
     @pytest.mark.asyncio
     async def test_get_agent_rooms_not_found(self, test_client: TestClient) -> None:
@@ -135,6 +185,29 @@ class TestMatrixOperations:
 
             assert response.status_code == 500
             assert "Failed to leave room" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_leave_room_for_team(
+        self,
+        test_client: TestClient,
+        mock_agent_user: Any,  # noqa: ANN401
+        mock_matrix_client: Any,  # noqa: ANN401
+    ) -> None:
+        """Test leaving a room for a configured team."""
+        _add_test_team_to_runtime_config()
+
+        with (
+            patch("mindroom.api.matrix_operations.create_agent_user", return_value=mock_agent_user),
+            patch("mindroom.api.matrix_operations.login_agent_user", return_value=mock_matrix_client),
+            patch("mindroom.api.matrix_operations.leave_room", return_value=True),
+        ):
+            response = test_client.post(
+                "/api/matrix/rooms/leave",
+                json={"agent_id": "test_team", "room_id": "!room_to_leave:localhost"},
+            )
+
+            assert response.status_code == 200
+            assert response.json()["success"] is True
 
     @pytest.mark.asyncio
     async def test_leave_room_agent_not_found(self, test_client: TestClient) -> None:
