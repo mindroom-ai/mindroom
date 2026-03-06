@@ -23,6 +23,7 @@ from backend.db_utils import update_instance_status
 from backend.deps import _extract_bearer_token, ensure_supabase, limiter
 from backend.k8s import (
     check_deployment_exists,
+    instance_deployment_ref,
     run_kubectl,
     wait_for_deployment_ready,
 )
@@ -283,7 +284,7 @@ async def start_instance_provisioner(
     logger.info("Starting instance %s", instance_id)
 
     if not await check_deployment_exists(instance_id):
-        error_msg = f"Deployment mindroom-backend-{instance_id} not found"
+        error_msg = f"Deployment {instance_deployment_ref(instance_id)} not found"
         logger.warning(error_msg)
         raise HTTPException(status_code=404, detail=error_msg)
 
@@ -291,7 +292,7 @@ async def start_instance_provisioner(
         code, out, err = await run_kubectl(
             [
                 "scale",
-                f"deployment/mindroom-backend-{instance_id}",
+                instance_deployment_ref(instance_id),
                 "--replicas=1",
             ],
             namespace="mindroom-instances",
@@ -323,7 +324,7 @@ async def stop_instance_provisioner(
     logger.info("Stopping instance %s", instance_id)
 
     if not await check_deployment_exists(instance_id):
-        error_msg = f"Deployment mindroom-backend-{instance_id} not found"
+        error_msg = f"Deployment {instance_deployment_ref(instance_id)} not found"
         logger.warning(error_msg)
         raise HTTPException(status_code=404, detail=error_msg)
 
@@ -331,7 +332,7 @@ async def stop_instance_provisioner(
         code, out, err = await run_kubectl(
             [
                 "scale",
-                f"deployment/mindroom-backend-{instance_id}",
+                instance_deployment_ref(instance_id),
                 "--replicas=0",
             ],
             namespace="mindroom-instances",
@@ -363,7 +364,7 @@ async def restart_instance_provisioner(
     logger.info("Restarting instance %s", instance_id)
 
     if not await check_deployment_exists(instance_id):
-        error_msg = f"Deployment mindroom-backend-{instance_id} not found"
+        error_msg = f"Deployment {instance_deployment_ref(instance_id)} not found"
         logger.warning(error_msg)
         raise HTTPException(status_code=404, detail=error_msg)
 
@@ -372,7 +373,7 @@ async def restart_instance_provisioner(
             [
                 "rollout",
                 "restart",
-                f"deployment/mindroom-backend-{instance_id}",
+                instance_deployment_ref(instance_id),
             ],
             namespace="mindroom-instances",
         )
@@ -496,7 +497,7 @@ async def sync_instances(
                     code, out, _ = await run_kubectl(
                         [
                             "get",
-                            f"deployment/mindroom-backend-{instance_id}",
+                            instance_deployment_ref(instance_id),
                             "-o=jsonpath={.spec.replicas}",
                         ],
                         namespace="mindroom-instances",

@@ -126,7 +126,7 @@ case "$1" in
             -f "$VALUES_FILE" \
             --kubeconfig="$KUBECONFIG"
         echo "⏳ Waiting for rollout to complete..."
-        kubectl rollout status deployment/mindroom-backend-$CUSTOMER_ID \
+        kubectl rollout status deployment/mindroom-$CUSTOMER_ID \
             -n mindroom-instances \
             --kubeconfig="$KUBECONFIG"
         if [ -n "$VALUES_TMP" ]; then

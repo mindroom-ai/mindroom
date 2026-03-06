@@ -1,10 +1,10 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: mindroom-backend-{{ .Values.customer }}
+  name: mindroom-{{ .Values.customer }}
   namespace: mindroom-instances
   labels:
-    app: mindroom-backend
+    app: mindroom
     customer: {{ .Values.customer | quote }}
 spec:
   strategy:
@@ -12,12 +12,12 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      app: mindroom-backend
+      app: mindroom
       customer: {{ .Values.customer | quote }}
   template:
     metadata:
       labels:
-        app: mindroom-backend
+        app: mindroom
         customer: {{ .Values.customer | quote }}
     spec:
       securityContext:
@@ -27,10 +27,10 @@ spec:
         runAsNonRoot: true
         fsGroupChangePolicy: OnRootMismatch
       containers:
-      - name: mindroom-backend
-        image: {{ .Values.mindroom_backend_image | default "ghcr.io/mindroom-ai/mindroom-backend:latest" }}
-        imagePullPolicy: {{ .Values.mindroom_backend_image_pull_policy | default "Always" }}
-        # Expose API port - backend now runs both bot and API
+      - name: mindroom
+        image: {{ .Values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" }}
+        imagePullPolicy: {{ .Values.mindroom_image_pull_policy | default "Always" }}
+        # Expose the MindRoom port - the runtime now serves bot, dashboard, and API
         ports:
         - containerPort: 8765
           name: api
@@ -104,8 +104,8 @@ spec:
             drop:
               - ALL
       - name: sandbox-runner
-        image: {{ .Values.mindroom_backend_image | default "ghcr.io/mindroom-ai/mindroom-backend:latest" }}
-        imagePullPolicy: {{ .Values.mindroom_backend_image_pull_policy | default "Always" }}
+        image: {{ .Values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" }}
+        imagePullPolicy: {{ .Values.mindroom_image_pull_policy | default "Always" }}
         command: ["/app/run-sandbox-runner.sh"]
         ports:
         - containerPort: 8766

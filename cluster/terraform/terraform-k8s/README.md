@@ -29,7 +29,7 @@ Complete Terraform configuration for deploying MindRoom on Kubernetes with a sin
    - `ghcr.io/mindroom-ai/platform-backend:latest`
 
    Customer instance images (from main MindRoom project):
-   - `ghcr.io/mindroom-ai/mindroom-backend:latest`
+   - `ghcr.io/mindroom-ai/mindroom:latest`
 
    Override `registry` if you want to deploy from a different registry.
 

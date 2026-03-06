@@ -168,12 +168,12 @@ PAYLOADS=(
 **Vulnerable Code**:
 ```python
 # Line 13: Direct string interpolation in deployment name
-deployment_name = f"deployment/mindroom-backend-{instance_id}"
+deployment_name = f"deployment/mindroom-{instance_id}"
 
 # Lines 38-44: User input in kubectl commands
 cmd = [
     "rollout", "status",
-    f"deployment/mindroom-backend-{instance_id}",
+    f"deployment/mindroom-{instance_id}",
     f"--timeout={timeout_seconds}s"
 ]
 ```

@@ -4,7 +4,7 @@ Deploy MindRoom using Docker for simple, containerized deployments.
 
 ## Quick Start
 
-MindRoom ships as a single backend container that serves:
+MindRoom ships as a single runtime container that serves:
 
 - the bot orchestrator
 - the dashboard UI at `http://localhost:8765`
@@ -15,12 +15,12 @@ Run it with:
 
 ```
 docker run -d \
-  --name mindroom-backend \
+  --name mindroom \
   -p 8765:8765 \
   -v ./config.yaml:/app/config.yaml:ro \
   -v ./mindroom_data:/app/mindroom_data \
   --env-file .env \
-  ghcr.io/mindroom-ai/mindroom-backend:latest
+  ghcr.io/mindroom-ai/mindroom:latest
 ```
 
 ## Docker Compose
@@ -30,7 +30,7 @@ Create a `docker-compose.yml`:
 ```
 services:
   mindroom:
-    image: ghcr.io/mindroom-ai/mindroom-backend:latest
+    image: ghcr.io/mindroom-ai/mindroom:latest
     container_name: mindroom
     restart: unless-stopped
     ports:
@@ -141,8 +141,8 @@ MindRoom stores data in the `mindroom_data` directory:
 
 ## Sandbox Proxy Isolation
 
-When configured, `shell`, `file`, and `python` tool calls can be proxied to a separate **sandbox-runner** sidecar container. The sidecar runs the same image but without access to secrets, credentials, or the primary data volume. This provides real process-level isolation for code-execution tools. Without proxy configuration, all tools execute locally in the backend process.
+When configured, `shell`, `file`, and `python` tool calls can be proxied to a separate **sandbox-runner** sidecar container. The sidecar runs the same image but without access to secrets, credentials, or the primary data volume. This provides real process-level isolation for code-execution tools. Without proxy configuration, all tools execute locally in the MindRoom process.
 
 See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) for full documentation including Docker Compose examples, Kubernetes sidecar setup, host-machine-with-container mode, credential leases, and environment variable reference.
 
-> [!TIP] For production, use a reverse proxy (Traefik, Nginx) in front of the backend container when you want TLS, host routing, or additional auth layers. See `local/instances/deploy/docker-compose.yml` for an example with Traefik labels.
+> [!TIP] For production, use a reverse proxy (Traefik, Nginx) in front of the MindRoom container when you want TLS, host routing, or additional auth layers. See `local/instances/deploy/docker-compose.yml` for an example with Traefik labels.

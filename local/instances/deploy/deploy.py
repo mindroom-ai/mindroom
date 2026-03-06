@@ -4,7 +4,7 @@
 # requires-python = ">=3.12"
 # dependencies = ["typer", "rich", "pydantic", "pyyaml", "jinja2"]
 # ///
-"""Docker Mindroom instance manager."""
+"""Docker MindRoom instance manager."""
 # ruff: noqa: S602  # subprocess with shell=True needed for docker compose
 # ruff: noqa: C901  # complexity is acceptable for CLI commands
 
@@ -29,7 +29,7 @@ from rich.console import Console
 from rich.table import Table
 
 app = typer.Typer(
-    help="Mindroom Instance Manager - Simple multi-instance deployment",
+    help="MindRoom Instance Manager - Simple multi-instance deployment",
     context_settings={"help_option_names": ["-h", "--help"]},
 )
 console = Console()
@@ -52,7 +52,6 @@ class InstanceStatus(str, Enum):
     CREATED = "created"
     RUNNING = "running"
     PARTIAL = "partial"  # Only Matrix server running
-    BACKEND_ONLY = "backend-only"  # Deprecated, kept for compatibility
     STOPPED = "stopped"
 
 
@@ -73,7 +72,7 @@ class Instance(BaseModel):
     """Instance configuration model."""
 
     name: str
-    backend_port: int
+    mindroom_port: int
     matrix_port: int | None = None
     data_dir: str
     domain: str
@@ -85,14 +84,14 @@ class Instance(BaseModel):
 class AllocatedPorts(BaseModel):
     """Allocated ports tracking model."""
 
-    backend: list[int] = Field(default_factory=list)
+    mindroom: list[int] = Field(default_factory=list)
     matrix: list[int] = Field(default_factory=list)
 
 
 class RegistryDefaults(BaseModel):
     """Registry defaults configuration."""
 
-    backend_port_start: int = 8765
+    mindroom_port_start: int = 8765
     matrix_port_start: int = 8448
     data_dir_base: str = Field(default_factory=lambda: str(SCRIPT_DIR / "instance_data"))
 
@@ -179,10 +178,10 @@ def _find_next_ports(registry: Registry) -> tuple[int, int]:
     defaults = registry.defaults
     allocated = registry.allocated_ports
 
-    backend_port = _find_available_port(defaults.backend_port_start, allocated.backend, "backend")
+    mindroom_port = _find_available_port(defaults.mindroom_port_start, allocated.mindroom, "MindRoom")
     matrix_port = _find_available_port(defaults.matrix_port_start, allocated.matrix, "matrix")
 
-    return backend_port, matrix_port
+    return mindroom_port, matrix_port
 
 
 def _prepare_matrix_config(
@@ -271,8 +270,8 @@ def _get_services_to_start(instance: Instance, only_matrix: bool = False) -> str
             raise ValueError(msg)
         return _get_matrix_services(instance.matrix_type).strip()
 
-    # Start full stack: backend + matrix + auth
-    services = ["backend"]
+    # Start full stack: MindRoom + matrix + auth
+    services = ["mindroom"]
 
     if instance.matrix_type == MatrixType.SYNAPSE:
         services.extend(["postgres", "redis", "synapse"])
@@ -317,7 +316,7 @@ def _pull_images_from_registry(registry_url: str, console: Console) -> None:
     arch = "arm64" if plat.machine() == "aarch64" else "amd64"
 
     images = [
-        (f"{registry_url}/mindroom-backend:{arch}", "deploy-mindroom-backend:latest"),
+        (f"{registry_url}/mindroom:{arch}", "deploy-mindroom:latest"),
     ]
     for source, target in images:
         pull_cmd = f"docker pull {source} && docker tag {source} {target}"
@@ -345,7 +344,7 @@ def _create_environment_file(instance: Instance, name: str, matrix_type: MatrixT
     with env_file.open("a") as f:
         f.write("\n# Instance configuration\n")
         f.write(f"INSTANCE_NAME={name}\n")
-        f.write(f"BACKEND_PORT={instance.backend_port}\n")
+        f.write(f"MINDROOM_PORT={instance.mindroom_port}\n")
         f.write(f"DATA_DIR={abs_data_dir}\n")
         f.write(f"INSTANCE_DOMAIN={instance.domain}\n")
 
@@ -620,7 +619,7 @@ def _setup_authelia_config(instance: Instance) -> None:
 def _update_registry(registry: Registry, instance: Instance, matrix_type: MatrixType | None) -> None:
     """Update the registry with the new instance."""
     registry.instances[instance.name] = instance
-    registry.allocated_ports.backend.append(instance.backend_port)
+    registry.allocated_ports.mindroom.append(instance.mindroom_port)
     if matrix_type and instance.matrix_port:
         registry.allocated_ports.matrix.append(instance.matrix_port)
     save_registry(registry)
@@ -629,7 +628,7 @@ def _update_registry(registry: Registry, instance: Instance, matrix_type: Matrix
 def _print_instance_info(instance: Instance, matrix_type: MatrixType | None, auth_type: AuthType | None = None) -> None:
     """Print information about the created instance."""
     console.print(f"[green]✓[/green] Created instance '[cyan]{instance.name}[/cyan]'")
-    console.print(f"  [dim]Dashboard/API port:[/dim] {instance.backend_port}")
+    console.print(f"  [dim]MindRoom port:[/dim] {instance.mindroom_port}")
     if matrix_type:
         console.print(f"  [dim]Matrix port:[/dim] {instance.matrix_port}")
     console.print(f"  [dim]Data dir:[/dim] {instance.data_dir}")
@@ -694,7 +693,7 @@ def create(
 
     # Allocate ports and create instance
     try:
-        backend_port, matrix_port_value = _find_next_ports(registry)
+        mindroom_port, matrix_port_value = _find_next_ports(registry)
     except RuntimeError as e:
         console.print(f"[red]✗[/red] Port allocation failed: {e}")
         console.print(
@@ -706,7 +705,7 @@ def create(
 
     instance = Instance(
         name=name,
-        backend_port=backend_port,
+        mindroom_port=mindroom_port,
         matrix_port=matrix_port_value if matrix_type else None,
         data_dir=data_dir,
         domain=domain or f"{name}.localhost",
@@ -743,13 +742,13 @@ def start(  # noqa: PLR0912, PLR0915
     only_matrix: bool = typer.Option(
         False,
         "--only-matrix",
-        help="Start only Matrix server without the MindRoom backend",
+        help="Start only Matrix server without the MindRoom runtime",
     ),
     use_registry: bool = typer.Option(False, "--registry", "-r", help="Pull images from registry instead of building"),
     registry_url: str = typer.Option(DEFAULT_REGISTRY, "--registry-url", help="Registry URL to pull from"),
     no_build: bool = typer.Option(False, "--no-build", help="Skip building images (use existing local images)"),
 ) -> None:
-    """Start a Mindroom instance."""
+    """Start a MindRoom instance."""
     registry = load_registry()
     if name not in registry.instances:
         console.print(f"[red]✗[/red] Instance '{name}' not found!")
@@ -802,7 +801,7 @@ def start(  # noqa: PLR0912, PLR0915
 
     status_msg = f"Starting Matrix server for '{name}'..." if only_matrix else f"Starting instance '{name}'..."
     if only_matrix:
-        console.print("[yellow]ℹ[/yellow] Starting only Matrix server (no MindRoom backend)")  # noqa: RUF001
+        console.print("[yellow]ℹ[/yellow] Starting only Matrix server (no MindRoom runtime)")  # noqa: RUF001
 
     # Pull images from registry if requested
     if use_registry:
@@ -850,7 +849,7 @@ def start(  # noqa: PLR0912, PLR0915
 
 @app.command()
 def stop(name: str = typer.Argument("default", help="Instance name to stop")) -> None:
-    """Stop a running Mindroom instance."""
+    """Stop a running MindRoom instance."""
     registry = load_registry()
     if name not in registry.instances:
         console.print(f"[red]✗[/red] Instance '{name}' not found!")
@@ -881,13 +880,13 @@ def restart(
     only_matrix: bool = typer.Option(
         False,
         "--only-matrix",
-        help="Restart only Matrix server without the MindRoom backend",
+        help="Restart only Matrix server without the MindRoom runtime",
     ),
     use_registry: bool = typer.Option(False, "--registry", "-r", help="Pull images from registry instead of building"),
     registry_url: str = typer.Option(DEFAULT_REGISTRY, "--registry-url", help="Registry URL to pull from"),
     no_build: bool = typer.Option(False, "--no-build", help="Skip building images (use existing local images)"),
 ) -> None:
-    """Restart a Mindroom instance (stop and start)."""
+    """Restart a MindRoom instance (stop and start)."""
     registry = load_registry()
 
     # Handle --all flag
@@ -1100,8 +1099,8 @@ def _remove_instance(name: str, registry: Registry, console: Console) -> None:
         del registry.instances[name]
 
         # Remove allocated ports
-        if instance.backend_port in registry.allocated_ports.backend:
-            registry.allocated_ports.backend.remove(instance.backend_port)
+        if instance.mindroom_port in registry.allocated_ports.mindroom:
+            registry.allocated_ports.mindroom.remove(instance.mindroom_port)
         if instance.matrix_port and instance.matrix_port in registry.allocated_ports.matrix:
             registry.allocated_ports.matrix.remove(instance.matrix_port)
 
@@ -1109,7 +1108,7 @@ def _remove_instance(name: str, registry: Registry, console: Console) -> None:
 def get_actual_status(name: str) -> tuple[bool, bool]:
     """Check which containers are actually running.
 
-    Returns: (backend_running, matrix_running)
+    Returns: (mindroom_running, matrix_running)
     """
     cmd = f"docker compose -p {name} ps --format json 2>/dev/null"
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=False)
@@ -1127,10 +1126,10 @@ def get_actual_status(name: str) -> tuple[bool, bool]:
             except json.JSONDecodeError:
                 pass
 
-    backend_running = "backend" in running_containers
+    mindroom_running = "mindroom" in running_containers
     matrix_running = any(m in running_containers for m in ["synapse", "tuwunel", "postgres", "redis"])
 
-    return backend_running, matrix_running
+    return mindroom_running, matrix_running
 
 
 @app.command("list")
@@ -1145,7 +1144,7 @@ def list_instances() -> None:
         console.print("  [cyan]./deploy.py create my-instance[/cyan]")
         return
 
-    table = Table(title="Mindroom Instances", show_header=True, header_style="bold magenta")
+    table = Table(title="MindRoom Instances", show_header=True, header_style="bold magenta")
     table.add_column("Name", style="cyan", no_wrap=True)
     table.add_column("Status", justify="center")
     table.add_column("Dashboard/API", justify="right")
@@ -1155,14 +1154,14 @@ def list_instances() -> None:
 
     for name, instance in instances.items():
         # Get actual container status
-        backend_up, matrix_up = get_actual_status(name)
+        mindroom_up, matrix_up = get_actual_status(name)
 
         # Determine status display based on actual running containers
-        if not any([backend_up, matrix_up]):
+        if not any([mindroom_up, matrix_up]):
             status_display = "[red]● stopped[/red]"
-        elif backend_up:
+        elif mindroom_up:
             status_display = "[green]● running[/green]"
-        elif matrix_up and not backend_up:
+        elif matrix_up and not mindroom_up:
             # Only Matrix server running (partial mode)
             status_display = "[yellow]● partial[/yellow]"
         else:
@@ -1186,7 +1185,7 @@ def list_instances() -> None:
         table.add_row(
             name,
             status_display,
-            str(instance.backend_port),
+            str(instance.mindroom_port),
             matrix_display,
             domain_display,
             instance.data_dir,
@@ -1209,7 +1208,7 @@ def pull(
     console.print(f"[blue]🐳[/blue] Pulling images from {registry_url}:{tag}...")
 
     images = [
-        (f"{registry_url}/mindroom-backend:{tag}", "deploy-mindroom-backend:latest"),
+        (f"{registry_url}/mindroom:{tag}", "deploy-mindroom:latest"),
     ]
 
     for source, target in images:

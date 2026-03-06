@@ -25,6 +25,7 @@ bun run screenshot
 ```
 
 To target a different URL, set `DEMO_URL`.
+If you prefer the Python wrapper, run `python take_screenshot.py` with an optional port or URL argument.
 
 ### 3. Find screenshots
 
@@ -47,6 +48,14 @@ Example:
 ```bash
 cd frontend
 DEMO_URL="http://localhost:8765" bun run screenshot
+```
+
+Or:
+
+```bash
+python frontend/take_screenshot.py
+python frontend/take_screenshot.py 3003
+python frontend/take_screenshot.py http://localhost:3003
 ```
 
 The script captures:

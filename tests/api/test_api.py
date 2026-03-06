@@ -766,12 +766,12 @@ def test_api_key_keeps_oauth_callbacks_open(
     assert response.status_code != 401
 
 
-def test_supabase_cookie_auth_allows_access(
-    test_client: TestClient,
+def _set_platform_auth(
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    valid_tokens: set[str],
 ) -> None:
-    """Platform requests should authenticate from the mindroom_jwt cookie."""
-    valid_cookie_token = "valid-cookie-token"  # noqa: S105
+    """Configure the API module for platform-managed cookie auth tests."""
 
     class _FakeUser:
         id = "user-123"
@@ -783,7 +783,7 @@ def test_supabase_cookie_auth_allows_access(
     class _FakeAuth:
         @staticmethod
         def get_user(token: str) -> _FakeResponse | None:
-            if token != valid_cookie_token:
+            if token not in valid_tokens:
                 return None
             return _FakeResponse()
 
@@ -793,6 +793,15 @@ def test_supabase_cookie_auth_allows_access(
     monkeypatch.setattr(main, "_MINDROOM_API_KEY", None)
     monkeypatch.setattr(main, "_supabase_auth", _FakeClient())
     monkeypatch.setattr(main, "_ACCOUNT_ID", None)
+
+
+def test_supabase_cookie_auth_allows_access(
+    test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Platform requests should authenticate from the mindroom_jwt cookie."""
+    valid_cookie_token = "valid-cookie-token"  # noqa: S105
+    _set_platform_auth(monkeypatch, valid_tokens={valid_cookie_token})
 
     response = test_client.post(
         "/api/config/load",
@@ -811,19 +820,56 @@ def test_platform_frontend_redirects_to_login_when_cookie_missing(
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
-    class _FakeAuth:
-        @staticmethod
-        def get_user(_token: str) -> None:
-            return None
-
-    class _FakeClient:
-        auth = _FakeAuth()
-
     monkeypatch.setattr(main, "_resolve_frontend_dist_dir", lambda: frontend_dir)
-    monkeypatch.setattr(main, "_MINDROOM_API_KEY", None)
-    monkeypatch.setattr(main, "_supabase_auth", _FakeClient())
+    _set_platform_auth(monkeypatch, valid_tokens=set())
     monkeypatch.setattr(main, "_PLATFORM_LOGIN_URL", "https://app.example.com/auth/login")
 
     response = test_client.get("/agents", follow_redirects=False)
     assert response.status_code == 307
     assert response.headers["location"].startswith("https://app.example.com/auth/login?redirect_to=")
+
+
+def test_platform_frontend_redirects_to_login_when_cookie_invalid(
+    test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Invalid platform cookies must redirect to login instead of serving the SPA shell."""
+    frontend_dir = tmp_path / "frontend-dist"
+    frontend_dir.mkdir()
+    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
+
+    monkeypatch.setattr(main, "_resolve_frontend_dist_dir", lambda: frontend_dir)
+    _set_platform_auth(monkeypatch, valid_tokens={"valid-cookie-token"})
+    monkeypatch.setattr(main, "_PLATFORM_LOGIN_URL", "https://app.example.com/auth/login")
+
+    response = test_client.get(
+        "/agents",
+        cookies={"mindroom_jwt": "definitely-invalid"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 307
+    assert response.headers["location"].startswith("https://app.example.com/auth/login?redirect_to=")
+
+
+def test_platform_frontend_serves_dashboard_with_valid_cookie(
+    test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Valid platform cookies should grant access to the bundled dashboard."""
+    valid_cookie_token = "valid-cookie-token"  # noqa: S105
+    frontend_dir = tmp_path / "frontend-dist"
+    frontend_dir.mkdir()
+    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
+
+    monkeypatch.setattr(main, "_resolve_frontend_dist_dir", lambda: frontend_dir)
+    _set_platform_auth(monkeypatch, valid_tokens={valid_cookie_token})
+    monkeypatch.setattr(main, "_PLATFORM_LOGIN_URL", "https://app.example.com/auth/login")
+
+    response = test_client.get(
+        "/",
+        cookies={"mindroom_jwt": valid_cookie_token},
+    )
+    assert response.status_code == 200
+    assert "MindRoom Dashboard" in response.text

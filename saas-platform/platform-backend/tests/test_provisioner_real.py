@@ -150,7 +150,7 @@ class TestProvisionerCommandValidation:
 
         # Verify deployment name format
         deployment = args[1].split("/")[1]
-        assert deployment == "mindroom-backend-123"
+        assert deployment == "mindroom-123"
 
 
 class TestProvisionerStateTransitions:
@@ -536,7 +536,7 @@ class TestProvisionerRealScenarios:
             mock_kubectl.return_value = (
                 1,  # Non-zero return code indicates failure
                 "",
-                'error: deployment "mindroom-backend-test-instance" exceeded its progress deadline',
+                'error: deployment "mindroom-test-instance" exceeded its progress deadline',
             )
 
             ready = await wait_for_deployment_ready("test-instance", timeout_seconds=5)

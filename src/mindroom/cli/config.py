@@ -629,7 +629,7 @@ MINDROOM_API_KEY={api_key}
 # OPENAI_COMPAT_API_KEYS=sk-my-secret-key
 # OPENAI_COMPAT_ALLOW_UNAUTHENTICATED=true
 
-# Backend port (default 8765)
+# MindRoom port (default 8765)
 # MINDROOM_PORT=8765
 """
 

@@ -2,10 +2,12 @@
 """Screenshot script for the MindRoom dashboard.
 
 Usage:
-    python take_screenshot.py <port>
+    python take_screenshot.py [port-or-url]
 
 Example:
+    python take_screenshot.py
     python take_screenshot.py 3003
+    python take_screenshot.py http://localhost:3003
 
 The dashboard must be running first. Use `uv run mindroom run` by default,
 or `./run-frontend.sh` when using the frontend dev server.
@@ -16,20 +18,36 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
+
+DEFAULT_DEMO_URL = "http://localhost:8765"
 
 
-def take_screenshot(port: int = 8765) -> bool:
+def _resolve_demo_url(target: str | None) -> str:
+    """Resolve a screenshot target from CLI input or the default URL."""
+    if target is None:
+        return DEFAULT_DEMO_URL
+
+    try:
+        port = int(target)
+    except ValueError:
+        parsed = urlparse(target)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            return target
+        msg = f"Error: '{target}' is not a valid port number or URL"
+        raise ValueError(msg) from None
+
+    return f"http://localhost:{port}"
+
+
+def take_screenshot(demo_url: str = DEFAULT_DEMO_URL) -> bool:
     """Take a screenshot of the dashboard using Puppeteer."""
-    env = {
-        "DEMO_URL": f"http://localhost:{port}",
-    }
-
-    print(f"Taking screenshot of app at http://localhost:{port}...")
+    print(f"Taking screenshot of app at {demo_url}...")
     result = subprocess.run(
         ["bun", "run", "screenshot"],
         check=False,
         cwd=Path(__file__).parent,  # We're now in the frontend directory
-        env={**os.environ, **env},
+        env={**os.environ, "DEMO_URL": demo_url},
         capture_output=True,
         text=True,
     )
@@ -44,22 +62,25 @@ def take_screenshot(port: int = 8765) -> bool:
 
 def main() -> None:
     """Main function to take screenshots."""
-    if len(sys.argv) != 2:
-        print("Usage: python take_screenshot.py <port>")
-        print("Example: python take_screenshot.py 8765")
+    if len(sys.argv) > 2:
+        print("Usage: python take_screenshot.py [port-or-url]")
+        print("Examples:")
+        print("  python take_screenshot.py")
+        print("  python take_screenshot.py 8765")
+        print("  python take_screenshot.py http://localhost:3003")
         print("\nNote: The dashboard must be running first. Use `uv run mindroom run`.")
         sys.exit(1)
 
     try:
-        port = int(sys.argv[1])
-    except ValueError:
-        print(f"Error: '{sys.argv[1]}' is not a valid port number")
+        demo_url = _resolve_demo_url(sys.argv[1] if len(sys.argv) == 2 else None)
+    except ValueError as exc:
+        print(str(exc))
         sys.exit(1)
 
-    print(f"Taking screenshot of app on port {port}...")
+    print(f"Taking screenshot of app at {demo_url}...")
 
     # Take screenshot
-    success = take_screenshot(port)
+    success = take_screenshot(demo_url)
 
     if success:
         print("\n📸 Screenshots saved to frontend/screenshots/")

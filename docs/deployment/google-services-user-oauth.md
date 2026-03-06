@@ -12,7 +12,7 @@ For team/shared deployments, use [Google Services OAuth (Admin Setup)](google-se
 
 - A Google account
 - Access to Google Cloud Console
-- A running MindRoom backend with the bundled dashboard (default URL: `http://localhost:8765`)
+- A running MindRoom instance with the bundled dashboard (default URL: `http://localhost:8765`)
 
 The callback path is always:
 
@@ -67,21 +67,21 @@ http://localhost:8765/api/google/callback
    - `http://localhost:8765/api/google/callback`
 5. Copy client ID and client secret.
 
-## Step 5: Configure MindRoom Backend
+## Step 5: Configure MindRoom
 
 Add this to `.env` (or export in your shell):
 
 ```bash
-BACKEND_PORT=8765
+MINDROOM_PORT=8765
 GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your-client-secret
 GOOGLE_PROJECT_ID=your-project-id
 GOOGLE_REDIRECT_URI=http://localhost:8765/api/google/callback
 ```
 
-Restart the MindRoom backend.
+Restart MindRoom.
 
-## Step 6: Verify Backend Reads Credentials
+## Step 6: Verify MindRoom Reads Credentials
 
 Run:
 
@@ -122,7 +122,7 @@ Gmail tool capabilities include:
 - `gmail_latest`: Read latest inbox emails
 - `gmail_unread`: Read unread emails only
 
-After editing `config.yaml`, restart MindRoom backend to reload configuration.
+After editing `config.yaml`, restart MindRoom to reload configuration.
 
 ## Disconnect Later (Optional)
 
@@ -133,11 +133,11 @@ After editing `config.yaml`, restart MindRoom backend to reload configuration.
 
 ### "Admin Setup Required" shown in frontend
 
-Your backend does not have valid Google OAuth env vars yet.
+MindRoom does not have valid Google OAuth env vars yet.
 
 ### "Failed to complete OAuth flow"
 
-Check redirect URI exact match between Google Cloud Console and MindRoom backend.
+Check redirect URI exact match between Google Cloud Console and MindRoom.
 
 ### Access blocked by Google
 

@@ -18,7 +18,7 @@ Use the `just` commands from the repo root to drive everything. Below is a quick
 - Local multi-instance (Compose) with bridges
   - Commands:
     - `just local-instances-create [INSTANCE] [tuwunel|synapse|none]`
-    - `just local-instances-start [INSTANCE]` or `just local-instances-start-backend [INSTANCE]`
+    - `just local-instances-start [INSTANCE]` or `just local-instances-start-matrix [INSTANCE]`
     - `just local-instances-stop [INSTANCE]`
     - `just local-instances-remove [INSTANCE]`
     - `just local-instances-list`
@@ -49,7 +49,7 @@ Use kind to spin up a throwaway local K8s cluster and install the platform chart
   or the focused one at `nix-shell cluster/k8s/kind/shell.nix`.
 - Quickstart:
   - `just cluster-kind-up`
-  - `just cluster-kind-build-load` (builds platform images and loads them into kind)
+  - `just cluster-kind-build-load` (builds platform + MindRoom images and loads them into kind)
   - `just cluster-kind-install-platform`
   - Or run the one-shot script: `cluster/k8s/kind/start-fresh.sh`
   - Port-forward:

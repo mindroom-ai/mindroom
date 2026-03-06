@@ -53,7 +53,7 @@ helm upgrade --install instance-1 ./cluster/k8s/instance \
 
 ## Secrets Management
 
-API keys are mounted as files at `/etc/secrets/` (not environment variables). The backend reads paths from `*_API_KEY_FILE` environment variables:
+API keys are mounted as files at `/etc/secrets/` (not environment variables). MindRoom reads paths from `*_API_KEY_FILE` environment variables:
 
 ```yaml
 env:
@@ -68,7 +68,7 @@ env:
 Each instance gets three hosts:
 
 - `{customer}.{baseDomain}` - Frontend and API
-- `{customer}.api.{baseDomain}` - Direct backend access
+- `{customer}.api.{baseDomain}` - Direct API access
 - `{customer}.matrix.{baseDomain}` - Matrix/Synapse server
 
 ## Platform Deployment
@@ -145,8 +145,7 @@ The provisioner creates the namespace, generates URLs, deploys via Helm, and upd
 cd saas-platform
 ./deploy.sh platform-frontend          # Deploy platform frontend
 ./deploy.sh platform-backend           # Deploy platform backend
-./redeploy-mindroom-backend.sh         # Redeploy all instance backends
-./redeploy-mindroom-frontend.sh        # Alias: bundled dashboard now redeploys the backend image
+./redeploy-mindroom.sh         # Redeploy all customer MindRoom instances
 ```
 
 ## Multi-Tenant Architecture

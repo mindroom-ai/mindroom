@@ -370,11 +370,11 @@ class TestProvisionerIntegration:
                 def kubectl_side_effect(args, namespace=None):
                     if "-o=jsonpath={.spec.replicas}" in args:
                         # Extract instance_id from deployment name
-                        if "mindroom-backend-1" in args[1]:
+                        if "mindroom-1" in args[1]:
                             return (0, "1", "")  # Running (1 replica)
-                        elif "mindroom-backend-2" in args[1]:
+                        elif "mindroom-2" in args[1]:
                             return (0, "0", "")  # Stopped (0 replicas)
-                        elif "mindroom-backend-4" in args[1]:
+                        elif "mindroom-4" in args[1]:
                             return (0, "1", "")  # Running (1 replica)
                     return (0, "", "")
 
@@ -523,7 +523,7 @@ class TestProvisionerIntegration:
                     mock_kubectl.return_value = (
                         1,
                         "",
-                        f"Error: deployment 'mindroom-backend-{operation}' not found",
+                        f"Error: deployment 'mindroom-{operation}' not found",
                     )
 
                     response = client.post(endpoint, headers=valid_auth)

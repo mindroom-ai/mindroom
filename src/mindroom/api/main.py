@@ -303,7 +303,7 @@ def _request_has_frontend_access(request: Request) -> bool:
         authorization,
         cookie_names=(_PLATFORM_AUTH_COOKIE_NAME,),
     )
-    return token is not None
+    return token is not None and _validate_supabase_token(token) is not None
 
 
 def _sanitize_next_path(next_path: str | None) -> str:

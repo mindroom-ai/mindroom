@@ -13,7 +13,7 @@ class FrontendBuildHook(BuildHookInterface):
     """Build the bundled dashboard before creating a distributable wheel."""
 
     def initialize(self, version: str, build_data: dict[str, object]) -> None:
-        """Build the frontend for wheel and editable installs."""
+        """Build dashboard assets when the current build target needs them."""
         if self.target_name != "wheel" or version not in {"standard", "editable"}:
             return
 
@@ -24,6 +24,8 @@ class FrontendBuildHook(BuildHookInterface):
 
         bun = shutil.which("bun")
         if bun is None:
+            if version == "editable":
+                return
             msg = (
                 "bun is required to build the bundled frontend for wheel distributions. "
                 "Install bun or build from a prebuilt wheel instead."

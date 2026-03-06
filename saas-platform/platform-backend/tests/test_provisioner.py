@@ -282,7 +282,7 @@ class TestProvisionerEndpoints:
 
         # Verify kubectl was called with scale command
         mock_kubectl.assert_called_with(
-            ["scale", "deployment/mindroom-backend-123", "--replicas=1"],
+            ["scale", "deployment/mindroom-123", "--replicas=1"],
             namespace="mindroom-instances",
         )
         mock_update_status.assert_called_with(123, "running")
@@ -342,7 +342,7 @@ class TestProvisionerEndpoints:
 
         # Verify kubectl was called with scale command
         mock_kubectl.assert_called_with(
-            ["scale", "deployment/mindroom-backend-123", "--replicas=0"],
+            ["scale", "deployment/mindroom-123", "--replicas=0"],
             namespace="mindroom-instances",
         )
         mock_update_status.assert_called_with(123, "stopped")
@@ -383,7 +383,7 @@ class TestProvisionerEndpoints:
 
         # Verify kubectl was called with rollout restart command
         mock_kubectl.assert_called_with(
-            ["rollout", "restart", "deployment/mindroom-backend-123"],
+            ["rollout", "restart", "deployment/mindroom-123"],
             namespace="mindroom-instances",
         )
 

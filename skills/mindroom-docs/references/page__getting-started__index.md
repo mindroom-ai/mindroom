@@ -2,9 +2,9 @@
 
 This guide will help you set up MindRoom and create your first AI agent.
 
-## Recommended: Hosted Matrix + Local Backend (`uv` only)
+## Recommended: Hosted Matrix + Local MindRoom (`uv` only)
 
-If you do not want to self-host Matrix yet, this is the simplest setup. You only run the MindRoom backend locally.
+If you do not want to self-host Matrix yet, this is the simplest setup. You only run MindRoom locally.
 
 **Prerequisite:** Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
 

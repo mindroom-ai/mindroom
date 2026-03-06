@@ -20,7 +20,7 @@ spec:
     - {{ .Values.customer }}.matrix.{{ .Values.baseDomain }}
     secretName: mindroom-{{ .Values.customer }}-tls
   rules:
-  # MindRoom dashboard and API on the same backend service
+  # MindRoom dashboard and API on the same service
   - host: {{ .Values.customer }}.{{ .Values.baseDomain }}
     http:
       paths:
@@ -28,11 +28,11 @@ spec:
         pathType: Prefix
         backend:
           service:
-            name: mindroom-backend-{{ .Values.customer }}
+            name: mindroom-{{ .Values.customer }}
             port:
               number: 8765
 
-  # API subdomain for direct backend access
+  # API subdomain for direct API access
   - host: {{ .Values.customer }}.api.{{ .Values.baseDomain }}
     http:
       paths:
@@ -40,7 +40,7 @@ spec:
         pathType: Prefix
         backend:
           service:
-            name: mindroom-backend-{{ .Values.customer }}
+            name: mindroom-{{ .Values.customer }}
             port:
               number: 8765
 

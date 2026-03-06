@@ -390,7 +390,7 @@ helm upgrade --install platform ./cluster/k8s/platform -f cluster/k8s/platform/v
 #   -f values-with-secrets.yaml  # Never commit this file!
 
 # Quick redeploy of MindRoom backend (updates all instances)
-./saas-platform/redeploy-mindroom-backend.sh
+./saas-platform/redeploy-mindroom.sh
 
 # Deploy platform frontend or backend
 ./saas-platform/deploy.sh platform-frontend  # Build, push, and deploy frontend
