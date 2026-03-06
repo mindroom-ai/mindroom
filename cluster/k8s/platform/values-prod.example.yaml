@@ -15,8 +15,6 @@ stripe:
   secretKey: # sk_live_...
   webhookSecret: # whsec_...
 
-# Optional image pull secrets for private registries
-imagePullSecrets: []
 cleanupScheduler:
   enabled: "true"
 
