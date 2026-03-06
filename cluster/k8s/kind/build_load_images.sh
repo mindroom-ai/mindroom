@@ -16,16 +16,8 @@ echo "[images] Building platform images tagged to chart defaults:" \
 
 pushd "${ROOT_DIR}" >/dev/null
 
-# Use dotenv to export vars from saas-platform/.env into current shell
-echo "[images] Loading env from saas-platform/.env for frontend build args"
-# shellcheck disable=SC2046
-eval $(uvx --from python-dotenv[cli] dotenv -f saas-platform/.env list --format shell)
-
 # Build frontend
 docker build \
-  --build-arg SUPABASE_URL="${SUPABASE_URL:-}" \
-  --build-arg SUPABASE_ANON_KEY="${SUPABASE_ANON_KEY:-}" \
-  --build-arg PLATFORM_DOMAIN="${PLATFORM_DOMAIN:-}" \
   -t "${FRONTEND_IMAGE}" \
   -f saas-platform/Dockerfile.platform-frontend .
 

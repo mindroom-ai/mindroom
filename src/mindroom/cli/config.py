@@ -26,6 +26,7 @@ from mindroom.constants import (
     config_search_locations,
     env_key_for_provider,
 )
+from mindroom.credentials_sync import get_secret_from_env
 
 console = Console()
 
@@ -415,7 +416,7 @@ def _find_missing_env_keys(config: Config) -> list[tuple[str, str]]:
     missing: list[tuple[str, str]] = []
     for provider in sorted(providers_used):
         env_key = env_key_for_provider(provider)
-        if env_key and not os.getenv(env_key):
+        if env_key and not get_secret_from_env(env_key):
             missing.append((provider, env_key))
     return missing
 

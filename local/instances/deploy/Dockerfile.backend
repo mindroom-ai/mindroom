@@ -69,6 +69,7 @@ RUN chmod +x /app/run-sandbox-runner.sh \
 
 # Set environment variable to indicate Docker mode
 ENV DOCKER_CONTAINER=1
+ENV PATH="/app/.venv/bin:${PATH}"
 
 # Run as non-root user
 USER 1000:1000

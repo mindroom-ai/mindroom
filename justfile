@@ -221,17 +221,7 @@ docker-build-backend:
 
 # Build SaaS platform frontend (Next.js standalone)
 docker-build-saas-frontend:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    # Load env from saas-platform/.env into current shell
-    eval "$(uvx --from python-dotenv[cli] dotenv -f saas-platform/.env list --format shell)"
-    cd saas-platform
-    docker build \
-        --build-arg SUPABASE_URL="${SUPABASE_URL:-}" \
-        --build-arg SUPABASE_ANON_KEY="${SUPABASE_ANON_KEY:-}" \
-        --build-arg PLATFORM_DOMAIN="${PLATFORM_DOMAIN:-}" \
-        -t platform-frontend:dev \
-        -f saas-platform/Dockerfile.platform-frontend .
+    docker build -t platform-frontend:dev -f saas-platform/Dockerfile.platform-frontend .
 
 # Build SaaS platform backend (FastAPI)
 docker-build-saas-backend:

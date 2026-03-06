@@ -31,9 +31,6 @@ IMAGE="ghcr.io/mindroom-ai/$APP:latest"
 
 echo "[build] Building $APP from repo root context..."
 docker build \
-  --build-arg SUPABASE_URL="${SUPABASE_URL:-}" \
-  --build-arg SUPABASE_ANON_KEY="${SUPABASE_ANON_KEY:-}" \
-  --build-arg PLATFORM_DOMAIN="${PLATFORM_DOMAIN:-}" \
   -t "$IMAGE" \
   -f "$SCRIPT_DIR/Dockerfile.$APP" \
   "$REPO_ROOT"
