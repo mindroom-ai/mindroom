@@ -32,3 +32,10 @@ def test_trusted_host_rejects_unknown() -> None:
     client = TestClient(app)
     r = client.get("/health", headers={"host": "evil.example.com"})
     assert r.status_code in (400, 421)
+
+
+def test_trusted_host_allows_loopback_with_port() -> None:
+    """Loopback health probes should work even in production mode."""
+    client = TestClient(app)
+    r = client.get("/health", headers={"host": "127.0.0.1:18000"})
+    assert r.status_code == 200
