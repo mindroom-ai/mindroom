@@ -535,6 +535,11 @@ def _reload_api_runtime_config(
     raise_api_config_load_result(result)
 
 
+def _resolve_frontend_dist_dir() -> Path | None:
+    """Return the built dashboard directory when bundled or locally built."""
+    return ensure_frontend_dist_dir()
+
+
 def _resolve_frontend_asset(frontend_dir: Path, request_path: str) -> Path | None:
     """Resolve a request path to a static asset or SPA fallback."""
     normalized_path = unquote(request_path).strip("/")
@@ -554,7 +559,6 @@ def _resolve_frontend_asset(frontend_dir: Path, request_path: str) -> Path | Non
         nested_index_path = candidate / "index.html"
         if nested_index_path.is_file():
             return nested_index_path
-
     if PurePosixPath(normalized_path).suffix:
         return None
 

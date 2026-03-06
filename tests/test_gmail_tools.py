@@ -164,6 +164,7 @@ class TestGmailTools:
             saved_creds = mock_credentials_manager.load_credentials("google")
             assert saved_creds is not None
             assert saved_creds["token"] == "new_access_token"  # noqa: S105
+            assert saved_creds["_source"] == "oauth"
 
     @patch("mindroom.custom_tools.gmail.logger")
     def test_auth_without_stored_credentials(

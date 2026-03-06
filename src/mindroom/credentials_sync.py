@@ -50,12 +50,9 @@ def _sync_github_private_credentials(runtime_paths: RuntimePaths) -> bool:
 
     creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
     existing = creds_manager.load_credentials("github_private")
-    if existing is not None:
-        source = existing.get("_source")
-        if source != "env":
-            # UI-set or legacy (no _source) — don't overwrite
-            logger.debug("Credentials for github_private not env-sourced, skipping env sync")
-            return False
+    if existing is not None and existing.get("_source") != "env":
+        logger.debug("Credentials for github_private not env-sourced, skipping env sync")
+        return False
 
     creds_manager.save_credentials(
         "github_private",

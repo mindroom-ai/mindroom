@@ -26,14 +26,10 @@ def _get_tier_from_price(price: dict) -> str:
     """Extract tier from price metadata.
 
     Our sync-stripe-prices.py script sets metadata.plan with the tier name.
-    Also supports metadata.tier for backward compatibility.
     """
     if metadata := price.get("metadata", {}):
-        # Try 'plan' first (new format), then 'tier' (old format)
         if plan := metadata.get("plan"):
             return plan
-        if tier := metadata.get("tier"):
-            return tier
 
     msg = (
         f"Unable to determine tier from price. "
@@ -277,8 +273,7 @@ def handle_payment_succeeded(invoice: dict) -> tuple[bool, str | None]:
     else:
         account_id = account_result.data["id"]
 
-    # Record the payment in both tables for compatibility
-    # First, record in payments table with tenant isolation
+    # Record the payment in both tables: payments is the ledger, usage powers metrics.
     sb.table("payments").insert(
         {
             "invoice_id": invoice["id"],

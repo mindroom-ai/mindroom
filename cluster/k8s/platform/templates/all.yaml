@@ -66,6 +66,12 @@ spec:
         app: platform-frontend
         environment: {{ .Values.environment }}
     spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+      {{- range . }}
+      - name: {{ . }}
+      {{- end }}
+      {{- end }}
       containers:
       - name: app
         image: {{ .Values.registry }}/platform-frontend:{{ .Values.imageTag }}
@@ -132,6 +138,12 @@ spec:
         environment: {{ .Values.environment }}
     spec:
       serviceAccountName: platform-backend
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+      {{- range . }}
+      - name: {{ . }}
+      {{- end }}
+      {{- end }}
       containers:
       - name: app
         image: {{ .Values.registry }}/platform-backend:{{ .Values.imageTag }}

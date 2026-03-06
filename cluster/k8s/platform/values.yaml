@@ -6,6 +6,7 @@ domain: mindroom.chat  # Base domain - override with --set domain based on envir
 registry: ghcr.io/mindroom-ai
 imageTag: latest
 imagePullPolicy: Always
+imagePullSecrets: []
 
 # Replicas
 replicas: 1
