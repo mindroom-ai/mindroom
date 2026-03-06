@@ -1,5 +1,6 @@
 """Tests for the dashboard backend API endpoints."""
 
+import asyncio
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -129,6 +130,25 @@ def test_ensure_writable_config_path_seeds_from_template(
 
     assert constants.ensure_writable_config_path() is True
     assert writable_config.read_text(encoding="utf-8") == template_config.read_text(encoding="utf-8")
+
+
+def test_api_lifespan_syncs_env_credentials_on_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """API startup should run env credential sync via the FastAPI lifespan hook."""
+    sync_calls: list[str] = []
+    watch_calls: list[str] = []
+
+    async def _fake_watch_config(stop_event: asyncio.Event) -> None:
+        watch_calls.append("watch")
+        await stop_event.wait()
+
+    monkeypatch.setattr(main, "sync_env_to_credentials", lambda: sync_calls.append("sync"))
+    monkeypatch.setattr(main, "_watch_config", _fake_watch_config)
+
+    with TestClient(main.app) as client:
+        assert client.get("/api/health").status_code == 200
+
+    assert sync_calls == ["sync"]
+    assert watch_calls == ["watch"]
 
 
 def test_health_check(test_client: TestClient) -> None:

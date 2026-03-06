@@ -65,7 +65,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await watch_task
 
 
-app = FastAPI(title="MindRoom Dashboard API", _lifespan=_lifespan)
+app = FastAPI(title="MindRoom Dashboard API", lifespan=_lifespan)
 
 # Configure CORS for the standalone frontend dev server.
 app.add_middleware(
