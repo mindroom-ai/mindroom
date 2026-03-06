@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 _MATRIX_PILL_RE = re.compile(r"""href=["']https://matrix\.to/#/(@[^"':]+:[^"']+)["']""")
 
 
-def _extract_mentioned_user_ids(content: dict[str, Any]) -> list[str]:
+def extract_mentioned_user_ids(content: dict[str, Any]) -> list[str]:
     """Extract mentioned user IDs from message content.
 
     Checks ``m.mentions.user_ids`` first.  When that field is absent or empty
@@ -59,7 +59,7 @@ def check_agent_mentioned(
     (i.e. a real human user).
     """
     content = event_source.get("content", {})
-    all_mentioned_ids = _extract_mentioned_user_ids(content)
+    all_mentioned_ids = extract_mentioned_user_ids(content)
     mentioned_agents = _agents_from_user_ids(all_mentioned_ids, config)
     am_i_mentioned = agent_id in mentioned_agents
     has_non_agent_mentions = any(not _is_bot_or_agent(uid, config) for uid in all_mentioned_ids)
@@ -180,7 +180,7 @@ def _has_any_agent_mentions_in_thread(thread_history: list[dict[str, Any]], conf
     """Check if any agents are mentioned anywhere in the thread."""
     for msg in thread_history:
         content = msg.get("content", {})
-        user_ids = _extract_mentioned_user_ids(content)
+        user_ids = extract_mentioned_user_ids(content)
         if _agents_from_user_ids(user_ids, config):
             return True
     return False
@@ -196,7 +196,7 @@ def get_all_mentioned_agents_in_thread(thread_history: list[dict[str, Any]], con
 
     for msg in thread_history:
         content = msg.get("content", {})
-        user_ids = _extract_mentioned_user_ids(content)
+        user_ids = extract_mentioned_user_ids(content)
         agents = _agents_from_user_ids(user_ids, config)
 
         for agent in agents:

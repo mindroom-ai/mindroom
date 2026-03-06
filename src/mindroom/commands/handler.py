@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.authorization import get_available_agents_for_sender
 from mindroom.commands import config_confirmation
@@ -39,6 +39,15 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+class CommandEvent(Protocol):
+    """Minimal event shape required by command handling."""
+
+    sender: str
+    event_id: str
+    body: str
+    source: dict[str, Any]
+
+
 @dataclass(frozen=True)
 class CommandHandlerContext:
     """Dependencies required by command handling."""
@@ -48,7 +57,7 @@ class CommandHandlerContext:
     logger: structlog.stdlib.BoundLogger
     response_tracker: ResponseTracker
     derive_conversation_context: Callable[[str, EventInfo], Awaitable[tuple[bool, str | None, list[dict[str, Any]]]]]
-    requester_user_id_for_event: Callable[[nio.RoomMessageText], str]
+    requester_user_id_for_event: Callable[[CommandEvent], str]
     resolve_reply_thread_id: Callable[..., str | None]
     send_response: Callable[..., Awaitable[str | None]]
     send_skill_command_response: Callable[..., Awaitable[str | None]]
@@ -379,7 +388,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     *,
     context: CommandHandlerContext,
     room: nio.MatrixRoom,
-    event: nio.RoomMessageText,
+    event: CommandEvent,
     command: Command,
 ) -> None:
     """Dispatch chat commands using injected bot context."""

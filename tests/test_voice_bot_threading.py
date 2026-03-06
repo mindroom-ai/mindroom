@@ -44,6 +44,10 @@ async def test_voice_message_in_main_room_creates_thread(mock_router_bot: AgentB
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
     room.canonical_alias = None
+    room.users = {
+        "@mindroom_router:localhost": MagicMock(),
+        "@user:example.com": MagicMock(),
+    }
 
     # Voice message in main room (not in a thread)
     voice_event = MagicMock(spec=nio.RoomMessageAudio)
@@ -56,6 +60,7 @@ async def test_voice_message_in_main_room_creates_thread(mock_router_bot: AgentB
     with (
         patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.bot.voice_handler.handle_voice_message", return_value="🎤 what is the weather"),
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_voice_message(room, voice_event)
@@ -79,6 +84,10 @@ async def test_voice_message_in_thread_continues_thread(mock_router_bot: AgentBo
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
     room.canonical_alias = None
+    room.users = {
+        "@mindroom_router:localhost": MagicMock(),
+        "@user:example.com": MagicMock(),
+    }
 
     # Voice message in an existing thread
     voice_event = MagicMock(spec=nio.RoomMessageAudio)
@@ -98,6 +107,7 @@ async def test_voice_message_in_thread_continues_thread(mock_router_bot: AgentBo
     with (
         patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.bot.voice_handler.handle_voice_message", return_value="🎤 show me the forecast"),
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_voice_message(room, voice_event)
@@ -121,6 +131,10 @@ async def test_voice_plain_reply_to_thread_message_uses_thread_root(mock_router_
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
     room.canonical_alias = None
+    room.users = {
+        "@mindroom_router:localhost": MagicMock(),
+        "@user:example.com": MagicMock(),
+    }
 
     voice_event = MagicMock(spec=nio.RoomMessageAudio)
     voice_event.event_id = "$voice789"
@@ -155,6 +169,7 @@ async def test_voice_plain_reply_to_thread_message_uses_thread_root(mock_router_
         patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=[])),
         patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.bot.voice_handler.handle_voice_message", return_value="🎤 continue the same thread"),
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_voice_message(room, voice_event)
