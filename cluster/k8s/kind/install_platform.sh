@@ -25,7 +25,9 @@ echo "[k8s] Ensuring namespace 'mindroom-instances' exists (for RBAC)..."
 kubectl get ns mindroom-instances >/dev/null 2>&1 || kubectl create namespace mindroom-instances
 
 echo "[helm] Installing/upgrading ${RELEASE_NAME}..."
-helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}" -f "${VALUES_FILE}"
+helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}" -f "${VALUES_FILE}" \
+  --set monitoring.enabled=false \
+  --set imagePullPolicy=IfNotPresent
 
 echo "[helm] Waiting for pods in namespace 'mindroom-staging' (best effort)..."
 kubectl wait --for=condition=ready pod -n mindroom-staging --all --timeout=120s || true

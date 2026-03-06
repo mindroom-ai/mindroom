@@ -69,6 +69,7 @@ spec:
       containers:
       - name: app
         image: {{ .Values.registry }}/platform-frontend:{{ .Values.imageTag }}
+        imagePullPolicy: {{ .Values.imagePullPolicy | default "Always" }}
         ports:
         - containerPort: 3000
         envFrom:
@@ -140,6 +141,7 @@ spec:
       containers:
       - name: app
         image: {{ .Values.registry }}/platform-backend:{{ .Values.imageTag }}
+        imagePullPolicy: {{ .Values.imagePullPolicy | default "Always" }}
         ports:
         - containerPort: 8000
         envFrom:
