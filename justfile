@@ -217,7 +217,7 @@ check-module-privacy:
 # Docker builds (local)
 # Build the core MindRoom runtime image (bot + dashboard + APIs)
 docker-build-mindroom:
-    docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.backend .
+    docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.mindroom .
 
 # Build SaaS platform frontend (Next.js standalone)
 docker-build-saas-frontend:

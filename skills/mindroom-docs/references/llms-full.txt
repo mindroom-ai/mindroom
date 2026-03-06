@@ -5346,7 +5346,7 @@ Start MindRoom with your configuration.
 │                                          (state, sessions, tracking)                   │
 │                                          [default: mindroom_data]                      │
 │ --api               --no-api             Start the bundled dashboard/API server        │
-│                                          bot                                           │
+│                                          alongside the bot                             │
 │                                          [default: api]                                │
 │ --api-port                      INTEGER  Port for the bundled dashboard/API server     │
 │                                          [default: 8765]                               │

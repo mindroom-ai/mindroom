@@ -44,11 +44,11 @@ if [ "${BUILD_MINDROOM_IMAGES}" = "1" ]; then
   echo "[images] Building MindRoom images locally..."
   docker build \
     -t "${MINDROOM_IMAGE}" \
-    -f local/instances/deploy/Dockerfile.backend .
+    -f local/instances/deploy/Dockerfile.mindroom .
 
   docker build \
     -t "${MINDROOM_MINIMAL_IMAGE}" \
-    -f local/instances/deploy/Dockerfile.backend-minimal .
+    -f local/instances/deploy/Dockerfile.mindroom-minimal .
 else
   echo "[images] Pulling published MindRoom images..."
   docker pull "${MINDROOM_IMAGE}"
