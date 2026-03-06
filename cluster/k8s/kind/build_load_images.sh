@@ -55,6 +55,9 @@ else
   docker pull "${MINDROOM_MINIMAL_IMAGE}"
 fi
 
+echo "[images] Pulling Synapse image..."
+docker pull "${SYNAPSE_IMAGE}"
+
 echo "[images] Loading images into kind cluster '${CLUSTER_NAME}'..."
 kind load docker-image "${PLATFORM_FRONTEND_IMAGE}" --name "${CLUSTER_NAME}"
 kind load docker-image "${PLATFORM_BACKEND_IMAGE}" --name "${CLUSTER_NAME}"
