@@ -33,7 +33,9 @@ describe('UnconfiguredRooms', () => {
     expect(await screen.findByText('Test Team')).toBeInTheDocument();
     expect(screen.getByText('Partner Room')).toBeInTheDocument();
     expect(
-      screen.getByText('Manage rooms that agents and teams have joined but are not in the configuration')
+      screen.getByText(
+        'Manage rooms that agents and teams have joined but are not in the configuration'
+      )
     ).toBeInTheDocument();
     expect(screen.getByText(/1 external room found across 1 entity/i)).toBeInTheDocument();
   });

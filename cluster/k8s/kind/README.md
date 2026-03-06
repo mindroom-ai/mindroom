@@ -84,8 +84,8 @@ helm upgrade --install instance-1 ../instance \
   --set matrix.admin_password=test
 
 # Access instance
-kubectl port-forward -n mindroom-instances svc/mindroom-frontend-1 8081:8080
-# Visit: http://localhost:8081
+kubectl port-forward -n mindroom-instances svc/mindroom-1 8765:8765
+# Visit: http://localhost:8765
 ```
 
 ## Troubleshooting
@@ -98,12 +98,12 @@ If pods show `ImagePullBackOff`, the images need to be loaded into kind:
 # Check images were loaded
 docker exec -it mindroom-control-plane crictl images | grep platform
 
-# If missing, reload:
+# If missing, rebuild and reload all platform + MindRoom images:
 ./build_load_images.sh
 
 # Update deployments to use correct tag and pull policy
-kubectl set image deployment/platform-backend app=git.nijho.lt/basnijholt/platform-backend:latest -n mindroom-staging
-kubectl set image deployment/platform-frontend app=git.nijho.lt/basnijholt/platform-frontend:latest -n mindroom-staging
+kubectl set image deployment/platform-backend app=ghcr.io/mindroom-ai/platform-backend:latest -n mindroom-staging
+kubectl set image deployment/platform-frontend app=ghcr.io/mindroom-ai/platform-frontend:latest -n mindroom-staging
 
 # Patch to use IfNotPresent
 kubectl patch deployment platform-backend -n mindroom-staging \
@@ -124,6 +124,9 @@ kubectl logs -n mindroom-staging -l app=platform-frontend -f
 
 # Test access
 ./test-access.sh
+
+# Deploy and smoke-test a real MindRoom instance
+./smoke_instance.sh
 ```
 
 ## Clean Up
@@ -138,8 +141,9 @@ kind delete cluster --name mindroom
 ## Scripts
 
 - `up.sh` - Create kind cluster with ingress
-- `build_load_images.sh` - Build and load Docker images
+- `build_load_images.sh` - Build and load platform + MindRoom Docker images
 - `install_platform.sh` - Deploy platform via Helm
+- `smoke_instance.sh` - Deploy and verify a MindRoom instance
 - `start-fresh.sh` - Complete setup from scratch
 - `setup-local-access.sh` - Configure ingress for local domains
 - `test-access.sh` - Test all access methods

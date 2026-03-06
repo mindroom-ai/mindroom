@@ -186,10 +186,15 @@ def _service_allowed_hosts(*, environment: str) -> list[str]:
 # 3. SlowAPI rate limiting middleware
 app.add_middleware(SlowAPIMiddleware)
 
-# 4. Trusted host middleware - restrict allowed hosts
-allowed_hosts = [f"*.{PLATFORM_DOMAIN}", PLATFORM_DOMAIN, "testserver"]
-if ENVIRONMENT != "production":
-    allowed_hosts += ["localhost", "127.0.0.1", "testserver"]
+# 4. Trusted host middleware - restrict allowed hosts.
+# Always allow loopback hosts so direct container health probes work in every environment.
+allowed_hosts = [
+    f"*.{PLATFORM_DOMAIN}",
+    PLATFORM_DOMAIN,
+    "testserver",
+    "localhost",
+    "127.0.0.1",
+]
 
 allowed_hosts += _service_allowed_hosts(environment=ENVIRONMENT)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)

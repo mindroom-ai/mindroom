@@ -63,11 +63,6 @@ locals {
       apiKey = var.provisioner_api_key
     }
 
-    gitea = {
-      user  = var.gitea_user
-      token = var.gitea_token
-    }
-
     apiKeys = {
       openai     = var.openai_api_key
       anthropic  = var.anthropic_api_key

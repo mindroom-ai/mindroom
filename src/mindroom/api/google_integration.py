@@ -55,8 +55,8 @@ _SCOPES = [
 _ENV_PATH = Path(__file__).parent.parent.parent.parent.parent / ".env"
 
 # Get configuration from environment
-_BACKEND_PORT = os.getenv("BACKEND_PORT", "8765")
-_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", f"http://localhost:{_BACKEND_PORT}/api/google/callback")
+_MINDROOM_PORT = os.getenv("MINDROOM_PORT", "8765")
+_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", f"http://localhost:{_MINDROOM_PORT}/api/google/callback")
 
 
 _GOOGLE_DEPS = ["google-auth", "google-auth-oauthlib"]
@@ -154,7 +154,7 @@ def _save_credentials(creds: Credentials) -> None:
     if id_token:
         token_data["_id_token"] = id_token
 
-    # Save using credentials manager (handles backward compatibility)
+    # Save using the unified credentials manager.
     _creds_manager.save_credentials("google", token_data)
 
 
@@ -173,7 +173,7 @@ def _save_env_credentials(client_id: str, client_secret: str, project_id: str | 
         "GOOGLE_CLIENT_SECRET": client_secret,
         "GOOGLE_PROJECT_ID": project_id or "mindroom-integration",
         "GOOGLE_REDIRECT_URI": current_redirect_uri,
-        "BACKEND_PORT": _BACKEND_PORT,
+        "MINDROOM_PORT": _MINDROOM_PORT,
     }
 
     for key, value in env_vars.items():
@@ -304,7 +304,6 @@ async def callback(request: Request) -> RedirectResponse:
         # Save credentials
         _save_credentials(flow.credentials)
 
-        # Redirect back to widget with success message
         # Extract the domain from the redirect URI for the final redirect
         parsed_uri = urlparse(current_redirect_uri)
         base_url = f"{parsed_uri.scheme}://{parsed_uri.netloc}"

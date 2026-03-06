@@ -1,4 +1,4 @@
-"""Test tool metadata and generate JSON for widget consumption."""
+"""Test tool metadata and generate JSON for dashboard consumption."""
 
 import json
 from pathlib import Path
@@ -9,9 +9,9 @@ from mindroom.tool_system.metadata import TOOL_METADATA, export_tools_metadata
 
 
 def test_export_tools_metadata_json() -> None:
-    """Export tool metadata to JSON file for widget consumption.
+    """Export tool metadata to JSON file for dashboard consumption.
 
-    This test generates a JSON file that the widget backend can read directly,
+    This test generates a JSON file that the dashboard backend can read directly,
     avoiding the need to import the entire mindroom.tools module at runtime.
     """
     output_path = Path(__file__).parent.parent / "src/mindroom/tools_metadata.json"

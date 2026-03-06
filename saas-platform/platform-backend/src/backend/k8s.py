@@ -6,13 +6,24 @@ from backend.config import logger
 from backend.process import run_cmd
 
 
+def instance_workload_name(instance_id: str | int) -> str:
+    """Return the Kubernetes workload name for a MindRoom instance."""
+    return f"mindroom-{instance_id}"
+
+
+def instance_deployment_ref(instance_id: str | int) -> str:
+    """Return the Kubernetes deployment reference for a MindRoom instance."""
+    return f"deployment/{instance_workload_name(instance_id)}"
+
+
 async def check_deployment_exists(instance_id: str, namespace: str = "mindroom-instances") -> bool:
     """Check if a Kubernetes deployment exists for an instance."""
     try:
-        code, _out, err = await run_kubectl(["get", f"deployment/mindroom-backend-{instance_id}"], namespace=namespace)
+        deployment_ref = instance_deployment_ref(instance_id)
+        code, _out, err = await run_kubectl(["get", deployment_ref], namespace=namespace)
         if code != 0:
             if "not found" in err.lower() or "notfound" in err.lower():
-                logger.info("Deployment mindroom-backend-%s not found in namespace %s", instance_id, namespace)
+                logger.info("Deployment %s not found in namespace %s", deployment_ref, namespace)
             return False
         return True  # noqa: TRY300
     except Exception:
@@ -29,8 +40,9 @@ async def wait_for_deployment_ready(
     Returns True if ready; False on timeout or error.
     """
     try:
+        deployment_ref = instance_deployment_ref(instance_id)
         code, out, err = await run_kubectl(
-            ["rollout", "status", f"deployment/mindroom-backend-{instance_id}", f"--timeout={timeout_seconds}s"],
+            ["rollout", "status", deployment_ref, f"--timeout={timeout_seconds}s"],
             namespace=namespace,
         )
         if code == 0:

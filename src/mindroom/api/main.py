@@ -1,18 +1,21 @@
 # ruff: noqa: D100
 import asyncio
+import html
 import importlib
 import os
 import secrets
-import shutil
 import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
-from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from pathlib import Path, PurePosixPath
+from typing import Annotated, Any, Protocol, cast
+from urllib.parse import quote
 
 import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from pydantic import BaseModel
 from watchfiles import awatch
 
 # Import routers
@@ -27,12 +30,10 @@ from mindroom.api.schedules import router as schedules_router
 from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
 from mindroom.config.main import Config
-from mindroom.constants import CONFIG_PATH, CONFIG_TEMPLATE_PATH, safe_replace
+from mindroom.constants import CONFIG_PATH, ensure_writable_config_path, safe_replace
 from mindroom.credentials_sync import sync_env_to_credentials
+from mindroom.frontend_assets import ensure_frontend_dist_dir
 from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_tool_extra
-
-if TYPE_CHECKING:
-    from supabase import Client as SupabaseClient
 
 
 async def _watch_config(stop_event: asyncio.Event) -> None:
@@ -65,9 +66,9 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await watch_task
 
 
-app = FastAPI(title="MindRoom Widget Backend", _lifespan=_lifespan)
+app = FastAPI(title="MindRoom Dashboard API", lifespan=_lifespan)
 
-# Configure CORS for widget - allow multiple origins including port forwarding
+# Configure CORS for the standalone frontend dev server.
 app.add_middleware(
     CORSMiddleware,  # ty: ignore[invalid-argument-type]
     allow_origins=[
@@ -83,35 +84,41 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
+_API_ROUTE_PREFIXES = frozenset({"api", "v1"})
+_PLATFORM_AUTH_COOKIE_NAME = "mindroom_jwt"
+_STANDALONE_AUTH_COOKIE_NAME = "mindroom_api_key"
+_PLATFORM_LOGIN_URL = os.getenv("MINDROOM_PLATFORM_LOGIN_URL")
+
 
 def load_runtime_config() -> tuple[Config, Path]:
     """Load the current runtime config and return it with its path."""
     return Config.from_yaml(CONFIG_PATH), CONFIG_PATH
 
 
-def _ensure_writable_config() -> None:
-    """Ensure the config file exists at a writable location.
+def _resolve_frontend_asset(frontend_dir: Path, request_path: str) -> Path | None:
+    """Resolve a request path to a static asset or SPA fallback."""
+    normalized_path = request_path.strip("/")
+    index_path = frontend_dir / "index.html"
+    if not normalized_path:
+        return index_path if index_path.is_file() else None
 
-    In managed deployments the writable config is placed on a persistent
-    volume while a read-only template is mounted separately. When the final
-    config file is missing we seed it from the template so both the bot and
-    API read/write the same path.
-    """
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    candidate_parts = PurePosixPath(normalized_path).parts
+    if ".." in candidate_parts:
+        return None
 
-    if CONFIG_PATH.exists():
-        return
+    candidate = frontend_dir.joinpath(*candidate_parts)
+    if candidate.is_file():
+        return candidate
 
-    if CONFIG_TEMPLATE_PATH != CONFIG_PATH and CONFIG_TEMPLATE_PATH.exists():
-        shutil.copyfile(CONFIG_TEMPLATE_PATH, CONFIG_PATH)
-        CONFIG_PATH.chmod(0o600)
-        print(f"Seeded config from template {CONFIG_TEMPLATE_PATH} -> {CONFIG_PATH}")
-        return
+    if candidate.is_dir():
+        nested_index_path = candidate / "index.html"
+        if nested_index_path.is_file():
+            return nested_index_path
 
-    # Fallback: create a minimal valid YAML structure so initial loads succeed
-    CONFIG_PATH.write_text("agents: {}\nmodels: {}\n", encoding="utf-8")
-    CONFIG_PATH.chmod(0o600)
-    print(f"Created new config file at {CONFIG_PATH}")
+    if PurePosixPath(normalized_path).suffix:
+        return None
+
+    return index_path if index_path.is_file() else None
 
 
 def _save_config_to_file(config: dict[str, Any]) -> None:
@@ -176,6 +183,13 @@ _SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 _ACCOUNT_ID = os.getenv("ACCOUNT_ID")  # optional: enforce instance ownership
 _MINDROOM_API_KEY = os.getenv("MINDROOM_API_KEY")  # optional: dashboard auth for standalone mode
 
+
+class _AuthSessionRequest(BaseModel):
+    """Standalone dashboard login payload."""
+
+    api_key: str
+
+
 _STANDALONE_PUBLIC_PATHS = frozenset(
     {
         "/api/google/callback",
@@ -185,7 +199,27 @@ _STANDALONE_PUBLIC_PATHS = frozenset(
 )
 
 
-def _init_supabase_auth(supabase_url: str | None, supabase_anon_key: str | None) -> "SupabaseClient | None":
+class _SupabaseUserProtocol(Protocol):
+    id: str
+    email: str | None
+
+
+class _SupabaseUserResponseProtocol(Protocol):
+    user: _SupabaseUserProtocol | None
+
+
+class _SupabaseAuthProtocol(Protocol):
+    def get_user(self, token: str) -> _SupabaseUserResponseProtocol | None: ...
+
+
+class _SupabaseClientProtocol(Protocol):
+    auth: _SupabaseAuthProtocol
+
+
+def _init_supabase_auth(
+    supabase_url: str | None,
+    supabase_anon_key: str | None,
+) -> _SupabaseClientProtocol | None:
     """Initialize Supabase auth client when credentials are configured."""
     if not supabase_url or not supabase_anon_key:
         return None
@@ -204,14 +238,181 @@ def _init_supabase_auth(supabase_url: str | None, supabase_anon_key: str | None)
             raise ImportError(msg) from None
         create_client = importlib.import_module("supabase").create_client
 
-    return create_client(supabase_url, supabase_anon_key)
+    return cast("_SupabaseClientProtocol", create_client(supabase_url, supabase_anon_key))
 
 
-_supabase_auth: "SupabaseClient | None" = _init_supabase_auth(_SUPABASE_URL, _SUPABASE_ANON_KEY)
+_supabase_auth: _SupabaseClientProtocol | None = _init_supabase_auth(_SUPABASE_URL, _SUPABASE_ANON_KEY)
+
+
+def _extract_bearer_token(authorization: str | None) -> str | None:
+    """Return the bearer token value from an Authorization header."""
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    token = authorization.removeprefix("Bearer ").strip()
+    return token or None
+
+
+def _get_request_token(
+    request: Request,
+    authorization: str | None,
+    *,
+    cookie_names: tuple[str, ...],
+) -> str | None:
+    """Return the request auth token from bearer auth or one of the allowed cookies."""
+    bearer_token = _extract_bearer_token(authorization)
+    if bearer_token:
+        return bearer_token
+
+    for cookie_name in cookie_names:
+        cookie_value = request.cookies.get(cookie_name)
+        if cookie_value:
+            return cookie_value
+
+    return None
+
+
+def _validate_supabase_token(token: str) -> _SupabaseUserProtocol | None:
+    """Validate a Supabase access token and return the authenticated user."""
+    if _supabase_auth is None:
+        return None
+
+    try:
+        response = _supabase_auth.auth.get_user(token)
+    except Exception:
+        return None
+
+    if not response or not response.user:
+        return None
+
+    return response.user
+
+
+def _request_has_frontend_access(request: Request) -> bool:
+    """Return whether the current request may load the dashboard UI."""
+    authorization = request.headers.get("authorization")
+
+    if _supabase_auth is None:
+        if not _MINDROOM_API_KEY:
+            return True
+        token = _get_request_token(
+            request,
+            authorization,
+            cookie_names=(_STANDALONE_AUTH_COOKIE_NAME,),
+        )
+        return token is not None and secrets.compare_digest(token, _MINDROOM_API_KEY)
+
+    token = _get_request_token(
+        request,
+        authorization,
+        cookie_names=(_PLATFORM_AUTH_COOKIE_NAME,),
+    )
+    return token is not None and _validate_supabase_token(token) is not None
+
+
+def _sanitize_next_path(next_path: str | None) -> str:
+    """Normalize redirect targets to an absolute in-app path."""
+    if not next_path or not next_path.startswith("/") or next_path.startswith("//"):
+        return "/"
+    return next_path
+
+
+def _render_standalone_login_page(next_path: str) -> str:
+    """Return the standalone dashboard login page."""
+    escaped_next_path = html.escape(next_path, quote=True)
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MindRoom Login</title>
+  <style>
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: #f6f4ef;
+      color: #1f2523;
+      font-family: system-ui, sans-serif;
+    }}
+    form {{
+      width: min(24rem, calc(100vw - 2rem));
+      padding: 1.5rem;
+      border: 1px solid #d2cbbd;
+      border-radius: 1rem;
+      background: #fffdf7;
+      box-shadow: 0 1rem 3rem rgba(31, 37, 35, 0.08);
+    }}
+    h1 {{
+      margin: 0 0 0.75rem;
+      font-size: 1.4rem;
+    }}
+    p {{
+      margin: 0 0 1rem;
+      color: #5d655f;
+    }}
+    input, button {{
+      box-sizing: border-box;
+      width: 100%;
+      border-radius: 0.75rem;
+      font: inherit;
+    }}
+    input {{
+      margin-bottom: 0.75rem;
+      padding: 0.8rem 0.9rem;
+      border: 1px solid #c7cfc7;
+      background: white;
+    }}
+    button {{
+      padding: 0.85rem 1rem;
+      border: 0;
+      background: #1f2523;
+      color: white;
+      cursor: pointer;
+    }}
+    #error {{
+      min-height: 1.25rem;
+      margin-top: 0.75rem;
+      color: #b42318;
+    }}
+  </style>
+</head>
+<body>
+  <form id="login-form">
+    <h1>MindRoom Dashboard</h1>
+    <p>Enter the dashboard API key to continue.</p>
+    <input id="api-key" name="api-key" type="password" autocomplete="current-password" autofocus>
+    <button type="submit">Continue</button>
+    <div id="error" role="alert"></div>
+  </form>
+  <script>
+    const nextPath = {escaped_next_path!r};
+    const form = document.getElementById("login-form");
+    const input = document.getElementById("api-key");
+    const error = document.getElementById("error");
+
+    form.addEventListener("submit", async (event) => {{
+      event.preventDefault();
+      error.textContent = "";
+      const response = await fetch("/api/auth/session", {{
+        method: "POST",
+        headers: {{ "Content-Type": "application/json" }},
+        body: JSON.stringify({{ api_key: input.value }}),
+      }});
+      if (response.ok) {{
+        window.location.assign(nextPath);
+        return;
+      }}
+      error.textContent = "Invalid API key.";
+      input.select();
+    }});
+  </script>
+</body>
+</html>"""
 
 
 async def verify_user(request: Request, authorization: str | None = Header(None)) -> dict:
-    """Validate Supabase JWT from Authorization header; enforce owner if ACCOUNT_ID set.
+    """Validate bearer or cookie auth and enforce owner if ACCOUNT_ID is set.
 
     In standalone mode (no Supabase), returns a default user to allow access.
     """
@@ -221,29 +422,33 @@ async def verify_user(request: Request, authorization: str | None = Header(None)
             return {"user_id": "standalone", "email": None}
 
         if _MINDROOM_API_KEY:
-            if not authorization or not authorization.startswith("Bearer "):
-                raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
-            token = authorization.removeprefix("Bearer ").strip()
+            token = _get_request_token(
+                request,
+                authorization,
+                cookie_names=(_STANDALONE_AUTH_COOKIE_NAME,),
+            )
+            if token is None:
+                raise HTTPException(status_code=401, detail="Missing or invalid credentials")
             if not secrets.compare_digest(token, _MINDROOM_API_KEY):
                 raise HTTPException(status_code=401, detail="Invalid API key")
         return {"user_id": "standalone", "email": None}
 
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = _get_request_token(
+        request,
+        authorization,
+        cookie_names=(_PLATFORM_AUTH_COOKIE_NAME,),
+    )
+    if token is None:
+        raise HTTPException(status_code=401, detail="Missing or invalid credentials")
 
-    token = authorization.removeprefix("Bearer ").strip()
-    try:
-        user = _supabase_auth.auth.get_user(token)
-    except Exception as err:
-        raise HTTPException(status_code=401, detail="Invalid token") from err
-
-    if not user or not user.user:
+    user = _validate_supabase_token(token)
+    if user is None:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    if _ACCOUNT_ID and user.user.id != _ACCOUNT_ID:
+    if _ACCOUNT_ID and user.id != _ACCOUNT_ID:
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    return {"user_id": user.user.id, "email": user.user.email}
+    return {"user_id": user.id, "email": user.email}
 
 
 def _load_config_from_file() -> None:
@@ -257,7 +462,7 @@ def _load_config_from_file() -> None:
         print(f"Error loading config: {e}")
 
 
-_ensure_writable_config()
+ensure_writable_config_path(create_minimal=True)
 
 # Load initial config
 _load_config_from_file()
@@ -279,6 +484,46 @@ app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify
 async def health_check() -> dict[str, str]:
     """Health check endpoint for testing."""
     return {"status": "healthy"}
+
+
+@app.post("/api/auth/session", include_in_schema=False)
+async def create_auth_session(request: Request, payload: _AuthSessionRequest, response: Response) -> dict[str, bool]:
+    """Set a same-origin cookie for standalone dashboard auth."""
+    if not _MINDROOM_API_KEY:
+        raise HTTPException(status_code=404, detail="Dashboard auth is not enabled")
+
+    if not payload.api_key or not secrets.compare_digest(payload.api_key, _MINDROOM_API_KEY):
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    response.set_cookie(
+        key=_STANDALONE_AUTH_COOKIE_NAME,
+        value=payload.api_key,
+        path="/",
+        secure=request.url.scheme == "https",
+        httponly=True,
+        samesite="lax",
+    )
+    return {"success": True}
+
+
+@app.delete("/api/auth/session", include_in_schema=False)
+async def clear_auth_session(response: Response) -> dict[str, bool]:
+    """Clear the standalone dashboard auth cookie."""
+    response.delete_cookie(key=_STANDALONE_AUTH_COOKIE_NAME, path="/")
+    return {"success": True}
+
+
+@app.get("/login", include_in_schema=False)
+async def standalone_login(request: Request, next: str = "/") -> Response:  # noqa: A002
+    """Render the standalone dashboard login form when API-key auth is enabled."""
+    if not _MINDROOM_API_KEY:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    next_path = _sanitize_next_path(next)
+    if _request_has_frontend_access(request):
+        return RedirectResponse(next_path)
+
+    return HTMLResponse(_render_standalone_login_page(next_path))
 
 
 @app.post("/api/config/load")
@@ -478,6 +723,36 @@ async def get_available_rooms(_user: Annotated[dict, Depends(verify_user)]) -> l
             rooms.update(agent_rooms)
 
     return sorted(rooms)
+
+
+@app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
+@app.api_route("/{path:path}", methods=["GET", "HEAD"], include_in_schema=False)
+async def serve_frontend(request: Request, path: str = "") -> Response:
+    """Serve the bundled dashboard and SPA routes from the backend."""
+    first_segment = path.split("/", 1)[0] if path else ""
+    if first_segment in _API_ROUTE_PREFIXES:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    if not _request_has_frontend_access(request):
+        target_path = _sanitize_next_path(f"/{path}" if path else "/")
+        if _supabase_auth is not None and _PLATFORM_LOGIN_URL:
+            redirect_to = quote(str(request.url), safe="")
+            return RedirectResponse(f"{_PLATFORM_LOGIN_URL}?redirect_to={redirect_to}")
+        if _MINDROOM_API_KEY:
+            login_target = quote(target_path, safe="/?=&")
+            return RedirectResponse(f"/login?next={login_target}")
+
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    frontend_dir = ensure_frontend_dist_dir()
+    if frontend_dir is None:
+        raise HTTPException(status_code=404, detail="Frontend assets are not available")
+
+    asset_path = _resolve_frontend_asset(frontend_dir, path)
+    if asset_path is None:
+        raise HTTPException(status_code=404, detail="Frontend asset not found")
+
+    return FileResponse(asset_path)
 
 
 if __name__ == "__main__":

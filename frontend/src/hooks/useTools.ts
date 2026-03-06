@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { API_ENDPOINTS, fetchAPI } from '@/lib/api';
+import { API_ENDPOINTS, fetchJSON } from '@/lib/api';
 import { useFetchData } from './useFetchData';
 
 export interface ToolInfo {
@@ -27,7 +27,7 @@ const DEFAULT: ToolInfo[] = [];
 export function useTools() {
   const fetcher = useMemo(
     () => async () => {
-      const response = (await fetchAPI(API_ENDPOINTS.tools)) as ToolsResponse;
+      const response = (await fetchJSON<ToolsResponse>(API_ENDPOINTS.tools)) as ToolsResponse;
       return response.tools;
     },
     []

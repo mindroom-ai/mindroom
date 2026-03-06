@@ -1,38 +1,19 @@
----
 apiVersion: v1
 kind: Service
 metadata:
-  name: mindroom-frontend-{{ .Values.customer }}
+  name: mindroom-{{ .Values.customer }}
   namespace: mindroom-instances
   labels:
-    app: mindroom-frontend
-    customer: {{ .Values.customer | quote }}
-spec:
-  type: ClusterIP
-  ports:
-  - port: 3003
-    targetPort: 8080  # Targets nginx auth proxy (non-root)
-    name: http
-  selector:
-    app: mindroom-frontend
-    customer: {{ .Values.customer | quote }}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: mindroom-backend-{{ .Values.customer }}
-  namespace: mindroom-instances
-  labels:
-    app: mindroom-backend
+    app: mindroom
     customer: {{ .Values.customer | quote }}
 spec:
   type: ClusterIP
   ports:
   - port: 8765
-    targetPort: 8765  # API server in backend container
+    targetPort: 8765  # API server in the MindRoom container
     name: api
   selector:
-    app: mindroom-backend
+    app: mindroom
     customer: {{ .Values.customer | quote }}
 ---
 apiVersion: v1

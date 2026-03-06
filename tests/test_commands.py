@@ -212,7 +212,6 @@ def test_get_command_help() -> None:
     help_text = get_command_help()
     assert "Available Commands" in help_text
     assert "!schedule" in help_text
-    assert "!widget" in help_text
     assert "!help" in help_text
     assert "!schedule" in help_text
     assert "!list_schedules" in help_text
@@ -224,9 +223,6 @@ def test_get_command_help() -> None:
     assert "Schedule Command" in schedule_help
     assert "Usage:" in schedule_help
     assert "Reminders" in schedule_help or "Workflows" in schedule_help
-
-    widget_help = get_command_help("widget")
-    assert "Widget Command" in widget_help
 
     # Schedule command help
     schedule_help = get_command_help("schedule")

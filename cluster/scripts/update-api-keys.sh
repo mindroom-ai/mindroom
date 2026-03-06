@@ -73,7 +73,7 @@ else
         update_secret "$SECRET_NAME" "mindroom-instances" "instance $INSTANCE_ID"
 
         echo "  Restarting instance $INSTANCE_ID to pick up new keys..."
-        kubectl rollout restart deployment/mindroom-backend-$INSTANCE_ID -n mindroom-instances --kubeconfig="$KUBECONFIG" 2>/dev/null || echo "  Backend not found or restart failed"
+        kubectl rollout restart deployment/mindroom-$INSTANCE_ID -n mindroom-instances --kubeconfig="$KUBECONFIG" 2>/dev/null || echo "  MindRoom deployment not found or restart failed"
     done
 fi
 

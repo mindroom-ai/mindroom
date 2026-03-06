@@ -8,9 +8,13 @@ from typing import Annotated, Any
 from backend.config import (
     ANTHROPIC_API_KEY,
     DEEPSEEK_API_KEY,
-    GITEA_TOKEN,
-    GITEA_USER,
     GOOGLE_API_KEY,
+    INSTANCE_BASE_DOMAIN,
+    INSTANCE_MINDROOM_IMAGE,
+    INSTANCE_MINDROOM_IMAGE_PULL_POLICY,
+    INSTANCE_SYNAPSE_IMAGE,
+    INSTANCE_SYNAPSE_IMAGE_PULL_POLICY,
+    INSTANCE_STORAGE_CLASS_NAME,
     OPENAI_API_KEY,
     OPENROUTER_API_KEY,
     PLATFORM_DOMAIN,
@@ -25,7 +29,7 @@ from backend.db_utils import update_instance_status
 from backend.deps import _extract_bearer_token, ensure_supabase, limiter
 from backend.k8s import (
     check_deployment_exists,
-    ensure_docker_registry_secret,
+    instance_deployment_ref,
     run_kubectl,
     wait_for_deployment_ready,
 )
@@ -159,9 +163,10 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     logger.info("Deploying instance %s to namespace %s", customer_id, namespace)
 
     # Compute URLs and persist them (subdomain is set via trigger if null)
-    frontend_url = f"https://{customer_id}.{PLATFORM_DOMAIN}"
-    api_url = f"https://{customer_id}.api.{PLATFORM_DOMAIN}"
-    matrix_url = f"https://{customer_id}.matrix.{PLATFORM_DOMAIN}"
+    base_domain = INSTANCE_BASE_DOMAIN or PLATFORM_DOMAIN
+    frontend_url = f"https://{customer_id}.{base_domain}"
+    api_url = f"https://{customer_id}.api.{base_domain}"
+    matrix_url = f"https://{customer_id}.matrix.{base_domain}"
     try:
         sb.table("instances").update(
             {
@@ -177,60 +182,56 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     except Exception:
         logger.warning("Failed to update URLs for instance %s", customer_id)
 
-    # Ensure image pull secret exists in namespace for private registry
-    if GITEA_USER and GITEA_TOKEN:
-        success = await ensure_docker_registry_secret(
-            secret_name="gitea-registry",  # noqa: S106
-            server="git.nijho.lt",
-            username=GITEA_USER,
-            password=GITEA_TOKEN,
-            namespace=namespace,
-        )
-        if not success:
-            logger.warning("Failed to create image pull secret, deployment may fail")
-
     # Keep this non-empty so shell/file/python proxying doesn't fail at runtime.
     sandbox_proxy_token = SANDBOX_PROXY_TOKEN or secrets.token_hex(32)
 
     try:
         # Use upgrade --install to handle both new and re-provisioning cases
-        code, stdout, stderr = await run_helm(
-            [
-                "upgrade",
-                "--install",
-                helm_release_name,
-                "/app/k8s/instance/",
-                "--namespace",
-                namespace,
-                "--create-namespace",
-                "--set",
-                f"customer={customer_id}",
-                "--set",
-                f"baseDomain={PLATFORM_DOMAIN}",
-                "--set",
-                f"accountId={account_id}",
-                "--set",
-                f"supabaseUrl={SUPABASE_URL or ''}",
-                "--set",
-                f"supabaseAnonKey={SUPABASE_ANON_KEY or ''}",
-                "--set",
-                f"supabaseServiceKey={SUPABASE_SERVICE_KEY or ''}",
-                "--set",
-                f"openai_key={OPENAI_API_KEY}",
-                "--set",
-                f"anthropic_key={ANTHROPIC_API_KEY}",
-                "--set",
-                f"google_key={GOOGLE_API_KEY}",
-                "--set",
-                f"openrouter_key={OPENROUTER_API_KEY}",
-                "--set",
-                f"deepseek_key={DEEPSEEK_API_KEY}",
-                "--set",
-                f"sandbox_proxy_token={sandbox_proxy_token}",
-                "--set",
-                "mindroom_image=git.nijho.lt/basnijholt/mindroom-frontend:latest",
-            ],
-        )
+        helm_args = [
+            "upgrade",
+            "--install",
+            helm_release_name,
+            "/app/k8s/instance/",
+            "--namespace",
+            namespace,
+            "--create-namespace",
+            "--set",
+            f"customer={customer_id}",
+            "--set",
+            f"baseDomain={base_domain}",
+            "--set",
+            f"accountId={account_id}",
+            "--set",
+            f"supabaseUrl={SUPABASE_URL or ''}",
+            "--set",
+            f"supabaseAnonKey={SUPABASE_ANON_KEY or ''}",
+            "--set",
+            f"supabaseServiceKey={SUPABASE_SERVICE_KEY or ''}",
+            "--set",
+            f"openai_key={OPENAI_API_KEY}",
+            "--set",
+            f"anthropic_key={ANTHROPIC_API_KEY}",
+            "--set",
+            f"google_key={GOOGLE_API_KEY}",
+            "--set",
+            f"openrouter_key={OPENROUTER_API_KEY}",
+            "--set",
+            f"deepseek_key={DEEPSEEK_API_KEY}",
+            "--set",
+            f"sandbox_proxy_token={sandbox_proxy_token}",
+        ]
+        if INSTANCE_STORAGE_CLASS_NAME:
+            helm_args += ["--set", f"storageClassName={INSTANCE_STORAGE_CLASS_NAME}"]
+        if INSTANCE_MINDROOM_IMAGE:
+            helm_args += ["--set", f"mindroom_image={INSTANCE_MINDROOM_IMAGE}"]
+        if INSTANCE_MINDROOM_IMAGE_PULL_POLICY:
+            helm_args += ["--set", f"mindroom_image_pull_policy={INSTANCE_MINDROOM_IMAGE_PULL_POLICY}"]
+        if INSTANCE_SYNAPSE_IMAGE:
+            helm_args += ["--set", f"synapse_image={INSTANCE_SYNAPSE_IMAGE}"]
+        if INSTANCE_SYNAPSE_IMAGE_PULL_POLICY:
+            helm_args += ["--set", f"synapse_image_pull_policy={INSTANCE_SYNAPSE_IMAGE_PULL_POLICY}"]
+
+        code, stdout, stderr = await run_helm(helm_args)
         if code != 0:
             # Mark as error in DB
             try:
@@ -300,7 +301,7 @@ async def start_instance_provisioner(
     logger.info("Starting instance %s", instance_id)
 
     if not await check_deployment_exists(instance_id):
-        error_msg = f"Deployment mindroom-backend-{instance_id} not found"
+        error_msg = f"Deployment {instance_deployment_ref(instance_id)} not found"
         logger.warning(error_msg)
         raise HTTPException(status_code=404, detail=error_msg)
 
@@ -308,7 +309,7 @@ async def start_instance_provisioner(
         code, out, err = await run_kubectl(
             [
                 "scale",
-                f"deployment/mindroom-backend-{instance_id}",
+                instance_deployment_ref(instance_id),
                 "--replicas=1",
             ],
             namespace="mindroom-instances",
@@ -340,7 +341,7 @@ async def stop_instance_provisioner(
     logger.info("Stopping instance %s", instance_id)
 
     if not await check_deployment_exists(instance_id):
-        error_msg = f"Deployment mindroom-backend-{instance_id} not found"
+        error_msg = f"Deployment {instance_deployment_ref(instance_id)} not found"
         logger.warning(error_msg)
         raise HTTPException(status_code=404, detail=error_msg)
 
@@ -348,7 +349,7 @@ async def stop_instance_provisioner(
         code, out, err = await run_kubectl(
             [
                 "scale",
-                f"deployment/mindroom-backend-{instance_id}",
+                instance_deployment_ref(instance_id),
                 "--replicas=0",
             ],
             namespace="mindroom-instances",
@@ -380,7 +381,7 @@ async def restart_instance_provisioner(
     logger.info("Restarting instance %s", instance_id)
 
     if not await check_deployment_exists(instance_id):
-        error_msg = f"Deployment mindroom-backend-{instance_id} not found"
+        error_msg = f"Deployment {instance_deployment_ref(instance_id)} not found"
         logger.warning(error_msg)
         raise HTTPException(status_code=404, detail=error_msg)
 
@@ -389,7 +390,7 @@ async def restart_instance_provisioner(
             [
                 "rollout",
                 "restart",
-                f"deployment/mindroom-backend-{instance_id}",
+                instance_deployment_ref(instance_id),
             ],
             namespace="mindroom-instances",
         )
@@ -513,7 +514,7 @@ async def sync_instances(
                     code, out, _ = await run_kubectl(
                         [
                             "get",
-                            f"deployment/mindroom-backend-{instance_id}",
+                            instance_deployment_ref(instance_id),
                             "-o=jsonpath={.spec.replicas}",
                         ],
                         namespace="mindroom-instances",

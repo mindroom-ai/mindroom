@@ -48,7 +48,7 @@ export default function AccountsPage() {
   const handleDelete = async (accountId: string, accountEmail: string) => {
     const confirmMessage = `Are you sure you want to permanently delete the account for ${accountEmail}?\n\n` +
       `This will:\n` +
-      `• Deprovision all MindRoom instances (Matrix server, backend, frontend)\n` +
+      `• Deprovision all MindRoom instances (Matrix server and bundled backend/dashboard)\n` +
       `• Cancel any active Stripe subscriptions\n` +
       `• Delete the account and all associated data\n\n` +
       `This action cannot be undone.`

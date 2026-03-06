@@ -174,20 +174,12 @@ async function fetchApiKeyValue(service: string): Promise<string | null> {
     const res = await fetch(
       `/api/credentials/${service}/api-key?key_name=api_key&include_value=true`
     );
-    if (res.ok) {
-      const data = await res.json();
-      if (data.api_key) {
-        return data.api_key;
-      }
-    }
-
-    // Fallback for older backends that don't support include_value
-    const legacyRes = await fetch(`/api/credentials/${service}`);
-    if (!legacyRes.ok) {
+    if (!res.ok) {
       return null;
     }
-    const legacyData = await legacyRes.json();
-    return legacyData.credentials?.api_key || null;
+
+    const data = await res.json();
+    return data.api_key || null;
   } catch {
     return null;
   }

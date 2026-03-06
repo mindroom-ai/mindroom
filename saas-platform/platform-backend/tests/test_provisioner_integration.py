@@ -60,30 +60,27 @@ class TestProvisionerIntegration:
 
                 mock_kubectl.side_effect = kubectl_side_effect
 
-                with patch("backend.routes.provisioner.ensure_docker_registry_secret") as mock_secret:
-                    mock_secret.return_value = True
+                with patch("backend.routes.provisioner.run_helm") as mock_helm:
+                    # Helm deployment succeeds
+                    mock_helm.return_value = (
+                        0,
+                        "Release installed successfully",
+                        "",
+                    )
 
-                    with patch("backend.routes.provisioner.run_helm") as mock_helm:
-                        # Helm deployment succeeds
-                        mock_helm.return_value = (
-                            0,
-                            "Release installed successfully",
-                            "",
+                    with patch("backend.routes.provisioner.wait_for_deployment_ready") as mock_wait:
+                        # Deployment not immediately ready (realistic)
+                        mock_wait.return_value = False
+
+                        response = client.post(
+                            "/system/provision",
+                            json={
+                                "subscription_id": "sub-123",
+                                "account_id": "acc-456",
+                                "tier": "professional",
+                            },
+                            headers=valid_auth,
                         )
-
-                        with patch("backend.routes.provisioner.wait_for_deployment_ready") as mock_wait:
-                            # Deployment not immediately ready (realistic)
-                            mock_wait.return_value = False
-
-                            response = client.post(
-                                "/system/provision",
-                                json={
-                                    "subscription_id": "sub-123",
-                                    "account_id": "acc-456",
-                                    "tier": "professional",
-                                },
-                                headers=valid_auth,
-                            )
 
             assert response.status_code == 200
             result = response.json()
@@ -373,11 +370,11 @@ class TestProvisionerIntegration:
                 def kubectl_side_effect(args, namespace=None):
                     if "-o=jsonpath={.spec.replicas}" in args:
                         # Extract instance_id from deployment name
-                        if "mindroom-backend-1" in args[1]:
+                        if "mindroom-1" in args[1]:
                             return (0, "1", "")  # Running (1 replica)
-                        elif "mindroom-backend-2" in args[1]:
+                        elif "mindroom-2" in args[1]:
                             return (0, "0", "")  # Stopped (0 replicas)
-                        elif "mindroom-backend-4" in args[1]:
+                        elif "mindroom-4" in args[1]:
                             return (0, "1", "")  # Running (1 replica)
                     return (0, "", "")
 
@@ -526,7 +523,7 @@ class TestProvisionerIntegration:
                     mock_kubectl.return_value = (
                         1,
                         "",
-                        f"Error: deployment 'mindroom-backend-{operation}' not found",
+                        f"Error: deployment 'mindroom-{operation}' not found",
                     )
 
                     response = client.post(endpoint, headers=valid_auth)

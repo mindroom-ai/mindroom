@@ -50,9 +50,9 @@ local-instances-create instance=default_instance matrix=default_matrix:
 local-instances-start instance=default_instance:
     cd local/instances/deploy && ./deploy.py start {{instance}}
 
-# Start a local instance (backend + Matrix only)
-local-instances-start-backend instance=default_instance:
-    cd local/instances/deploy && ./deploy.py start {{instance}} --no-frontend
+# Start only the Matrix side of a local instance
+local-instances-start-matrix instance=default_instance:
+    cd local/instances/deploy && ./deploy.py start {{instance}} --only-matrix
 
 # Stop a local instance
 local-instances-stop instance=default_instance:
@@ -70,9 +70,9 @@ local-instances-list:
 local-instances-logs instance=default_instance:
     cd local/instances/deploy && docker compose -p {{instance}} logs -f
 
-# Shell into local backend container for an instance
+# Shell into the local MindRoom container for an instance
 local-instances-shell instance=default_instance:
-    cd local/instances/deploy && docker compose -p {{instance}} exec backend bash
+    cd local/instances/deploy && docker compose -p {{instance}} exec mindroom bash
 
 # Remove ALL local instances (containers + data)
 local-instances-reset:
@@ -215,27 +215,13 @@ check-module-privacy:
 #############################
 
 # Docker builds (local)
-# Build core MindRoom frontend image (static, Nginx)
-docker-build-frontend:
-    docker build -t mindroom-frontend:dev -f local/instances/deploy/Dockerfile.frontend .
-
-# Build core MindRoom backend image (FastAPI)
-docker-build-backend:
-    docker build -t mindroom-backend:dev -f local/instances/deploy/Dockerfile.backend .
+# Build the core MindRoom runtime image (bot + dashboard + APIs)
+docker-build-mindroom:
+    docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.backend .
 
 # Build SaaS platform frontend (Next.js standalone)
 docker-build-saas-frontend:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    # Load env from saas-platform/.env into current shell
-    eval "$(uvx --from python-dotenv[cli] dotenv -f saas-platform/.env list --format shell)"
-    cd saas-platform
-    docker build \
-        --build-arg SUPABASE_URL="${SUPABASE_URL:-}" \
-        --build-arg SUPABASE_ANON_KEY="${SUPABASE_ANON_KEY:-}" \
-        --build-arg PLATFORM_DOMAIN="${PLATFORM_DOMAIN:-}" \
-        -t platform-frontend:dev \
-        -f saas-platform/Dockerfile.platform-frontend .
+    docker build -t platform-frontend:dev -f saas-platform/Dockerfile.platform-frontend .
 
 # Build SaaS platform backend (FastAPI)
 docker-build-saas-backend:
@@ -246,8 +232,8 @@ docker-build-saas-backend:
 start-frontend-dev:
     cd frontend && bun install && bun run dev -- --host 0.0.0.0 --port 3003
 
-# Start core MindRoom backend (dev)
-start-backend-dev:
+# Start core MindRoom runtime (dev)
+start-mindroom-dev:
     uv run mindroom run
 
 # SaaS Platform app dev

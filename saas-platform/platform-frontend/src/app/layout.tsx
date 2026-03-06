@@ -20,7 +20,7 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const runtimeConfig = getServerRuntimeConfig()
+  const runtimeConfig = getServerRuntimeConfig({ requireSupabase: false })
   const serializedConfig = serializeRuntimeConfig(runtimeConfig)
 
   return (

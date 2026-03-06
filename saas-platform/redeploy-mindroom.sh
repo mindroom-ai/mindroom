@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Redeploy MindRoom frontend for all customer instances
+# Redeploy MindRoom for all customer instances
 
 set -e
 
@@ -8,16 +8,16 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 KUBECONFIG="$REPO_ROOT/cluster/terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml"
 
-echo "📦 Building mindroom-frontend..."
+echo "📦 Building mindroom..."
 cd "$REPO_ROOT"
-docker build -t git.nijho.lt/basnijholt/mindroom-frontend:latest -f local/instances/deploy/Dockerfile.frontend .
+docker build -t ghcr.io/mindroom-ai/mindroom:latest -f local/instances/deploy/Dockerfile.backend .
 
 echo "⬆️ Pushing to registry..."
-docker push git.nijho.lt/basnijholt/mindroom-frontend:latest
+docker push ghcr.io/mindroom-ai/mindroom:latest
 
-echo "🔄 Restarting all customer frontend deployments..."
+echo "🔄 Restarting all customer MindRoom deployments..."
 kubectl get deployments -n mindroom-instances --kubeconfig="$KUBECONFIG" \
-    | grep mindroom-frontend \
+    | grep mindroom \
     | awk '{print $1}' \
     | while read deployment; do
         echo "  Restarting $deployment..."
@@ -26,11 +26,11 @@ kubectl get deployments -n mindroom-instances --kubeconfig="$KUBECONFIG" \
 
 echo "⏳ Waiting for rollouts to complete..."
 kubectl get deployments -n mindroom-instances --kubeconfig="$KUBECONFIG" \
-    | grep mindroom-frontend \
+    | grep mindroom \
     | awk '{print $1}' \
     | while read deployment; do
         echo "  Waiting for $deployment..."
         kubectl rollout status deployment/$deployment -n mindroom-instances --kubeconfig="$KUBECONFIG"
     done
 
-echo "✅ Redeploy completed for all customer frontend instances"
+echo "✅ Redeploy completed for all customer MindRoom instances"

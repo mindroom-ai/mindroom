@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-import nio
-
 from mindroom.constants import VOICE_PREFIX
 from mindroom.logging_config import get_logger
 
@@ -23,7 +21,6 @@ class CommandType(Enum):
     LIST_SCHEDULES = "list_schedules"
     CANCEL_SCHEDULE = "cancel_schedule"
     EDIT_SCHEDULE = "edit_schedule"
-    WIDGET = "widget"
     CONFIG = "config"  # Configuration command
     HI = "hi"  # Welcome message command
     SKILL = "skill"  # Skill command
@@ -37,7 +34,6 @@ _COMMAND_DOCS = {
     CommandType.CANCEL_SCHEDULE: ("!cancel_schedule <id>", "Cancel a scheduled task"),
     CommandType.EDIT_SCHEDULE: ("!edit_schedule <id> <task>", "Edit an existing scheduled task"),
     CommandType.HELP: ("!help [topic]", "Get help"),
-    CommandType.WIDGET: ("!widget [url]", "Add configuration widget"),
     CommandType.CONFIG: ("!config <operation>", "Manage configuration"),
     CommandType.HI: ("!hi", "Show welcome message"),
     CommandType.SKILL: ("!skill <name> [args]", "Run a skill by name"),
@@ -94,7 +90,6 @@ class _CommandParser:
     LIST_SCHEDULES_PATTERN = re.compile(r"^!(?:list|inspect)[_-]?schedules?$", re.IGNORECASE)
     CANCEL_SCHEDULE_PATTERN = re.compile(r"^!cancel[_-]?schedule\s+(.+)$", re.IGNORECASE)
     EDIT_SCHEDULE_PATTERN = re.compile(r"^!edit[_-]?schedule\s+(\S+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
-    WIDGET_PATTERN = re.compile(r"^!widget(?:\s+(.+))?$", re.IGNORECASE)
     CONFIG_PATTERN = re.compile(r"^!config(?:\s+(.+))?$", re.IGNORECASE)
     HI_PATTERN = re.compile(r"^!hi$", re.IGNORECASE)
     SKILL_PATTERN = re.compile(r"^!skill(?:\s+(.+))?$", re.IGNORECASE)
@@ -175,16 +170,6 @@ class _CommandParser:
             return Command(
                 type=CommandType.EDIT_SCHEDULE,
                 args={"task_id": task_id, "full_text": full_text},
-                raw_text=message,
-            )
-
-        # !widget command
-        match = self.WIDGET_PATTERN.match(message)
-        if match:
-            url = match.group(1).strip() if match.group(1) else None
-            return Command(
-                type=CommandType.WIDGET,
-                args={"url": url},
                 raw_text=message,
             )
 
@@ -347,20 +332,6 @@ Usage: `!config <operation>` - View and modify MindRoom configuration
 
 **Note:** Configuration changes are immediately saved to config.yaml and affect all new agent interactions."""
 
-    if topic == "widget":
-        return """**Widget Command**
-
-Usage: `!widget [url]` - Add the MindRoom configuration widget to this room
-
-Examples:
-- `!widget` - Add widget using default URL (http://localhost:3003)
-- `!widget https://config.mindroom.ai` - Add widget from custom URL
-
-The widget provides a visual interface for configuring MindRoom agents and settings.
-Pin it to keep it visible in the room.
-
-Note: Widget support requires Element Desktop or self-hosted Element Web."""
-
     # General help - dynamically generated from COMMAND_DOCS
     commands_text = "\n".join(_get_command_entries(format_code=True))
 
@@ -374,69 +345,9 @@ Note: Widget support requires Element Desktop or self-hosted Element Web."""
 - Agent workflows - mention agents to have them collaborate on scheduled tasks
 - Natural language time parsing - "tomorrow", "in 5 minutes", "every Monday"
 
-Note: All commands only work within threads, not in main room messages
-(except !widget which works in the main room).
+Note: All commands only work within threads, not in main room messages.
 
 For detailed help on a command, use: `!help <command>`"""
-
-
-async def handle_widget_command(
-    client: nio.AsyncClient,
-    room_id: str,
-    url: str | None = None,
-) -> str:
-    """Handle the widget command to add configuration widget to room.
-
-    Args:
-        client: The Matrix client
-        room_id: The room ID to add widget to
-        url: Optional custom widget URL
-
-    Returns:
-        Response text for the user
-
-    """
-    # Default URL for local development
-    default_url = "http://localhost:3003/matrix-widget.html"
-    widget_url = url if url else default_url
-
-    # Create the widget state event content
-    widget_content = {
-        "type": "custom",
-        "url": widget_url,
-        "name": "MindRoom Configuration",
-        "data": {"title": "MindRoom Configuration", "curl": widget_url.replace("/matrix-widget.html", "")},
-        "creatorUserId": client.user_id,
-        "id": "mindroom_config",
-    }
-
-    try:
-        # Send the state event to add the widget
-        response = await client.room_put_state(
-            room_id=room_id,
-            event_type="im.vector.modular.widgets",
-            state_key="mindroom_config",
-            content=widget_content,
-        )
-
-        if isinstance(response, nio.RoomPutStateError):
-            logger.error(f"Failed to add widget to room {room_id}: {response.message}")
-            return f"❌ Failed to add widget: {response.message}"
-
-        logger.info(f"Successfully added widget to room {room_id}")
-    except Exception as e:
-        logger.exception("Error adding widget to room", room_id=room_id)
-        return f"❌ Error adding widget: {e!s}"
-    else:
-        return (
-            "✅ **MindRoom Configuration widget added!**\n\n"
-            "• Pin the widget to keep it visible\n"
-            "• All room members can access the configuration\n"
-            "• Changes sync in real-time with config.yaml\n\n"
-            f"Widget URL: {widget_url}\n\n"
-            "**Note:** Widgets require Element Desktop or self-hosted Element Web.\n"
-            "Alternatively, you can use: `/addwidget {url}` in Element."
-        )
 
 
 # Global parser instance

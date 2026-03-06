@@ -42,7 +42,6 @@ The router exclusively handles all commands:
 - `!list_schedules` - List scheduled tasks
 - `!cancel_schedule <id>` - Cancel a scheduled task
 - `!edit_schedule <id> <task>` - Edit an existing scheduled task
-- `!widget [url]` - Add configuration widget to the room
 - `!config <operation>` - Manage configuration
 - `!skill <name> [args]` - Run a skill by name
 

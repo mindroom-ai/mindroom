@@ -353,6 +353,24 @@ class TestConfigValidate:
         assert result.exit_code == 1
         assert "Issues found" in result.output
 
+    def test_validate_accepts_file_based_api_key_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Config validate does not warn when provider secrets are supplied via *_FILE."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-5.2\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        secret_file = tmp_path / "openai_key"
+        secret_file.write_text("sk-test", encoding="utf-8")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setenv("OPENAI_API_KEY_FILE", str(secret_file))
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 0
+        assert "Missing API key environment variables" not in result.output
+
 
 # ---------------------------------------------------------------------------
 # mindroom config path

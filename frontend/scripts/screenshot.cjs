@@ -31,12 +31,12 @@ async function takeScreenshot() {
       deviceScaleFactor: 2, // For high quality screenshots
     });
 
-    // Navigate to the widget
-    const url = process.env.DEMO_URL || "http://localhost:3003";
+    // Navigate to the dashboard
+    const url = process.env.DEMO_URL || "http://localhost:8765";
     console.log(`Navigating to ${url}...`);
     await page.goto(url, { waitUntil: "networkidle0" });
 
-    // Wait for the widget to be visible - use a more generic selector
+    // Wait for the dashboard to be visible.
     await page.waitForSelector("#root", { visible: true, timeout: 10000 });
 
     // Wait a bit more for everything to render
@@ -50,7 +50,7 @@ async function takeScreenshot() {
 
     // Take full page screenshot
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const fullPagePath = path.join(screenshotsDir, `mindroom-config-fullpage-${timestamp}.png`);
+    const fullPagePath = path.join(screenshotsDir, `mindroom-dashboard-fullpage-${timestamp}.png`);
     await page.screenshot({
       path: fullPagePath,
       fullPage: true,
@@ -64,7 +64,7 @@ async function takeScreenshot() {
       await new Promise(resolve => setTimeout(resolve, 1000));
 
       // Take screenshot with agent selected
-      const selectedPath = path.join(screenshotsDir, `mindroom-config-selected-${timestamp}.png`);
+      const selectedPath = path.join(screenshotsDir, `mindroom-dashboard-agents-${timestamp}.png`);
       await page.screenshot({
         path: selectedPath,
         fullPage: true,
@@ -81,7 +81,7 @@ async function takeScreenshot() {
         await new Promise(resolve => setTimeout(resolve, 1000));
 
         // Take screenshot of models tab
-        const modelsPath = path.join(screenshotsDir, `mindroom-config-models-${timestamp}.png`);
+        const modelsPath = path.join(screenshotsDir, `mindroom-dashboard-models-${timestamp}.png`);
         await page.screenshot({
           path: modelsPath,
           fullPage: true,

@@ -160,9 +160,9 @@ Gmail, GitHub, Spotify, Home Assistant, Google Drive, Reddit, weather services, 
 - [uv](https://github.com/astral-sh/uv) for Python package management
 - Node.js 20+ and [bun](https://bun.sh/) (optional, for web UI)
 
-### Fastest Path: Hosted Matrix + Local Backend (`uvx` only)
+### Fastest Path: Hosted Matrix + Local MindRoom (`uvx` only)
 
-Use this path if you want to run only the backend locally while using hosted chat + Matrix on `mindroom.chat`.
+Use this path if you want to run MindRoom locally while using hosted chat + Matrix on `mindroom.chat`.
 
 ```bash
 mkdir -p ~/mindroom-local
@@ -178,7 +178,7 @@ $EDITOR ~/.mindroom/.env
 # Settings -> Local MindRoom -> Generate Pair Code
 uvx mindroom connect --pair-code ABCD-EFGH
 
-# Start backend
+# Start MindRoom
 uvx mindroom run
 ```
 
@@ -194,14 +194,12 @@ uv sync --all-extras
 ```
 
 ```bash
-# Terminal 1: Start backend (agents + API)
+# Start MindRoom (agents + API + web dashboard)
 uv run mindroom run
-
-# Terminal 2: Start frontend (optional, for web UI)
-./run-frontend.sh
 ```
 
-The web interface will be available at http://localhost:3003
+The web interface will be available at http://localhost:8765
+When running from a source checkout, MindRoom will build the dashboard assets on first start if Bun is available.
 
 ### First Steps
 
@@ -242,7 +240,6 @@ resolves the reply chain and continues the correct conversation thread.
 - `!list_schedules` - List scheduled tasks
 - `!cancel_schedule <id>` - Cancel a scheduled task
 - `!edit_schedule <id> <task>` - Edit an existing scheduled task
-- `!widget [url]` - Add configuration widget
 - `!config <operation>` - Manage configuration
 - `!hi` - Show welcome message
 - `!skill <name> [args]` - Run a skill by name
@@ -366,7 +363,7 @@ Mix and match:
 - **Agents**: Python with matrix-nio
 - **AI Models**: OpenAI, Anthropic, Ollama, or any provider
 - **Memory**: Mem0 + ChromaDB vector storage (persistent on disk)
-- **UI**: Web widget + any Matrix client
+- **UI**: Web dashboard + any Matrix client
 
 ## Philosophy
 

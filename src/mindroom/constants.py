@@ -224,3 +224,28 @@ def safe_replace(tmp_path: Path, target_path: Path) -> None:
     except OSError:
         shutil.copy2(tmp_path, target_path)
         tmp_path.unlink(missing_ok=True)
+
+
+def ensure_writable_config_path(*, create_minimal: bool = False) -> bool:
+    """Ensure the writable config path exists when running from a managed template.
+
+    Returns whether a config file exists after the call.
+    """
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    if CONFIG_PATH.exists():
+        return True
+
+    if CONFIG_TEMPLATE_PATH != CONFIG_PATH and CONFIG_TEMPLATE_PATH.exists():
+        shutil.copyfile(CONFIG_TEMPLATE_PATH, CONFIG_PATH)
+        CONFIG_PATH.chmod(0o600)
+        print(f"Seeded config from template {CONFIG_TEMPLATE_PATH} -> {CONFIG_PATH}")
+        return True
+
+    if not create_minimal:
+        return False
+
+    CONFIG_PATH.write_text("agents: {}\nmodels: {}\n", encoding="utf-8")
+    CONFIG_PATH.chmod(0o600)
+    print(f"Created new config file at {CONFIG_PATH}")
+    return True

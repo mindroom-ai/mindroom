@@ -59,7 +59,7 @@ class HomeAssistantTools(Toolkit):
         """Make an API request to Home Assistant."""
         config = self._load_config()
         if not config:
-            return {"error": "Home Assistant is not configured. Please connect through the widget."}
+            return {"error": "Home Assistant is not configured. Please connect through the dashboard."}
 
         instance_url = config.get("instance_url")
         token = config.get("access_token") or config.get("long_lived_token")

@@ -1,0 +1,138 @@
+name: Smoke Stacks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/smoke-stacks.yml"
+      - "cluster/k8s/**"
+      - "docs/deployment/**"
+      - "frontend/**"
+      - "hatch_build.py"
+      - "local/instances/deploy/**"
+      - "pyproject.toml"
+      - "README.md"
+      - "saas-platform/**"
+      - "scripts/smoke_mindroom_stack.sh"
+      - "src/**"
+      - "uv.lock"
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout mindroom
+        uses: actions/checkout@v5
+        with:
+          lfs: true
+
+      - name: Checkout mindroom-stack
+        uses: actions/checkout@v5
+        with:
+          repository: mindroom-ai/mindroom-stack
+          path: mindroom-stack
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Set up kind
+        uses: engineerd/setup-kind@v0.6.2
+
+      - name: Detect image changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            mindroom:
+              - "src/**"
+              - "frontend/**"
+              - "skills/**"
+              - "local/instances/deploy/**"
+              - "pyproject.toml"
+              - "uv.lock"
+              - "hatch_build.py"
+              - "config.yaml"
+              - "run-sandbox-runner.sh"
+              - "scripts/**"
+              - "avatars/**"
+            platform:
+              - "saas-platform/**"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build wheel
+        run: uv build --wheel
+
+      - name: Create kind cluster
+        run: bash cluster/k8s/kind/up.sh
+
+      - name: Build and load images
+        run: bash cluster/k8s/kind/build_load_images.sh
+        env:
+          BUILD_MINDROOM_IMAGES: ${{ steps.changes.outputs.mindroom == 'true' && '1' || '0' }}
+          BUILD_PLATFORM_IMAGES: ${{ steps.changes.outputs.platform == 'true' && '1' || '0' }}
+
+      - name: Probe runtime images
+        run: |
+          docker run --rm ghcr.io/mindroom-ai/mindroom:latest mindroom version
+          docker run --rm ghcr.io/mindroom-ai/mindroom-minimal:latest mindroom version
+
+      - name: Probe platform images
+        run: |
+          docker run -d --rm --name platform-backend-smoke -p 18000:8000 ghcr.io/mindroom-ai/platform-backend:latest
+          docker run -d --rm --name platform-frontend-smoke -p 13000:3000 ghcr.io/mindroom-ai/platform-frontend:latest
+
+          cleanup() {
+            docker logs platform-backend-smoke || true
+            docker logs platform-frontend-smoke || true
+            docker rm -f platform-backend-smoke platform-frontend-smoke || true
+          }
+          trap cleanup EXIT
+
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18000/health >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+
+          curl -fsS http://127.0.0.1:18000/health
+          curl -fsS http://127.0.0.1:13000/ | grep -q "MindRoom"
+
+      - name: Install platform chart
+        run: bash cluster/k8s/kind/install_platform.sh
+
+      - name: Smoke kind platform and instance
+        run: bash cluster/k8s/kind/smoke_instance.sh
+
+      - name: Smoke mindroom-stack compose
+        run: bash scripts/smoke_mindroom_stack.sh "${GITHUB_WORKSPACE}/mindroom-stack"
+
+      - name: Tear down kind cluster
+        if: always()
+        run: kind delete cluster --name mindroom

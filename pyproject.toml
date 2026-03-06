@@ -413,6 +413,8 @@ version_scheme = "no-guess-dev"
 [tool.hatch.build.targets.wheel]
 packages = [ "src/mindroom" ]
 
+[tool.hatch.build.targets.wheel.hooks.custom]
+
 [tool.hatch.build.targets.wheel.force-include]
 "skills" = "mindroom/_bundled_skills"
 
