@@ -304,7 +304,6 @@ async def callback(request: Request) -> RedirectResponse:
         # Save credentials
         _save_credentials(flow.credentials)
 
-        # Redirect back to widget with success message
         # Extract the domain from the redirect URI for the final redirect
         parsed_uri = urlparse(current_redirect_uri)
         base_url = f"{parsed_uri.scheme}://{parsed_uri.netloc}"

@@ -13,6 +13,8 @@ services:
       - ${DATA_DIR}/config/config.yaml:/app/config.yaml
       - ${DATA_DIR}/mindroom_data:/app/mindroom_data
       - ${DATA_DIR}/logs:/app/logs
+    ports:
+      - "${BACKEND_PORT:-8765}:8765"
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - MINDROOM_STORAGE_PATH=/app/mindroom_data
@@ -24,11 +26,20 @@ services:
       - MEM0_DIR=/app/mindroom_data/memory/mem0  # Used by mem0
       - GOOGLE_REDIRECT_URI=https://${INSTANCE_DOMAIN}/api/google/callback
       - BACKEND_PORT=${BACKEND_PORT:-8765}
+      - MINDROOM_API_KEY=${MINDROOM_API_KEY:-}
     networks:
       - mindroom-network
       - mynetwork
     labels:
       - traefik.enable=true
+      # Dashboard routes go directly to the backend, which now serves the bundled UI
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.rule=Host(`${INSTANCE_DOMAIN}`)
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.entrypoints=websecure
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.tls=true
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.tls.certresolver=porkbun
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.service=${INSTANCE_NAME:-mindroom}
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.priority=50
+      - traefik.http.services.${INSTANCE_NAME:-mindroom}.loadbalancer.server.port=8765
       # OpenAI-compatible /v1 routes go directly to backend (has its own auth)
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}-v1.rule=Host(`${INSTANCE_DOMAIN}`) && PathPrefix(`/v1`)
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}-v1.entrypoints=websecure
@@ -56,36 +67,6 @@ services:
       - MINDROOM_STORAGE_PATH=/app/workspace/.mindroom
     networks:
       - mindroom-network
-
-  frontend:
-    image: ${FRONTEND_IMAGE:-deploy-mindroom-frontend:latest}
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.frontend
-    container_name: ${INSTANCE_NAME:-mindroom}-frontend
-    restart: always
-    ports:
-      - "${FRONTEND_PORT:-8080}:8080"
-    volumes:
-      - ${DATA_DIR}/logs:/app/logs
-    environment:
-      - HOME=/app
-      # nginx proxies /api to backend; MINDROOM_API_KEY injects auth header
-      - BACKEND_URL=http://backend:${BACKEND_PORT:-8765}
-      - MINDROOM_API_KEY=${MINDROOM_API_KEY:-}
-    networks:
-      - mindroom-network
-      - mynetwork
-    labels:
-      - traefik.enable=true
-      # Frontend routes - serves UI + proxies /api on port 8080
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.rule=Host(`${INSTANCE_DOMAIN}`)
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.entrypoints=websecure
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.tls=true
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.tls.certresolver=porkbun
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.service=${INSTANCE_NAME:-mindroom}
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.priority=50
-      - traefik.http.services.${INSTANCE_NAME:-mindroom}.loadbalancer.server.port=8080
 
 volumes:
   sandbox-workspace:

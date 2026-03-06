@@ -146,7 +146,7 @@ cd saas-platform
 ./deploy.sh platform-frontend          # Deploy platform frontend
 ./deploy.sh platform-backend           # Deploy platform backend
 ./redeploy-mindroom-backend.sh         # Redeploy all instance backends
-./redeploy-mindroom-frontend.sh        # Redeploy all instance frontends
+./redeploy-mindroom-frontend.sh        # Alias: bundled dashboard now redeploys the backend image
 ```
 
 ## Multi-Tenant Architecture

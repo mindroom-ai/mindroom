@@ -10,7 +10,9 @@ Use the `just` commands from the repo root to drive everything. Below is a quick
 ## Decision Table
 
 - Core dev against local Matrix + DB
-  - Commands: `just local-matrix-up|down|logs|reset`, then `mindroom run`, `run-frontend.sh`
+  - Commands: `just local-matrix-up|down|logs|reset`, then `mindroom run`
+  - `mindroom run` serves the bundled dashboard on `http://localhost:8765`
+  - Optional frontend-only dev server for UI iteration: `run-frontend.sh`
   - Compose files: `local/matrix/docker-compose.yml`, assets in `local/matrix/docker/`
 
 - Local multi-instance (Compose) with bridges

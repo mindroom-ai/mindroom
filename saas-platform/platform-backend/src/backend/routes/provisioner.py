@@ -227,8 +227,6 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
                 f"deepseek_key={DEEPSEEK_API_KEY}",
                 "--set",
                 f"sandbox_proxy_token={sandbox_proxy_token}",
-                "--set",
-                "mindroom_image=git.nijho.lt/basnijholt/mindroom-frontend:latest",
             ],
         )
         if code != 0:

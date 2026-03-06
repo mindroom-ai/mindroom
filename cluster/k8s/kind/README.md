@@ -84,8 +84,8 @@ helm upgrade --install instance-1 ../instance \
   --set matrix.admin_password=test
 
 # Access instance
-kubectl port-forward -n mindroom-instances svc/mindroom-frontend-1 8081:8080
-# Visit: http://localhost:8081
+kubectl port-forward -n mindroom-instances svc/mindroom-backend-1 8765:8765
+# Visit: http://localhost:8765
 ```
 
 ## Troubleshooting

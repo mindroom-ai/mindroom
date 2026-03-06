@@ -8,12 +8,14 @@ Deploy MindRoom using Docker for simple, containerized deployments.
 
 ## Quick Start
 
-MindRoom consists of two containers:
+MindRoom ships as a single backend container that serves:
 
-- **Backend**: The bot orchestrator and API server (port 8765)
-- **Frontend**: The dashboard UI (port 8080)
+- the bot orchestrator
+- the dashboard UI at `http://localhost:8765`
+- the dashboard API at `http://localhost:8765/api`
+- the OpenAI-compatible API at `http://localhost:8765/v1`
 
-For a minimal setup with just the backend:
+Run it with:
 
 ```bash
 docker run -d \
@@ -75,6 +77,8 @@ Key environment variables (set in `.env` or pass directly):
 | `MINDROOM_API_KEY` | API key for dashboard auth (standalone) | - (open access) |
 
 Streaming responses are configured in `config.yaml` via `defaults.enable_streaming` (default: `true`).
+
+If `MINDROOM_API_KEY` is set, the browser dashboard will prompt for the key via a same-origin login page before loading the UI.
 
 ## Building from Source
 
@@ -147,38 +151,5 @@ When configured, `shell`, `file`, and `python` tool calls can be proxied to a se
 
 See [Sandbox Proxy Isolation](sandbox-proxy.md) for full documentation including Docker Compose examples, Kubernetes sidecar setup, host-machine-with-container mode, credential leases, and environment variable reference.
 
-## Full Stack with Frontend
-
-For a complete deployment including the dashboard:
-
-```yaml
-services:
-  backend:
-    image: ghcr.io/mindroom-ai/mindroom-backend:latest
-    container_name: mindroom-backend
-    restart: unless-stopped
-    ports:
-      - "8765:8765"
-    volumes:
-      - ./config.yaml:/app/config.yaml:ro
-      - ./mindroom_data:/app/mindroom_data
-    env_file:
-      - .env
-    environment:
-      - MINDROOM_STORAGE_PATH=/app/mindroom_data
-
-  frontend:
-    image: ghcr.io/mindroom-ai/mindroom-frontend:latest
-    container_name: mindroom-frontend
-    restart: unless-stopped
-    ports:
-      - "8080:8080"
-    depends_on:
-      - backend
-```
-
-> [!NOTE]
-> The frontend image is built with `VITE_API_URL=""` (empty), meaning it uses relative URLs and expects `/api/*` requests to be proxied to the backend. If you also use the OpenAI-compatible API through the same domain, proxy `/v1/*` to the backend as well. For standalone deployments without a reverse proxy, rebuild the frontend image with `VITE_API_URL=http://localhost:8765`.
-
 > [!TIP]
-> For production, use a reverse proxy (Traefik, Nginx) to serve both services under the same domain. See `local/instances/deploy/docker-compose.yml` for an example with Traefik labels.
+> For production, use a reverse proxy (Traefik, Nginx) in front of the backend container when you want TLS, host routing, or additional auth layers. See `local/instances/deploy/docker-compose.yml` for an example with Traefik labels.

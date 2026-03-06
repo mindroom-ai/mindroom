@@ -41,7 +41,6 @@ jobs:
         image:
           - backend
           - backend-minimal
-          - frontend
         platform:
           - linux/amd64
           - linux/arm64
@@ -125,7 +124,6 @@ jobs:
         image:
           - backend
           - backend-minimal
-          - frontend
 
     steps:
     - name: Login to GitHub Container Registry

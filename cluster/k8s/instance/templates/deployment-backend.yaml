@@ -72,6 +72,8 @@ spec:
           value: "/etc/secrets/supabase_service_key"
         - name: SUPABASE_ANON_KEY
           value: {{ .Values.supabaseAnonKey | quote }}
+        - name: MINDROOM_PLATFORM_LOGIN_URL
+          value: "https://app.{{ .Values.baseDomain }}/auth/login"
         - name: OPENROUTER_API_KEY_FILE
           value: "/etc/secrets/openrouter_key"
         - name: GOOGLE_API_KEY_FILE

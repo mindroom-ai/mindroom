@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Any, Protocol, cast
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
@@ -17,6 +17,22 @@ router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
 # Initialize credentials manager
 _creds_manager = CredentialsManager()
+
+
+def _get_frontend_url(request: Request) -> str:
+    """Return the dashboard base URL for OAuth redirects."""
+    configured = os.getenv("FRONTEND_URL")
+    if configured:
+        return configured.rstrip("/")
+    return str(request.base_url).rstrip("/")
+
+
+def _get_spotify_redirect_uri(request: Request) -> str:
+    """Return the Spotify OAuth callback URL."""
+    configured = os.getenv("SPOTIFY_REDIRECT_URI")
+    if configured:
+        return configured
+    return str(request.url_for("spotify_callback"))
 
 
 class _SpotifyClientProtocol(Protocol):
@@ -147,7 +163,7 @@ async def get_service_status(service: str) -> ServiceStatus:
 
 # Spotify
 @router.post("/spotify/connect")
-async def connect_spotify() -> dict[str, str]:
+async def connect_spotify(request: Request) -> dict[str, str]:
     """Start Spotify OAuth flow."""
     client_id = os.getenv("SPOTIFY_CLIENT_ID")
     client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
@@ -162,7 +178,7 @@ async def connect_spotify() -> dict[str, str]:
     sp_oauth = spotify_oauth_cls(
         client_id=client_id,
         client_secret=client_secret,
-        redirect_uri="http://localhost:8000/api/integrations/spotify/callback",
+        redirect_uri=_get_spotify_redirect_uri(request),
         scope="user-read-private user-read-email user-read-playback-state user-read-currently-playing user-top-read",
     )
 
@@ -171,7 +187,7 @@ async def connect_spotify() -> dict[str, str]:
 
 
 @router.get("/spotify/callback")
-async def spotify_callback(code: str) -> RedirectResponse:
+async def spotify_callback(request: Request, code: str) -> RedirectResponse:
     """Handle Spotify OAuth callback."""
     client_id = os.getenv("SPOTIFY_CLIENT_ID")
     client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
@@ -184,7 +200,7 @@ async def spotify_callback(code: str) -> RedirectResponse:
         sp_oauth = spotify_oauth_cls(
             client_id=client_id,
             client_secret=client_secret,
-            redirect_uri="http://localhost:8000/api/integrations/spotify/callback",
+            redirect_uri=_get_spotify_redirect_uri(request),
         )
 
         token_info = sp_oauth.get_access_token(code)
@@ -202,8 +218,7 @@ async def spotify_callback(code: str) -> RedirectResponse:
         }
         _save_service_credentials("spotify", credentials)
 
-        # Redirect back to widget
-        return RedirectResponse(url="http://localhost:5173/?spotify=connected")
+        return RedirectResponse(url=f"{_get_frontend_url(request)}/?spotify=connected")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"OAuth failed: {e!s}") from e
 

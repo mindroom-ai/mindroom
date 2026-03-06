@@ -1,4 +1,4 @@
-"""Tests for the widget backend API endpoints."""
+"""Tests for the dashboard backend API endpoints."""
 
 from pathlib import Path
 from typing import Any, NoReturn
@@ -7,6 +7,7 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from mindroom import frontend_assets
 from mindroom.api import main
 
 
@@ -60,6 +61,58 @@ def test_init_supabase_auth_raises_when_auto_install_fails(monkeypatch: pytest.M
 
     assert install_calls == ["supabase"]
     assert "MINDROOM_NO_AUTO_INSTALL_TOOLS" not in str(err.value)
+
+
+def test_ensure_frontend_dist_dir_builds_repo_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Source checkouts should auto-build frontend assets when they are missing."""
+    frontend_source_dir = tmp_path / "frontend"
+    frontend_source_dir.mkdir()
+    (frontend_source_dir / "package.json").write_text("{}")
+    frontend_dist_dir = frontend_source_dir / "dist"
+
+    commands: list[tuple[list[str], Path]] = []
+
+    def _fake_run(command: list[str], *, check: bool, cwd: Path) -> None:
+        assert check is True
+        commands.append((command, cwd))
+        if command[1:] == ["run", "vite", "build"]:
+            frontend_dist_dir.mkdir()
+
+    monkeypatch.setattr(frontend_assets, "_PACKAGE_FRONTEND_DIR", tmp_path / "package-assets")
+    monkeypatch.setattr(frontend_assets, "_REPO_FRONTEND_SOURCE_DIR", frontend_source_dir)
+    monkeypatch.setattr(frontend_assets, "_REPO_FRONTEND_DIST_DIR", frontend_dist_dir)
+    monkeypatch.setattr(frontend_assets, "_FRONTEND_BUILD_ATTEMPTED", False)
+    monkeypatch.setattr(frontend_assets.shutil, "which", lambda name: "/usr/bin/bun" if name == "bun" else None)
+    monkeypatch.setattr(frontend_assets.subprocess, "run", _fake_run)
+
+    assert frontend_assets.ensure_frontend_dist_dir() == frontend_dist_dir
+    assert commands == [
+        (["/usr/bin/bun", "install", "--frozen-lockfile"], frontend_source_dir),
+        (["/usr/bin/bun", "run", "tsc"], frontend_source_dir),
+        (["/usr/bin/bun", "run", "vite", "build"], frontend_source_dir),
+    ]
+
+
+def test_ensure_frontend_dist_dir_respects_disable_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Source checkouts should not auto-build when explicitly disabled."""
+    frontend_source_dir = tmp_path / "frontend"
+    frontend_source_dir.mkdir()
+    (frontend_source_dir / "package.json").write_text("{}")
+
+    monkeypatch.setenv("MINDROOM_AUTO_BUILD_FRONTEND", "0")
+    monkeypatch.setattr(frontend_assets, "_PACKAGE_FRONTEND_DIR", tmp_path / "package-assets")
+    monkeypatch.setattr(frontend_assets, "_REPO_FRONTEND_SOURCE_DIR", frontend_source_dir)
+    monkeypatch.setattr(frontend_assets, "_REPO_FRONTEND_DIST_DIR", frontend_source_dir / "dist")
+    monkeypatch.setattr(frontend_assets, "_FRONTEND_BUILD_ATTEMPTED", False)
+    monkeypatch.setattr(frontend_assets.shutil, "which", lambda _name: "/usr/bin/bun")
+
+    assert frontend_assets.ensure_frontend_dist_dir() is None
 
 
 def test_health_check(test_client: TestClient) -> None:
@@ -331,6 +384,60 @@ def test_frontend_does_not_shadow_unknown_api_routes(
 
     response = test_client.get("/api/not-real")
     assert response.status_code == 404
+
+
+def test_frontend_redirects_to_login_when_api_key_auth_is_enabled(
+    api_key_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Protected standalone dashboards should send unauthenticated users to the login page."""
+    frontend_dir = tmp_path / "frontend-dist"
+    frontend_dir.mkdir()
+    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
+
+    monkeypatch.setattr(main, "_resolve_frontend_dist_dir", lambda: frontend_dir)
+
+    response = api_key_client.get("/", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == "/login?next=/"
+
+
+def test_frontend_login_page_renders_for_api_key_auth(api_key_client: TestClient) -> None:
+    """Standalone API-key auth should expose a simple login form."""
+    response = api_key_client.get("/login?next=/agents")
+    assert response.status_code == 200
+    assert "Enter the dashboard API key to continue" in response.text
+
+
+def test_api_key_cookie_auth_allows_protected_requests(api_key_client: TestClient) -> None:
+    """A valid standalone auth session cookie should work without bearer headers."""
+    response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert response.status_code == 200
+    assert response.cookies.get("mindroom_api_key") == "test-key"
+
+    response = api_key_client.post("/api/config/load")
+    assert response.status_code == 200
+
+
+def test_frontend_serves_after_api_key_login(
+    api_key_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Authenticated standalone users should receive the bundled dashboard."""
+    frontend_dir = tmp_path / "frontend-dist"
+    frontend_dir.mkdir()
+    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
+
+    monkeypatch.setattr(main, "_resolve_frontend_dist_dir", lambda: frontend_dir)
+
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+
+    response = api_key_client.get("/")
+    assert response.status_code == 200
+    assert "MindRoom Dashboard" in response.text
 
 
 def test_get_teams_empty(test_client: TestClient) -> None:
@@ -641,3 +748,66 @@ def test_api_key_keeps_oauth_callbacks_open(
     """OAuth callbacks must remain reachable without Authorization headers."""
     response = api_key_client.get(path)
     assert response.status_code != 401
+
+
+def test_supabase_cookie_auth_allows_access(
+    test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Platform requests should authenticate from the mindroom_jwt cookie."""
+    valid_cookie_token = "valid-cookie-token"  # noqa: S105
+
+    class _FakeUser:
+        id = "user-123"
+        email = "user@example.com"
+
+    class _FakeResponse:
+        user = _FakeUser()
+
+    class _FakeAuth:
+        @staticmethod
+        def get_user(token: str) -> _FakeResponse | None:
+            if token != valid_cookie_token:
+                return None
+            return _FakeResponse()
+
+    class _FakeClient:
+        auth = _FakeAuth()
+
+    monkeypatch.setattr(main, "_MINDROOM_API_KEY", None)
+    monkeypatch.setattr(main, "_supabase_auth", _FakeClient())
+    monkeypatch.setattr(main, "_ACCOUNT_ID", None)
+
+    response = test_client.post(
+        "/api/config/load",
+        cookies={"mindroom_jwt": valid_cookie_token},
+    )
+    assert response.status_code == 200
+
+
+def test_platform_frontend_redirects_to_login_when_cookie_missing(
+    test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Platform deployments should redirect unauthenticated dashboard requests to the platform login."""
+    frontend_dir = tmp_path / "frontend-dist"
+    frontend_dir.mkdir()
+    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
+
+    class _FakeAuth:
+        @staticmethod
+        def get_user(_token: str) -> None:
+            return None
+
+    class _FakeClient:
+        auth = _FakeAuth()
+
+    monkeypatch.setattr(main, "_resolve_frontend_dist_dir", lambda: frontend_dir)
+    monkeypatch.setattr(main, "_MINDROOM_API_KEY", None)
+    monkeypatch.setattr(main, "_supabase_auth", _FakeClient())
+    monkeypatch.setattr(main, "_PLATFORM_LOGIN_URL", "https://app.example.com/auth/login")
+
+    response = test_client.get("/agents", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"].startswith("https://app.example.com/auth/login?redirect_to=")

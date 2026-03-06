@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Screenshot script for MindRoom Configuration Widget.
+"""Screenshot script for the MindRoom dashboard.
 
 Usage:
     python take_screenshot.py <port>
@@ -7,7 +7,8 @@ Usage:
 Example:
     python take_screenshot.py 3003
 
-The servers must be running first. Use ./run.sh to start them.
+The dashboard must be running first. Use `uv run mindroom run` by default,
+or `./run-frontend.sh` when using the frontend dev server.
 
 """
 
@@ -17,8 +18,8 @@ import sys
 from pathlib import Path
 
 
-def take_screenshot(port: int = 3003) -> bool:
-    """Take a screenshot of the widget using Puppeteer."""
+def take_screenshot(port: int = 8765) -> bool:
+    """Take a screenshot of the dashboard using Puppeteer."""
     env = {
         "DEMO_URL": f"http://localhost:{port}",
     }
@@ -45,8 +46,8 @@ def main() -> None:
     """Main function to take screenshots."""
     if len(sys.argv) != 2:
         print("Usage: python take_screenshot.py <port>")
-        print("Example: python take_screenshot.py 3003")
-        print("\nNote: The servers must be running first. Use ./run.sh to start them.")
+        print("Example: python take_screenshot.py 8765")
+        print("\nNote: The dashboard must be running first. Use `uv run mindroom run`.")
         sys.exit(1)
 
     try:
@@ -62,10 +63,10 @@ def main() -> None:
 
     if success:
         print("\n📸 Screenshots saved to frontend/screenshots/")
-        print("You can now view the MindRoom Configuration Widget appearance!")
+        print("You can now view the MindRoom dashboard appearance!")
     else:
         print("\n❌ Failed to take screenshots.")
-        print("Make sure the widget is running on the specified port.")
+        print("Make sure the dashboard is running on the specified port.")
         sys.exit(1)
 
 

@@ -199,6 +199,7 @@ uv run mindroom run
 ```
 
 The web interface will be available at http://localhost:8765
+When running from a source checkout, MindRoom will build the dashboard assets on first start if Bun is available.
 
 ### First Steps
 

@@ -4,13 +4,13 @@ MindRoom can be deployed in various ways depending on your needs.
 
 ## Deployment Options
 
-| Method                                                                                        | Best For                                                    |
-| --------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| [Hosted Matrix + local backend](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) | Simplest setup: run only `uvx mindroom run` locally         |
-| Full Stack (Docker Compose)                                                                   | All-in-one: backend + frontend + Matrix (Synapse) + Element |
-| [Docker (single container)](https://docs.mindroom.chat/deployment/docker/index.md)            | Backend-only or when you already have Matrix                |
-| [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/index.md)                       | Multi-tenant SaaS, production                               |
-| Direct                                                                                        | Development, simple setups                                  |
+| Method                                                                                        | Best For                                                   |
+| --------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| [Hosted Matrix + local backend](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) | Simplest setup: run only `uvx mindroom run` locally        |
+| Full Stack (Docker Compose)                                                                   | All-in-one: bundled dashboard + Matrix (Synapse) + Element |
+| [Docker (single container)](https://docs.mindroom.chat/deployment/docker/index.md)            | Backend-only or when you already have Matrix               |
+| [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/index.md)                       | Multi-tenant SaaS, production                              |
+| Direct                                                                                        | Development, simple setups                                 |
 
 ## Bridges
 
@@ -82,7 +82,7 @@ docker run -d \
   ghcr.io/mindroom-ai/mindroom-backend:latest
 ```
 
-See the [Docker deployment guide](https://docs.mindroom.chat/deployment/docker/index.md) for full setup including the frontend.
+See the [Docker deployment guide](https://docs.mindroom.chat/deployment/docker/index.md) for the full single-container setup.
 
 ### Kubernetes
 

@@ -1,1 +1,1 @@
-"""Backend initialization for the widget module."""
+"""Backend initialization for the dashboard API."""

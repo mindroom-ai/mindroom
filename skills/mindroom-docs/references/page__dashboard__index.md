@@ -10,7 +10,7 @@ MindRoom includes a web dashboard for configuring agents, teams, rooms, and inte
 mindroom run
 ```
 
-The dashboard will be available at `http://localhost:8765`.
+The dashboard will be available at `http://localhost:8765`. When running from a source checkout, MindRoom will build the dashboard assets on first start if Bun is available.
 
 **SaaS Platform:** Access your dashboard at `https://<instance-id>.mindroom.chat`
 

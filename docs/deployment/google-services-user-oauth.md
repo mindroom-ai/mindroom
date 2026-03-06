@@ -12,7 +12,7 @@ For team/shared deployments, use [Google Services OAuth (Admin Setup)](google-se
 
 - A Google account
 - Access to Google Cloud Console
-- A running MindRoom backend/frontend (default backend URL: `http://localhost:8765`)
+- A running MindRoom backend with the bundled dashboard (default URL: `http://localhost:8765`)
 
 The callback path is always:
 

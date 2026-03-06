@@ -1,4 +1,4 @@
-"""Hatch build hook for bundling the frontend into wheel distributions."""
+"""Hatch build hook for bundling the frontend into distributable builds."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ class FrontendBuildHook(BuildHookInterface):
     """Build the bundled dashboard before creating a distributable wheel."""
 
     def initialize(self, version: str, build_data: dict[str, object]) -> None:
-        """Build the frontend and inject the generated assets into wheel contents."""
-        if self.target_name != "wheel" or version != "standard":
+        """Build the frontend for wheel and editable installs."""
+        if self.target_name != "wheel" or version not in {"standard", "editable"}:
             return
 
         frontend_dir = Path(self.root) / "frontend"
@@ -30,18 +30,32 @@ class FrontendBuildHook(BuildHookInterface):
             )
             raise RuntimeError(msg)
 
-        output_dir = Path(self.directory) / "frontend-dist"
+        output_dir = _get_output_dir(frontend_dir, self.directory, version)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        subprocess.run([bun, "install", "--frozen-lockfile"], check=True, cwd=frontend_dir)
-        subprocess.run(
-            [bun, "run", "build", "--", "--outDir", str(output_dir)],
-            check=True,
-            cwd=frontend_dir,
-        )
+        _build_frontend(frontend_dir, output_dir, bun)
 
-        force_include = build_data.setdefault("force_include", {})
-        if not isinstance(force_include, dict):
-            msg = "Wheel build data force_include must be a dictionary"
-            raise TypeError(msg)
-        force_include[str(output_dir)] = "mindroom/_frontend"
+        if version == "standard":
+            force_include = build_data.setdefault("force_include", {})
+            if not isinstance(force_include, dict):
+                msg = "Wheel build data force_include must be a dictionary"
+                raise TypeError(msg)
+            force_include[str(output_dir)] = "mindroom/_frontend"
+
+
+def _get_output_dir(frontend_dir: Path, build_directory: str, version: str) -> Path:
+    """Return the frontend build output directory for the requested build mode."""
+    if version == "editable":
+        return frontend_dir / "dist"
+    return Path(build_directory) / "frontend-dist"
+
+
+def _build_frontend(frontend_dir: Path, output_dir: Path, bun: str) -> None:
+    """Install frontend deps and write a production build to the output directory."""
+    subprocess.run([bun, "install", "--frozen-lockfile"], check=True, cwd=frontend_dir)
+    subprocess.run([bun, "run", "tsc"], check=True, cwd=frontend_dir)
+    subprocess.run(
+        [bun, "run", "vite", "build", "--outDir", str(output_dir)],
+        check=True,
+        cwd=frontend_dir,
+    )

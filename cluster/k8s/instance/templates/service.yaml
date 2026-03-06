@@ -1,22 +1,3 @@
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: mindroom-frontend-{{ .Values.customer }}
-  namespace: mindroom-instances
-  labels:
-    app: mindroom-frontend
-    customer: {{ .Values.customer | quote }}
-spec:
-  type: ClusterIP
-  ports:
-  - port: 3003
-    targetPort: 8080  # Targets nginx auth proxy (non-root)
-    name: http
-  selector:
-    app: mindroom-frontend
-    customer: {{ .Values.customer | quote }}
----
 apiVersion: v1
 kind: Service
 metadata:

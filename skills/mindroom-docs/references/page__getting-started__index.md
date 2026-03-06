@@ -61,9 +61,9 @@ Send a message mentioning your agent in a room where it is configured.
 
 For a detailed architecture and credential model, see: [Hosted Matrix deployment guide](https://docs.mindroom.chat/deployment/hosted-matrix/index.md).
 
-## Alternative: Full Stack Docker Compose (backend + frontend + Matrix + Element)
+## Alternative: Full Stack Docker Compose (bundled dashboard + Matrix + Element)
 
-Use this when you want everything local: backend, frontend, Matrix homeserver, and a Matrix client in one stack.
+Use this when you want everything local: the bundled MindRoom dashboard, Matrix homeserver, and a Matrix client in one stack.
 
 **Prereqs:** Docker + Docker Compose.
 

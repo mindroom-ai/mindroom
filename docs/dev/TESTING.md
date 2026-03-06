@@ -1,8 +1,8 @@
-# Testing Guide for MindRoom Configuration Widget
+# Testing Guide for the MindRoom Dashboard
 
 ## Overview
 
-The widget includes comprehensive tests for both frontend (TypeScript/React) and backend (Python/FastAPI) components.
+The dashboard includes comprehensive tests for both frontend (TypeScript/React) and backend (Python/FastAPI) components.
 
 ## Frontend Tests (TypeScript/React)
 
@@ -180,5 +180,5 @@ jobs:
 1. Add E2E tests using Playwright
 2. Increase test coverage to >80%
 3. Add performance tests
-4. Add integration tests for widget-Matrix communication
+4. Add integration tests for dashboard-Matrix communication
 5. Add mutation testing

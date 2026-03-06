@@ -31,12 +31,12 @@ async function takeScreenshot() {
       deviceScaleFactor: 2, // For high quality screenshots
     });
 
-    // Navigate to the widget
-    const url = process.env.DEMO_URL || "http://localhost:3003";
+    // Navigate to the dashboard
+    const url = process.env.DEMO_URL || "http://localhost:8765";
     console.log(`Navigating to ${url}...`);
     await page.goto(url, { waitUntil: "networkidle0" });
 
-    // Wait for the widget to be visible - use a more generic selector
+    // Wait for the dashboard to be visible.
     await page.waitForSelector("#root", { visible: true, timeout: 10000 });
 
     // Wait a bit more for everything to render

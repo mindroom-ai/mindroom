@@ -30,9 +30,13 @@ _creds_manager = CredentialsManager()
 # Home Assistant doesn't use traditional OAuth scopes, but we request full API access
 _SCOPES: list[str] = []
 
-# Get configuration from environment
-_BACKEND_PORT = os.getenv("BACKEND_PORT", "8765")
-_FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+
+def _get_frontend_url(request: Request) -> str:
+    """Return the dashboard base URL for OAuth redirects."""
+    configured = os.getenv("FRONTEND_URL")
+    if configured:
+        return configured.rstrip("/")
+    return str(request.base_url).rstrip("/")
 
 
 class HomeAssistantStatus(BaseModel):
@@ -178,7 +182,7 @@ async def get_status() -> HomeAssistantStatus:
 
 
 @router.post("/connect/oauth")
-async def connect_oauth(config: HomeAssistantConfig) -> HomeAssistantAuthUrl:
+async def connect_oauth(request: Request, config: HomeAssistantConfig) -> HomeAssistantAuthUrl:
     """Start Home Assistant OAuth flow."""
     if not config.instance_url:
         raise HTTPException(
@@ -194,7 +198,7 @@ async def connect_oauth(config: HomeAssistantConfig) -> HomeAssistantAuthUrl:
 
     # Build OAuth authorization URL
     # Home Assistant OAuth2 flow: https://developers.home-assistant.io/docs/auth_api/
-    redirect_uri = f"{_FRONTEND_URL}/homeassistant-callback"
+    redirect_uri = f"{_get_frontend_url(request)}/homeassistant-callback"
 
     auth_params = {
         "client_id": config.client_id,
@@ -310,8 +314,7 @@ async def callback(request: Request) -> RedirectResponse:
                 },
             )
 
-            # Redirect back to widget with success message
-            return RedirectResponse(url=f"{_FRONTEND_URL}/?homeassistant=connected")
+            return RedirectResponse(url=f"{_get_frontend_url(request)}/?homeassistant=connected")
 
     except httpx.RequestError as e:
         raise HTTPException(status_code=503, detail=f"Failed to exchange code: {e!s}") from e

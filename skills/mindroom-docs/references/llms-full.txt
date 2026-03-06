@@ -26,7 +26,7 @@ MindRoom is an AI agent orchestration system with Matrix integration. It provide
 
 ## Quick Start
 
-### Recommended: Full Stack Docker Compose (backend + frontend + Matrix + Element)
+### Recommended: Full Stack Docker Compose (bundled dashboard + Matrix + Element)
 
 **Prereqs:** Docker + Docker Compose.
 
@@ -236,9 +236,9 @@ Send a message mentioning your agent in a room where it is configured.
 
 For a detailed architecture and credential model, see: [Hosted Matrix deployment guide](https://docs.mindroom.chat/deployment/hosted-matrix/index.md).
 
-## Alternative: Full Stack Docker Compose (backend + frontend + Matrix + Element)
+## Alternative: Full Stack Docker Compose (bundled dashboard + Matrix + Element)
 
-Use this when you want everything local: backend, frontend, Matrix homeserver, and a Matrix client in one stack.
+Use this when you want everything local: the bundled MindRoom dashboard, Matrix homeserver, and a Matrix client in one stack.
 
 **Prereqs:** Docker + Docker Compose.
 
@@ -423,7 +423,7 @@ MindRoom includes a web dashboard for configuring agents, teams, rooms, and inte
 mindroom run
 ```
 
-The dashboard will be available at `http://localhost:8765`.
+The dashboard will be available at `http://localhost:8765`. When running from a source checkout, MindRoom will build the dashboard assets on first start if Bun is available.
 
 **SaaS Platform:** Access your dashboard at `https://<instance-id>.mindroom.chat`
 
@@ -1899,7 +1899,7 @@ agents:
       - claude_agent
 ```
 
-Configure credentials via the dashboard widget or by writing `mindroom_data/credentials/claude_agent_credentials.json`:
+Configure credentials via the dashboard or by writing `mindroom_data/credentials/claude_agent_credentials.json`:
 
 ```
 {
@@ -3642,7 +3642,7 @@ Client `system` / `developer` messages are prepended to the prompt. They augment
 | Unset                    | `true`                                | No authentication required                                        |
 | Unset                    | Unset/`false`                         | All requests return 401 (locked)                                  |
 
-The OpenAI-compatible API uses its own auth (`OPENAI_COMPAT_API_KEYS`), separate from the dashboard API auth. In standalone mode, the dashboard `/api/*` endpoints can be protected with `MINDROOM_API_KEY` (Bearer token). The auth header is injected at the proxy layer (nginx in Docker/K8s), so the frontend JS bundle does not contain secrets. These are independent: `MINDROOM_API_KEY` secures the dashboard, while `OPENAI_COMPAT_API_KEYS` secures the `/v1/*` chat completions endpoints.
+The OpenAI-compatible API uses its own auth (`OPENAI_COMPAT_API_KEYS`), separate from the dashboard API auth. In standalone mode, the dashboard `/api/*` endpoints can be protected with `MINDROOM_API_KEY`; the browser dashboard uses a same-origin auth cookie, while CLI and curl clients can still send `Authorization: Bearer ...`. These are independent: `MINDROOM_API_KEY` secures the dashboard, while `OPENAI_COMPAT_API_KEYS` secures the `/v1/*` chat completions endpoints.
 
 ## Limitations
 
@@ -3981,13 +3981,13 @@ MindRoom can be deployed in various ways depending on your needs.
 
 ## Deployment Options
 
-| Method                                                                                        | Best For                                                    |
-| --------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| [Hosted Matrix + local backend](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) | Simplest setup: run only `uvx mindroom run` locally         |
-| Full Stack (Docker Compose)                                                                   | All-in-one: backend + frontend + Matrix (Synapse) + Element |
-| [Docker (single container)](https://docs.mindroom.chat/deployment/docker/index.md)            | Backend-only or when you already have Matrix                |
-| [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/index.md)                       | Multi-tenant SaaS, production                               |
-| Direct                                                                                        | Development, simple setups                                  |
+| Method                                                                                        | Best For                                                   |
+| --------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| [Hosted Matrix + local backend](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) | Simplest setup: run only `uvx mindroom run` locally        |
+| Full Stack (Docker Compose)                                                                   | All-in-one: bundled dashboard + Matrix (Synapse) + Element |
+| [Docker (single container)](https://docs.mindroom.chat/deployment/docker/index.md)            | Backend-only or when you already have Matrix               |
+| [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/index.md)                       | Multi-tenant SaaS, production                              |
+| Direct                                                                                        | Development, simple setups                                 |
 
 ## Bridges
 
@@ -4059,7 +4059,7 @@ docker run -d \
   ghcr.io/mindroom-ai/mindroom-backend:latest
 ```
 
-See the [Docker deployment guide](https://docs.mindroom.chat/deployment/docker/index.md) for full setup including the frontend.
+See the [Docker deployment guide](https://docs.mindroom.chat/deployment/docker/index.md) for the full single-container setup.
 
 ### Kubernetes
 
@@ -4626,7 +4626,7 @@ For team/shared deployments, use [Google Services OAuth (Admin Setup)](https://d
 
 - A Google account
 - Access to Google Cloud Console
-- A running MindRoom backend/frontend (default backend URL: `http://localhost:8765`)
+- A running MindRoom backend with the bundled dashboard (default URL: `http://localhost:8765`)
 
 The callback path is always:
 
@@ -4765,12 +4765,14 @@ Deploy MindRoom using Docker for simple, containerized deployments.
 
 ## Quick Start
 
-MindRoom consists of two containers:
+MindRoom ships as a single backend container that serves:
 
-- **Backend**: The bot orchestrator and API server (port 8765)
-- **Frontend**: The dashboard UI (port 8080)
+- the bot orchestrator
+- the dashboard UI at `http://localhost:8765`
+- the dashboard API at `http://localhost:8765/api`
+- the OpenAI-compatible API at `http://localhost:8765/v1`
 
-For a minimal setup with just the backend:
+Run it with:
 
 ```
 docker run -d \
@@ -4832,6 +4834,8 @@ Key environment variables (set in `.env` or pass directly):
 | `MINDROOM_API_KEY`      | API key for dashboard auth (standalone)    | - (open access)                                 |
 
 Streaming responses are configured in `config.yaml` via `defaults.enable_streaming` (default: `true`).
+
+If `MINDROOM_API_KEY` is set, the browser dashboard will prompt for the key via a same-origin login page before loading the UI.
 
 ## Building from Source
 
@@ -4902,39 +4906,7 @@ When configured, `shell`, `file`, and `python` tool calls can be proxied to a se
 
 See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) for full documentation including Docker Compose examples, Kubernetes sidecar setup, host-machine-with-container mode, credential leases, and environment variable reference.
 
-## Full Stack with Frontend
-
-For a complete deployment including the dashboard:
-
-```
-services:
-  backend:
-    image: ghcr.io/mindroom-ai/mindroom-backend:latest
-    container_name: mindroom-backend
-    restart: unless-stopped
-    ports:
-      - "8765:8765"
-    volumes:
-      - ./config.yaml:/app/config.yaml:ro
-      - ./mindroom_data:/app/mindroom_data
-    env_file:
-      - .env
-    environment:
-      - MINDROOM_STORAGE_PATH=/app/mindroom_data
-
-  frontend:
-    image: ghcr.io/mindroom-ai/mindroom-frontend:latest
-    container_name: mindroom-frontend
-    restart: unless-stopped
-    ports:
-      - "8080:8080"
-    depends_on:
-      - backend
-```
-
-> [!NOTE] The frontend image is built with `VITE_API_URL=""` (empty), meaning it uses relative URLs and expects `/api/*` requests to be proxied to the backend. If you also use the OpenAI-compatible API through the same domain, proxy `/v1/*` to the backend as well. For standalone deployments without a reverse proxy, rebuild the frontend image with `VITE_API_URL=http://localhost:8765`.
->
-> [!TIP] For production, use a reverse proxy (Traefik, Nginx) to serve both services under the same domain. See `local/instances/deploy/docker-compose.yml` for an example with Traefik labels.
+> [!TIP] For production, use a reverse proxy (Traefik, Nginx) in front of the backend container when you want TLS, host routing, or additional auth layers. See `local/instances/deploy/docker-compose.yml` for an example with Traefik labels.
 
 # Sandbox Proxy Isolation
 
@@ -5283,7 +5255,7 @@ cd saas-platform
 ./deploy.sh platform-frontend          # Deploy platform frontend
 ./deploy.sh platform-backend           # Deploy platform backend
 ./redeploy-mindroom-backend.sh         # Redeploy all instance backends
-./redeploy-mindroom-frontend.sh        # Redeploy all instance frontends
+./redeploy-mindroom-frontend.sh        # Alias: bundled dashboard now redeploys the backend image
 ```
 
 ## Multi-Tenant Architecture

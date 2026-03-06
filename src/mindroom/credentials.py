@@ -1,7 +1,7 @@
 """Unified credentials management for MindRoom.
 
 This module provides centralized credential storage and retrieval for all integrations,
-used by both agents and the widget interface.
+used by both agents and the dashboard interface.
 """
 
 import json

@@ -108,7 +108,7 @@ class TestHomeAssistantTools:
             ha_tools = HomeAssistantTools()
             result = await ha_tools._api_request("GET", "/api/states")
 
-            assert result == {"error": "Home Assistant is not configured. Please connect through the widget."}
+            assert result == {"error": "Home Assistant is not configured. Please connect through the dashboard."}
 
     @pytest.mark.asyncio
     async def test_api_request_missing_credentials(self) -> None:

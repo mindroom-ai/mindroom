@@ -215,11 +215,7 @@ check-module-privacy:
 #############################
 
 # Docker builds (local)
-# Build core MindRoom frontend image (static, Nginx)
-docker-build-frontend:
-    docker build -t mindroom-frontend:dev -f local/instances/deploy/Dockerfile.frontend .
-
-# Build core MindRoom backend image (FastAPI)
+# Build core MindRoom backend image (FastAPI + bundled dashboard)
 docker-build-backend:
     docker build -t mindroom-backend:dev -f local/instances/deploy/Dockerfile.backend .
 

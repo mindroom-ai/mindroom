@@ -60,20 +60,13 @@ spec:
   - host: instance1.local
     http:
       paths:
-      - path: /api
+      - path: /
         pathType: Prefix
         backend:
           service:
             name: mindroom-backend-1
             port:
-              number: 8000
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: mindroom-frontend-1
-            port:
-              number: 8080
+              number: 8765
 EOF
 
 echo ""
@@ -116,3 +109,4 @@ echo ""
 echo "Direct service access (without ingress):"
 echo "  kubectl port-forward -n mindroom-staging svc/platform-frontend 3000:3000"
 echo "  kubectl port-forward -n mindroom-staging svc/platform-backend 8000:8000"
+echo "  kubectl port-forward -n mindroom-instances svc/mindroom-backend-1 8765:8765"

@@ -22,6 +22,7 @@ from mindroom.constants import (
     STORAGE_PATH,
     config_search_locations,
 )
+from mindroom.frontend_assets import ensure_frontend_dist_dir
 
 from .banner import make_banner
 from .config import (
@@ -145,8 +146,13 @@ async def _run(
     console.print()
     console.print(f"Starting Mindroom (log level: {log_level})...")
     if api:
+        frontend_dir = ensure_frontend_dist_dir()
         display_host = "localhost" if api_host == "0.0.0.0" else api_host  # noqa: S104
-        console.print(f"Dashboard: http://{display_host}:{api_port}")
+        if frontend_dir is None:
+            console.print("Dashboard: unavailable (frontend assets missing)")
+            console.print("  Install Bun or provide MINDROOM_FRONTEND_DIST when running from a source checkout.")
+        else:
+            console.print(f"Dashboard: http://{display_host}:{api_port}")
         console.print(f"API: http://{display_host}:{api_port}/api")
     console.print("Press Ctrl+C to stop\n")
 

@@ -30,7 +30,6 @@ Complete Terraform configuration for deploying MindRoom on Kubernetes with a sin
 
    Customer instance images (from main MindRoom project):
    - `mindroom-backend:latest`
-   - `mindroom-frontend:latest`
 
    These should be built and pushed to your registry before deployment.
 
