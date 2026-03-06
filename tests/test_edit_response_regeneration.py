@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
 import pytest
+from agno.media import Audio
 
 from mindroom import interactive
 from mindroom.bot import AgentBot
@@ -15,6 +16,7 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
+from mindroom.teams import TeamFormationDecision, TeamMode
 
 
 @pytest.mark.asyncio
@@ -707,7 +709,7 @@ async def test_config_confirmation_blocked_by_reply_permissions(tmp_path: Path) 
 
 @pytest.mark.asyncio
 async def test_on_voice_message_tracks_response_event_id(tmp_path: Path) -> None:
-    """Test that _on_voice_message properly tracks the response event ID."""
+    """Direct audio handling should track the generated response event ID."""
     # Create a mock agent user
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
@@ -785,13 +787,23 @@ async def test_on_voice_message_tracks_response_event_id(tmp_path: Path) -> None
 
     # Mock voice_handler.handle_voice_message to return a transcription
     with (
+        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
         patch("mindroom.bot.is_authorized_sender", return_value=True),
-        patch.object(bot, "_send_response", new_callable=AsyncMock) as mock_send_response,
+        patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=True),
+        patch("mindroom.bot.decide_team_formation", new_callable=AsyncMock) as mock_decide_team,
+        patch("mindroom.bot.should_agent_respond", return_value=True),
+        patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate_response,
     ):
         # Setup mocks
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_handle_voice.return_value = "This is the transcribed message from voice"
-        mock_send_response.return_value = "$response:example.com"
+        mock_decide_team.return_value = TeamFormationDecision(
+            should_form_team=False,
+            agents=[],
+            mode=TeamMode.COLLABORATE,
+        )
+        mock_generate_response.return_value = "$response:example.com"
 
         # Process the voice event
         await bot._on_voice_message(room, voice_event)
@@ -803,12 +815,12 @@ async def test_on_voice_message_tracks_response_event_id(tmp_path: Path) -> None
         # Verify the methods were called
         mock_handle_voice.assert_called_once()
         assert mock_handle_voice.call_args.args == (bot.client, room, voice_event, config)
-        mock_send_response.assert_called_once()
+        mock_generate_response.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_on_voice_message_no_transcription_still_marks_responded(tmp_path: Path) -> None:
-    """Test that _on_voice_message marks as responded even when no transcription is produced."""
+    """Direct audio handling should still respond when transcription is unavailable."""
     # Create a mock agent user
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
@@ -886,25 +898,35 @@ async def test_on_voice_message_no_transcription_still_marks_responded(tmp_path:
 
     # Mock voice_handler.handle_voice_message to return None (no transcription)
     with (
+        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
         patch("mindroom.bot.is_authorized_sender", return_value=True),
-        patch.object(bot, "_send_response", new_callable=AsyncMock) as mock_send_response,
+        patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=True),
+        patch("mindroom.bot.decide_team_formation", new_callable=AsyncMock) as mock_decide_team,
+        patch("mindroom.bot.should_agent_respond", return_value=True),
+        patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate_response,
     ):
         # Setup mocks
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_handle_voice.return_value = None  # No transcription
+        mock_decide_team.return_value = TeamFormationDecision(
+            should_form_team=False,
+            agents=[],
+            mode=TeamMode.COLLABORATE,
+        )
+        mock_generate_response.return_value = "$response:example.com"
 
         # Process the voice event
         await bot._on_voice_message(room, voice_event)
 
-        # Verify that the bot marked as responded even without a transcription
+        # Verify that the bot marked as responded with the generated fallback reply.
         assert bot.response_tracker.has_responded("$voice:example.com")
-        # Should not have a response event ID since no response was sent
-        assert bot.response_tracker.get_response_event_id("$voice:example.com") is None
+        assert bot.response_tracker.get_response_event_id("$voice:example.com") == "$response:example.com"
 
-        # Verify voice handler was called but _send_response was not
+        # Verify voice handler was called and the direct agent response ran.
         mock_handle_voice.assert_called_once()
         assert mock_handle_voice.call_args.args == (bot.client, room, voice_event, config)
-        mock_send_response.assert_not_called()
+        mock_generate_response.assert_called_once()
 
 
 @pytest.mark.asyncio

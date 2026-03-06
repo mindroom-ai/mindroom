@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 from agno.media import Audio
 
 from mindroom.attachments import _attachment_id_for_event, load_attachment
-from mindroom.bot import AgentBot
+from mindroom.bot import AgentBot, _MessageContext
 from mindroom.config.main import Config
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -17,6 +18,8 @@ from mindroom.constants import (
     VOICE_PREFIX,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
+from mindroom.matrix.identity import MatrixID
+from mindroom.teams import TeamFormationDecision, TeamMode
 
 
 @pytest.mark.asyncio
@@ -424,4 +427,318 @@ async def test_router_voice_disabled_still_relays_raw_audio_in_thread(tmp_path) 
     assert attachment is not None
     assert attachment.local_path.exists()
     assert attachment.local_path.is_file()
+    bot.response_tracker.mark_responded.assert_called_once_with("$voice_event", "$response")
+
+
+@pytest.mark.asyncio
+async def test_agent_processes_audio_directly_without_router_when_voice_disabled(tmp_path) -> None:  # noqa: ANN001
+    """Without a router, agents should own audio directly and still see the attachment."""
+    agent_user = MagicMock()
+    agent_user.user_id = "@mindroom_home:localhost"
+    agent_user.agent_name = "home"
+
+    config = Config(
+        agents={
+            "home": {
+                "display_name": "HomeAssistant",
+                "rooms": ["!test:example.com"],
+            },
+        },
+        authorization={"default_room_access": True},
+    )
+
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        rooms=["!test:example.com"],
+    )
+    bot.response_tracker = MagicMock()
+    bot.response_tracker.has_responded.return_value = False
+    bot.logger = MagicMock()
+    bot.client = MagicMock()
+    bot._generate_response = AsyncMock(return_value="$response")
+    bot._extract_message_context = AsyncMock(
+        return_value=_MessageContext(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        ),
+    )
+
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!test:example.com"
+    room.canonical_alias = None
+    room.users = {
+        "@mindroom_home:localhost": MagicMock(),
+        "@alice:example.com": MagicMock(),
+    }
+
+    event = MagicMock(spec=nio.RoomMessageAudio)
+    event.sender = "@alice:example.com"
+    event.event_id = "$voice_event"
+    event.body = "voice.ogg"
+    event.source = {"content": {"body": "voice.ogg"}}
+
+    with (
+        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=True),
+        patch("mindroom.bot.decide_team_formation", new_callable=AsyncMock) as mock_decide_team,
+        patch("mindroom.bot.should_agent_respond", return_value=True),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        mock_decide_team.return_value = TeamFormationDecision(
+            should_form_team=False,
+            agents=[],
+            mode=TeamMode.COLLABORATE,
+        )
+        await bot._on_voice_message(room, event)
+
+    mock_voice.assert_not_called()
+    bot._generate_response.assert_called_once()
+    call_kwargs = bot._generate_response.call_args.kwargs
+    expected_attachment_id = _attachment_id_for_event("$voice_event")
+    assert call_kwargs["prompt"].startswith(f"{VOICE_PREFIX}[Attached voice message]")
+    assert expected_attachment_id in call_kwargs["prompt"]
+    assert list(call_kwargs["media"].audio)
+    assert call_kwargs["attachment_ids"] == [expected_attachment_id]
+    bot.response_tracker.mark_responded.assert_called_once_with("$voice_event", "$response")
+
+
+@pytest.mark.asyncio
+async def test_agent_skips_original_audio_when_router_can_reply(tmp_path) -> None:  # noqa: ANN001
+    """Non-router agents should not process the original audio when the router owns it."""
+    agent_user = MagicMock()
+    agent_user.user_id = "@mindroom_home:localhost"
+    agent_user.agent_name = "home"
+
+    config = Config(
+        agents={
+            "home": {
+                "display_name": "HomeAssistant",
+                "rooms": ["!test:example.com"],
+            },
+        },
+        authorization={"default_room_access": True},
+    )
+
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        rooms=["!test:example.com"],
+    )
+    bot.response_tracker = MagicMock()
+    bot.response_tracker.has_responded.return_value = False
+    bot.logger = MagicMock()
+    bot.client = MagicMock()
+    bot._generate_response = AsyncMock(return_value="$response")
+    bot._extract_message_context = AsyncMock(
+        return_value=_MessageContext(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        ),
+    )
+
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!test:example.com"
+    room.canonical_alias = None
+    room.users = {
+        "@mindroom_router:localhost": MagicMock(),
+        "@mindroom_home:localhost": MagicMock(),
+        "@alice:example.com": MagicMock(),
+    }
+
+    event = MagicMock(spec=nio.RoomMessageAudio)
+    event.sender = "@alice:example.com"
+    event.event_id = "$voice_event"
+    event.body = "voice.ogg"
+    event.source = {"content": {"body": "voice.ogg"}}
+
+    with (
+        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+    ):
+        await bot._on_voice_message(room, event)
+
+    mock_download_audio.assert_not_called()
+    mock_voice.assert_not_called()
+    bot._generate_response.assert_not_called()
+    bot.response_tracker.mark_responded.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_processes_audio_when_router_present_but_disallowed(tmp_path) -> None:  # noqa: ANN001
+    """If the router cannot reply, the agent should own the original audio even when router is present."""
+    agent_user = MagicMock()
+    agent_user.user_id = "@mindroom_home:localhost"
+    agent_user.agent_name = "home"
+
+    config = Config(
+        agents={
+            "home": {
+                "display_name": "HomeAssistant",
+                "rooms": ["!test:example.com"],
+            },
+        },
+        authorization={
+            "default_room_access": True,
+            "agent_reply_permissions": {
+                "router": ["@alice:localhost"],
+                "home": ["@bob:localhost"],
+            },
+        },
+    )
+
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        rooms=["!test:example.com"],
+    )
+    bot.response_tracker = MagicMock()
+    bot.response_tracker.has_responded.return_value = False
+    bot.logger = MagicMock()
+    bot.client = MagicMock()
+    bot._generate_response = AsyncMock(return_value="$response")
+    bot._extract_message_context = AsyncMock(
+        return_value=_MessageContext(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        ),
+    )
+
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!test:example.com"
+    room.canonical_alias = None
+    room.users = {
+        "@mindroom_router:localhost": MagicMock(),
+        "@mindroom_home:localhost": MagicMock(),
+        "@bob:localhost": MagicMock(),
+    }
+
+    event = MagicMock(spec=nio.RoomMessageAudio)
+    event.sender = "@bob:localhost"
+    event.event_id = "$voice_event"
+    event.body = "voice.ogg"
+    event.source = {"content": {"body": "voice.ogg"}}
+
+    with (
+        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=True),
+        patch("mindroom.bot.decide_team_formation", new_callable=AsyncMock) as mock_decide_team,
+        patch("mindroom.bot.should_agent_respond", return_value=True),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        mock_decide_team.return_value = TeamFormationDecision(
+            should_form_team=False,
+            agents=[],
+            mode=TeamMode.COLLABORATE,
+        )
+        await bot._on_voice_message(room, event)
+
+    mock_voice.assert_not_called()
+    bot._generate_response.assert_called_once()
+    bot.response_tracker.mark_responded.assert_called_once_with("$voice_event", "$response")
+
+
+@pytest.mark.asyncio
+async def test_agent_uses_transcribed_mentions_when_router_absent(tmp_path) -> None:  # noqa: ANN001
+    """Direct audio handling should reuse mention parsing from the transcription itself."""
+    agent_user = MagicMock()
+    agent_user.user_id = "@mindroom_research:localhost"
+    agent_user.agent_name = "research"
+    agent_user.matrix_id = MatrixID.parse("@mindroom_research:localhost")
+
+    config = Config(
+        agents={
+            "home": {
+                "display_name": "HomeAssistant",
+                "rooms": ["!test:example.com"],
+            },
+            "research": {
+                "display_name": "ResearchAgent",
+                "rooms": ["!test:example.com"],
+            },
+        },
+        authorization={"default_room_access": True},
+        voice={"enabled": True},
+    )
+
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        rooms=["!test:example.com"],
+    )
+    bot.response_tracker = MagicMock()
+    bot.response_tracker.has_responded.return_value = False
+    bot.logger = MagicMock()
+    bot.client = MagicMock()
+    bot._generate_response = AsyncMock(return_value="$response")
+    bot._extract_message_context = AsyncMock(
+        return_value=_MessageContext(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        ),
+    )
+
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!test:example.com"
+    room.canonical_alias = None
+    room.users = {
+        "@mindroom_home:localhost": MagicMock(),
+        "@mindroom_research:localhost": MagicMock(),
+        "@alice:example.com": MagicMock(),
+    }
+
+    event = MagicMock(spec=nio.RoomMessageAudio)
+    event.sender = "@alice:example.com"
+    event.event_id = "$voice_event"
+    event.body = "voice.ogg"
+    event.source = {"content": {"body": "voice.ogg"}}
+
+    with (
+        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.bot.decide_team_formation", new_callable=AsyncMock) as mock_decide_team,
+        patch("mindroom.bot.should_agent_respond", return_value=True) as mock_should_respond,
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        mock_voice.return_value = f"{VOICE_PREFIX}@research summarize this audio"
+        mock_decide_team.return_value = TeamFormationDecision(
+            should_form_team=False,
+            agents=[],
+            mode=TeamMode.COLLABORATE,
+        )
+        await bot._on_voice_message(room, event)
+
+    mock_should_respond.assert_called_once()
+    assert mock_should_respond.call_args.kwargs["am_i_mentioned"] is True
+    assert mock_should_respond.call_args.kwargs["mentioned_agents"] == [MatrixID.parse("@mindroom_research:localhost")]
+    bot._generate_response.assert_called_once()
+    call_kwargs = bot._generate_response.call_args.kwargs
+    assert call_kwargs["prompt"].startswith(f"{VOICE_PREFIX}@research summarize this audio")
     bot.response_tracker.mark_responded.assert_called_once_with("$voice_event", "$response")

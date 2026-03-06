@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from agno.media import Audio
 
 from mindroom.bot import ROUTER_AGENT_NAME, AgentBot
 from mindroom.config.main import Config
@@ -48,10 +49,15 @@ async def test_voice_message_in_main_room_creates_thread(mock_router_bot: AgentB
     voice_event = MagicMock(spec=nio.RoomMessageAudio)
     voice_event.event_id = "$voice123"
     voice_event.sender = "@user:example.com"
+    voice_event.body = "voice.ogg"
     voice_event.source = {"content": {}}  # No thread relation
 
     # Mock voice handler to return transcription
-    with patch("mindroom.bot.voice_handler.handle_voice_message", return_value="🎤 what is the weather"):
+    with (
+        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.bot.voice_handler.handle_voice_message", return_value="🎤 what is the weather"),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_voice_message(room, voice_event)
 
         # Verify _send_response was called with correct threading
@@ -78,6 +84,7 @@ async def test_voice_message_in_thread_continues_thread(mock_router_bot: AgentBo
     voice_event = MagicMock(spec=nio.RoomMessageAudio)
     voice_event.event_id = "$voice456"
     voice_event.sender = "@user:example.com"
+    voice_event.body = "voice.ogg"
     voice_event.source = {
         "content": {
             "m.relates_to": {
@@ -88,7 +95,11 @@ async def test_voice_message_in_thread_continues_thread(mock_router_bot: AgentBo
     }
 
     # Mock voice handler to return transcription
-    with patch("mindroom.bot.voice_handler.handle_voice_message", return_value="🎤 show me the forecast"):
+    with (
+        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.bot.voice_handler.handle_voice_message", return_value="🎤 show me the forecast"),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_voice_message(room, voice_event)
 
         # Verify _send_response was called with correct threading
@@ -114,6 +125,7 @@ async def test_voice_plain_reply_to_thread_message_uses_thread_root(mock_router_
     voice_event = MagicMock(spec=nio.RoomMessageAudio)
     voice_event.event_id = "$voice789"
     voice_event.sender = "@user:example.com"
+    voice_event.body = "voice.ogg"
     voice_event.source = {
         "content": {
             "m.relates_to": {
@@ -141,8 +153,10 @@ async def test_voice_plain_reply_to_thread_message_uses_thread_root(mock_router_
 
     with (
         patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=[])),
+        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.bot.voice_handler.handle_voice_message", return_value="🎤 continue the same thread"),
     ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_voice_message(room, voice_event)
 
     bot._send_response.assert_called_once()

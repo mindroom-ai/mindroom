@@ -482,7 +482,9 @@ class TestAgentBot:
         # The bot calls ensure_setup which calls ensure_user_account
         # and then login with whatever user account was ensured
         assert mock_login.called
-        assert mock_client.add_event_callback.call_count == 9  # invite, message, reaction, image/file/video callbacks
+        assert (
+            mock_client.add_event_callback.call_count == 11
+        )  # invite, message, reaction, audio, image/file/video callbacks
 
     @pytest.mark.asyncio
     async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
