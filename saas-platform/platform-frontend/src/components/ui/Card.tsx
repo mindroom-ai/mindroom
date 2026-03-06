@@ -48,24 +48,6 @@ interface CardHeaderProps {
 
 export function CardHeader({ children, className = '' }: CardHeaderProps) {
   const classes = [
-    'flex flex-col',
-    className
-  ].filter(Boolean).join(' ')
-
-  return (
-    <div className={classes}>
-      {children}
-    </div>
-  )
-}
-
-interface CardTitleProps {
-  children: ReactNode
-  className?: string
-}
-
-export function CardTitle({ children, className = '' }: CardTitleProps) {
-  const classes = [
     'text-2xl font-bold bg-gradient-to-r from-gray-900 to-gray-600 dark:from-white dark:to-gray-300 bg-clip-text text-transparent',
     className
   ].filter(Boolean).join(' ')
@@ -74,19 +56,6 @@ export function CardTitle({ children, className = '' }: CardTitleProps) {
     <h2 className={classes}>
       {children}
     </h2>
-  )
-}
-
-interface CardContentProps {
-  children: ReactNode
-  className?: string
-}
-
-export function CardContent({ children, className = '' }: CardContentProps) {
-  return (
-    <div className={className}>
-      {children}
-    </div>
   )
 }
 
@@ -107,3 +76,7 @@ export function CardSection({ children, className = '' }: CardSectionProps) {
     </div>
   )
 }
+
+// Aliases for compatibility with existing admin pages
+export { Card as CardContent }
+export { CardHeader as CardTitle }

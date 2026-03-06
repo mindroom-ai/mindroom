@@ -59,3 +59,11 @@ class SanitizedLogger:
 
 # Create the sanitized logger instance
 logger = SanitizedLogger(_logger)
+
+# For backward compatibility, also export the original logger methods
+debug = logger.debug
+info = logger.info
+warning = logger.warning
+error = logger.error
+exception = logger.exception
+critical = logger.critical

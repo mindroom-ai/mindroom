@@ -7,14 +7,10 @@ import { apiCall } from '@/lib/api'
 import { logger } from '@/lib/logger'
 
 interface AdminStats {
-  accounts: number
-  active_subscriptions: number
-  running_instances: number
-  recent_activity?: Array<{
-    type: string
-    description: string
-    timestamp: string
-  }>
+  // Keep legacy shape for compatibility; we compute values defensively
+  accounts_count?: number
+  subscriptions_count?: number
+  instances_count?: number
 }
 
 interface HealthStatus {
@@ -83,24 +79,28 @@ export default function AdminDashboard() {
     )
   }
 
+  const accountsVal = (stats as any)?.accounts ?? stats?.accounts_count ?? 0
+  const subsVal = (stats as any)?.active_subscriptions ?? stats?.subscriptions_count ?? 0
+  const runningVal = (stats as any)?.running_instances ?? stats?.instances_count ?? 0
+
   const statCards = [
     {
       title: 'Total Accounts',
-      value: stats?.accounts ?? 0,
+      value: accountsVal,
       icon: Users,
       change: '+12%',
       changeType: 'positive' as const
     },
     {
       title: 'Active Subscriptions',
-      value: stats?.active_subscriptions ?? 0,
+      value: subsVal,
       icon: CreditCard,
       change: '+8%',
       changeType: 'positive' as const
     },
     {
       title: 'Running Instances',
-      value: stats?.running_instances ?? 0,
+      value: runningVal,
       icon: Server,
       change: '+23%',
       changeType: 'positive' as const
