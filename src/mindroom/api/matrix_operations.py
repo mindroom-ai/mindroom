@@ -4,7 +4,7 @@ import asyncio
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from mindroom.constants import MATRIX_HOMESERVER
 from mindroom.logging_config import get_logger
@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/matrix", tags=["matrix"])
 
 
 class RoomLeaveRequest(BaseModel):
-    """Request to leave a room."""
+    """Request for an agent or team to leave a room."""
 
     agent_id: str
     room_id: str
@@ -32,28 +32,47 @@ class _RoomInfo(BaseModel):
 
 
 class AgentRoomsResponse(BaseModel):
-    """Response containing agent rooms information."""
+    """Response containing Matrix entity room information."""
 
     agent_id: str
     display_name: str
     configured_rooms: list[str]
     joined_rooms: list[str]
     unconfigured_rooms: list[str]
-    unconfigured_room_details: list[_RoomInfo] = []
+    unconfigured_room_details: list[_RoomInfo] = Field(default_factory=list)
 
 
 class AllAgentsRoomsResponse(BaseModel):
-    """Response containing all agents' room information."""
+    """Response containing all configured Matrix entities' room information."""
 
     agents: list[AgentRoomsResponse]
 
 
+def _get_configured_matrix_entities(config_data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Return configured agents and teams keyed by their Matrix entity ID."""
+    return {
+        **config_data.get("agents", {}),
+        **config_data.get("teams", {}),
+    }
+
+
+def _get_configured_matrix_entity(
+    config_data: dict[str, Any],
+    entity_id: str,
+) -> dict[str, Any]:
+    """Return one configured Matrix entity or raise a 404."""
+    entities = _get_configured_matrix_entities(config_data)
+    if entity_id not in entities:
+        raise HTTPException(status_code=404, detail=f"Agent or team {entity_id} not found")
+    return entities[entity_id]
+
+
 async def _get_agent_matrix_rooms(agent_id: str, agent_data: dict[str, Any]) -> AgentRoomsResponse:
-    """Get Matrix rooms for a specific agent.
+    """Get Matrix rooms for a specific configured agent or team.
 
     Args:
-        agent_id: The agent identifier
-        agent_data: The agent configuration data
+        agent_id: The agent or team identifier
+        agent_data: The entity configuration data
 
     Returns:
         AgentRoomsResponse with room information
@@ -101,20 +120,18 @@ async def _get_agent_matrix_rooms(agent_id: str, agent_data: dict[str, Any]) -> 
 
 @router.get("/agents/rooms")
 async def get_all_agents_rooms() -> AllAgentsRoomsResponse:
-    """Get room information for all agents.
+    """Get room information for all configured agents and teams.
 
     Returns information about configured rooms, joined rooms,
-    and unconfigured rooms (joined but not in config) for each agent.
+    and unconfigured rooms (joined but not in config) for each Matrix entity.
     """
     from mindroom.api.main import config, config_lock  # noqa: PLC0415
 
-    agents_rooms = []
-
     with config_lock:
-        agents = config.get("agents", {})
+        entities = _get_configured_matrix_entities(config)
 
-    # Gather room information for all agents concurrently
-    tasks = [_get_agent_matrix_rooms(agent_id, agent_data) for agent_id, agent_data in agents.items()]
+    # Gather room information for all configured Matrix entities concurrently.
+    tasks = [_get_agent_matrix_rooms(agent_id, agent_data) for agent_id, agent_data in entities.items()]
     agents_rooms = await asyncio.gather(*tasks)
 
     return AllAgentsRoomsResponse(agents=agents_rooms)
@@ -122,54 +139,46 @@ async def get_all_agents_rooms() -> AllAgentsRoomsResponse:
 
 @router.get("/agents/{agent_id}/rooms")
 async def get_agent_rooms(agent_id: str) -> AgentRoomsResponse:
-    """Get room information for a specific agent.
+    """Get room information for a specific configured agent or team.
 
     Args:
-        agent_id: The agent identifier
+        agent_id: The agent or team identifier
 
     Returns:
-        Room information for the agent
+        Room information for the configured Matrix entity
 
     Raises:
-        HTTPException: If agent not found or error occurs
+        HTTPException: If the entity is not found or an error occurs
 
     """
     from mindroom.api.main import config, config_lock  # noqa: PLC0415
 
     with config_lock:
-        agents = config.get("agents", {})
-        if agent_id not in agents:
-            raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
-        agent_data = agents[agent_id]
+        agent_data = _get_configured_matrix_entity(config, agent_id)
 
     return await _get_agent_matrix_rooms(agent_id, agent_data)
 
 
 @router.post("/rooms/leave")
 async def leave_room_endpoint(request: RoomLeaveRequest) -> dict[str, bool]:
-    """Make an agent leave a specific room.
+    """Make an agent or team leave a specific room.
 
     Args:
-        request: Contains agent_id and room_id
+        request: Contains the agent/team ID and room ID
 
     Returns:
         Success status
 
     Raises:
-        HTTPException: If agent not found or leave operation fails
+        HTTPException: If the entity is not found or the leave operation fails
 
     """
     from mindroom.api.main import config, config_lock  # noqa: PLC0415
 
     with config_lock:
-        agents = config.get("agents", {})
-        if request.agent_id not in agents:
-            raise HTTPException(status_code=404, detail=f"Agent {request.agent_id} not found")
+        agent_data = _get_configured_matrix_entity(config, request.agent_id)
 
-    # Get agent configuration
-    agent_data = agents[request.agent_id]
-
-    # Create or get the agent user
+    # Create or get the Matrix user for this configured entity.
     agent_user = await create_agent_user(
         MATRIX_HOMESERVER,
         request.agent_id,
