@@ -1,10 +1,8 @@
 """Sync API keys from environment variables to CredentialsManager.
 
 On first run, API keys from .env are seeded into the CredentialsManager.
-On subsequent runs, env-sourced credentials (_source=env) are updated from
-.env, but UI-sourced credentials (_source=ui) are never overwritten.
-This lets users change keys via the UI without losing them on restart,
-while still picking up .env changes for keys that were never manually set.
+On subsequent runs, env-sourced credentials are updated from .env, while
+credentials written through the dashboard or local tools are left alone.
 """
 
 import os
@@ -51,12 +49,9 @@ def _sync_github_private_credentials() -> bool:
 
     creds_manager = get_credentials_manager()
     existing = creds_manager.load_credentials("github_private")
-    if existing is not None:
-        source = existing.get("_source")
-        if source != "env":
-            # UI-set or legacy (no _source) — don't overwrite
-            logger.debug("Credentials for github_private not env-sourced, skipping env sync")
-            return False
+    if existing is not None and existing.get("_source") != "env":
+        logger.debug("Credentials for github_private not env-sourced, skipping env sync")
+        return False
 
     creds_manager.save_credentials(
         "github_private",
@@ -77,10 +72,8 @@ def sync_env_to_credentials() -> None:
     """Sync API keys from environment variables into CredentialsManager.
 
     - If no credential file exists for a service, seed it from .env.
-    - If the existing credential has ``_source=env``, update it from .env
-      (the user never touched it via UI, so .env should still win).
-    - If the existing credential has ``_source=ui`` (or no ``_source``,
-      for legacy files), skip it to protect the user's manual override.
+    - If the existing credential has ``_source=env``, update it from .env.
+    - Any other credential source is treated as user-managed and left alone.
 
     Environment variables are always exported to ``os.environ`` so that
     libraries like mem0 can pick them up regardless.
@@ -101,14 +94,10 @@ def sync_env_to_credentials() -> None:
         if service != "ollama":
             os.environ[env_var] = env_value
 
-        # Check existing credentials and their source
         existing = creds_manager.load_credentials(service)
-        if existing is not None:
-            source = existing.get("_source")
-            if source != "env":
-                # UI-set or legacy (no _source) — don't overwrite
-                logger.debug(f"Credentials for {service} not env-sourced, skipping env sync")
-                continue
+        if existing is not None and existing.get("_source") != "env":
+            logger.debug(f"Credentials for {service} not env-sourced, skipping env sync")
+            continue
 
         if service == "ollama":
             new_creds = {"host": env_value, "_source": "env"}

@@ -1,6 +1,7 @@
 """Tests for the dashboard backend API endpoints."""
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, NoReturn
 
 import pytest
@@ -8,7 +9,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 from mindroom import constants, frontend_assets
-from mindroom.api import main
+from mindroom.api import google_integration, homeassistant_integration, integrations, main
 
 
 def test_init_supabase_auth_returns_none_without_credentials() -> None:
@@ -129,6 +130,106 @@ def test_ensure_writable_config_path_seeds_from_template(
 
     assert constants.ensure_writable_config_path() is True
     assert writable_config.read_text(encoding="utf-8") == template_config.read_text(encoding="utf-8")
+
+
+def test_google_save_credentials_marks_oauth_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Google OAuth saves should always stamp a credential source."""
+    saved: dict[str, Any] = {}
+    access_value = "access-value"
+    refresh_value = "refresh-value"
+    token_uri_value = "https://oauth2.googleapis.com/token"  # noqa: S105
+    client_secret_value = "client-secret-value"  # noqa: S105
+    id_token_value = "id-token-value"  # noqa: S105
+
+    class _FakeManager:
+        def save_credentials(self, service: str, credentials: dict[str, Any]) -> None:
+            saved["service"] = service
+            saved["credentials"] = credentials
+
+    monkeypatch.setattr(google_integration, "_creds_manager", _FakeManager())
+
+    google_integration._save_credentials(
+        SimpleNamespace(
+            token=access_value,
+            refresh_token=refresh_value,
+            token_uri=token_uri_value,
+            client_id="client-id",
+            client_secret=client_secret_value,
+            scopes=["scope-a"],
+            id_token=id_token_value,
+        ),
+    )
+
+    assert saved == {
+        "service": "google",
+        "credentials": {
+            "token": access_value,
+            "refresh_token": refresh_value,
+            "token_uri": token_uri_value,
+            "client_id": "client-id",
+            "client_secret": client_secret_value,
+            "scopes": ["scope-a"],
+            "_id_token": id_token_value,
+            "_source": "oauth",
+        },
+    }
+
+
+def test_homeassistant_save_config_marks_ui_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Home Assistant config saves should always stamp a credential source."""
+    saved: dict[str, Any] = {}
+
+    class _FakeManager:
+        def save_credentials(self, service: str, credentials: dict[str, Any]) -> None:
+            saved["service"] = service
+            saved["credentials"] = credentials
+
+    monkeypatch.setattr(homeassistant_integration, "_creds_manager", _FakeManager())
+
+    homeassistant_integration._save_config(
+        {
+            "instance_url": "http://ha.local",
+            "long_lived_token": "token",
+        },
+    )
+
+    assert saved == {
+        "service": "homeassistant",
+        "credentials": {
+            "instance_url": "http://ha.local",
+            "long_lived_token": "token",
+            "_source": "ui",
+        },
+    }
+
+
+def test_service_credentials_mark_oauth_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Third-party OAuth saves should always stamp a credential source."""
+    saved: dict[str, Any] = {}
+
+    class _FakeManager:
+        def save_credentials(self, service: str, credentials: dict[str, Any]) -> None:
+            saved["service"] = service
+            saved["credentials"] = credentials
+
+    monkeypatch.setattr(integrations, "_creds_manager", _FakeManager())
+
+    integrations._save_service_credentials(
+        "spotify",
+        {
+            "access_token": "spotify-token",
+            "refresh_token": "spotify-refresh",
+        },
+    )
+
+    assert saved == {
+        "service": "spotify",
+        "credentials": {
+            "access_token": "spotify-token",
+            "refresh_token": "spotify-refresh",
+            "_source": "oauth",
+        },
+    }
 
 
 def test_health_check(test_client: TestClient) -> None:

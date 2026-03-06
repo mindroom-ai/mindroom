@@ -1230,7 +1230,7 @@
         }
       ],
       "dependencies": [],
-      "description": "Advanced code-oriented file operations (precise edits, grep, and discovery). Prefer this over file for coding agents; keep file for backward compatibility.",
+      "description": "Advanced code-oriented file operations (precise edits, grep, and discovery). Prefer this over file for coding agents.",
       "display_name": "Coding Tools",
       "docs_url": null,
       "helper_text": null,

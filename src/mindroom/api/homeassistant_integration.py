@@ -64,7 +64,7 @@ def _get_stored_config() -> dict[str, Any] | None:
 
 def _save_config(config: dict[str, Any]) -> None:
     """Save Home Assistant configuration."""
-    _creds_manager.save_credentials("homeassistant", config)
+    _creds_manager.save_credentials("homeassistant", {**config, "_source": config.get("_source", "ui")})
 
 
 async def _test_connection(instance_url: str, token: str) -> dict[str, Any]:

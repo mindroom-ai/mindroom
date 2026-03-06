@@ -7,7 +7,7 @@ Unlike the generic ``file`` tool (agno's FileTools), this toolkit is
 optimised for coding agents: line-numbered reads with pagination,
 search-and-replace edits with fuzzy matching, ripgrep-backed grep,
 and gitignore-aware file discovery. Prefer this tool over ``file`` for
-coding-heavy agents; keep ``file`` for backward compatibility.
+coding-heavy agents.
 """
 
 from __future__ import annotations
