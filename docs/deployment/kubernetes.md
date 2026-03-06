@@ -10,7 +10,7 @@ Deploy MindRoom on Kubernetes for production multi-tenant deployments.
 
 MindRoom uses two Helm charts:
 
-- **Instance Chart** (`cluster/k8s/instance/`) - Individual MindRoom instance with bundled Matrix/Synapse
+- **Instance Chart** (`cluster/k8s/instance/`) - Individual MindRoom runtime with bundled dashboard/API plus Matrix/Synapse
 - **Platform Chart** (`cluster/k8s/platform/`) - SaaS control plane (API, frontend, provisioner)
 
 ## Prerequisites
@@ -67,7 +67,7 @@ env:
 
 Each instance gets three hosts:
 
-- `{customer}.{baseDomain}` - Frontend and API
+- `{customer}.{baseDomain}` - MindRoom dashboard and API
 - `{customer}.api.{baseDomain}` - Direct API access
 - `{customer}.matrix.{baseDomain}` - Matrix/Synapse server
 

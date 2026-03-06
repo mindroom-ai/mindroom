@@ -124,7 +124,7 @@ securityContext:
 - Align with compliance requirements (SOC 2, GDPR breach notification)
 
 9. **Move Secrets from Environment Variables to Volumes** ✅ **COMPLETED**
-   - **Status:** Already implemented in `deployment-backend.yaml`
+   - **Status:** Already implemented in `deployment-mindroom.yaml`
    - **Implementation:** Secrets mounted as files at `/etc/secrets`
    ```yaml
    volumeMounts:

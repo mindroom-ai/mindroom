@@ -816,7 +816,7 @@ async def _watch_skills_task(orchestrator: MultiAgentOrchestrator) -> None:
 
 
 async def _run_api_server(host: str, port: int, log_level: str) -> None:
-    """Run the dashboard API server as an asyncio task."""
+    """Run the bundled dashboard/API server as an asyncio task."""
     from mindroom.api.main import app as api_app  # noqa: PLC0415  # avoid heavy import at module level
 
     config = uvicorn.Config(api_app, host=host, port=port, log_level=log_level.lower())
@@ -837,9 +837,9 @@ async def main(
     Args:
         log_level: The logging level to use (DEBUG, INFO, WARNING, ERROR)
         storage_path: The base directory for storing agent data
-        api: Whether to start the dashboard API server
-        api_port: Port for the dashboard API server
-        api_host: Host for the dashboard API server
+        api: Whether to start the bundled dashboard/API server
+        api_port: Port for the bundled dashboard/API server
+        api_host: Host for the bundled dashboard/API server
 
     """
     # Set up logging with the specified level
@@ -875,9 +875,9 @@ async def main(
 
         tasks = {orchestrator_task, watcher_task, skills_watcher_task}
 
-        # Optionally start the dashboard API server
+        # Optionally start the bundled dashboard/API server
         if api:
-            logger.info("Starting dashboard API server on %s:%d", api_host, api_port)
+            logger.info("Starting bundled dashboard/API server on %s:%d", api_host, api_port)
             api_task = asyncio.create_task(_run_api_server(api_host, api_port, log_level))
             tasks.add(api_task)
 

@@ -749,7 +749,7 @@ async def get_available_rooms(_user: Annotated[dict, Depends(verify_user)]) -> l
 @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
 @app.api_route("/{path:path}", methods=["GET", "HEAD"], include_in_schema=False)
 async def serve_frontend(request: Request, path: str = "") -> Response:
-    """Serve the bundled dashboard and SPA routes from the backend."""
+    """Serve the bundled dashboard and SPA routes from the MindRoom runtime."""
     first_segment = path.split("/", 1)[0] if path else ""
     if first_segment in _API_ROUTE_PREFIXES:
         raise HTTPException(status_code=404, detail="Not found")

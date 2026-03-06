@@ -10,7 +10,7 @@ KUBECONFIG="$REPO_ROOT/cluster/terraform/terraform-k8s/mindroom-k8s_kubeconfig.y
 
 echo "📦 Building mindroom..."
 cd "$REPO_ROOT"
-docker build -t ghcr.io/mindroom-ai/mindroom:latest -f local/instances/deploy/Dockerfile.backend .
+docker build -t ghcr.io/mindroom-ai/mindroom:latest -f local/instances/deploy/Dockerfile.mindroom .
 
 echo "⬆️ Pushing to registry..."
 docker push ghcr.io/mindroom-ai/mindroom:latest

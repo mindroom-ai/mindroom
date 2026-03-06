@@ -1,4 +1,6 @@
-# Multi-stage build for MindRoom Backend
+# Minimal MindRoom runtime image - no tool extras pre-installed.
+# Tools auto-install their dependencies at runtime via tool_dependencies.py.
+# Good target for sandbox runners where image size matters.
 FROM ghcr.io/astral-sh/uv:latest AS uv
 FROM oven/bun:1 AS bun
 
@@ -15,7 +17,7 @@ WORKDIR /app
 # Copy project files
 COPY pyproject.toml uv.lock README.md hatch_build.py /app/
 
-# Install dependencies
+# Install dependencies (base only, no extras)
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-install-project --no-dev
 
@@ -24,16 +26,16 @@ COPY src /app/src
 COPY skills /app/skills
 COPY frontend /app/frontend
 
-# Install the project itself
+# Install the project itself (base only, no extras)
 # Set pretend version for setuptools-scm (no .git in container)
 ARG VERSION=0.0.0
 ENV SETUPTOOLS_SCM_PRETEND_VERSION=${VERSION}
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --all-extras
+    uv sync --locked --no-dev
 
 # Final production stage
 FROM public.ecr.aws/docker/library/python:3.12-slim AS final
-# Copy uv for runtime
+# Copy uv for runtime (needed for auto-installing tool extras)
 COPY --from=uv /uv /uvx /bin/
 
 # Set version for setuptools-scm at runtime (no .git in container)
