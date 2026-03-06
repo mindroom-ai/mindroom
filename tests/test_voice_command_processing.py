@@ -18,6 +18,7 @@ from mindroom.constants import (
     VOICE_PREFIX,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
+from mindroom.matrix.identity import MatrixID
 from mindroom.voice_handler import prepare_voice_message
 
 
@@ -50,6 +51,7 @@ async def test_router_processes_own_voice_transcriptions(tmp_path) -> None:  # n
     agent_user = MagicMock()
     agent_user.user_id = "@mindroom_router:example.com"
     agent_user.agent_name = ROUTER_AGENT_NAME
+    agent_user.matrix_id = MatrixID.parse("@mindroom_router:example.com")
 
     bot = AgentBot(
         agent_user=agent_user,
@@ -87,6 +89,7 @@ async def test_router_ignores_non_voice_self_messages(tmp_path) -> None:  # noqa
     agent_user = MagicMock()
     agent_user.user_id = "@mindroom_router:example.com"
     agent_user.agent_name = ROUTER_AGENT_NAME
+    agent_user.matrix_id = MatrixID.parse("@mindroom_router:example.com")
 
     bot = AgentBot(
         agent_user=agent_user,
@@ -197,6 +200,7 @@ async def test_router_ignores_audio_events_from_internal_agents(tmp_path) -> Non
     agent_user = MagicMock()
     agent_user.user_id = "@mindroom_router:example.com"
     agent_user.agent_name = ROUTER_AGENT_NAME
+    agent_user.matrix_id = MatrixID.parse("@mindroom_router:example.com")
 
     config = Config(
         agents={"assistant": {"display_name": "Assistant"}},
@@ -247,6 +251,7 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
     agent_user = MagicMock()
     agent_user.user_id = "@mindroom_home:localhost"
     agent_user.agent_name = "home"
+    agent_user.matrix_id = MatrixID.parse("@mindroom_home:localhost")
 
     bot = AgentBot(
         agent_user=agent_user,
@@ -295,6 +300,7 @@ async def test_agent_handles_audio_with_router_present_in_single_agent_room(tmp_
     agent_user = MagicMock()
     agent_user.user_id = "@mindroom_home:localhost"
     agent_user.agent_name = "home"
+    agent_user.matrix_id = MatrixID.parse("@mindroom_home:localhost")
 
     bot = AgentBot(
         agent_user=agent_user,
@@ -337,6 +343,7 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
     agent_user = MagicMock()
     agent_user.user_id = "@mindroom_router:localhost"
     agent_user.agent_name = ROUTER_AGENT_NAME
+    agent_user.matrix_id = MatrixID.parse("@mindroom_router:localhost")
 
     config = Config(
         agents={
@@ -409,6 +416,7 @@ async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absen
         agent_user = MagicMock()
         agent_user.user_id = f"@mindroom_{agent_name}:localhost"
         agent_user.agent_name = agent_name
+        agent_user.matrix_id = MatrixID.parse(f"@mindroom_{agent_name}:localhost")
         bot = AgentBot(
             agent_user=agent_user,
             storage_path=tmp_path,

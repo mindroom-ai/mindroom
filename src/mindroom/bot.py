@@ -345,10 +345,7 @@ class AgentBot:
     @cached_property
     def matrix_id(self) -> MatrixID:
         """Get the Matrix ID for this agent bot."""
-        matrix_id = getattr(self.agent_user, "matrix_id", None)
-        if isinstance(matrix_id, MatrixID):
-            return matrix_id
-        return MatrixID.parse(self.agent_user.user_id)
+        return self.agent_user.matrix_id
 
     def _resolve_reply_thread_id(
         self,
@@ -1155,23 +1152,9 @@ class AgentBot:
 
     def _requester_user_id_for_event(
         self,
-        event: _DispatchEvent,
-    ) -> str:
-        """Return the effective requester for per-user reply checks."""
-        content = event.source.get("content") if isinstance(event.source, dict) else None
-        if (
-            event.sender == self.matrix_id.full_id
-            and isinstance(content, dict)
-            and isinstance(content.get(ORIGINAL_SENDER_KEY), str)
-        ):
-            return content[ORIGINAL_SENDER_KEY]
-        return get_effective_sender_id_for_reply_permissions(event.sender, event.source, self.config)
-
-    def _requester_user_id_for_command_event(
-        self,
         event: CommandEvent,
     ) -> str:
-        """Typed adapter for command handling dependencies."""
+        """Return the effective requester for per-user reply checks."""
         content = event.source.get("content") if isinstance(event.source, dict) else None
         if (
             event.sender == self.matrix_id.full_id
@@ -2634,7 +2617,7 @@ class AgentBot:
             logger=self.logger,
             response_tracker=self.response_tracker,
             derive_conversation_context=self._derive_conversation_context,
-            requester_user_id_for_event=self._requester_user_id_for_command_event,
+            requester_user_id_for_event=self._requester_user_id_for_event,
             resolve_reply_thread_id=self._resolve_reply_thread_id,
             send_response=self._send_response,
             send_skill_command_response=self._send_skill_command_response,
