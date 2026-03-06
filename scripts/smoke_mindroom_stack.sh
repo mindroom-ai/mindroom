@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/smoke_helpers.sh
+source "${SCRIPT_DIR}/smoke_helpers.sh"
+
 STACK_DIR="${1:-}"
 PROJECT_NAME="${PROJECT_NAME:-mindroom-stack-smoke}"
 STACK_SYNAPSE_PORT="${STACK_SYNAPSE_PORT:-18008}"
@@ -47,29 +51,12 @@ sed \
   -e "s/\"8080:8080\"/\"127.0.0.1:${STACK_ELEMENT_PORT}:8080\"/" \
   "${STACK_DIR}/compose.yaml" >"${TMP_COMPOSE}"
 
-wait_for_status() {
-  local url="$1"
-  local expected="$2"
-  local label="$3"
-
-  for _ in $(seq 1 40); do
-    if curl -fsS "${url}" | grep -q "${expected}"; then
-      echo "[smoke] ${label} ready"
-      return 0
-    fi
-    sleep 3
-  done
-
-  echo "[error] Timed out waiting for ${label} (${url})" >&2
-  return 1
-}
-
 echo "[smoke] Starting mindroom-stack from ${STACK_DIR}"
 docker compose --project-directory "${STACK_DIR}" --project-name "${PROJECT_NAME}" --env-file "${TMP_ENV}" -f "${TMP_COMPOSE}" up -d
 
-wait_for_status "http://127.0.0.1:${STACK_MINDROOM_PORT}/api/health" "\"healthy\"" "MindRoom health"
-wait_for_status "http://127.0.0.1:${STACK_MINDROOM_PORT}/" "MindRoom" "MindRoom dashboard"
-wait_for_status "http://127.0.0.1:${STACK_SYNAPSE_PORT}/_matrix/client/versions" "\"versions\"" "Synapse"
+wait_for_http_match "http://127.0.0.1:${STACK_MINDROOM_PORT}/api/health" "\"healthy\"" "MindRoom health" 40 3
+wait_for_http_match "http://127.0.0.1:${STACK_MINDROOM_PORT}/" "MindRoom" "MindRoom dashboard" 40 3
+wait_for_http_match "http://127.0.0.1:${STACK_SYNAPSE_PORT}/_matrix/client/versions" "\"versions\"" "Synapse" 40 3
 
 for _ in $(seq 1 20); do
   code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${STACK_ELEMENT_PORT}/" || true)"

@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+# shellcheck source=scripts/smoke_helpers.sh
+source "${ROOT_DIR}/scripts/smoke_helpers.sh"
 INSTANCE_ID="${INSTANCE_ID:-1}"
 INSTANCE_NAMESPACE="${INSTANCE_NAMESPACE:-mindroom-instances}"
 PLATFORM_NAMESPACE="${PLATFORM_NAMESPACE:-mindroom-staging}"
@@ -35,23 +37,6 @@ cleanup() {
   rm -rf "${TMP_DIR}"
 }
 trap cleanup EXIT
-
-wait_for_url() {
-  local url="$1"
-  local expected="$2"
-  local label="$3"
-
-  for _ in $(seq 1 30); do
-    if curl -fsS "${url}" | grep -q "${expected}"; then
-      echo "[smoke] ${label} ready"
-      return 0
-    fi
-    sleep 2
-  done
-
-  echo "[error] Timed out waiting for ${label} (${url})" >&2
-  return 1
-}
 
 wait_for_port_forward() {
   local local_port="$1"
@@ -120,10 +105,10 @@ PF_PLATFORM_FRONTEND_PID="$(start_port_forward "${PLATFORM_NAMESPACE}" svc/platf
 PF_MINDROOM_PID="$(start_port_forward "${INSTANCE_NAMESPACE}" "svc/mindroom-${INSTANCE_ID}" "${MINDROOM_LOCAL_PORT}" 8765 "${TMP_DIR}/pf-mindroom.log" "MindRoom")"
 PF_SYNAPSE_PID="$(start_port_forward "${INSTANCE_NAMESPACE}" "svc/synapse-${INSTANCE_ID}" "${SYNAPSE_LOCAL_PORT}" 8008 "${TMP_DIR}/pf-synapse.log" "Synapse")"
 
-wait_for_url "${PLATFORM_HEALTH_URL}" "\"status\"" "platform backend health"
-wait_for_url "${PLATFORM_UI_URL}" "MindRoom" "platform frontend"
-wait_for_url "${MINDROOM_HEALTH_URL}" "\"healthy\"" "MindRoom health"
-wait_for_url "${MINDROOM_UI_URL}" "MindRoom" "MindRoom dashboard"
-wait_for_url "${SYNAPSE_URL}" "\"versions\"" "instance Synapse"
+wait_for_http_match "${PLATFORM_HEALTH_URL}" "\"status\"" "platform backend health"
+wait_for_http_match "${PLATFORM_UI_URL}" "MindRoom" "platform frontend"
+wait_for_http_match "${MINDROOM_HEALTH_URL}" "\"healthy\"" "MindRoom health"
+wait_for_http_match "${MINDROOM_UI_URL}" "MindRoom" "MindRoom dashboard"
+wait_for_http_match "${SYNAPSE_URL}" "\"versions\"" "instance Synapse"
 
 echo "[smoke] kind platform + instance checks passed"

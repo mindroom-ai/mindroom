@@ -19,7 +19,7 @@ router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 _creds_manager = CredentialsManager()
 
 
-def _get_frontend_url(request: Request) -> str:
+def get_frontend_url(request: Request) -> str:
     """Return the dashboard base URL for OAuth redirects."""
     configured = os.getenv("FRONTEND_URL")
     if configured:
@@ -218,7 +218,7 @@ async def spotify_callback(request: Request, code: str) -> RedirectResponse:
         }
         _save_service_credentials("spotify", credentials)
 
-        return RedirectResponse(url=f"{_get_frontend_url(request)}/?spotify=connected")
+        return RedirectResponse(url=f"{get_frontend_url(request)}/?spotify=connected")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"OAuth failed: {e!s}") from e
 
