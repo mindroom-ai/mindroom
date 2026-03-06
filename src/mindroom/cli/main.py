@@ -145,7 +145,9 @@ async def _run(
     console.print()
     console.print(f"Starting Mindroom (log level: {log_level})...")
     if api:
-        console.print(f"Dashboard API: http://{api_host}:{api_port}")
+        display_host = "localhost" if api_host == "0.0.0.0" else api_host  # noqa: S104
+        console.print(f"Dashboard: http://{display_host}:{api_port}")
+        console.print(f"API: http://{display_host}:{api_port}/api")
     console.print("Press Ctrl+C to stop\n")
 
     try:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol, cast
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import RedirectResponse
@@ -13,23 +13,48 @@ from mindroom.credentials import CredentialsManager
 from mindroom.tool_system.dependencies import ensure_tool_deps
 from mindroom.tool_system.metadata import ensure_tool_registry_loaded, export_tools_metadata
 
-if TYPE_CHECKING:
-    from spotipy import Spotify, SpotifyOAuth
-
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
 # Initialize credentials manager
 _creds_manager = CredentialsManager()
 
 
-def _ensure_spotify_packages() -> tuple[type[Spotify], type[SpotifyOAuth]]:
+class _SpotifyClientProtocol(Protocol):
+    def current_user(self) -> dict[str, Any]: ...
+
+
+class _SpotifyClientFactoryProtocol(Protocol):
+    def __call__(self, *, auth: str) -> _SpotifyClientProtocol: ...
+
+
+class _SpotifyOAuthClientProtocol(Protocol):
+    def get_authorize_url(self) -> str: ...
+
+    def get_access_token(self, code: str) -> dict[str, Any]: ...
+
+
+class _SpotifyOAuthFactoryProtocol(Protocol):
+    def __call__(
+        self,
+        *,
+        client_id: str,
+        client_secret: str,
+        redirect_uri: str,
+        scope: str = "",
+    ) -> _SpotifyOAuthClientProtocol: ...
+
+
+def _ensure_spotify_packages() -> tuple[_SpotifyClientFactoryProtocol, _SpotifyOAuthFactoryProtocol]:
     """Lazily import Spotify packages, auto-installing if needed."""
     ensure_tool_deps(["spotipy"], "spotify")
 
     from spotipy import Spotify as _Spotify  # noqa: PLC0415
     from spotipy import SpotifyOAuth as _SpotifyOAuth  # noqa: PLC0415
 
-    return _Spotify, _SpotifyOAuth
+    return (
+        cast("_SpotifyClientFactoryProtocol", _Spotify),
+        cast("_SpotifyOAuthFactoryProtocol", _SpotifyOAuth),
+    )
 
 
 # Load tool metadata from the single source of truth

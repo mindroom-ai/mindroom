@@ -64,9 +64,9 @@
             }
         }
 
-        // Get the widget URL from query parameters or use default
+        // Get the widget URL from query parameters or use the current origin
         const params = new URLSearchParams(window.location.search);
-        const appUrl = params.get('url') || 'http://localhost:3003';
+        const appUrl = params.get('url') || window.location.origin;
 
         // Create iframe for the actual app
         const container = document.getElementById('container');

@@ -283,6 +283,56 @@ def test_cors_headers(test_client: TestClient) -> None:
     assert response.status_code == 200
 
 
+def test_frontend_root_serves_index(
+    test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Root path should serve the bundled dashboard index when assets are available."""
+    frontend_dir = tmp_path / "frontend-dist"
+    frontend_dir.mkdir()
+    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
+
+    monkeypatch.setattr(main, "_resolve_frontend_dist_dir", lambda: frontend_dir)
+
+    response = test_client.get("/")
+    assert response.status_code == 200
+    assert "MindRoom Dashboard" in response.text
+
+
+def test_frontend_spa_routes_fall_back_to_index(
+    test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Unknown non-API paths should return index.html for client-side routing."""
+    frontend_dir = tmp_path / "frontend-dist"
+    frontend_dir.mkdir()
+    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
+
+    monkeypatch.setattr(main, "_resolve_frontend_dist_dir", lambda: frontend_dir)
+
+    response = test_client.get("/agents")
+    assert response.status_code == 200
+    assert "MindRoom Dashboard" in response.text
+
+
+def test_frontend_does_not_shadow_unknown_api_routes(
+    test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Unknown API paths should remain 404 instead of falling back to the SPA."""
+    frontend_dir = tmp_path / "frontend-dist"
+    frontend_dir.mkdir()
+    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
+
+    monkeypatch.setattr(main, "_resolve_frontend_dist_dir", lambda: frontend_dir)
+
+    response = test_client.get("/api/not-real")
+    assert response.status_code == 404
+
+
 def test_get_teams_empty(test_client: TestClient) -> None:
     """Test getting teams when none exist."""
     test_client.post("/api/config/load")

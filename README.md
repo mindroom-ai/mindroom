@@ -194,14 +194,11 @@ uv sync --all-extras
 ```
 
 ```bash
-# Terminal 1: Start backend (agents + API)
+# Start MindRoom (agents + API + web dashboard)
 uv run mindroom run
-
-# Terminal 2: Start frontend (optional, for web UI)
-./run-frontend.sh
 ```
 
-The web interface will be available at http://localhost:3003
+The web interface will be available at http://localhost:8765
 
 ### First Steps
 
@@ -242,7 +239,6 @@ resolves the reply chain and continues the correct conversation thread.
 - `!list_schedules` - List scheduled tasks
 - `!cancel_schedule <id>` - Cancel a scheduled task
 - `!edit_schedule <id> <task>` - Edit an existing scheduled task
-- `!widget [url]` - Add configuration widget
 - `!config <operation>` - Manage configuration
 - `!hi` - Show welcome message
 - `!skill <name> [args]` - Run a skill by name
@@ -366,7 +362,7 @@ Mix and match:
 - **Agents**: Python with matrix-nio
 - **AI Models**: OpenAI, Anthropic, Ollama, or any provider
 - **Memory**: Mem0 + ChromaDB vector storage (persistent on disk)
-- **UI**: Web widget + any Matrix client
+- **UI**: Web dashboard + any Matrix client
 
 ## Philosophy
 

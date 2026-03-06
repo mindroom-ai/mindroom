@@ -47,6 +47,7 @@ def _check_standard_tool_configured(tool: dict[str, Any], manager: CredentialsMa
 
 
 @router.get("")
+@router.get("/")
 async def get_registered_tools() -> ToolsResponse:
     """Get all registered tools from mindroom.
 

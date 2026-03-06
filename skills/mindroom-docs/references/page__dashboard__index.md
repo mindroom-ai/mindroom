@@ -7,11 +7,10 @@ MindRoom includes a web dashboard for configuring agents, teams, rooms, and inte
 **Standalone Mode:**
 
 ```
-mindroom run              # Start the backend
-cd frontend && bun run dev  # Start the frontend (in another terminal)
+mindroom run
 ```
 
-The dashboard will be available at `http://localhost:3003`.
+The dashboard will be available at `http://localhost:8765`.
 
 **SaaS Platform:** Access your dashboard at `https://<instance-id>.mindroom.chat`
 

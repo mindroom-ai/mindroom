@@ -7,12 +7,13 @@ import shutil
 import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
-from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from pathlib import Path, PurePosixPath
+from typing import Annotated, Any, Protocol, cast
 
 import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from watchfiles import awatch
 
 # Import routers
@@ -30,9 +31,6 @@ from mindroom.config.main import Config
 from mindroom.constants import CONFIG_PATH, CONFIG_TEMPLATE_PATH, safe_replace
 from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_tool_extra
-
-if TYPE_CHECKING:
-    from supabase import Client as SupabaseClient
 
 
 async def _watch_config(stop_event: asyncio.Event) -> None:
@@ -65,9 +63,9 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await watch_task
 
 
-app = FastAPI(title="MindRoom Widget Backend", _lifespan=_lifespan)
+app = FastAPI(title="MindRoom Dashboard API", _lifespan=_lifespan)
 
-# Configure CORS for widget - allow multiple origins including port forwarding
+# Configure CORS for the standalone frontend dev server.
 app.add_middleware(
     CORSMiddleware,  # ty: ignore[invalid-argument-type]
     allow_origins=[
@@ -83,10 +81,54 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
+_API_ROUTE_PREFIXES = frozenset({"api", "v1"})
+_PACKAGE_FRONTEND_DIR = Path(__file__).resolve().parents[1] / "_frontend"
+_REPO_FRONTEND_DIR = Path(__file__).resolve().parents[3] / "frontend" / "dist"
+
 
 def load_runtime_config() -> tuple[Config, Path]:
     """Load the current runtime config and return it with its path."""
     return Config.from_yaml(CONFIG_PATH), CONFIG_PATH
+
+
+def _resolve_frontend_dist_dir() -> Path | None:
+    """Return the built dashboard directory when bundled or locally built."""
+    override = os.getenv("MINDROOM_FRONTEND_DIST")
+    if override:
+        override_path = Path(override).expanduser().resolve()
+        return override_path if override_path.is_dir() else None
+
+    for candidate in (_PACKAGE_FRONTEND_DIR, _REPO_FRONTEND_DIR):
+        if candidate.is_dir():
+            return candidate
+
+    return None
+
+
+def _resolve_frontend_asset(frontend_dir: Path, request_path: str) -> Path | None:
+    """Resolve a request path to a static asset or SPA fallback."""
+    normalized_path = request_path.strip("/")
+    index_path = frontend_dir / "index.html"
+    if not normalized_path:
+        return index_path if index_path.is_file() else None
+
+    candidate_parts = PurePosixPath(normalized_path).parts
+    if ".." in candidate_parts:
+        return None
+
+    candidate = frontend_dir.joinpath(*candidate_parts)
+    if candidate.is_file():
+        return candidate
+
+    if candidate.is_dir():
+        nested_index_path = candidate / "index.html"
+        if nested_index_path.is_file():
+            return nested_index_path
+
+    if PurePosixPath(normalized_path).suffix:
+        return None
+
+    return index_path if index_path.is_file() else None
 
 
 def _ensure_writable_config() -> None:
@@ -185,7 +227,27 @@ _STANDALONE_PUBLIC_PATHS = frozenset(
 )
 
 
-def _init_supabase_auth(supabase_url: str | None, supabase_anon_key: str | None) -> "SupabaseClient | None":
+class _SupabaseUserProtocol(Protocol):
+    id: str
+    email: str | None
+
+
+class _SupabaseUserResponseProtocol(Protocol):
+    user: _SupabaseUserProtocol | None
+
+
+class _SupabaseAuthProtocol(Protocol):
+    def get_user(self, token: str) -> _SupabaseUserResponseProtocol | None: ...
+
+
+class _SupabaseClientProtocol(Protocol):
+    auth: _SupabaseAuthProtocol
+
+
+def _init_supabase_auth(
+    supabase_url: str | None,
+    supabase_anon_key: str | None,
+) -> _SupabaseClientProtocol | None:
     """Initialize Supabase auth client when credentials are configured."""
     if not supabase_url or not supabase_anon_key:
         return None
@@ -204,10 +266,10 @@ def _init_supabase_auth(supabase_url: str | None, supabase_anon_key: str | None)
             raise ImportError(msg) from None
         create_client = importlib.import_module("supabase").create_client
 
-    return create_client(supabase_url, supabase_anon_key)
+    return cast("_SupabaseClientProtocol", create_client(supabase_url, supabase_anon_key))
 
 
-_supabase_auth: "SupabaseClient | None" = _init_supabase_auth(_SUPABASE_URL, _SUPABASE_ANON_KEY)
+_supabase_auth: _SupabaseClientProtocol | None = _init_supabase_auth(_SUPABASE_URL, _SUPABASE_ANON_KEY)
 
 
 async def verify_user(request: Request, authorization: str | None = Header(None)) -> dict:
@@ -478,6 +540,25 @@ async def get_available_rooms(_user: Annotated[dict, Depends(verify_user)]) -> l
             rooms.update(agent_rooms)
 
     return sorted(rooms)
+
+
+@app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
+@app.api_route("/{path:path}", methods=["GET", "HEAD"], include_in_schema=False)
+async def serve_frontend(path: str = "") -> FileResponse:
+    """Serve the bundled dashboard and SPA routes from the backend."""
+    first_segment = path.split("/", 1)[0] if path else ""
+    if first_segment in _API_ROUTE_PREFIXES:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    frontend_dir = _resolve_frontend_dist_dir()
+    if frontend_dir is None:
+        raise HTTPException(status_code=404, detail="Frontend assets are not available")
+
+    asset_path = _resolve_frontend_asset(frontend_dir, path)
+    if asset_path is None:
+        raise HTTPException(status_code=404, detail="Frontend asset not found")
+
+    return FileResponse(asset_path)
 
 
 if __name__ == "__main__":
