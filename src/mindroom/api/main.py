@@ -14,7 +14,8 @@ from urllib.parse import quote
 import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from pydantic import BaseModel
 from watchfiles import awatch
 
 # Import routers
@@ -32,6 +33,7 @@ from mindroom.config.main import Config
 from mindroom.constants import CONFIG_PATH, ensure_writable_config_path, safe_replace
 from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.frontend_assets import ensure_frontend_dist_dir
+from mindroom.runtime_state import get_runtime_state
 from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_tool_extra
 
 
@@ -65,7 +67,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await watch_task
 
 
-app = FastAPI(title="MindRoom Dashboard API", _lifespan=_lifespan)
+app = FastAPI(title="MindRoom Dashboard API", lifespan=_lifespan)
 
 # Configure CORS for the standalone frontend dev server.
 app.add_middleware(
@@ -118,7 +120,6 @@ def _resolve_frontend_asset(frontend_dir: Path, request_path: str) -> Path | Non
         nested_index_path = candidate / "index.html"
         if nested_index_path.is_file():
             return nested_index_path
-
     if PurePosixPath(normalized_path).suffix:
         return None
 
@@ -186,6 +187,13 @@ _SUPABASE_URL = os.getenv("SUPABASE_URL")
 _SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 _ACCOUNT_ID = os.getenv("ACCOUNT_ID")  # optional: enforce instance ownership
 _MINDROOM_API_KEY = os.getenv("MINDROOM_API_KEY")  # optional: dashboard auth for standalone mode
+
+
+class _AuthSessionRequest(BaseModel):
+    """Standalone dashboard login payload."""
+
+    api_key: str
+
 
 _STANDALONE_PUBLIC_PATHS = frozenset(
     {
@@ -316,6 +324,7 @@ def _sanitize_next_path(next_path: str | None) -> str:
 def _render_standalone_login_page(next_path: str) -> str:
     """Return the standalone dashboard login page."""
     escaped_next_path = html.escape(next_path, quote=True)
+    env_path = html.escape(str(CONFIG_PATH.expanduser().resolve().parent / ".env"))
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -348,6 +357,12 @@ def _render_standalone_login_page(next_path: str) -> str:
       margin: 0 0 1rem;
       color: #5d655f;
     }}
+    code {{
+      padding: 0.1rem 0.3rem;
+      border-radius: 0.35rem;
+      background: #f1ece0;
+      font-size: 0.92em;
+    }}
     input, button {{
       box-sizing: border-box;
       width: 100%;
@@ -378,6 +393,7 @@ def _render_standalone_login_page(next_path: str) -> str:
   <form id="login-form">
     <h1>MindRoom Dashboard</h1>
     <p>Enter the dashboard API key to continue.</p>
+    <p>Find it in <code>{env_path}</code> as <code>MINDROOM_API_KEY=...</code>.</p>
     <input id="api-key" name="api-key" type="password" autocomplete="current-password" autofocus>
     <button type="submit">Continue</button>
     <div id="error" role="alert"></div>
@@ -483,19 +499,30 @@ async def health_check() -> dict[str, str]:
     return {"status": "healthy"}
 
 
+@app.get("/api/ready")
+async def readiness_check() -> JSONResponse:
+    """Readiness endpoint tied to successful orchestrator startup."""
+    state = get_runtime_state()
+    if state.phase == "ready":
+        return JSONResponse({"status": "ready"})
+    return JSONResponse(
+        status_code=503,
+        content={"status": state.phase, "detail": state.detail or "MindRoom is not ready"},
+    )
+
+
 @app.post("/api/auth/session", include_in_schema=False)
-async def create_auth_session(request: Request, payload: dict[str, str], response: Response) -> dict[str, bool]:
+async def create_auth_session(request: Request, payload: _AuthSessionRequest, response: Response) -> dict[str, bool]:
     """Set a same-origin cookie for standalone dashboard auth."""
     if not _MINDROOM_API_KEY:
         raise HTTPException(status_code=404, detail="Dashboard auth is not enabled")
 
-    api_key = payload.get("api_key", "")
-    if not api_key or not secrets.compare_digest(api_key, _MINDROOM_API_KEY):
+    if not payload.api_key or not secrets.compare_digest(payload.api_key, _MINDROOM_API_KEY):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     response.set_cookie(
         key=_STANDALONE_AUTH_COOKIE_NAME,
-        value=api_key,
+        value=payload.api_key,
         path="/",
         secure=request.url.scheme == "https",
         httponly=True,

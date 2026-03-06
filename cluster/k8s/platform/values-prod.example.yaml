@@ -17,7 +17,6 @@ stripe:
 
 # Optional image pull secrets for private registries
 imagePullSecrets: []
-
 cleanupScheduler:
   enabled: "true"
 
