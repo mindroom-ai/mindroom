@@ -140,12 +140,6 @@ spec:
           capabilities:
             drop:
               - ALL
-      {{- with .Values.imagePullSecrets }}
-      imagePullSecrets:
-      {{- range . }}
-      - name: {{ . }}
-      {{- end }}
-      {{- end }}
       volumes:
       - name: storage
         persistentVolumeClaim:
