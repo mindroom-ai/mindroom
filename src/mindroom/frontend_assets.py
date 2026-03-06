@@ -47,7 +47,8 @@ def _build_repo_frontend_dist() -> Path | None:
     if os.getenv("MINDROOM_AUTO_BUILD_FRONTEND") == "0":
         return None
 
-    if not _REPO_FRONTEND_SOURCE_DIR.is_dir() or not (_REPO_FRONTEND_SOURCE_DIR / "package.json").is_file():
+    package_json = _REPO_FRONTEND_SOURCE_DIR / "package.json"
+    if not _REPO_FRONTEND_SOURCE_DIR.is_dir() or not package_json.is_file():
         return None
 
     bun = shutil.which("bun")

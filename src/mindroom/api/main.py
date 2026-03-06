@@ -15,6 +15,7 @@ import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from pydantic import BaseModel
 from watchfiles import awatch
 
 # Import routers
@@ -92,11 +93,6 @@ _PLATFORM_LOGIN_URL = os.getenv("MINDROOM_PLATFORM_LOGIN_URL")
 def load_runtime_config() -> tuple[Config, Path]:
     """Load the current runtime config and return it with its path."""
     return Config.from_yaml(CONFIG_PATH), CONFIG_PATH
-
-
-def _resolve_frontend_dist_dir() -> Path | None:
-    """Return the built dashboard directory when bundled or locally built."""
-    return ensure_frontend_dist_dir()
 
 
 def _resolve_frontend_asset(frontend_dir: Path, request_path: str) -> Path | None:
@@ -186,6 +182,13 @@ _SUPABASE_URL = os.getenv("SUPABASE_URL")
 _SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 _ACCOUNT_ID = os.getenv("ACCOUNT_ID")  # optional: enforce instance ownership
 _MINDROOM_API_KEY = os.getenv("MINDROOM_API_KEY")  # optional: dashboard auth for standalone mode
+
+
+class _AuthSessionRequest(BaseModel):
+    """Standalone dashboard login payload."""
+
+    api_key: str
+
 
 _STANDALONE_PUBLIC_PATHS = frozenset(
     {
@@ -484,18 +487,17 @@ async def health_check() -> dict[str, str]:
 
 
 @app.post("/api/auth/session", include_in_schema=False)
-async def create_auth_session(request: Request, payload: dict[str, str], response: Response) -> dict[str, bool]:
+async def create_auth_session(request: Request, payload: _AuthSessionRequest, response: Response) -> dict[str, bool]:
     """Set a same-origin cookie for standalone dashboard auth."""
     if not _MINDROOM_API_KEY:
         raise HTTPException(status_code=404, detail="Dashboard auth is not enabled")
 
-    api_key = payload.get("api_key", "")
-    if not api_key or not secrets.compare_digest(api_key, _MINDROOM_API_KEY):
+    if not payload.api_key or not secrets.compare_digest(payload.api_key, _MINDROOM_API_KEY):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     response.set_cookie(
         key=_STANDALONE_AUTH_COOKIE_NAME,
-        value=api_key,
+        value=payload.api_key,
         path="/",
         secure=request.url.scheme == "https",
         httponly=True,
@@ -742,7 +744,7 @@ async def serve_frontend(request: Request, path: str = "") -> Response:
 
         raise HTTPException(status_code=401, detail="Authentication required")
 
-    frontend_dir = _resolve_frontend_dist_dir()
+    frontend_dir = ensure_frontend_dist_dir()
     if frontend_dir is None:
         raise HTTPException(status_code=404, detail="Frontend assets are not available")
 

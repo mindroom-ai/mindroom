@@ -382,7 +382,7 @@ def test_frontend_root_serves_index(
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
-    monkeypatch.setattr(main, "_resolve_frontend_dist_dir", lambda: frontend_dir)
+    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda: frontend_dir)
 
     response = test_client.get("/")
     assert response.status_code == 200
@@ -399,7 +399,7 @@ def test_frontend_spa_routes_fall_back_to_index(
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
-    monkeypatch.setattr(main, "_resolve_frontend_dist_dir", lambda: frontend_dir)
+    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda: frontend_dir)
 
     response = test_client.get("/agents")
     assert response.status_code == 200
@@ -416,10 +416,32 @@ def test_frontend_does_not_shadow_unknown_api_routes(
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
-    monkeypatch.setattr(main, "_resolve_frontend_dist_dir", lambda: frontend_dir)
+    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda: frontend_dir)
 
     response = test_client.get("/api/not-real")
     assert response.status_code == 404
+
+
+def test_frontend_blocks_path_traversal(
+    test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Path traversal attempts must not leak files outside the frontend directory."""
+    frontend_dir = tmp_path / "frontend-dist"
+    frontend_dir.mkdir()
+    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
+    secret = tmp_path / "secret.txt"
+    secret.write_text("do-not-leak")
+
+    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda: frontend_dir)
+
+    # Starlette normalizes bare `..` segments, so percent-encoded traversal
+    # is the real attack vector that _resolve_frontend_asset must block.
+    for traversal_path in ["assets/..%2F..%2Fsecret.txt", "..%2Fsecret.txt"]:
+        response = test_client.get(f"/{traversal_path}")
+        assert response.status_code == 404, f"Path traversal not blocked for {traversal_path}"
+        assert "do-not-leak" not in response.text
 
 
 def test_frontend_redirects_to_login_when_api_key_auth_is_enabled(
@@ -432,7 +454,7 @@ def test_frontend_redirects_to_login_when_api_key_auth_is_enabled(
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
-    monkeypatch.setattr(main, "_resolve_frontend_dist_dir", lambda: frontend_dir)
+    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda: frontend_dir)
 
     response = api_key_client.get("/", follow_redirects=False)
     assert response.status_code == 307
@@ -466,7 +488,7 @@ def test_frontend_serves_after_api_key_login(
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
-    monkeypatch.setattr(main, "_resolve_frontend_dist_dir", lambda: frontend_dir)
+    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda: frontend_dir)
 
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
@@ -840,7 +862,7 @@ def test_platform_frontend_redirects_to_login_when_cookie_missing(
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
-    monkeypatch.setattr(main, "_resolve_frontend_dist_dir", lambda: frontend_dir)
+    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda: frontend_dir)
     _set_platform_auth(monkeypatch, valid_tokens=set())
     monkeypatch.setattr(main, "_PLATFORM_LOGIN_URL", "https://app.example.com/auth/login")
 
@@ -859,7 +881,7 @@ def test_platform_frontend_redirects_to_login_when_cookie_invalid(
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
-    monkeypatch.setattr(main, "_resolve_frontend_dist_dir", lambda: frontend_dir)
+    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda: frontend_dir)
     _set_platform_auth(monkeypatch, valid_tokens={"valid-cookie-token"})
     monkeypatch.setattr(main, "_PLATFORM_LOGIN_URL", "https://app.example.com/auth/login")
 
@@ -883,7 +905,7 @@ def test_platform_frontend_serves_dashboard_with_valid_cookie(
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
-    monkeypatch.setattr(main, "_resolve_frontend_dist_dir", lambda: frontend_dir)
+    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda: frontend_dir)
     _set_platform_auth(monkeypatch, valid_tokens={valid_cookie_token})
     monkeypatch.setattr(main, "_PLATFORM_LOGIN_URL", "https://app.example.com/auth/login")
 
