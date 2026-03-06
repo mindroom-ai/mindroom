@@ -1,6 +1,6 @@
 # Shared Components
 
-This directory contains foundational UI components for standardizing the MindRoom widget interface. These components enforce consistent styling, behavior, and user experience across all list-based interfaces.
+This directory contains foundational UI components for standardizing the MindRoom dashboard. These components enforce consistent styling, behavior, and user experience across all list-based interfaces.
 
 ## Components
 
@@ -132,4 +132,4 @@ When refactoring existing components to use these shared components:
 4. **Use consistent empty states** with EmptyState
 5. **Apply shared styles** for uniform appearance
 
-This approach reduces code duplication while ensuring a consistent user experience across the MindRoom widget interface.
+This approach reduces code duplication while ensuring a consistent user experience across the MindRoom dashboard.

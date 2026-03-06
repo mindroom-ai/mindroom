@@ -10,7 +10,7 @@ Token tracking will integrate at these key points:
 1. **Collection**: After agent responses in `ai.py` (lines 237, 247, 388)
 2. **Storage**: Dual-mode (JSON for self-hosted, Supabase for SaaS)
 3. **API**: Expose usage via MindRoom API (`src/mindroom/api/`)
-4. **Frontend**: Display in MindRoom widget (`frontend/`)
+4. **Frontend**: Display in the MindRoom dashboard (`frontend/`)
 5. **SaaS Platform**: Additional APIs in `saas-platform/platform-backend/`
 
 ## Phase 1: Core Token Tracking Module

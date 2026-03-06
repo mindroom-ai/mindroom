@@ -18,7 +18,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
-from mindroom.api.integrations import get_frontend_url
+from mindroom.api.integrations import get_dashboard_url
 from mindroom.credentials import CredentialsManager
 
 router = APIRouter(prefix="/api/homeassistant", tags=["homeassistant-integration"])
@@ -190,7 +190,7 @@ async def connect_oauth(request: Request, config: HomeAssistantConfig) -> HomeAs
 
     # Build OAuth authorization URL
     # Home Assistant OAuth2 flow: https://developers.home-assistant.io/docs/auth_api/
-    redirect_uri = f"{get_frontend_url(request)}/homeassistant-callback"
+    redirect_uri = f"{get_dashboard_url(request)}/homeassistant-callback"
 
     auth_params = {
         "client_id": config.client_id,
@@ -306,7 +306,7 @@ async def callback(request: Request) -> RedirectResponse:
                 },
             )
 
-            return RedirectResponse(url=f"{get_frontend_url(request)}/?homeassistant=connected")
+            return RedirectResponse(url=f"{get_dashboard_url(request)}/?homeassistant=connected")
 
     except httpx.RequestError as e:
         raise HTTPException(status_code=503, detail=f"Failed to exchange code: {e!s}") from e

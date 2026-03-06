@@ -55,9 +55,9 @@ vi.mock('./iconMapping', () => ({
   getIconForTool: (icon: string | null, _iconColor?: string | null) => <span>{icon}</span>,
 }));
 
-// Mock API_BASE
+// Mock API base URL
 vi.mock('@/lib/api', () => ({
-  API_BASE: 'http://localhost:8080',
+  API_BASE_URL: 'http://localhost:8080',
 }));
 
 // Mock EnhancedConfigDialog

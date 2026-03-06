@@ -1,5 +1,5 @@
 /**
- * Shared style utilities and consistent className patterns for MindRoom widget components
+ * Shared style utilities and consistent className patterns for dashboard components
  */
 
 export const sharedStyles = {

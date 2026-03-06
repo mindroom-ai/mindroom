@@ -53,7 +53,6 @@ describe('ModelConfig', () => {
   };
 
   let keyStatusByService: Record<string, KeyStatusResponse>;
-  let keyValueByService: Record<string, string>;
   let fetchMock: ReturnType<typeof vi.fn>;
   const writeTextMock = vi.fn();
 
@@ -73,10 +72,6 @@ describe('ModelConfig', () => {
         api_key: 'sk-openrouter-backup-real',
       },
     };
-    keyValueByService = {
-      'model:openrouter_backup': 'sk-openrouter-backup-real',
-    };
-
     fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const method = init?.method || 'GET';
       const url = typeof input === 'string' ? input : input.toString();
@@ -87,18 +82,6 @@ describe('ModelConfig', () => {
         return {
           ok: true,
           json: async () => payload,
-        };
-      }
-
-      if (method === 'GET' && url.includes('/api/credentials/')) {
-        const service = extractService(url);
-        const apiKey = keyValueByService[service];
-        return {
-          ok: true,
-          json: async () => ({
-            service,
-            credentials: apiKey ? { api_key: apiKey } : {},
-          }),
         };
       }
 
@@ -357,34 +340,6 @@ describe('ModelConfig', () => {
         '/api/credentials/model:anthropic/api-key?key_name=api_key&include_value=true'
       );
       expect(writeTextMock).toHaveBeenCalledWith('sk-anthropic-real');
-    });
-  });
-
-  it('copies API key via legacy credentials endpoint fallback', async () => {
-    keyStatusByService['model:anthropic'] = {
-      has_key: true,
-      source: 'ui',
-      masked_key: 'sk-an...1234',
-    };
-    keyValueByService['model:anthropic'] = 'sk-anthropic-legacy-real';
-
-    render(<ModelConfig />);
-
-    const row = screen.getByText('anthropic').closest('tr');
-    if (!row) throw new Error('row not found');
-
-    await waitFor(() => {
-      expect(within(row).getByTitle('Copy API key')).toBeTruthy();
-    });
-
-    fireEvent.click(within(row).getByTitle('Copy API key'));
-
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        '/api/credentials/model:anthropic/api-key?key_name=api_key&include_value=true'
-      );
-      expect(fetchMock).toHaveBeenCalledWith('/api/credentials/model:anthropic');
-      expect(writeTextMock).toHaveBeenCalledWith('sk-anthropic-legacy-real');
     });
   });
 

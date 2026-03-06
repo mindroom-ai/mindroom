@@ -1,5 +1,5 @@
 /**
- * Shared UI components for MindRoom widget standardization
+ * Shared UI components for the MindRoom dashboard
  */
 
 export { ListPanel } from './ListPanel';

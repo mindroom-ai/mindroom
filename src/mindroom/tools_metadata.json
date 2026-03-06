@@ -4148,7 +4148,7 @@
       "display_name": "Amazon Redshift",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/redshift",
       "helper_text": null,
-      "icon": "SiAmazonredshift",
+      "icon": "FaAws",
       "icon_color": "text-red-600",
       "name": "redshift",
       "setup_type": "special",

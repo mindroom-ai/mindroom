@@ -5,9 +5,6 @@ const viteApiUrl = (import.meta as any).env?.VITE_API_URL;
 export const API_BASE_URL =
   typeof viteApiUrl === 'string' && viteApiUrl.length > 0 ? viteApiUrl : '';
 
-// Export as API_BASE for compatibility
-export const API_BASE = API_BASE_URL;
-
 export const API_ENDPOINTS = {
   // Config endpoints
   config: {
@@ -112,9 +109,4 @@ export async function fetchJSON<T>(url: string, options?: RequestInit): Promise<
     }
     throw error;
   }
-}
-
-// Backward-compatible helper for existing call sites.
-export async function fetchAPI(url: string, options?: RequestInit): Promise<any> {
-  return fetchJSON<any>(url, options);
 }

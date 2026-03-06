@@ -9,7 +9,8 @@ import pytest
 
 _SCRIPT_PATH = Path(__file__).resolve().parents[1] / "frontend" / "take_screenshot.py"
 _MODULE_SPEC = importlib.util.spec_from_file_location("mindroom_take_screenshot", _SCRIPT_PATH)
-assert _MODULE_SPEC is not None and _MODULE_SPEC.loader is not None
+assert _MODULE_SPEC is not None
+assert _MODULE_SPEC.loader is not None
 take_screenshot = importlib.util.module_from_spec(_MODULE_SPEC)
 _MODULE_SPEC.loader.exec_module(take_screenshot)
 

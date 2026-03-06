@@ -70,9 +70,9 @@ Screenshots are saved with timestamps:
 
 ```
 frontend/screenshots/
-├── mindroom-config-fullpage-YYYY-MM-DDTHH-mm-ss-sssZ.png
-├── mindroom-config-agents-YYYY-MM-DDTHH-mm-ss-sssZ.png
-└── mindroom-config-models-YYYY-MM-DDTHH-mm-ss-sssZ.png
+├── mindroom-dashboard-fullpage-YYYY-MM-DDTHH-mm-ss-sssZ.png
+├── mindroom-dashboard-agents-YYYY-MM-DDTHH-mm-ss-sssZ.png
+└── mindroom-dashboard-models-YYYY-MM-DDTHH-mm-ss-sssZ.png
 ```
 
 ## Frontend Dev Server Mode

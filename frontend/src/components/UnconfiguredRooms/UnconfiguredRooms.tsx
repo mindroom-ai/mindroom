@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Trash2, RefreshCw, ExternalLink, AlertCircle } from 'lucide-react';
-import { API_ENDPOINTS, fetchAPI } from '../../lib/api';
+import { API_ENDPOINTS, fetchJSON } from '../../lib/api';
 import { Button } from '../ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card';
 import { Badge } from '../ui/badge';
@@ -28,6 +28,15 @@ interface RoomLeaveRequest {
   room_id: string;
 }
 
+interface AgentRoomsResponse {
+  agents: AgentRoomsInfo[];
+}
+
+interface LeaveRoomsBulkResponse {
+  success: boolean;
+  results: Array<{ success: boolean }>;
+}
+
 export function UnconfiguredRooms() {
   const [agentsRooms, setAgentsRooms] = useState<AgentRoomsInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -40,7 +49,7 @@ export function UnconfiguredRooms() {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetchAPI(API_ENDPOINTS.matrix.agentsRooms);
+      const response = await fetchJSON<AgentRoomsResponse>(API_ENDPOINTS.matrix.agentsRooms);
       setAgentsRooms(response.agents);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load agent rooms');
@@ -106,10 +115,13 @@ export function UnconfiguredRooms() {
         return { agent_id, room_id };
       });
 
-      const response = await fetchAPI(API_ENDPOINTS.matrix.leaveRoomsBulk, {
-        method: 'POST',
-        body: JSON.stringify(requests),
-      });
+      const response = await fetchJSON<LeaveRoomsBulkResponse>(
+        API_ENDPOINTS.matrix.leaveRoomsBulk,
+        {
+          method: 'POST',
+          body: JSON.stringify(requests),
+        }
+      );
 
       if (response.success) {
         // Clear selection and reload data
@@ -117,7 +129,7 @@ export function UnconfiguredRooms() {
         await loadAgentRooms();
       } else {
         // Handle partial failures
-        const failed = response.results.filter((r: any) => !r.success);
+        const failed = response.results.filter(result => !result.success);
         if (failed.length > 0) {
           setError(`Failed to leave ${failed.length} room(s). Please try again.`);
         }

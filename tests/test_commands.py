@@ -47,7 +47,6 @@ def test_invalid_commands() -> None:
         "!unknowncmd",
         "!test123",
         "!notacommand",
-        "!widget",
     ]
 
     for cmd_text in unknown_commands:
@@ -218,7 +217,6 @@ def test_get_command_help() -> None:
     assert "!list_schedules" in help_text
     assert "!cancel_schedule" in help_text
     assert "!edit_schedule" in help_text
-    assert "!widget" not in help_text
 
     # Specific command help
     schedule_help = get_command_help("schedule")
