@@ -10,7 +10,7 @@ spec:
   type: ClusterIP
   ports:
   - port: 8765
-    targetPort: 8765  # API server in the MindRoom container
+    targetPort: 8765  # MindRoom runtime port for the bundled dashboard and API
     name: api
   selector:
     app: mindroom

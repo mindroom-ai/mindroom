@@ -59,7 +59,7 @@ GOOGLE_API_KEY=...
 ```
 
 This will start:
-- MindRoom with bundled dashboard (port automatically assigned, e.g., 8765)
+- MindRoom on its bundled dashboard/API port (automatically assigned, e.g., 8765)
 - Matrix server if enabled (port automatically assigned, e.g., 8448)
 - Authelia authentication server if enabled (with Redis for sessions)
 - PostgreSQL and Redis (if using Synapse)
@@ -67,7 +67,7 @@ This will start:
 ### 4. Access Your Instance
 
 After starting, your instance will be available at:
-- **Dashboard + API**: `http://localhost:{MINDROOM_PORT}` (e.g., `http://localhost:8765`)
+- **MindRoom**: `http://localhost:{MINDROOM_PORT}` (e.g., `http://localhost:8765`)
 - **Matrix Server** (if enabled): `http://localhost:{MATRIX_PORT}` (e.g., `http://localhost:8448`)
 - **Auth Portal** (if enabled): `https://auth-{DOMAIN}` (e.g., `https://auth-myapp.example.com`)
 
@@ -103,7 +103,7 @@ Output:
 ```
                               MindRoom Instances
 ┏━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━┓
-┃ Name    ┃  Status   ┃ Dashboard/API ┃   Matrix ┃ Domain    ┃ Data       ┃
+┃ Name    ┃  Status   ┃   MindRoom ┃   Matrix ┃ Domain    ┃ Data       ┃
 ┡━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━┩
 │ prod    │ ● running │         8765 │ 8448 (S) │ prod.com  │ ./instance…│
 │ dev     │ ○ stopped │         8766 │ 8449 (T) │ dev.local │ ./instance…│
@@ -151,7 +151,7 @@ nano .env.test  # Add API keys
 ### No Matrix
 - **When to use**: When you only need MindRoom without chat features
 - **Command**: (default, no flag needed)
-- **Features**: Just MindRoom with the bundled dashboard
+- **Features**: Just MindRoom on the bundled dashboard/API port
 
 ## Testing Your Matrix Server
 
@@ -171,7 +171,7 @@ python deploy/test_matrix.py 8450 Synapse
 ## Port Management
 
 Ports are automatically assigned and tracked:
-- **Dashboard/API**: Starts at 8765, increments for each instance
+- **MindRoom**: Starts at 8765, increments for each instance
 - **Matrix**: Starts at 8448, increments for each instance
 
 The instance manager ensures no port conflicts.
@@ -240,11 +240,11 @@ docker logs {instance_name}-tuwunel
 ### Instance Registry
 - `instances.json` - Tracks all instances, ports, and configuration
 - Automatically manages port allocation (no conflicts!)
-- Port allocation starts at: Dashboard/API (8765), Matrix (8448)
+- Port allocation starts at: MindRoom (8765), Matrix (8448)
 
 ### Docker Compose Structure
 The system uses parameterized Docker Compose files:
-- `docker-compose.yml` - Base MindRoom services (runtime + bundled dashboard)
+- `docker-compose.yml` - Base MindRoom services (runtime + bundled dashboard/API)
 - `docker-compose.tuwunel.yml` - Adds Tuwunel Matrix server
 - `docker-compose.synapse.yml` - Adds Synapse with PostgreSQL and Redis
 
@@ -301,7 +301,7 @@ echo "OPENAI_API_KEY=sk-..." >> .env.dev
 echo "ANTHROPIC_API_KEY=sk-ant-..." >> .env.dev
 ./deploy.py start dev
 
-# Access at the Dashboard/API port shown by ./deploy.py list
+# Access at the MindRoom port shown by ./deploy.py list
 ```
 
 ### Production Setup
