@@ -937,8 +937,6 @@ class AgentBot:
     ) -> None:
         """Handle user voice message events for transcription and processing."""
         assert self.client is not None
-        if not self.config.voice.enabled:
-            return
 
         if self._precheck_event(room, event) is None:
             return
@@ -955,13 +953,15 @@ class AgentBot:
         self.logger.info("Processing voice message", event_id=event.event_id, sender=event.sender)
 
         voice_audio = await voice_handler.download_audio(self.client, event)
-        transcribed_message = await voice_handler.handle_voice_message(
-            self.client,
-            room,
-            event,
-            self.config,
-            audio=voice_audio,
-        )
+        transcribed_message = None
+        if self.config.voice.enabled:
+            transcribed_message = await voice_handler.handle_voice_message(
+                self.client,
+                room,
+                event,
+                self.config,
+                audio=voice_audio,
+            )
         event_info = EventInfo.from_event(event.source)
         _, thread_id, _ = await self._derive_conversation_context(room.room_id, event_info)
         effective_thread_id = self._resolve_reply_thread_id(
@@ -1001,7 +1001,7 @@ class AgentBot:
             return
 
         self.logger.info(
-            "Voice transcription unavailable, relaying raw audio fallback",
+            "Voice transcription disabled or unavailable, relaying raw audio fallback",
             event_id=event.event_id,
             sender=event.sender,
         )

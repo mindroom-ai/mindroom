@@ -359,3 +359,69 @@ async def test_router_voice_transcription_falls_back_to_raw_audio(tmp_path) -> N
     assert attachment is not None
     assert attachment.local_path.exists()
     assert attachment.local_path.is_file()
+
+
+@pytest.mark.asyncio
+async def test_router_voice_disabled_still_relays_raw_audio_in_thread(tmp_path) -> None:  # noqa: ANN001
+    """Voice-disabled configs should still relay threaded audio as an attachment fallback."""
+    agent_user = MagicMock()
+    agent_user.user_id = "@mindroom_router:example.com"
+    agent_user.agent_name = ROUTER_AGENT_NAME
+
+    config = Config(
+        authorization={"default_room_access": True},
+    )
+
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        rooms=["!test:example.com"],
+    )
+    bot.response_tracker = MagicMock()
+    bot.response_tracker.has_responded.return_value = False
+    bot.logger = MagicMock()
+    bot.client = MagicMock()
+    bot._send_response = AsyncMock(return_value="$response")
+    bot._derive_conversation_context = AsyncMock(return_value=(True, "$thread_root", []))
+
+    room = MagicMock()
+    room.room_id = "!test:example.com"
+
+    event = MagicMock()
+    event.sender = "@alice:example.com"
+    event.event_id = "$voice_event"
+    event.body = "voice.ogg"
+    event.source = {
+        "content": {
+            "body": "voice.ogg",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+        },
+    }
+
+    with (
+        patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        await bot._on_voice_message(room, event)
+
+    mock_voice.assert_not_called()
+    mock_download_audio.assert_called_once()
+    bot._send_response.assert_called_once()
+    call_kwargs = bot._send_response.call_args.kwargs
+    expected_attachment_id = _attachment_id_for_event("$voice_event")
+    assert call_kwargs["reply_to_event_id"] == "$voice_event"
+    assert call_kwargs["thread_id"] == "$thread_root"
+    assert call_kwargs["response_text"] == f"{VOICE_PREFIX}[Attached voice message]"
+    assert call_kwargs["extra_content"] == {
+        ORIGINAL_SENDER_KEY: "@alice:example.com",
+        VOICE_RAW_AUDIO_FALLBACK_KEY: True,
+        ATTACHMENT_IDS_KEY: [expected_attachment_id],
+    }
+    attachment = load_attachment(tmp_path, expected_attachment_id)
+    assert attachment is not None
+    assert attachment.local_path.exists()
+    assert attachment.local_path.is_file()
+    bot.response_tracker.mark_responded.assert_called_once_with("$voice_event", "$response")
