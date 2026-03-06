@@ -21,6 +21,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 jobs:
   smoke:
@@ -57,6 +58,33 @@ jobs:
       - name: Set up kind
         uses: engineerd/setup-kind@v0.6.2
 
+      - name: Detect image changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            mindroom:
+              - "src/**"
+              - "frontend/**"
+              - "skills/**"
+              - "local/instances/deploy/**"
+              - "pyproject.toml"
+              - "uv.lock"
+              - "hatch_build.py"
+              - "config.yaml"
+              - "run-sandbox-runner.sh"
+              - "scripts/**"
+              - "avatars/**"
+            platform:
+              - "saas-platform/**"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Build wheel
         run: uv build --wheel
 
@@ -65,6 +93,9 @@ jobs:
 
       - name: Build and load images
         run: bash cluster/k8s/kind/build_load_images.sh
+        env:
+          BUILD_MINDROOM_IMAGES: ${{ steps.changes.outputs.mindroom == 'true' && '1' || '0' }}
+          BUILD_PLATFORM_IMAGES: ${{ steps.changes.outputs.platform == 'true' && '1' || '0' }}
 
       - name: Probe runtime images
         run: |
