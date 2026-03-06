@@ -6,11 +6,12 @@ import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import uvicorn
 
 from mindroom.memory.auto_flush import MemoryAutoFlushWorker, auto_flush_enabled
+from mindroom.runtime_state import reset_runtime_state, set_runtime_failed, set_runtime_ready, set_runtime_starting
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
 
@@ -38,6 +39,11 @@ if TYPE_CHECKING:
     from .knowledge.manager import KnowledgeManager
 
 logger = get_logger(__name__)
+
+
+def _raise_runtime_error(message: str) -> NoReturn:
+    """Raise a runtime error with the provided message."""
+    raise RuntimeError(message)
 
 
 @dataclass
@@ -212,52 +218,58 @@ class MultiAgentOrchestrator:
 
     async def start(self) -> None:
         """Start all agent bots."""
-        if not self.agent_bots:
-            await self.initialize()
+        try:
+            if not self.agent_bots:
+                await self.initialize()
 
-        # Start each agent bot (this registers callbacks and logs in, but doesn't join rooms)
-        start_tasks = [bot.try_start() for bot in self.agent_bots.values()]
-        results = await asyncio.gather(*start_tasks)
+            # Start each agent bot (this registers callbacks and logs in, but doesn't join rooms)
+            start_tasks = [bot.try_start() for bot in self.agent_bots.values()]
+            results = await asyncio.gather(*start_tasks)
 
-        # Check for failures
-        failed_agents = [bot.agent_name for bot, success in zip(self.agent_bots.values(), results) if not success]
+            # Check for failures
+            failed_agents = [bot.agent_name for bot, success in zip(self.agent_bots.values(), results) if not success]
 
-        if len(failed_agents) == len(self.agent_bots):
-            msg = "All agents failed to start - cannot proceed"
-            raise RuntimeError(msg)
-        if failed_agents:
-            logger.warning(
-                f"System starting in degraded mode. "
-                f"Failed agents: {', '.join(failed_agents)} "
-                f"({len(self.agent_bots) - len(failed_agents)}/{len(self.agent_bots)} operational)",
-            )
-        else:
-            logger.info("All agent bots started successfully")
+            if len(failed_agents) == len(self.agent_bots):
+                _raise_runtime_error("All agents failed to start - cannot proceed")
+            if failed_agents:
+                logger.warning(
+                    f"System starting in degraded mode. "
+                    f"Failed agents: {', '.join(failed_agents)} "
+                    f"({len(self.agent_bots) - len(failed_agents)}/{len(self.agent_bots)} operational)",
+                )
+            else:
+                logger.info("All agent bots started successfully")
 
-        self.running = True
-        config = self.config
-        if config is None:
-            msg = "Configuration not loaded"
-            raise RuntimeError(msg)
+            self.running = True
+            config = self.config
+            if config is None:
+                _raise_runtime_error("Configuration not loaded")
 
-        # Setup rooms and have all bots join them before potentially heavy
-        # knowledge indexing, so new rooms/invites are not delayed by embeddings.
-        await self._setup_rooms_and_memberships(list(self.agent_bots.values()))
+            # Setup rooms and have all bots join them before potentially heavy
+            # knowledge indexing, so new rooms/invites are not delayed by embeddings.
+            await self._setup_rooms_and_memberships(list(self.agent_bots.values()))
 
-        # Build knowledge before sync loops start so first responses include configured bases.
-        await self._configure_knowledge(config, start_watcher=True)
+            # Build knowledge before sync loops start so first responses include configured bases.
+            await self._configure_knowledge(config, start_watcher=True)
 
-        await self._sync_memory_auto_flush_worker()
+            await self._sync_memory_auto_flush_worker()
 
-        # Create sync tasks for each bot with automatic restart on failure
-        for entity_name, bot in self.agent_bots.items():
-            # Create a task for each bot's sync loop with restart wrapper
-            sync_task = asyncio.create_task(_sync_forever_with_restart(bot))
-            # Store the task reference for later cancellation
-            self._sync_tasks[entity_name] = sync_task
+            # Create sync tasks for each bot with automatic restart on failure
+            for entity_name, bot in self.agent_bots.items():
+                # Create a task for each bot's sync loop with restart wrapper
+                sync_task = asyncio.create_task(_sync_forever_with_restart(bot))
+                # Store the task reference for later cancellation
+                self._sync_tasks[entity_name] = sync_task
 
-        # Run all sync tasks
-        await asyncio.gather(*tuple(self._sync_tasks.values()))
+            set_runtime_ready()
+
+            # Run all sync tasks
+            await asyncio.gather(*tuple(self._sync_tasks.values()))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            set_runtime_failed(str(exc))
+            raise
 
     async def update_config(self) -> bool:  # noqa: C901, PLR0912, PLR0915
         """Update configuration with simplified self-managing agents.
@@ -848,6 +860,7 @@ async def main(
     # Create and start orchestrator
     logger.info("Starting orchestrator...")
     orchestrator = MultiAgentOrchestrator(storage_path=storage_path)
+    set_runtime_starting()
 
     try:
         # Create task to run the orchestrator
@@ -897,3 +910,4 @@ async def main(
         # Final cleanup
         if orchestrator is not None:
             await orchestrator.stop()
+        reset_runtime_state()
