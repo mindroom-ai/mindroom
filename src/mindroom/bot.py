@@ -998,27 +998,21 @@ class AgentBot:
         """Handle image/file/video/audio events and dispatch media-aware responses."""
         assert self.client is not None
 
-        is_audio_event = isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio)
+        if isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio):
+            await self._on_audio_media_message(room, event)
+            return
+
         is_image_event = isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage)
         default_caption = (
-            "[Attached voice message]"
-            if is_audio_event
+            "[Attached image]"
+            if is_image_event
             else (
-                "[Attached image]"
-                if is_image_event
-                else (
-                    "[Attached video]"
-                    if isinstance(event, nio.RoomMessageVideo | nio.RoomEncryptedVideo)
-                    else "[Attached file]"
-                )
+                "[Attached video]"
+                if isinstance(event, nio.RoomMessageVideo | nio.RoomEncryptedVideo)
+                else "[Attached file]"
             )
         )
         caption = extract_media_caption(event, default=default_caption)
-
-        if is_audio_event:
-            assert isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio)
-            await self._on_audio_media_message(room, event)
-            return
 
         dispatch = await self._prepare_dispatch(
             room,
