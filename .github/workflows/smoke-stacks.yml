@@ -15,8 +15,12 @@ on:
       - "pyproject.toml"
       - "README.md"
       - "saas-platform/**"
-      - "scripts/smoke_mindroom_stack.sh"
+      - "skills/**"
+      - "scripts/**"
       - "src/**"
+      - "avatars/**"
+      - "config.yaml"
+      - "run-sandbox-runner.sh"
       - "uv.lock"
 
 permissions:

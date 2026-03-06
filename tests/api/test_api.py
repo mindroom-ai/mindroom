@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from mindroom import constants, frontend_assets
 from mindroom.api import main
+from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 
 
 def test_init_supabase_auth_returns_none_without_credentials() -> None:
@@ -157,6 +158,28 @@ def test_health_check(test_client: TestClient) -> None:
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "healthy"
+
+
+def test_readiness_check_reports_idle(test_client: TestClient) -> None:
+    """Readiness should stay closed until the runtime reports successful startup."""
+    reset_runtime_state()
+
+    response = test_client.get("/api/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "idle", "detail": "MindRoom is not ready"}
+
+
+def test_readiness_check_reports_ready(test_client: TestClient) -> None:
+    """Readiness should open once the orchestrator marks startup complete."""
+    set_runtime_starting()
+    set_runtime_ready()
+
+    response = test_client.get("/api/ready")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready"}
+    reset_runtime_state()
 
 
 def test_load_config(test_client: TestClient) -> None:
@@ -727,6 +750,17 @@ def test_api_key_health_stays_open(api_key_client: TestClient) -> None:
     """Health endpoint should remain accessible without auth even when API key is set."""
     response = api_key_client.get("/api/health")
     assert response.status_code == 200
+
+
+def test_api_key_readiness_stays_open(api_key_client: TestClient) -> None:
+    """Readiness endpoint should remain accessible without auth even when API key is set."""
+    set_runtime_ready()
+
+    response = api_key_client.get("/api/ready")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready"}
+    reset_runtime_state()
 
 
 def test_api_key_valid_key_allows_access(api_key_client: TestClient) -> None:

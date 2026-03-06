@@ -21,7 +21,7 @@ PROVISIONER_API_KEY="${PROVISIONER_API_KEY:-kind-provisioner-key}"
 SMOKE_REQUIRE_PLATFORM_PROVISIONING="${SMOKE_REQUIRE_PLATFORM_PROVISIONING:-0}"
 PLATFORM_HEALTH_URL="http://127.0.0.1:${PLATFORM_BACKEND_LOCAL_PORT}/health"
 PLATFORM_UI_URL="http://127.0.0.1:${PLATFORM_FRONTEND_LOCAL_PORT}/"
-MINDROOM_HEALTH_URL="http://127.0.0.1:${MINDROOM_LOCAL_PORT}/api/health"
+MINDROOM_READY_URL="http://127.0.0.1:${MINDROOM_LOCAL_PORT}/api/ready"
 MINDROOM_UI_URL="http://127.0.0.1:${MINDROOM_LOCAL_PORT}/"
 SYNAPSE_URL="http://127.0.0.1:${SYNAPSE_LOCAL_PORT}/_matrix/client/versions"
 
@@ -182,7 +182,7 @@ fi
 kubectl rollout status "deployment/mindroom-${INSTANCE_ID}" -n "${INSTANCE_NAMESPACE}" --timeout=300s
 kubectl rollout status "deployment/synapse-${INSTANCE_ID}" -n "${INSTANCE_NAMESPACE}" --timeout=300s
 
-PF_MINDROOM_PID="$(start_port_forward_for_http_match "${INSTANCE_NAMESPACE}" "svc/mindroom-${INSTANCE_ID}" "${MINDROOM_LOCAL_PORT}" 8765 "${TMP_DIR}/pf-mindroom.log" "MindRoom health" "${MINDROOM_HEALTH_URL}" "\"healthy\"")"
+PF_MINDROOM_PID="$(start_port_forward_for_http_match "${INSTANCE_NAMESPACE}" "svc/mindroom-${INSTANCE_ID}" "${MINDROOM_LOCAL_PORT}" 8765 "${TMP_DIR}/pf-mindroom.log" "MindRoom readiness" "${MINDROOM_READY_URL}" "\"ready\"")"
 wait_for_http_match "${MINDROOM_UI_URL}" "MindRoom" "MindRoom dashboard"
 PF_SYNAPSE_PID="$(start_port_forward_for_http_match "${INSTANCE_NAMESPACE}" "svc/synapse-${INSTANCE_ID}" "${SYNAPSE_LOCAL_PORT}" 8008 "${TMP_DIR}/pf-synapse.log" "instance Synapse" "${SYNAPSE_URL}" "\"versions\"")"
 

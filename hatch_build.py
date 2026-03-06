@@ -33,8 +33,6 @@ class FrontendBuildHook(BuildHookInterface):
             raise RuntimeError(msg)
 
         output_dir = _get_output_dir(frontend_dir, self.directory, version)
-        output_dir.mkdir(parents=True, exist_ok=True)
-
         _build_frontend(frontend_dir, output_dir, bun)
 
         if version == "standard":
@@ -49,11 +47,13 @@ def _get_output_dir(frontend_dir: Path, build_directory: str, version: str) -> P
     """Return the frontend build output directory for the requested build mode."""
     if version == "editable":
         return frontend_dir / "dist"
-    return Path(build_directory) / "frontend-dist"
+    return Path(build_directory).parent / ".frontend-build" / "frontend-dist"
 
 
 def _build_frontend(frontend_dir: Path, output_dir: Path, bun: str) -> None:
     """Install frontend deps and write a production build to the output directory."""
+    shutil.rmtree(output_dir, ignore_errors=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
     subprocess.run([bun, "install", "--frozen-lockfile"], check=True, cwd=frontend_dir)
     subprocess.run([bun, "run", "tsc"], check=True, cwd=frontend_dir)
     subprocess.run(

@@ -54,7 +54,7 @@ sed \
 echo "[smoke] Starting mindroom-stack from ${STACK_DIR}"
 docker compose --project-directory "${STACK_DIR}" --project-name "${PROJECT_NAME}" --env-file "${TMP_ENV}" -f "${TMP_COMPOSE}" up -d
 
-wait_for_http_match "http://127.0.0.1:${STACK_MINDROOM_PORT}/api/health" "\"healthy\"" "MindRoom health" 40 3
+wait_for_http_match "http://127.0.0.1:${STACK_MINDROOM_PORT}/api/ready" "\"ready\"" "MindRoom readiness" 40 3
 wait_for_http_match "http://127.0.0.1:${STACK_MINDROOM_PORT}/" "MindRoom" "MindRoom dashboard" 40 3
 wait_for_http_match "http://127.0.0.1:${STACK_SYNAPSE_PORT}/_matrix/client/versions" "\"versions\"" "Synapse" 40 3
 

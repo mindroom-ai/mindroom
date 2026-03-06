@@ -14,7 +14,7 @@ from urllib.parse import quote
 import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel
 from watchfiles import awatch
 
@@ -33,6 +33,7 @@ from mindroom.config.main import Config
 from mindroom.constants import CONFIG_PATH, ensure_writable_config_path, safe_replace
 from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.frontend_assets import ensure_frontend_dist_dir
+from mindroom.runtime_state import get_runtime_state
 from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_tool_extra
 
 
@@ -484,6 +485,18 @@ app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify
 async def health_check() -> dict[str, str]:
     """Health check endpoint for testing."""
     return {"status": "healthy"}
+
+
+@app.get("/api/ready")
+async def readiness_check() -> JSONResponse:
+    """Readiness endpoint tied to successful orchestrator startup."""
+    state = get_runtime_state()
+    if state.phase == "ready":
+        return JSONResponse({"status": "ready"})
+    return JSONResponse(
+        status_code=503,
+        content={"status": state.phase, "detail": state.detail or "MindRoom is not ready"},
+    )
 
 
 @app.post("/api/auth/session", include_in_schema=False)

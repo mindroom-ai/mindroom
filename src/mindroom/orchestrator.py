@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 import uvicorn
 
 from mindroom.memory.auto_flush import MemoryAutoFlushWorker, auto_flush_enabled
+from mindroom.runtime_state import reset_runtime_state, set_runtime_failed, set_runtime_ready, set_runtime_starting
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
 
@@ -211,7 +212,17 @@ class MultiAgentOrchestrator:
         logger.info("Initialized agent bots", count=len(self.agent_bots))
 
     async def start(self) -> None:
-        """Start all agent bots."""
+        """Start all agent bots and publish readiness state."""
+        try:
+            await self._start_runtime()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            set_runtime_failed(str(exc))
+            raise
+
+    async def _start_runtime(self) -> None:
+        """Run the startup sequence before handing off to the sync loops."""
         if not self.agent_bots:
             await self.initialize()
 
@@ -255,6 +266,8 @@ class MultiAgentOrchestrator:
             sync_task = asyncio.create_task(_sync_forever_with_restart(bot))
             # Store the task reference for later cancellation
             self._sync_tasks[entity_name] = sync_task
+
+        set_runtime_ready()
 
         # Run all sync tasks
         await asyncio.gather(*tuple(self._sync_tasks.values()))
@@ -848,6 +861,7 @@ async def main(
     # Create and start orchestrator
     logger.info("Starting orchestrator...")
     orchestrator = MultiAgentOrchestrator(storage_path=storage_path)
+    set_runtime_starting()
 
     try:
         # Create task to run the orchestrator
@@ -897,3 +911,4 @@ async def main(
         # Final cleanup
         if orchestrator is not None:
             await orchestrator.stop()
+        reset_runtime_state()
