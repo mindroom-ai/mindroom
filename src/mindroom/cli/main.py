@@ -82,17 +82,17 @@ def run(
     api: bool = typer.Option(
         True,
         "--api/--no-api",
-        help="Start the dashboard API server alongside the bot",
+        help="Start the bundled dashboard/API server alongside the bot",
     ),
     api_port: int = typer.Option(
         8765,
         "--api-port",
-        help="Port for the dashboard API server",
+        help="Port for the bundled dashboard/API server",
     ),
     api_host: str = typer.Option(
         "0.0.0.0",  # noqa: S104
         "--api-host",
-        help="Host for the dashboard API server",
+        help="Host for the bundled dashboard/API server",
     ),
 ) -> None:
     """Run the mindroom multi-agent system.
@@ -101,7 +101,7 @@ def run(
     - Creates all necessary user and agent accounts
     - Creates all rooms defined in config.yaml
     - Manages agent room memberships
-    - Starts the dashboard API server (disable with --no-api)
+    - Starts the bundled dashboard/API server (disable with --no-api)
     """
     asyncio.run(
         _run(

@@ -81,12 +81,12 @@ If `MINDROOM_API_KEY` is set, the browser dashboard will prompt for the key via 
 Build from the repository root:
 
 ```
-docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.backend .
+docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.mindroom .
 ```
 
 The Dockerfile uses a multi-stage build with `uv` for dependency management and runs as a non-root user (UID 1000).
 
-A `Dockerfile.backend-minimal` variant is also available, which builds a smaller image without pre-installed tool extras -- useful for sandbox runners.
+A `Dockerfile.mindroom-minimal` variant is also available, which builds a smaller image without pre-installed tool extras -- useful for sandbox runners.
 
 ## With Local Matrix
 

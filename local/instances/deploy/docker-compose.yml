@@ -3,7 +3,7 @@ services:
     image: ${MINDROOM_IMAGE:-deploy-mindroom:latest}
     build:
       context: ..
-      dockerfile: deploy/Dockerfile.backend
+      dockerfile: deploy/Dockerfile.mindroom
     container_name: ${INSTANCE_NAME:-mindroom}-mindroom
     restart: always
     env_file:
@@ -53,7 +53,7 @@ services:
     image: ${MINDROOM_IMAGE:-deploy-mindroom:latest}
     build:
       context: ..
-      dockerfile: deploy/Dockerfile.backend
+      dockerfile: deploy/Dockerfile.mindroom
     container_name: ${INSTANCE_NAME:-mindroom}-sandbox-runner
     restart: always
     user: "${UID:-1000}:${GID:-1000}"

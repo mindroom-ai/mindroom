@@ -1147,7 +1147,7 @@ def list_instances() -> None:
     table = Table(title="MindRoom Instances", show_header=True, header_style="bold magenta")
     table.add_column("Name", style="cyan", no_wrap=True)
     table.add_column("Status", justify="center")
-    table.add_column("Dashboard/API", justify="right")
+    table.add_column("MindRoom", justify="right")
     table.add_column("Matrix", justify="right")
     table.add_column("Domain")
     table.add_column("Data Directory")

@@ -6,7 +6,7 @@ This directory contains Docker configurations for running the MindRoom platform 
 
 ## Files
 
-- `Dockerfile.backend` - MindRoom runtime image with bundled dashboard
+- `Dockerfile.mindroom` - MindRoom runtime image with bundled dashboard/API
 - `Dockerfile.platform-frontend` - Customer portal Next.js application
 - `Dockerfile.stripe-handler` - Stripe webhook handler Node.js service
 - `Dockerfile.dokku-provisioner` - Dokku provisioning FastAPI service

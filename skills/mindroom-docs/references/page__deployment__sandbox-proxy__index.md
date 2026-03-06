@@ -68,7 +68,7 @@ Key differences from the primary MindRoom runtime:
 
 ### Kubernetes (pod sidecar)
 
-In Kubernetes the runner runs as a second container in the same pod, sharing `localhost` networking. See `cluster/k8s/instance/templates/deployment-backend.yaml` for the full manifest. The runner gets:
+In Kubernetes the runner runs as a second container in the same pod, sharing `localhost` networking. See `cluster/k8s/instance/templates/deployment-mindroom.yaml` for the full manifest. The runner gets:
 
 - An `emptyDir` volume for scratch workspace
 - Read-only access to config (for plugin tool registration)

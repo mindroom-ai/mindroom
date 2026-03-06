@@ -16,7 +16,7 @@ spec:
   ingress:
   # Allow only required service ports from any source (ingress controller / external)
   - ports:
-    - port: 8765    # backend API
+    - port: 8765    # MindRoom runtime (bundled dashboard + API)
     - port: 8008    # synapse HTTP
   egress:
   # Allow DNS
