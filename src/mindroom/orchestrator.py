@@ -6,7 +6,7 @@ import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any
 
 import uvicorn
 
@@ -39,11 +39,6 @@ if TYPE_CHECKING:
     from .knowledge.manager import KnowledgeManager
 
 logger = get_logger(__name__)
-
-
-def _raise_runtime_error(message: str) -> NoReturn:
-    """Raise a runtime error with the provided message."""
-    raise RuntimeError(message)
 
 
 @dataclass
@@ -217,59 +212,65 @@ class MultiAgentOrchestrator:
         logger.info("Initialized agent bots", count=len(self.agent_bots))
 
     async def start(self) -> None:
-        """Start all agent bots."""
+        """Start all agent bots and publish readiness state."""
         try:
-            if not self.agent_bots:
-                await self.initialize()
-
-            # Start each agent bot (this registers callbacks and logs in, but doesn't join rooms)
-            start_tasks = [bot.try_start() for bot in self.agent_bots.values()]
-            results = await asyncio.gather(*start_tasks)
-
-            # Check for failures
-            failed_agents = [bot.agent_name for bot, success in zip(self.agent_bots.values(), results) if not success]
-
-            if len(failed_agents) == len(self.agent_bots):
-                _raise_runtime_error("All agents failed to start - cannot proceed")
-            if failed_agents:
-                logger.warning(
-                    f"System starting in degraded mode. "
-                    f"Failed agents: {', '.join(failed_agents)} "
-                    f"({len(self.agent_bots) - len(failed_agents)}/{len(self.agent_bots)} operational)",
-                )
-            else:
-                logger.info("All agent bots started successfully")
-
-            self.running = True
-            config = self.config
-            if config is None:
-                _raise_runtime_error("Configuration not loaded")
-
-            # Setup rooms and have all bots join them before potentially heavy
-            # knowledge indexing, so new rooms/invites are not delayed by embeddings.
-            await self._setup_rooms_and_memberships(list(self.agent_bots.values()))
-
-            # Build knowledge before sync loops start so first responses include configured bases.
-            await self._configure_knowledge(config, start_watcher=True)
-
-            await self._sync_memory_auto_flush_worker()
-
-            # Create sync tasks for each bot with automatic restart on failure
-            for entity_name, bot in self.agent_bots.items():
-                # Create a task for each bot's sync loop with restart wrapper
-                sync_task = asyncio.create_task(_sync_forever_with_restart(bot))
-                # Store the task reference for later cancellation
-                self._sync_tasks[entity_name] = sync_task
-
-            set_runtime_ready()
-
-            # Run all sync tasks
-            await asyncio.gather(*tuple(self._sync_tasks.values()))
+            await self._start_runtime()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             set_runtime_failed(str(exc))
             raise
+
+    async def _start_runtime(self) -> None:
+        """Run the startup sequence before handing off to the sync loops."""
+        if not self.agent_bots:
+            await self.initialize()
+
+        # Start each agent bot (this registers callbacks and logs in, but doesn't join rooms)
+        start_tasks = [bot.try_start() for bot in self.agent_bots.values()]
+        results = await asyncio.gather(*start_tasks)
+
+        # Check for failures
+        failed_agents = [bot.agent_name for bot, success in zip(self.agent_bots.values(), results) if not success]
+
+        if len(failed_agents) == len(self.agent_bots):
+            msg = "All agents failed to start - cannot proceed"
+            raise RuntimeError(msg)
+        if failed_agents:
+            logger.warning(
+                f"System starting in degraded mode. "
+                f"Failed agents: {', '.join(failed_agents)} "
+                f"({len(self.agent_bots) - len(failed_agents)}/{len(self.agent_bots)} operational)",
+            )
+        else:
+            logger.info("All agent bots started successfully")
+
+        self.running = True
+        config = self.config
+        if config is None:
+            msg = "Configuration not loaded"
+            raise RuntimeError(msg)
+
+        # Setup rooms and have all bots join them before potentially heavy
+        # knowledge indexing, so new rooms/invites are not delayed by embeddings.
+        await self._setup_rooms_and_memberships(list(self.agent_bots.values()))
+
+        # Build knowledge before sync loops start so first responses include configured bases.
+        await self._configure_knowledge(config, start_watcher=True)
+
+        await self._sync_memory_auto_flush_worker()
+
+        # Create sync tasks for each bot with automatic restart on failure
+        for entity_name, bot in self.agent_bots.items():
+            # Create a task for each bot's sync loop with restart wrapper
+            sync_task = asyncio.create_task(_sync_forever_with_restart(bot))
+            # Store the task reference for later cancellation
+            self._sync_tasks[entity_name] = sync_task
+
+        set_runtime_ready()
+
+        # Run all sync tasks
+        await asyncio.gather(*tuple(self._sync_tasks.values()))
 
     async def update_config(self) -> bool:  # noqa: C901, PLR0912, PLR0915
         """Update configuration with simplified self-managing agents.
