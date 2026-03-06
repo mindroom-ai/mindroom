@@ -320,6 +320,7 @@ def _sanitize_next_path(next_path: str | None) -> str:
 def _render_standalone_login_page(next_path: str) -> str:
     """Return the standalone dashboard login page."""
     escaped_next_path = html.escape(next_path, quote=True)
+    env_path = html.escape(str(CONFIG_PATH.expanduser().resolve().parent / ".env"))
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -352,6 +353,12 @@ def _render_standalone_login_page(next_path: str) -> str:
       margin: 0 0 1rem;
       color: #5d655f;
     }}
+    code {{
+      padding: 0.1rem 0.3rem;
+      border-radius: 0.35rem;
+      background: #f1ece0;
+      font-size: 0.92em;
+    }}
     input, button {{
       box-sizing: border-box;
       width: 100%;
@@ -382,6 +389,7 @@ def _render_standalone_login_page(next_path: str) -> str:
   <form id="login-form">
     <h1>MindRoom Dashboard</h1>
     <p>Enter the dashboard API key to continue.</p>
+    <p>Find it in <code>{env_path}</code> as <code>MINDROOM_API_KEY=...</code>.</p>
     <input id="api-key" name="api-key" type="password" autocomplete="current-password" autofocus>
     <button type="submit">Continue</button>
     <div id="error" role="alert"></div>
