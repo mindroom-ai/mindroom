@@ -7,7 +7,6 @@ storagePath: "/mindroom_data"  # Base path inside container for persisted state
 # Docker images
 mindroom_image: ghcr.io/mindroom-ai/mindroom:latest
 mindroom_image_pull_policy: Always
-imagePullSecrets: []
 synapse_image: matrixdotorg/synapse:latest
 
 # API keys and secrets (referenced via Secret in deployment)
