@@ -4,7 +4,6 @@ import html
 import importlib
 import os
 import secrets
-import shutil
 import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
@@ -30,7 +29,7 @@ from mindroom.api.schedules import router as schedules_router
 from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
 from mindroom.config.main import Config
-from mindroom.constants import CONFIG_PATH, CONFIG_TEMPLATE_PATH, safe_replace
+from mindroom.constants import CONFIG_PATH, ensure_writable_config_path, safe_replace
 from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.frontend_assets import ensure_frontend_dist_dir
 from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_tool_extra
@@ -124,31 +123,6 @@ def _resolve_frontend_asset(frontend_dir: Path, request_path: str) -> Path | Non
         return None
 
     return index_path if index_path.is_file() else None
-
-
-def _ensure_writable_config() -> None:
-    """Ensure the config file exists at a writable location.
-
-    In managed deployments the writable config is placed on a persistent
-    volume while a read-only template is mounted separately. When the final
-    config file is missing we seed it from the template so both the bot and
-    API read/write the same path.
-    """
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-    if CONFIG_PATH.exists():
-        return
-
-    if CONFIG_TEMPLATE_PATH != CONFIG_PATH and CONFIG_TEMPLATE_PATH.exists():
-        shutil.copyfile(CONFIG_TEMPLATE_PATH, CONFIG_PATH)
-        CONFIG_PATH.chmod(0o600)
-        print(f"Seeded config from template {CONFIG_TEMPLATE_PATH} -> {CONFIG_PATH}")
-        return
-
-    # Fallback: create a minimal valid YAML structure so initial loads succeed
-    CONFIG_PATH.write_text("agents: {}\nmodels: {}\n", encoding="utf-8")
-    CONFIG_PATH.chmod(0o600)
-    print(f"Created new config file at {CONFIG_PATH}")
 
 
 def _save_config_to_file(config: dict[str, Any]) -> None:
@@ -485,7 +459,7 @@ def _load_config_from_file() -> None:
         print(f"Error loading config: {e}")
 
 
-_ensure_writable_config()
+ensure_writable_config_path(create_minimal=True)
 
 # Load initial config
 _load_config_from_file()

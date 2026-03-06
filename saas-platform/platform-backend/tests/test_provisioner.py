@@ -60,13 +60,6 @@ class TestProvisionerEndpoints:
             yield mock
 
     @pytest.fixture
-    def mock_ensure_secret(self):
-        """Mock docker registry secret creation."""
-        with patch("backend.routes.provisioner.ensure_docker_registry_secret") as mock:
-            mock.return_value = True  # Default success
-            yield mock
-
-    @pytest.fixture
     def valid_auth_header(self):
         """Get valid authorization header."""
         # Need to patch where it's used, not where it's defined
@@ -83,8 +76,6 @@ class TestProvisionerEndpoints:
             SUPABASE_ANON_KEY="test-anon-key",
             OPENROUTER_API_KEY="test-openrouter",
             OPENAI_API_KEY="test-openai",
-            GITEA_USER="test-user",
-            GITEA_TOKEN="test-token",
         ):
             yield
 
@@ -112,7 +103,6 @@ class TestProvisionerEndpoints:
         mock_kubectl: AsyncMock,
         mock_helm: AsyncMock,
         mock_wait_for_deployment: AsyncMock,
-        mock_ensure_secret: AsyncMock,
         valid_auth_header: dict,
         mock_config,
     ):
@@ -143,7 +133,6 @@ class TestProvisionerEndpoints:
         # Verify calls
         mock_kubectl.assert_called()
         mock_helm.assert_called()
-        mock_ensure_secret.assert_called()
 
     def test_provision_re_provision_existing(
         self,

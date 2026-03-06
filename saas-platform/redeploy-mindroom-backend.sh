@@ -10,10 +10,10 @@ KUBECONFIG="$REPO_ROOT/cluster/terraform/terraform-k8s/mindroom-k8s_kubeconfig.y
 
 echo "📦 Building mindroom-backend..."
 cd "$REPO_ROOT"
-docker build -t git.nijho.lt/basnijholt/mindroom-backend:latest -f local/instances/deploy/Dockerfile.backend .
+docker build -t ghcr.io/mindroom-ai/mindroom-backend:latest -f local/instances/deploy/Dockerfile.backend .
 
 echo "⬆️ Pushing to registry..."
-docker push git.nijho.lt/basnijholt/mindroom-backend:latest
+docker push ghcr.io/mindroom-ai/mindroom-backend:latest
 
 echo "🔄 Restarting all customer backend deployments..."
 kubectl get deployments -n mindroom-instances --kubeconfig="$KUBECONFIG" \

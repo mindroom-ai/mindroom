@@ -60,30 +60,27 @@ class TestProvisionerIntegration:
 
                 mock_kubectl.side_effect = kubectl_side_effect
 
-                with patch("backend.routes.provisioner.ensure_docker_registry_secret") as mock_secret:
-                    mock_secret.return_value = True
+                with patch("backend.routes.provisioner.run_helm") as mock_helm:
+                    # Helm deployment succeeds
+                    mock_helm.return_value = (
+                        0,
+                        "Release installed successfully",
+                        "",
+                    )
 
-                    with patch("backend.routes.provisioner.run_helm") as mock_helm:
-                        # Helm deployment succeeds
-                        mock_helm.return_value = (
-                            0,
-                            "Release installed successfully",
-                            "",
+                    with patch("backend.routes.provisioner.wait_for_deployment_ready") as mock_wait:
+                        # Deployment not immediately ready (realistic)
+                        mock_wait.return_value = False
+
+                        response = client.post(
+                            "/system/provision",
+                            json={
+                                "subscription_id": "sub-123",
+                                "account_id": "acc-456",
+                                "tier": "professional",
+                            },
+                            headers=valid_auth,
                         )
-
-                        with patch("backend.routes.provisioner.wait_for_deployment_ready") as mock_wait:
-                            # Deployment not immediately ready (realistic)
-                            mock_wait.return_value = False
-
-                            response = client.post(
-                                "/system/provision",
-                                json={
-                                    "subscription_id": "sub-123",
-                                    "account_id": "acc-456",
-                                    "tier": "professional",
-                                },
-                                headers=valid_auth,
-                            )
 
             assert response.status_code == 200
             result = response.json()

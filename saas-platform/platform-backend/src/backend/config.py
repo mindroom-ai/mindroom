@@ -76,9 +76,6 @@ STRIPE_WEBHOOK_SECRET = _get_secret("STRIPE_WEBHOOK_SECRET", "")
 # Provisioner API key for internal provisioning actions
 PROVISIONER_API_KEY = _get_secret("PROVISIONER_API_KEY", "")
 
-# Gitea registry credentials (for pulling instance images)
-GITEA_USER = os.getenv("GITEA_USER", "")
-
 # API keys for MindRoom instances (shared across customers for now)
 OPENAI_API_KEY = _get_secret("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = _get_secret("ANTHROPIC_API_KEY", "")
@@ -86,9 +83,6 @@ GOOGLE_API_KEY = _get_secret("GOOGLE_API_KEY", "")
 OPENROUTER_API_KEY = _get_secret("OPENROUTER_API_KEY", "")
 DEEPSEEK_API_KEY = _get_secret("DEEPSEEK_API_KEY", "")
 SANDBOX_PROXY_TOKEN = _get_secret("SANDBOX_PROXY_TOKEN", "")
-
-# Gitea registry token
-GITEA_TOKEN = _get_secret("GITEA_TOKEN", "")
 
 
 def _build_allowed_origins(domain: str, environment: str) -> list[str]:
@@ -120,8 +114,6 @@ __all__ = [
     "ALLOWED_ORIGINS",
     "ENABLE_CLEANUP_SCHEDULER",
     "ENVIRONMENT",
-    "GITEA_TOKEN",
-    "GITEA_USER",
     "PLATFORM_DOMAIN",
     "PROVISIONER_API_KEY",
     "STRIPE_WEBHOOK_SECRET",

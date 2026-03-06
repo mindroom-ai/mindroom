@@ -1,10 +1,13 @@
 customer: demo
 baseDomain: mindroom.chat  # Base domain for all services
 storage: 10Gi  # More storage for Matrix data
+storageClassName: hcloud-volumes  # Override to local cluster storage class (for example `standard` in kind)
 storagePath: "/mindroom_data"  # Base path inside container for persisted state
 
 # Docker images
-mindroom_backend_image: git.nijho.lt/basnijholt/mindroom-backend:latest
+mindroom_backend_image: ghcr.io/mindroom-ai/mindroom-backend:latest
+mindroom_backend_image_pull_policy: Always
+imagePullSecrets: []
 synapse_image: matrixdotorg/synapse:latest
 
 # API keys and secrets (referenced via Secret in deployment)

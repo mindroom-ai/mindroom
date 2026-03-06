@@ -157,7 +157,7 @@ All deployments have proper resource limits configured:
 **Severity: MEDIUM**
 
 #### Current State
-- **Custom images:** `git.nijho.lt/basnijholt/mindroom-*:latest`
+- **Custom images:** `ghcr.io/mindroom-ai/mindroom-*:latest`
 - **Third-party:** `matrixdotorg/synapse:latest`, `nginx:alpine`
 - **Base images:** Use public ECR (good practice)
 
@@ -174,7 +174,7 @@ All deployments have proper resource limits configured:
 #### Remediation
 ```yaml
 # Pin specific versions
-mindroom_backend_image: git.nijho.lt/basnijholt/mindroom-backend:v1.2.3
+mindroom_backend_image: ghcr.io/mindroom-ai/mindroom-backend:v1.2.3
 synapse_image: matrixdotorg/synapse:v1.96.1
 
 # Image policy (using OPA Gatekeeper)

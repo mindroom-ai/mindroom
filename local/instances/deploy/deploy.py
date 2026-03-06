@@ -39,7 +39,7 @@ SCRIPT_DIR = Path(__file__).parent.absolute()
 REGISTRY_FILE = SCRIPT_DIR / "instances.json"
 ENV_DIR = SCRIPT_DIR / "envs"
 ENV_TEMPLATE = SCRIPT_DIR / ".env.template"
-DEFAULT_REGISTRY = "git.nijho.lt/basnijholt"
+DEFAULT_REGISTRY = "ghcr.io/mindroom-ai"
 
 # Ensure env directory exists
 ENV_DIR.mkdir(exist_ok=True)

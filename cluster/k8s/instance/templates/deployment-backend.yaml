@@ -28,8 +28,8 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
       - name: mindroom-backend
-        image: {{ .Values.mindroom_backend_image | default "git.nijho.lt/basnijholt/mindroom-backend:latest" }}
-        imagePullPolicy: Always
+        image: {{ .Values.mindroom_backend_image | default "ghcr.io/mindroom-ai/mindroom-backend:latest" }}
+        imagePullPolicy: {{ .Values.mindroom_backend_image_pull_policy | default "Always" }}
         # Expose API port - backend now runs both bot and API
         ports:
         - containerPort: 8765
@@ -104,8 +104,8 @@ spec:
             drop:
               - ALL
       - name: sandbox-runner
-        image: {{ .Values.mindroom_backend_image | default "git.nijho.lt/basnijholt/mindroom-backend:latest" }}
-        imagePullPolicy: Always
+        image: {{ .Values.mindroom_backend_image | default "ghcr.io/mindroom-ai/mindroom-backend:latest" }}
+        imagePullPolicy: {{ .Values.mindroom_backend_image_pull_policy | default "Always" }}
         command: ["/app/run-sandbox-runner.sh"]
         ports:
         - containerPort: 8766
@@ -140,8 +140,12 @@ spec:
           capabilities:
             drop:
               - ALL
+      {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
-      - name: gitea-registry
+      {{- range . }}
+      - name: {{ . }}
+      {{- end }}
+      {{- end }}
       volumes:
       - name: storage
         persistentVolumeClaim:

@@ -15,7 +15,7 @@ COPY --from=bun /usr/local/bin/bunx /usr/local/bin/bunx
 WORKDIR /app
 
 # Copy project files
-COPY pyproject.toml uv.lock README.md /app/
+COPY pyproject.toml uv.lock README.md hatch_build.py /app/
 
 # Install dependencies (base only, no extras)
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -76,5 +76,5 @@ ENV DOCKER_CONTAINER=1
 USER 1000:1000
 
 EXPOSE 8765
-# Run the app
-CMD ["uv", "run", "mindroom", "run"]
+# Run the app from the prebuilt virtualenv to avoid rebuilding at runtime
+CMD ["/app/.venv/bin/mindroom", "run"]

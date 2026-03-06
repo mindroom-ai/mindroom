@@ -8,8 +8,6 @@ from typing import Annotated, Any
 from backend.config import (
     ANTHROPIC_API_KEY,
     DEEPSEEK_API_KEY,
-    GITEA_TOKEN,
-    GITEA_USER,
     GOOGLE_API_KEY,
     OPENAI_API_KEY,
     OPENROUTER_API_KEY,
@@ -25,7 +23,6 @@ from backend.db_utils import update_instance_status
 from backend.deps import _extract_bearer_token, ensure_supabase, limiter
 from backend.k8s import (
     check_deployment_exists,
-    ensure_docker_registry_secret,
     run_kubectl,
     wait_for_deployment_ready,
 )
@@ -176,18 +173,6 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         ).eq("instance_id", customer_id).execute()
     except Exception:
         logger.warning("Failed to update URLs for instance %s", customer_id)
-
-    # Ensure image pull secret exists in namespace for private registry
-    if GITEA_USER and GITEA_TOKEN:
-        success = await ensure_docker_registry_secret(
-            secret_name="gitea-registry",  # noqa: S106
-            server="git.nijho.lt",
-            username=GITEA_USER,
-            password=GITEA_TOKEN,
-            namespace=namespace,
-        )
-        if not success:
-            logger.warning("Failed to create image pull secret, deployment may fail")
 
     # Keep this non-empty so shell/file/python proxying doesn't fail at runtime.
     sandbox_proxy_token = SANDBOX_PROXY_TOKEN or secrets.token_hex(32)

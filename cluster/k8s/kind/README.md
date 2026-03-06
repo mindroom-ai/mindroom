@@ -102,8 +102,8 @@ docker exec -it mindroom-control-plane crictl images | grep platform
 ./build_load_images.sh
 
 # Update deployments to use correct tag and pull policy
-kubectl set image deployment/platform-backend app=git.nijho.lt/basnijholt/platform-backend:latest -n mindroom-staging
-kubectl set image deployment/platform-frontend app=git.nijho.lt/basnijholt/platform-frontend:latest -n mindroom-staging
+kubectl set image deployment/platform-backend app=ghcr.io/mindroom-ai/platform-backend:latest -n mindroom-staging
+kubectl set image deployment/platform-frontend app=ghcr.io/mindroom-ai/platform-frontend:latest -n mindroom-staging
 
 # Patch to use IfNotPresent
 kubectl patch deployment platform-backend -n mindroom-staging \

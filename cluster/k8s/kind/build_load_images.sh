@@ -7,7 +7,7 @@ ROOT_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 CLUSTER_NAME="mindroom"
 
 # Image coordinates used by the Helm chart defaults
-REGISTRY="git.nijho.lt/basnijholt"
+REGISTRY="ghcr.io/mindroom-ai"
 BACKEND_IMAGE="${REGISTRY}/platform-backend:latest"
 FRONTEND_IMAGE="${REGISTRY}/platform-frontend:latest"
 

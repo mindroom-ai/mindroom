@@ -317,19 +317,16 @@ class TestProvisionerErrorRecovery:
                     with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
                         mock_kubectl.return_value = (0, "Success", "")
 
-                        with patch("backend.routes.provisioner.ensure_docker_registry_secret") as mock_secret:
-                            mock_secret.return_value = True
-
-                            with pytest.raises(Exception):
-                                await provision_instance(
-                                    None,  # request
-                                    {
-                                        "subscription_id": "sub-123",
-                                        "account_id": "acc-123",
-                                    },
-                                    "Bearer test-key",  # authorization
-                                    None,  # background_tasks
-                                )
+                        with pytest.raises(Exception):
+                            await provision_instance(
+                                None,  # request
+                                {
+                                    "subscription_id": "sub-123",
+                                    "account_id": "acc-123",
+                                },
+                                "Bearer test-key",  # authorization
+                                None,  # background_tasks
+                            )
 
         # In a real implementation, we should call rollback
         # assert rollback_called, "Failed to rollback after Helm failure"
@@ -632,29 +629,24 @@ class TestProvisionerObservability:
             with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
                 mock_kubectl.return_value = (0, "Success", "")
 
-                with patch("backend.routes.provisioner.ensure_docker_registry_secret") as mock_secret:
-                    mock_secret.return_value = True
+                with patch("backend.routes.provisioner.run_helm") as mock_helm:
+                    mock_helm.return_value = (1, "", "Connection refused")
 
-                    with patch("backend.routes.provisioner.run_helm") as mock_helm:
-                        mock_helm.return_value = (1, "", "Connection refused")
+                    with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:
+                        mock_sb.return_value.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
+                        mock_sb.return_value.table().update().eq().execute.return_value = Mock()
 
-                        with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:
-                            mock_sb.return_value.table().insert().execute.return_value = Mock(
-                                data=[{"instance_id": "123"}]
+                        with pytest.raises(Exception) as exc_info:
+                            await provision_instance(
+                                None,  # request
+                                {
+                                    "subscription_id": "sub-123",
+                                    "account_id": "acc-123",
+                                    "tier": "professional",
+                                },
+                                "Bearer test-key",  # authorization
+                                None,  # background_tasks
                             )
-                            mock_sb.return_value.table().update().eq().execute.return_value = Mock()
-
-                            with pytest.raises(Exception) as exc_info:
-                                await provision_instance(
-                                    None,  # request
-                                    {
-                                        "subscription_id": "sub-123",
-                                        "account_id": "acc-123",
-                                        "tier": "professional",
-                                    },
-                                    "Bearer test-key",  # authorization
-                                    None,  # background_tasks
-                                )
 
                 error = str(exc_info.value)
 

@@ -21,6 +21,7 @@ from mindroom.constants import (
     MATRIX_SSL_VERIFY,
     STORAGE_PATH,
     config_search_locations,
+    ensure_writable_config_path,
 )
 from mindroom.frontend_assets import ensure_frontend_dist_dir
 
@@ -122,6 +123,8 @@ async def _run(
     api_host: str,
 ) -> None:
     """Run the multi-agent system with friendly error handling."""
+    ensure_writable_config_path()
+
     # Check config exists before starting
     config_path = Path(CONFIG_PATH)
     if not config_path.exists():

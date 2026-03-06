@@ -7,7 +7,7 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from mindroom import frontend_assets
+from mindroom import constants, frontend_assets
 from mindroom.api import main
 
 
@@ -113,6 +113,22 @@ def test_ensure_frontend_dist_dir_respects_disable_flag(
     monkeypatch.setattr(frontend_assets.shutil, "which", lambda _name: "/usr/bin/bun")
 
     assert frontend_assets.ensure_frontend_dist_dir() is None
+
+
+def test_ensure_writable_config_path_seeds_from_template(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Managed deployments should seed the writable config from the mounted template."""
+    writable_config = tmp_path / "data" / "config.yaml"
+    template_config = tmp_path / "template.yaml"
+    template_config.write_text("agents: {}\nmodels: {}\n", encoding="utf-8")
+
+    monkeypatch.setattr(constants, "CONFIG_PATH", writable_config)
+    monkeypatch.setattr(constants, "CONFIG_TEMPLATE_PATH", template_config)
+
+    assert constants.ensure_writable_config_path() is True
+    assert writable_config.read_text(encoding="utf-8") == template_config.read_text(encoding="utf-8")
 
 
 def test_health_check(test_client: TestClient) -> None:

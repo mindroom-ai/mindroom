@@ -20,7 +20,6 @@ data:
   SUPABASE_ANON_KEY: {{ .Values.supabase.anonKey | default "" | quote }}
   STRIPE_PUBLISHABLE_KEY: {{ .Values.stripe.publishableKey | default "" | quote }}
   PLATFORM_BACKEND_URL: "http://platform-backend:8000"
-  GITEA_USER: {{ .Values.gitea.user }}
 ---
 # Sensitive secrets for platform services
 apiVersion: v1
@@ -34,22 +33,11 @@ stringData:
   stripe_secret_key: {{ .Values.stripe.secretKey }}
   stripe_webhook_secret: {{ .Values.stripe.webhookSecret }}
   provisioner_api_key: {{ .Values.provisioner.apiKey }}
-  gitea_token: {{ .Values.gitea.token }}
   openai_key: {{ .Values.apiKeys.openai | default "" }}
   anthropic_key: {{ .Values.apiKeys.anthropic | default "" }}
   openrouter_key: {{ .Values.apiKeys.openrouter | default "" }}
   google_key: {{ .Values.apiKeys.google | default "" }}
   deepseek_key: {{ .Values.apiKeys.deepseek | default "" }}
----
-# Docker registry secret
-apiVersion: v1
-kind: Secret
-metadata:
-  name: gitea-registry
-  namespace: mindroom-{{ .Values.environment }}
-type: kubernetes.io/dockerconfigjson
-data:
-  .dockerconfigjson: {{ printf "{\"auths\":{\"git.nijho.lt\":{\"username\":\"basnijholt\",\"password\":\"%s\",\"auth\":\"%s\"}}}" .Values.gitea.token (printf "basnijholt:%s" .Values.gitea.token | b64enc) | b64enc }}
 ---
 # Customer Portal
 apiVersion: apps/v1
@@ -72,8 +60,12 @@ spec:
         app: platform-frontend
         environment: {{ .Values.environment }}
     spec:
+      {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
-      - name: gitea-registry
+      {{- range . }}
+      - name: {{ . }}
+      {{- end }}
+      {{- end }}
       containers:
       - name: app
         image: {{ .Values.registry }}/platform-frontend:{{ .Values.imageTag }}
@@ -139,8 +131,12 @@ spec:
         environment: {{ .Values.environment }}
     spec:
       serviceAccountName: platform-backend
+      {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
-      - name: gitea-registry
+      {{- range . }}
+      - name: {{ . }}
+      {{- end }}
+      {{- end }}
       containers:
       - name: app
         image: {{ .Values.registry }}/platform-backend:{{ .Values.imageTag }}
@@ -159,8 +155,6 @@ spec:
           value: "/etc/secrets/stripe_webhook_secret"
         - name: PROVISIONER_API_KEY_FILE
           value: "/etc/secrets/provisioner_api_key"
-        - name: GITEA_TOKEN_FILE
-          value: "/etc/secrets/gitea_token"
         - name: OPENAI_API_KEY_FILE
           value: "/etc/secrets/openai_key"
         - name: ANTHROPIC_API_KEY_FILE
