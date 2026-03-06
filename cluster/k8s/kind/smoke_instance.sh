@@ -55,7 +55,7 @@ wait_for_port_forward() {
       return 1
     fi
 
-    if ss -ltn "( sport = :${local_port} )" | grep -q "${local_port}"; then
+    if bash -c "exec 3<>/dev/tcp/127.0.0.1/${local_port}" >/dev/null 2>&1; then
       echo "[smoke] ${label} port-forward ready" >&2
       return 0
     fi

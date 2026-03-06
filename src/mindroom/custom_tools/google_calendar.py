@@ -89,6 +89,7 @@ class GoogleCalendarTools(AgnoGoogleCalendarTools):
 
                     # Save the refreshed credentials back
                     token_data["token"] = self.creds.token
+                    token_data.setdefault("_source", "oauth")
                     creds_manager.save_credentials("google", token_data)
 
                 logger.info("Google Calendar authentication successful")

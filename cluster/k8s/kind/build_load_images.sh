@@ -62,6 +62,7 @@ echo "[images] Loading images into kind cluster '${CLUSTER_NAME}'..."
 kind load docker-image "${PLATFORM_FRONTEND_IMAGE}" --name "${CLUSTER_NAME}"
 kind load docker-image "${PLATFORM_BACKEND_IMAGE}" --name "${CLUSTER_NAME}"
 kind load docker-image "${MINDROOM_IMAGE}" --name "${CLUSTER_NAME}"
+kind load docker-image "${MINDROOM_MINIMAL_IMAGE}" --name "${CLUSTER_NAME}"
 kind load docker-image "${SYNAPSE_IMAGE}" --name "${CLUSTER_NAME}"
 
 echo "[images] Done. Helm will use these images with imagePullPolicy=IfNotPresent."

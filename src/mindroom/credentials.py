@@ -150,6 +150,7 @@ class CredentialsManager:
         """
         credentials = self.load_credentials(service) or {}
         credentials[key_name] = api_key
+        credentials["_source"] = "manual"
         self.save_credentials(service, credentials)
 
 

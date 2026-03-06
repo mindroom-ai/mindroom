@@ -90,15 +90,14 @@ class TestCredentialsSync:
 
             assert cm.get_api_key("openai") == "ui-set-key"
 
-    def test_sync_env_does_not_overwrite_legacy_credentials(
+    def test_sync_env_does_not_overwrite_manual_credentials(
         self,
         temp_credentials_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Test that env sync does NOT overwrite legacy credentials (no _source)."""
+        """Test that env sync does NOT overwrite manually managed credentials."""
         cm = CredentialsManager(base_path=temp_credentials_dir)
-        # Legacy credential without _source field
-        cm.set_api_key("openai", "legacy-key")
+        cm.set_api_key("openai", "manual-key")
 
         monkeypatch.setenv("OPENAI_API_KEY", "env-key")
 
@@ -106,7 +105,11 @@ class TestCredentialsSync:
             mock_get_cm.return_value = cm
             sync_env_to_credentials()
 
-            assert cm.get_api_key("openai") == "legacy-key"
+            assert cm.get_api_key("openai") == "manual-key"
+            assert cm.load_credentials("openai") == {
+                "api_key": "manual-key",
+                "_source": "manual",
+            }
 
     def test_sync_env_updates_env_sourced_credentials(
         self,

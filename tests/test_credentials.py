@@ -198,6 +198,10 @@ class TestCredentialsManager:
         # Test setting new API key
         manager.set_api_key("anthropic", "claude-key")
         assert manager.get_api_key("anthropic") == "claude-key"
+        assert manager.load_credentials("anthropic") == {
+            "api_key": "claude-key",
+            "_source": "manual",
+        }
 
         # Test updating existing API key
         manager.set_api_key("anthropic", "new-claude-key")
@@ -208,6 +212,7 @@ class TestCredentialsManager:
         creds = manager.load_credentials("service")
         assert creds is not None
         assert creds["custom_key"] == "value123"
+        assert creds["_source"] == "manual"
 
         # Test that other fields are preserved
         manager.save_credentials("multi", {"field1": "value1", "api_key": "old"})
@@ -216,6 +221,7 @@ class TestCredentialsManager:
         assert creds is not None
         assert creds["api_key"] == "new"
         assert creds["field1"] == "value1"
+        assert creds["_source"] == "manual"
 
 
 class TestGlobalCredentialsManager:

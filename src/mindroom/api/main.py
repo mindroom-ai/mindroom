@@ -96,6 +96,11 @@ def load_runtime_config() -> tuple[Config, Path]:
     return Config.from_yaml(CONFIG_PATH), CONFIG_PATH
 
 
+def _resolve_frontend_dist_dir() -> Path | None:
+    """Return the built dashboard directory when bundled or locally built."""
+    return ensure_frontend_dist_dir()
+
+
 def _resolve_frontend_asset(frontend_dir: Path, request_path: str) -> Path | None:
     """Resolve a request path to a static asset or SPA fallback."""
     normalized_path = request_path.strip("/")
@@ -115,7 +120,6 @@ def _resolve_frontend_asset(frontend_dir: Path, request_path: str) -> Path | Non
         nested_index_path = candidate / "index.html"
         if nested_index_path.is_file():
             return nested_index_path
-
     if PurePosixPath(normalized_path).suffix:
         return None
 
@@ -765,7 +769,7 @@ async def serve_frontend(request: Request, path: str = "") -> Response:
 
         raise HTTPException(status_code=401, detail="Authentication required")
 
-    frontend_dir = ensure_frontend_dist_dir()
+    frontend_dir = _resolve_frontend_dist_dir()
     if frontend_dir is None:
         raise HTTPException(status_code=404, detail="Frontend assets are not available")
 

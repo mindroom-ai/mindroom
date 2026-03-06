@@ -425,7 +425,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
 
     resolved_storage_path = storage_path if storage_path is not None else STORAGE_PATH_OBJ
 
-    # Use passed config (config_path is deprecated)
     agent_config = config.get_agent(agent_name)
     defaults = config.defaults
 

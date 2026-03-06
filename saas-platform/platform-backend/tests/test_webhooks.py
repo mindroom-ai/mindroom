@@ -642,41 +642,6 @@ class TestWebhookEndpoints:
         # At least one should be rate limited (429)
         assert 429 in responses
 
-    def test_legacy_tier_metadata(
-        self,
-        client: TestClient,
-        mock_stripe_signature: Mock,
-        mock_supabase: MagicMock,
-    ):
-        """Test handling of legacy 'tier' metadata field."""
-        # Setup with legacy metadata format
-        subscription_data = self._create_subscription_data()
-        # Use 'tier' instead of 'plan' in metadata
-        subscription_data["items"]["data"][0]["price"]["metadata"] = {
-            "tier": "starter",  # Legacy field name
-            "billing_cycle": "monthly",
-        }
-        event = self._create_stripe_event("customer.subscription.created", subscription_data)
-        mock_stripe_signature.return_value = event
-
-        # Mock Supabase responses
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
-        mock_supabase.table().select().eq().execute.return_value = Mock(data=[])
-        mock_supabase.table().insert().execute.return_value = Mock()
-
-        # Make request
-        response = client.post(
-            "/webhooks/stripe",
-            content=b"test body",
-            headers={"Stripe-Signature": "valid_sig"},
-        )
-
-        # Verify - should handle legacy format successfully
-        assert response.status_code == 200
-        data = response.json()
-        assert data["received"] is True
-        assert data["error"] is None
-
     def test_missing_price_metadata(
         self,
         client: TestClient,

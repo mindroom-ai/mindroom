@@ -111,7 +111,7 @@ def _get_service_credentials(service: str) -> dict[str, Any]:
 
 def _save_service_credentials(service: str, credentials: dict[str, Any]) -> None:
     """Save service credentials."""
-    _creds_manager.save_credentials(service, credentials)
+    _creds_manager.save_credentials(service, {**credentials, "_source": credentials.get("_source", "oauth")})
 
 
 @router.get("/{service}/status")

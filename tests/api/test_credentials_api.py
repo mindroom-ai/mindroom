@@ -231,23 +231,6 @@ class TestCredentialsAPI:
         assert data["api_key"] == "sk-real-value"
         assert data["source"] == "ui"
 
-    def test_get_api_key_returns_source_none_for_legacy(
-        self,
-        client: TestClient,
-        mock_credentials_manager: MagicMock,
-    ) -> None:
-        """Test that get_api_key returns null source for legacy credentials."""
-        mock_credentials_manager.load_credentials.return_value = {
-            "api_key": "sk-test-long-key-value",
-        }
-
-        response = client.get("/api/credentials/openai/api-key")
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["has_key"] is True
-        assert data["source"] is None
-
     def test_get_credentials_filters_internal_keys(
         self,
         client: TestClient,

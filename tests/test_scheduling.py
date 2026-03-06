@@ -17,7 +17,6 @@ from mindroom.scheduling import (
     _run_once_task,
     cancel_all_scheduled_tasks,
     edit_scheduled_task,
-    get_scheduled_tasks_for_room,
     list_scheduled_tasks,
     save_edited_scheduled_task,
 )
@@ -530,36 +529,6 @@ async def test_cancel_all_scheduled_tasks() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_scheduled_tasks_for_room_includes_cancelled_without_workflow() -> None:
-    """Cancelled tasks without workflow payload are still returned for non-pending listings."""
-    client = AsyncMock()
-    mock_response = nio.RoomGetStateResponse.from_dict(
-        [
-            {
-                "type": "com.mindroom.scheduled.task",
-                "state_key": "old_cancelled",
-                "content": {
-                    "status": "cancelled",
-                },
-                "event_id": "$state_cancelled",
-                "sender": "@system:server",
-                "origin_server_ts": 1234567890,
-            },
-        ],
-        room_id="!test:server",
-    )
-
-    client.room_get_state = AsyncMock(return_value=mock_response)
-
-    tasks = await get_scheduled_tasks_for_room(client=client, room_id="!test:server", include_non_pending=True)
-
-    assert len(tasks) == 1
-    assert tasks[0].task_id == "old_cancelled"
-    assert tasks[0].status == "cancelled"
-    assert tasks[0].workflow.description == "Cancelled task"
-
-
-@pytest.mark.asyncio
 async def test_cancel_all_scheduled_tasks_no_tasks() -> None:
     """Test cancel_all_scheduled_tasks when no tasks exist."""
     # Create mock client
@@ -640,8 +609,16 @@ async def test_edit_scheduled_task_rejects_non_pending() -> None:
     """Editing should fail for cancelled/completed tasks."""
     client = AsyncMock()
     room = MagicMock()
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=5),
+        message="Initial message",
+        description="Initial task",
+        thread_id="$original_thread",
+        room_id="!test:server",
+    )
     state_response = nio.RoomGetStateEventResponse(
-        content={"status": "cancelled"},
+        content={"status": "cancelled", "workflow": workflow.model_dump_json()},
         event_type=_SCHEDULED_TASK_EVENT_TYPE,
         state_key="task123",
         room_id="!test:server",

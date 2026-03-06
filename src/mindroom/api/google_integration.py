@@ -154,6 +154,7 @@ def _save_credentials(creds: Credentials) -> None:
     if id_token:
         token_data["_id_token"] = id_token
 
+    token_data["_source"] = "oauth"
     # Save using the unified credentials manager.
     _creds_manager.save_credentials("google", token_data)
 

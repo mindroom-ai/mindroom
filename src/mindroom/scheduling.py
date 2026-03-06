@@ -143,27 +143,6 @@ def _parse_scheduled_task_record(
         except (ValueError, json.JSONDecodeError):
             logger.exception("Failed to parse scheduled task workflow", room_id=room_id, task_id=task_id)
             return None
-    elif status != "pending":
-        # Backward compatibility: older cancellation paths wrote only {"status": "cancelled"}.
-        description_value = content.get("description")
-        description = (
-            description_value if isinstance(description_value, str) and description_value else "Cancelled task"
-        )
-        message_value = content.get("message")
-        message = message_value if isinstance(message_value, str) else ""
-        thread_id_value = content.get("thread_id")
-        thread_id = thread_id_value if isinstance(thread_id_value, str) else None
-        created_by_value = content.get("created_by")
-        created_by = created_by_value if isinstance(created_by_value, str) else None
-        workflow = ScheduledWorkflow(
-            schedule_type="once",
-            execute_at=None,
-            message=message,
-            description=description,
-            created_by=created_by,
-            thread_id=thread_id,
-            room_id=room_id,
-        )
     else:
         return None
 
