@@ -489,6 +489,8 @@ def test_frontend_login_page_renders_for_api_key_auth(api_key_client: TestClient
     response = api_key_client.get("/login?next=/agents")
     assert response.status_code == 200
     assert "Enter the dashboard API key to continue" in response.text
+    assert "MINDROOM_API_KEY" in response.text
+    assert ".env" in response.text
 
 
 def test_api_key_cookie_auth_allows_protected_requests(api_key_client: TestClient) -> None:
