@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Self
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
+import httpx
 import nio
 import pytest
 from agno.knowledge.document import Document
@@ -30,7 +31,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
-from mindroom.orchestrator import MultiAgentOrchestrator
+from mindroom.orchestrator import MultiAgentOrchestrator, _wait_for_matrix_homeserver
 from mindroom.teams import TeamFormationDecision, TeamMode
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import TEST_PASSWORD
@@ -3080,6 +3081,100 @@ class TestMultiAgentOrchestrator:
             await orchestrator.start()
 
         assert call_order[:2] == ["wait_for_homeserver", "initialize"]
+
+    @pytest.mark.asyncio
+    async def test_wait_for_matrix_homeserver_returns_when_versions(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The homeserver wait should return as soon as `/versions` succeeds."""
+        calls = 0
+
+        class _FakeAsyncClient:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                del args, kwargs
+
+            async def __aenter__(self) -> Self:
+                return self
+
+            async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+                del exc_type, exc, tb
+
+            async def get(self, url: str) -> httpx.Response:
+                nonlocal calls
+                calls += 1
+                request = httpx.Request("GET", url)
+                return httpx.Response(200, json={"versions": ["v1.1"]}, request=request)
+
+        monkeypatch.setattr("mindroom.orchestrator.httpx.AsyncClient", _FakeAsyncClient)
+
+        await _wait_for_matrix_homeserver(timeout_seconds=0.1, retry_interval_seconds=0)
+
+        assert calls == 1
+
+    @pytest.mark.asyncio
+    async def test_wait_for_matrix_homeserver_retries_on_connection_errors(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Transient transport failures should be retried until `/versions` succeeds."""
+        responses: list[Exception | httpx.Response] = [
+            httpx.ConnectError("boom"),
+            httpx.ConnectError("boom again"),
+            httpx.Response(
+                200,
+                json={"versions": ["v1.1"]},
+                request=httpx.Request("GET", "http://localhost/_matrix/client/versions"),
+            ),
+        ]
+
+        class _FakeAsyncClient:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                del args, kwargs
+
+            async def __aenter__(self) -> Self:
+                return self
+
+            async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+                del exc_type, exc, tb
+
+            async def get(self, _url: str) -> httpx.Response:
+                response = responses.pop(0)
+                if isinstance(response, Exception):
+                    raise response
+                return response
+
+        monkeypatch.setattr("mindroom.orchestrator.httpx.AsyncClient", _FakeAsyncClient)
+
+        await _wait_for_matrix_homeserver(timeout_seconds=0.1, retry_interval_seconds=0)
+
+        assert responses == []
+
+    @pytest.mark.asyncio
+    async def test_wait_for_matrix_homeserver_times_out_when_never_ready(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The homeserver wait should fail fast when `/versions` never becomes valid."""
+
+        class _FakeAsyncClient:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                del args, kwargs
+
+            async def __aenter__(self) -> Self:
+                return self
+
+            async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+                del exc_type, exc, tb
+
+            async def get(self, url: str) -> httpx.Response:
+                request = httpx.Request("GET", url)
+                return httpx.Response(503, text="starting", request=request)
+
+        monkeypatch.setattr("mindroom.orchestrator.httpx.AsyncClient", _FakeAsyncClient)
+
+        with pytest.raises(RuntimeError, match="Timed out waiting for Matrix homeserver"):
+            await _wait_for_matrix_homeserver(timeout_seconds=0.01, retry_interval_seconds=0.001)
 
     @pytest.mark.asyncio
     async def test_schedule_knowledge_refresh_logs_failure(self, tmp_path: Path) -> None:

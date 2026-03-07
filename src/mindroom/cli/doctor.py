@@ -24,6 +24,7 @@ from mindroom.constants import (
     STORAGE_PATH,
     env_key_for_provider,
 )
+from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
 
 from .config import _load_config_quiet, console
 
@@ -553,15 +554,17 @@ def _check_memory_embedder(config: Config) -> tuple[int, int, int]:
 
 def _check_matrix_homeserver() -> tuple[int, int, int]:
     """Check Matrix homeserver reachability. Returns (passed, failed, warnings)."""
-    url = f"{MATRIX_HOMESERVER}/_matrix/client/versions"
-    valid, detail = _http_check(url, verify=MATRIX_SSL_VERIFY)
-    if valid is True:
+    url = matrix_versions_url(MATRIX_HOMESERVER)
+    try:
+        response = httpx.get(url, timeout=5, verify=MATRIX_SSL_VERIFY)
+    except httpx.HTTPError as exc:
+        console.print(f"[red]✗[/red] Matrix homeserver unreachable: {MATRIX_HOMESERVER} ({exc})")
+        return 0, 1, 0
+    if response_has_matrix_versions(response):
         console.print(f"[green]✓[/green] Matrix homeserver: {MATRIX_HOMESERVER}")
         return 1, 0, 0
-    if valid is False:
-        console.print(f"[red]✗[/red] Matrix homeserver {detail}: {MATRIX_HOMESERVER}")
-        return 0, 1, 0
-    console.print(f"[red]✗[/red] Matrix homeserver unreachable: {MATRIX_HOMESERVER} ({detail})")
+    detail = f"HTTP {response.status_code}" if not response.is_success else "returned invalid /versions payload"
+    console.print(f"[red]✗[/red] Matrix homeserver {detail}: {MATRIX_HOMESERVER}")
     return 0, 1, 0
 
 

@@ -87,16 +87,16 @@ jobs:
           docker run --rm ghcr.io/mindroom-ai/mindroom-minimal:latest mindroom version
 
       - name: Smoke platform images
-        run: python scripts/smoke_platform_images.py
+        run: python -m scripts.smoke_platform_images
 
       - name: Install platform chart
         run: bash cluster/k8s/kind/install_platform.sh
 
       - name: Smoke kind platform and instance
-        run: python cluster/k8s/kind/smoke_instance.py
+        run: python -m cluster.k8s.kind.smoke_instance
 
       - name: Smoke mindroom-stack compose
-        run: python scripts/smoke_mindroom_stack.py "${GITHUB_WORKSPACE}/mindroom-stack"
+        run: python -m scripts.smoke_mindroom_stack "${GITHUB_WORKSPACE}/mindroom-stack"
 
       - name: Tear down kind cluster
         if: always()

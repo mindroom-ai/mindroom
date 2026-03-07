@@ -126,7 +126,7 @@ kubectl logs -n mindroom-staging -l app=platform-frontend -f
 ./test-access.sh
 
 # Deploy and smoke-test a real MindRoom instance
-python smoke_instance.py
+python -m cluster.k8s.kind.smoke_instance
 ```
 
 ## Clean Up

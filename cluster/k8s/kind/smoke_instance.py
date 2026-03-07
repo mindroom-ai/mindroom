@@ -11,50 +11,21 @@ import sys
 import tempfile
 import time
 import traceback
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import IO
 
+from scripts.smoke_helpers import (
+    error,
+    getenv_int,
+    http_contains,
+    http_get_text,
+    log,
+    run_command,
+    validate_port,
+    wait_for_http_match,
+)
+
 ROOT_DIR = Path(__file__).resolve().parents[3]
-
-
-def getenv_int(name: str, default: int) -> int:
-    """Read an integer environment variable."""
-    return int(os.getenv(name, str(default)))
-
-
-def validate_port(name: str, port: int) -> None:
-    """Ensure a TCP port is within the valid range."""
-    if not 1 <= port <= 65535:
-        msg = f"{name} must be between 1 and 65535, got {port}"
-        raise ValueError(msg)
-
-
-def log(message: str) -> None:
-    """Print a smoke log line."""
-    print(message, flush=True)
-
-
-def error(message: str) -> None:
-    """Print an error log line."""
-    print(message, file=sys.stderr, flush=True)
-
-
-def run_command(
-    command: list[str],
-    *,
-    check: bool = True,
-    capture_output: bool = False,
-) -> subprocess.CompletedProcess[str]:
-    """Run a command with text output."""
-    return subprocess.run(
-        command,
-        check=check,
-        capture_output=capture_output,
-        text=True,
-        cwd=ROOT_DIR,
-    )
 
 
 def read_log_file(path: Path) -> None:
@@ -64,39 +35,6 @@ def read_log_file(path: Path) -> None:
     content = path.read_text(encoding="utf-8", errors="replace")
     if content:
         error(content)
-
-
-def http_get_text(
-    url: str,
-    *,
-    timeout: float = 2.0,
-    headers: dict[str, str] | None = None,
-    method: str = "GET",
-    body: bytes | None = None,
-) -> str:
-    """Fetch a URL and return the response body as text."""
-    request = urllib.request.Request(url, headers=headers or {}, method=method, data=body)  # noqa: S310
-    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
-        return response.read().decode("utf-8", errors="replace")
-
-
-def http_contains(url: str, expected: str, *, timeout: float = 2.0) -> bool:
-    """Return whether the response body contains the expected text."""
-    try:
-        return expected in http_get_text(url, timeout=timeout)
-    except (OSError, urllib.error.URLError, urllib.error.HTTPError):
-        return False
-
-
-def wait_for_http_match(url: str, expected: str, label: str, *, attempts: int = 30, sleep_seconds: float = 2.0) -> None:
-    """Poll an HTTP endpoint until the response body contains the expected text."""
-    for _ in range(attempts):
-        if http_contains(url, expected):
-            log(f"[smoke] {label} ready")
-            return
-        time.sleep(sleep_seconds)
-    msg = f"[error] Timed out waiting for {label} ({url})"
-    raise RuntimeError(msg)
 
 
 def port_is_listening(local_port: int) -> bool:
@@ -417,7 +355,214 @@ def cleanup_port_forwards(port_forwards: list[tuple[subprocess.Popen[str], IO[st
         log_handle.close()
 
 
-def main() -> int:  # noqa: PLR0915
+def validate_local_ports(
+    platform_backend_local_port: int,
+    platform_frontend_local_port: int,
+    mindroom_local_port: int,
+    synapse_local_port: int,
+) -> None:
+    """Validate all host ports used by the smoke run."""
+    validate_port("PLATFORM_BACKEND_LOCAL_PORT", platform_backend_local_port)
+    validate_port("PLATFORM_FRONTEND_LOCAL_PORT", platform_frontend_local_port)
+    validate_port("MINDROOM_LOCAL_PORT", mindroom_local_port)
+    validate_port("SYNAPSE_LOCAL_PORT", synapse_local_port)
+
+
+def start_platform_port_forwards(
+    *,
+    platform_namespace: str,
+    platform_backend_local_port: int,
+    platform_frontend_local_port: int,
+    tmp_dir: Path,
+    port_forwards: list[tuple[subprocess.Popen[str], IO[str]]],
+) -> str:
+    """Wait for the platform backend and frontend over local port-forwards."""
+    platform_health_url = f"http://127.0.0.1:{platform_backend_local_port}/health"
+    platform_ui_url = f"http://127.0.0.1:{platform_frontend_local_port}/"
+    start_port_forward_for_http_match(
+        platform_namespace,
+        "svc/platform-backend",
+        platform_backend_local_port,
+        8000,
+        tmp_dir / "pf-platform-backend.log",
+        "platform backend health",
+        platform_health_url,
+        '"status"',
+        port_forwards,
+    )
+    start_port_forward_for_http_match(
+        platform_namespace,
+        "svc/platform-frontend",
+        platform_frontend_local_port,
+        3000,
+        tmp_dir / "pf-platform-frontend.log",
+        "platform frontend",
+        platform_ui_url,
+        "MindRoom",
+        port_forwards,
+    )
+    return http_get_text(platform_health_url, timeout=5.0)
+
+
+def resolve_instance_id(
+    *,
+    instance_id: str,
+    platform_health: str,
+    smoke_require_platform_provisioning: str,
+    platform_backend_local_port: int,
+    provisioner_api_key: str,
+    account_id: str,
+    tmp_dir: Path,
+    instance_namespace: str,
+    base_domain: str,
+    mindroom_image: str,
+    mindroom_image_pull_policy: str,
+    synapse_image: str,
+    synapse_image_pull_policy: str,
+) -> str:
+    """Provision an instance through the platform when available, else deploy directly."""
+    if '"supabase":true' in platform_health:
+        log("[smoke] Provisioning instance through live platform API")
+        return provision_via_platform_api(
+            platform_backend_local_port,
+            provisioner_api_key,
+            account_id,
+            tmp_dir,
+        )
+    if smoke_require_platform_provisioning == "1":
+        msg = "[error] Platform provisioning smoke requires Supabase-configured platform backend"
+        raise RuntimeError(msg)
+    log("[smoke] Platform backend has no Supabase; falling back to direct Helm instance deploy")
+    deploy_instance_directly(
+        instance_id=instance_id,
+        instance_namespace=instance_namespace,
+        base_domain=base_domain,
+        account_id=account_id,
+        mindroom_image=mindroom_image,
+        mindroom_image_pull_policy=mindroom_image_pull_policy,
+        synapse_image=synapse_image,
+        synapse_image_pull_policy=synapse_image_pull_policy,
+    )
+    return instance_id
+
+
+def wait_for_rollout(deployment_name: str, instance_namespace: str, deployment_rollout_timeout: str) -> None:
+    """Wait for a deployment rollout to complete."""
+    run_command(
+        [
+            "kubectl",
+            "rollout",
+            "status",
+            f"deployment/{deployment_name}",
+            "-n",
+            instance_namespace,
+            f"--timeout={deployment_rollout_timeout}",
+        ],
+    )
+
+
+def wait_for_instance_rollouts(instance_id: str, instance_namespace: str, deployment_rollout_timeout: str) -> None:
+    """Wait for both Synapse and MindRoom deployments to finish rolling out."""
+    wait_for_rollout(f"synapse-{instance_id}", instance_namespace, deployment_rollout_timeout)
+    wait_for_rollout(f"mindroom-{instance_id}", instance_namespace, deployment_rollout_timeout)
+
+
+def verify_instance_http_endpoints(
+    *,
+    instance_id: str,
+    instance_namespace: str,
+    mindroom_local_port: int,
+    synapse_local_port: int,
+    tmp_dir: Path,
+    port_forwards: list[tuple[subprocess.Popen[str], IO[str]]],
+) -> None:
+    """Verify the deployed instance readiness and UI endpoints over port-forwards."""
+    mindroom_ready_url = f"http://127.0.0.1:{mindroom_local_port}/api/ready"
+    mindroom_ui_url = f"http://127.0.0.1:{mindroom_local_port}/"
+    synapse_url = f"http://127.0.0.1:{synapse_local_port}/_matrix/client/versions"
+    start_port_forward_for_http_match(
+        instance_namespace,
+        f"svc/mindroom-{instance_id}",
+        mindroom_local_port,
+        8765,
+        tmp_dir / "pf-mindroom.log",
+        "MindRoom readiness",
+        mindroom_ready_url,
+        '"ready"',
+        port_forwards,
+    )
+    wait_for_http_match(mindroom_ui_url, "MindRoom", "MindRoom dashboard")
+    start_port_forward_for_http_match(
+        instance_namespace,
+        f"svc/synapse-{instance_id}",
+        synapse_local_port,
+        8008,
+        tmp_dir / "pf-synapse.log",
+        "instance Synapse",
+        synapse_url,
+        '"versions"',
+        port_forwards,
+    )
+
+
+def run_smoke(
+    *,
+    instance_id: str,
+    instance_namespace: str,
+    platform_namespace: str,
+    base_domain: str,
+    account_id: str,
+    mindroom_image: str,
+    mindroom_image_pull_policy: str,
+    synapse_image: str,
+    synapse_image_pull_policy: str,
+    platform_backend_local_port: int,
+    platform_frontend_local_port: int,
+    mindroom_local_port: int,
+    synapse_local_port: int,
+    provisioner_api_key: str,
+    smoke_require_platform_provisioning: str,
+    deployment_rollout_timeout: str,
+    tmp_dir: Path,
+    port_forwards: list[tuple[subprocess.Popen[str], IO[str]]],
+) -> str:
+    """Run the full platform and instance smoke flow and return the final instance id."""
+    platform_health = start_platform_port_forwards(
+        platform_namespace=platform_namespace,
+        platform_backend_local_port=platform_backend_local_port,
+        platform_frontend_local_port=platform_frontend_local_port,
+        tmp_dir=tmp_dir,
+        port_forwards=port_forwards,
+    )
+    instance_id = resolve_instance_id(
+        instance_id=instance_id,
+        platform_health=platform_health,
+        smoke_require_platform_provisioning=smoke_require_platform_provisioning,
+        platform_backend_local_port=platform_backend_local_port,
+        provisioner_api_key=provisioner_api_key,
+        account_id=account_id,
+        tmp_dir=tmp_dir,
+        instance_namespace=instance_namespace,
+        base_domain=base_domain,
+        mindroom_image=mindroom_image,
+        mindroom_image_pull_policy=mindroom_image_pull_policy,
+        synapse_image=synapse_image,
+        synapse_image_pull_policy=synapse_image_pull_policy,
+    )
+    wait_for_instance_rollouts(instance_id, instance_namespace, deployment_rollout_timeout)
+    verify_instance_http_endpoints(
+        instance_id=instance_id,
+        instance_namespace=instance_namespace,
+        mindroom_local_port=mindroom_local_port,
+        synapse_local_port=synapse_local_port,
+        tmp_dir=tmp_dir,
+        port_forwards=port_forwards,
+    )
+    log("[smoke] kind platform + instance checks passed")
+    return instance_id
+
+
+def main() -> int:
     """Run the smoke deploy."""
     instance_id = os.getenv("INSTANCE_ID", "1")
     instance_namespace = os.getenv("INSTANCE_NAMESPACE", "mindroom-instances")
@@ -435,126 +580,44 @@ def main() -> int:  # noqa: PLR0915
     provisioner_api_key = os.getenv("PROVISIONER_API_KEY", "kind-provisioner-key")
     smoke_require_platform_provisioning = os.getenv("SMOKE_REQUIRE_PLATFORM_PROVISIONING", "0")
     deployment_rollout_timeout = os.getenv("DEPLOYMENT_ROLLOUT_TIMEOUT", "600s")
-    platform_health_url = f"http://127.0.0.1:{platform_backend_local_port}/health"
-    platform_ui_url = f"http://127.0.0.1:{platform_frontend_local_port}/"
-    mindroom_ready_url = f"http://127.0.0.1:{mindroom_local_port}/api/ready"
-    mindroom_ui_url = f"http://127.0.0.1:{mindroom_local_port}/"
-    synapse_url = f"http://127.0.0.1:{synapse_local_port}/_matrix/client/versions"
-
-    validate_port("PLATFORM_BACKEND_LOCAL_PORT", platform_backend_local_port)
-    validate_port("PLATFORM_FRONTEND_LOCAL_PORT", platform_frontend_local_port)
-    validate_port("MINDROOM_LOCAL_PORT", mindroom_local_port)
-    validate_port("SYNAPSE_LOCAL_PORT", synapse_local_port)
+    validate_local_ports(
+        platform_backend_local_port,
+        platform_frontend_local_port,
+        mindroom_local_port,
+        synapse_local_port,
+    )
 
     port_forwards: list[tuple[subprocess.Popen[str], IO[str]]] = []
-    exit_code = 0
-
     try:
         with tempfile.TemporaryDirectory() as tmp_dir_name:
-            tmp_dir = Path(tmp_dir_name)
-            start_port_forward_for_http_match(
-                platform_namespace,
-                "svc/platform-backend",
-                platform_backend_local_port,
-                8000,
-                tmp_dir / "pf-platform-backend.log",
-                "platform backend health",
-                platform_health_url,
-                '"status"',
-                port_forwards,
+            instance_id = run_smoke(
+                instance_id=instance_id,
+                instance_namespace=instance_namespace,
+                platform_namespace=platform_namespace,
+                base_domain=base_domain,
+                account_id=account_id,
+                mindroom_image=mindroom_image,
+                mindroom_image_pull_policy=mindroom_image_pull_policy,
+                synapse_image=synapse_image,
+                synapse_image_pull_policy=synapse_image_pull_policy,
+                platform_backend_local_port=platform_backend_local_port,
+                platform_frontend_local_port=platform_frontend_local_port,
+                mindroom_local_port=mindroom_local_port,
+                synapse_local_port=synapse_local_port,
+                provisioner_api_key=provisioner_api_key,
+                smoke_require_platform_provisioning=smoke_require_platform_provisioning,
+                deployment_rollout_timeout=deployment_rollout_timeout,
+                tmp_dir=Path(tmp_dir_name),
+                port_forwards=port_forwards,
             )
-            start_port_forward_for_http_match(
-                platform_namespace,
-                "svc/platform-frontend",
-                platform_frontend_local_port,
-                3000,
-                tmp_dir / "pf-platform-frontend.log",
-                "platform frontend",
-                platform_ui_url,
-                "MindRoom",
-                port_forwards,
-            )
-
-            platform_health = http_get_text(platform_health_url, timeout=5.0)
-            if '"supabase":true' in platform_health:
-                log("[smoke] Provisioning instance through live platform API")
-                instance_id = provision_via_platform_api(
-                    platform_backend_local_port,
-                    provisioner_api_key,
-                    account_id,
-                    tmp_dir,
-                )
-            elif smoke_require_platform_provisioning == "1":
-                msg = "[error] Platform provisioning smoke requires Supabase-configured platform backend"
-                raise RuntimeError(msg)  # noqa: TRY301
-            else:
-                log("[smoke] Platform backend has no Supabase; falling back to direct Helm instance deploy")
-                deploy_instance_directly(
-                    instance_id=instance_id,
-                    instance_namespace=instance_namespace,
-                    base_domain=base_domain,
-                    account_id=account_id,
-                    mindroom_image=mindroom_image,
-                    mindroom_image_pull_policy=mindroom_image_pull_policy,
-                    synapse_image=synapse_image,
-                    synapse_image_pull_policy=synapse_image_pull_policy,
-                )
-
-            run_command(
-                [
-                    "kubectl",
-                    "rollout",
-                    "status",
-                    f"deployment/synapse-{instance_id}",
-                    "-n",
-                    instance_namespace,
-                    f"--timeout={deployment_rollout_timeout}",
-                ],
-            )
-            run_command(
-                [
-                    "kubectl",
-                    "rollout",
-                    "status",
-                    f"deployment/mindroom-{instance_id}",
-                    "-n",
-                    instance_namespace,
-                    f"--timeout={deployment_rollout_timeout}",
-                ],
-            )
-
-            start_port_forward_for_http_match(
-                instance_namespace,
-                f"svc/mindroom-{instance_id}",
-                mindroom_local_port,
-                8765,
-                tmp_dir / "pf-mindroom.log",
-                "MindRoom readiness",
-                mindroom_ready_url,
-                '"ready"',
-                port_forwards,
-            )
-            wait_for_http_match(mindroom_ui_url, "MindRoom", "MindRoom dashboard")
-            start_port_forward_for_http_match(
-                instance_namespace,
-                f"svc/synapse-{instance_id}",
-                synapse_local_port,
-                8008,
-                tmp_dir / "pf-synapse.log",
-                "instance Synapse",
-                synapse_url,
-                '"versions"',
-                port_forwards,
-            )
-            log("[smoke] kind platform + instance checks passed")
     except Exception as exc:
         error(f"[error] smoke_instance.py failed: {exc}")
         traceback.print_exc()
         dump_instance_diagnostics(instance_namespace, instance_id)
-        exit_code = 1
+        return 1
     finally:
         cleanup_port_forwards(port_forwards)
-    return exit_code
+    return 0
 
 
 if __name__ == "__main__":

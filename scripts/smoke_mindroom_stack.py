@@ -4,85 +4,19 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
 import tempfile
-import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
-
-
-def getenv_int(name: str, default: int) -> int:
-    """Read an integer environment variable."""
-    return int(os.getenv(name, str(default)))
-
-
-def validate_port(name: str, port: int) -> None:
-    """Ensure a TCP port is within the valid range."""
-    if not 1 <= port <= 65535:
-        msg = f"{name} must be between 1 and 65535, got {port}"
-        raise ValueError(msg)
-
-
-def log(message: str) -> None:
-    """Print a smoke log line."""
-    print(message, flush=True)
-
-
-def error(message: str) -> None:
-    """Print an error log line."""
-    print(message, file=sys.stderr, flush=True)
-
-
-def run_command(
-    command: list[str],
-    *,
-    check: bool = True,
-    capture_output: bool = False,
-) -> subprocess.CompletedProcess[str]:
-    """Run a subprocess in the repository root."""
-    return subprocess.run(
-        command,
-        check=check,
-        capture_output=capture_output,
-        text=True,
-        cwd=ROOT_DIR,
-    )
-
-
-def http_contains(url: str, expected: str) -> bool:
-    """Return whether an HTTP response contains the expected text."""
-    try:
-        with urllib.request.urlopen(url, timeout=3.0) as response:  # noqa: S310
-            body = response.read().decode("utf-8", errors="replace")
-    except (OSError, urllib.error.URLError, urllib.error.HTTPError):
-        return False
-    return expected in body
-
-
-def http_status(url: str) -> int | None:
-    """Return the HTTP status code for a URL."""
-    try:
-        with urllib.request.urlopen(url, timeout=3.0) as response:  # noqa: S310
-            return response.status
-    except urllib.error.HTTPError as exc:
-        return exc.code
-    except (OSError, urllib.error.URLError):
-        return None
-
-
-def wait_for_http_match(url: str, expected: str, label: str, *, attempts: int = 30, sleep_seconds: float = 2.0) -> None:
-    """Poll an HTTP endpoint until it contains the expected response content."""
-    for _ in range(attempts):
-        if http_contains(url, expected):
-            log(f"[smoke] {label} ready")
-            return
-        time.sleep(sleep_seconds)
-    msg = f"[error] Timed out waiting for {label} ({url})"
-    raise RuntimeError(msg)
+from scripts.smoke_helpers import (
+    error,
+    getenv_int,
+    log,
+    run_command,
+    validate_port,
+    wait_for_http_match,
+    wait_for_http_status,
+)
 
 
 def dump_compose_diagnostics(stack_dir: Path, project_name: str, env_file: Path, compose_file: Path) -> None:
@@ -236,16 +170,14 @@ def main() -> int:
                 sleep_seconds=3,
             )
 
-            element_url = f"http://127.0.0.1:{stack_element_port}/"
-            for _ in range(20):
-                if http_status(element_url) == 200:
-                    log("[smoke] Element ready")
-                    log("[smoke] mindroom-stack checks passed")
-                    break
-                time.sleep(3)
-            else:
-                msg = f"[error] Timed out waiting for Element ({element_url})"
-                raise RuntimeError(msg)  # noqa: TRY301
+            wait_for_http_status(
+                f"http://127.0.0.1:{stack_element_port}/",
+                200,
+                "Element",
+                attempts=20,
+                sleep_seconds=3,
+            )
+            log("[smoke] mindroom-stack checks passed")
         except Exception as exc:
             error(str(exc))
             dump_compose_diagnostics(stack_dir, project_name, env_file, compose_file)

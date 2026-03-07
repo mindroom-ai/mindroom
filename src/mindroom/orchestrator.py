@@ -26,6 +26,7 @@ from .file_watcher import watch_file
 from .knowledge.manager import initialize_knowledge_managers, shutdown_knowledge_managers
 from .logging_config import get_logger, setup_logging
 from .matrix.client import get_joined_rooms, get_room_members, invite_to_room
+from .matrix.health import matrix_versions_url, response_has_matrix_versions
 from .matrix.identity import MatrixID, extract_server_name_from_homeserver
 from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, load_rooms, resolve_room_aliases
 from .matrix.state import MatrixState
@@ -41,21 +42,30 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+_MATRIX_HOMESERVER_TIMEOUT_SECONDS = 300
+_MATRIX_HOMESERVER_REQUEST_TIMEOUT_SECONDS = 5.0
+_MATRIX_HOMESERVER_RETRY_INTERVAL_SECONDS = 2.0
 
-async def _wait_for_matrix_homeserver() -> None:
+
+async def _wait_for_matrix_homeserver(
+    *,
+    timeout_seconds: float = _MATRIX_HOMESERVER_TIMEOUT_SECONDS,
+    request_timeout_seconds: float = _MATRIX_HOMESERVER_REQUEST_TIMEOUT_SECONDS,
+    retry_interval_seconds: float = _MATRIX_HOMESERVER_RETRY_INTERVAL_SECONDS,
+) -> None:
     """Wait for the configured Matrix homeserver to answer `/versions`."""
-    versions_url = f"{MATRIX_HOMESERVER.rstrip('/')}/_matrix/client/versions"
+    versions_url = matrix_versions_url(MATRIX_HOMESERVER)
     set_runtime_starting(f"Waiting for Matrix homeserver at {versions_url}")
-    deadline = asyncio.get_running_loop().time() + 300
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
     attempt = 0
     logger.info("Waiting for Matrix homeserver", url=versions_url)
 
-    async with httpx.AsyncClient(timeout=5.0, verify=MATRIX_SSL_VERIFY) as client:
+    async with httpx.AsyncClient(timeout=request_timeout_seconds, verify=MATRIX_SSL_VERIFY) as client:
         while asyncio.get_running_loop().time() < deadline:
             attempt += 1
             try:
                 response = await client.get(versions_url)
-            except httpx.HTTPError as exc:
+            except httpx.TransportError as exc:
                 if attempt == 1 or attempt % 5 == 0:
                     logger.info(
                         "Matrix homeserver not ready yet",
@@ -63,15 +73,12 @@ async def _wait_for_matrix_homeserver() -> None:
                         attempt=attempt,
                         error=str(exc),
                     )
-                await asyncio.sleep(2)
+                await asyncio.sleep(retry_interval_seconds)
                 continue
 
-            if response.is_success:
-                with suppress(ValueError):
-                    payload = response.json()
-                    if isinstance(payload, dict) and "versions" in payload:
-                        logger.info("Matrix homeserver ready", url=versions_url)
-                        return
+            if response_has_matrix_versions(response):
+                logger.info("Matrix homeserver ready", url=versions_url)
+                return
 
             if attempt == 1 or attempt % 5 == 0:
                 logger.info(
@@ -81,7 +88,7 @@ async def _wait_for_matrix_homeserver() -> None:
                     status_code=response.status_code,
                     body_preview=response.text[:200].replace("\n", " "),
                 )
-            await asyncio.sleep(2)
+            await asyncio.sleep(retry_interval_seconds)
 
     msg = f"Timed out waiting for Matrix homeserver at {versions_url}"
     raise RuntimeError(msg)
