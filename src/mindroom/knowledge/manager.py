@@ -12,7 +12,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote, urlparse, urlunparse
 
 from agno.knowledge.chunking.fixed import FixedSizeChunking
@@ -100,29 +100,60 @@ def _settings_key(config: Config, storage_path: Path, base_id: str) -> tuple[str
     git_config = base_config.git
     return (
         *_indexing_settings_key(config, storage_path, base_id),
+        str(base_config.embedding_max_in_flight_requests),
         str(base_config.watch),
         str(git_config.poll_interval_seconds) if git_config is not None else "",
         git_config.credentials_service or "" if git_config is not None else "",
     )
 
 
-def _create_embedder(config: Config) -> Embedder:
+class _ThrottledEmbedder:
+    """Cap concurrent async embedding calls."""
+
+    def __init__(self, embedder: Embedder, *, max_concurrent: int) -> None:
+        self._embedder = embedder
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._embedder, name)
+
+    def get_embedding(self, text: str) -> list[float]:
+        return self._embedder.get_embedding(text)
+
+    def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, object] | None]:
+        return self._embedder.get_embedding_and_usage(text)
+
+    async def async_get_embedding(self, text: str) -> list[float]:
+        async with self._semaphore:
+            return await self._embedder.async_get_embedding(text)
+
+    async def async_get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, object] | None]:
+        async with self._semaphore:
+            return await self._embedder.async_get_embedding_and_usage(text)
+
+
+def _create_embedder(config: Config, base_id: str) -> Embedder:
     provider = config.memory.embedder.provider
     embedder_config = config.memory.embedder.config
+    max_in_flight_requests = _knowledge_base_config(config, base_id).embedding_max_in_flight_requests
 
     if provider == "openai":
-        return OpenAIEmbedder(
+        embedder: Embedder = OpenAIEmbedder(
             id=embedder_config.model,
             api_key=get_api_key_for_provider("openai"),
             base_url=embedder_config.host,
         )
-
-    if provider == "ollama":
+    elif provider == "ollama":
         host = get_ollama_host() or embedder_config.host or "http://localhost:11434"
-        return OllamaEmbedder(id=embedder_config.model, host=host)
+        embedder = OllamaEmbedder(id=embedder_config.model, host=host)
+    else:
+        msg = f"Unsupported knowledge embedder provider: {provider}. Supported providers: openai, ollama"
+        raise ValueError(msg)
 
-    msg = f"Unsupported knowledge embedder provider: {provider}. Supported providers: openai, ollama"
-    raise ValueError(msg)
+    if max_in_flight_requests <= 0:
+        return embedder
+
+    return cast("Embedder", _ThrottledEmbedder(embedder, max_concurrent=max_in_flight_requests))
 
 
 def _coerce_int(value: object) -> int | None:
@@ -263,6 +294,7 @@ class KnowledgeManager:
     _git_sync_task: asyncio.Task[None] | None = field(default=None, init=False)
     _git_sync_stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _git_sync_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _sync_completed: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         """Initialize filesystem paths and the underlying vector database."""
@@ -279,9 +311,15 @@ class KnowledgeManager:
             collection=_collection_name(self.base_id),
             path=str(self._base_storage_path),
             persistent_client=True,
-            embedder=_create_embedder(self.config),
+            embedder=_create_embedder(self.config, self.base_id),
         )
         self._knowledge = Knowledge(vector_db=vector_db)
+        if base_config.embedding_max_in_flight_requests > 0:
+            logger.info(
+                "Knowledge indexing embedding backpressure enabled",
+                base_id=self.base_id,
+                max_in_flight_requests=base_config.embedding_max_in_flight_requests,
+            )
 
     def matches(self, config: Config, storage_path: Path) -> bool:
         """Return True when manager settings match the provided config."""
@@ -600,6 +638,7 @@ class KnowledgeManager:
             await self.sync_git_repository()
 
         indexed_count = await self.reindex_all()
+        self._sync_completed = True
         logger.info(
             "Knowledge base initialized",
             base_id=self.base_id,
@@ -665,6 +704,7 @@ class KnowledgeManager:
 
         await asyncio.to_thread(self._save_failed_signatures, failed_signatures)
 
+        self._sync_completed = True
         return {
             "loaded_count": len(indexed_files),
             "indexed_count": indexed_count,
@@ -897,6 +937,42 @@ class KnowledgeManager:
 
 
 _knowledge_managers: dict[str, KnowledgeManager] = {}
+_knowledge_sync_tasks: dict[str, asyncio.Task[None]] = {}
+
+
+async def _cancel_background_sync(base_id: str) -> None:
+    task = _knowledge_sync_tasks.pop(base_id, None)
+    if task is None:
+        return
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+
+async def _run_background_sync(manager: KnowledgeManager) -> None:
+    current_task = asyncio.current_task()
+    try:
+        sync_result = await manager.sync_indexed_files()
+        logger.info(
+            "Knowledge manager background sync completed",
+            base_id=manager.base_id,
+            path=str(manager.knowledge_path),
+            loaded_count=sync_result["loaded_count"],
+            indexed_count=sync_result["indexed_count"],
+            removed_count=sync_result["removed_count"],
+        )
+    except Exception:
+        logger.exception(
+            "Knowledge manager background sync failed",
+            base_id=manager.base_id,
+            path=str(manager.knowledge_path),
+        )
+    finally:
+        # Only clear registration if this exact task is still tracked.
+        # A replacement task may have been registered for the same base while
+        # this task was finishing or being cancelled.
+        if current_task is not None and _knowledge_sync_tasks.get(manager.base_id) is current_task:
+            _knowledge_sync_tasks.pop(manager.base_id, None)
 
 
 async def initialize_knowledge_managers(
@@ -905,11 +981,13 @@ async def initialize_knowledge_managers(
     *,
     start_watchers: bool = False,
     reindex_on_create: bool = True,
+    background_sync_on_create: bool = False,
 ) -> dict[str, KnowledgeManager]:
     """Initialize process-wide knowledge managers for all configured knowledge bases."""
     configured_base_ids = set(config.knowledge_bases)
 
     for base_id in sorted(set(_knowledge_managers) - configured_base_ids):
+        await _cancel_background_sync(base_id)
         await _knowledge_managers[base_id].stop_watcher()
         del _knowledge_managers[base_id]
 
@@ -920,17 +998,34 @@ async def initialize_knowledge_managers(
             existing.config = config
             existing._settings = _settings_key(config, storage_path, base_id)
             existing._indexing_settings = _indexing_settings_key(config, storage_path, base_id)
+            if not existing._sync_completed and background_sync_on_create and base_id not in _knowledge_sync_tasks:
+                _knowledge_sync_tasks[base_id] = asyncio.create_task(
+                    _run_background_sync(existing),
+                    name=f"knowledge_sync_{base_id}",
+                )
+                logger.info("Retrying background sync for previously failed knowledge base", base_id=base_id)
             if start_watchers:
                 await existing.start_watcher()
             continue
 
         full_reindex_required = existing.needs_full_reindex(config, storage_path) if existing is not None else False
         if existing is not None:
+            await _cancel_background_sync(base_id)
             await existing.stop_watcher()
 
         manager = KnowledgeManager(base_id=base_id, config=config, storage_path=storage_path)
         if reindex_on_create or full_reindex_required:
             await manager.initialize()
+        elif background_sync_on_create:
+            _knowledge_sync_tasks[base_id] = asyncio.create_task(
+                _run_background_sync(manager),
+                name=f"knowledge_sync_{base_id}",
+            )
+            logger.info(
+                "Knowledge manager initialized with background sync",
+                base_id=base_id,
+                path=str(manager.knowledge_path),
+            )
         else:
             sync_result = await manager.sync_indexed_files()
             logger.info(
@@ -957,6 +1052,9 @@ def get_knowledge_manager(base_id: str) -> KnowledgeManager | None:
 
 async def shutdown_knowledge_managers() -> None:
     """Shutdown and clear all process-wide knowledge managers."""
+    for base_id in list(_knowledge_sync_tasks):
+        await _cancel_background_sync(base_id)
+
     for manager in list(_knowledge_managers.values()):
         await manager.stop_watcher()
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, call
 
@@ -13,7 +14,12 @@ from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.knowledge.manager import (
     _FAILED_SIGNATURE_RETRY_NS,
+    _cancel_background_sync,
+    _knowledge_sync_tasks,
+    _run_background_sync,
     KnowledgeManager,
+    _knowledge_sync_tasks,
+    _ThrottledEmbedder,
     get_knowledge_manager,
     initialize_knowledge_managers,
     shutdown_knowledge_managers,
@@ -111,6 +117,62 @@ class _DummyChromaDb:
 
     def exists(self) -> bool:
         return True
+
+
+class _TrackingEmbedder:
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    def get_embedding(self, text: str) -> list[float]:
+        _ = text
+        return [0.0]
+
+    def get_embedding_and_usage(self, text: str) -> tuple[list[float], None]:
+        _ = text
+        return [0.0], None
+
+    async def async_get_embedding(self, text: str) -> list[float]:
+        embedding, _usage = await self.async_get_embedding_and_usage(text)
+        return embedding
+
+    async def async_get_embedding_and_usage(self, text: str) -> tuple[list[float], None]:
+        _ = text
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            await self.release.wait()
+            return [0.0], None
+        finally:
+            self.in_flight -= 1
+
+
+class _BlockingBackgroundSyncManager:
+    def __init__(self, base_id: str, started: asyncio.Event, cancelled: asyncio.Event, release: asyncio.Event) -> None:
+        self.base_id = base_id
+        self.knowledge_path = "."
+        self._started = started
+        self._cancelled = cancelled
+        self._release = release
+
+    async def sync_indexed_files(self) -> dict[str, int]:
+        self._started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self._cancelled.set()
+            await self._release.wait()
+            raise
+
+
+class _IdleBackgroundSyncManager:
+    def __init__(self, base_id: str) -> None:
+        self.base_id = base_id
+        self.knowledge_path = "."
+
+    async def sync_indexed_files(self) -> dict[str, int]:
+        await asyncio.Event().wait()
 
 
 def _make_config(path: Path) -> Config:
@@ -258,6 +320,29 @@ def test_knowledge_base_chunk_overlap_must_be_smaller_than_chunk_size() -> None:
     """KnowledgeBaseConfig should reject overlap >= size."""
     with pytest.raises(ValidationError, match="chunk_overlap must be smaller than chunk_size"):
         KnowledgeBaseConfig(path="./docs", chunk_size=500, chunk_overlap=500)
+
+
+def test_knowledge_base_embedding_backpressure_default_and_validation() -> None:
+    """Backpressure config should default to disabled and reject negative values."""
+    config = KnowledgeBaseConfig(path="./docs")
+    assert config.embedding_max_in_flight_requests == 0
+
+    with pytest.raises(ValidationError):
+        KnowledgeBaseConfig(path="./docs", embedding_max_in_flight_requests=-1)
+
+
+@pytest.mark.asyncio
+async def test_throttled_embedder_caps_concurrency() -> None:
+    """Throttled wrapper should cap concurrent async embedding calls."""
+    tracking = _TrackingEmbedder()
+    wrapped = _ThrottledEmbedder(tracking, max_concurrent=2)
+
+    tasks = [asyncio.create_task(wrapped.async_get_embedding_and_usage(f"chunk-{idx}")) for idx in range(6)]
+    await asyncio.sleep(0)
+    await asyncio.sleep(0.01)
+    assert tracking.max_in_flight == 2
+    tracking.release.set()
+    await asyncio.gather(*tasks)
 
 
 @pytest.mark.asyncio
@@ -543,6 +628,135 @@ async def test_initialize_knowledge_managers_non_index_setting_change_uses_incre
     sync_indexed_files.assert_awaited_once()
 
     await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_initialize_knowledge_managers_can_schedule_background_sync_on_create(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Background create-time sync should not block manager initialization."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    config = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(path=str(tmp_path / "research"), watch=False),
+        },
+    )
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _sync_indexed_files(self: KnowledgeManager) -> dict[str, int]:
+        _ = self
+        started.set()
+        await release.wait()
+        return {"loaded_count": 0, "indexed_count": 0, "removed_count": 0}
+
+    monkeypatch.setattr(KnowledgeManager, "sync_indexed_files", _sync_indexed_files)
+
+    managers = await initialize_knowledge_managers(
+        config,
+        tmp_path / "storage",
+        reindex_on_create=False,
+        background_sync_on_create=True,
+    )
+
+    assert set(managers) == {"research"}
+    await asyncio.wait_for(started.wait(), timeout=1)
+    assert "research" in _knowledge_sync_tasks
+    release.set()
+
+    for _ in range(20):
+        if "research" not in _knowledge_sync_tasks:
+            break
+        await asyncio.sleep(0.01)
+    assert "research" not in _knowledge_sync_tasks
+
+    await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_initialize_knowledge_managers_retries_background_sync_on_matching_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed background sync should be retried when config matches on next init call."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    config = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(path=str(tmp_path / "research"), watch=False),
+        },
+    )
+
+    call_count = 0
+
+    async def _failing_then_ok(self: KnowledgeManager) -> dict[str, int]:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            msg = "simulated failure"
+            raise RuntimeError(msg)
+        return {"loaded_count": 0, "indexed_count": 0, "removed_count": 0}
+
+    monkeypatch.setattr(KnowledgeManager, "sync_indexed_files", _failing_then_ok)
+
+    storage = tmp_path / "storage"
+
+    # First init: background sync fails
+    await initialize_knowledge_managers(config, storage, reindex_on_create=False, background_sync_on_create=True)
+    await asyncio.sleep(0.05)  # let the background task run and fail
+
+    # Second init with same config: should retry
+    await initialize_knowledge_managers(config, storage, reindex_on_create=False, background_sync_on_create=True)
+    await asyncio.sleep(0.05)
+
+    assert call_count == 2
+    await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_background_sync_cancellation_does_not_drop_replacement_task() -> None:
+    """A canceled task must not clear tracking for a newer replacement task."""
+    base_id = "research"
+    _knowledge_sync_tasks.clear()
+    second_task: asyncio.Task[None] | None = None
+
+    try:
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+        release = asyncio.Event()
+        first = _BlockingBackgroundSyncManager(base_id, started, cancelled, release)
+
+        first_task = asyncio.create_task(_run_background_sync(first), name="knowledge_sync_first")
+        _knowledge_sync_tasks[base_id] = first_task
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        cancel_task = asyncio.create_task(_cancel_background_sync(base_id))
+        await asyncio.wait_for(cancelled.wait(), timeout=1)
+
+        second = _IdleBackgroundSyncManager(base_id)
+        second_task = asyncio.create_task(_run_background_sync(second), name="knowledge_sync_second")
+        _knowledge_sync_tasks[base_id] = second_task
+
+        release.set()
+        await asyncio.wait_for(cancel_task, timeout=1)
+        assert _knowledge_sync_tasks.get(base_id) is second_task
+    finally:
+        if second_task is not None:
+            second_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await second_task
+        _knowledge_sync_tasks.clear()
 
 
 @pytest.mark.asyncio

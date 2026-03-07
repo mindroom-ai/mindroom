@@ -120,6 +120,7 @@ class MultiAgentOrchestrator:
             storage_path=self.storage_path,
             start_watchers=start_watcher,
             reindex_on_create=False,
+            background_sync_on_create=True,
         )
 
     async def _cancel_knowledge_refresh_task(self) -> None:
