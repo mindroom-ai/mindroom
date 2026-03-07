@@ -90,6 +90,7 @@ async def test_agent_joins_configured_rooms(monkeypatch: pytest.MonkeyPatch, tmp
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
+    monkeypatch.setattr("mindroom.bot.get_joined_rooms", AsyncMock(return_value=[]))
 
     # Test that the bot joins its configured rooms
     await bot.join_configured_rooms()
@@ -98,6 +99,37 @@ async def test_agent_joins_configured_rooms(monkeypatch: pytest.MonkeyPatch, tmp
     assert len(joined_rooms) == 2
     assert "!room1:localhost" in joined_rooms
     assert "!room2:localhost" in joined_rooms
+
+
+@pytest.mark.asyncio
+async def test_agent_skips_rejoining_rooms_it_already_has(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Agents should skip redundant joins for rooms they are already in."""
+    agent_user = AgentMatrixUser(
+        agent_name="agent1",
+        user_id="@mindroom_agent1:localhost",
+        display_name="Agent 1",
+        password=TEST_PASSWORD,
+    )
+    config = Config(router=RouterConfig(model="default"))
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        rooms=["!room1:localhost", "!room2:localhost"],
+    )
+
+    mock_client = AsyncMock()
+    mock_client.rooms = {"!room1:localhost": MagicMock()}
+    bot.client = mock_client
+
+    join_room = AsyncMock(return_value=True)
+    monkeypatch.setattr("mindroom.bot.join_room", join_room)
+    monkeypatch.setattr("mindroom.bot.get_joined_rooms", AsyncMock(return_value=["!room1:localhost"]))
+    monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", AsyncMock(return_value=0))
+
+    await bot.join_configured_rooms()
+
+    join_room.assert_awaited_once_with(mock_client, "!room2:localhost")
 
 
 @pytest.mark.asyncio

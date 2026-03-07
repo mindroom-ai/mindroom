@@ -188,6 +188,7 @@ knowledge_bases:
 # Voice message handling (optional)
 voice:
   enabled: false                   # Default: false
+  visible_router_echo: false       # Optional: show the normalized voice text from the router
   stt:
     provider: openai               # Default: openai
     model: whisper-1               # Default: whisper-1

@@ -94,6 +94,11 @@ class EmbedderConfig(BaseModel):
     model: str = Field(default="text-embedding-3-small", description="Model name for embeddings")
     api_key: str | None = Field(default=None, description="API key (usually from environment variable)")
     host: str | None = Field(default=None, description="Host URL for self-hosted models (Ollama, llama.cpp, etc.)")
+    dimensions: int | None = Field(
+        default=None,
+        ge=1,
+        description="Optional embedding dimension override for OpenAI-compatible providers",
+    )
 
 
 class ModelConfig(BaseModel):

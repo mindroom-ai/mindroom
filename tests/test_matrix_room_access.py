@@ -144,6 +144,7 @@ async def test_existing_room_reconciliation_respects_flag(
     )
     mock_client = AsyncMock()
     mock_client.homeserver = "https://example.com"
+    mock_client.rooms = {}
     mock_client.room_resolve_alias.return_value = nio.RoomResolveAliasResponse(
         room_alias="#lobby:example.com",
         room_id="!lobby:example.com",
@@ -152,7 +153,7 @@ async def test_existing_room_reconciliation_respects_flag(
 
     monkeypatch.setattr(matrix_rooms, "load_rooms", dict)
     monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
-    monkeypatch.setattr(matrix_rooms, "join_room", AsyncMock(return_value=True))
+    monkeypatch.setattr(matrix_rooms, "get_joined_rooms", AsyncMock(return_value=["!lobby:example.com"]))
     monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", AsyncMock())
     configure_access = AsyncMock(return_value=True)
     monkeypatch.setattr(matrix_rooms, "_configure_managed_room_access", configure_access)
@@ -358,6 +359,7 @@ async def test_existing_room_reconciliation_skipped_when_not_joined(monkeypatch:
     )
     mock_client = AsyncMock()
     mock_client.homeserver = "https://example.com"
+    mock_client.rooms = {}
     mock_client.room_resolve_alias.return_value = nio.RoomResolveAliasResponse(
         room_alias="#lobby:example.com",
         room_id="!lobby:example.com",
@@ -366,20 +368,81 @@ async def test_existing_room_reconciliation_skipped_when_not_joined(monkeypatch:
 
     monkeypatch.setattr(matrix_rooms, "load_rooms", dict)
     monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
-    monkeypatch.setattr(matrix_rooms, "join_room", AsyncMock(return_value=False))
+    monkeypatch.setattr(matrix_rooms, "get_joined_rooms", AsyncMock(return_value=[]))
+    monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", AsyncMock())
     configure_access = AsyncMock(return_value=True)
     monkeypatch.setattr(matrix_rooms, "_configure_managed_room_access", configure_access)
 
-    with pytest.raises(RuntimeError, match="could not join"):
-        await matrix_rooms._ensure_room_exists(
-            client=mock_client,
-            room_key="lobby",
-            config=config,
-            room_name="Lobby",
-            power_users=[],
-        )
+    room_id = await matrix_rooms._ensure_room_exists(
+        client=mock_client,
+        room_key="lobby",
+        config=config,
+        room_name="Lobby",
+        power_users=[],
+    )
 
+    assert room_id == "!lobby:example.com"
     configure_access.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_existing_room_reconciliation_runs_after_later_join(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reconciliation should run on a later retry once the service account is joined."""
+    config = Config(
+        matrix_room_access={
+            "mode": "multi_user",
+            "reconcile_existing_rooms": True,
+        },
+    )
+    mock_client = AsyncMock()
+    mock_client.homeserver = "https://example.com"
+    mock_client.rooms = {}
+    mock_client.room_resolve_alias.return_value = nio.RoomResolveAliasResponse(
+        room_alias="#lobby:example.com",
+        room_id="!lobby:example.com",
+        servers=["example.com"],
+    )
+
+    monkeypatch.setattr(matrix_rooms, "load_rooms", dict)
+    monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
+    monkeypatch.setattr(matrix_rooms, "get_joined_rooms", AsyncMock(side_effect=[[], ["!lobby:example.com"]]))
+    ensure_room_has_topic = AsyncMock()
+    monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", ensure_room_has_topic)
+    configure_access = AsyncMock(return_value=True)
+    monkeypatch.setattr(matrix_rooms, "_configure_managed_room_access", configure_access)
+
+    first_room_id = await matrix_rooms._ensure_room_exists(
+        client=mock_client,
+        room_key="lobby",
+        config=config,
+        room_name="Lobby",
+        power_users=[],
+    )
+
+    assert first_room_id == "!lobby:example.com"
+    ensure_room_has_topic.assert_not_awaited()
+    configure_access.assert_not_awaited()
+
+    mock_client.rooms = {"!lobby:example.com": object()}
+
+    second_room_id = await matrix_rooms._ensure_room_exists(
+        client=mock_client,
+        room_key="lobby",
+        config=config,
+        room_name="Lobby",
+        power_users=[],
+    )
+
+    assert second_room_id == "!lobby:example.com"
+    ensure_room_has_topic.assert_awaited_once_with(mock_client, "!lobby:example.com", "lobby", "Lobby", config)
+    configure_access.assert_awaited_once_with(
+        client=mock_client,
+        room_key="lobby",
+        room_id="!lobby:example.com",
+        config=config,
+        room_alias="#lobby:example.com",
+        context="existing_room_reconciliation",
+    )
 
 
 @pytest.mark.asyncio

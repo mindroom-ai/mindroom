@@ -12,6 +12,7 @@ When a voice message is received:
 1. If STT is unavailable, disabled, or fails, MindRoom falls back to `🎤 [Attached voice message]`.
 1. The normalized text plus attachment metadata is dispatched using the normal routing and thread logic.
 1. If routing is ambiguous in a multi-agent room, the router posts a visible handoff message.
+1. If `voice.visible_router_echo` is enabled and the router is present and allowed to reply, the router also posts the normalized voice text as a display-only message.
 1. Otherwise, no extra router message is posted and the chosen agent replies directly.
 1. The responding agent receives the original audio attachment alongside the normalized prompt.
 
@@ -22,6 +23,7 @@ Enable STT and voice-intelligence formatting in `config.yaml`:
 ```
 voice:
   enabled: true
+  visible_router_echo: false
   stt:
     provider: openai
     model: whisper-1
@@ -33,7 +35,7 @@ voice:
 
 Or use the dashboard's Voice tab.
 
-With `voice.enabled: false`, audio messages are still surfaced as attachments with the fallback prompt. Enabling voice adds STT and command-recognition on top of that attachment flow.
+With `voice.enabled: false`, audio messages are still surfaced as attachments with the fallback prompt. Enabling voice adds STT and command-recognition on top of that attachment flow. With `voice.visible_router_echo: true`, the router also posts the normalized transcript or fallback text for inspection when it is present in the room and allowed to reply.
 
 ## STT Providers
 
@@ -136,19 +138,19 @@ You can specify a different model for faster or more accurate command recognitio
 
 ### Single-agent rooms or explicitly targeted audio
 
-If only one eligible agent is visible, that agent responds directly to the normalized audio event. If the audio caption or transcript explicitly mentions an agent, that targeted agent responds directly as well. In these cases, the router does not post an extra visible routing handoff. The transcript or fallback text is used internally for dispatch, not echoed to the room as a separate message.
+If only one eligible agent is visible, that agent responds directly to the normalized audio event. If the audio caption or transcript explicitly mentions an agent, that targeted agent responds directly as well. In these cases, the router does not post an extra visible routing handoff. The transcript or fallback text is used internally for dispatch, not echoed to the room as a separate message. If `voice.visible_router_echo` is enabled, the router still posts a display-only copy of the normalized voice text, but agents ignore that echo and continue responding to the original audio event.
 
 ### Multi-agent rooms where the router must choose
 
-If multiple agents are available and the audio does not already target one of them, the router uses the normalized text to do the usual routing step. The router then posts a normal handoff message such as `@home could you help with this?`. The selected agent responds to that router handoff, and the handoff carries the original audio attachment metadata forward. This is the case where a visible router message appears.
+If multiple agents are available and the audio does not already target one of them, the router uses the normalized text to do the usual routing step. The router then posts a normal handoff message such as `@home could you help with this?`. The selected agent responds to that router handoff, and the handoff carries the original audio attachment metadata forward. This is the case where a visible router message appears. If `voice.visible_router_echo` is also enabled, the router first posts the normalized voice text as a display-only echo and then posts the normal handoff.
 
 ### No router, or router cannot reply
 
-Audio still works when the router is absent. In that case, agents handle the normalized audio directly using the same mention, thread, and permission rules as normal text messages. The same direct handling also applies when the router is present but is not allowed to reply to the original sender. If multiple eligible agents remain and the audio does not already target one of them, there is no automatic handoff until the user mentions an agent.
+Audio still works when the router is absent. In that case, agents handle the normalized audio directly using the same mention, thread, and permission rules as normal text messages. The same direct handling also applies when the router is present but is not allowed to reply to the original sender. In these cases, there is no visible router echo because the router does not handle the event. If multiple eligible agents remain and the audio does not already target one of them, there is no automatic handoff until the user mentions an agent.
 
 ### Visibility rule
 
-MindRoom does not automatically post the transcript to the room. A visible router message appears only when the router must disambiguate between multiple eligible responders. If the responder is already clear from room shape, thread context, or explicit targeting, the chosen agent replies directly without an extra router message.
+MindRoom does not automatically post the transcript to the room. A visible router message appears only when the router must disambiguate between multiple eligible responders. If the responder is already clear from room shape, thread context, or explicit targeting, the chosen agent replies directly without an extra router message. Setting `voice.visible_router_echo: true` adds a visible router-authored echo of the normalized voice text when the router is actually allowed to process the event, without changing which event agents actually answer.
 
 ### Attachment access
 

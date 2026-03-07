@@ -14,6 +14,7 @@ from mindroom.matrix.client import (
     create_room,
     ensure_room_directory_visibility,
     ensure_room_join_rule,
+    get_joined_rooms,
     join_room,
     leave_room,
     matrix_client,
@@ -194,7 +195,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
 
     response = await client.room_resolve_alias(full_alias)
     if isinstance(response, nio.RoomResolveAliasResponse):
-        room_id = response.room_id
+        room_id = str(response.room_id)
         logger.debug(f"Room alias {full_alias} exists on server, room ID: {room_id}")
 
         # Update our state if needed
@@ -204,8 +205,14 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
             _add_room(room_key, room_id, full_alias, room_name)
             logger.info(f"Updated state with existing room {room_key} (ID: {room_id})")
 
-        # Try to join the room
-        joined_room = await join_room(client, room_id)
+        # Room existence and room membership are separate concerns. Existing
+        # private rooms may be managed outside MindRoom, so don't force a join
+        # attempt here just to record that the alias resolves.
+        joined_room = room_id in client.rooms
+        if not joined_room:
+            joined_room_ids = await get_joined_rooms(client)
+            joined_room = joined_room_ids is not None and room_id in joined_room_ids
+
         if joined_room:
             # For existing rooms, ensure they have a topic set
             if room_name is None:
@@ -216,7 +223,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
                 await _configure_managed_room_access(
                     client=client,
                     room_key=room_key,
-                    room_id=str(room_id),
+                    room_id=room_id,
                     config=config,
                     room_alias=full_alias,
                     context="existing_room_reconciliation",
@@ -225,17 +232,21 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
                 logger.info(
                     "Skipping existing room access reconciliation",
                     room_key=room_key,
-                    room_id=str(room_id),
+                    room_id=room_id,
                     reason="matrix_room_access.reconcile_existing_rooms is false",
                 )
         else:
-            msg = (
-                f"Managed room alias '{full_alias}' already exists as '{room_id}' but this MindRoom could not join it. "
-                "Possible causes: another installation owns this alias, the room is invite-only, or server-side access policies prevent joining. "
-                "If on a shared homeserver, try setting a unique MINDROOM_NAMESPACE."
+            logger.warning(
+                "Managed room exists but service account is not joined; skipping existing-room reconciliation",
+                room_key=room_key,
+                room_id=room_id,
+                room_alias=full_alias,
+                hint=(
+                    "If this room should be router-managed, invite the router or make the room joinable. "
+                    "If it is externally managed, this warning is expected."
+                ),
             )
-            raise RuntimeError(msg)
-        return str(room_id)
+        return room_id
 
     # Room alias doesn't exist on server, so we can create it
     if room_key in existing_rooms:

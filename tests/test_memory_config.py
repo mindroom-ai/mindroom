@@ -114,6 +114,33 @@ class TestMemoryConfig:
         assert os.environ.get("OPENAI_API_KEY") == "test-key"
 
     @patch("mindroom.memory.config.get_credentials_manager")
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"})
+    def test_get_memory_config_passes_configured_embedding_dimensions(
+        self,
+        mock_get_creds_manager: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Configured embedding dimensions should be forwarded to Mem0."""
+        mock_creds_manager = MagicMock()
+        mock_creds_manager.get_api_key.return_value = "test-key"
+        mock_get_creds_manager.return_value = mock_creds_manager
+
+        embedder_config = _MemoryEmbedderConfig(
+            provider="openai",
+            config=EmbedderConfig(
+                model="gemini-embedding-001",
+                host="http://example.com/v1",
+                dimensions=3072,
+            ),
+        )
+        memory = MemoryConfig(embedder=embedder_config, llm=None)
+        config = Config(memory=memory, router=RouterConfig(model="default"))
+
+        result = _get_memory_config(tmp_path / "memory", config)
+
+        assert result["embedder"]["config"]["embedding_dims"] == 3072
+
+    @patch("mindroom.memory.config.get_credentials_manager")
     @patch.dict("os.environ", {}, clear=True)
     def test_get_memory_config_no_model_fallback(
         self,

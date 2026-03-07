@@ -119,6 +119,7 @@ from .media_inputs import MediaInputs
 from .response_tracker import ResponseTracker
 from .routing import suggest_agent_for_message
 from .scheduling import (
+    cancel_all_running_scheduled_tasks,
     restore_scheduled_tasks,
 )
 
@@ -177,6 +178,14 @@ class _ResponseAction:
 
     kind: Literal["skip", "team", "individual"]
     form_team: TeamFormationDecision | None = None
+
+
+@dataclass(frozen=True)
+class _RouterDispatchResult:
+    """Whether router dispatch consumed the event and if display-only echoes count as handled."""
+
+    handled: bool
+    mark_visible_echo_responded: bool = False
 
 
 def _should_skip_mentions(event_source: dict) -> bool:
@@ -435,26 +444,39 @@ class AgentBot:
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
         assert self.client is not None
+        joined_rooms = await get_joined_rooms(self.client)
+        current_rooms = set(joined_rooms or [])
+        current_rooms.update(self.client.rooms)
+
         for room_id in self.rooms:
+            if room_id in current_rooms:
+                self.logger.debug("Already joined room", room_id=room_id)
+                await self._post_join_room_setup(room_id)
+                continue
+
             if await join_room(self.client, room_id):
+                current_rooms.add(room_id)
                 self.logger.info("Joined room", room_id=room_id)
-                # Only the router agent should restore scheduled tasks
-                # to avoid duplicate task instances after restart
-                if self.agent_name == ROUTER_AGENT_NAME:
-                    # Restore scheduled tasks
-                    restored_tasks = await restore_scheduled_tasks(self.client, room_id, self.config)
-                    if restored_tasks > 0:
-                        self.logger.info(f"Restored {restored_tasks} scheduled tasks in room {room_id}")
-
-                    # Restore pending config confirmations
-                    restored_configs = await config_confirmation.restore_pending_changes(self.client, room_id)
-                    if restored_configs > 0:
-                        self.logger.info(f"Restored {restored_configs} pending config changes in room {room_id}")
-
-                    # Send welcome message if room is empty
-                    await self._send_welcome_message_if_empty(room_id)
+                await self._post_join_room_setup(room_id)
             else:
                 self.logger.warning("Failed to join room", room_id=room_id)
+
+    async def _post_join_room_setup(self, room_id: str) -> None:
+        """Run room setup that should happen after joins and across restarts."""
+        if self.agent_name != ROUTER_AGENT_NAME:
+            return
+
+        assert self.client is not None
+
+        restored_tasks = await restore_scheduled_tasks(self.client, room_id, self.config)
+        if restored_tasks > 0:
+            self.logger.info(f"Restored {restored_tasks} scheduled tasks in room {room_id}")
+
+        restored_configs = await config_confirmation.restore_pending_changes(self.client, room_id)
+        if restored_configs > 0:
+            self.logger.info(f"Restored {restored_configs} pending config changes in room {room_id}")
+
+        await self._send_welcome_message_if_empty(room_id)
 
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this agent is no longer configured for."""
@@ -635,6 +657,11 @@ class AgentBot:
             self.logger.info("Background tasks completed")
         except Exception as e:
             self.logger.warning(f"Some background tasks did not complete: {e}")
+
+        if self.agent_name == ROUTER_AGENT_NAME:
+            cancelled_tasks = await cancel_all_running_scheduled_tasks()
+            if cancelled_tasks > 0:
+                self.logger.info("Cancelled running scheduled tasks", count=cancelled_tasks)
 
         if self.client is not None:
             self.logger.warning("Client is not None in stop()")
@@ -981,6 +1008,13 @@ class AgentBot:
             self.response_tracker.mark_responded(event.event_id)
             return
 
+        await self._maybe_send_visible_voice_echo(
+            room,
+            event,
+            text=prepared_voice.text,
+            thread_id=effective_thread_id,
+        )
+
         await self._dispatch_text_message(
             room,
             _SyntheticTextEvent(
@@ -991,6 +1025,33 @@ class AgentBot:
             ),
             requester_user_id,
         )
+
+    async def _maybe_send_visible_voice_echo(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
+        *,
+        text: str,
+        thread_id: str | None,
+    ) -> str | None:
+        """Optionally post a display-only router echo for normalized audio."""
+        if self.agent_name != ROUTER_AGENT_NAME or not self.config.voice.visible_router_echo:
+            return None
+
+        existing_visible_echo_event_id = self.response_tracker.get_visible_echo_event_id(event.event_id)
+        if existing_visible_echo_event_id is not None:
+            return existing_visible_echo_event_id
+
+        visible_echo_event_id = await self._send_response(
+            room_id=room.room_id,
+            reply_to_event_id=event.event_id,
+            response_text=text,
+            thread_id=thread_id,
+            skip_mentions=True,
+        )
+        if visible_echo_event_id is not None:
+            self.response_tracker.mark_visible_echo_sent(event.event_id, visible_echo_event_id)
+        return visible_echo_event_id
 
     async def _on_media_message(
         self,
@@ -1245,14 +1306,22 @@ class AgentBot:
         extra_content: dict[str, Any] | None = None,
     ) -> _ResponseAction | None:
         """Resolve routing + team/individual/skip action for a prepared dispatch."""
-        if await self._handle_router_dispatch(
+        router_result = await self._handle_router_dispatch(
             room,
             event,
             dispatch.context,
             dispatch.requester_user_id,
             message=router_message,
             extra_content=extra_content,
-        ):
+        )
+        if router_result.handled:
+            visible_router_echo_event_id = self.response_tracker.get_visible_echo_event_id(event.event_id)
+            if (
+                router_result.mark_visible_echo_responded
+                and visible_router_echo_event_id is not None
+                and not self.response_tracker.has_responded(event.event_id)
+            ):
+                self.response_tracker.mark_responded(event.event_id, visible_router_echo_event_id)
             return None
 
         assert self.client is not None
@@ -1324,14 +1393,14 @@ class AgentBot:
         *,
         message: str | None = None,
         extra_content: dict[str, Any] | None = None,
-    ) -> bool:
+    ) -> _RouterDispatchResult:
         """Run the router dispatch logic shared by text and media handlers.
 
-        Returns True when this agent is the router and has handled (or skipped)
-        the message, meaning the caller should ``return`` immediately.
+        Returns whether router handling should short-circuit normal dispatch, and
+        whether a display-only router voice echo should count as handled.
         """
         if self.agent_name != ROUTER_AGENT_NAME:
-            return False
+            return _RouterDispatchResult(handled=False)
 
         agents_in_thread = get_agents_in_thread(context.thread_history, self.config)
         sender_visible = filter_agents_by_sender_permissions(agents_in_thread, requester_user_id, self.config)
@@ -1339,21 +1408,22 @@ class AgentBot:
         if not context.mentioned_agents and not context.has_non_agent_mentions and not sender_visible:
             if context.is_thread and has_multiple_non_agent_users_in_thread(context.thread_history, self.config):
                 self.logger.info("Skipping routing: multiple non-agent users in thread (mention required)")
-            else:
-                available_agents = get_available_agents_for_sender(room, requester_user_id, self.config)
-                if len(available_agents) == 1:
-                    self.logger.info("Skipping routing: only one agent present")
-                else:
-                    await self._handle_ai_routing(
-                        room,
-                        event,
-                        context.thread_history,
-                        context.thread_id,
-                        message=message,
-                        requester_user_id=requester_user_id,
-                        extra_content=extra_content,
-                    )
-        return True
+                return _RouterDispatchResult(handled=True, mark_visible_echo_responded=True)
+            available_agents = get_available_agents_for_sender(room, requester_user_id, self.config)
+            if len(available_agents) == 1:
+                self.logger.info("Skipping routing: only one agent present")
+                return _RouterDispatchResult(handled=True, mark_visible_echo_responded=True)
+            await self._handle_ai_routing(
+                room,
+                event,
+                context.thread_history,
+                context.thread_id,
+                message=message,
+                requester_user_id=requester_user_id,
+                extra_content=extra_content,
+            )
+            return _RouterDispatchResult(handled=True)
+        return _RouterDispatchResult(handled=True, mark_visible_echo_responded=True)
 
     async def _resolve_response_action(
         self,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -20,6 +21,9 @@ from mindroom.constants import (
 )
 from mindroom.matrix.identity import MatrixID
 from mindroom.voice_handler import prepare_voice_message
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _make_voice_event(
@@ -43,6 +47,51 @@ def _make_room(*user_ids: str) -> nio.MatrixRoom:
     room.canonical_alias = None
     room.users = {user_id: MagicMock() for user_id in user_ids}
     return room
+
+
+def _make_visible_router_echo_scenario(
+    tmp_path: Path,
+    *,
+    agents: dict | None = None,
+    authorization: dict | None = None,
+    send_response_return: str | None = "$voice_echo",
+    send_response_side_effect: list[str] | None = None,
+) -> tuple[AgentBot, nio.MatrixRoom, nio.RoomMessageAudio]:
+    """Build a router bot + room + voice event for visible echo tests."""
+    agent_user = MagicMock()
+    agent_user.user_id = "@mindroom_router:localhost"
+    agent_user.agent_name = ROUTER_AGENT_NAME
+    agent_user.matrix_id = MatrixID.parse("@mindroom_router:localhost")
+
+    configured_agents = agents or {"home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]}}
+    config = Config(
+        agents=configured_agents,
+        authorization=authorization or {"default_room_access": True},
+        voice={"enabled": True, "visible_router_echo": True},
+    )
+
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        rooms=["!test:example.com"],
+    )
+    bot.logger = MagicMock()
+    bot.client = AsyncMock()
+    bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
+    if send_response_side_effect is not None:
+        bot._send_response = AsyncMock(side_effect=send_response_side_effect)
+    else:
+        bot._send_response = AsyncMock(return_value=send_response_return)
+
+    room_user_ids = [
+        "@mindroom_router:localhost",
+        *[f"@mindroom_{name}:localhost" for name in configured_agents],
+        "@alice:example.com",
+    ]
+    room = _make_room(*room_user_ids)
+    event = _make_voice_event(sender="@alice:example.com")
+    return bot, room, event
 
 
 @pytest.mark.asyncio
@@ -390,6 +439,149 @@ async def test_router_and_agent_share_audio_normalization_when_router_is_present
     assert mock_voice.await_count == 1
     bots[0]._send_response.assert_not_called()
     assert bots[1]._generate_response.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_router_posts_visible_voice_echo_when_enabled(tmp_path) -> None:  # noqa: ANN001
+    """Router can optionally post the normalized voice text for user visibility."""
+    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
+
+    with (
+        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        mock_voice.return_value = f"{VOICE_PREFIX}@home turn on the lights"
+        await bot._on_media_message(room, event)
+
+    bot._send_response.assert_called_once()
+    call_kwargs = bot._send_response.call_args.kwargs
+    assert call_kwargs["reply_to_event_id"] == "$voice_event"
+    assert call_kwargs["response_text"] == f"{VOICE_PREFIX}@home turn on the lights"
+    assert call_kwargs["thread_id"] == "$voice_event"
+    assert call_kwargs["skip_mentions"] is True
+
+
+@pytest.mark.asyncio
+async def test_router_visible_voice_echo_is_deduplicated_on_redelivery(tmp_path) -> None:  # noqa: ANN001
+    """Visible router echoes should be sent once even if the same audio event is redelivered."""
+    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
+
+    with (
+        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        mock_voice.return_value = f"{VOICE_PREFIX}@home turn on the lights"
+        await bot._on_media_message(room, event)
+        await bot._on_media_message(room, event)
+
+    bot._send_response.assert_called_once()
+    assert mock_download_audio.await_count == 1
+    assert mock_voice.await_count == 1
+    assert bot.response_tracker.has_responded(event.event_id)
+    assert bot.response_tracker.get_response_event_id(event.event_id) == "$voice_echo"
+
+
+@pytest.mark.asyncio
+async def test_router_visible_voice_echo_respects_reply_permissions(tmp_path) -> None:  # noqa: ANN001
+    """Router should not post visible echoes when it cannot reply to the sender."""
+    bot, room, event = _make_visible_router_echo_scenario(
+        tmp_path,
+        authorization={
+            "default_room_access": True,
+            "agent_reply_permissions": {ROUTER_AGENT_NAME: ["@bob:example.com"]},
+        },
+    )
+
+    with (
+        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+    ):
+        await bot._on_media_message(room, event)
+
+    bot._send_response.assert_not_called()
+    mock_download_audio.assert_not_awaited()
+    mock_voice.assert_not_awaited()
+    assert bot.response_tracker.has_responded(event.event_id)
+    assert bot.response_tracker.get_response_event_id(event.event_id) is None
+
+
+@pytest.mark.asyncio
+async def test_router_visible_voice_echo_keeps_multi_agent_handoff(tmp_path) -> None:  # noqa: ANN001
+    """Visible router echoes should not replace the normal multi-agent handoff."""
+    bot, room, event = _make_visible_router_echo_scenario(
+        tmp_path,
+        agents={
+            "home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]},
+            "research": {"display_name": "ResearchAgent", "rooms": ["!test:example.com"]},
+        },
+        send_response_side_effect=["$voice_echo", "$route"],
+    )
+
+    with (
+        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch("mindroom.bot.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
+        await bot._on_media_message(room, event)
+
+    assert bot._send_response.await_count == 2
+    echo_call = bot._send_response.call_args_list[0].kwargs
+    handoff_call = bot._send_response.call_args_list[1].kwargs
+    assert echo_call["reply_to_event_id"] == "$voice_event"
+    assert echo_call["response_text"] == f"{VOICE_PREFIX}summarize this audio"
+    assert echo_call["skip_mentions"] is True
+    assert "extra_content" not in echo_call
+    assert handoff_call["reply_to_event_id"] == "$voice_event"
+    assert handoff_call["response_text"] == "@home could you help with this?"
+    assert handoff_call["extra_content"] == {
+        ORIGINAL_SENDER_KEY: "@alice:example.com",
+        ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
+    }
+
+
+@pytest.mark.asyncio
+async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(tmp_path) -> None:  # noqa: ANN001
+    """A failed handoff retry should reuse the prior visible echo instead of reposting it."""
+    bot, room, event = _make_visible_router_echo_scenario(
+        tmp_path,
+        agents={
+            "home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]},
+            "research": {"display_name": "ResearchAgent", "rooms": ["!test:example.com"]},
+        },
+        send_response_side_effect=["$voice_echo", None, "$route"],
+    )
+
+    with (
+        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch("mindroom.bot.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
+        await bot._on_media_message(room, event)
+
+        assert not bot.response_tracker.has_responded(event.event_id)
+        assert bot.response_tracker.get_visible_echo_event_id(event.event_id) == "$voice_echo"
+
+        await bot._on_media_message(room, event)
+
+    response_texts = [call.kwargs["response_text"] for call in bot._send_response.call_args_list]
+    assert response_texts == [
+        f"{VOICE_PREFIX}summarize this audio",
+        "@home could you help with this?",
+        "@home could you help with this?",
+    ]
+    assert bot.response_tracker.has_responded(event.event_id)
+    assert bot.response_tracker.get_visible_echo_event_id(event.event_id) == "$voice_echo"
 
 
 @pytest.mark.asyncio
